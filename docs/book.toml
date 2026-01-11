@@ -1,0 +1,7 @@
+[book]
+title = "Power Grid Book"
+authors = ["Markus Mirz"]
+language = "en"
+
+[output.html]
+mathjax-support = true
