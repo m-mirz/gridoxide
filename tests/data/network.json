@@ -1,0 +1,57 @@
+{
+  "buses": [
+    {
+      "idx": 0,
+      "bus_type": "Slack",
+      "voltage_mag": 1.06,
+      "voltage_ang": 0.0,
+      "p_spec": 0.0,
+      "q_spec": 0.0,
+      "q_min": -999.0,
+      "q_max": 999.0
+    },
+    {
+      "idx": 1,
+      "bus_type": "PV",
+      "voltage_mag": 1.04,
+      "voltage_ang": 0.0,
+      "p_spec": 0.5,
+      "q_spec": 0.0,
+      "q_min": -0.5,
+      "q_max": 0.5
+    },
+    {
+      "idx": 2,
+      "bus_type": "PQ",
+      "voltage_mag": 1.0,
+      "voltage_ang": 0.0,
+      "p_spec": -0.6,
+      "q_spec": -0.25,
+      "q_min": -999.0,
+      "q_max": 999.0
+    }
+  ],
+  "lines": [
+    {
+      "from": 0,
+      "to": 1,
+      "r": 0.02,
+      "x": 0.06,
+      "b_shunt": 0.03
+    },
+    {
+      "from": 0,
+      "to": 2,
+      "r": 0.08,
+      "x": 0.24,
+      "b_shunt": 0.025
+    },
+    {
+      "from": 1,
+      "to": 2,
+      "r": 0.06,
+      "x": 0.18,
+      "b_shunt": 0.02
+    }
+  ]
+}

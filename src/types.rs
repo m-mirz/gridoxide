@@ -1,11 +1,13 @@
-#[derive(Clone, Copy, Debug, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BusType {
     Slack,
     PV,
     PQ,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bus {
     pub idx: usize,          // index in arrays (0-based)
     pub bus_type: BusType,
@@ -17,7 +19,7 @@ pub struct Bus {
     pub q_max: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Line {
     pub from: usize,
     pub to: usize,
