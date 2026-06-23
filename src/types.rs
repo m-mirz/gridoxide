@@ -27,3 +27,20 @@ pub struct Line {
     pub x: f64,
     pub b_shunt: f64, // total line charging
 }
+
+/// Three-phase line parameters in per-unit.
+/// Positive- and zero-sequence values are stored separately;
+/// `build_ybus_3ph` converts them to the phase-domain 3×3 admittance matrix.
+/// `b1`/`b0` are the *total* shunt susceptances (ω·c·Z_base); the π-model
+/// splits them equally to both terminals, analogous to `Line::b_shunt`.
+#[derive(Clone, Debug)]
+pub struct Line3Ph {
+    pub from: usize, // physical node index
+    pub to: usize,
+    pub r1: f64,
+    pub x1: f64,
+    pub b1: f64, // total positive-sequence shunt susceptance (p.u.)
+    pub r0: f64,
+    pub x0: f64,
+    pub b0: f64, // total zero-sequence shunt susceptance (p.u.)
+}

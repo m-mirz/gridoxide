@@ -1,6 +1,6 @@
 use nalgebra::{DMatrix, DVector};
 use nalgebra::Complex;
-use super::types::{Bus, Line};
+use super::types::{Bus, Line, Line3Ph};
 
 pub fn build_ybus(n: usize, lines: &[Line]) -> DMatrix<Complex<f64>> {
     let mut y = DMatrix::from_element(n, n, Complex::new(0.0, 0.0));
@@ -21,6 +21,60 @@ pub fn build_ybus(n: usize, lines: &[Line]) -> DMatrix<Complex<f64>> {
         // off-diagonal elements
         y[(ln.from, ln.to)] -= y_line;
         y[(ln.to, ln.from)] -= y_line;
+    }
+    y
+}
+
+/// Builds a 3N×3N phase-domain Y-bus from a list of three-phase lines.
+///
+/// Physical node `k` maps to rows/columns `3k`, `3k+1`, `3k+2` (phases a, b, c).
+/// Sequence parameters are converted to the 3×3 primitive admittance matrix via
+/// the symmetrical-components transform; off-diagonal terms couple phases when
+/// r0≠r1 or x0≠x1.
+pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> DMatrix<Complex<f64>> {
+    let zero = Complex::new(0.0, 0.0);
+    let mut y = DMatrix::from_element(3 * n, 3 * n, zero);
+
+    for ln in lines {
+        let y_c1 = Complex::new(0.0, ln.b1);
+        let y_c0 = Complex::new(0.0, ln.b0);
+
+        if ln.from == ln.to {
+            // Pure shunt: add full 3×3 shunt matrix to the diagonal block.
+            let d = (y_c0 + 2.0 * y_c1) / 3.0;
+            let o = (y_c0 - y_c1) / 3.0;
+            let fi = ln.from;
+            for p in 0..3 {
+                for q in 0..3 {
+                    let val = if p == q { d } else { o };
+                    y[(3 * fi + p, 3 * fi + q)] += val;
+                }
+            }
+            continue;
+        }
+
+        let y1 = Complex::new(1.0, 0.0) / Complex::new(ln.r1, ln.x1);
+        let y0 = Complex::new(1.0, 0.0) / Complex::new(ln.r0, ln.x0);
+
+        // 3×3 series admittance: diagonal (y0+2y1)/3, off-diagonal (y0-y1)/3.
+        let d_s = (y0 + 2.0 * y1) / 3.0;
+        let o_s = (y0 - y1) / 3.0;
+        // Half-shunt per terminal.
+        let d_sh = (y_c0 + 2.0 * y_c1) / 6.0;
+        let o_sh = (y_c0 - y_c1) / 6.0;
+
+        let fi = ln.from;
+        let ti = ln.to;
+        for p in 0..3 {
+            for q in 0..3 {
+                let ys = if p == q { d_s } else { o_s };
+                let ysh = if p == q { d_sh } else { o_sh };
+                y[(3 * fi + p, 3 * fi + q)] += ys + ysh;
+                y[(3 * ti + p, 3 * ti + q)] += ys + ysh;
+                y[(3 * fi + p, 3 * ti + q)] -= ys;
+                y[(3 * ti + p, 3 * fi + q)] -= ys;
+            }
+        }
     }
     y
 }

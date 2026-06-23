@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use serde::Deserialize;
-use super::types::{Bus, BusType, Line};
+use super::types::{Bus, BusType, Line, Line3Ph};
 use super::json::NetworkData;
 
 // ── Input structs ─────────────────────────────────────────────────────────────
@@ -15,7 +15,10 @@ pub struct PgmData {
     pub node: Vec<PgmNode>,
     pub line: Vec<PgmLine>,
     pub source: Vec<PgmSource>,
+    #[serde(default)]
     pub sym_load: Vec<PgmSymLoad>,
+    #[serde(default)]
+    pub asym_load: Vec<PgmAsymLoad>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +37,9 @@ pub struct PgmLine {
     pub r1: f64,
     pub x1: f64,
     pub c1: f64,
+    pub r0: f64,
+    pub x0: f64,
+    pub c0: f64,
 }
 
 #[derive(Deserialize)]
@@ -55,6 +61,15 @@ pub struct PgmSymLoad {
     pub q_specified: f64,
 }
 
+#[derive(Deserialize)]
+pub struct PgmAsymLoad {
+    pub id: u64,
+    pub node: u64,
+    pub status: u8,
+    pub p_specified: [f64; 3],
+    pub q_specified: [f64; 3],
+}
+
 // ── Output structs (used by integration tests) ────────────────────────────────
 
 #[derive(Deserialize)]
@@ -72,6 +87,23 @@ pub struct PgmNodeOutput {
     pub id: u64,
     pub u_pu: f64,
     pub u_angle: f64,
+}
+
+#[derive(Deserialize)]
+pub struct PgmAsymOutput {
+    pub data: PgmAsymOutputData,
+}
+
+#[derive(Deserialize)]
+pub struct PgmAsymOutputData {
+    pub node: Vec<PgmNodeAsymOutput>,
+}
+
+#[derive(Deserialize)]
+pub struct PgmNodeAsymOutput {
+    pub id: u64,
+    pub u_pu: [f64; 3],
+    pub u_angle: [f64; 3],
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────────
@@ -206,4 +238,167 @@ pub fn pgm_to_network_data(input: PgmInput, s_base_va: f64, freq_hz: f64) -> Net
     }
 
     NetworkData { buses, lines }
+}
+
+/// Converts a PGM input document (with `asym_load`) into a 3N-bus expanded
+/// representation suitable for three-phase power flow.
+///
+/// Physical node `k` (sorted by PGM node ID) maps to buses at indices
+/// `3k`, `3k+1`, `3k+2` for phases a, b, c respectively.  Each active
+/// source adds one virtual Slack node appended after all physical nodes,
+/// whose three phase buses carry fixed voltages `u_ref ∠ 0°`, `u_ref ∠ -120°`,
+/// `u_ref ∠ +120°`.
+///
+/// Returns `(buses, lines_3ph, id_to_physical_idx)`.  Pass `buses.len() / 3`
+/// as `n` to `build_ybus_3ph`.
+pub fn pgm_to_3ph_network(
+    input: PgmInput,
+    s_base_va: f64,
+    freq_hz: f64,
+) -> (Vec<Bus>, Vec<Line3Ph>, HashMap<u64, usize>) {
+    let id_to_idx = node_id_to_idx(&input);
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
+
+    let n_nodes = input.data.node.len();
+    let two_pi_f = 2.0 * std::f64::consts::PI * freq_hz;
+    let phase_ang = [0.0_f64, -2.0 * std::f64::consts::PI / 3.0, 2.0 * std::f64::consts::PI / 3.0];
+
+    // Per-node, per-phase net injection [phase_a, phase_b, phase_c] in p.u.
+    let mut p_inj: HashMap<u64, [f64; 3]> = HashMap::new();
+    let mut q_inj: HashMap<u64, [f64; 3]> = HashMap::new();
+    // The phase-domain power flow equations naturally work in units of S_base/3
+    // (per-phase base), so per-phase Watts must be divided by s_base_va/3.
+    let s_base_1ph = s_base_va / 3.0;
+    for load in &input.data.asym_load {
+        if load.status == 0 { continue; }
+        let pe = p_inj.entry(load.node).or_insert([0.0; 3]);
+        let qe = q_inj.entry(load.node).or_insert([0.0; 3]);
+        for ph in 0..3 {
+            pe[ph] -= load.p_specified[ph] / s_base_1ph;
+            qe[ph] -= load.q_specified[ph] / s_base_1ph;
+        }
+    }
+    // sym_load p_specified is 3-phase total; each phase gets 1/3 of total,
+    // and P_1ph_pu = (P_total/3) / (s_base/3) = P_total / s_base.
+    for load in &input.data.sym_load {
+        if load.status == 0 { continue; }
+        let pe = p_inj.entry(load.node).or_insert([0.0; 3]);
+        let qe = q_inj.entry(load.node).or_insert([0.0; 3]);
+        let p_ph = load.p_specified / s_base_va;
+        let q_ph = load.q_specified / s_base_va;
+        for ph in 0..3 {
+            pe[ph] -= p_ph;
+            qe[ph] -= q_ph;
+        }
+    }
+
+    // Build 3N buses: physical node k → buses 3k, 3k+1, 3k+2.
+    let mut sorted_ids: Vec<u64> = input.data.node.iter().map(|n| n.id).collect();
+    sorted_ids.sort_unstable();
+
+    let mut buses: Vec<Bus> = Vec::with_capacity(3 * n_nodes);
+    for _ in 0..3 * n_nodes {
+        buses.push(Bus {
+            idx: 0,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            q_min: -f64::INFINITY,
+            q_max: f64::INFINITY,
+        });
+    }
+    for id in &sorted_ids {
+        let phys = id_to_idx[id];
+        let p_arr = p_inj.get(id).copied().unwrap_or([0.0; 3]);
+        let q_arr = q_inj.get(id).copied().unwrap_or([0.0; 3]);
+        for ph in 0..3 {
+            let bus_idx = 3 * phys + ph;
+            buses[bus_idx] = Bus {
+                idx: bus_idx,
+                bus_type: BusType::PQ,
+                voltage_mag: 1.0,
+                voltage_ang: phase_ang[ph],
+                p_spec: p_arr[ph],
+                q_spec: q_arr[ph],
+                q_min: -f64::INFINITY,
+                q_max: f64::INFINITY,
+            };
+        }
+    }
+
+    // Build Line3Ph list.
+    let mut lines: Vec<Line3Ph> = Vec::new();
+    for ln in &input.data.line {
+        let u_rated_from = id_to_u_rated[&ln.from_node];
+        let z_base = u_rated_from * u_rated_from / s_base_va;
+        let b1 = two_pi_f * ln.c1 * z_base;
+        let b0 = two_pi_f * ln.c0 * z_base;
+        let r1_pu = ln.r1 / z_base;
+        let x1_pu = ln.x1 / z_base;
+        let r0_pu = ln.r0 / z_base;
+        let x0_pu = ln.x0 / z_base;
+        let from_phys = id_to_idx[&ln.from_node];
+        let to_phys = id_to_idx[&ln.to_node];
+
+        match (ln.from_status, ln.to_status) {
+            (1, 1) => {
+                lines.push(Line3Ph {
+                    from: from_phys,
+                    to: to_phys,
+                    r1: r1_pu, x1: x1_pu, b1,
+                    r0: r0_pu, x0: x0_pu, b0,
+                });
+            }
+            (1, 0) => {
+                lines.push(Line3Ph {
+                    from: from_phys, to: from_phys,
+                    r1: 0.0, x1: 0.0, b1,
+                    r0: 0.0, x0: 0.0, b0,
+                });
+            }
+            (0, 1) => {
+                lines.push(Line3Ph {
+                    from: to_phys, to: to_phys,
+                    r1: 0.0, x1: 0.0, b1,
+                    r0: 0.0, x0: 0.0, b0,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Virtual Slack buses + source-impedance lines for each active source.
+    for (i, src) in input.data.source.iter().filter(|s| s.status != 0).enumerate() {
+        let virtual_phys = n_nodes + i;
+        let z_s_pu = src.u_ref * src.u_ref * s_base_va / src.sk;
+        let x_s = z_s_pu / (src.rx_ratio * src.rx_ratio + 1.0_f64).sqrt();
+        let r_s = src.rx_ratio * x_s;
+
+        for ph in 0..3 {
+            let bus_idx = 3 * virtual_phys + ph;
+            buses.push(Bus {
+                idx: bus_idx,
+                bus_type: BusType::Slack,
+                voltage_mag: src.u_ref,
+                voltage_ang: phase_ang[ph],
+                p_spec: 0.0,
+                q_spec: 0.0,
+                q_min: -f64::INFINITY,
+                q_max: f64::INFINITY,
+            });
+        }
+
+        // Source impedance: symmetric (r0=r1, x0=x1) → diagonal 3×3 block.
+        lines.push(Line3Ph {
+            from: virtual_phys,
+            to: id_to_idx[&src.node],
+            r1: r_s, x1: x_s, b1: 0.0,
+            r0: r_s, x0: x_s, b0: 0.0,
+        });
+    }
+
+    (buses, lines, id_to_idx)
 }
