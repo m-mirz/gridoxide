@@ -5,6 +5,11 @@ use super::types::{Bus, Line};
 pub fn build_ybus(n: usize, lines: &[Line]) -> DMatrix<Complex<f64>> {
     let mut y = DMatrix::from_element(n, n, Complex::new(0.0, 0.0));
     for ln in lines {
+        // Self-loop: pure shunt element (no series branch).
+        if ln.from == ln.to {
+            y[(ln.from, ln.from)] += Complex::new(0.0, ln.b_shunt);
+            continue;
+        }
         let z = Complex::new(ln.r, ln.x);
         // series admittance
         let y_line = Complex::new(1.0, 0.0) / z;

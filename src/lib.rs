@@ -2,6 +2,7 @@ pub mod types;
 pub mod network;
 pub mod solver;
 pub mod json;
+pub mod pgm;
 
 use network::build_ybus;
 use solver::newton_raphson;
