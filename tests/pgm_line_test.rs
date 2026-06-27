@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
-use gridoxide::pgm::{PgmInput, PgmOutput, node_id_to_idx, pgm_to_network_data};
-use gridoxide::run_power_flow_analysis;
+use gridoxide::pgm::{PgmInput, PgmOutput, node_id_to_idx, pgm_to_buses_and_branches};
+use gridoxide::network::build_ybus;
+use gridoxide::run_power_flow_analysis_from_ybus;
 
 #[test]
 fn test_pgm_line_power_flow() {
@@ -15,19 +16,16 @@ fn test_pgm_line_power_flow() {
         &fs::read_to_string(base.join("sym_output.json")).unwrap()
     ).unwrap();
 
-    // Build the index map before consuming input.
     let id_to_idx = node_id_to_idx(&input);
+    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
+    let n = buses.len();
+    let ybus = build_ybus(n, &lines, &transformers);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus);
 
-    let network_data = pgm_to_network_data(input, 1e6, 50.0);
-    let buses = run_power_flow_analysis(network_data);
-
-    // Source impedance is now modelled explicitly via a virtual Slack bus, so
-    // results should match PGM's sym_output to within the solver tolerance.
     let tol = 1e-5;
-
     for node_out in &expected.data.node {
         let idx = id_to_idx[&node_out.id];
-        let bus = &buses[idx];
+        let bus = &result[idx];
         assert!(
             (bus.voltage_mag - node_out.u_pu).abs() < tol,
             "node {}: voltage_mag = {:.6}, expected u_pu = {:.6}",

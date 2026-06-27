@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use serde::Deserialize;
-use super::types::{Bus, BusType, Line, Line3Ph};
-use super::json::NetworkData;
+use super::types::{Bus, BusType, Line, Line3Ph, Transformer};
+use super::network::{source_impedance_pu, transformer_tap, transformer_admittances};
 
 // ── Input structs ─────────────────────────────────────────────────────────────
 
@@ -13,12 +13,15 @@ pub struct PgmInput {
 #[derive(Deserialize)]
 pub struct PgmData {
     pub node: Vec<PgmNode>,
+    #[serde(default)]
     pub line: Vec<PgmLine>,
     pub source: Vec<PgmSource>,
     #[serde(default)]
     pub sym_load: Vec<PgmSymLoad>,
     #[serde(default)]
     pub asym_load: Vec<PgmAsymLoad>,
+    #[serde(default)]
+    pub transformer: Vec<PgmTransformer>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +73,27 @@ pub struct PgmAsymLoad {
     pub q_specified: [f64; 3],
 }
 
+#[derive(Deserialize, Clone)]
+pub struct PgmTransformer {
+    pub id: u64,
+    pub from_node: u64,
+    pub to_node: u64,
+    pub from_status: u8,
+    pub to_status: u8,
+    pub u1: f64,
+    pub u2: f64,
+    pub sn: f64,
+    pub uk: f64,
+    pub pk: f64,
+    pub i0: f64,
+    pub p0: f64,
+    pub clock: i32,
+    pub tap_side: u8,
+    pub tap_pos: i32,
+    pub tap_nom: i32,
+    pub tap_size: f64,
+}
+
 // ── Output structs (used by integration tests) ────────────────────────────────
 
 #[derive(Deserialize)]
@@ -115,29 +139,20 @@ pub fn node_id_to_idx(input: &PgmInput) -> HashMap<u64, usize> {
     ids.into_iter().enumerate().map(|(idx, id)| (id, idx)).collect()
 }
 
-/// Converts a PGM input document to the gridoxide `NetworkData` type.
+/// Converts a PGM input document to per-unit buses, lines, and transformers.
 ///
-/// `s_base_va` — chosen system base power in VA (e.g. 1e6 for 1 MVA).
+/// `s_base_va` — system base power in VA (e.g. 1e6 for 1 MVA).
 /// `freq_hz`   — grid frequency in Hz (e.g. 50.0 or 60.0).
 ///
-/// Unit-conversion rules:
-///   Z_base     = u_rated² / s_base_va
-///   r_pu       = r1 / Z_base
-///   x_pu       = x1 / Z_base
-///   b_shunt_pu = (2π · freq · c1) · Z_base
-///   p_pu       = p_specified / s_base_va   (load → negative injection)
-///   q_pu       = q_specified / s_base_va
-///
-/// Lines with from_status=0 or to_status=0 are excluded (open terminals).
-///
-/// Each active source is modelled as a virtual Slack bus (EMF = u_ref) behind a
-/// series source impedance z_s (R_s, X_s, b_shunt=0), where:
-///   |z_s_pu| = u_ref² · s_base_va / sk
-///   X_s      = |z_s_pu| / sqrt(rx_ratio² + 1)
-///   R_s      = rx_ratio · X_s
-/// The virtual bus is appended after all PGM nodes; the source terminal node
-/// itself becomes a plain PQ bus.
-pub fn pgm_to_network_data(input: PgmInput, s_base_va: f64, freq_hz: f64) -> NetworkData {
+/// All PGM nodes become PQ buses. Each active source is modelled as a virtual
+/// Slack bus appended after the physical nodes, connected via a source-impedance
+/// `Line`. Transformers are returned as `Transformer` values in per-unit on the
+/// system base; stamp them into a Y-bus with `network::stamp_transformers`.
+pub fn pgm_to_buses_and_branches(
+    input: PgmInput,
+    s_base_va: f64,
+    freq_hz: f64,
+) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>) {
     let id_to_idx = node_id_to_idx(&input);
     let id_to_u_rated: HashMap<u64, f64> = input.data.node.iter()
         .map(|n| (n.id, n.u_rated))
@@ -152,12 +167,11 @@ pub fn pgm_to_network_data(input: PgmInput, s_base_va: f64, freq_hz: f64) -> Net
         *q_inj.entry(load.node).or_insert(0.0) -= load.q_specified / s_base_va;
     }
 
-    // All PGM nodes are PQ buses — sources are modelled via virtual Slack buses below.
+    // Physical PQ buses.
     let n_nodes = input.data.node.len();
-    let mut opt_buses = vec![None::<Bus>; n_nodes];
     let mut sorted_ids: Vec<u64> = input.data.node.iter().map(|n| n.id).collect();
     sorted_ids.sort_unstable();
-
+    let mut opt_buses = vec![None::<Bus>; n_nodes];
     for id in &sorted_ids {
         let idx = id_to_idx[id];
         opt_buses[idx] = Some(Bus {
@@ -169,23 +183,19 @@ pub fn pgm_to_network_data(input: PgmInput, s_base_va: f64, freq_hz: f64) -> Net
             q_spec: *q_inj.get(id).unwrap_or(&0.0),
             q_min: -f64::INFINITY,
             q_max: f64::INFINITY,
+            u_rated: id_to_u_rated[id],
         });
     }
     let mut buses: Vec<Bus> = opt_buses.into_iter().map(|b| b.unwrap()).collect();
 
-    // Build line list. PGM's c1 is the *total* shunt capacitance; each π-end
-    // carries c1/2. build_ybus halves b_shunt, so passing ω·c1·Z_base gives
-    // ω·c1·Z_base/2 per end, matching PGM's y_shunt/2.
-    // Half-open lines: the connected-end shunt (c1/2) plus the far-end shunt
-    // seen through the series impedance sum to ≈ ω·c1·Z_base, so we model
-    // the half-open contribution as a self-loop with that susceptance.
+    // Lines. PGM's c1 is the *total* shunt capacitance; build_ybus splits b_shunt/2
+    // per end, matching PGM's y_shunt/2. Half-open cases become self-loop shunts.
     let omega = 2.0 * std::f64::consts::PI * freq_hz;
-    let mut lines = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
     for ln in &input.data.line {
         match (ln.from_status, ln.to_status) {
             (1, 1) => {
-                let u_rated = id_to_u_rated[&ln.from_node];
-                let z_base = u_rated * u_rated / s_base_va;
+                let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 lines.push(Line {
                     from: id_to_idx[&ln.from_node],
                     to: id_to_idx[&ln.to_node],
@@ -195,29 +205,41 @@ pub fn pgm_to_network_data(input: PgmInput, s_base_va: f64, freq_hz: f64) -> Net
                 });
             }
             (1, 0) => {
-                let u_rated = id_to_u_rated[&ln.from_node];
-                let z_base = u_rated * u_rated / s_base_va;
+                let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.from_node];
                 lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
                     b_shunt: omega * ln.c1 * z_base });
             }
             (0, 1) => {
-                let u_rated = id_to_u_rated[&ln.to_node];
-                let z_base = u_rated * u_rated / s_base_va;
+                let z_base = id_to_u_rated[&ln.to_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.to_node];
                 lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
                     b_shunt: omega * ln.c1 * z_base });
             }
-            _ => {} // both open — nothing connected
+            _ => {}
         }
     }
 
-    // Virtual Slack bus + source-impedance branch for each active source.
+    // Transformers — convert physical-unit PGM parameters to system pu.
+    let mut transformers: Vec<Transformer> = Vec::new();
+    for t in &input.data.transformer {
+        let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_nom, t.tap_size, t.clock);
+        let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
+        transformers.push(Transformer {
+            from: id_to_idx[&t.from_node],
+            to: id_to_idx[&t.to_node],
+            from_status: t.from_status,
+            to_status: t.to_status,
+            y_series,
+            y_shunt,
+            tap,
+        });
+    }
+
+    // Virtual Slack bus + source-impedance Line for each active source.
     for (i, src) in input.data.source.iter().filter(|s| s.status != 0).enumerate() {
         let virtual_idx = n_nodes + i;
-        let z_s_pu = src.u_ref * src.u_ref * s_base_va / src.sk;
-        let x_s = z_s_pu / (src.rx_ratio * src.rx_ratio + 1.0_f64).sqrt();
-        let r_s = src.rx_ratio * x_s;
+        let (r_s, x_s) = source_impedance_pu(src.u_ref, src.sk, src.rx_ratio, s_base_va);
         buses.push(Bus {
             idx: virtual_idx,
             bus_type: BusType::Slack,
@@ -227,17 +249,12 @@ pub fn pgm_to_network_data(input: PgmInput, s_base_va: f64, freq_hz: f64) -> Net
             q_spec: 0.0,
             q_min: -f64::INFINITY,
             q_max: f64::INFINITY,
+            u_rated: id_to_u_rated[&src.node],
         });
-        lines.push(Line {
-            from: virtual_idx,
-            to: id_to_idx[&src.node],
-            r: r_s,
-            x: x_s,
-            b_shunt: 0.0,
-        });
+        lines.push(Line { from: virtual_idx, to: id_to_idx[&src.node], r: r_s, x: x_s, b_shunt: 0.0 });
     }
 
-    NetworkData { buses, lines }
+    (buses, lines, transformers)
 }
 
 /// Converts a PGM input document (with `asym_load`) into a 3N-bus expanded
@@ -308,6 +325,7 @@ pub fn pgm_to_3ph_network(
             q_spec: 0.0,
             q_min: -f64::INFINITY,
             q_max: f64::INFINITY,
+            u_rated: 0.0,
         });
     }
     for id in &sorted_ids {
@@ -325,6 +343,7 @@ pub fn pgm_to_3ph_network(
                 q_spec: q_arr[ph],
                 q_min: -f64::INFINITY,
                 q_max: f64::INFINITY,
+                u_rated: id_to_u_rated[id],
             };
         }
     }
@@ -373,9 +392,7 @@ pub fn pgm_to_3ph_network(
     // Virtual Slack buses + source-impedance lines for each active source.
     for (i, src) in input.data.source.iter().filter(|s| s.status != 0).enumerate() {
         let virtual_phys = n_nodes + i;
-        let z_s_pu = src.u_ref * src.u_ref * s_base_va / src.sk;
-        let x_s = z_s_pu / (src.rx_ratio * src.rx_ratio + 1.0_f64).sqrt();
-        let r_s = src.rx_ratio * x_s;
+        let (r_s, x_s) = source_impedance_pu(src.u_ref, src.sk, src.rx_ratio, s_base_va);
 
         for ph in 0..3 {
             let bus_idx = 3 * virtual_phys + ph;
@@ -388,6 +405,7 @@ pub fn pgm_to_3ph_network(
                 q_spec: 0.0,
                 q_min: -f64::INFINITY,
                 q_max: f64::INFINITY,
+                u_rated: id_to_u_rated[&src.node],
             });
         }
 

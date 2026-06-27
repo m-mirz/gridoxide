@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use nalgebra::Complex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BusType {
@@ -17,6 +18,8 @@ pub struct Bus {
     pub q_spec: f64,         // Q specified (generation - load) in p.u.
     pub q_min: f64,          // reactive limits (for PV handling, optional)
     pub q_max: f64,
+    #[serde(default)]
+    pub u_rated: f64,        // rated line-to-line voltage in V (0 = not set)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26,6 +29,21 @@ pub struct Line {
     pub r: f64,
     pub x: f64,
     pub b_shunt: f64, // total line charging
+}
+
+/// Two-winding transformer parameters in per-unit (system base, to-side voltage base).
+///
+/// `tap` = k · exp(j · clock · π/6) where k is the off-nominal voltage-magnitude ratio
+/// and the argument encodes the vector-group phase shift. `tap.norm()` gives k.
+#[derive(Clone, Debug)]
+pub struct Transformer {
+    pub from: usize,
+    pub to: usize,
+    pub from_status: u8,
+    pub to_status: u8,
+    pub y_series: Complex<f64>,
+    pub y_shunt: Complex<f64>,
+    pub tap: Complex<f64>,
 }
 
 /// Three-phase line parameters in per-unit.

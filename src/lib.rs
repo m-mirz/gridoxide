@@ -14,7 +14,7 @@ pub fn run_power_flow_analysis(network_data: NetworkData) -> Vec<Bus> {
     let mut buses = network_data.buses;
     let lines = network_data.lines;
 
-    let ybus = build_ybus(buses.len(), &lines);
+    let ybus = build_ybus(buses.len(), &lines, &[]);
 
     newton_raphson(&mut buses, &ybus, 1e-6, 20);
 

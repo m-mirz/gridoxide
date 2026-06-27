@@ -1,8 +1,8 @@
 use nalgebra::{DMatrix, DVector};
 use nalgebra::Complex;
-use super::types::{Bus, Line, Line3Ph};
+use super::types::{Bus, Line, Line3Ph, Transformer};
 
-pub fn build_ybus(n: usize, lines: &[Line]) -> DMatrix<Complex<f64>> {
+pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> DMatrix<Complex<f64>> {
     let mut y = DMatrix::from_element(n, n, Complex::new(0.0, 0.0));
     for ln in lines {
         // Self-loop: pure shunt element (no series branch).
@@ -22,6 +22,7 @@ pub fn build_ybus(n: usize, lines: &[Line]) -> DMatrix<Complex<f64>> {
         y[(ln.from, ln.to)] -= y_line;
         y[(ln.to, ln.from)] -= y_line;
     }
+    stamp_transformers(&mut y, transformers);
     y
 }
 
@@ -77,6 +78,79 @@ pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> DMatrix<Complex<f64>> {
         }
     }
     y
+}
+
+/// Stamps two-winding transformer contributions into an existing Y-bus.
+///
+/// Implements PGM's π-equivalent model: y_shunt is split equally between both
+/// terminals. The complex tap ratio `t.tap = k·exp(jθ)` carries both the
+/// off-nominal magnitude k and the vector-group phase shift θ.
+///
+/// Status rules (mirrors PGM's `calc_param_y_sym`):
+///   (1,1): Y[ff] += (y_s+y_sh/2)/k², Y[tt] += y_s+y_sh/2,
+///          Y[ft] -= y_s/conj(a), Y[tf] -= y_s/a
+///   (1,0)/(0,1): effective shunt = y_sh/2 + 1/(1/y_s + 2/y_sh) at connected end
+///   (0,0): no contribution
+fn stamp_transformers(ybus: &mut DMatrix<Complex<f64>>, transformers: &[Transformer]) {
+    let one = Complex::new(1.0, 0.0);
+    for t in transformers {
+        let k = t.tap.norm();
+        match (t.from_status, t.to_status) {
+            (1, 1) => {
+                let y_diag = t.y_series + t.y_shunt * 0.5;
+                ybus[(t.from, t.from)] += y_diag / (k * k);
+                ybus[(t.to, t.to)] += y_diag;
+                ybus[(t.from, t.to)] -= t.y_series / t.tap.conj();
+                ybus[(t.to, t.from)] -= t.y_series / t.tap;
+            }
+            (1, 0) | (0, 1) => {
+                let branch_shunt = t.y_shunt * 0.5
+                    + one / (one / t.y_series + Complex::new(2.0, 0.0) / t.y_shunt);
+                if t.from_status == 1 {
+                    ybus[(t.from, t.from)] += branch_shunt / (k * k);
+                } else {
+                    ybus[(t.to, t.to)] += branch_shunt;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Computes per-unit source impedance (r, x) from short-circuit power and R/X ratio.
+pub fn source_impedance_pu(u_ref: f64, sk: f64, rx_ratio: f64, s_base_va: f64) -> (f64, f64) {
+    let z_s_pu = u_ref * u_ref * s_base_va / sk;
+    let x_s = z_s_pu / (rx_ratio * rx_ratio + 1.0_f64).sqrt();
+    (rx_ratio * x_s, x_s)
+}
+
+/// Computes the complex off-nominal tap ratio k·exp(j·clock·π/6) from transformer nameplate data.
+pub fn transformer_tap(
+    u1: f64, u2: f64, tap_side: u8,
+    tap_pos: i32, tap_nom: i32, tap_size: f64, clock: i32,
+) -> Complex<f64> {
+    let k = if tap_side == 0 {
+        (u1 + (tap_pos - tap_nom) as f64 * tap_size) / u1
+    } else {
+        u2 / (u2 + (tap_pos - tap_nom) as f64 * tap_size)
+    };
+    Complex::from_polar(k, clock as f64 * std::f64::consts::PI / 6.0)
+}
+
+/// Computes per-unit series and shunt admittances from transformer nameplate data.
+/// Both are referenced to the to-side (u2) voltage base.
+pub fn transformer_admittances(
+    u2: f64, sn: f64, uk: f64, pk: f64, i0: f64, p0: f64, s_base_va: f64,
+) -> (Complex<f64>, Complex<f64>) {
+    let base_y_to = s_base_va / (u2 * u2);
+    let r_ohm = pk * u2 * u2 / (sn * sn);
+    let x_ohm = ((uk * u2 * u2 / sn).powi(2) - r_ohm * r_ohm).sqrt();
+    let y_series = Complex::new(1.0, 0.0) / Complex::new(r_ohm, x_ohm) / base_y_to;
+    let g_fe = p0 / (u2 * u2);
+    let y_sh_abs = i0 * sn / (u2 * u2);
+    let b_m = -(y_sh_abs * y_sh_abs - g_fe * g_fe).sqrt();
+    let y_shunt = Complex::new(g_fe, b_m) / base_y_to;
+    (y_series, y_shunt)
 }
 
 pub fn power_injections(
