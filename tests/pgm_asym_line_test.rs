@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use gridoxide::pgm::{PgmInput, PgmAsymOutput, pgm_to_3ph_network};
+use gridoxide::pgm::{PgmInput, PgmOutput, PgmNodeAsymOutput, pgm_to_3ph_network};
 use gridoxide::network::build_ybus_3ph;
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -12,7 +12,7 @@ fn test_pgm_asym_line_power_flow() {
     let input: PgmInput = serde_json::from_str(
         &fs::read_to_string(base.join("input.json")).unwrap()
     ).unwrap();
-    let expected: PgmAsymOutput = serde_json::from_str(
+    let expected: PgmOutput<PgmNodeAsymOutput> = serde_json::from_str(
         &fs::read_to_string(base.join("asym_output.json")).unwrap()
     ).unwrap();
 

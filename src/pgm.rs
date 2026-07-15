@@ -97,13 +97,13 @@ pub struct PgmTransformer {
 // ── Output structs (used by integration tests) ────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct PgmOutput {
-    pub data: PgmOutputData,
+pub struct PgmOutput<N> {
+    pub data: PgmOutputData<N>,
 }
 
 #[derive(Deserialize)]
-pub struct PgmOutputData {
-    pub node: Vec<PgmNodeOutput>,
+pub struct PgmOutputData<N> {
+    pub node: Vec<N>,
 }
 
 #[derive(Deserialize)]
@@ -111,16 +111,6 @@ pub struct PgmNodeOutput {
     pub id: u64,
     pub u_pu: f64,
     pub u_angle: f64,
-}
-
-#[derive(Deserialize)]
-pub struct PgmAsymOutput {
-    pub data: PgmAsymOutputData,
-}
-
-#[derive(Deserialize)]
-pub struct PgmAsymOutputData {
-    pub node: Vec<PgmNodeAsymOutput>,
 }
 
 #[derive(Deserialize)]
