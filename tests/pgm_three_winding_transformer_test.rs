@@ -6,10 +6,10 @@ use gridoxide::network::build_ybus;
 use gridoxide::run_power_flow_analysis_from_ybus;
 
 #[test]
-fn test_pgm_transformer_power_flow() {
-    // Adopted from Power Grid Model tests/data/power_flow/pandapower/components/symmetric/transformer
+fn test_pgm_three_winding_transformer_batch() {
+    // Adopted from Power Grid Model tests/data/power_flow/pandapower/components/symmetric/three_winding_transformer
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pgm/powerflow/symmetric/transformer");
+        .join("tests/data/pgm/powerflow/symmetric/three_winding_transformer");
 
     let base_json = common::load_json(&base.join("input.json"));
     let update = common::load_json(&base.join("update_batch.json"));
@@ -26,13 +26,6 @@ fn test_pgm_transformer_power_flow() {
 
         for node_out in &expected_scenario.node {
             common::assert_sym_node(&result, &id_to_idx, node_out, tol);
-            let bus = &result[id_to_idx[&node_out.id]];
-            let u_phys = bus.voltage_mag * bus.u_rated;
-            assert!(
-                (u_phys - node_out.u).abs() < tol * bus.u_rated,
-                "node {}: u_phys = {:.4}, expected u = {:.4}",
-                node_out.id, u_phys, node_out.u
-            );
         }
     }
 }

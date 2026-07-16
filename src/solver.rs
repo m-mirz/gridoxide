@@ -1,7 +1,7 @@
 use nalgebra::{DMatrix, DVector};
 use nalgebra::Complex;
 use super::types::{Bus, BusType};
-use super::network::power_injections;
+use super::network::{effective_injection, power_injections};
 
 pub fn newton_raphson(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>, tol: f64, max_iter: usize) {
 
@@ -35,12 +35,14 @@ pub fn newton_raphson(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>, tol: f64,
         let mut mis_idx = 0;
         for &i in &non_slack_idx {
             // P mismatch for PV and PQ buses
-            mismatch[mis_idx] = buses[i].p_spec - p_calc[i];
+            let (p_eff, _) = effective_injection(&buses[i]);
+            mismatch[mis_idx] = p_eff - p_calc[i];
             mis_idx += 1;
         }
         for &i in &pq_idx {
             // Q mismatch for PQ buses
-            mismatch[mis_idx] = buses[i].q_spec - q_calc[i];
+            let (_, q_eff) = effective_injection(&buses[i]);
+            mismatch[mis_idx] = q_eff - q_calc[i];
             mis_idx += 1;
         }
 

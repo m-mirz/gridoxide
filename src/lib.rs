@@ -4,7 +4,7 @@ pub mod solver;
 pub mod json;
 pub mod pgm;
 
-use network::build_ybus;
+use network::{build_ybus, linear_initial_guess};
 use solver::newton_raphson;
 use json::NetworkData;
 use types::Bus;
@@ -16,6 +16,7 @@ pub fn run_power_flow_analysis(network_data: NetworkData) -> Vec<Bus> {
 
     let ybus = build_ybus(buses.len(), &lines, &[]);
 
+    linear_initial_guess(&mut buses, &ybus);
     newton_raphson(&mut buses, &ybus, 1e-6, 20);
 
     buses
@@ -28,6 +29,7 @@ pub fn run_power_flow_analysis_from_ybus(
     mut buses: Vec<Bus>,
     ybus: DMatrix<Complex<f64>>,
 ) -> Vec<Bus> {
+    linear_initial_guess(&mut buses, &ybus);
     newton_raphson(&mut buses, &ybus, 1e-6, 20);
     buses
 }
