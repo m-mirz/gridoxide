@@ -1,13 +1,17 @@
 //! Ad-hoc runtime benchmark against a PGM-format JSON network, for comparing
 //! against power-grid-model on the same input. Not part of the test suite.
 //!
-//! Usage: cargo run --release --example bench_network -- <path-to-input.json> [repeat-count]
+//! Usage: cargo run --release --example bench_network -- <path-to-input.json> [repeat-count] [backend]
 //!
 //! `repeat-count` (default 1) re-runs the linear initial guess + full
 //! Newton-Raphson solve that many times from a fresh clone of the
 //! post-parse (flat-start) buses each time, so `perf record` gets enough
 //! samples to profile — a single solve at realistic network sizes is only
 //! tens of milliseconds, too short to sample meaningfully.
+//!
+//! `backend` (default "scalar") selects `scalar` (the default `faer`-backed
+//! path) or `block` (the experimental block-per-bus path, symmetric only)
+//! for a head-to-head comparison on the same network.
 
 use std::env;
 use std::fs;
@@ -15,12 +19,19 @@ use std::time::Instant;
 
 use gridoxide::network::{build_ybus, linear_initial_guess};
 use gridoxide::pgm::pgm_to_buses_and_branches;
-use gridoxide::solver::newton_raphson;
+use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend};
 
 fn main() {
     let mut args = env::args().skip(1);
-    let path = args.next().expect("usage: bench_network <input.json> [repeat-count]");
+    let path = args.next().expect("usage: bench_network <input.json> [repeat-count] [backend]");
     let repeat: usize = args.next().map(|s| s.parse().expect("repeat-count must be an integer")).unwrap_or(1);
+    let backend_arg = args.next().unwrap_or_else(|| "scalar".to_string());
+    let backend = match backend_arg.as_str() {
+        "scalar" => JacobianBackend::Scalar,
+        "block" => JacobianBackend::Block,
+        other => panic!("unknown backend '{other}', expected 'scalar' or 'block'"),
+    };
+    println!("backend={backend_arg}");
     let raw = fs::read_to_string(&path).expect("read input file");
 
     let t_parse0 = Instant::now();
@@ -49,7 +60,7 @@ fn main() {
         total_guess += t_guess0.elapsed();
 
         let t_nr0 = Instant::now();
-        newton_raphson(&mut buses, &ybus, 1e-6, 20);
+        newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, backend);
         total_nr += t_nr0.elapsed();
     }
 

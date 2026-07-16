@@ -1,8 +1,43 @@
 use super::types::{Bus, BusType};
 use super::network::{effective_injection, power_injections, YBusSparse};
 use super::sparse::RealSparseSystem;
+use super::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
+
+/// Selects which sparse-LU backend `newton_raphson_with_backend` uses to
+/// solve the Jacobian system each iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JacobianBackend {
+    /// The default, production path: scalar sparse triplets solved via
+    /// `faer` (`sparse::RealSparseSystem`). Used by `newton_raphson`.
+    Scalar,
+    /// Experimental, opt-in: groups each bus's own (angle, magnitude)
+    /// unknowns into one 2×2 block, mirroring power-grid-model's
+    /// block-per-bus matrix structure (`block_sparse::BlockLu`). Symmetric
+    /// power flow only — every non-slack bus must be `PQ` (gridoxide never
+    /// constructs a `PV` bus today; this backend panics rather than
+    /// silently mishandling one if that ever changes, since its block
+    /// indexing assumes every non-slack bus has exactly 2 unknowns).
+    Block,
+}
 
 pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
+    newton_raphson_with_backend(buses, ybus, tol, max_iter, JacobianBackend::Scalar);
+}
+
+pub fn newton_raphson_with_backend(
+    buses: &mut [Bus],
+    ybus: &YBusSparse,
+    tol: f64,
+    max_iter: usize,
+    backend: JacobianBackend,
+) {
+    match backend {
+        JacobianBackend::Scalar => newton_raphson_scalar(buses, ybus, tol, max_iter),
+        JacobianBackend::Block => newton_raphson_block(buses, ybus, tol, max_iter),
+    }
+}
+
+fn newton_raphson_scalar(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
 
     // Identify PV and PQ indices (exclude slack)
     let mut pv_idx: Vec<usize> = Vec::new();
@@ -192,4 +227,106 @@ fn build_jacobian_triplets(
     }
 
     triplets
+}
+
+/// Experimental block-per-bus Newton-Raphson, backed by
+/// `block_sparse::BlockLu`. See `JacobianBackend::Block`'s doc comment for
+/// scope. Like `newton_raphson_scalar`'s `RealSparseSystem` reuse, the
+/// `colamd` ordering and elimination-graph reachability (`BlockSymbolic`)
+/// are computed once and reused via `BlockLu::refactor` for cheap
+/// numeric-only refactorization on every subsequent iteration.
+fn newton_raphson_block(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
+    let non_slack_idx: Vec<usize> = buses
+        .iter()
+        .filter(|b| !matches!(b.bus_type, BusType::Slack))
+        .map(|b| b.idx)
+        .collect();
+    assert!(
+        buses.iter().all(|b| !matches!(b.bus_type, BusType::PV)),
+        "JacobianBackend::Block only supports symmetric power flow with no PV buses \
+         (every non-slack bus must be PQ, giving a uniform 2x2 block per bus)"
+    );
+
+    let mut block_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (pos, &i) in non_slack_idx.iter().enumerate() {
+        block_pos[i] = Some(pos);
+    }
+
+    let mut symbolic: Option<BlockSymbolic> = None;
+
+    for iter in 0..max_iter {
+        let (p_calc, q_calc) = power_injections(buses, ybus);
+
+        let mismatch: Vec<[f64; 2]> = non_slack_idx
+            .iter()
+            .map(|&i| {
+                let (p_eff, q_eff) = effective_injection(&buses[i]);
+                [p_eff - p_calc[i], q_eff - q_calc[i]]
+            })
+            .collect();
+
+        let max_mis = mismatch.iter().flatten().fold(0.0f64, |a, &b| a.max(b.abs()));
+        println!("iter {}: max mismatch = {:.6e}", iter + 1, max_mis);
+        if max_mis < tol {
+            println!("Converged in {} iterations", iter + 1);
+            return;
+        }
+
+        let blocks = build_jacobian_blocks(buses, ybus, &non_slack_idx, &block_pos, &p_calc, &q_calc).finish();
+        if symbolic.is_none() {
+            symbolic = Some(BlockSymbolic::analyze(&blocks));
+        }
+        let Some(lu) = BlockLu::refactor(symbolic.as_ref().unwrap(), &blocks) else {
+            println!("Jacobian is singular. Failed to solve.");
+            return;
+        };
+        let dx = lu.solve(&mismatch);
+
+        for (pos, &i) in non_slack_idx.iter().enumerate() {
+            buses[i].voltage_ang += dx[pos][0];
+            buses[i].voltage_mag += dx[pos][1];
+        }
+    }
+
+    println!("Failed to converge in {} iterations", max_iter);
+}
+
+/// Assembles the same H/N/M/L formulas as `build_jacobian_triplets`, but as
+/// one 2×2 block per (bus, bus) pair — `[[H, N], [M, L]]` on the diagonal,
+/// `[[H_ik, N_ik], [M_ik, L_ik]]` off-diagonal — instead of four separate
+/// scalar triplets. Requires every non-slack bus to be `PQ` (see
+/// `JacobianBackend::Block`).
+fn build_jacobian_blocks(
+    buses: &[Bus],
+    ybus: &YBusSparse,
+    non_slack_idx: &[usize],
+    block_pos: &[Option<usize>],
+    p_calc: &[f64],
+    q_calc: &[f64],
+) -> BlockMatrix {
+    let vm: Vec<f64> = buses.iter().map(|b| b.voltage_mag).collect();
+    let va: Vec<f64> = buses.iter().map(|b| b.voltage_ang).collect();
+    let mut blocks = BlockMatrix::new(non_slack_idx.len());
+
+    for (row, &i) in non_slack_idx.iter().enumerate() {
+        for &(k, y_ik) in ybus.row(i) {
+            if k == i {
+                let h_ii = -q_calc[i] - vm[i].powi(2) * y_ik.im;
+                let n_ii = p_calc[i] / vm[i] + vm[i] * y_ik.re;
+                let m_ii = p_calc[i] - vm[i].powi(2) * y_ik.re;
+                let l_ii = q_calc[i] / vm[i] - vm[i] * y_ik.im;
+                blocks.add(row, row, [[h_ii, n_ii], [m_ii, l_ii]]);
+                continue;
+            }
+            let Some(col) = block_pos[k] else { continue };
+            let angle_ik = va[i] - va[k];
+            let h_ik = vm[i] * vm[k] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
+            let n_ik = vm[i] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
+            let m_ik = -vm[i] * vm[k] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
+            let l_ik = vm[i] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
+            blocks.add(row, col, [[h_ik, n_ik], [m_ik, l_ik]]);
+        }
+    }
+
+    blocks
 }
