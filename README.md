@@ -72,3 +72,9 @@ See `src/sparse.rs` for the thin backend wrapper around `faer` — it's intentio
 imports `faer` types directly, so a different sparse-solver backend (e.g. a KLU binding, if `faer` ever
 proves numerically insufficient) could be swapped in behind the same interface without touching the rest of
 the codebase.
+
+## Profiling
+
+For profiling with perf, set
+
+    sysctl kernel.perf_event_paranoid=1
