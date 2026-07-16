@@ -1,6 +1,6 @@
-use nalgebra::{DMatrix, DVector};
-use nalgebra::Complex;
+use num_complex::Complex;
 use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind};
+use super::sparse;
 
 /// A lumped shunt admittance to be added to the Y-bus diagonal at bus `at`.
 pub struct ShuntAdm {
@@ -27,12 +27,90 @@ fn seq_to_phase_shunt(y1: Complex<f64>, y0: Complex<f64>) -> [[Complex<f64>; 3];
     m
 }
 
-pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> DMatrix<Complex<f64>> {
-    let mut y = DMatrix::from_element(n, n, Complex::new(0.0, 0.0));
+/// A mutable Y-bus under construction: a COO (triplet) accumulator. Entries
+/// at the same `(row, col)` are summed once finalized via `finish()` — this
+/// gives the same accumulation semantics as the old dense `ybus[(i,j)] +=
+/// val`, including for parallel branches between the same two buses (e.g.
+/// `symmetric/distribution-case`'s two parallel transformers).
+pub struct YBus {
+    n: usize,
+    entries: Vec<(usize, usize, Complex<f64>)>,
+}
+
+impl YBus {
+    pub fn new(n: usize) -> Self {
+        Self { n, entries: Vec::new() }
+    }
+
+    pub fn add(&mut self, i: usize, j: usize, val: Complex<f64>) {
+        self.entries.push((i, j, val));
+    }
+
+    /// Consolidates the accumulated triplets into the frozen, sparse form
+    /// used for the actual power-flow solve. Call once all `build_ybus*`/
+    /// `stamp_*` contributions have been added.
+    pub fn finish(self) -> YBusSparse {
+        // Consolidate duplicate (i, j) entries and group by row, giving each
+        // row's actual admittance neighbors (including its own diagonal) —
+        // used by `linear_initial_guess` and `build_jacobian` to walk only
+        // real neighbors instead of every other bus.
+        let mut merged: std::collections::HashMap<(usize, usize), Complex<f64>> = std::collections::HashMap::new();
+        for &(i, j, v) in &self.entries {
+            *merged.entry((i, j)).or_insert(Complex::new(0.0, 0.0)) += v;
+        }
+        let mut adjacency: Vec<Vec<(usize, Complex<f64>)>> = vec![Vec::new(); self.n];
+        for (&(i, j), &v) in &merged {
+            adjacency[i].push((j, v));
+        }
+        for row in &mut adjacency {
+            row.sort_unstable_by_key(|&(j, _)| j);
+        }
+        let matrix = sparse::SparseMatrix::build(self.n, &self.entries)
+            .expect("Y-bus triplet set should always form a valid sparse matrix");
+        YBusSparse { n: self.n, adjacency, matrix }
+    }
+}
+
+/// A finalized, frozen Y-bus: consolidated per-row admittance neighbors (for
+/// sparse-aware assembly of the linear initial guess and the Jacobian) plus
+/// a ready-to-use sparse matrix (for `power_injections`'s mat-vec, needed
+/// every Newton-Raphson iteration). Built once via `YBus::finish`.
+pub struct YBusSparse {
+    n: usize,
+    adjacency: Vec<Vec<(usize, Complex<f64>)>>,
+    matrix: sparse::SparseMatrix,
+}
+
+impl YBusSparse {
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// The `(col, value)` pairs for row `i`'s actual admittance neighbors
+    /// (including the diagonal), sorted by column index.
+    pub fn row(&self, i: usize) -> &[(usize, Complex<f64>)] {
+        &self.adjacency[i]
+    }
+
+    /// The value at `(i, j)`, or zero if there's no entry there.
+    pub fn get(&self, i: usize, j: usize) -> Complex<f64> {
+        self.adjacency[i]
+            .binary_search_by_key(&j, |&(col, _)| col)
+            .map(|idx| self.adjacency[i][idx].1)
+            .unwrap_or(Complex::new(0.0, 0.0))
+    }
+
+    pub fn mul_vec(&self, v: &[Complex<f64>]) -> Vec<Complex<f64>> {
+        self.matrix.mul_vec(v)
+    }
+}
+
+pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> YBus {
+    let mut y = YBus::new(n);
     for ln in lines {
         // Self-loop: pure shunt element (no series branch).
         if ln.from == ln.to {
-            y[(ln.from, ln.from)] += Complex::new(0.0, ln.b_shunt);
+            y.add(ln.from, ln.from, Complex::new(0.0, ln.b_shunt));
             continue;
         }
         let z = Complex::new(ln.r, ln.x);
@@ -41,11 +119,11 @@ pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> DMa
         // split shunt susceptance equally to both ends of line
         let b2 = Complex::new(0.0, ln.b_shunt / 2.0);
         // diagonal elements
-        y[(ln.from, ln.from)] += y_line + b2;
-        y[(ln.to, ln.to)] += y_line + b2;
+        y.add(ln.from, ln.from, y_line + b2);
+        y.add(ln.to, ln.to, y_line + b2);
         // off-diagonal elements
-        y[(ln.from, ln.to)] -= y_line;
-        y[(ln.to, ln.from)] -= y_line;
+        y.add(ln.from, ln.to, -y_line);
+        y.add(ln.to, ln.from, -y_line);
     }
     stamp_transformers(&mut y, transformers);
     y
@@ -57,9 +135,8 @@ pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> DMa
 /// Sequence parameters are converted to the 3×3 primitive admittance matrix via
 /// the symmetrical-components transform; off-diagonal terms couple phases when
 /// r0≠r1 or x0≠x1.
-pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> DMatrix<Complex<f64>> {
-    let zero = Complex::new(0.0, 0.0);
-    let mut y = DMatrix::from_element(3 * n, 3 * n, zero);
+pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> YBus {
+    let mut y = YBus::new(3 * n);
 
     for ln in lines {
         let y_c1 = Complex::new(0.0, ln.b1);
@@ -71,7 +148,7 @@ pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> DMatrix<Complex<f64>> {
             let fi = ln.from;
             for p in 0..3 {
                 for q in 0..3 {
-                    y[(3 * fi + p, 3 * fi + q)] += m[p][q];
+                    y.add(3 * fi + p, 3 * fi + q, m[p][q]);
                 }
             }
             continue;
@@ -93,10 +170,10 @@ pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> DMatrix<Complex<f64>> {
             for q in 0..3 {
                 let ys = if p == q { d_s } else { o_s };
                 let ysh = if p == q { d_sh } else { o_sh };
-                y[(3 * fi + p, 3 * fi + q)] += ys + ysh;
-                y[(3 * ti + p, 3 * ti + q)] += ys + ysh;
-                y[(3 * fi + p, 3 * ti + q)] -= ys;
-                y[(3 * ti + p, 3 * fi + q)] -= ys;
+                y.add(3 * fi + p, 3 * fi + q, ys + ysh);
+                y.add(3 * ti + p, 3 * ti + q, ys + ysh);
+                y.add(3 * fi + p, 3 * ti + q, -ys);
+                y.add(3 * ti + p, 3 * fi + q, -ys);
             }
         }
     }
@@ -151,14 +228,14 @@ pub fn branch_calc_param(
 
 /// Stamps two-winding transformer contributions into an existing Y-bus, via
 /// `branch_calc_param` for the per-branch [yff, yft, ytf, ytt] entries.
-fn stamp_transformers(ybus: &mut DMatrix<Complex<f64>>, transformers: &[Transformer]) {
+fn stamp_transformers(ybus: &mut YBus, transformers: &[Transformer]) {
     for t in transformers {
         let [yff, yft, ytf, ytt] =
             branch_calc_param(t.y_series, t.y_shunt, t.tap, t.from_status, t.to_status);
-        ybus[(t.from, t.from)] += yff;
-        ybus[(t.from, t.to)] += yft;
-        ybus[(t.to, t.from)] += ytf;
-        ybus[(t.to, t.to)] += ytt;
+        ybus.add(t.from, t.from, yff);
+        ybus.add(t.from, t.to, yft);
+        ybus.add(t.to, t.from, ytf);
+        ybus.add(t.to, t.to, ytt);
     }
 }
 
@@ -245,14 +322,14 @@ pub fn transformer_seq_params(
 }
 
 /// Stamps asymmetric transformer contributions into a 3N×3N phase-domain Y-bus.
-pub fn stamp_transformers_3ph(ybus: &mut DMatrix<Complex<f64>>, transformers: &[Transformer3PhSeq]) {
+pub fn stamp_transformers_3ph(ybus: &mut YBus, transformers: &[Transformer3PhSeq]) {
     for t in transformers {
         let blocks = [(t.from, t.from), (t.from, t.to), (t.to, t.from), (t.to, t.to)];
         for (i, &(bi, bj)) in blocks.iter().enumerate() {
             let m = fortescue_to_phase(t.y0[i], t.y1[i], t.y2[i]);
             for p in 0..3 {
                 for q in 0..3 {
-                    ybus[(3 * bi + p, 3 * bj + q)] += m[p][q];
+                    ybus.add(3 * bi + p, 3 * bj + q, m[p][q]);
                 }
             }
         }
@@ -260,19 +337,19 @@ pub fn stamp_transformers_3ph(ybus: &mut DMatrix<Complex<f64>>, transformers: &[
 }
 
 /// Adds a set of lumped shunt admittances to the Y-bus diagonal.
-pub fn stamp_shunts(ybus: &mut DMatrix<Complex<f64>>, shunts: &[ShuntAdm]) {
+pub fn stamp_shunts(ybus: &mut YBus, shunts: &[ShuntAdm]) {
     for s in shunts {
-        ybus[(s.at, s.at)] += s.y;
+        ybus.add(s.at, s.at, s.y);
     }
 }
 
 /// Adds a set of three-phase shunt admittances to the phase-domain Y-bus diagonal blocks.
-pub fn stamp_shunts_3ph(ybus: &mut DMatrix<Complex<f64>>, shunts: &[ShuntAdm3Ph]) {
+pub fn stamp_shunts_3ph(ybus: &mut YBus, shunts: &[ShuntAdm3Ph]) {
     for s in shunts {
         let m = seq_to_phase_shunt(s.y1, s.y0);
         for p in 0..3 {
             for q in 0..3 {
-                ybus[(3 * s.at + p, 3 * s.at + q)] += m[p][q];
+                ybus.add(3 * s.at + p, 3 * s.at + q, m[p][q]);
             }
         }
     }
@@ -407,41 +484,52 @@ pub fn effective_injection(bus: &Bus) -> (f64, f64) {
 /// step damping or voltage clamping beyond this — a better initial guess is
 /// its only robustness mechanism, needed on networks combining weak sources
 /// with large transformer phase shifts where plain flat-start NR diverges.
-pub fn linear_initial_guess(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>) {
+pub fn linear_initial_guess(buses: &mut [Bus], ybus: &YBusSparse) {
     let n = buses.len();
-    let mut yp = ybus.clone();
-    for (i, b) in buses.iter().enumerate() {
-        if !matches!(b.bus_type, BusType::PQ) {
-            continue;
-        }
-        let (p, q) = effective_injection(b);
-        yp[(i, i)] += -Complex::new(p, q).conj();
-    }
-
     let unknown_idx: Vec<usize> = (0..n).filter(|&i| matches!(buses[i].bus_type, BusType::PQ)).collect();
     if unknown_idx.is_empty() {
         return;
     }
     let m = unknown_idx.len();
 
-    let mut a = DMatrix::from_element(m, m, Complex::new(0.0, 0.0));
-    let mut rhs = DVector::from_element(m, Complex::new(0.0, 0.0));
+    // Map physical bus index -> reduced (unknown-system) index.
+    let mut reduced_pos: Vec<Option<usize>> = vec![None; n];
     for (r, &i) in unknown_idx.iter().enumerate() {
-        for (c, &j) in unknown_idx.iter().enumerate() {
-            a[(r, c)] = yp[(i, j)];
-        }
-        let mut b = Complex::new(0.0, 0.0);
-        for k in 0..n {
-            if unknown_idx.binary_search(&k).is_ok() {
-                continue;
-            }
-            let u_k = Complex::from_polar(buses[k].voltage_mag, buses[k].voltage_ang);
-            b -= yp[(i, k)] * u_k;
-        }
-        rhs[r] = b;
+        reduced_pos[i] = Some(r);
     }
 
-    if let Some(sol) = a.lu().solve(&rhs) {
+    // Walk each unknown bus's actual admittance neighbors (from the sparse
+    // Y-bus's row structure) instead of the full unknown×unknown cross
+    // product — neighbors that are themselves unknown become reduced-system
+    // triplets; neighbors that are known (Slack, including de-energized
+    // buses) move to the RHS via their fixed voltage.
+    let mut triplets: Vec<(usize, usize, Complex<f64>)> = Vec::new();
+    let mut rhs = vec![Complex::new(0.0, 0.0); m];
+    for (r, &i) in unknown_idx.iter().enumerate() {
+        let (p, q) = effective_injection(&buses[i]);
+        let y_load = -Complex::new(p, q).conj();
+        let mut diag_seen = false;
+        for &(j, y_ij) in ybus.row(i) {
+            let y_ij = if j == i {
+                diag_seen = true;
+                y_ij + y_load
+            } else {
+                y_ij
+            };
+            match reduced_pos[j] {
+                Some(c) => triplets.push((r, c, y_ij)),
+                None => {
+                    let u_j = Complex::from_polar(buses[j].voltage_mag, buses[j].voltage_ang);
+                    rhs[r] -= y_ij * u_j;
+                }
+            }
+        }
+        if !diag_seen {
+            triplets.push((r, r, y_load));
+        }
+    }
+
+    if let Some(sol) = sparse::solve_complex(m, &triplets, &rhs) {
         for (r, &i) in unknown_idx.iter().enumerate() {
             buses[i].voltage_mag = sol[r].norm();
             buses[i].voltage_ang = sol[r].arg();
@@ -451,7 +539,7 @@ pub fn linear_initial_guess(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>) {
 
 pub fn power_injections(
     buses: &[Bus],
-    ybus: &DMatrix<Complex<f64>>,
+    ybus: &YBusSparse,
 ) -> (Vec<f64>, Vec<f64>) {
     // Calculates the complex power injection into each bus.
     // S = V .* conj(I) where I = Ybus * V
@@ -460,17 +548,13 @@ pub fn power_injections(
     let mut p = vec![0.0; n];
     let mut q = vec![0.0; n];
 
-    let v = DVector::from_iterator(
-        n,
-        buses.iter().map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang)),
-    );
-
-    let i = ybus * v.clone();
-    let s = v.component_mul(&i.conjugate());
+    let v: Vec<Complex<f64>> = buses.iter().map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang)).collect();
+    let i = ybus.mul_vec(&v);
 
     for k in 0..n {
-        p[k] = s[k].re;
-        q[k] = s[k].im;
+        let s = v[k] * i[k].conj();
+        p[k] = s.re;
+        q[k] = s.im;
     }
 
     (p, q)

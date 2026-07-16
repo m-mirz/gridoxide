@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use nalgebra::Complex;
+use num_complex::Complex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BusType {

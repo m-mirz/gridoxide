@@ -1,9 +1,8 @@
-use nalgebra::{DMatrix, DVector};
-use nalgebra::Complex;
 use super::types::{Bus, BusType};
-use super::network::{effective_injection, power_injections};
+use super::network::{effective_injection, power_injections, YBusSparse};
+use super::sparse::RealSparseSystem;
 
-pub fn newton_raphson(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>, tol: f64, max_iter: usize) {
+pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
 
     // Identify PV and PQ indices (exclude slack)
     let mut pv_idx: Vec<usize> = Vec::new();
@@ -26,12 +25,32 @@ pub fn newton_raphson(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>, tol: f64,
     let n_vmag = pq_idx.len();
     let n_unknowns = n_angle + n_vmag;
 
+    // Physical bus index -> position within non_slack_idx / pq_idx, for
+    // O(1) lookup while walking each bus's actual Y-bus neighbors (as
+    // opposed to the full non_slack_idx × non_slack_idx / pq_idx × pq_idx
+    // cross product the dense implementation used).
+    let mut non_slack_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (pos, &i) in non_slack_idx.iter().enumerate() {
+        non_slack_pos[i] = Some(pos);
+    }
+    let mut pq_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (pos, &i) in pq_idx.iter().enumerate() {
+        pq_pos[i] = Some(pos);
+    }
+
+    // The Jacobian's sparsity *pattern* is fixed across iterations (same
+    // bus topology every time, only numeric values change), so the
+    // symbolic factorization (ordering + fill-in) is computed once here and
+    // reused via `factor_and_solve` for every iteration's numeric-only
+    // refactorization, mirroring PGM's own prefactorization-reuse approach.
+    let mut sparse_system: Option<RealSparseSystem> = None;
+
     for iter in 0..max_iter {
         // compute injections
         let (p_calc, q_calc) = power_injections(buses, ybus);
 
         // Build mismatch vector
-        let mut mismatch = DVector::from_element(n_unknowns, 0.0);
+        let mut mismatch = vec![0.0; n_unknowns];
         let mut mis_idx = 0;
         for &i in &non_slack_idx {
             // P mismatch for PV and PQ buses
@@ -53,12 +72,19 @@ pub fn newton_raphson(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>, tol: f64,
             return;
         }
 
-        // Build Jacobian
-        let j = build_jacobian(buses, ybus, &non_slack_idx, &pq_idx, &p_calc, &q_calc);
+        // Build Jacobian (sparse triplets)
+        let triplets = build_jacobian_triplets(
+            buses, ybus, &non_slack_idx, &pq_idx, &non_slack_pos, &pq_pos, n_angle, &p_calc, &q_calc,
+        );
 
-        // Solve
-        let lu = j.lu();
-        let dx = match lu.solve(&mismatch) {
+        if sparse_system.is_none() {
+            sparse_system = RealSparseSystem::new(n_unknowns, &triplets);
+        }
+        let Some(system) = sparse_system.as_ref() else {
+            println!("Jacobian is singular. Failed to solve.");
+            return;
+        };
+        let dx = match system.factor_and_solve(&triplets, &mismatch) {
             Some(sol) => sol,
             None => {
                 println!("Jacobian is singular. Failed to solve.");
@@ -83,90 +109,87 @@ pub fn newton_raphson(buses: &mut [Bus], ybus: &DMatrix<Complex<f64>>, tol: f64,
     println!("Failed to converge in {} iterations", max_iter);
 }
 
-fn build_jacobian(
+/// Assembles the Newton-Raphson Jacobian's nonzero entries as `(row, col,
+/// value)` triplets, walking only each unknown bus's actual Y-bus neighbors
+/// (`ybus.row(i)`) instead of the full cross product of unknown-bus indices.
+/// Every topological neighbor is always included regardless of its computed
+/// value (even if it happens to evaluate to exactly zero at some iteration),
+/// so the resulting sparsity *pattern* is identical across calls — required
+/// for `RealSparseSystem`'s cached symbolic factorization to stay valid.
+///
+/// Block structure (H/N/M/L), matching the original dense Jacobian:
+/// ```text
+/// J = [ H  N ]   H = dP/d_ang, N = dP/d_vmag
+///     [ M  L ]   M = dQ/d_ang, L = dQ/d_vmag
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn build_jacobian_triplets(
     buses: &[Bus],
-    ybus: &DMatrix<Complex<f64>>,
+    ybus: &YBusSparse,
     non_slack_idx: &[usize],
     pq_idx: &[usize],
+    non_slack_pos: &[Option<usize>],
+    pq_pos: &[Option<usize>],
+    n_angle: usize,
     p_calc: &[f64],
     q_calc: &[f64],
-) -> DMatrix<f64> {
-    // J = [ H  N ]
-    //     [ M  L ]
-    // H = dP/d_ang, N = dP/d_vmag
-    // M = dQ/d_ang, L = dQ/d_vmag
-    let n_angle = non_slack_idx.len();
-    let n_vmag = pq_idx.len();
-    let n_unknowns = n_angle + n_vmag;
-    let mut j = DMatrix::from_element(n_unknowns, n_unknowns, 0.0);
-
-    // Extract voltage magnitudes and angles for each bus
+) -> Vec<(usize, usize, f64)> {
     let vm: Vec<f64> = buses.iter().map(|b| b.voltage_mag).collect();
     let va: Vec<f64> = buses.iter().map(|b| b.voltage_ang).collect();
+    let mut triplets = Vec::new();
 
-    // Jacobian structure:
-    // J = [ H  N ]
-    //     [ M  L ]
-    // H = dP/d_ang, N = dP/d_vmag
-    // M = dQ/d_ang, L = dQ/d_vmag
-
-    // Loop over non-slack buses for rows
-    // First n_angle rows: P equations
+    // H and N blocks: rows = non_slack_idx (P-mismatch equations).
     for (row_idx, &i) in non_slack_idx.iter().enumerate() {
-        // H block (dP/d_ang)
-        for (col_idx, &k) in non_slack_idx.iter().enumerate() {
-            if i == k { // H_ii = dP_i/d_ang_i
+        for &(k, y_ik) in ybus.row(i) {
+            if k == i {
                 // H_ii = -Q_i - V_i^2 * B_ii
-                j[(row_idx, col_idx)] = -q_calc[i] - vm[i].powi(2) * ybus[(i, i)].im;
-            } else { // H_ik = dP_i/d_ang_k
-                // H_ik = V_i * V_k * (G_ik * sin(d_i - d_k) - B_ik * cos(d_i - d_k))
-                let y_ik = ybus[(i, k)];
-                let angle_ik = va[i] - va[k];
-                j[(row_idx, col_idx)] = vm[i] * vm[k] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
+                triplets.push((row_idx, row_idx, -q_calc[i] - vm[i].powi(2) * y_ik.im));
+                // N_ii = P_i/V_i + V_i * G_ii (only if i has a magnitude unknown)
+                if let Some(col_idx) = pq_pos[i] {
+                    triplets.push((row_idx, n_angle + col_idx, p_calc[i] / vm[i] + vm[i] * y_ik.re));
+                }
+                continue;
             }
-        }
-        // N block (dP/d_vmag)
-        for (col_idx, &k) in pq_idx.iter().enumerate() {
-            if i == k { // N_ii = dP_i/d_vmag_i
-                // N_ii = P_i/V_i + V_i * G_ii
-                j[(row_idx, n_angle + col_idx)] = p_calc[i] / vm[i] + vm[i] * ybus[(i, i)].re;
-            } else { // N_ik = dP_i/d_vmag_k
-                // N_ik = V_i * (G_ik * cos(d_i - d_k) + B_ik * sin(d_i - d_k))
-                let y_ik = ybus[(i, k)];
-                let angle_ik = va[i] - va[k];
-                j[(row_idx, n_angle + col_idx)] = vm[i] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
+            let angle_ik = va[i] - va[k];
+            if let Some(col_idx) = non_slack_pos[k] {
+                // H_ik = V_i * V_k * (G_ik * sin(d_ik) - B_ik * cos(d_ik))
+                let h_ik = vm[i] * vm[k] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
+                triplets.push((row_idx, col_idx, h_ik));
+            }
+            if let Some(col_idx) = pq_pos[k] {
+                // N_ik = V_i * (G_ik * cos(d_ik) + B_ik * sin(d_ik))
+                let n_ik = vm[i] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
+                triplets.push((row_idx, n_angle + col_idx, n_ik));
             }
         }
     }
 
-    // Loop over PQ buses for rows
-    // Next n_vmag rows: Q equations
+    // M and L blocks: rows = pq_idx (Q-mismatch equations).
     for (row_idx, &i) in pq_idx.iter().enumerate() {
-        // M block (dQ/d_ang)
-        for (col_idx, &k) in non_slack_idx.iter().enumerate() {
-            if i == k { // M_ii = dQ_i/d_ang_i
-                // M_ii = P_i - V_i^2 * G_ii
-                j[(n_angle + row_idx, col_idx)] = p_calc[i] - vm[i].powi(2) * ybus[(i, i)].re;
-            } else { // M_ik = dQ_i/d_ang_k
-                // M_ik = -V_i * V_k * (G_ik * cos(d_i - d_k) + B_ik * sin(d_i - d_k))
-                let y_ik = ybus[(i, k)];
-                let angle_ik = va[i] - va[k];
-                j[(n_angle + row_idx, col_idx)] = -vm[i] * vm[k] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
-            }
-        }
-        // L block (dQ/d_vmag)
-        for (col_idx, &k) in pq_idx.iter().enumerate() {
-             if i == k { // L_ii = dQ_i/d_vmag_i
+        for &(k, y_ik) in ybus.row(i) {
+            if k == i {
+                // M_ii = P_i - V_i^2 * G_ii; column is i's position among
+                // *all* non-slack buses, not just PQ ones (may differ from
+                // row_idx once PV buses exist).
+                let col_idx = non_slack_pos[i].expect("a PQ bus is always non-slack");
+                triplets.push((n_angle + row_idx, col_idx, p_calc[i] - vm[i].powi(2) * y_ik.re));
                 // L_ii = Q_i/V_i - V_i * B_ii
-                j[(n_angle + row_idx, n_angle + col_idx)] = q_calc[i] / vm[i] - vm[i] * ybus[(i, i)].im;
-            } else { // L_ik = dQ_i/d_vmag_k
-                // L_ik = V_i * (G_ik * sin(d_i - d_k) - B_ik * cos(d_i - d_k))
-                let y_ik = ybus[(i, k)];
-                let angle_ik = va[i] - va[k];
-                j[(n_angle + row_idx, n_angle + col_idx)] = vm[i] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
+                triplets.push((n_angle + row_idx, n_angle + row_idx, q_calc[i] / vm[i] - vm[i] * y_ik.im));
+                continue;
+            }
+            let angle_ik = va[i] - va[k];
+            if let Some(col_idx) = non_slack_pos[k] {
+                // M_ik = -V_i * V_k * (G_ik * cos(d_ik) + B_ik * sin(d_ik))
+                let m_ik = -vm[i] * vm[k] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
+                triplets.push((n_angle + row_idx, col_idx, m_ik));
+            }
+            if let Some(col_idx) = pq_pos[k] {
+                // L_ik = V_i * (G_ik * sin(d_ik) - B_ik * cos(d_ik))
+                let l_ik = vm[i] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
+                triplets.push((n_angle + row_idx, n_angle + col_idx, l_ik));
             }
         }
     }
 
-    j
+    triplets
 }

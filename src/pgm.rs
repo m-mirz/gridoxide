@@ -6,7 +6,7 @@ use super::network::{
     transformer_admittances_ex, transformer_seq_params, tap_ratio_from_voltages, three_winding_star_params,
     ShuntAdm, ShuntAdm3Ph,
 };
-use nalgebra::Complex;
+use num_complex::Complex;
 
 // ── Input structs ─────────────────────────────────────────────────────────────
 

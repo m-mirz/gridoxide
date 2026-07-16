@@ -3,23 +3,16 @@ pub mod network;
 pub mod solver;
 pub mod json;
 pub mod pgm;
+pub mod sparse;
 
-use network::{build_ybus, linear_initial_guess};
+use network::{build_ybus, linear_initial_guess, YBus};
 use solver::newton_raphson;
 use json::NetworkData;
 use types::Bus;
-use nalgebra::{DMatrix, Complex};
 
 pub fn run_power_flow_analysis(network_data: NetworkData) -> Vec<Bus> {
-    let mut buses = network_data.buses;
-    let lines = network_data.lines;
-
-    let ybus = build_ybus(buses.len(), &lines, &[]);
-
-    linear_initial_guess(&mut buses, &ybus);
-    newton_raphson(&mut buses, &ybus, 1e-6, 20);
-
-    buses
+    let ybus = build_ybus(network_data.buses.len(), &network_data.lines, &[]);
+    run_power_flow_analysis_from_ybus(network_data.buses, ybus)
 }
 
 /// Runs a power flow analysis given a pre-built Y-bus matrix.
@@ -27,8 +20,9 @@ pub fn run_power_flow_analysis(network_data: NetworkData) -> Vec<Bus> {
 /// `ybus` is the 3N×3N phase-domain admittance matrix from `build_ybus_3ph`.
 pub fn run_power_flow_analysis_from_ybus(
     mut buses: Vec<Bus>,
-    ybus: DMatrix<Complex<f64>>,
+    ybus: YBus,
 ) -> Vec<Bus> {
+    let ybus = ybus.finish();
     linear_initial_guess(&mut buses, &ybus);
     newton_raphson(&mut buses, &ybus, 1e-6, 20);
     buses
