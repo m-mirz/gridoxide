@@ -1,7 +1,7 @@
 //! Ad-hoc runtime benchmark against a PGM-format JSON network, for comparing
 //! against power-grid-model on the same input. Not part of the test suite.
 //!
-//! Usage: cargo run --release --example bench_network -- <path-to-input.json> [repeat-count] [backend]
+//! Usage: cargo run --release --example bench_network -- <path-to-input.json> [repeat-count] [backend] [mode]
 //!
 //! `repeat-count` (default 1) re-runs the linear initial guess + full
 //! Newton-Raphson solve that many times from a fresh clone of the
@@ -13,6 +13,19 @@
 //! path), `block` (the experimental block-per-bus path, symmetric only), or
 //! `klu` (the experimental vendored-KLU path, only available when built with
 //! `--features klu`) for a head-to-head comparison on the same network.
+//!
+//! `mode` (default "cold") selects `cold` (each repeat calls
+//! `newton_raphson_with_backend` fresh — no state carries over between
+//! repeats, so every repeat redoes symbolic factorization, i.e. fill-
+//! reducing ordering, from scratch) or `warm` (one `solver::PersistentSolver`
+//! is reused across all repeats, so only the *first* repeat pays for
+//! symbolic factorization — every later repeat only does a numeric
+//! refactorization). `warm` is the fair comparison against tools that keep
+//! one persistent solver/model object across repeated solves on unchanged
+//! topology (lightsim2grid's `ac_pf`, PGM's `PowerGridModel`) — `cold`
+//! measures "N independent flat-start solves with no shared state," a
+//! different, also-legitimate scenario. Confirmed on a 9,241-bus case:
+//! `warm` cut per-repeat `klu` time by ~45%.
 
 use std::env;
 use std::fs;
@@ -20,11 +33,11 @@ use std::time::Instant;
 
 use gridoxide::network::{build_ybus, linear_initial_guess};
 use gridoxide::pgm::pgm_to_buses_and_branches;
-use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend};
+use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend, PersistentSolver};
 
 fn main() {
     let mut args = env::args().skip(1);
-    let path = args.next().expect("usage: bench_network <input.json> [repeat-count] [backend]");
+    let path = args.next().expect("usage: bench_network <input.json> [repeat-count] [backend] [mode]");
     let repeat: usize = args.next().map(|s| s.parse().expect("repeat-count must be an integer")).unwrap_or(1);
     let backend_arg = args.next().unwrap_or_else(|| "scalar".to_string());
     let backend = match backend_arg.as_str() {
@@ -36,7 +49,13 @@ fn main() {
         "klu" => panic!("the 'klu' backend needs `cargo run --features klu ...` (see the README's \"Sparse solver\" section)"),
         other => panic!("unknown backend '{other}', expected 'scalar', 'block', or 'klu'"),
     };
-    println!("backend={backend_arg}");
+    let mode_arg = args.next().unwrap_or_else(|| "cold".to_string());
+    let warm = match mode_arg.as_str() {
+        "cold" => false,
+        "warm" => true,
+        other => panic!("unknown mode '{other}', expected 'cold' or 'warm'"),
+    };
+    println!("backend={backend_arg} mode={mode_arg}");
     let raw = fs::read_to_string(&path).expect("read input file");
 
     let t_parse0 = Instant::now();
@@ -57,6 +76,7 @@ fn main() {
     let mut total_guess = std::time::Duration::ZERO;
     let mut total_nr = std::time::Duration::ZERO;
     let mut buses = buses_template.clone();
+    let mut persistent_solver = warm.then(|| PersistentSolver::new(backend));
     for _ in 0..repeat {
         buses = buses_template.clone();
 
@@ -65,7 +85,10 @@ fn main() {
         total_guess += t_guess0.elapsed();
 
         let t_nr0 = Instant::now();
-        newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, backend);
+        match persistent_solver.as_mut() {
+            Some(solver) => solver.solve(&mut buses, &ybus, 1e-6, 20),
+            None => newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, backend),
+        }
         total_nr += t_nr0.elapsed();
     }
 

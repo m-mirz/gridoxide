@@ -52,10 +52,9 @@ The Y-bus admittance matrix and Newton-Raphson Jacobian are stored and factored 
 the [`faer`](https://crates.io/crates/faer) crate), not dense ones.
 
 At 2,605 nodes the dense solver was over 100,000x slower than PGM; the sparse rewrite closed that to roughly
-an order of magnitude, which is the realistic target — PGM's C++ core has additional tuning (e.g. reusing a
-factorization across repeated solves) this implementation doesn't attempt to replicate. The underlying grid
-is sparse (each bus only connects to a handful of neighbors), so a dense representation was doing asymptotically
-unnecessary work regardless of how fast the constant-factor arithmetic was.
+an order of magnitude on a cold, single-shot solve — the underlying grid is sparse (each bus only connects to
+a handful of neighbors), so a dense representation was doing asymptotically unnecessary work regardless of
+how fast the constant-factor arithmetic was.
 
 Two things make this work, not just "swap in a sparse matrix type":
 
@@ -66,7 +65,40 @@ Two things make this work, not just "swap in a sparse matrix type":
 - **Symbolic factorization reuse.** A Newton-Raphson Jacobian has the same sparsity *pattern* every
   iteration (same bus topology, only numeric values change), so `solver::newton_raphson` computes the
   symbolic factorization (fill-reducing ordering) once and reuses it for a cheap numeric-only refactorization
-  on every iteration (`sparse::RealSparseSystem`), mirroring what PGM's own solver does internally.
+  on every iteration (`sparse::RealSparseSystem`), mirroring what PGM's own solver does internally. This
+  reuse now also extends *across* repeated solves, not just the iterations within one — see
+  `solver::PersistentSolver` below, PGM's own equivalent tuning this implementation used to not replicate.
+
+## Reusing factorization across repeated solves
+
+A single `newton_raphson`/`newton_raphson_with_backend` call already reuses its symbolic factorization across
+its own NR iterations, but starts cold (re-derives the fill-reducing ordering from scratch) on every call —
+fine for a genuinely one-off solve, wasteful for anything that solves the *same* topology repeatedly (a time
+series, a batch of scenarios, contingency analysis), where only bus values (`p_spec`, `q_spec`, voltage
+guess) change between calls, not the topology itself.
+
+`solver::PersistentSolver` fixes this: construct one per topology, call `.solve(&mut buses, &ybus, tol,
+max_iter)` as many times as needed, and only the *first* call pays for symbolic factorization — every later
+call does a numeric-only refactorization, the same reuse `newton_raphson` already does within one call,
+extended across calls. Call `.reset()` (or construct a new one) if the topology itself changes between
+solves.
+
+```rust
+use gridoxide::solver::{JacobianBackend, PersistentSolver};
+
+let mut solver = PersistentSolver::new(JacobianBackend::Klu);
+for scenario in scenarios {
+    apply_scenario(&mut buses, scenario); // changes p_spec/q_spec only
+    solver.solve(&mut buses, &ybus, 1e-6, 20);
+}
+```
+
+Measured on a 9,241-bus real-world grid (see the real-test-case benchmark below): reusing factorization
+across repeated solves cut per-solve `Klu` time by ~45% (`perf` showed COLAMD/AMD/BTF ordering — the
+fill-reducing step a cold solve redoes every time — responsible for roughly a third of total solve time on
+that case). `examples/bench_network.rs` exposes this as an optional `warm` mode (its default `cold` mode
+still measures "N independent flat-start solves with no shared state," a different, also-legitimate number)
+— see `scripts/bench/README.md`.
 
 See `src/sparse.rs` for the thin backend wrapper around `faer` — it's intentionally the only file that
 imports `faer` types directly, so a different sparse-solver backend can be swapped in behind the same
@@ -96,18 +128,23 @@ Both are strictly parallel to `Scalar`, not replacements — a bug in either can
 default behavior, and every existing test keeps using `Scalar` unless it explicitly opts into a different
 backend (see `tests/block_jacobian_test.rs`, `tests/klu_jacobian_test.rs`).
 
-Measured with `examples/bench_network.rs --backend {scalar,block,klu}` (see `scripts/bench/README.md` for how
-to reproduce these numbers, including generating the benchmark grids and running the power-grid-model
+Measured with `examples/bench_network.rs --backend {scalar,block,klu} warm` (see `scripts/bench/README.md` for
+how to reproduce these numbers, including generating the benchmark grids and running the power-grid-model
 comparison from the section above):
 
-| Nodes | Scalar | Block | Klu |
-|---|---|---|---|
-| 192 | 1.94 ms | 0.74 ms | 0.67 ms |
-| 1,003 | 11.70 ms | 3.93 ms | 3.88 ms |
-| 2,605 | 15.41 ms | 10.71 ms | 9.27 ms |
+| Nodes | Scalar | Block | Klu | PGM (warm) |
+|---|---|---|---|---|
+| 192 | 1.50 ms | 0.67 ms | 0.45 ms | 0.42 ms |
+| 1,003 | 8.38 ms | 3.15 ms | 2.47 ms | 0.93 ms |
+| 2,605 | 21.67 ms | 8.10 ms | 6.71 ms | 2.49 ms |
 
-All three produce identical converged voltages at every scale — these are purely performance comparisons, not
-correctness trade-offs.
+All three gridoxide backends produce identical converged voltages at every scale — these are purely
+performance comparisons, not correctness trade-offs. PGM is clearly faster than any gridoxide backend on
+*this* synthetic radial distribution/LV topology, even with gridoxide's own factorization reuse now doing the
+same warm-solve trick PGM's own `PowerGridModel` does — a real, standing gap, not one this project has closed.
+(Interestingly, that gap doesn't hold universally: on the real-world *transmission*-topology grids in the
+next benchmark, gridoxide's `Klu` backend is frequently faster than lightsim2grid's own KLU-backed C++
+solver — the comparison depends on topology, not just implementation language.)
 
 A second, separate benchmark compares gridoxide against four other independent solvers — PGM,
 [lightsim2grid](https://github.com/m-mirz/lightsim2grid), RTE's
@@ -117,7 +154,13 @@ own default solver — on 12 real IEEE/MATPOWER power-system test-case grids (14
 results table and methodology. gridoxide and pandapower's own native path are the only two of the five that
 converge on all 12; the other three each fail on a subset of the same handful of genuinely hard cases (RTE's
 own real production grids), confirmed by cross-checking against `powsybl-open-loadflow` directly, not a
-gridoxide gap. This benchmark is also what led to `src/pgm.rs` parsing PGM's `voltage_regulator` component:
+gridoxide gap. Once compared warm-vs-warm (`PersistentSolver`, see above — the earlier `cold` comparison made
+gridoxide look 1.3-1.7x slower across the board, an artifact of redoing symbolic factorization every repeat
+that lightsim2grid's own benchmark never does), `Klu` is frequently *faster* than lightsim2grid's own
+KLU-backed C++ solver on this real transmission-topology data, tied only on the largest (9,241-bus) case —
+even though PGM still clearly beats every gridoxide backend on the synthetic radial-distribution topology
+above, so the comparison genuinely depends on grid topology, not just implementation language. This benchmark
+is also what led to `src/pgm.rs` parsing PGM's `voltage_regulator` component:
 real generator PV (voltage-controlled) buses, not just the slack/PQ split described above — see
 `types::BusType::PV` and `solver::newton_raphson_scalar`/
 `newton_raphson_klu`'s existing PV handling, now actually reachable from PGM JSON input — and to fixing a

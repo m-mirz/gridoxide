@@ -31,13 +31,18 @@ python3 scripts/bench/generate_grid.py grid_large.json  --target-nodes 2200  # -
 
 ```bash
 cargo build --release --example bench_network
-./target/release/examples/bench_network grid.json [repeat-count] [backend]
+./target/release/examples/bench_network grid.json [repeat-count] [backend] [mode]
 ```
 
 `repeat-count` (default 1) re-runs the solve that many times from a fresh flat start each time — useful both
 for stable timing averages and for `perf record`-based profiling, since a single solve is often too fast
 (tens of milliseconds) to sample meaningfully. `backend` selects `scalar` (default), `block`, or `klu` (if
-built with `--features klu`) — see the top-level README's "Sparse solver" section.
+built with `--features klu`) — see the top-level README's "Sparse solver" section. `mode` selects `cold`
+(default — every repeat calls `newton_raphson_with_backend` fresh, redoing symbolic factorization every time)
+or `warm` (one `solver::PersistentSolver` is reused across all repeats, so only the first pays for symbolic
+factorization) — see the top-level README's "Reusing factorization across repeated solves" section. `warm` is
+the fair comparison against PGM's `min`/`mean` below and against every other tool in step 4, all of which
+reuse their own persistent model/solver object across their repeated timed calls.
 
 ## 3. Benchmark power-grid-model
 
@@ -52,10 +57,25 @@ python3 -m venv .venv-pgm
 ## Interpreting results
 
 Compare gridoxide's `total (guess + NR)` line against PGM's `min`/`mean` (warm, repeated calls on an
-already-built model) and `cold (construct+calc)` (includes PGM's own model-build overhead) figures. Sample
-voltage output (`voltage_mag min/max` from gridoxide, `u_pu min/max` from PGM) should match closely if both
-are solving the same input correctly — a large mismatch there means something is wrong with the comparison,
-not just the timing.
+already-built model) and `cold (construct+calc)` (includes PGM's own model-build overhead) figures — use
+gridoxide's `warm` mode for this (see step 2), since PGM's `min`/`mean` are themselves warm (repeated calls on
+one persistent `PowerGridModel`), not `cold`. Sample voltage output (`voltage_mag min/max` from gridoxide,
+`u_pu min/max` from PGM) should match closely if both are solving the same input correctly — a large mismatch
+there means something is wrong with the comparison, not just the timing.
+
+`newton_raphson`-only time (ms/run, 50 warm repeats) vs. PGM's own `mean` (5 warm runs):
+
+| Nodes | Scalar | Block | Klu | PGM |
+|---|---|---|---|---|
+| 192 | 1.50 | 0.67 | 0.45 | 0.42 |
+| 1,003 | 8.38 | 3.15 | 2.47 | 0.93 |
+| 2,605 | 21.67 | 8.10 | 6.71 | 2.49 |
+
+PGM is clearly faster than any gridoxide backend on this synthetic radial distribution/LV topology, even
+warm-vs-warm — a real, standing gap (see the top-level README's "Experimental backends" section). Contrast
+with step 4 below, where gridoxide's `Klu` backend is frequently *faster* than lightsim2grid's own KLU-backed
+C++ solver on real transmission-topology grids — the comparison depends heavily on the grid's topology, not
+just implementation language or which C library both ultimately call into.
 
 ## 4. Benchmark against real power-system test-case grids
 
@@ -124,22 +144,23 @@ standalone, for benchmarking or debugging one case/tool at a time.
 
 ### Results
 
-`newton_raphson`-only time (ms/run, 10 repeats) vs. each other tool's own warm-run mean (5 runs):
+`newton_raphson`-only time (ms/run, 10 **warm** repeats — `run_case_suite.py` always uses `bench_network.rs`'s
+`warm` mode, see step 2) vs. each other tool's own warm-run mean (5 runs):
 
 | case | buses | scalar | block | klu | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
 |---|---|---|---|---|---|---|---|---|
-| case14 | 15 | 0.049 | N/A¹ | 0.037 | 0.134 | 0.026 | 1.665 | 16.248 |
-| case118 | 119 | 0.374 | N/A¹ | 0.193 | FAILED² | 0.151 | 4.554 | 16.892 |
-| case_illinois200 | 201 | 0.867 | N/A¹ | 0.424 | 0.573 | 0.299 | 5.857 | 16.247 |
-| case300 | 301 | 2.067 | N/A¹ | 0.771 | FAILED² | 0.539 | 7.849 | 16.620 |
-| case1354pegase | 1355 | 9.042 | N/A¹ | 3.959 | FAILED³ | 2.536 | 37.060 | 26.974 |
-| case1888rte | 1889 | 11.948 | N/A¹ | 4.468 | FAILED² | FAILED⁴ | FAILED⁵ | 27.916 |
-| case2848rte | 2849 | 19.662 | N/A¹ | 7.672 | FAILED² | 7.531 | FAILED⁵ | 32.433 |
-| case2869pegase | 2870 | 23.929 | N/A¹ | 9.873 | FAILED³ | 6.182 | 96.524 | 33.982 |
-| case3120sp | 3121 | 21.054 | N/A¹ | 9.196 | FAILED³ | 7.088 | 79.131 | 32.107 |
-| case6495rte | 6496 | 64.359 | N/A¹ | 24.531 | FAILED³ | FAILED⁴ | FAILED⁵ | 144.302 |
-| case6515rte | 6516 | 72.729 | N/A¹ | 26.744 | FAILED³ | FAILED⁴ | FAILED⁵ | 61.075 |
-| case9241pegase | 9242 | 117.379 | N/A¹ | 40.982 | FAILED³ | 24.667 | 379.553 | 82.602 |
+| case14 | 15 | 0.043 | N/A¹ | 0.025 | 0.144 | 0.026 | 1.717 | 14.258 |
+| case118 | 119 | 0.267 | N/A¹ | 0.103 | FAILED² | 0.153 | 5.201 | 15.426 |
+| case_illinois200 | 201 | 0.613 | N/A¹ | 0.277 | 0.573 | 0.304 | 6.228 | 16.479 |
+| case300 | 301 | 1.633 | N/A¹ | 0.400 | FAILED² | 0.872 | 8.107 | 19.091 |
+| case1354pegase | 1355 | 8.171 | N/A¹ | 2.409 | FAILED³ | 2.570 | 36.184 | 23.325 |
+| case1888rte | 1889 | 9.902 | N/A¹ | 2.379 | FAILED² | FAILED⁴ | FAILED⁵ | 28.383 |
+| case2848rte | 2849 | 17.371 | N/A¹ | 3.861 | FAILED² | 7.689 | FAILED⁵ | 33.145 |
+| case2869pegase | 2870 | 20.966 | N/A¹ | 5.249 | FAILED³ | 6.369 | 100.563 | 34.427 |
+| case3120sp | 3121 | 20.012 | N/A¹ | 4.483 | FAILED³ | 6.751 | 78.637 | 31.663 |
+| case6495rte | 6496 | 61.870 | N/A¹ | 13.501 | FAILED³ | FAILED⁴ | FAILED⁵ | 142.685 |
+| case6515rte | 6516 | 74.618 | N/A¹ | 18.833 | FAILED³ | FAILED⁴ | FAILED⁵ | 56.463 |
+| case9241pegase | 9242 | 108.130 | N/A¹ | 25.957 | FAILED³ | 24.919 | 382.352 | 83.616 |
 
 ¹ `Block` is documented as symmetric-only with no PV-bus support (`src/solver.rs`'s `JacobianBackend::Block`
 doc comment) and correctly panics with a clear message rather than silently mishandling one — every case
@@ -160,15 +181,19 @@ phase-shift-zeroing workaround that repo's own `MatpowerUtil.java` applies befor
 three cases (confirmed directly: applying that workaround via `pypowsybl` does make powsybl-open-loadflow
 converge on all three, in ~4 iterations each — see matpower_to_pgm.py's docstring).
 
-Three consistent findings across the table: gridoxide (`scalar`/`klu`) and pandapower (its own native,
-no-cross-tool-conversion path) are the only two that converge on **all 12** cases. `case1888rte`,
-`case6495rte`, and `case6515rte` are hard for every tool that doesn't special-case them — a genuine property
-of those three cases' data (RTE's own real production grid, per the case names), not a gridoxide-, PGM-,
-lightsim2grid-, or pypowsybl-specific gap. `klu` is consistently 2–4x faster than `scalar`, and — on the
-cases where a same-input, same-settings comparison is possible at all — within roughly the same order of
-magnitude as lightsim2grid and PGM's own C++/C++ engines, well ahead of pandapower's and pypowsybl's
-heavier general-purpose frameworks.
+gridoxide (`scalar`/`klu`) and pandapower (its own native, no-cross-tool-conversion path) are the only two of
+five tools that converge on **all 12** cases. `case1888rte`, `case6495rte`, and `case6515rte` are hard for
+every tool that doesn't special-case them — a genuine property of those three cases' data (RTE's own real
+production grid, per the case names), not a gridoxide-, PGM-, lightsim2grid-, or pypowsybl-specific gap.
 
-gridoxide now converges on all 12 cases. `klu` is consistently 2–4x faster than `scalar` (as with the
-synthetic-grid benchmark above), and is within roughly 1.1–1.8x of lightsim2grid's mature, heavily-optimized
-C++ implementation at every scale up to 9,241 buses.
+`klu` is consistently 2–5x faster than `scalar`. More notably: on every case where a direct comparison is
+possible, gridoxide's `klu` is now *at least as fast as, and frequently faster than*, lightsim2grid's own
+KLU-backed C++ solver (e.g. `case300`: 0.40ms vs 0.87ms; `case2848rte`: 3.86ms vs 7.69ms) — only tied on the
+largest case, `case9241pegase` (25.96ms vs 24.92ms). This is the *warm* comparison (`bench_network.rs`'s
+`warm` mode — see the top-level README's "Reusing factorization across repeated solves"); the earlier `cold`
+numbers made gridoxide look 1.3–1.7x *slower* across the board, which `perf`-profiling one case
+(`case9241pegase`) traced to symbolic factorization (fill-reducing ordering) being redone from scratch on
+every repeat in `cold` mode, something lightsim2grid's own benchmark never does (it reuses one persistent
+`grid` object across its timed calls) — not a genuine solver-speed gap. Both `pypowsybl` and `pandapower` are
+markedly slower than every C-backed solver here, consistent with being heavier, more general-purpose Python
+frameworks not specifically tuned for repeated single-scenario power flow.

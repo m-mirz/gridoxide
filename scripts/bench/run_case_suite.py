@@ -30,6 +30,16 @@ controlled) buses via PGM's `voltage_regulator` component
 (`src/pgm.rs::pgm_to_buses_and_branches`, mirroring PGM's own
 `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types`) — so PGM is a full
 column here, not excluded on a PV-support technicality.
+
+gridoxide's timings use `bench_network.rs`'s `warm` mode (one
+`solver::PersistentSolver` reused across all timed repeats) rather than its
+`cold` default (fresh symbolic factorization — fill-reducing ordering —
+every repeat). This isn't cosmetic: every other tool here reuses its own
+persistent model/solver object across its own repeated timed calls
+(lightsim2grid's `ac_pf`, PGM's `calculate_power_flow`), so `cold` numbers
+weren't actually comparable to them — confirmed by profiling (`perf`) a
+9,241-bus case, where symbolic factorization alone was responsible for most
+of what first looked like a solver-speed gap against lightsim2grid.
 """
 import argparse
 import re
@@ -87,8 +97,19 @@ def convert_case(python: str, case_name: str, cache_dir: Path) -> tuple[Path | N
 def run_gridoxide(json_path: Path, backend: str, repeat: int) -> tuple[float | None, int | None, str | None]:
     if not GRIDOXIDE_BIN.exists():
         return None, None, "bench_network not built (cargo build --release --example bench_network --features klu)"
+    # "warm" mode reuses one PersistentSolver's symbolic factorization
+    # across all `repeat` solves, matching how every other tool here is
+    # actually measured: lightsim2grid's `ac_pf` and PGM's
+    # `calculate_power_flow` both reuse their own persistent model/solver
+    # object across their 5 timed calls (see bench_lightsim2grid.py,
+    # bench_pgm.py) rather than rebuilding it from scratch each time.
+    # "cold" mode (bench_network.rs's default) redoes symbolic
+    # factorization — fill-reducing ordering — on every repeat, which is a
+    # different, real, but not-comparable-to-the-other-tools' number here;
+    # confirmed on a 9,241-bus case that this alone accounts for most of
+    # what looked like a solver-speed gap against lightsim2grid.
     proc = subprocess.run(
-        [str(GRIDOXIDE_BIN), str(json_path), str(repeat), backend],
+        [str(GRIDOXIDE_BIN), str(json_path), str(repeat), backend, "warm"],
         capture_output=True, text=True, timeout=300,
     )
     if proc.returncode != 0:
