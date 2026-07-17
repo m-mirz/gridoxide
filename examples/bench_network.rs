@@ -10,8 +10,9 @@
 //! tens of milliseconds, too short to sample meaningfully.
 //!
 //! `backend` (default "scalar") selects `scalar` (the default `faer`-backed
-//! path) or `block` (the experimental block-per-bus path, symmetric only)
-//! for a head-to-head comparison on the same network.
+//! path), `block` (the experimental block-per-bus path, symmetric only), or
+//! `klu` (the experimental vendored-KLU path, only available when built with
+//! `--features klu`) for a head-to-head comparison on the same network.
 
 use std::env;
 use std::fs;
@@ -29,7 +30,11 @@ fn main() {
     let backend = match backend_arg.as_str() {
         "scalar" => JacobianBackend::Scalar,
         "block" => JacobianBackend::Block,
-        other => panic!("unknown backend '{other}', expected 'scalar' or 'block'"),
+        #[cfg(feature = "klu")]
+        "klu" => JacobianBackend::Klu,
+        #[cfg(not(feature = "klu"))]
+        "klu" => panic!("the 'klu' backend needs `cargo run --features klu ...` (see the README's \"Sparse solver\" section)"),
+        other => panic!("unknown backend '{other}', expected 'scalar', 'block', or 'klu'"),
     };
     println!("backend={backend_arg}");
     let raw = fs::read_to_string(&path).expect("read input file");

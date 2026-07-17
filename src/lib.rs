@@ -5,6 +5,8 @@ pub mod json;
 pub mod pgm;
 pub mod sparse;
 pub mod block_sparse;
+#[cfg(feature = "klu")]
+pub mod sparse_klu;
 
 use network::{build_ybus, linear_initial_guess, YBus};
 use solver::newton_raphson;

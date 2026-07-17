@@ -69,9 +69,45 @@ Two things make this work, not just "swap in a sparse matrix type":
   on every iteration (`sparse::RealSparseSystem`), mirroring what PGM's own solver does internally.
 
 See `src/sparse.rs` for the thin backend wrapper around `faer` — it's intentionally the only file that
-imports `faer` types directly, so a different sparse-solver backend (e.g. a KLU binding, if `faer` ever
-proves numerically insufficient) could be swapped in behind the same interface without touching the rest of
-the codebase.
+imports `faer` types directly, so a different sparse-solver backend can be swapped in behind the same
+interface without touching the rest of the codebase. Two such backends exist today, both strictly opt-in
+experiments selectable via `solver::JacobianBackend` (`newton_raphson_with_backend`) — see the next section.
+
+## Experimental backends
+
+`solver::newton_raphson` always uses the default `Scalar` (`faer`-backed) path described above.
+`newton_raphson_with_backend` additionally accepts:
+
+- **`JacobianBackend::Block`** (`src/block_sparse.rs`, no extra build requirements) — groups each bus's own
+  (angle, voltage-magnitude) unknowns into one dense 2×2 block, mirroring power-grid-model's block-per-bus
+  matrix structure, with a hand-written Gilbert-Peierls sparse block LU (`block_sparse::BlockLu`). Symmetric
+  power flow only. **1.6-3x faster than `Scalar`** at every benchmarked scale.
+- **`JacobianBackend::Klu`** (`src/sparse_klu.rs`, needs `cargo build --features klu`) — the same scalar
+  Jacobian as `Scalar`, solved by [SuiteSparse's KLU](https://github.com/DrTimothyAldenDavis/SuiteSparse)
+  instead of `faer`, vendored and compiled from source (`vendor/suitesparse/`, see
+  `vendor/suitesparse/PROVENANCE.md`) rather than depending on a third-party Rust wrapper crate. Needs a C
+  compiler and `libclang` (for `bindgen`) at build time. **KLU and BTF (one of KLU's own dependencies) are
+  LGPL-2.1-or-later** — this is why the `klu` feature is opt-in rather than always built; a `klu-dynamic`
+  sub-feature links a system-installed `libklu.so` instead of compiling the vendored copy statically, for
+  anyone who needs strict LGPL relinking compliance. Matches or beats `Block`'s performance at every
+  benchmarked scale.
+
+Both are strictly parallel to `Scalar`, not replacements — a bug in either can't affect `newton_raphson`'s
+default behavior, and every existing test keeps using `Scalar` unless it explicitly opts into a different
+backend (see `tests/block_jacobian_test.rs`, `tests/klu_jacobian_test.rs`).
+
+Measured with `examples/bench_network.rs --backend {scalar,block,klu}` (see `scripts/bench/README.md` for how
+to reproduce these numbers, including generating the benchmark grids and running the power-grid-model
+comparison from the section above):
+
+| Nodes | Scalar | Block | Klu |
+|---|---|---|---|
+| 192 | 1.94 ms | 0.74 ms | 0.67 ms |
+| 1,003 | 11.70 ms | 3.93 ms | 3.88 ms |
+| 2,605 | 15.41 ms | 10.71 ms | 9.27 ms |
+
+All three produce identical converged voltages at every scale — these are purely performance comparisons, not
+correctness trade-offs.
 
 ## Profiling
 

@@ -2,9 +2,32 @@
 name = "gridoxide"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 faer = "0.24.4"
 num-complex = { version = "0.4.6", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[build-dependencies]
+cc = { version = "1.0", optional = true }
+bindgen = { version = "0.72", optional = true }
+
+[features]
+default = []
+# Builds the vendored SuiteSparse KLU solver (vendor/suitesparse/) as a third,
+# opt-in JacobianBackend — see the README's "Sparse solver" section. Needs a
+# C compiler and libclang (for bindgen) at build time. KLU and BTF (one of
+# KLU's own dependencies) are LGPL-2.1-or-later — see
+# vendor/suitesparse/PROVENANCE.md before enabling this in a distributed
+# binary.
+klu = ["dep:cc", "dep:bindgen"]
+# Links a system-installed libklu.so instead of compiling the vendored
+# source statically, for anyone who needs strict LGPL relinking compliance.
+klu-dynamic = ["klu"]
+
+[[test]]
+name = "klu_jacobian_test"
+path = "tests/klu_jacobian_test.rs"
+required-features = ["klu"]

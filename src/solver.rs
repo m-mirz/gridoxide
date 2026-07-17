@@ -2,6 +2,8 @@ use super::types::{Bus, BusType};
 use super::network::{effective_injection, power_injections, YBusSparse};
 use super::sparse::RealSparseSystem;
 use super::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
+#[cfg(feature = "klu")]
+use super::sparse_klu::KluRealSystem;
 
 /// Selects which sparse-LU backend `newton_raphson_with_backend` uses to
 /// solve the Jacobian system each iteration.
@@ -18,6 +20,13 @@ pub enum JacobianBackend {
     /// silently mishandling one if that ever changes, since its block
     /// indexing assumes every non-slack bus has exactly 2 unknowns).
     Block,
+    /// Experimental, opt-in, only compiled with the `klu` Cargo feature:
+    /// the same scalar Jacobian as `Scalar` (reuses `build_jacobian_triplets`
+    /// unchanged), solved via the vendored SuiteSparse KLU solver
+    /// (`sparse_klu::KluRealSystem`) instead of `faer`. See the README's
+    /// "Sparse solver" section and `vendor/suitesparse/PROVENANCE.md`.
+    #[cfg(feature = "klu")]
+    Klu,
 }
 
 pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
@@ -34,6 +43,8 @@ pub fn newton_raphson_with_backend(
     match backend {
         JacobianBackend::Scalar => newton_raphson_scalar(buses, ybus, tol, max_iter),
         JacobianBackend::Block => newton_raphson_block(buses, ybus, tol, max_iter),
+        #[cfg(feature = "klu")]
+        JacobianBackend::Klu => newton_raphson_klu(buses, ybus, tol, max_iter),
     }
 }
 
@@ -136,6 +147,99 @@ fn newton_raphson_scalar(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_ite
         }
         for &i in &pq_idx {
             // update voltage magnitudes
+            buses[i].voltage_mag += dx[dx_idx];
+            dx_idx += 1;
+        }
+    }
+
+    println!("Failed to converge in {} iterations", max_iter);
+}
+
+/// Identical to `newton_raphson_scalar` except the sparse solve is backed by
+/// `sparse_klu::KluRealSystem` instead of `sparse::RealSparseSystem` — reuses
+/// `build_jacobian_triplets` unchanged, since `Klu` solves the same scalar
+/// Jacobian shape as `Scalar`, only the solver library differs.
+#[cfg(feature = "klu")]
+fn newton_raphson_klu(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
+    let mut pv_idx: Vec<usize> = Vec::new();
+    let mut pq_idx: Vec<usize> = Vec::new();
+    for b in buses.iter() {
+        match b.bus_type {
+            BusType::Slack => (),
+            BusType::PV => pv_idx.push(b.idx),
+            BusType::PQ => pq_idx.push(b.idx),
+        }
+    }
+
+    let non_slack_idx: Vec<usize> = buses
+        .iter()
+        .filter(|b| !matches!(b.bus_type, BusType::Slack))
+        .map(|b| b.idx)
+        .collect();
+
+    let n_angle = non_slack_idx.len();
+    let n_vmag = pq_idx.len();
+    let n_unknowns = n_angle + n_vmag;
+
+    let mut non_slack_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (pos, &i) in non_slack_idx.iter().enumerate() {
+        non_slack_pos[i] = Some(pos);
+    }
+    let mut pq_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (pos, &i) in pq_idx.iter().enumerate() {
+        pq_pos[i] = Some(pos);
+    }
+
+    let mut sparse_system: Option<KluRealSystem> = None;
+
+    for iter in 0..max_iter {
+        let (p_calc, q_calc) = power_injections(buses, ybus);
+
+        let mut mismatch = vec![0.0; n_unknowns];
+        let mut mis_idx = 0;
+        for &i in &non_slack_idx {
+            let (p_eff, _) = effective_injection(&buses[i]);
+            mismatch[mis_idx] = p_eff - p_calc[i];
+            mis_idx += 1;
+        }
+        for &i in &pq_idx {
+            let (_, q_eff) = effective_injection(&buses[i]);
+            mismatch[mis_idx] = q_eff - q_calc[i];
+            mis_idx += 1;
+        }
+
+        let max_mis = mismatch.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+        println!("iter {}: max mismatch = {:.6e}", iter + 1, max_mis);
+        if max_mis < tol {
+            println!("Converged in {} iterations", iter + 1);
+            return;
+        }
+
+        let triplets = build_jacobian_triplets(
+            buses, ybus, &non_slack_idx, &pq_idx, &non_slack_pos, &pq_pos, n_angle, &p_calc, &q_calc,
+        );
+
+        if sparse_system.is_none() {
+            sparse_system = KluRealSystem::new(n_unknowns, &triplets);
+        }
+        let Some(system) = sparse_system.as_mut() else {
+            println!("Jacobian is singular. Failed to solve.");
+            return;
+        };
+        let dx = match system.factor_and_solve(&triplets, &mismatch) {
+            Some(sol) => sol,
+            None => {
+                println!("Jacobian is singular. Failed to solve.");
+                return;
+            }
+        };
+
+        let mut dx_idx = 0;
+        for &i in &non_slack_idx {
+            buses[i].voltage_ang += dx[dx_idx];
+            dx_idx += 1;
+        }
+        for &i in &pq_idx {
             buses[i].voltage_mag += dx[dx_idx];
             dx_idx += 1;
         }
