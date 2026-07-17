@@ -194,6 +194,7 @@ fn newton_raphson_scalar_cached(
     for (pos, &i) in pq_idx.iter().enumerate() {
         pq_pos[i] = Some(pos);
     }
+    let triplet_capacity = jacobian_triplet_capacity(ybus, &non_slack_idx, &pq_idx);
 
     // The Jacobian's sparsity *pattern* is fixed across iterations (same
     // bus topology every time, only numeric values change), so the
@@ -230,6 +231,7 @@ fn newton_raphson_scalar_cached(
         // Build Jacobian (sparse triplets)
         let triplets = build_jacobian_triplets(
             buses, ybus, &non_slack_idx, &pq_idx, &non_slack_pos, &pq_pos, n_angle, &p_calc, &q_calc,
+            triplet_capacity,
         );
 
         if sparse_system.is_none() {
@@ -310,6 +312,7 @@ fn newton_raphson_klu_cached(
     for (pos, &i) in pq_idx.iter().enumerate() {
         pq_pos[i] = Some(pos);
     }
+    let triplet_capacity = jacobian_triplet_capacity(ybus, &non_slack_idx, &pq_idx);
 
     for iter in 0..max_iter {
         let (p_calc, q_calc) = power_injections(buses, ybus);
@@ -336,6 +339,7 @@ fn newton_raphson_klu_cached(
 
         let triplets = build_jacobian_triplets(
             buses, ybus, &non_slack_idx, &pq_idx, &non_slack_pos, &pq_pos, n_angle, &p_calc, &q_calc,
+            triplet_capacity,
         );
 
         if sparse_system.is_none() {
@@ -368,6 +372,19 @@ fn newton_raphson_klu_cached(
     SolveStatus::MaxIterationsReached
 }
 
+/// Upper bound on `build_jacobian_triplets`' output length for a given
+/// topology — computed once per solve (not per iteration) and reused via
+/// `Vec::with_capacity`, since the sparsity pattern, and hence this bound,
+/// never changes across a solve's iterations while `build_jacobian_triplets`
+/// itself starts a fresh `Vec` from scratch every iteration. Each Y-bus
+/// neighbor contributes at most 2 triplets to the H/N block (one per
+/// non-slack row) and at most 2 to the M/L block (one per PQ row).
+fn jacobian_triplet_capacity(ybus: &YBusSparse, non_slack_idx: &[usize], pq_idx: &[usize]) -> usize {
+    let non_slack_degree: usize = non_slack_idx.iter().map(|&i| ybus.row(i).len()).sum();
+    let pq_degree: usize = pq_idx.iter().map(|&i| ybus.row(i).len()).sum();
+    2 * non_slack_degree + 2 * pq_degree
+}
+
 /// Assembles the Newton-Raphson Jacobian's nonzero entries as `(row, col,
 /// value)` triplets, walking only each unknown bus's actual Y-bus neighbors
 /// (`ybus.row(i)`) instead of the full cross product of unknown-bus indices.
@@ -392,10 +409,11 @@ fn build_jacobian_triplets(
     n_angle: usize,
     p_calc: &[f64],
     q_calc: &[f64],
+    triplet_capacity: usize,
 ) -> Vec<(usize, usize, f64)> {
     let vm: Vec<f64> = buses.iter().map(|b| b.voltage_mag).collect();
     let va: Vec<f64> = buses.iter().map(|b| b.voltage_ang).collect();
-    let mut triplets = Vec::new();
+    let mut triplets = Vec::with_capacity(triplet_capacity);
 
     // H and N blocks: rows = non_slack_idx (P-mismatch equations).
     for (row_idx, &i) in non_slack_idx.iter().enumerate() {
