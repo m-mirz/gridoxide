@@ -6,15 +6,23 @@ one combined markdown timing table.
 Usage: python3 run_case_suite.py [--python PYTHON] [--repeat N]
                                   [--cache-dir DIR] [--out FILE]
 
-`--python` (default: the interpreter running this script) must have
-`pandapower`, `power-grid-model-io`, and `lightsim2grid` installed —
-one combined venv covers convert_pandapower_case.py and
-bench_lightsim2grid.py both.
+`--python` (default: the interpreter running this script) needs `numpy` and
+`scipy` (for matpower_to_pgm.py) plus `pandapower` and `lightsim2grid` (for
+bench_lightsim2grid.py, which needs a pandapower net directly since
+lightsim2grid isn't fed PGM JSON).
+
+gridoxide's side of this benchmark is converted straight from MATPOWER's
+own `.m` case files (matpower_to_pgm.py), not through pandapower's own
+MATPOWER importer — see that script's docstring for why: pandapower's
+importer (via power-grid-model-io's PandaPowerConverter) introduced a real,
+now-fixed-by-avoiding-it class of from-side/to-side base-mismatch bug for
+transformers, and three of these twelve cases (case1888rte, case6495rte,
+case6515rte) would not converge at all through that path.
 
 Why no PGM column here (unlike the rest of scripts/bench/): this is a
 deliberate scope split, not a technical limitation — PGM does support PV
 buses (via its `voltage_regulator` component, the same mechanism gridoxide
-now parses too, see convert_pandapower_case.py), but PGM's own team doesn't
+now parses too, see matpower_to_pgm.py), but PGM's own team doesn't
 benchmark against these particular IEEE/MATPOWER test cases either. This
 track instead compares gridoxide head-to-head against lightsim2grid across
 a realistic range of real-world grid sizes/sparsity patterns. For a
@@ -25,26 +33,43 @@ import argparse
 import re
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
-from cases import CASE_NAMES
+from cases import CASE_NAMES, matpower_filename
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 GRIDOXIDE_BIN = REPO_ROOT / "target" / "release" / "examples" / "bench_network"
-CONVERT_SCRIPT = Path(__file__).resolve().parent / "convert_pandapower_case.py"
+CONVERT_SCRIPT = Path(__file__).resolve().parent / "matpower_to_pgm.py"
 LS2G_SCRIPT = Path(__file__).resolve().parent / "bench_lightsim2grid.py"
+MATPOWER_RAW_URL = "https://raw.githubusercontent.com/m-mirz/matpower/master/data/{filename}"
 
 MEAN_RE = re.compile(r"min=[\d.]+ms mean=([\d.]+)ms")
 NODES_RE = re.compile(r"nodes=(\d+)")
 NR_RE = re.compile(r"newton_raphson: [\d.]+ ms total, ([\d.]+) ms/run")
 
 
+def fetch_matpower_case(case_name: str, cache_dir: Path) -> tuple[Path | None, str | None]:
+    filename = matpower_filename(case_name)
+    m_path = cache_dir / filename
+    if m_path.exists():
+        return m_path, None
+    try:
+        urllib.request.urlretrieve(MATPOWER_RAW_URL.format(filename=filename), m_path)
+    except OSError as e:
+        return None, f"download failed: {e}"
+    return m_path, None
+
+
 def convert_case(python: str, case_name: str, cache_dir: Path) -> tuple[Path | None, str | None]:
     out_path = cache_dir / f"{case_name}.json"
     if out_path.exists():
         return out_path, None
+    m_path, fetch_err = fetch_matpower_case(case_name, cache_dir)
+    if m_path is None:
+        return None, fetch_err
     proc = subprocess.run(
-        [python, str(CONVERT_SCRIPT), case_name, str(out_path)],
+        [python, str(CONVERT_SCRIPT), str(m_path), str(out_path)],
         capture_output=True, text=True, timeout=300,
     )
     if proc.returncode != 0 or not out_path.exists():

@@ -2,3 +2,4 @@
 /scripts/bench/.case-cache/
 /.venv*
 __pycache__/
+/references/

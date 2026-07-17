@@ -64,8 +64,7 @@ C++/KLU-backed Newton-Raphson solver) on the same 12 real IEEE/MATPOWER-derived 
 own benchmark uses
 ([`benchmarks/benchmark_grid_size.py`](https://github.com/m-mirz/lightsim2grid/blob/master/benchmarks/benchmark_grid_size.py)):
 `case14`, `case118`, `case_illinois200`, `case300`, `case1354pegase`, `case1888rte`, `case2848rte`,
-`case2869pegase`, `case3120sp`, `case6495rte`, `case6515rte`, `case9241pegase` — all bundled directly in
-pandapower's own `pandapower.networks` module, nothing to download separately.
+`case2869pegase`, `case3120sp`, `case6495rte`, `case6515rte`, `case9241pegase`.
 
 **PGM isn't part of this comparison** — a deliberate scope split, not a technical limitation: PGM's own team
 doesn't benchmark against these particular IEEE/MATPOWER test cases either. gridoxide models these test
@@ -73,29 +72,45 @@ cases' generators as genuine PV (voltage-controlled) buses, the same way PGM and
 `voltage_regulator` component (`regulated_object` = the generator, `u_ref` = its voltage setpoint) is PGM's
 real PV-bus mechanism, and `src/pgm.rs::pgm_to_buses_and_branches` now parses it the same way PGM's own
 `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types` does, assigning `BusType::PV` and pinning the bus's
-voltage magnitude. See `convert_pandapower_case.py`'s docstring for the full rationale, including a known
-data-quality quirk in how pandapower's MATPOWER-derived loaders encode transformers (large `sn_mva`/
-`vk_percent` values that push PGM's `uk` field outside its own documented valid range) that affects every
-one of these 12 cases.
+voltage magnitude.
+
+gridoxide's side is converted straight from MATPOWER's own `.m` case files
+(`matpower_to_pgm.py`, fetched from a fork of MATPOWER's repo,
+https://github.com/m-mirz/matpower/tree/master/data), not through pandapower's own MATPOWER importer.
+This isn't cosmetic: three of these twelve cases (`case1888rte`, `case6495rte`, `case6515rte`) would not
+converge at all through pandapower's importer, root-caused by comparing directly against
+`references/powsybl-open-loadflow` via `pypowsybl` — pandapower's importer assigns each bus a real physical
+`baseKV`, and for a transformer connecting two different voltage levels that requires very carefully keeping
+every impedance/tap conversion referenced to a *consistent* side (easy to get subtly wrong — this project's
+own first attempt did, twice). powsybl's own MATPOWER importer sidesteps the problem entirely: verified
+directly that it assigns `nominal_v = 1.0` to *every* bus regardless of the file's `baseKV` column, and
+encodes an off-nominal ratio purely via `rated_u1 = ratio`, `rated_u2 = 1.0` — MATPOWER's own power-flow
+formulation never actually needs a physical voltage reference, only a *consistent* one.
+`matpower_to_pgm.py` does the same, which fixed convergence on all three cases immediately. See that
+script's docstring for the full derivation, including a real, narrower-than-PGM's-C++-reference gap this
+surfaced in gridoxide's own `network::transformer_tap` (`src/network.rs`) along the way.
+`convert_pandapower_case.py` (pandapower-based, kept as a standalone tool, no longer used by this suite)
+documents the specific data-quality quirk that trips up pandapower's importer.
 
 ```bash
 python3 -m venv .venv-case-suite
-.venv-case-suite/bin/pip install pandapower power-grid-model-io lightsim2grid
+.venv-case-suite/bin/pip install numpy scipy pandapower lightsim2grid
 cargo build --release --example bench_network --features klu
 .venv-case-suite/bin/python3 scripts/bench/run_case_suite.py --python .venv-case-suite/bin/python3
 ```
 
-This loops all 12 cases, converting each to PGM JSON on first use (cached under
-`scripts/bench/.case-cache/`, gitignored — delete it to force reconversion), running gridoxide's `scalar`,
-`block`, and `klu` backends, and running lightsim2grid with `SolverType.KLU` (matching lightsim2grid's own
-benchmark default, and gridoxide's own fastest backend, for the closest apples-to-apples solver comparison),
-then prints one combined markdown table. A case that fails to convert or diverges gets an explicit `FAILED
-(...)` cell rather than a misleading blank one. Use `--repeat` to change how many timed solves gridoxide
-averages per case (default 10), `--cache-dir`/`--out` to change where converted grids/the results table are
-written.
+This loops all 12 cases, fetching each MATPOWER `.m` file and converting it to PGM JSON on first use (cached
+under `scripts/bench/.case-cache/`, gitignored — delete it to force re-fetch/reconversion), running
+gridoxide's `scalar`, `block`, and `klu` backends, and running lightsim2grid with `SolverType.KLU` (matching
+lightsim2grid's own benchmark default, and gridoxide's own fastest backend, for the closest apples-to-apples
+solver comparison), then prints one combined markdown table. A case that fails to convert or diverges gets an
+explicit `FAILED (...)` cell rather than a misleading blank one. Use `--repeat` to change how many timed
+solves gridoxide averages per case (default 10), `--cache-dir`/`--out` to change where converted grids/the
+results table are written.
 
-`convert_pandapower_case.py <case_name> <output.json>` and `bench_lightsim2grid.py <case_name>` also work
-standalone, for benchmarking or debugging one case at a time.
+`matpower_to_pgm.py <input.m-or-.mat> <output.json>`, `convert_pandapower_case.py <case_name> <output.json>`,
+and `bench_lightsim2grid.py <case_name>` also work standalone, for benchmarking or debugging one case at a
+time.
 
 ### Results
 
@@ -103,28 +118,29 @@ standalone, for benchmarking or debugging one case at a time.
 
 | case | buses | scalar | block | klu | lightsim2grid (KLU) |
 |---|---|---|---|---|---|
-| case14 | 15 | 0.045 | N/A¹ | 0.040 | 0.024 |
-| case118 | 119 | 0.324 | N/A¹ | 0.192 | 0.144 |
-| case_illinois200 | 201 | 1.245 | N/A¹ | 0.508 | 0.289 |
-| case300 | 301 | 2.145 | N/A¹ | 0.922 | 0.566 |
-| case1354pegase | 1355 | 8.949 | N/A¹ | 3.898 | 2.572 |
-| case1888rte | 1889 | 13.341 | N/A¹ | 5.242 | FAILED² |
-| case2848rte | 2849 | 19.055 | N/A¹ | 8.171 | 7.804 |
-| case2869pegase | 2870 | 23.485 | N/A¹ | 10.073 | 7.203 |
-| case3120sp | 3121 | 23.788 | N/A¹ | 9.338 | 6.394 |
-| case6495rte | — | FAILED³ | N/A¹ | FAILED³ | FAILED² |
-| case6515rte | — | FAILED³ | N/A¹ | FAILED³ | FAILED² |
-| case9241pegase | 9242 | 120.869 | N/A¹ | 42.355 | 25.389 |
+| case14 | 15 | 0.089 | N/A¹ | 0.038 | 0.027 |
+| case118 | 119 | 0.317 | N/A¹ | 0.196 | 0.156 |
+| case_illinois200 | 201 | 0.841 | N/A¹ | 0.467 | 0.297 |
+| case300 | 301 | 2.271 | N/A¹ | 0.762 | 0.533 |
+| case1354pegase | 1355 | 8.670 | N/A¹ | 4.004 | 3.005 |
+| case1888rte | 1889 | 11.494 | N/A¹ | 4.760 | FAILED² |
+| case2848rte | 2849 | 20.312 | N/A¹ | 7.695 | 7.899 |
+| case2869pegase | 2870 | 26.641 | N/A¹ | 10.675 | 6.364 |
+| case3120sp | 3121 | 21.188 | N/A¹ | 9.047 | 6.026 |
+| case6495rte | 6496 | 63.205 | N/A¹ | 24.194 | FAILED² |
+| case6515rte | 6516 | 95.627 | N/A¹ | 26.753 | FAILED² |
+| case9241pegase | 9242 | 120.056 | N/A¹ | 45.337 | 25.253 |
 
 ¹ `Block` is documented as symmetric-only with no PV-bus support (`src/solver.rs`'s `JacobianBackend::Block`
 doc comment) and correctly panics with a clear message rather than silently mishandling one — every case
 here has at least one PV bus (a real `gen`), so `Block` never runs on this track.
-² lightsim2grid's own `ac_pf` reports divergence (`V.shape[0] == 0`) on these cases.
-³ gridoxide's Newton-Raphson doesn't converge within 20 iterations from a flat start on these two cases.
-Notably, lightsim2grid also fails on both — independent evidence these two specific real-world RTE cases are
-genuinely hard to solve from a flat start, not a gridoxide-specific gap. `case1888rte` is the interesting
-counter-example: gridoxide converges cleanly there while lightsim2grid diverges.
+² lightsim2grid's own `ac_pf` reports divergence (`V.shape[0] == 0`) on these three cases — its `gridmodel`
+still loads via `pandapower.networks.<case_name>()` directly (it needs the pandapower net object, not PGM
+JSON), so it's still exposed to the same underlying data quirk `matpower_to_pgm.py` sidesteps for gridoxide.
+Confirmed via `pypowsybl` that even `powsybl-open-loadflow` fails on these same three cases without an
+explicit workaround (RTE's own benchmark code zeroes a handful of phase-shift values first) — this is a
+genuine property of these specific cases' data, not a gridoxide-, lightsim2grid-, or powsybl-specific gap.
 
-`klu` is consistently 2–3x faster than `scalar` (as with the synthetic-grid benchmark above), and is within
-roughly 1.2–1.7x of lightsim2grid's mature, heavily-optimized C++ implementation at every scale up to 9,241
-buses — without matching lightsim2grid's convergence robustness on the two hardest cases.
+gridoxide now converges on all 12 cases. `klu` is consistently 2–4x faster than `scalar` (as with the
+synthetic-grid benchmark above), and is within roughly 1.1–1.8x of lightsim2grid's mature, heavily-optimized
+C++ implementation at every scale up to 9,241 buses.

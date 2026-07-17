@@ -3,6 +3,12 @@
 cases.py) into PGM-format JSON, so it can be fed straight into gridoxide's
 existing `examples/bench_network.rs` / `bench_pgm.py` unchanged.
 
+Standalone tool, kept for pandapower-net-based conversion needs — not used
+by run_case_suite.py, which converts straight from MATPOWER's own case
+files instead (matpower_to_pgm.py) after this pandapower-based path proved
+unable to converge on 3 of the 12 lightsim2grid-benchmark cases. See
+matpower_to_pgm.py's docstring for the full root-cause and why.
+
 Usage: python3 convert_pandapower_case.py <case_name> <output.json>
 
 `case_name` is a function in `pandapower.networks` (e.g. "case14",
