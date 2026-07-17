@@ -1,1 +1,4 @@
 /target
+/scripts/bench/.case-cache/
+/.venv*
+__pycache__/

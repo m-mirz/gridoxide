@@ -35,6 +35,8 @@ pub struct PgmData {
     pub transformer: Vec<PgmTransformer>,
     #[serde(default)]
     pub three_winding_transformer: Vec<PgmThreeWindingTransformer>,
+    #[serde(default)]
+    pub voltage_regulator: Vec<PgmVoltageRegulator>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +109,21 @@ pub struct PgmSymGen {
     pub load_type: u8,
     pub p_specified: f64,
     pub q_specified: f64,
+}
+
+/// PV-bus control: an active `voltage_regulator` pins its `regulated_object`
+/// (a `sym_gen` id) bus's voltage magnitude to `u_ref`, letting Q float —
+/// mirrors PGM's own `VoltageRegulator` component (`regulated_object` ==
+/// `generator_id` in PGM's C++ `VoltageRegulator::calc_param()`). Reactive
+/// power limits (`q_min`/`q_max` in PGM's schema) aren't enforced — no
+/// PV→PQ switching, matching this project's existing scope note on `Bus`'s
+/// `q_min`/`q_max` fields ("for PV handling, optional").
+#[derive(Deserialize)]
+pub struct PgmVoltageRegulator {
+    pub id: u64,
+    pub regulated_object: u64,
+    pub status: u8,
+    pub u_ref: f64,
 }
 
 #[derive(Deserialize)]
@@ -185,6 +202,8 @@ pub struct PgmTransformer {
     pub clock: i32,
     pub tap_side: u8,
     pub tap_pos: i32,
+    pub tap_min: i32,
+    pub tap_max: i32,
     pub tap_nom: i32,
     pub tap_size: f64,
 }
@@ -335,7 +354,7 @@ pub fn pgm_transformers_3ph(
 ) -> Vec<Transformer3PhSeq> {
     input.data.transformer.iter()
         .map(|t| {
-            let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_nom, t.tap_size, t.clock);
+            let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock);
             let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
             let (y0, y1, y2) = transformer_seq_params(
                 y_series, y_shunt, tap, t.from_status, t.to_status,
@@ -436,6 +455,19 @@ pub fn pgm_to_buses_and_branches(
     }
     let mut buses: Vec<Bus> = opt_buses.into_iter().map(|b| b.unwrap()).collect();
 
+    // PV buses: an active `voltage_regulator` pins its regulated `sym_gen`'s
+    // bus voltage magnitude to `u_ref`, letting Q float (see `PgmVoltageRegulator`).
+    let sym_gen_node: HashMap<u64, u64> = input.data.sym_gen.iter().map(|g| (g.id, g.node)).collect();
+    for vr in &input.data.voltage_regulator {
+        if vr.status == 0 { continue; }
+        let Some(&node) = sym_gen_node.get(&vr.regulated_object) else { continue };
+        let idx = id_to_idx[&node];
+        if buses[idx].bus_type == BusType::PQ {
+            buses[idx].bus_type = BusType::PV;
+            buses[idx].voltage_mag = vr.u_ref;
+        }
+    }
+
     // Lines. PGM's c1 is the *total* shunt capacitance; build_ybus splits b_shunt/2
     // per end, matching PGM's y_shunt/2. Half-open cases become self-loop shunts.
     let omega = 2.0 * std::f64::consts::PI * freq_hz;
@@ -471,7 +503,7 @@ pub fn pgm_to_buses_and_branches(
     // Transformers — convert physical-unit PGM parameters to system pu.
     let mut transformers: Vec<Transformer> = Vec::new();
     for t in &input.data.transformer {
-        let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_nom, t.tap_size, t.clock);
+        let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock);
         let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
         transformers.push(Transformer {
             from: id_to_idx[&t.from_node],

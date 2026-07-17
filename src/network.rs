@@ -377,10 +377,17 @@ pub fn source_impedance_pu_seq(
 }
 
 /// Computes the complex off-nominal tap ratio k·exp(j·clock·π/6) from transformer nameplate data.
+///
+/// `tap_pos` is clamped to `[min(tap_min, tap_max), max(tap_min, tap_max)]` before use, mirroring
+/// PGM's own `Transformer::tap_limit` — real-world converted data (e.g. pandapower's MATPOWER-derived
+/// test cases) can carry a `tap_pos` outside that range for transformers with no adjustable tap
+/// changer (`tap_min == tap_max`), and PGM's reference implementation silently clamps rather than
+/// applying the out-of-range offset.
 pub fn transformer_tap(
     u1: f64, u2: f64, tap_side: u8,
-    tap_pos: i32, tap_nom: i32, tap_size: f64, clock: i32,
+    tap_pos: i32, tap_min: i32, tap_max: i32, tap_nom: i32, tap_size: f64, clock: i32,
 ) -> Complex<f64> {
+    let tap_pos = tap_pos.clamp(tap_min.min(tap_max), tap_min.max(tap_max));
     let delta = (tap_pos - tap_nom) as f64 * tap_size;
     if tap_side == 0 {
         tap_ratio_from_voltages(u1 + delta, u1, clock)

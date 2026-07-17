@@ -109,6 +109,15 @@ comparison from the section above):
 All three produce identical converged voltages at every scale — these are purely performance comparisons, not
 correctness trade-offs.
 
+A second, separate benchmark compares gridoxide against
+[lightsim2grid](https://github.com/m-mirz/lightsim2grid) on 12 real IEEE/MATPOWER power-system test-case grids
+(14 to 9,241 buses) — see `scripts/bench/README.md`'s "Benchmark against real power-system test-case grids"
+section for the full results table and methodology. `klu` is consistently within roughly 1.2-1.7x of
+lightsim2grid's mature C++ implementation up to 9,241 buses. This benchmark is also what led to `src/pgm.rs`
+parsing PGM's `voltage_regulator` component: real generator PV (voltage-controlled) buses, not just the
+slack/PQ split described above — see `types::BusType::PV` and `solver::newton_raphson_scalar`/
+`newton_raphson_klu`'s existing PV handling, now actually reachable from PGM JSON input.
+
 ## Profiling
 
 For profiling with perf, set
