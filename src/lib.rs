@@ -5,6 +5,7 @@ pub mod json;
 pub mod pgm;
 pub mod sparse;
 pub mod block_sparse;
+pub mod klu_native;
 #[cfg(feature = "klu")]
 pub mod sparse_klu;
 #[cfg(feature = "python")]
