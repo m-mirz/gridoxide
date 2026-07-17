@@ -106,8 +106,6 @@ def run_gridoxide(python: str, json_path: Path, backend: str) -> tuple[float | N
         capture_output=True, text=True, timeout=300,
     )
     if proc.returncode != 0:
-        if "only supports symmetric power flow with no PV buses" in proc.stderr:
-            return None, None, "N/A (Block backend doesn't support PV buses)"
         if "ModuleNotFoundError" in proc.stderr and "gridoxide" in proc.stderr:
             return None, None, "gridoxide extension module not built (see this directory's README)"
         return None, None, (extract_error(proc.stderr) if proc.stderr else "failed")

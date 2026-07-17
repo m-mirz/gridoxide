@@ -6,11 +6,11 @@
 //! This is a **parallel, opt-in** backend (`solver::JacobianBackend::Block`)
 //! — the default `Scalar` path (`sparse.rs`, backed by `faer`) is completely
 //! untouched by this module, so a bug here cannot affect existing behavior.
-//! Scoped to symmetric power flow only: every non-slack bus in gridoxide's
-//! current model is `PQ` (never `PV`; confirmed no code path constructs a
-//! `PV` bus), so every block is uniformly 2×2 — `debug_assert!`s in this
-//! module enforce that assumption rather than silently mishandling a
-//! hypothetical `PV` bus.
+//! Scoped to symmetric power flow only. Every non-slack bus, PV or PQ, gets
+//! a uniform 2×2 block here — this module itself has no notion of bus
+//! types; `solver::build_jacobian_blocks` is what encodes a `PV` bus's
+//! missing Q-mismatch equation, by substituting a dummy `ΔVmag = 0` row
+//! instead of varying block size per bus.
 //!
 //! Only the fill-reducing *ordering* is reused from `faer`
 //! (`faer::sparse::linalg::colamd::order`, which is purely structural and
@@ -95,8 +95,16 @@ impl BlockMatrix {
     }
 
     /// Consolidates duplicate `(i, j)` entries (summing them) and returns a
-    /// row-major adjacency list: `row(i)` gives all `(j, block)` pairs with
-    /// a nonzero block in row `i` (including the diagonal), sorted by `j`.
+    /// row-major *and* column-major adjacency list: `row(i)` gives all
+    /// `(j, block)` pairs with a nonzero block in row `i` (including the
+    /// diagonal), `col(j)` gives all `(i, block)` pairs with a nonzero block
+    /// in column `j` — both sorted by the other index. Kept as two separate
+    /// views (not just one, transposed on demand) because the real
+    /// power-flow Jacobian is *not* value-symmetric (`block(i, j) !=
+    /// block(j, i)` in general, even though the sparsity *pattern* is
+    /// structurally symmetric) — `BlockLu::refactor` genuinely needs
+    /// column `j`'s own values, not row `j`'s reused under a symmetry
+    /// assumption that doesn't hold for this matrix.
     ///
     /// Sort-based, not hash-based: `newton_raphson_block` calls this once
     /// per iteration (the Jacobian's numeric values change every iteration
@@ -105,11 +113,14 @@ impl BlockMatrix {
     /// a `HashMap`-based merge costing ~25% of total block-backend runtime
     /// at 2,605 nodes. Sorting by `(i, j)` avoids hashing entirely and
     /// leaves each row already grouped in ascending-`j` order, so no
-    /// separate per-row sort is needed afterwards either.
+    /// separate per-row sort is needed afterwards either; iterating that
+    /// same ascending-`i` order while building `cols` likewise leaves each
+    /// column already grouped in ascending-`i` order for free.
     pub fn finish(mut self) -> BlockAdjacency {
         self.entries.sort_unstable_by_key(|&(i, j, _)| (i, j));
 
         let mut rows: Vec<Vec<(usize, Block2)>> = vec![Vec::new(); self.n];
+        let mut cols: Vec<Vec<(usize, Block2)>> = vec![Vec::new(); self.n];
         let mut idx = 0;
         while idx < self.entries.len() {
             let (i, j, mut acc) = self.entries[idx];
@@ -119,16 +130,20 @@ impl BlockMatrix {
                 k += 1;
             }
             rows[i].push((j, acc));
+            cols[j].push((i, acc));
             idx = k;
         }
-        BlockAdjacency { n: self.n, rows }
+        BlockAdjacency { n: self.n, rows, cols }
     }
 }
 
-/// The finalized, consolidated block structure of a `BlockMatrix`.
+/// The finalized, consolidated block structure of a `BlockMatrix`, indexed
+/// both by row and by column (see `BlockMatrix::finish`'s doc comment for
+/// why both are needed rather than one derived from the other on demand).
 pub struct BlockAdjacency {
     n: usize,
     rows: Vec<Vec<(usize, Block2)>>,
+    cols: Vec<Vec<(usize, Block2)>>,
 }
 
 impl BlockAdjacency {
@@ -138,6 +153,14 @@ impl BlockAdjacency {
 
     pub fn row(&self, i: usize) -> &[(usize, Block2)] {
         &self.rows[i]
+    }
+
+    /// All `(row, block)` pairs with a nonzero block in column `j`, sorted
+    /// by `row`. `block` is the real `A[row][j]` value — *not* `A[j][row]`
+    /// reused under a symmetry assumption, since the Jacobian doesn't
+    /// satisfy one (see `BlockMatrix::finish`).
+    pub fn col(&self, j: usize) -> &[(usize, Block2)] {
+        &self.cols[j]
     }
 
     pub fn get(&self, i: usize, j: usize) -> Block2 {
@@ -286,11 +309,15 @@ impl BlockSymbolic {
 /// diagonal pivot is ever too close to singular, rather than silently
 /// producing a wrong answer.
 ///
-/// Relies on the Y-bus/Jacobian's sparsity pattern being structurally
+/// Relies on the Y-bus/Jacobian's sparsity *pattern* being structurally
 /// symmetric (if bus `i` affects bus `k`, bus `k` affects bus `i` too, since
-/// branch admittance couples both directions) — `BlockAdjacency::row` is
-/// used for both row *and* column structural lookups on that assumption,
-/// rather than maintaining a separate column-indexed structure.
+/// branch admittance couples both directions) for `BlockSymbolic::analyze`'s
+/// structural reachability search, which uses `BlockAdjacency::row` for both
+/// row and column structural lookups on that assumption. The numeric scatter
+/// step below needs actual column *values* though (`block(i, j) !=
+/// block(j, i)` in general for this matrix), so it reads
+/// `BlockAdjacency::col` rather than reusing row values under the same
+/// assumption.
 pub struct BlockLu {
     n: usize,
     /// `perm[k]` = original bus index placed at elimination position `k`.
@@ -339,9 +366,12 @@ impl BlockLu {
         let mut touched_at: Vec<i64> = vec![-1; n];
 
         for j in 0..n {
-            // 1. Scatter (permuted) column j's numeric entries into x.
-            for &(orig_neighbor, block) in adj.row(perm[j]) {
-                let row = pos[orig_neighbor];
+            // 1. Scatter (permuted) column j's numeric entries into x —
+            //    `adj.col`, not `adj.row`: this needs A's actual column
+            //    values, and `block(i, j) != block(j, i)` in general for
+            //    this matrix (see this type's doc comment).
+            for &(orig_row, block) in adj.col(perm[j]) {
+                let row = pos[orig_row];
                 if touched_at[row] != j as i64 {
                     touched_at[row] = j as i64;
                     x[row] = block;
@@ -625,6 +655,33 @@ mod tests {
         let adj = m.finish();
         let lu = BlockLu::factorize(&adj).unwrap();
         let b: Vec<[f64; 2]> = (0..n).map(|i| [1.0 + i as f64, 2.0 - i as f64 * 0.5]).collect();
+        let x = lu.solve(&b);
+        let expected = dense_reference_solve(&adj, &b);
+        assert_close(&x, &expected, 1e-8);
+    }
+
+    #[test]
+    fn solve_asymmetric_off_diagonal_matches_dense_reference() {
+        // Deliberately `block(i, j) != block(j, i)` — unlike every other
+        // test in this file, which always adds the same `off` value both
+        // ways. The real power-flow Jacobian is exactly this shape (its
+        // H/N/M/L formulas aren't symmetric under swapping bus i and k), and
+        // `BlockLu::refactor` used to scatter `adj.row(perm[j])`'s values
+        // where it needed `adj.col(perm[j])`'s — silently wrong on any
+        // matrix without value symmetry, which every prior hand-written
+        // test here happened to have.
+        let n = 3;
+        let mut m = BlockMatrix::new(n);
+        m.add(0, 0, [[6.0, 0.2], [0.15, 5.0]]);
+        m.add(1, 1, [[7.0, 0.1], [0.2, 4.5]]);
+        m.add(2, 2, [[8.0, 0.3], [0.1, 5.5]]);
+        m.add(0, 1, [[-0.9, 0.3], [-0.2, -0.4]]);
+        m.add(1, 0, [[-0.5, -0.1], [0.4, -0.7]]);
+        m.add(1, 2, [[-0.6, 0.2], [0.1, -0.3]]);
+        m.add(2, 1, [[-0.3, -0.2], [0.25, -0.55]]);
+        let adj = m.finish();
+        let lu = BlockLu::factorize(&adj).unwrap();
+        let b: Vec<[f64; 2]> = vec![[1.0, 2.0], [3.0, -1.0], [0.5, 1.5]];
         let x = lu.solve(&b);
         let expected = dense_reference_solve(&adj, &b);
         assert_close(&x, &expected, 1e-8);

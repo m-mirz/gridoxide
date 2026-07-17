@@ -1,6 +1,8 @@
 mod common;
 
+use std::fs;
 use std::path::PathBuf;
+use gridoxide::json::NetworkData;
 use gridoxide::network::{build_ybus, linear_initial_guess, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches, PgmNodeOutput};
 use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend};
@@ -35,6 +37,33 @@ fn assert_matches_pgm(base: &PathBuf, tol: f64) {
 
     for node_out in &expected.data.node {
         common::assert_sym_node(&result, &id_to_idx, node_out, tol);
+    }
+}
+
+/// The classic 3-bus slack/PV/PQ network `tests/powerflow_test.rs` already
+/// snapshot-tests against the `Scalar` backend — reused here to confirm the
+/// `Block` backend's dummy-`ΔVmag=0`-row PV handling
+/// (`solver::build_jacobian_blocks`) converges to the same solution as the
+/// scalar reduced-dimension formulation, not just that it no longer panics.
+#[test]
+fn block_backend_matches_scalar_backend_with_pv_bus() {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/data/network.json");
+    let network_json = fs::read_to_string(&path).expect("Unable to read network.json");
+    let network_data: NetworkData = serde_json::from_str(&network_json).expect("Unable to parse network.json");
+
+    let mut buses = network_data.buses;
+    assert!(buses.iter().any(|b| matches!(b.bus_type, gridoxide::types::BusType::PV)),
+        "fixture must contain a PV bus to exercise this backend's PV handling");
+    let ybus = build_ybus(buses.len(), &network_data.lines, &[]).finish();
+    linear_initial_guess(&mut buses, &ybus);
+    newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, JacobianBackend::Block);
+
+    // Same expected values as tests/powerflow_test.rs's Scalar-backend run.
+    let expected_voltages = [(1.06, 0.0), (1.04, 0.014349), (1.003358, -0.043141)];
+    for (i, &(expected_mag, expected_ang_rad)) in expected_voltages.iter().enumerate() {
+        assert!((buses[i].voltage_mag - expected_mag).abs() < 1e-5, "bus {i} voltage_mag");
+        assert!((buses[i].voltage_ang - expected_ang_rad).abs() < 1e-5, "bus {i} voltage_ang");
     }
 }
 

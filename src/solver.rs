@@ -14,11 +14,15 @@ pub enum JacobianBackend {
     Scalar,
     /// Experimental, opt-in: groups each bus's own (angle, magnitude)
     /// unknowns into one 2×2 block, mirroring power-grid-model's
-    /// block-per-bus matrix structure (`block_sparse::BlockLu`). Symmetric
-    /// power flow only — every non-slack bus must be `PQ` (gridoxide never
-    /// constructs a `PV` bus today; this backend panics rather than
-    /// silently mishandling one if that ever changes, since its block
-    /// indexing assumes every non-slack bus has exactly 2 unknowns).
+    /// block-per-bus matrix structure (`block_sparse::BlockLu`). Every
+    /// non-slack bus gets a block — including `PV` buses, which have no
+    /// real Q-mismatch equation. Rather than varying block size per bus
+    /// (which `block_sparse::BlockLu` doesn't support), a `PV` bus's second
+    /// row is replaced with a dummy `ΔVmag_i = 0` equation (coefficients
+    /// `[0, 1]`, target `0`) that pins its voltage-magnitude update to zero
+    /// every iteration — mathematically equivalent to the scalar backend's
+    /// actual dimension reduction, since that row is fully decoupled from
+    /// every other unknown. See `build_jacobian_blocks`.
     Block,
     /// Experimental, opt-in, only compiled with the `klu` Cargo feature:
     /// the same scalar Jacobian as `Scalar` (reuses `build_jacobian_triplets`
@@ -471,11 +475,6 @@ fn newton_raphson_block_cached(
         .filter(|b| !matches!(b.bus_type, BusType::Slack))
         .map(|b| b.idx)
         .collect();
-    assert!(
-        buses.iter().all(|b| !matches!(b.bus_type, BusType::PV)),
-        "JacobianBackend::Block only supports symmetric power flow with no PV buses \
-         (every non-slack bus must be PQ, giving a uniform 2x2 block per bus)"
-    );
 
     let mut block_pos: Vec<Option<usize>> = vec![None; buses.len()];
     for (pos, &i) in non_slack_idx.iter().enumerate() {
@@ -485,11 +484,21 @@ fn newton_raphson_block_cached(
     for iter in 0..max_iter {
         let (p_calc, q_calc) = power_injections(buses, ybus);
 
+        // PV buses get a dummy `ΔVmag = 0` target in the mismatch vector's
+        // second slot instead of a real Q mismatch — see
+        // `JacobianBackend::Block`'s doc comment. It's always exactly 0, so
+        // it never affects the `max_mis` convergence check below (matching
+        // the scalar backend, which has no Q-mismatch entry for PV buses at
+        // all).
         let mismatch: Vec<[f64; 2]> = non_slack_idx
             .iter()
             .map(|&i| {
                 let (p_eff, q_eff) = effective_injection(&buses[i]);
-                [p_eff - p_calc[i], q_eff - q_calc[i]]
+                let q_mismatch = match buses[i].bus_type {
+                    BusType::PV => 0.0,
+                    _ => q_eff - q_calc[i],
+                };
+                [p_eff - p_calc[i], q_mismatch]
             })
             .collect();
 
@@ -523,8 +532,17 @@ fn newton_raphson_block_cached(
 /// Assembles the same H/N/M/L formulas as `build_jacobian_triplets`, but as
 /// one 2×2 block per (bus, bus) pair — `[[H, N], [M, L]]` on the diagonal,
 /// `[[H_ik, N_ik], [M_ik, L_ik]]` off-diagonal — instead of four separate
-/// scalar triplets. Requires every non-slack bus to be `PQ` (see
-/// `JacobianBackend::Block`).
+/// scalar triplets.
+///
+/// A `PV` row bus has no real Q-mismatch equation, so its block's second row
+/// is replaced with the dummy `ΔVmag_i = 0` equation instead: `[0, 1]` on
+/// the diagonal block (pins this bus's own magnitude update to zero) and
+/// `[0, 0]` on every off-diagonal block in that row (so the dummy equation
+/// stays fully decoupled from every other bus's unknowns — required for it
+/// to pin exactly `0`, not something entangled with the rest of the solve).
+/// The H/N formulas themselves (first row) are unaffected — they're already
+/// correct for any non-slack bus, PV or PQ, matching
+/// `build_jacobian_triplets`'s scalar H/N block.
 fn build_jacobian_blocks(
     buses: &[Bus],
     ybus: &YBusSparse,
@@ -538,12 +556,16 @@ fn build_jacobian_blocks(
     let mut blocks = BlockMatrix::new(non_slack_idx.len());
 
     for (row, &i) in non_slack_idx.iter().enumerate() {
+        let is_pv = matches!(buses[i].bus_type, BusType::PV);
         for &(k, y_ik) in ybus.row(i) {
             if k == i {
                 let h_ii = -q_calc[i] - vm[i].powi(2) * y_ik.im;
                 let n_ii = p_calc[i] / vm[i] + vm[i] * y_ik.re;
-                let m_ii = p_calc[i] - vm[i].powi(2) * y_ik.re;
-                let l_ii = q_calc[i] / vm[i] - vm[i] * y_ik.im;
+                let (m_ii, l_ii) = if is_pv {
+                    (0.0, 1.0)
+                } else {
+                    (p_calc[i] - vm[i].powi(2) * y_ik.re, q_calc[i] / vm[i] - vm[i] * y_ik.im)
+                };
                 blocks.add(row, row, [[h_ii, n_ii], [m_ii, l_ii]]);
                 continue;
             }
@@ -551,8 +573,14 @@ fn build_jacobian_blocks(
             let angle_ik = va[i] - va[k];
             let h_ik = vm[i] * vm[k] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
             let n_ik = vm[i] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
-            let m_ik = -vm[i] * vm[k] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
-            let l_ik = vm[i] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
+            let (m_ik, l_ik) = if is_pv {
+                (0.0, 0.0)
+            } else {
+                (
+                    -vm[i] * vm[k] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin()),
+                    vm[i] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos()),
+                )
+            };
             blocks.add(row, col, [[h_ik, n_ik], [m_ik, l_ik]]);
         }
     }
