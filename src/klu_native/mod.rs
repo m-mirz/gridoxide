@@ -44,5 +44,9 @@ pub mod types;
 #[allow(dead_code)]
 mod btf;
 
+// TODO(Phase 3): remove once `amd_order` is consumed by `analyze.rs`.
+#[allow(dead_code)]
+mod amd;
+
 #[cfg(all(test, feature = "klu"))]
 mod ffi_oracle;
