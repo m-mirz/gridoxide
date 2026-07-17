@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gridoxide"
+version = "0.1.0"
+description = "AC power flow analysis (Newton-Raphson) — Python bindings"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# `src/python.rs`'s bindings — only ever built via maturin, never combined
+# with a plain `cargo build`/`cargo test` (see Cargo.toml's `python` feature
+# doc comment for why).
+features = ["python"]
+module-name = "gridoxide"

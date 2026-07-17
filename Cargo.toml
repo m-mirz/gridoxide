@@ -4,9 +4,18 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+# "rlib" keeps the crate usable as a normal Rust dependency (examples/,
+# tests/) exactly as before; "cdylib" is the loadable-by-Python extension
+# module artifact maturin builds when the `python` feature is enabled — see
+# that feature's doc comment below for why the two must never be built
+# together in one `cargo` invocation.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 faer = "0.24.4"
 num-complex = { version = "0.4.6", features = ["serde"] }
+pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -26,6 +35,17 @@ klu = ["dep:cc", "dep:bindgen"]
 # Links a system-installed libklu.so instead of compiling the vendored
 # source statically, for anyone who needs strict LGPL relinking compliance.
 klu-dynamic = ["klu"]
+# Builds `src/python.rs`'s PyO3 bindings (the `gridoxide` Python extension
+# module — see scripts/bench/README.md and pyproject.toml). Only ever build
+# this via `maturin` (`maturin develop --features python`), never as part of
+# a plain `cargo build`/`cargo test` invocation alongside examples or test
+# binaries: `pyo3`'s `extension-module` feature (needed so the built
+# `cdylib` doesn't try to link against libpython itself, since Python will
+# dlopen it and provide the symbols at runtime) makes a normal standalone
+# binary/test harness fail to link, since *those* do need libpython linked
+# in directly. This is a well-known, expected PyO3 constraint, not a
+# gridoxide-specific issue.
+python = ["dep:pyo3"]
 
 [[test]]
 name = "klu_jacobian_test"

@@ -29,6 +29,22 @@ pub enum JacobianBackend {
     Klu,
 }
 
+/// Outcome of a single Newton-Raphson solve — returned by
+/// [`PersistentSolver::solve`] (the one-shot `newton_raphson`/
+/// `newton_raphson_with_backend` stay `()`-returning, printing status to
+/// stdout instead, to avoid changing their long-established signature).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolveStatus {
+    /// Converged within `max_iter` iterations; `buses` holds the solution.
+    Converged,
+    /// Ran `max_iter` iterations without reaching `tol`; `buses` holds
+    /// whatever the last iteration produced, not a converged solution.
+    MaxIterationsReached,
+    /// The Jacobian was singular at some iteration; `buses` holds whatever
+    /// partial state existed at that point, not a valid solution.
+    Singular,
+}
+
 pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
     newton_raphson_with_backend(buses, ybus, tol, max_iter, JacobianBackend::Scalar);
 }
@@ -104,7 +120,7 @@ impl PersistentSolver {
     /// symbolic factorization from a previous `solve()` call on this same
     /// `PersistentSolver` when available. See the type-level doc comment
     /// for when a cached factorization stays valid.
-    pub fn solve(&mut self, buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
+    pub fn solve(&mut self, buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) -> SolveStatus {
         match self.backend {
             JacobianBackend::Scalar => newton_raphson_scalar_cached(buses, ybus, tol, max_iter, &mut self.scalar),
             JacobianBackend::Block => newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut self.block),
@@ -133,13 +149,14 @@ fn newton_raphson_scalar(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_ite
 
 /// Identical to `newton_raphson_scalar`, except the cached symbolic
 /// factorization lives in a caller-supplied `sparse_system` rather than a
-/// function-local variable — this is what lets `PersistentSolver` reuse it
-/// across repeated `solve()` calls on unchanged topology, not just across
-/// the iterations within a single call.
+/// function-local variable (what lets `PersistentSolver` reuse it across
+/// repeated `solve()` calls on unchanged topology, not just across the
+/// iterations within a single call), and convergence status is returned
+/// rather than only printed.
 fn newton_raphson_scalar_cached(
     buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
     sparse_system: &mut Option<RealSparseSystem>,
-) {
+) -> SolveStatus {
     // Identify PV and PQ indices (exclude slack)
     let mut pv_idx: Vec<usize> = Vec::new();
     let mut pq_idx: Vec<usize> = Vec::new();
@@ -203,7 +220,7 @@ fn newton_raphson_scalar_cached(
         println!("iter {}: max mismatch = {:.6e}", iter + 1, max_mis);
         if max_mis < tol {
             println!("Converged in {} iterations", iter + 1);
-            return;
+            return SolveStatus::Converged;
         }
 
         // Build Jacobian (sparse triplets)
@@ -216,13 +233,13 @@ fn newton_raphson_scalar_cached(
         }
         let Some(system) = sparse_system.as_ref() else {
             println!("Jacobian is singular. Failed to solve.");
-            return;
+            return SolveStatus::Singular;
         };
         let dx = match system.factor_and_solve(&triplets, &mismatch) {
             Some(sol) => sol,
             None => {
                 println!("Jacobian is singular. Failed to solve.");
-                return;
+                return SolveStatus::Singular;
             }
         };
 
@@ -241,6 +258,7 @@ fn newton_raphson_scalar_cached(
     }
 
     println!("Failed to converge in {} iterations", max_iter);
+    SolveStatus::MaxIterationsReached
 }
 
 /// Identical to `newton_raphson_scalar` except the sparse solve is backed by
@@ -259,7 +277,7 @@ fn newton_raphson_klu(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: 
 fn newton_raphson_klu_cached(
     buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
     sparse_system: &mut Option<KluRealSystem>,
-) {
+) -> SolveStatus {
     let mut pv_idx: Vec<usize> = Vec::new();
     let mut pq_idx: Vec<usize> = Vec::new();
     for b in buses.iter() {
@@ -309,7 +327,7 @@ fn newton_raphson_klu_cached(
         println!("iter {}: max mismatch = {:.6e}", iter + 1, max_mis);
         if max_mis < tol {
             println!("Converged in {} iterations", iter + 1);
-            return;
+            return SolveStatus::Converged;
         }
 
         let triplets = build_jacobian_triplets(
@@ -321,13 +339,13 @@ fn newton_raphson_klu_cached(
         }
         let Some(system) = sparse_system.as_mut() else {
             println!("Jacobian is singular. Failed to solve.");
-            return;
+            return SolveStatus::Singular;
         };
         let dx = match system.factor_and_solve(&triplets, &mismatch) {
             Some(sol) => sol,
             None => {
                 println!("Jacobian is singular. Failed to solve.");
-                return;
+                return SolveStatus::Singular;
             }
         };
 
@@ -343,6 +361,7 @@ fn newton_raphson_klu_cached(
     }
 
     println!("Failed to converge in {} iterations", max_iter);
+    SolveStatus::MaxIterationsReached
 }
 
 /// Assembles the Newton-Raphson Jacobian's nonzero entries as `(row, col,
@@ -446,7 +465,7 @@ fn newton_raphson_block(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter
 fn newton_raphson_block_cached(
     buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
     symbolic: &mut Option<BlockSymbolic>,
-) {
+) -> SolveStatus {
     let non_slack_idx: Vec<usize> = buses
         .iter()
         .filter(|b| !matches!(b.bus_type, BusType::Slack))
@@ -478,7 +497,7 @@ fn newton_raphson_block_cached(
         println!("iter {}: max mismatch = {:.6e}", iter + 1, max_mis);
         if max_mis < tol {
             println!("Converged in {} iterations", iter + 1);
-            return;
+            return SolveStatus::Converged;
         }
 
         let blocks = build_jacobian_blocks(buses, ybus, &non_slack_idx, &block_pos, &p_calc, &q_calc).finish();
@@ -487,7 +506,7 @@ fn newton_raphson_block_cached(
         }
         let Some(lu) = BlockLu::refactor(symbolic.as_ref().unwrap(), &blocks) else {
             println!("Jacobian is singular. Failed to solve.");
-            return;
+            return SolveStatus::Singular;
         };
         let dx = lu.solve(&mismatch);
 
@@ -498,6 +517,7 @@ fn newton_raphson_block_cached(
     }
 
     println!("Failed to converge in {} iterations", max_iter);
+    SolveStatus::MaxIterationsReached
 }
 
 /// Assembles the same H/N/M/L formulas as `build_jacobian_triplets`, but as

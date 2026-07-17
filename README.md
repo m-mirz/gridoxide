@@ -100,6 +100,29 @@ that case). `examples/bench_network.rs` exposes this as an optional `warm` mode 
 still measures "N independent flat-start solves with no shared state," a different, also-legitimate number)
 — see `scripts/bench/README.md`.
 
+## Python bindings
+
+`src/python.rs` exposes `PersistentSolver` (and PGM-JSON loading) as a `gridoxide` Python extension module,
+built with [maturin](https://www.maturin.rs/) (`maturin develop --release --features python,klu`) — gated
+entirely behind the opt-in `python` Cargo feature, compiled by nothing else, so a plain `cargo build`/`cargo
+test` never touches it.
+
+```python
+import gridoxide
+
+model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", backend="klu")
+model.solve()
+print(model.voltage_mag(), model.voltage_ang())
+```
+
+Repeated `.solve()` calls on the same `PowerFlowModel` reuse cached symbolic factorization exactly like the
+Rust `PersistentSolver` API above, since it *is* that API — this is what lets `scripts/bench/` run its whole
+comparison in pure Python (`scripts/bench/bench_gridoxide_native.py`), timing gridoxide with the same
+`time.perf_counter()`-around-a-persistent-solve-object methodology every other tool there already uses (PGM's
+`PowerGridModel`, lightsim2grid's `GridModel`, pandapower's `net`), rather than shelling out to a compiled
+Rust binary and parsing its stdout. See `scripts/bench/README.md`'s "Python bindings" section for build
+details and the constraint on never combining the `python` feature with a plain `cargo` invocation.
+
 See `src/sparse.rs` for the thin backend wrapper around `faer` — it's intentionally the only file that
 imports `faer` types directly, so a different sparse-solver backend can be swapped in behind the same
 interface without touching the rest of the codebase. Two such backends exist today, both strictly opt-in

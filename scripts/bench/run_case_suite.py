@@ -3,11 +3,12 @@
 and pandapower head-to-head across all 12 real power-system test-case grids
 in cases.py, and prints/saves one combined markdown timing table.
 
-Usage: python3 run_case_suite.py [--python PYTHON] [--repeat N]
-                                  [--cache-dir DIR] [--out FILE]
+Usage: python3 run_case_suite.py [--python PYTHON] [--cache-dir DIR] [--out FILE]
 
-`--python` (default: the interpreter running this script) needs `numpy` and
-`scipy` (matpower_to_pgm.py, bench_pypowsybl.py), `power-grid-model`
+`--python` (default: the interpreter running this script) needs the
+`gridoxide` extension module built and installed (`maturin develop
+--release --features python,klu` — see this directory's README), `numpy`
+and `scipy` (matpower_to_pgm.py, bench_pypowsybl.py), `power-grid-model`
 (bench_pgm.py), `pandapower` (bench_pandapower.py, and bench_lightsim2grid.py
 since lightsim2grid needs a pandapower net directly), `lightsim2grid`, and
 `pypowsybl`.
@@ -31,13 +32,19 @@ controlled) buses via PGM's `voltage_regulator` component
 `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types`) — so PGM is a full
 column here, not excluded on a PV-support technicality.
 
-gridoxide's timings use `bench_network.rs`'s `warm` mode (one
-`solver::PersistentSolver` reused across all timed repeats) rather than its
-`cold` default (fresh symbolic factorization — fill-reducing ordering —
-every repeat). This isn't cosmetic: every other tool here reuses its own
-persistent model/solver object across its own repeated timed calls
-(lightsim2grid's `ac_pf`, PGM's `calculate_power_flow`), so `cold` numbers
-weren't actually comparable to them — confirmed by profiling (`perf`) a
+gridoxide's own timings come from `bench_gridoxide_native.py` — the
+`gridoxide` Python extension module (`src/python.rs`, built via `maturin`),
+not a subprocess call into a compiled `bench_network.rs` binary. Every tool
+in this comparison is now driven the same way: a small Python script that
+constructs one persistent model/solver object and times repeated `solve()`
+calls on it with `time.perf_counter()`, printing `min=Xms mean=Yms`. This
+also means gridoxide's numbers here are inherently *warm* (`PowerFlowModel`
+wraps `solver::PersistentSolver` directly, reusing cached symbolic
+factorization across all 5 timed calls) — not cosmetic: every other tool
+here also reuses its own persistent model/solver object across its own
+repeated timed calls (lightsim2grid's `ac_pf`, PGM's `calculate_power_flow`),
+so a `cold` (fresh symbolic factorization every call) number wouldn't
+actually be comparable to them — confirmed by profiling (`perf`) a
 9,241-bus case, where symbolic factorization alone was responsible for most
 of what first looked like a solver-speed gap against lightsim2grid.
 """
@@ -51,9 +58,9 @@ from pathlib import Path
 from cases import CASE_NAMES, matpower_filename
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-GRIDOXIDE_BIN = REPO_ROOT / "target" / "release" / "examples" / "bench_network"
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONVERT_SCRIPT = SCRIPT_DIR / "matpower_to_pgm.py"
+BENCH_GRIDOXIDE_SCRIPT = SCRIPT_DIR / "bench_gridoxide_native.py"
 BENCH_PGM_SCRIPT = SCRIPT_DIR / "bench_pgm.py"
 LS2G_SCRIPT = SCRIPT_DIR / "bench_lightsim2grid.py"
 PYPOWSYBL_SCRIPT = SCRIPT_DIR / "bench_pypowsybl.py"
@@ -62,7 +69,6 @@ MATPOWER_RAW_URL = "https://raw.githubusercontent.com/m-mirz/matpower/master/dat
 
 MEAN_RE = re.compile(r"min=[\d.]+ms mean=([\d.]+)ms")
 NODES_RE = re.compile(r"nodes=(\d+)")
-NR_RE = re.compile(r"newton_raphson: [\d.]+ ms total, ([\d.]+) ms/run")
 
 
 def fetch_matpower_case(case_name: str, cache_dir: Path) -> tuple[Path | None, str | None]:
@@ -94,35 +100,22 @@ def convert_case(python: str, case_name: str, cache_dir: Path) -> tuple[Path | N
     return m_path, out_path, None
 
 
-def run_gridoxide(json_path: Path, backend: str, repeat: int) -> tuple[float | None, int | None, str | None]:
-    if not GRIDOXIDE_BIN.exists():
-        return None, None, "bench_network not built (cargo build --release --example bench_network --features klu)"
-    # "warm" mode reuses one PersistentSolver's symbolic factorization
-    # across all `repeat` solves, matching how every other tool here is
-    # actually measured: lightsim2grid's `ac_pf` and PGM's
-    # `calculate_power_flow` both reuse their own persistent model/solver
-    # object across their 5 timed calls (see bench_lightsim2grid.py,
-    # bench_pgm.py) rather than rebuilding it from scratch each time.
-    # "cold" mode (bench_network.rs's default) redoes symbolic
-    # factorization — fill-reducing ordering — on every repeat, which is a
-    # different, real, but not-comparable-to-the-other-tools' number here;
-    # confirmed on a 9,241-bus case that this alone accounts for most of
-    # what looked like a solver-speed gap against lightsim2grid.
+def run_gridoxide(python: str, json_path: Path, backend: str) -> tuple[float | None, int | None, str | None]:
     proc = subprocess.run(
-        [str(GRIDOXIDE_BIN), str(json_path), str(repeat), backend, "warm"],
+        [python, str(BENCH_GRIDOXIDE_SCRIPT), str(json_path), backend],
         capture_output=True, text=True, timeout=300,
     )
     if proc.returncode != 0:
         if "only supports symmetric power flow with no PV buses" in proc.stderr:
             return None, None, "N/A (Block backend doesn't support PV buses)"
+        if "ModuleNotFoundError" in proc.stderr and "gridoxide" in proc.stderr:
+            return None, None, "gridoxide extension module not built (see this directory's README)"
         return None, None, (extract_error(proc.stderr) if proc.stderr else "failed")
-    if "Failed to converge" in proc.stdout:
-        return None, None, "did not converge in 20 iterations"
-    nr_match = NR_RE.search(proc.stdout)
+    mean_match = MEAN_RE.search(proc.stdout)
     nodes_match = NODES_RE.search(proc.stdout)
-    if not nr_match:
+    if not mean_match:
         return None, None, "could not parse output"
-    return float(nr_match.group(1)), (int(nodes_match.group(1)) if nodes_match else None), None
+    return float(mean_match.group(1)), (int(nodes_match.group(1)) if nodes_match else None), None
 
 
 def extract_error(stderr: str) -> str:
@@ -168,7 +161,6 @@ def fmt(value: float | None, err: str | None) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("--repeat", type=int, default=10, help="gridoxide solve repeat count per backend")
     parser.add_argument("--cache-dir", type=Path, default=Path(__file__).resolve().parent / ".case-cache")
     parser.add_argument("--out", type=Path, default=None, help="also write the table to this file")
     args = parser.parse_args()
@@ -186,7 +178,7 @@ def main() -> None:
         n_nodes = None
         backend_times = {}
         for backend in ("scalar", "block", "klu"):
-            t, n, err = run_gridoxide(json_path, backend, args.repeat)
+            t, n, err = run_gridoxide(args.python, json_path, backend)
             n_nodes = n_nodes or n
             backend_times[backend] = fmt(t, err)
 
