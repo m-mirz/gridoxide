@@ -83,6 +83,7 @@ for the RTE cases' unusual near-zero-impedance phase-shifting branches (as
 small as -16.6 to 6.48 degrees), this is a real, bounded approximation, not
 a bug — the same constraint any correct MATPOWER-to-PGM converter faces.
 """
+import math
 import sys
 from pathlib import Path
 
@@ -90,7 +91,7 @@ import numpy as np
 import scipy.io as sio
 
 BUS_I, BUS_TYPE, PD, QD, GS, BS, _AREA, VM, VA, _BASE_KV, _ZONE, _VMAX, _VMIN = range(13)
-GEN_BUS, PG, QG, _QMAX, _QMIN, VG, _MBASE, GEN_STATUS = range(8)
+GEN_BUS, PG, QG, QMAX, QMIN, VG, _MBASE, GEN_STATUS = range(8)
 F_BUS, T_BUS, BR_R, BR_X, BR_B, _RATE_A, _RATE_B, _RATE_C, RATIO, ANGLE, BR_STATUS = range(11)
 
 PQ, PV, REF, ISOLATED = 1, 2, 3, 4
@@ -185,12 +186,21 @@ def convert(mat_path: Path, output_path: Path) -> None:
     sym_gens = []
     voltage_regulators = []
     gen_p_by_bus: dict[int, float] = {}
+    # Summed across every active gen at a bus (same as gen_p_by_bus), not
+    # just the first one voltage_regulator's u_ref comes from — q_min/q_max
+    # bound the *bus's* net reactive injection (see PgmVoltageRegulator's
+    # doc comment in src/pgm.rs), consistent with p_specified/q_specified
+    # already being summed across every load/gen at a node.
+    gen_qmin_by_bus: dict[int, float] = {}
+    gen_qmax_by_bus: dict[int, float] = {}
     first_active_gen_by_bus: dict[int, int] = {}
     for g in range(len(gen)):
         if gen[g, GEN_STATUS] <= 0:
             continue
         node_id = int(gen[g, GEN_BUS])
         gen_p_by_bus[node_id] = gen_p_by_bus.get(node_id, 0.0) + gen[g, PG]
+        gen_qmin_by_bus[node_id] = gen_qmin_by_bus.get(node_id, 0.0) + gen[g, QMIN]
+        gen_qmax_by_bus[node_id] = gen_qmax_by_bus.get(node_id, 0.0) + gen[g, QMAX]
         first_active_gen_by_bus.setdefault(node_id, g)
 
     for row in range(len(bus)):
@@ -210,8 +220,22 @@ def convert(mat_path: Path, output_path: Path) -> None:
                           "p_specified": p_mw * 1e6, "q_specified": 0.0})
         if btype == PV:
             g = first_active_gen_by_bus[node_id]
-            voltage_regulators.append({"id": next_id(), "regulated_object": gen_id,
-                                        "status": 1, "u_ref": gen[g, VG]})
+            vr = {"id": next_id(), "regulated_object": gen_id, "status": 1, "u_ref": gen[g, VG]}
+            # MATPOWER represents "no limit" as literal +-Inf on some real
+            # cases (e.g. case9241pegase) — omit the key entirely rather
+            # than writing a non-finite value: `json.dumps` would emit
+            # Python's own non-standard Infinity/-Infinity/NaN tokens, which
+            # aren't valid JSON and fail to parse on the Rust side. Omitting
+            # matches PGM's own "unset means unbounded" convention for these
+            # fields (see PgmVoltageRegulator's `#[serde(default = "nan")]`
+            # in src/pgm.rs) exactly.
+            q_min_var = gen_qmin_by_bus[node_id] * 1e6
+            q_max_var = gen_qmax_by_bus[node_id] * 1e6
+            if math.isfinite(q_min_var):
+                vr["q_min"] = q_min_var
+            if math.isfinite(q_max_var):
+                vr["q_max"] = q_max_var
+            voltage_regulators.append(vr)
 
     lines = []
     transformers = []

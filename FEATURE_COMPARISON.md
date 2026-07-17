@@ -81,8 +81,12 @@ gridoxide and the references evolve.
 
 ## Note on realistic benchmark coverage
 
-`scripts/bench/matpower_to_pgm.py` doesn't currently populate `voltage_regulator.q_min`/`q_max` from
-MATPOWER's `gen` matrix `Qmax`/`Qmin` columns, so none of the 12 real benchmark cases exercise
-`newton_raphson_enforcing_q_limits` yet (every converted PV bus has unbounded `q_min`/`q_max`,
-matching the previous behavior exactly). Wiring that up is a natural, separate follow-up if
-real-grid Q-limit enforcement wants exercising end-to-end, not done as part of this change.
+`scripts/bench/matpower_to_pgm.py` now populates `voltage_regulator.q_min`/`q_max` from MATPOWER's
+`gen` matrix `Qmax`/`Qmin` columns (summed across every active gen at a bus, matching how
+`p_specified` is already summed). Confirmed against all 12 real benchmark cases: 11 of them have at
+least one PV bus whose unconstrained Q genuinely exceeds its nameplate limit (from 4 violations on
+the smallest case to 166 on `case3120sp`), and `newton_raphson_enforcing_q_limits` converges on
+every one of them, including cases needing dozens of simultaneous PV→PQ switches across several
+outer iterations. MATPOWER represents "no limit" as literal `+-Inf` on some real cases (e.g.
+`case9241pegase`) — the converter omits the key entirely in that case rather than writing a
+non-standard `Infinity` JSON token, matching PGM's own "unset means unbounded" convention exactly.
