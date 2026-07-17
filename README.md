@@ -123,6 +123,14 @@ comparison in pure Python (`scripts/bench/bench_gridoxide_native.py`), timing gr
 Rust binary and parsing its stdout. See `scripts/bench/README.md`'s "Python bindings" section for build
 details and the constraint on never combining the `python` feature with a plain `cargo` invocation.
 
+`python/tests/` has a small pytest suite (`scalar`/`block` only — no `klu`, matching what's published, see
+below) checked against this project's own committed PGM reference fixtures, run by
+`.github/workflows/python.yml` on every push/PR. `.github/workflows/pypi.yml` builds wheels (Linux/Windows/
+macOS) plus an sdist and publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/)
+on `v*` tags — **the published wheel deliberately doesn't include the `klu` backend** (LGPL-2.1-or-later
+vendored SuiteSparse source, and a C compiler + libclang needed on every target platform — see Cargo.toml's
+`python`/`klu` feature doc comments); build from source with `--features python,klu` for that backend.
+
 See `src/sparse.rs` for the thin backend wrapper around `faer` — it's intentionally the only file that
 imports `faer` types directly, so a different sparse-solver backend can be swapped in behind the same
 interface without touching the rest of the codebase. Two such backends exist today, both strictly opt-in
