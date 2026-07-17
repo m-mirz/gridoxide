@@ -109,15 +109,17 @@ comparison from the section above):
 All three produce identical converged voltages at every scale — these are purely performance comparisons, not
 correctness trade-offs.
 
-A second, separate benchmark compares gridoxide against
-[lightsim2grid](https://github.com/m-mirz/lightsim2grid) on 12 real IEEE/MATPOWER power-system test-case grids
-(14 to 9,241 buses) — see `scripts/bench/README.md`'s "Benchmark against real power-system test-case grids"
-section for the full results table and methodology. gridoxide converges on all 12 (`klu` consistently within
-roughly 1.1-1.8x of lightsim2grid's mature C++ implementation up to 9,241 buses); lightsim2grid itself fails
-to converge on 3 of them, a genuine property of those specific cases' underlying data confirmed by
-cross-checking against `powsybl-open-loadflow`, not a gridoxide gap. This benchmark is also what led to
-`src/pgm.rs` parsing PGM's `voltage_regulator` component: real generator PV (voltage-controlled) buses, not
-just the slack/PQ split described above — see `types::BusType::PV` and `solver::newton_raphson_scalar`/
+A second, separate benchmark compares gridoxide against four other independent solvers — PGM,
+[lightsim2grid](https://github.com/m-mirz/lightsim2grid), RTE's
+[powsybl-open-loadflow](https://github.com/powsybl/powsybl-open-loadflow) (via `pypowsybl`), and pandapower's
+own default solver — on 12 real IEEE/MATPOWER power-system test-case grids (14 to 9,241 buses) — see
+`scripts/bench/README.md`'s "Benchmark against real power-system test-case grids" section for the full
+results table and methodology. gridoxide and pandapower's own native path are the only two of the five that
+converge on all 12; the other three each fail on a subset of the same handful of genuinely hard cases (RTE's
+own real production grids), confirmed by cross-checking against `powsybl-open-loadflow` directly, not a
+gridoxide gap. This benchmark is also what led to `src/pgm.rs` parsing PGM's `voltage_regulator` component:
+real generator PV (voltage-controlled) buses, not just the slack/PQ split described above — see
+`types::BusType::PV` and `solver::newton_raphson_scalar`/
 `newton_raphson_klu`'s existing PV handling, now actually reachable from PGM JSON input — and to fixing a
 real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping (`src/network.rs`).
 

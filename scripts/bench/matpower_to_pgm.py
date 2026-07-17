@@ -114,7 +114,7 @@ def parse_matpower_m(m_path: Path) -> dict:
     MATLAB — this covers exactly that, not arbitrary `.m` scripts.
     """
     text = m_path.read_text()
-    result: dict = {}
+    result: dict = {"version": "2"}
     base_mva_match = __import__("re").search(r"mpc\.baseMVA\s*=\s*([\d.eE+-]+)\s*;", text)
     result["baseMVA"] = float(base_mva_match.group(1)) if base_mva_match else 100.0
     for name in ("bus", "gen", "branch"):
@@ -132,12 +132,20 @@ def parse_matpower_m(m_path: Path) -> dict:
     return result
 
 
-def convert(mat_path: Path, output_path: Path) -> None:
+def load_mpc(mat_path: Path) -> dict:
+    """Loads a MATPOWER case (`.m` or `.mat`) into a plain dict with
+    `version`/`baseMVA`/`bus`/`gen`/`branch` keys — shared by `convert()`
+    here and by bench_pypowsybl.py, which re-serializes it to `.mat` for
+    pypowsybl (whose MATPOWER importer only reads `.mat`, not `.m` — see
+    that script for the exact struct shape it requires)."""
     if mat_path.suffix == ".m":
-        mpc = parse_matpower_m(mat_path)
-    else:
-        data = sio.loadmat(mat_path, simplify_cells=True)
-        mpc = data["mpc"] if "mpc" in data else data
+        return parse_matpower_m(mat_path)
+    data = sio.loadmat(mat_path, simplify_cells=True)
+    return data["mpc"] if "mpc" in data else data
+
+
+def convert(mat_path: Path, output_path: Path) -> None:
+    mpc = load_mpc(mat_path)
     base_mva = float(mpc["baseMVA"])
     s_base_va = base_mva * 1e6
     bus = np.atleast_2d(mpc["bus"])
@@ -221,9 +229,19 @@ def convert(mat_path: Path, output_path: Path) -> None:
             b_siemens = branch[row, BR_B] / z_base
             omega = 2 * np.pi * 50.0
             c1 = b_siemens / omega if omega != 0 else 0.0
+            # tan1/tan0 (dielectric loss angle) default to NaN if omitted —
+            # gridoxide's PgmLine parser doesn't read them at all, but real
+            # PGM's C++ core does, and a NaN there poisons the line's shunt
+            # admittance into a NaN that later surfaces as a spurious
+            # "possibly singular matrix" error during PowerGridModel
+            # construction (confirmed empirically by bisecting a minimal
+            # 2-node/1-line/1-source/1-load case against known-good fixture
+            # data field-by-field). MATPOWER has no equivalent loss-angle
+            # concept, so 0.0 (lossless shunt) is the only sensible value.
             lines.append({"id": next_id(), "from_node": f_id, "to_node": t_id,
                            "from_status": 1, "to_status": 1,
-                           "r1": r_ohm, "x1": x_ohm, "c1": c1, "r0": r_ohm, "x0": x_ohm, "c0": c1})
+                           "r1": r_ohm, "x1": x_ohm, "c1": c1, "tan1": 0.0,
+                           "r0": r_ohm, "x0": x_ohm, "c0": c1, "tan0": 0.0})
             continue
 
         # Off-nominal and/or phase-shifting branch -> PGM transformer. sn
@@ -236,19 +254,39 @@ def convert(mat_path: Path, output_path: Path) -> None:
         z_abs = np.hypot(r_ohm, x_ohm)
         uk = z_abs * sn / (U_RATED_UNIFORM ** 2)
         pk = r_ohm * sn * sn / (U_RATED_UNIFORM ** 2)
-        clock = int(round(angle / 30.0)) % 12
+        # PGM only allows *even* clock values for a wye-wye transformer
+        # (winding_from == winding_to == 1 below) — confirmed empirically:
+        # power_grid_model's PowerGridModel() raises InvalidTransformerClock
+        # for an odd clock otherwise. Round to the nearest 60-degree
+        # multiple, not 30. gridoxide's own transformer_tap doesn't enforce
+        # this (it accepted odd clocks fine), but matching PGM's real
+        # constraint keeps this script's output usable by both.
+        clock = (int(round(angle / 60.0)) * 2) % 12
         effective_ratio = ratio if ratio != 0.0 else 1.0
 
         # Ratio injected via a forced tap step (see module docstring for why
         # scaling u1 directly wouldn't do anything in gridoxide's model).
-        tap_size = U_RATED_UNIFORM * (effective_ratio - 1.0)
+        # PGM's own validator (unlike gridoxide's simplified port) requires
+        # tap_size >= 0 and tap_nom within [tap_min, tap_max] — confirmed
+        # empirically (InvalidTransformerClock, then these two once that was
+        # fixed). A single fixed delta can be *either* sign while keeping
+        # tap_size non-negative by choosing which side of the step tap_pos
+        # sits on: for ratio >= 1, step up from tap_nom=0 to tap_pos=1; for
+        # ratio < 1, step down from tap_nom=1 to tap_pos=0. Either way
+        # tap_min=0/tap_max=1 keeps tap_nom in range.
+        if effective_ratio >= 1.0:
+            tap_pos, tap_nom = 1, 0
+            tap_size = U_RATED_UNIFORM * (effective_ratio - 1.0)
+        else:
+            tap_pos, tap_nom = 0, 1
+            tap_size = U_RATED_UNIFORM * (1.0 - effective_ratio)
         transformers.append({
             "id": next_id(), "from_node": f_id, "to_node": t_id,
             "from_status": 1, "to_status": 1,
             "u1": U_RATED_UNIFORM, "u2": U_RATED_UNIFORM,
             "sn": sn, "uk": uk, "pk": pk, "i0": 0.0, "p0": 0.0,
             "winding_from": 1, "winding_to": 1, "clock": clock,
-            "tap_side": 0, "tap_pos": 1, "tap_min": 1, "tap_max": 1, "tap_nom": 0, "tap_size": tap_size,
+            "tap_side": 0, "tap_pos": tap_pos, "tap_min": 0, "tap_max": 1, "tap_nom": tap_nom, "tap_size": tap_size,
         })
 
     output = {
