@@ -31,8 +31,8 @@ pub struct Bus {
     pub voltage_ang: f64,    // Va (rad)
     pub p_spec: f64,         // P specified (generation - load) in p.u., constant-power part
     pub q_spec: f64,         // Q specified (generation - load) in p.u., constant-power part
-    pub q_min: f64,          // reactive limits (for PV handling, optional)
-    pub q_max: f64,
+    pub q_min: f64,          // PV bus reactive limits, enforced only by
+    pub q_max: f64,          // solver::newton_raphson_enforcing_q_limits
     #[serde(default)]
     pub u_rated: f64,        // rated line-to-line voltage in V (0 = not set)
     /// Additional voltage-dependent (constant-current/-impedance) injection terms,

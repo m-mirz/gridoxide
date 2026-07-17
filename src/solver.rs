@@ -146,6 +146,90 @@ impl PersistentSolver {
     }
 }
 
+/// Runs Newton-Raphson to convergence like [`newton_raphson_with_backend`],
+/// but additionally enforces each `PV` bus's `q_min`/`q_max` — the one gap
+/// every reference power-flow tool this project benchmarks against either
+/// has, half-has, or explicitly disclaims not having (see
+/// `references/FEATURE_COMPARISON.md`). Plain `newton_raphson`/
+/// `PersistentSolver::solve` ignore `q_min`/`q_max` entirely, matching every
+/// existing test/benchmark's behavior unchanged; this is a separate, opt-in
+/// entry point.
+///
+/// Implements the standard "PV→PQ switching" heuristic (the same algorithm
+/// MATPOWER's `runpf` uses under `enforce_q_lims`): solve with every `PV`
+/// bus free, then check each one's actual computed Q against its limits. A
+/// bus that violates one is switched to `PQ` with `q_spec` pinned at the
+/// violated limit (so it now targets exactly that Q, letting its voltage
+/// float instead of holding `u_ref`) and the whole system is re-solved —
+/// repeated until an outer pass finds no new violations, or `max_outer_iter`
+/// is exhausted. Switching is one-directional (a bus switched to `PQ` here
+/// never switches back to `PV` within the same call) — deliberately simple,
+/// avoiding the oscillation a bidirectional scheme would need real
+/// anti-oscillation logic to prevent, matching MATPOWER's own default
+/// behavior.
+///
+/// Bus voltages are *not* reset between outer passes — each re-solve starts
+/// from the previous pass's converged state, which is normally very close
+/// to the next equilibrium (only one bus's type changed), so this typically
+/// converges in very few extra Newton iterations per outer pass.
+///
+/// Every outer pass invalidates and rebuilds the cached factorization
+/// (`PersistentSolver::reset`), since switching a bus from `PV` to `PQ`
+/// changes `n_unknowns` itself for the `Scalar`/`Klu` backends (the `Block`
+/// backend's per-bus block count doesn't change, only that bus's block
+/// values, but it's reset here too for simplicity and to stay
+/// backend-agnostic).
+///
+/// **Scope note**: a `PV` bus's `q_min`/`q_max` bound its *net* reactive
+/// injection, matching how `Bus.q_spec` is itself already a net value
+/// aggregated from every load/gen at that node (see `PgmVoltageRegulator`'s
+/// doc comment) — pinning `q_spec` to the violated limit exactly achieves
+/// that limit only if the bus carries no voltage-dependent `zip_terms` (no
+/// co-located ZIP-model load); the common case for a PV/generator bus.
+pub fn newton_raphson_enforcing_q_limits(
+    buses: &mut [Bus],
+    ybus: &YBusSparse,
+    tol: f64,
+    max_iter: usize,
+    backend: JacobianBackend,
+    max_outer_iter: usize,
+) -> SolveStatus {
+    let mut solver = PersistentSolver::new(backend);
+    for _ in 0..max_outer_iter {
+        let status = solver.solve(buses, ybus, tol, max_iter);
+        if status != SolveStatus::Converged {
+            return status;
+        }
+
+        let (_, q_calc) = power_injections(buses, ybus);
+        let mut switched = false;
+        for b in buses.iter_mut() {
+            if b.bus_type != BusType::PV {
+                continue;
+            }
+            let q = q_calc[b.idx];
+            if q < b.q_min {
+                println!("bus {}: Q={:.6} below q_min={:.6}, switching PV -> PQ", b.idx, q, b.q_min);
+                b.bus_type = BusType::PQ;
+                b.q_spec = b.q_min;
+                switched = true;
+            } else if q > b.q_max {
+                println!("bus {}: Q={:.6} above q_max={:.6}, switching PV -> PQ", b.idx, q, b.q_max);
+                b.bus_type = BusType::PQ;
+                b.q_spec = b.q_max;
+                switched = true;
+            }
+        }
+        if !switched {
+            return SolveStatus::Converged;
+        }
+        solver.reset();
+    }
+
+    println!("Q-limit enforcement did not stabilize within {} outer iterations", max_outer_iter);
+    SolveStatus::MaxIterationsReached
+}
+
 fn newton_raphson_scalar(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
     let mut sparse_system: Option<RealSparseSystem> = None;
     newton_raphson_scalar_cached(buses, ybus, tol, max_iter, &mut sparse_system);

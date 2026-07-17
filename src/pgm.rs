@@ -61,6 +61,7 @@ pub struct PgmLine {
 }
 
 fn one() -> f64 { 1.0 }
+fn nan() -> f64 { f64::NAN }
 
 #[derive(Deserialize)]
 pub struct PgmSource {
@@ -114,16 +115,28 @@ pub struct PgmSymGen {
 /// PV-bus control: an active `voltage_regulator` pins its `regulated_object`
 /// (a `sym_gen` id) bus's voltage magnitude to `u_ref`, letting Q float —
 /// mirrors PGM's own `VoltageRegulator` component (`regulated_object` ==
-/// `generator_id` in PGM's C++ `VoltageRegulator::calc_param()`). Reactive
-/// power limits (`q_min`/`q_max` in PGM's schema) aren't enforced — no
-/// PV→PQ switching, matching this project's existing scope note on `Bus`'s
-/// `q_min`/`q_max` fields ("for PV handling, optional").
+/// `generator_id` in PGM's C++ `VoltageRegulator::calc_param()`).
+///
+/// `q_min`/`q_max` (VAr, PGM's own field names, optional — `NaN` if
+/// omitted, matching PGM's own "unset" convention for this component) bound
+/// the *bus's net* reactive injection, not any one generator's own gross
+/// terminal output, since `Bus` (like PGM's own aggregated `q_specified`)
+/// only tracks one netted P/Q per node — a real simplification versus a
+/// bus with a PV generator *and* a significant co-located load, but exactly
+/// consistent with how this parser already aggregates every other P/Q
+/// quantity per bus. See `solver::newton_raphson_enforcing_q_limits` for
+/// where these get enforced (PV→PQ switching); plain `newton_raphson`
+/// ignores them entirely, same as before.
 #[derive(Deserialize)]
 pub struct PgmVoltageRegulator {
     pub id: u64,
     pub regulated_object: u64,
     pub status: u8,
     pub u_ref: f64,
+    #[serde(default = "nan")]
+    pub q_min: f64,
+    #[serde(default = "nan")]
+    pub q_max: f64,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +478,8 @@ pub fn pgm_to_buses_and_branches(
         if buses[idx].bus_type == BusType::PQ {
             buses[idx].bus_type = BusType::PV;
             buses[idx].voltage_mag = vr.u_ref;
+            buses[idx].q_min = if vr.q_min.is_nan() { -f64::INFINITY } else { vr.q_min / s_base_va };
+            buses[idx].q_max = if vr.q_max.is_nan() { f64::INFINITY } else { vr.q_max / s_base_va };
         }
     }
 
