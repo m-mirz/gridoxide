@@ -10,12 +10,23 @@
 //! Cargo feature specifically to isolate that burden and the LGPL-2.1-or-
 //! later license `KLU`/`BTF` carry (see `vendor/suitesparse/PROVENANCE.md`).
 //! This module is a faithful *translation* of the same algorithm into Rust
-//! instead — no C toolchain needed to build it — but a close translation of
-//! LGPL C is still reasonably a derivative work regardless of language, so
-//! this module (and everything under it) is itself LGPL-2.1-or-later,
-//! **always built** (no feature gate) per a deliberate, confirmed choice —
-//! see `Cargo.toml`'s `license` field and the README's licensing section for
-//! the crate-wide consequence of that choice.
+//! instead — no C toolchain needed to build it.
+//!
+//! **Licensing**: a close translation of licensed C source is reasonably a
+//! derivative work regardless of language, so this module carries forward
+//! its upstream licenses — **not uniformly one license**: `amd/` translates
+//! `AMD`, which is BSD-3-Clause upstream (confirmed directly from its
+//! source headers' `SPDX-License-Identifier`, same as
+//! `vendor/suitesparse/PROVENANCE.md`'s own table), while everything else
+//! here (`btf/`, `analyze.rs`, `kernel.rs`, `factor.rs`, `scale.rs`,
+//! `refactor.rs`, `solve.rs`) translates `BTF`/`KLU`, both
+//! LGPL-2.1-or-later. See `PROVENANCE.md` (this directory) for the full
+//! per-file mapping. This whole module is **always built** (no feature
+//! gate), per a deliberate, confirmed choice — unlike the FFI `klu` feature,
+//! there's no C-toolchain burden left to gate against — so a default
+//! `cargo build` now always bundles this BSD/LGPL content alongside
+//! gridoxide's own Apache-2.0 code. See `Cargo.toml`'s `license` field and
+//! the README's licensing section for that crate-wide consequence.
 //!
 //! **Scope**: real (`f64`) matrices only, single right-hand side, `int32`-
 //! range indices — gridoxide's own Newton-Raphson Jacobian solve never needs

@@ -3,6 +3,15 @@ name = "gridoxide"
 version = "0.0.1"
 edition = "2024"
 build = "build.rs"
+# gridoxide's own code is Apache-2.0. `src/klu_native/` (always built, no
+# feature gate) is a close Rust translation of vendored SuiteSparse C —
+# BSD-3-Clause for the AMD-derived pieces, LGPL-2.1-or-later for the
+# BTF/KLU-derived pieces — so every default build now bundles all three.
+# See src/klu_native/PROVENANCE.md and the README's licensing section.
+# (Building with `--features klu` additionally links the vendored C itself,
+# already LGPL-2.1-or-later/BSD-3-Clause per vendor/suitesparse/PROVENANCE.md
+# — no new license beyond what's already listed here.)
+license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
 
 # "rlib" keeps the crate usable as a normal Rust dependency (examples/,
 # tests/) exactly as before; "cdylib" is the loadable-by-Python extension

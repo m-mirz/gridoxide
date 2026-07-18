@@ -154,28 +154,45 @@ experiments selectable via `solver::JacobianBackend` (`newton_raphson_with_backe
   sub-feature links a system-installed `libklu.so` instead of compiling the vendored copy statically, for
   anyone who needs strict LGPL relinking compliance. Matches or beats `Block`'s performance at every
   benchmarked scale.
+- **`JacobianBackend::KluNative`** (`src/klu_native/`, no extra build requirements) — a from-scratch Rust
+  *translation* of the same KLU algorithm `Klu` links over FFI: BTF block-triangular preprocessing,
+  per-block AMD ordering, a partial-pivoting Gilbert-Peierls LU kernel with Eisenstat-Liu pruning, and
+  cheap numeric-only refactorization, all faithfully ported (not a simplified reimplementation — see
+  `src/klu_native/PROVENANCE.md` for the file-by-file mapping back to the upstream C). No C compiler or
+  `libclang` needed, so — unlike `Klu` — it's always built. Validated end-to-end against real KLU on all
+  13 real MATPOWER benchmark cases (`scripts/bench/.case-cache/`, 14 to 9,241 buses): identical iteration
+  counts and identical converged voltages on every case. One known, documented gap: row scaling
+  (`klu_native::scale`) is ported and independently tested but not yet wired into the factor/refactor
+  path (see `src/klu_native/mod.rs`'s module doc comment) — a numerical-stability preconditioning step,
+  not a correctness one, so this doesn't affect the results above.
 
-Both are strictly parallel to `Scalar`, not replacements — a bug in either can't affect `newton_raphson`'s
-default behavior, and every existing test keeps using `Scalar` unless it explicitly opts into a different
-backend (see `tests/block_jacobian_test.rs`, `tests/klu_jacobian_test.rs`).
+All three are strictly parallel to `Scalar`, not replacements — a bug in any of them can't affect
+`newton_raphson`'s default behavior, and every existing test keeps using `Scalar` unless it explicitly
+opts into a different backend (see `tests/block_jacobian_test.rs`, `tests/klu_jacobian_test.rs`,
+`tests/klu_native_jacobian_test.rs`).
 
-Measured with `examples/bench_network.rs --backend {scalar,block,klu} warm` (see `scripts/bench/README.md` for
-how to reproduce these numbers, including generating the benchmark grids and running the power-grid-model
-comparison from the section above):
+Measured with `examples/bench_network.rs --backend {scalar,block,klu,klu_native} warm` (see
+`scripts/bench/README.md` for how to reproduce these numbers, including generating the benchmark grids and
+running the power-grid-model comparison from the section above):
 
-| Nodes | Scalar | Block | Klu | PGM (warm) |
-|---|---|---|---|---|
-| 192 | 1.50 ms | 0.67 ms | 0.45 ms | 0.42 ms |
-| 1,003 | 8.38 ms | 3.15 ms | 2.47 ms | 0.93 ms |
-| 2,605 | 21.67 ms | 8.10 ms | 6.71 ms | 2.49 ms |
+| Nodes | Scalar | Block | Klu | KluNative | PGM (warm) |
+|---|---|---|---|---|---|
+| 192 | 1.50 ms | 0.67 ms | 0.45 ms | 0.98 ms | 0.42 ms |
+| 1,003 | 8.38 ms | 3.15 ms | 2.47 ms | 5.35 ms | 0.93 ms |
+| 2,605 | 21.67 ms | 8.10 ms | 6.71 ms | 13.69 ms | 2.49 ms |
 
-All three gridoxide backends produce identical converged voltages at every scale — these are purely
-performance comparisons, not correctness trade-offs. PGM is clearly faster than any gridoxide backend on
-*this* synthetic radial distribution/LV topology, even with gridoxide's own factorization reuse now doing the
-same warm-solve trick PGM's own `PowerGridModel` does — a real, standing gap, not one this project has closed.
-(Interestingly, that gap doesn't hold universally: on the real-world *transmission*-topology grids in the
-next benchmark, gridoxide's `Klu` backend is frequently faster than lightsim2grid's own KLU-backed C++
-solver — the comparison depends on topology, not just implementation language.)
+All four gridoxide backends produce identical converged voltages at every scale — these are purely
+performance comparisons, not correctness trade-offs. `KluNative` lands consistently around 2x slower than
+`Klu` (the same algorithm, but linked as vendored C via FFI instead of translated to Rust) across this whole
+range of scales — likely the cost of `klu_native::kernel`'s per-column `Vec<Vec<(usize, f64)>>` storage
+(chosen for safety/clarity over C's packed flat buffer, see that module's own doc comment) rather than
+anything algorithmic, though this hasn't been profiled to confirm. PGM is clearly faster than any gridoxide
+backend on *this* synthetic radial distribution/LV topology, even with gridoxide's own factorization reuse
+now doing the same warm-solve trick PGM's own `PowerGridModel` does — a real, standing gap, not one this
+project has closed. (Interestingly, that gap doesn't hold universally: on the real-world
+*transmission*-topology grids in the next benchmark, gridoxide's `Klu` backend is frequently faster than
+lightsim2grid's own KLU-backed C++ solver — the comparison depends on topology, not just implementation
+language.)
 
 A second, separate benchmark compares gridoxide against four other independent solvers — PGM,
 [lightsim2grid](https://github.com/m-mirz/lightsim2grid), RTE's
@@ -202,3 +219,25 @@ real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping (`src/ne
 For profiling with perf, set
 
     sysctl kernel.perf_event_paranoid=1
+
+## License
+
+gridoxide's own code is licensed under Apache-2.0 (`LICENSE`). Two pieces of vendored/translated
+third-party code are also always part of a default build:
+
+- **`src/klu_native/`** (always built, no feature gate) is a from-scratch Rust translation of vendored
+  SuiteSparse `AMD`, `BTF`, and `KLU` C source (see the "Experimental backends" section above). A close
+  translation of licensed source carries forward its upstream license, and that's not one license here:
+  `AMD` is BSD-3-Clause upstream, while `BTF`/`KLU` are LGPL-2.1-or-later — see
+  `src/klu_native/PROVENANCE.md` for the exact file-by-file breakdown.
+
+As a result, `Cargo.toml`'s `license` field is
+`"Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"` — accurate for every default `cargo build`, not
+just an opt-in one.
+
+Building with `cargo build --features klu` additionally compiles the vendored SuiteSparse C itself
+(`vendor/suitesparse/`, see `vendor/suitesparse/PROVENANCE.md`) into the binary via FFI — already
+BSD-3-Clause/LGPL-2.1-or-later per the same table above, so this doesn't add any license beyond what's
+already listed, but it does add LGPL's relinking obligations for anyone distributing a binary built with
+that feature (a `klu-dynamic` sub-feature exists for that case — see `Cargo.toml`'s feature doc
+comments).

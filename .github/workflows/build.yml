@@ -18,5 +18,13 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose
+    # No `--features klu`: this doesn't build/run the FFI-backed `Klu`
+    # backend (needs a C compiler + libclang) or the differential tests in
+    # `src/klu_native/` that compare its pure-Rust port against real
+    # vendored KLU (`#[cfg(feature = "klu")]`-gated). klu_native's own
+    # structural/dense-oracle tests and tests/klu_native_jacobian_test.rs
+    # still run here, since that backend needs no C toolchain. Adding
+    # `--features klu` here (a C-compiler + libclang runner dependency)
+    # is a known follow-up, not done as part of the klu_native port itself.
     - name: Run tests
       run: cargo test --verbose

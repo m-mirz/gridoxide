@@ -71,8 +71,9 @@ cargo build --release --example bench_network
 
 `repeat-count` (default 1) re-runs the solve that many times from a fresh flat start each time — useful both
 for stable timing averages and for `perf record`-based profiling, since a single solve is often too fast
-(tens of milliseconds) to sample meaningfully. `backend` selects `scalar` (default), `block`, or `klu` (if
-built with `--features klu`) — see the top-level README's "Sparse solver" section. `mode` selects `cold`
+(tens of milliseconds) to sample meaningfully. `backend` selects `scalar` (default), `block`, `klu` (if
+built with `--features klu`), or `klu_native` (no extra build requirements) — see the top-level README's
+"Sparse solver" and "Experimental backends" sections. `mode` selects `cold`
 (default — every repeat calls `newton_raphson_with_backend` fresh, redoing symbolic factorization every time)
 or `warm` (one `solver::PersistentSolver` is reused across all repeats, so only the first pays for symbolic
 factorization) — see the top-level README's "Reusing factorization across repeated solves" section. `warm` is
@@ -108,14 +109,16 @@ there means something is wrong with the comparison, not just the timing.
 
 `newton_raphson`-only time (ms/run, 50 warm repeats) vs. PGM's own `mean` (5 warm runs):
 
-| Nodes | Scalar | Block | Klu | PGM |
-|---|---|---|---|---|
-| 192 | 1.50 | 0.67 | 0.45 | 0.42 |
-| 1,003 | 8.38 | 3.15 | 2.47 | 0.93 |
-| 2,605 | 21.67 | 8.10 | 6.71 | 2.49 |
+| Nodes | Scalar | Block | Klu | KluNative | PGM |
+|---|---|---|---|---|---|
+| 192 | 1.50 | 0.67 | 0.45 | 0.98 | 0.42 |
+| 1,003 | 8.38 | 3.15 | 2.47 | 5.35 | 0.93 |
+| 2,605 | 21.67 | 8.10 | 6.71 | 13.69 | 2.49 |
 
 PGM is clearly faster than any gridoxide backend on this synthetic radial distribution/LV topology, even
-warm-vs-warm — a real, standing gap (see the top-level README's "Experimental backends" section). Contrast
+warm-vs-warm — a real, standing gap (see the top-level README's "Experimental backends" section). `KluNative`
+(the pure-Rust port of `Klu`'s algorithm, `src/klu_native/`) lands consistently around 2x slower than `Klu`
+itself across this range of scales. Contrast
 with step 4 below, where gridoxide's `Klu` backend is frequently *faster* than lightsim2grid's own KLU-backed
 C++ solver on real transmission-topology grids — the comparison depends heavily on the grid's topology, not
 just implementation language or which C library both ultimately call into.
