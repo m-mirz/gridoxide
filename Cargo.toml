@@ -55,8 +55,26 @@ klu-dynamic = ["klu"]
 # in directly. This is a well-known, expected PyO3 constraint, not a
 # gridoxide-specific issue.
 python = ["dep:pyo3"]
+# Builds a fifth, opt-in `JacobianBackend` (`Pardiso`) backed by Intel oneMKL's
+# PARDISO sparse direct solver, linked dynamically against a locally-installed
+# oneMKL (discovered via the `MKLROOT` env var — see the README's "Experimental
+# backends" section). Unlike `klu`, nothing is vendored or compiled from
+# source: MKL is proprietary (Intel Simplified Software License, not OSS), so
+# this only ever links a system install's `libmkl_rt.so` and generates FFI
+# bindings via `bindgen` against that install's own `mkl_pardiso.h` — nothing
+# MKL-derived is redistributed by this crate, so `Cargo.toml`'s `license`
+# field doesn't need to change for this feature. Needs `libclang` (for
+# `bindgen`) at build time, plus `MKLROOT` set (e.g. `source
+# /opt/intel/oneapi/setvars.sh`). Not built or tested in CI — no CI runner
+# has MKL installed — so this is a local/manual-verification-only backend.
+pardiso = ["dep:bindgen"]
 
 [[test]]
 name = "klu_jacobian_test"
 path = "tests/klu_jacobian_test.rs"
 required-features = ["klu"]
+
+[[test]]
+name = "pardiso_jacobian_test"
+path = "tests/pardiso_jacobian_test.rs"
+required-features = ["pardiso"]

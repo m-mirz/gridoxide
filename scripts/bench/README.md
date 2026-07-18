@@ -16,6 +16,8 @@ pip install maturin
 maturin develop --release --features python         # scalar + block backends
 maturin develop --release --features python,klu     # + the klu backend (needs a C compiler, libclang — see
                                                       # the top-level README's "Experimental backends" section)
+maturin develop --release --features python,pardiso # + the pardiso backend (needs MKLROOT set — see
+                                                      # the top-level README's "Experimental backends" section)
 ```
 
 (`maturin develop` needs an active virtualenv — either run it from inside one, or set `VIRTUAL_ENV=/path/to/venv`
@@ -72,8 +74,9 @@ cargo build --release --example bench_network
 `repeat-count` (default 1) re-runs the solve that many times from a fresh flat start each time — useful both
 for stable timing averages and for `perf record`-based profiling, since a single solve is often too fast
 (tens of milliseconds) to sample meaningfully. `backend` selects `scalar` (default), `block`, `klu` (if
-built with `--features klu`), or `klu_native` (no extra build requirements) — see the top-level README's
-"Sparse solver" and "Experimental backends" sections. `mode` selects `cold`
+built with `--features klu`), `klu_native` (no extra build requirements), or `pardiso` (if built with
+`--features pardiso` and `MKLROOT` set) — see the top-level README's "Sparse solver" and "Experimental
+backends" sections. `mode` selects `cold`
 (default — every repeat calls `newton_raphson_with_backend` fresh, redoing symbolic factorization every time)
 or `warm` (one `solver::PersistentSolver` is reused across all repeats, so only the first pays for symbolic
 factorization) — see the top-level README's "Reusing factorization across repeated solves" section. `warm` is
@@ -107,18 +110,21 @@ one persistent `PowerGridModel`), not `cold`. Sample voltage output (`voltage_ma
 `u_pu min/max` from PGM) should match closely if both are solving the same input correctly — a large mismatch
 there means something is wrong with the comparison, not just the timing.
 
-`newton_raphson`-only time (ms/run, 50 warm repeats) vs. PGM's own `mean` (5 warm runs):
+`newton_raphson`-only time (ms/run, 200 warm repeats) vs. PGM's own `mean` (5 warm runs):
 
-| Nodes | Scalar | Block | Klu | KluNative | PGM |
-|---|---|---|---|---|---|
-| 192 | 1.50 | 0.67 | 0.45 | 0.98 | 0.42 |
-| 1,003 | 8.38 | 3.15 | 2.47 | 5.35 | 0.93 |
-| 2,605 | 21.67 | 8.10 | 6.71 | 13.69 | 2.49 |
+| Nodes | Scalar | Block | Klu | KluNative | Pardiso | PGM |
+|---|---|---|---|---|---|---|
+| 192 | 1.28 | 0.52 | 0.44 | 0.45 | 2.06 | 0.42 |
+| 1,003 | 7.86 | 2.80 | 2.52 | 2.69 | 5.06 | 0.93 |
+| 2,605 | 20.97 | 6.81 | 6.04 | 6.56 | 11.73 | 2.49 |
 
 PGM is clearly faster than any gridoxide backend on this synthetic radial distribution/LV topology, even
 warm-vs-warm — a real, standing gap (see the top-level README's "Experimental backends" section). `KluNative`
-(the pure-Rust port of `Klu`'s algorithm, `src/klu_native/`) lands consistently around 2x slower than `Klu`
-itself across this range of scales. Contrast
+(the pure-Rust port of `Klu`'s algorithm, `src/klu_native/`) lands close to `Klu` itself (1.02-1.09x) across
+this range of scales. `Pardiso` (Intel oneMKL, `src/sparse_pardiso.rs`) is 2-4.7x slower than `Klu` at every
+scale, and slower than even `Scalar` at 192 nodes — its default nonsymmetric matching/scaling preprocessing
+carries a largely size-independent fixed cost per solve that dominates at these small problem sizes, though
+it does scale better than `Scalar` as node count grows (overtaking it by 2,605 nodes). Contrast
 with step 4 below, where gridoxide's `Klu` backend is frequently *faster* than lightsim2grid's own KLU-backed
 C++ solver on real transmission-topology grids — the comparison depends heavily on the grid's topology, not
 just implementation language or which C library both ultimately call into.
@@ -181,13 +187,16 @@ VIRTUAL_ENV=.venv-case-suite .venv-case-suite/bin/maturin develop --release --fe
 
 This loops all 12 cases, fetching each MATPOWER `.m` file and converting it to PGM JSON on first use (cached
 under `scripts/bench/.case-cache/`, gitignored — delete it to force re-fetch/reconversion), running
-gridoxide's `scalar`, `block`, and `klu` backends, PGM, lightsim2grid with `SolverType.KLU` (matching
-lightsim2grid's own benchmark default, and gridoxide's own fastest backend, for the closest apples-to-apples
-solver comparison), pypowsybl with the same "basic" `LoadFlowParameters` powsybl's own benchmark repo uses,
-and pandapower with its own defaults — then prints one combined markdown table. A case that fails to convert
-or diverges gets an explicit `FAILED (...)` cell (with the tool's actual exception, not a generic trailer)
-rather than a misleading blank one. Use `--repeat` to change how many timed solves gridoxide averages per
-case (default 10), `--cache-dir`/`--out` to change where converted grids/the results table are written.
+gridoxide's `scalar`, `block`, `klu`, `klu_native`, and `pardiso` backends (`pardiso` needs the extension
+built with `--features python,pardiso` and `MKLROOT` set — see "Python bindings" above; otherwise every
+`pardiso` cell reports its own build/load error rather than a timing), PGM, lightsim2grid with
+`SolverType.KLU` (matching lightsim2grid's own benchmark default, and gridoxide's own fastest backend, for
+the closest apples-to-apples solver comparison), pypowsybl with the same "basic" `LoadFlowParameters`
+powsybl's own benchmark repo uses, and pandapower with its own defaults — then prints one combined markdown
+table. A case that fails to convert or diverges gets an explicit `FAILED (...)` cell (with the tool's actual
+exception, not a generic trailer) rather than a misleading blank one. Use `--repeat` to change how many timed
+solves gridoxide averages per case (default 10), `--cache-dir`/`--out` to change where converted grids/the
+results table are written.
 
 `matpower_to_pgm.py <input.m-or-.mat> <output.json>`, `bench_pgm.py <input.json>`,
 `convert_pandapower_case.py <case_name> <output.json>`, `bench_lightsim2grid.py <case_name>`,
@@ -199,20 +208,20 @@ standalone, for benchmarking or debugging one case/tool at a time.
 Every tool's own warm-run mean (5 timed calls on one persistent model/solver object, `time.perf_counter()`),
 gridoxide included (`bench_gridoxide_native.py`/`PowerFlowModel`, always warm — see "Python bindings" above):
 
-| case | buses | scalar | block | klu | klu_native | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
-|---|---|---|---|---|---|---|---|---|---|
-| case14 | 15 | 0.103 | 0.039 | 0.027 | 0.031 | 0.224 | 0.026 | 1.462 | 14.733 |
-| case118 | 119 | 0.232 | 0.218 | 0.100 | 0.113 | FAILED¹ | 0.152 | 5.867 | 16.642 |
-| case_illinois200 | 201 | 0.590 | 0.306 | 0.329 | 0.370 | 0.588 | 0.301 | 6.429 | 16.365 |
-| case300 | 301 | 1.640 | 0.632 | 0.697 | 0.525 | FAILED¹ | 0.525 | 7.676 | 18.441 |
-| case1354pegase | 1355 | 6.828 | 3.070 | 2.386 | 2.552 | FAILED² | 2.894 | 40.901 | 24.354 |
-| case1888rte | 1889 | 11.223 | 3.847 | 3.300 | 4.359 | FAILED¹ | FAILED³ | FAILED⁴ | 29.184 |
-| case2848rte | 2849 | 17.722 | 6.035 | 5.129 | 5.850 | FAILED¹ | 7.829 | FAILED⁴ | 34.919 |
-| case2869pegase | 2870 | 19.226 | 7.690 | 7.042 | 6.451 | FAILED² | 6.830 | 104.080 | 37.113 |
-| case3120sp | 3121 | 23.890 | 7.710 | 6.439 | 8.073 | FAILED² | 6.601 | 93.190 | 41.887 |
-| case6495rte | 6496 | 67.302 | 21.278 | 18.390 | 21.591 | FAILED² | FAILED³ | FAILED⁴ | 149.624 |
-| case6515rte | 6516 | 88.197 | 27.414 | 25.107 | 25.419 | FAILED² | FAILED³ | FAILED⁴ | 58.595 |
-| case9241pegase | 9242 | 117.147 | 39.824 | 29.654 | 36.363 | FAILED² | 25.625 | 434.922 | 86.479 |
+| case | buses | scalar | block | klu | klu_native | pardiso | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
+|---|---|---|---|---|---|---|---|---|---|---|
+| case14 | 15 | 0.103 | 0.039 | 0.027 | 0.031 | not run⁵ | 0.224 | 0.026 | 1.462 | 14.733 |
+| case118 | 119 | 0.232 | 0.218 | 0.100 | 0.113 | not run⁵ | FAILED¹ | 0.152 | 5.867 | 16.642 |
+| case_illinois200 | 201 | 0.590 | 0.306 | 0.329 | 0.370 | not run⁵ | 0.588 | 0.301 | 6.429 | 16.365 |
+| case300 | 301 | 1.640 | 0.632 | 0.697 | 0.525 | not run⁵ | FAILED¹ | 0.525 | 7.676 | 18.441 |
+| case1354pegase | 1355 | 6.828 | 3.070 | 2.386 | 2.552 | not run⁵ | FAILED² | 2.894 | 40.901 | 24.354 |
+| case1888rte | 1889 | 11.223 | 3.847 | 3.300 | 4.359 | not run⁵ | FAILED¹ | FAILED³ | FAILED⁴ | 29.184 |
+| case2848rte | 2849 | 17.722 | 6.035 | 5.129 | 5.850 | not run⁵ | FAILED¹ | 7.829 | FAILED⁴ | 34.919 |
+| case2869pegase | 2870 | 19.226 | 7.690 | 7.042 | 6.451 | not run⁵ | FAILED² | 6.830 | 104.080 | 37.113 |
+| case3120sp | 3121 | 23.890 | 7.710 | 6.439 | 8.073 | not run⁵ | FAILED² | 6.601 | 93.190 | 41.887 |
+| case6495rte | 6496 | 67.302 | 21.278 | 18.390 | 21.591 | not run⁵ | FAILED² | FAILED³ | FAILED⁴ | 149.624 |
+| case6515rte | 6516 | 88.197 | 27.414 | 25.107 | 25.419 | not run⁵ | FAILED² | FAILED³ | FAILED⁴ | 58.595 |
+| case9241pegase | 9242 | 117.147 | 39.824 | 29.654 | 36.363 | not run⁵ | FAILED² | 25.625 | 434.922 | 86.479 |
 
 `klu_native` (`src/klu_native/`, the from-scratch Rust port — see the top-level README's "Experimental
 backends") converges to the same voltages as every other gridoxide backend on all 12 cases, and lands close
@@ -264,6 +273,10 @@ before any iteration runs.
 phase-shift-zeroing workaround that repo's own `MatpowerUtil.java` applies before benchmarking these same
 three cases (confirmed directly: applying that workaround via `pypowsybl` does make powsybl-open-loadflow
 converge on all three, in ~4 iterations each — see matpower_to_pgm.py's docstring).
+⁵ `pardiso` wasn't run as part of this table — reproducing it needs the extension built with `--features
+python,pardiso` and a local Intel oneMKL install (`MKLROOT` set), on top of every other tool's own
+environment already required here. See the top-level README's "Experimental backends" section for `pardiso`
+measured on the three smaller synthetic grids from step 1 instead, where it landed 2-4.7x slower than `klu`.
 
 gridoxide (`scalar`/`block`/`klu`/`klu_native`) and pandapower (its own native, no-cross-tool-conversion
 path) are the only two of five tools that converge on **all 12** cases. `case1888rte`, `case6495rte`, and

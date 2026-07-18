@@ -170,12 +170,16 @@ def main() -> None:
         print(f"=== {case_name} ===", file=sys.stderr)
         m_path, json_path, conv_err = convert_case(args.python, case_name, args.cache_dir)
         if json_path is None:
-            rows.append((case_name, "-", f"FAILED ({conv_err})", "-", "-", "-", "-", "-", "-", "-"))
+            rows.append((case_name, "-", f"FAILED ({conv_err})", "-", "-", "-", "-", "-", "-", "-", "-"))
             continue
 
         n_nodes = None
         backend_times = {}
-        for backend in ("scalar", "block", "klu", "klu_native"):
+        # "pardiso" needs the gridoxide Python extension built with
+        # `--features python,pardiso` and MKLROOT set at build time (see the
+        # top-level README's "Experimental backends" section) — not run in
+        # CI or by default, only when locally available.
+        for backend in ("scalar", "block", "klu", "klu_native", "pardiso"):
             t, n, err = run_gridoxide(args.python, json_path, backend)
             n_nodes = n_nodes or n
             backend_times[backend] = fmt(t, err)
@@ -192,6 +196,7 @@ def main() -> None:
             backend_times["block"],
             backend_times["klu"],
             backend_times["klu_native"],
+            backend_times["pardiso"],
             fmt(pgm_time, pgm_err),
             fmt(ls2g_time, ls2g_err),
             fmt(pypowsybl_time, pypowsybl_err),
@@ -199,7 +204,7 @@ def main() -> None:
         ))
 
     header = ["case", "buses", "gridoxide scalar", "gridoxide block", "gridoxide klu", "gridoxide klu_native",
-              "PGM", "lightsim2grid (KLU)", "pypowsybl", "pandapower"]
+              "gridoxide pardiso", "PGM", "lightsim2grid (KLU)", "pypowsybl", "pandapower"]
     lines = [
         "| " + " | ".join(header) + " |",
         "|" + "|".join(["---"] * len(header)) + "|",

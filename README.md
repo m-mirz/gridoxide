@@ -165,25 +165,44 @@ experiments selectable via `solver::JacobianBackend` (`newton_raphson_with_backe
   (`klu_native::scale`) is ported and independently tested but not yet wired into the factor/refactor
   path (see `src/klu_native/mod.rs`'s module doc comment) — a numerical-stability preconditioning step,
   not a correctness one, so this doesn't affect the results above.
+- **`JacobianBackend::Pardiso`** (`src/sparse_pardiso.rs`, needs `cargo build --features pardiso` and
+  `MKLROOT` set at build time) — the same scalar Jacobian as `Scalar`, solved by
+  [Intel oneMKL's PARDISO](https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/) sparse
+  direct solver instead of `faer`. Unlike `Klu`, nothing is vendored — MKL is proprietary (Intel Simplified
+  Software License, not OSS), so this only dynamically links a locally-installed oneMKL (`libmkl_rt.so`,
+  discovered via `MKLROOT`, e.g. `source /opt/intel/oneapi/setvars.sh`) and generates FFI bindings via
+  `bindgen` against *that install's own* `mkl_pardiso.h` — no MKL header or source is copied into this repo.
+  PARDISO's C API is one function called repeatedly with different `phase` values against a persistent
+  opaque handle, rather than KLU's separate analyze/factor/refactor/solve functions; `mtype = 11` (real,
+  nonsymmetric) and `iparm[34] = 1` (0-based indexing) are the two settings that matter for matching
+  gridoxide's existing CSR/CSC conventions. **Not built or tested in CI** — no CI runner has MKL installed —
+  so this is a local/manual-verification-only backend.
 
-All three are strictly parallel to `Scalar`, not replacements — a bug in any of them can't affect
+All four are strictly parallel to `Scalar`, not replacements — a bug in any of them can't affect
 `newton_raphson`'s default behavior, and every existing test keeps using `Scalar` unless it explicitly
 opts into a different backend (see `tests/block_jacobian_test.rs`, `tests/klu_jacobian_test.rs`,
-`tests/klu_native_jacobian_test.rs`).
+`tests/klu_native_jacobian_test.rs`, `tests/pardiso_jacobian_test.rs`).
 
-Measured with `examples/bench_network.rs --backend {scalar,block,klu,klu_native} warm` (see
+Measured with `examples/bench_network.rs --backend {scalar,block,klu,klu_native,pardiso} warm` (see
 `scripts/bench/README.md` for how to reproduce these numbers, including generating the benchmark grids and
 running the power-grid-model comparison from the section above):
 
-| Nodes | Scalar | Block | Klu | KluNative | PGM (warm) |
-|---|---|---|---|---|---|
-| 192 | 1.50 ms | 0.67 ms | 0.45 ms | 0.48 ms | 0.42 ms |
-| 1,003 | 8.38 ms | 3.15 ms | 2.47 ms | 2.68 ms | 0.93 ms |
-| 2,605 | 21.67 ms | 8.10 ms | 6.71 ms | 7.13 ms | 2.49 ms |
+| Nodes | Scalar | Block | Klu | KluNative | Pardiso | PGM (warm) |
+|---|---|---|---|---|---|---|
+| 192 | 1.28 ms | 0.52 ms | 0.44 ms | 0.45 ms | 2.06 ms | 0.42 ms |
+| 1,003 | 7.86 ms | 2.80 ms | 2.52 ms | 2.69 ms | 5.06 ms | 0.93 ms |
+| 2,605 | 20.97 ms | 6.81 ms | 6.04 ms | 6.56 ms | 11.73 ms | 2.49 ms |
 
-All four gridoxide backends produce identical converged voltages at every scale — these are purely
-performance comparisons, not correctness trade-offs. `KluNative` now lands close to `Klu` (1.06-1.15x) across
-this whole range of scales — down from an earlier version of this port that ran a consistent ~2x slower.
+All five gridoxide backends produce identical converged voltages at every scale — these are purely
+performance comparisons, not correctness trade-offs. `KluNative` lands close to `Klu` (1.02-1.09x) across
+this whole range of scales. `Pardiso` is 2-4.7x slower than `Klu` at every scale, and slower than even
+`Scalar` at the smallest size (192 nodes) — its default nonsymmetric preprocessing (maximum weighted
+matching + scaling) carries a largely size-independent fixed setup cost per solve that dominates at these
+small problem sizes; it does scale somewhat better than the naive `Scalar`/`faer` path as node count grows
+(overtaking `Scalar` by 2,605 nodes), but never catches up to `Klu`/`Block`/`KluNative` in this range. This
+isn't a gridoxide-specific gap — PARDISO's general-purpose machinery (multi-threading support, iterative
+refinement, pivoting robustness for a much broader class of matrices than KLU targets) is understood to pay
+off more at larger/denser problems than these small radial-distribution grids, not at this scale.
 `perf`-profiling traced that gap to allocator churn, not anything algorithmic: `kernel::refactor_block`
 allocated two new `Vec`s per column on *every* Newton iteration's refactor (tens of millions of allocations
 across a timed benchmark run on the larger real-world cases below), where real KLU's own `klu_refactor.c`
@@ -220,6 +239,11 @@ real generator PV (voltage-controlled) buses, not just the slack/PQ split descri
 `newton_raphson_klu`'s existing PV handling, now actually reachable from PGM JSON input — and to fixing a
 real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping (`src/network.rs`).
 
+`Pardiso` is not included in this second, real-MATPOWER-case benchmark (only measured on the three synthetic
+grids in the "Experimental backends" table above) — reproducing it needs the same local MKL install as
+everywhere else `pardiso` is used, on top of the PGM/lightsim2grid/pypowsybl/pandapower Python environments
+that benchmark already requires.
+
 ## Profiling
 
 For profiling with perf, set
@@ -247,3 +271,12 @@ BSD-3-Clause/LGPL-2.1-or-later per the same table above, so this doesn't add any
 already listed, but it does add LGPL's relinking obligations for anyone distributing a binary built with
 that feature (a `klu-dynamic` sub-feature exists for that case — see `Cargo.toml`'s feature doc
 comments).
+
+Building with `cargo build --features pardiso` is a separate case from all of the above: it dynamically
+links a locally-installed Intel oneMKL (`libmkl_rt.so`) at build/run time, under Intel's own Simplified
+Software License — not LGPL, not OSS, and not vendored or redistributed by this repo in any form (no MKL
+header or source is copied in; `bindgen` only reads the local install's own `mkl_pardiso.h` at build time to
+generate FFI bindings). Because nothing MKL-derived is ever copied into or shipped by this crate,
+`Cargo.toml`'s `license` field does **not** need to change for this feature. Anyone who builds with
+`--features pardiso` and distributes the resulting binary is responsible for their own compliance with
+Intel's oneMKL redistribution terms — this project doesn't audit that on their behalf.

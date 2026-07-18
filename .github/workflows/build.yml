@@ -26,5 +26,11 @@ jobs:
     # still run here, since that backend needs no C toolchain. Adding
     # `--features klu` here (a C-compiler + libclang runner dependency)
     # is a known follow-up, not done as part of the klu_native port itself.
+    # No `--features pardiso` either, for the same reason plus one more:
+    # the `Pardiso` backend (`src/sparse_pardiso.rs`) needs a locally
+    # installed, separately-licensed Intel oneMKL (`MKLROOT` set) — not
+    # available on GitHub-hosted runners at all, so this backend is
+    # local/manual-verification-only (see the top-level README's
+    # "Experimental backends" section).
     - name: Run tests
       run: cargo test --verbose

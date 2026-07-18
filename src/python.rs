@@ -33,8 +33,15 @@ fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
              (maturin develop --features python,klu)",
         )),
         "klu_native" => Ok(JacobianBackend::KluNative),
+        #[cfg(feature = "pardiso")]
+        "pardiso" => Ok(JacobianBackend::Pardiso),
+        #[cfg(not(feature = "pardiso"))]
+        "pardiso" => Err(PyValueError::new_err(
+            "the 'pardiso' backend needs the crate's `pardiso` Cargo feature enabled too \
+             (maturin develop --features python,pardiso, with MKLROOT set)",
+        )),
         other => Err(PyValueError::new_err(format!(
-            "unknown backend '{other}', expected 'scalar', 'block', 'klu', or 'klu_native'"
+            "unknown backend '{other}', expected 'scalar', 'block', 'klu', 'klu_native', or 'pardiso'"
         ))),
     }
 }
@@ -52,7 +59,12 @@ fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
 /// single-threaded benchmark usage) rather than asserting `Send` ourselves,
 /// which would require verifying SuiteSparse's cross-thread-move safety —
 /// not something to claim without being sure. Deliberately doesn't touch
-/// `sparse_klu.rs`'s own raw-pointer RAII wrapper to stay conservative.
+/// `sparse_klu.rs`'s own raw-pointer RAII wrapper to stay conservative. With
+/// the `pardiso` feature, `PersistentSolver` can likewise hold a
+/// `sparse_pardiso::PardisoRealSystem` — PARDISO's own `pt` handle has the
+/// same not-safe-for-concurrent-use profile (documented in multiple Intel
+/// community threads, including interactions with its internal METIS
+/// reordering), so this same `unsendable` already covers it too.
 #[pyclass(unsendable)]
 struct PowerFlowModel {
     buses_template: Vec<Bus>,
@@ -69,7 +81,9 @@ impl PowerFlowModel {
     /// and `matpower_to_pgm.py`/`convert_pandapower_case.py` produce).
     ///
     /// `backend` is `"scalar"` (default), `"block"`, `"klu"` (needs the
-    /// crate's `klu` feature built in too), or `"klu_native"`.
+    /// crate's `klu` feature built in too), `"klu_native"`, or `"pardiso"`
+    /// (needs the crate's `pardiso` feature built in too, plus `MKLROOT`
+    /// set at build time).
     /// `s_base_va`/`freq_hz` match
     /// `pgm::pgm_to_buses_and_branches`'s own defaults used elsewhere in
     /// this project (1e6 VA, 50 Hz) unless overridden.

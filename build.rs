@@ -1,6 +1,8 @@
 fn main() {
     #[cfg(feature = "klu")]
     klu::build();
+    #[cfg(feature = "pardiso")]
+    pardiso::build();
 }
 
 /// Compiles the vendored SuiteSparse KLU solver (`vendor/suitesparse/`) and
@@ -110,6 +112,94 @@ mod klu {
         bindings
             .write_to_file(out_dir.join("klu_bindings.rs"))
             .expect("failed to write KLU FFI bindings");
+    }
+
+    fn find_gcc_builtin_include() -> Option<PathBuf> {
+        let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        path.is_dir().then_some(path)
+    }
+}
+
+/// Links a locally-installed Intel oneMKL's PARDISO sparse direct solver as
+/// a fifth, opt-in `JacobianBackend` (`solver::JacobianBackend::Pardiso`,
+/// `src/sparse_pardiso.rs`) — see the README's "Experimental backends"
+/// section for why this exists. Unlike `klu`, nothing is vendored: MKL is
+/// proprietary, so this only locates and dynamically links a system install
+/// (via the `MKLROOT` env var, the same variable Intel's own
+/// `setvars.sh` sets) and generates FFI bindings from *that install's own*
+/// `mkl_pardiso.h` — no MKL header or source is copied into this repo.
+#[cfg(feature = "pardiso")]
+mod pardiso {
+    use std::env;
+    use std::path::PathBuf;
+
+    pub fn build() {
+        let mkl_root = env::var("MKLROOT").expect(
+            "the `pardiso` feature needs Intel oneMKL installed locally; set MKLROOT \
+             (e.g. `source /opt/intel/oneapi/setvars.sh`) before building",
+        );
+        let mkl_root = PathBuf::from(mkl_root);
+
+        // oneAPI 2024+ puts libmkl_rt.so directly under `lib/`, with
+        // `lib/intel64` kept only as a symlink to `lib` for backward
+        // compatibility; older oneAPI releases used `lib/intel64` as the
+        // real directory instead. Probe both, preferring the newer layout.
+        let lib_dir = [mkl_root.join("lib"), mkl_root.join("lib/intel64")]
+            .into_iter()
+            .find(|p| p.join("libmkl_rt.so").is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "couldn't find libmkl_rt.so under {}/lib or {}/lib/intel64 — \
+                     is MKLROOT ({}) a valid oneMKL install?",
+                    mkl_root.display(),
+                    mkl_root.display(),
+                    mkl_root.display()
+                )
+            });
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        // The Single Dynamic Library: one link target, LP64 (32-bit
+        // MKL_INT — plenty for gridoxide's network sizes) and sequential
+        // threading by default, avoiding MKL's own thread pool interacting
+        // unpredictably with any caller-level parallelism (e.g. a batch of
+        // scenarios run concurrently). Override via MKL's own env vars
+        // (MKL_INTERFACE_LAYER/MKL_THREADING_LAYER) if a different
+        // interface/threading layer is needed.
+        println!("cargo:rustc-link-lib=dylib=mkl_rt");
+
+        generate_bindings(&mkl_root);
+
+        println!("cargo:rerun-if-env-changed=MKLROOT");
+    }
+
+    fn generate_bindings(mkl_root: &std::path::Path) {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let include_dir = mkl_root.join("include");
+        let mut builder = bindgen::Builder::default()
+            .header(include_dir.join("mkl_pardiso.h").to_str().unwrap())
+            .clang_arg(format!("-I{}", include_dir.display()))
+            .allowlist_function("pardiso.*")
+            .allowlist_type("_MKL_DSS_HANDLE_t|MKL_INT");
+
+        // Same libclang-without-a-full-clang-toolchain fallback `klu`'s own
+        // bindgen invocation needs (duplicated rather than shared, since
+        // `mod klu` only exists under the separate `klu` feature and this
+        // module must build without it) — see `klu::find_gcc_builtin_include`
+        // for why this exists.
+        if let Some(gcc_builtin_include) = find_gcc_builtin_include() {
+            builder = builder.clang_arg(format!("-I{}", gcc_builtin_include.display()));
+        }
+
+        let bindings = builder.generate().expect("failed to generate PARDISO FFI bindings");
+
+        bindings
+            .write_to_file(out_dir.join("pardiso_bindings.rs"))
+            .expect("failed to write PARDISO FFI bindings");
     }
 
     fn find_gcc_builtin_include() -> Option<PathBuf> {

@@ -8,6 +8,8 @@ pub mod block_sparse;
 pub mod klu_native;
 #[cfg(feature = "klu")]
 pub mod sparse_klu;
+#[cfg(feature = "pardiso")]
+pub mod sparse_pardiso;
 #[cfg(feature = "python")]
 mod python;
 

@@ -12,9 +12,11 @@
 //! `backend` (default "scalar") selects `scalar` (the default `faer`-backed
 //! path), `block` (the experimental block-per-bus path, symmetric only),
 //! `klu` (the experimental vendored-KLU-via-FFI path, only available when
-//! built with `--features klu`), or `klu_native` (the experimental
-//! from-scratch Rust port of the same KLU algorithm, no feature flag needed)
-//! for a head-to-head comparison on the same network.
+//! built with `--features klu`), `klu_native` (the experimental
+//! from-scratch Rust port of the same KLU algorithm, no feature flag needed),
+//! or `pardiso` (Intel oneMKL PARDISO, linked dynamically, only available
+//! when built with `--features pardiso` and `MKLROOT` set) for a
+//! head-to-head comparison on the same network.
 //!
 //! `mode` (default "cold") selects `cold` (each repeat calls
 //! `newton_raphson_with_backend` fresh — no state carries over between
@@ -50,7 +52,14 @@ fn main() {
         #[cfg(not(feature = "klu"))]
         "klu" => panic!("the 'klu' backend needs `cargo run --features klu ...` (see the README's \"Sparse solver\" section)"),
         "klu_native" => JacobianBackend::KluNative,
-        other => panic!("unknown backend '{other}', expected 'scalar', 'block', 'klu', or 'klu_native'"),
+        #[cfg(feature = "pardiso")]
+        "pardiso" => JacobianBackend::Pardiso,
+        #[cfg(not(feature = "pardiso"))]
+        "pardiso" => panic!(
+            "the 'pardiso' backend needs `cargo run --features pardiso ...` with MKLROOT set \
+             (see the README's \"Experimental backends\" section)"
+        ),
+        other => panic!("unknown backend '{other}', expected 'scalar', 'block', 'klu', 'klu_native', or 'pardiso'"),
     };
     let mode_arg = args.next().unwrap_or_else(|| "cold".to_string());
     let warm = match mode_arg.as_str() {

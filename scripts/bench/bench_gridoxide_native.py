@@ -9,17 +9,19 @@ parsing its stdout at all.
 
 Usage: python3 bench_gridoxide_native.py <input.json> [backend]
 
-`backend` (default "scalar") selects `scalar`, `block`, `klu`, or
-`klu_native` — the `gridoxide` module must have been built with the
+`backend` (default "scalar") selects `scalar`, `block`, `klu`, `klu_native`,
+or `pardiso` — the `gridoxide` module must have been built with the
 matching Cargo feature (`klu` needs `maturin develop --features
-python,klu`; `klu_native` needs no extra feature; see this directory's
-README for the exact command).
+python,klu`; `klu_native` needs no extra feature; `pardiso` needs `maturin
+develop --features python,pardiso` with `MKLROOT` set at build time; see
+this directory's README for the exact command).
 
 Build the bindings first:
 
     pip install maturin
     maturin develop --release --features python        # scalar + block
     maturin develop --release --features python,klu     # + klu
+    maturin develop --release --features python,pardiso # + pardiso (needs MKLROOT)
 
 `PowerFlowModel.solve()` reuses cached symbolic factorization across calls
 on the same model (it wraps `solver::PersistentSolver` directly) — this
