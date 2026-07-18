@@ -36,17 +36,18 @@
 //! `factor` → `scale` → `refactor` → `solve`, with the public API assembled
 //! here.
 
+// TODO(Phase 7): remove once this module is wired into `solver::
+// JacobianBackend` — until then, nothing outside this module's own tests
+// calls into it, so cargo's dead-code analysis (correctly) flags the whole
+// tree as unreachable from any public entry point.
+#![allow(dead_code)]
+
 pub mod types;
 
-// TODO(Phase 3): remove once `btf_order` is consumed by `analyze.rs`'s
-// symbolic-analysis orchestration — currently only exercised by its own
-// tests.
-#[allow(dead_code)]
 mod btf;
-
-// TODO(Phase 3): remove once `amd_order` is consumed by `analyze.rs`.
-#[allow(dead_code)]
 mod amd;
+mod analyze;
+mod kernel;
 
 #[cfg(all(test, feature = "klu"))]
 mod ffi_oracle;
