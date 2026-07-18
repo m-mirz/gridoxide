@@ -48,6 +48,8 @@ mod btf;
 mod amd;
 mod analyze;
 mod kernel;
+mod factor;
+mod scale;
 
 #[cfg(all(test, feature = "klu"))]
 mod ffi_oracle;

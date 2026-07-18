@@ -113,6 +113,45 @@ pub fn amd_order_oracle(n: usize, col_ptr: &[i32], row_idx: &[i32]) -> Option<Ve
     (status >= 0).then_some(p)
 }
 
+/// Safe wrapper around the vendored `klu_scale`, reusing `sparse_klu.rs`'s
+/// bindgen-generated `klu_common`/`klu_defaults`/`klu_scale` bindings (see
+/// that file's `#[cfg(test)]` re-export) rather than hand-declaring a second
+/// `extern "C"` signature that would need to independently match the real
+/// `KLU_common` struct's ABI — unlike `btf_order`/`amd_order` above,
+/// `klu_scale` takes a `KLU_common *`, and `klu_scale` is already in
+/// `build.rs`'s `klu_.*` bindgen allowlist, so there's no need to hand-roll
+/// it here. Returns `None` on any non-`KLU_OK` status (matches `KLU_scale`
+/// returning `FALSE`), `Some(rs)` (`rs.len() == n`) otherwise -- callers only
+/// ever pass `scale >= 1` (this port's own oracle test never exercises
+/// `scale <= 0`, which `scale.rs`'s pure-Rust unit tests already cover
+/// without any FFI needed).
+#[allow(dead_code)]
+pub fn klu_scale_oracle(scale: i32, n: usize, col_ptr: &[i32], row_idx: &[i32], values: &[f64]) -> Option<Vec<f64>> {
+    use crate::sparse_klu::{klu_common_for_oracle, klu_defaults_for_oracle, klu_scale_for_oracle};
+
+    assert_eq!(col_ptr.len(), n + 1, "col_ptr must have n+1 entries");
+    assert_eq!(row_idx.len(), values.len());
+
+    let mut common: klu_common_for_oracle = unsafe { std::mem::zeroed() };
+    unsafe { klu_defaults_for_oracle(&mut common) };
+
+    let mut rs = vec![0.0f64; n];
+    let mut w = vec![0i32; n];
+    let ok = unsafe {
+        klu_scale_for_oracle(
+            scale,
+            n as i32,
+            col_ptr.as_ptr() as *mut i32,
+            row_idx.as_ptr() as *mut i32,
+            values.as_ptr() as *mut f64,
+            rs.as_mut_ptr(),
+            w.as_mut_ptr(),
+            &mut common,
+        )
+    };
+    (ok != 0 && common.status == 0).then_some(rs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

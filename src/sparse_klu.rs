@@ -25,6 +25,15 @@ use bindings::{
     klu_refactor, klu_solve, klu_symbolic, klu_z_factor, klu_z_solve,
 };
 
+/// Re-exported for `klu_native::ffi_oracle`'s differential tests: `klu_scale`
+/// needs the real `klu_common` struct layout (bindgen-generated here from
+/// `klu.h`, not hand-declared) — reusing it is simpler and safer than
+/// hand-writing a second FFI declaration that must independently match the
+/// same ABI, the approach `ffi_oracle.rs` otherwise uses for `btf_order`/
+/// `amd_order` (neither of which takes a `klu_common`).
+#[cfg(test)]
+pub(crate) use bindings::{klu_common as klu_common_for_oracle, klu_defaults as klu_defaults_for_oracle, klu_scale as klu_scale_for_oracle};
+
 const KLU_OK: i32 = 0;
 
 /// Builds a KLU-ready CSC structure (column pointers + sorted row indices)
