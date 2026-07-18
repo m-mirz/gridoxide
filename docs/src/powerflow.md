@@ -13,7 +13,8 @@ Each node in the network is fully described by the following four electrical qua
 * \\(P_k\\): active power
 * \\(Q_k\\): reactive power
 
-There are three types of network nodes: VD, PV and PQ.
+There are three types of network nodes: VD (also called the slack or reference bus — `types::BusType::Slack`
+in gridoxide's own code), PV and PQ.
 Depending on the node type, two of the four electrical quantities are specified.
 
 | Node Type	| Known		                      | Unknown                         |
@@ -162,7 +163,7 @@ The Jacobian matrix is obtained by taking all first-order partial derivates of t
 J_{jk}^{P \theta} &= \frac{\partial P_j (x ) } {\partial \theta_k} = \vert V_j \vert \vert V_k \vert \left ( G_{jk} sin(\theta_{jk}) - 																B_{jk} cos(\theta_{jk} ) \right ) \\\\
 J_{jj}^{P \theta} &= \frac{\partial P_j(x)}{\partial \theta_j} = -Q_j (x ) - B_{jj} \vert V_j \vert ^{2} \\\\
 J_{jk}^{Q \theta} &= \frac{\partial Q_j(x)}{\partial \theta_k} = - \vert V_j \vert \vert V_k \vert \left ( G_{jk} cos(\theta_{jk}) + 																B_{jk} sin(\theta_{jk}) \right ) \\\\
-    J_{jj}^{Q \theta} &= \frac{\partial Q_j(x)}{\partial \theta_k} = P_j (x ) - G_{jj} \vert V_j \vert ^{2} \\\\
+    J_{jj}^{Q \theta} &= \frac{\partial Q_j(x)}{\partial \theta_j} = P_j (x ) - G_{jj} \vert V_j \vert ^{2} \\\\
     J_{jk}^{PV} &= \frac{\partial P_j (x ) } {\partial \vert V_k \vert } = \vert V_j \vert \left ( G_{jk} cos(\theta_{jk}) + 																B_{jk} sin(\theta_{jk}) \right ) \\\\
     J_{jj}^{PV} &= \frac{\partial P_j(x)}{\partial \vert V_j \vert } = \frac{P_j (x )}{\vert V_j \vert} + G_{jj} \vert V_j \vert \\\\
     J_{jk}^{QV} &= \frac{\partial Q_j (x ) } {\partial \vert V_k \vert } = \vert V_j \vert \left ( G_{jk} sin(\theta_{jk}) - B_{jk} cos(\theta_{jk}) \right ) \\\\
