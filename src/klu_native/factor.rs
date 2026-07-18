@@ -133,74 +133,8 @@ pub fn factor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym: &
 #[cfg(test)]
 mod tests {
     use super::super::analyze::analyze;
+    use super::super::solve::solve;
     use super::*;
-
-    /// Solves `A x = b` given a full `Numeric`. `Symbolic::r`'s block
-    /// boundaries describe an *upper* block triangular matrix -- meaning an
-    /// *earlier* block's row-equations may reference a *later* block's
-    /// columns (`block(row) <= block(col)` required for any nonzero, the
-    /// standard upper-triangular condition applied at block granularity),
-    /// the same direction `off_p`/`off_i`/`off_x` are built in (entries
-    /// found while extracting a block's own columns, at rows belonging to
-    /// an *earlier* block). So blocks must be solved in **reverse** order
-    /// (last block first, with no unsolved dependencies) and each block's
-    /// off-diagonal entries propagated backward into not-yet-solved
-    /// *earlier* blocks' right-hand side once that block's own `x` is
-    /// known -- the same right-looking update `solve.rs` will formalize;
-    /// written directly here purely to validate `factor()`'s output
-    /// end-to-end before that phase exists.
-    fn solve(num: &Numeric, r: &[usize], q: &[usize], n: usize, b: &[f64]) -> Vec<f64> {
-        let mut y = vec![0.0; n];
-        for k in 0..n {
-            y[k] = b[num.pnum[k] as usize];
-        }
-
-        let nblocks = r.len() - 1;
-        let mut x = vec![0.0; n];
-        for block in (0..nblocks).rev() {
-            let k1 = r[block];
-            let k2 = r[block + 1];
-            let nk = k2 - k1;
-            let bf = &num.blocks[block];
-
-            let rhs_local: Vec<f64> = y[k1..k2].to_vec();
-
-            // Forward: L y = rhs_local (block-local pivot order).
-            let mut yl = rhs_local;
-            for k in 0..nk {
-                let yk = yl[k];
-                for &(row, lij) in &bf.l_cols[k] {
-                    yl[row] -= lij * yk;
-                }
-            }
-            // Backward: U x = y.
-            let mut xl = yl;
-            for k in (0..nk).rev() {
-                xl[k] /= bf.udiag[k];
-                let xk = xl[k];
-                for &(row, uij) in &bf.u_cols[k] {
-                    xl[row] -= uij * xk;
-                }
-            }
-            x[k1..(nk + k1)].copy_from_slice(&xl[..nk]);
-
-            // Propagate this block's off-diagonal contribution backward
-            // into not-yet-solved earlier blocks' right-hand side.
-            for (global_col, &xk) in x.iter().enumerate().take(k2).skip(k1) {
-                for p in num.off_p[global_col] as usize..num.off_p[global_col + 1] as usize {
-                    let row = num.off_i[p] as usize;
-                    y[row] -= num.off_x[p] * xk;
-                }
-            }
-        }
-        // x is currently indexed by pivot position (== column position in
-        // the Q-permuted system); map back to original variable indices.
-        let mut result = vec![0.0; n];
-        for k in 0..n {
-            result[q[k]] = x[k];
-        }
-        result
-    }
 
     fn dense_solve(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
         let n = a.len();
@@ -281,7 +215,7 @@ mod tests {
         let num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
 
         let b = vec![1.0, 2.0, -1.0, 0.5];
-        let x = solve(&num, &sym.r, &sym.q, n, &b);
+        let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &entries), &b);
         for i in 0..n {
             assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
@@ -315,7 +249,7 @@ mod tests {
 
         let num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
         let b = vec![1.0, -2.0, 0.5, 3.0, -1.0];
-        let x = solve(&num, &sym.r, &sym.q, n, &b);
+        let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &entries), &b);
         for i in 0..n {
             assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
@@ -365,7 +299,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("trial {trial} (n={n}): unexpectedly singular"));
 
             let b: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.3).collect();
-            let rust_x = solve(&num, &sym.r, &sym.q, n, &b);
+            let rust_x = solve(&sym, &num, None, &b);
 
             let mut klu_sys = crate::sparse_klu::KluRealSystem::new(n, &entries).unwrap();
             let klu_x = klu_sys.factor_and_solve(&entries, &b).unwrap();

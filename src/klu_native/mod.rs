@@ -51,6 +51,7 @@ mod kernel;
 mod factor;
 mod scale;
 mod refactor;
+mod solve;
 
 #[cfg(all(test, feature = "klu"))]
 mod ffi_oracle;

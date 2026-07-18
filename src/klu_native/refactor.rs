@@ -97,59 +97,8 @@ pub fn refactor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym:
 mod tests {
     use super::super::analyze::analyze;
     use super::super::factor::factor;
+    use super::super::solve::solve;
     use super::*;
-
-    /// Solves `A x = b` given a full `Numeric` -- identical to
-    /// `factor.rs`'s own test-only `solve` helper (block-reverse-order
-    /// solve through BTF's upper-block-triangular structure); duplicated
-    /// here rather than shared since both are test-only scaffolding that
-    /// predates `solve.rs` (Phase 6), which will supersede both.
-    fn solve(num: &Numeric, r: &[usize], q: &[usize], n: usize, b: &[f64]) -> Vec<f64> {
-        let mut y = vec![0.0; n];
-        for k in 0..n {
-            y[k] = b[num.pnum[k] as usize];
-        }
-
-        let nblocks = r.len() - 1;
-        let mut x = vec![0.0; n];
-        for block in (0..nblocks).rev() {
-            let k1 = r[block];
-            let k2 = r[block + 1];
-            let nk = k2 - k1;
-            let bf = &num.blocks[block];
-
-            let rhs_local: Vec<f64> = y[k1..k2].to_vec();
-
-            let mut yl = rhs_local;
-            for k in 0..nk {
-                let yk = yl[k];
-                for &(row, lij) in &bf.l_cols[k] {
-                    yl[row] -= lij * yk;
-                }
-            }
-            let mut xl = yl;
-            for k in (0..nk).rev() {
-                xl[k] /= bf.udiag[k];
-                let xk = xl[k];
-                for &(row, uij) in &bf.u_cols[k] {
-                    xl[row] -= uij * xk;
-                }
-            }
-            x[k1..(nk + k1)].copy_from_slice(&xl[..nk]);
-
-            for (global_col, &xk) in x.iter().enumerate().take(k2).skip(k1) {
-                for p in num.off_p[global_col] as usize..num.off_p[global_col + 1] as usize {
-                    let row = num.off_i[p] as usize;
-                    y[row] -= num.off_x[p] * xk;
-                }
-            }
-        }
-        let mut result = vec![0.0; n];
-        for k in 0..n {
-            result[q[k]] = x[k];
-        }
-        result
-    }
 
     fn dense_solve(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
         let n = a.len();
@@ -256,7 +205,7 @@ mod tests {
         let num2 = refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &num1).unwrap();
 
         let b = vec![1.0, -2.0, 0.5, 3.0, -1.0];
-        let x = solve(&num2, &sym.r, &sym.q, n, &b);
+        let x = solve(&sym, &num2, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &updated), &b);
         for i in 0..n {
             assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
@@ -283,7 +232,7 @@ mod tests {
             num = refactor(n, &cp, &ri, &vals, &sym, &num).unwrap();
 
             let b = vec![1.0, 2.0, -1.0, 0.5];
-            let x = solve(&num, &sym.r, &sym.q, n, &b);
+            let x = solve(&sym, &num, None, &b);
             let expected = dense_solve(&dense_from_entries(n, &updated), &b);
             for i in 0..n {
                 assert!((x[i] - expected[i]).abs() < 1e-8, "trial {trial}, index {i}: {} vs {}", x[i], expected[i]);
@@ -347,7 +296,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("trial {trial} (n={n}): unexpectedly singular (refactor)"));
 
             let b: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.3).collect();
-            let rust_x = solve(&num2, &sym.r, &sym.q, n, &b);
+            let rust_x = solve(&sym, &num2, None, &b);
 
             let mut klu_sys = crate::sparse_klu::KluRealSystem::new(n, &entries1).unwrap();
             let _ = klu_sys.factor_and_solve(&entries1, &b).unwrap();
