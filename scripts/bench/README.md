@@ -131,19 +131,22 @@ just implementation language or which C library both ultimately call into.
 
 ## 4. Benchmark against real power-system test-case grids
 
-A second, separate comparison: gridoxide against **four** other independent Newton-Raphson implementations —
+A second, separate comparison: gridoxide against **five** other independent Newton-Raphson implementations —
 [power-grid-model](https://github.com/PowerGridModel/power-grid-model) (PGM),
 [lightsim2grid](https://github.com/m-mirz/lightsim2grid) (C++/KLU-backed),
 [powsybl-open-loadflow](https://github.com/powsybl/powsybl-open-loadflow) (RTE's Java solver, via
-[pypowsybl](https://pypi.org/project/pypowsybl/)), and pandapower's own default solver — on the same 12 real
+[pypowsybl](https://pypi.org/project/pypowsybl/)), pandapower's own default solver, and
+[VeraGrid](https://github.com/SanPen/VeraGrid) (Python/numba-JIT-backed) — on the same 12 real
 IEEE/MATPOWER-derived test-case grids lightsim2grid's own benchmark uses
 ([`benchmarks/benchmark_grid_size.py`](https://github.com/m-mirz/lightsim2grid/blob/master/benchmarks/benchmark_grid_size.py)):
 `case14`, `case118`, `case_illinois200`, `case300`, `case1354pegase`, `case1888rte`, `case2848rte`,
 `case2869pegase`, `case3120sp`, `case6495rte`, `case6515rte`, `case9241pegase`.
 
 gridoxide models these cases' generators as genuine PV (voltage-controlled) buses, the same way PGM,
-lightsim2grid, pypowsybl, and pandapower all do — PGM's `voltage_regulator` component (`regulated_object` =
-the generator, `u_ref` = its voltage setpoint) is PGM's real PV-bus mechanism, and
+lightsim2grid, pypowsybl, pandapower, and VeraGrid all do — VeraGrid's own MATPOWER importer reads each bus's
+`type` column and each generator's `Vg` setpoint directly from the case file, so PV-bus handling comes for
+free there with no extra conversion step (see bench_veragrid.py). PGM's `voltage_regulator` component
+(`regulated_object` = the generator, `u_ref` = its voltage setpoint) is PGM's real PV-bus mechanism, and
 `src/pgm.rs::pgm_to_buses_and_branches` now parses it the same way PGM's own
 `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types` does, assigning `BusType::PV` and pinning the bus's
 voltage magnitude.
@@ -168,9 +171,10 @@ script for both). `convert_pandapower_case.py` (pandapower-based, kept as a stan
 by this suite) documents the specific data-quality quirk that trips up pandapower's importer.
 
 lightsim2grid and pandapower still load via `pandapower.networks.<case_name>()` directly (they need the
-pandapower net object, not PGM JSON); pypowsybl loads the same MATPOWER file gridoxide and PGM do, via its
-own MATPOWER importer (`bench_pypowsybl.py` — re-serializes a `.m` file to a temporary `.mat` first, since
-pypowsybl's importer only reads the binary format).
+pandapower net object, not PGM JSON); pypowsybl and VeraGrid both load the same MATPOWER file gridoxide and
+PGM do, each via its own MATPOWER importer (`bench_pypowsybl.py` — re-serializes a `.m` file to a temporary
+`.mat` first, since pypowsybl's importer only reads the binary format; `bench_veragrid.py` reads `.m`/`.mat`
+directly, no re-serialization needed).
 
 gridoxide's own side runs through its native Python bindings (`bench_gridoxide_native.py`, see "Python
 bindings" below) rather than a subprocess call into a compiled `bench_network.rs` binary — every tool in this
@@ -180,7 +184,8 @@ and timing repeated `solve()`/`ac_pf()`/`calculate_power_flow()`/`runpp()` calls
 
 ```bash
 python3 -m venv .venv-case-suite
-.venv-case-suite/bin/pip install maturin numpy scipy power-grid-model pandapower lightsim2grid pypowsybl
+.venv-case-suite/bin/pip install maturin numpy scipy power-grid-model pandapower lightsim2grid pypowsybl \
+    VeraGridEngine
 VIRTUAL_ENV=.venv-case-suite .venv-case-suite/bin/maturin develop --release --features python,klu
 .venv-case-suite/bin/python3 scripts/bench/run_case_suite.py --python .venv-case-suite/bin/python3
 ```
@@ -192,8 +197,10 @@ built with `--features python,pardiso` and `MKLROOT` set — see "Python binding
 `pardiso` cell reports its own build/load error rather than a timing), PGM, lightsim2grid with
 `SolverType.KLU` (matching lightsim2grid's own benchmark default, and gridoxide's own fastest backend, for
 the closest apples-to-apples solver comparison), pypowsybl with the same "basic" `LoadFlowParameters`
-powsybl's own benchmark repo uses, and pandapower with its own defaults — then prints one combined markdown
-table. A case that fails to convert or diverges gets an explicit `FAILED (...)` cell (with the tool's actual
+powsybl's own benchmark repo uses, pandapower with its own defaults, and VeraGrid with `SolverType.NR` and
+every automatic-control feature (tap changers, remote voltage regulation, alternate-solver fallback) turned
+off, for the same reason — see bench_veragrid.py's docstring — then prints one combined markdown table. A
+case that fails to convert or diverges gets an explicit `FAILED (...)` cell (with the tool's actual
 exception, not a generic trailer) rather than a misleading blank one. Use `--repeat` to change how many timed
 solves gridoxide averages per case (default 10), `--cache-dir`/`--out` to change where converted grids/the
 results table are written.
@@ -208,24 +215,24 @@ standalone, for benchmarking or debugging one case/tool at a time.
 Every tool's own warm-run mean (5 timed calls on one persistent model/solver object, `time.perf_counter()`),
 gridoxide included (`bench_gridoxide_native.py`/`PowerFlowModel`, always warm — see "Python bindings" above):
 
-| case | buses | scalar | block | klu | klu_native | pardiso⁵ | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
-|---|---|---|---|---|---|---|---|---|---|---|
-| case14 | 15 | 0.103 | 0.039 | 0.027 | 0.031 | 0.072 | 0.224 | 0.026 | 1.462 | 14.733 |
-| case118 | 119 | 0.232 | 0.218 | 0.100 | 0.113 | 0.354 | FAILED¹ | 0.152 | 5.867 | 16.642 |
-| case_illinois200 | 201 | 0.590 | 0.306 | 0.329 | 0.370 | 0.647 | 0.588 | 0.301 | 6.429 | 16.365 |
-| case300 | 301 | 1.640 | 0.632 | 0.697 | 0.525 | 1.603 | FAILED¹ | 0.525 | 7.676 | 18.441 |
-| case1354pegase | 1355 | 6.828 | 3.070 | 2.386 | 2.552 | 3.618 | FAILED² | 2.894 | 40.901 | 24.354 |
-| case1888rte | 1889 | 11.223 | 3.847 | 3.300 | 4.359 | 4.513 | FAILED¹ | FAILED³ | FAILED⁴ | 29.184 |
-| case2848rte | 2849 | 17.722 | 6.035 | 5.129 | 5.850 | 7.545 | FAILED¹ | 7.829 | FAILED⁴ | 34.919 |
-| case2869pegase | 2870 | 19.226 | 7.690 | 7.042 | 6.451 | 8.412 | FAILED² | 6.830 | 104.080 | 37.113 |
-| case3120sp | 3121 | 23.890 | 7.710 | 6.439 | 8.073 | 7.358 | FAILED² | 6.601 | 93.190 | 41.887 |
-| case6495rte | 6496 | 67.302 | 21.278 | 18.390 | 21.591 | 21.257 | FAILED² | FAILED³ | FAILED⁴ | 149.624 |
-| case6515rte | 6516 | 88.197 | 27.414 | 25.107 | 25.419 | 25.374 | FAILED² | FAILED³ | FAILED⁴ | 58.595 |
-| case9241pegase | 9242 | 117.147 | 39.824 | 29.654 | 36.363 | 36.304 | FAILED² | 25.625 | 434.922 | 86.479 |
+| case | buses | scalar | block | klu | klu_native | pardiso⁵ | PGM | lightsim2grid (KLU) | pypowsybl | pandapower | VeraGrid |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| case14 | 15 | 0.042 | 0.032 | 0.059 | 0.027 | 0.074 | 0.155 | 0.028 | 1.985 | 14.547 | 3.083 |
+| case118 | 119 | 0.211 | 0.164 | 0.106 | 0.111 | 0.340 | FAILED¹ | 0.149 | 4.969 | 15.445 | 6.389 |
+| case_illinois200 | 201 | 0.664 | 0.296 | 0.257 | 0.269 | 0.649 | 0.585 | 0.329 | 6.816 | 15.741 | 7.131 |
+| case300 | 301 | 1.709 | 0.582 | 0.490 | 0.512 | 1.525 | FAILED¹ | 0.528 | 9.578 | 19.078 | 11.577 |
+| case1354pegase | 1355 | 6.665 | 2.969 | 2.393 | 3.167 | 3.626 | FAILED² | 2.575 | 38.163 | 22.155 | 48.832 |
+| case1888rte | 1889 | 10.343 | 3.951 | 3.716 | 3.429 | 4.617 | FAILED¹ | FAILED³ | FAILED⁴ | 26.073 | FAILED⁶ |
+| case2848rte | 2849 | 18.166 | 6.202 | 5.255 | 5.347 | 7.213 | FAILED¹ | 7.699 | FAILED⁴ | 30.648 | 87.872 |
+| case2869pegase | 2870 | 18.856 | 7.366 | 6.109 | 6.731 | 8.270 | FAILED² | 6.135 | 97.341 | 31.530 | 99.871 |
+| case3120sp | 3121 | 18.793 | 6.553 | 5.323 | 6.078 | 7.108 | FAILED² | 6.297 | 81.665 | 29.024 | 97.111 |
+| case6495rte | 6496 | 61.226 | 19.387 | 16.721 | 19.994 | 20.931 | FAILED² | FAILED³ | FAILED⁴ | 111.096 | FAILED⁶ |
+| case6515rte | 6516 | 73.762 | 22.021 | 18.578 | 22.537 | 25.251 | FAILED² | FAILED³ | FAILED⁴ | 49.822 | FAILED⁶ |
+| case9241pegase | 9242 | 110.813 | 33.835 | 29.260 | 34.623 | 35.644 | FAILED² | 27.460 | 384.882 | 75.689 | 384.093 |
 
 `klu_native` (`src/klu_native/`, the from-scratch Rust port — see the top-level README's "Experimental
 backends") converges to the same voltages as every other gridoxide backend on all 12 cases, and lands close
-to `klu` throughout (mostly 1.0-1.2x, `case1888rte`/`case3120sp` closer to 1.3x) — a large improvement from
+to `klu` throughout (mostly 1.0-1.2x, `case1354pegase` closer to 1.3x) — a large improvement from
 an earlier, unoptimized version of this port that ran a consistent ~1.9-2x slower across every scale.
 `perf`-profiling `case9241pegase` traced that gap to allocator churn, not algorithmic overhead:
 `kernel::refactor_block` allocated two new heap-backed `Vec`s per column on *every* Newton iteration's
@@ -238,13 +245,16 @@ lifetime), eliminated nearly all of that churn — `case9241pegase`'s glibc allo
 absent from the profile.
 
 `pardiso` (Intel oneMKL, `src/sparse_pardiso.rs`) converges to the same voltages as every other gridoxide
-backend on all 12 cases (`case14`'s `voltage_mag` matches the others exactly: 1.010000/1.090000), but its
-gap to `klu` shrinks sharply with problem size — from ~2.7-3.5x slower on the two smallest cases (`case14`,
-`case118`) down to roughly parity by the largest (`case6515rte`: 25.37ms vs 25.11ms, ~1.01x;
-`case9241pegase`: 36.30ms vs 29.65ms, ~1.22x). This matches the pattern already seen on the synthetic grids
-in the top-level README's "Experimental backends" section: PARDISO's default nonsymmetric matching/scaling
-preprocessing carries a largely size-independent fixed cost per solve, which dominates on small systems but
-is proportionally far less significant once the actual factorization work is large enough to amortize it.
+backend on all 12 cases (`case14`'s `voltage_mag` matches the others exactly: 1.010000/1.090000). Its gap to
+`klu` ranges from ~1.2x (`case14`, `case1888rte`, `case6495rte`) up to ~3.2x (`case118`, `case300`) depending
+on case, without as clean a shrinks-monotonically-with-size trend as the three synthetic radial-distribution
+grids in the top-level README's "Experimental backends" section show — these 12 cases vary more in topology
+and conditioning than those synthetic grids do. The largest cases still settle in a similar 1.2-1.4x range
+(`case6515rte`: 25.25ms vs 18.58ms, ~1.36x; `case9241pegase`: 35.64ms vs 29.26ms, ~1.22x), consistent with
+the same underlying cause: PARDISO's default nonsymmetric matching/scaling preprocessing carries a largely
+size-independent fixed cost per solve, which matters proportionally less once there's enough real
+factorization work to amortize it against, but topology and matrix conditioning clearly also play a role
+here that the synthetic grids' more uniform structure doesn't surface.
 
 PGM's numbers above needed a workaround to get at all: once `matpower_to_pgm.py` started writing real
 `q_min`/`q_max` onto `voltage_regulator` (see that script's docstring), every one of these 12 inputs started
@@ -273,7 +283,10 @@ exactly (`voltage_mag`/`u_pu` both 1.010000/1.090000), confirming the converted 
 `case_illinois200` converges in both but to visibly different voltages (gridoxide: 1.0082/1.0400, PGM:
 1.0101/1.0548) — both plausible, neither obviously wrong, not chased further; PGM's own particular
 Newton-Raphson implementation is simply less robust on these specific harder cases via this input path than
-gridoxide's.
+gridoxide's. VeraGrid also converges on this case, to 1.010942/1.054895 — much closer to PGM's value than to
+gridoxide's, a third independent data point suggesting this specific case genuinely has more than one
+plausible solution basin reachable by flat-start Newton-Raphson, not that any one tool's implementation is
+simply wrong.
 ² PGM's own `SparseMatrixError` ("possibly singular matrix") — raised during `PowerGridModel()` construction,
 before any iteration runs.
 ³ lightsim2grid's own `ac_pf` reports divergence (`V.shape[0] == 0`).
@@ -285,26 +298,35 @@ converge on all three, in ~4 iterations each — see matpower_to_pgm.py's docstr
 ⁵ `pardiso`'s numbers need the extension built with `--features python,pardiso` and a local Intel oneMKL
 install (`MKLROOT` set) — not part of the `--features python,klu` build command above, so build that
 separately if reproducing this column specifically.
+⁶ VeraGrid's own `PowerFlowDriver` reports `results.converged == 0` (this script raises a `RuntimeError` when
+it sees that) with `SolverType.NR` and every automatic-control feature disabled the same way as elsewhere in
+this table — the same three cases every other tool here (bar gridoxide and pandapower) also fails on.
 
 gridoxide (`scalar`/`block`/`klu`/`klu_native`/`pardiso`) and pandapower (its own native, no-cross-tool-conversion
-path) are the only two of five tools that converge on **all 12** cases. `case1888rte`, `case6495rte`, and
+path) are the only two of six tools that converge on **all 12** cases. `case1888rte`, `case6495rte`, and
 `case6515rte` are
 hard for every tool that doesn't special-case them — a genuine property of those three cases' data (RTE's own
-real production grid, per the case names), not a gridoxide-, PGM-, lightsim2grid-, or pypowsybl-specific gap.
+real production grid, per the case names), not a gridoxide-, PGM-, lightsim2grid-, pypowsybl-, or
+VeraGrid-specific gap; four independent implementations (PGM, lightsim2grid, pypowsybl, VeraGrid) all fail on
+exactly the same three cases.
 
-`block` is consistently faster than `scalar` (2–3x on the larger cases: `case9241pegase` 39.82ms vs
-117.15ms) despite `scalar` being backed by `faer`, a mature general-purpose sparse solver, and `block`'s LU
+`block` is consistently faster than `scalar` (2–3x on the larger cases: `case9241pegase` 33.84ms vs
+110.81ms) despite `scalar` being backed by `faer`, a mature general-purpose sparse solver, and `block`'s LU
 being a from-scratch, no-partial-pivoting implementation — the payoff of factoring at 2×2-block granularity
 (half as many colamd-ordered elimination steps, no interleaved-scalar bookkeeping) is apparently large enough
-to outweigh that. `klu` is faster still, consistently ~10-25% ahead of `block` on the larger cases (e.g.
-`case9241pegase`: 29.65ms vs 39.82ms). Comparing gridoxide's `klu` against lightsim2grid's own KLU-backed C++
-solver, the two are roughly competitive: `klu` is faster on some cases (`case2848rte`: 5.13ms vs 7.83ms),
-lightsim2grid faster on others (`case9241pegase`: 29.65ms vs 25.63ms; `case300`: 0.70ms vs 0.53ms, though at
-`case300`'s sub-millisecond scale that gap is close to run-to-run timing noise). This is the *warm* comparison
-(both gridoxide's `PowerFlowModel` and lightsim2grid's `GridModel` reuse one persistent solver object across
-their 5 timed calls — see the top-level README's "Reusing factorization across repeated solves"); the
-earlier `cold` numbers (fresh symbolic factorization every repeat) made gridoxide look 1.3–1.7x *slower*
-across the board, which `perf`-profiling one case (`case9241pegase`) traced to that redone-every-time
-ordering step, something lightsim2grid's own benchmark never does — not a genuine solver-speed gap. Both
-`pypowsybl` and `pandapower` are markedly slower than every C-backed solver here, consistent with being
-heavier, more general-purpose Python frameworks not specifically tuned for repeated single-scenario power flow.
+to outweigh that. `klu` is faster still, consistently ~10-15% ahead of `block` on the larger cases (e.g.
+`case9241pegase`: 29.26ms vs 33.84ms). Comparing gridoxide's `klu` against lightsim2grid's own KLU-backed C++
+solver, the two are roughly competitive: `klu` is faster on most cases (e.g. `case2848rte`: 5.26ms vs
+7.70ms), lightsim2grid faster on a couple (`case9241pegase`: 29.26ms vs 27.46ms; `case14`: 0.059ms vs
+0.028ms, though at `case14`'s sub-millisecond scale that gap is close to run-to-run timing noise). This is
+the *warm* comparison (both gridoxide's `PowerFlowModel` and lightsim2grid's `GridModel` reuse one persistent
+solver object across their 5 timed calls — see the top-level README's "Reusing factorization across repeated
+solves"); the earlier `cold` numbers (fresh symbolic factorization every repeat) made gridoxide look 1.3–1.7x
+*slower* across the board, which `perf`-profiling one case (`case9241pegase`) traced to that
+redone-every-time ordering step, something lightsim2grid's own benchmark never does — not a genuine
+solver-speed gap. `pypowsybl`, `pandapower`, and `VeraGrid` are all markedly slower than every C/Rust-backed
+solver here (`klu`/`klu_native`/`block`/lightsim2grid), consistent with being heavier, more general-purpose
+Python frameworks not specifically tuned for repeated single-scenario power flow — `VeraGrid`'s own numerical
+kernels are numba-JIT-compiled, so this comparison is already its *warm*, post-JIT-warmup number (see
+bench_veragrid.py's docstring); its *first* call on a case this size costs low-single-digit seconds, not
+milliseconds, entirely JIT-compilation overhead unrelated to the power-flow algorithm itself.

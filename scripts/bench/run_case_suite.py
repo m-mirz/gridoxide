@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Runs gridoxide (scalar/block/klu backends), PGM, lightsim2grid, pypowsybl,
-and pandapower head-to-head across all 12 real power-system test-case grids
-in cases.py, and prints/saves one combined markdown timing table.
+"""Runs gridoxide (scalar/block/klu/klu_native/pardiso backends), PGM,
+lightsim2grid, pypowsybl, pandapower, and VeraGrid head-to-head across all
+12 real power-system test-case grids in cases.py, and prints/saves one
+combined markdown timing table.
 
 Usage: python3 run_case_suite.py [--python PYTHON] [--cache-dir DIR] [--out FILE]
 
@@ -10,8 +11,9 @@ Usage: python3 run_case_suite.py [--python PYTHON] [--cache-dir DIR] [--out FILE
 --release --features python,klu` — see this directory's README), `numpy`
 and `scipy` (matpower_to_pgm.py, bench_pypowsybl.py), `power-grid-model`
 (bench_pgm.py), `pandapower` (bench_pandapower.py, and bench_lightsim2grid.py
-since lightsim2grid needs a pandapower net directly), `lightsim2grid`, and
-`pypowsybl`.
+since lightsim2grid needs a pandapower net directly), `lightsim2grid`,
+`pypowsybl`, and `VeraGridEngine` (bench_veragrid.py — the headless engine
+package, not the GUI-bundled `VeraGrid` package).
 
 gridoxide's and PGM's side of this benchmark are converted straight from
 MATPOWER's own `.m` case files (matpower_to_pgm.py), not through
@@ -22,9 +24,9 @@ base-mismatch bug for transformers, and three of these twelve cases
 (case1888rte, case6495rte, case6515rte) would not converge at all through
 that path. lightsim2grid and pandapower still load via
 `pandapower.networks.<case_name>()` directly (they need the pandapower net
-object, not PGM JSON); pypowsybl loads the same MATPOWER `.m`/`.mat` file
-gridoxide and PGM do, via its own MATPOWER importer (see
-bench_pypowsybl.py).
+object, not PGM JSON); pypowsybl and VeraGrid both load the same MATPOWER
+`.m`/`.mat` file gridoxide and PGM do, each via its own MATPOWER importer
+(see bench_pypowsybl.py, bench_veragrid.py).
 
 gridoxide now models these cases' generators as genuine PV (voltage-
 controlled) buses via PGM's `voltage_regulator` component
@@ -65,6 +67,7 @@ BENCH_PGM_SCRIPT = SCRIPT_DIR / "bench_pgm.py"
 LS2G_SCRIPT = SCRIPT_DIR / "bench_lightsim2grid.py"
 PYPOWSYBL_SCRIPT = SCRIPT_DIR / "bench_pypowsybl.py"
 PANDAPOWER_SCRIPT = SCRIPT_DIR / "bench_pandapower.py"
+VERAGRID_SCRIPT = SCRIPT_DIR / "bench_veragrid.py"
 MATPOWER_RAW_URL = "https://raw.githubusercontent.com/m-mirz/matpower/master/data/{filename}"
 
 MEAN_RE = re.compile(r"min=[\d.]+ms mean=([\d.]+)ms")
@@ -170,7 +173,7 @@ def main() -> None:
         print(f"=== {case_name} ===", file=sys.stderr)
         m_path, json_path, conv_err = convert_case(args.python, case_name, args.cache_dir)
         if json_path is None:
-            rows.append((case_name, "-", f"FAILED ({conv_err})", "-", "-", "-", "-", "-", "-", "-", "-"))
+            rows.append((case_name, "-", f"FAILED ({conv_err})", "-", "-", "-", "-", "-", "-", "-", "-", "-"))
             continue
 
         n_nodes = None
@@ -188,6 +191,7 @@ def main() -> None:
         ls2g_time, ls2g_err = run_subprocess_mean(args.python, LS2G_SCRIPT, [case_name])
         pypowsybl_time, pypowsybl_err = run_subprocess_mean(args.python, PYPOWSYBL_SCRIPT, [case_name, str(m_path)])
         pandapower_time, pandapower_err = run_subprocess_mean(args.python, PANDAPOWER_SCRIPT, [case_name])
+        veragrid_time, veragrid_err = run_subprocess_mean(args.python, VERAGRID_SCRIPT, [case_name, str(m_path)])
 
         rows.append((
             case_name,
@@ -201,10 +205,11 @@ def main() -> None:
             fmt(ls2g_time, ls2g_err),
             fmt(pypowsybl_time, pypowsybl_err),
             fmt(pandapower_time, pandapower_err),
+            fmt(veragrid_time, veragrid_err),
         ))
 
     header = ["case", "buses", "gridoxide scalar", "gridoxide block", "gridoxide klu", "gridoxide klu_native",
-              "gridoxide pardiso", "PGM", "lightsim2grid (KLU)", "pypowsybl", "pandapower"]
+              "gridoxide pardiso", "PGM", "lightsim2grid (KLU)", "pypowsybl", "pandapower", "VeraGrid"]
     lines = [
         "| " + " | ".join(header) + " |",
         "|" + "|".join(["---"] * len(header)) + "|",

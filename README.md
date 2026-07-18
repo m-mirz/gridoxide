@@ -219,18 +219,18 @@ backend is frequently faster than
 lightsim2grid's own KLU-backed C++ solver — the comparison depends on topology, not just implementation
 language.)
 
-A second, separate benchmark compares gridoxide against four other independent solvers — PGM,
+A second, separate benchmark compares gridoxide against five other independent solvers — PGM,
 [lightsim2grid](https://github.com/m-mirz/lightsim2grid), RTE's
-[powsybl-open-loadflow](https://github.com/powsybl/powsybl-open-loadflow) (via `pypowsybl`), and pandapower's
-own default solver — on 12 real IEEE/MATPOWER power-system test-case grids (14 to 9,241 buses) — see
-`scripts/bench/README.md`'s "Benchmark against real power-system test-case grids" section for the full
-results table and methodology. gridoxide and pandapower's own native path are the only two of the five that
-converge on all 12; the other three each fail on a subset of the same handful of genuinely hard cases (RTE's
-own real production grids), confirmed by cross-checking against `powsybl-open-loadflow` directly, not a
-gridoxide gap. Once compared warm-vs-warm (`PersistentSolver`, see above — the earlier `cold` comparison made
-gridoxide look 1.3-1.7x slower across the board, an artifact of redoing symbolic factorization every repeat
-that lightsim2grid's own benchmark never does), `Klu` is frequently *faster* than lightsim2grid's own
-KLU-backed C++ solver on this real transmission-topology data, tied only on the largest (9,241-bus) case —
+[powsybl-open-loadflow](https://github.com/powsybl/powsybl-open-loadflow) (via `pypowsybl`), pandapower's own
+default solver, and [VeraGrid](https://github.com/SanPen/VeraGrid) — on 12 real IEEE/MATPOWER power-system
+test-case grids (14 to 9,241 buses) — see `scripts/bench/README.md`'s "Benchmark against real power-system
+test-case grids" section for the full results table and methodology. gridoxide and pandapower's own native
+path are the only two of the six that converge on all 12; the other four each fail on a subset of the same
+handful of genuinely hard cases (RTE's own real production grids), confirmed by cross-checking against
+`powsybl-open-loadflow` directly, not a gridoxide gap. Once compared warm-vs-warm (`PersistentSolver`, see
+above — the earlier `cold` comparison made gridoxide look 1.3-1.7x slower across the board, an artifact of
+redoing symbolic factorization every repeat that lightsim2grid's own benchmark never does), `Klu` is
+frequently *faster* than lightsim2grid's own KLU-backed C++ solver on this real transmission-topology data —
 even though PGM still clearly beats every gridoxide backend on the synthetic radial-distribution topology
 above, so the comparison genuinely depends on grid topology, not just implementation language. This benchmark
 is also what led to `src/pgm.rs` parsing PGM's `voltage_regulator` component:
@@ -240,14 +240,21 @@ real generator PV (voltage-controlled) buses, not just the slack/PQ split descri
 real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping (`src/network.rs`).
 
 `Pardiso` also converges to the same voltages as every other gridoxide backend on all 12 of these real
-MATPOWER cases, but with a gap to `Klu` that shrinks sharply with problem size — from ~2.7-3.5x slower on the
-two smallest cases down to roughly parity on the largest (`case6515rte`: ~1.01x; `case9241pegase`: ~1.22x) —
-see `scripts/bench/README.md`'s results table for the full per-case numbers. This matches the fixed-overhead
-pattern already seen on the synthetic grids above: PARDISO's default matching/scaling preprocessing costs
-about the same regardless of matrix size, so it matters far less once there's enough real factorization work
-to amortize it against. Reproducing this column needs the same local MKL install as everywhere else
-`pardiso` is used, on top of the PGM/lightsim2grid/pypowsybl/pandapower Python environments
-that benchmark already requires.
+MATPOWER cases. Its gap to `Klu` ranges from ~1.2x up to ~3.2x depending on case, without as clean a
+shrinks-monotonically-with-size trend as the synthetic grids above show — these real cases vary more in
+topology and conditioning — though the largest cases still settle in a similar 1.2-1.4x range (`case9241pegase`:
+~1.22x) — see `scripts/bench/README.md`'s results table for the full per-case numbers. Reproducing this
+column needs the same local MKL install as everywhere else `pardiso` is used, on top of the
+PGM/lightsim2grid/pypowsybl/pandapower/VeraGrid Python environments that benchmark already requires.
+
+`VeraGrid` (Python, numba-JIT-backed) converges on 9 of the 12 cases — failing on the same three RTE cases
+every other tool here besides gridoxide and pandapower also fails on — and is markedly slower than every
+C/Rust-backed solver in this comparison (roughly on par with `pypowsybl`), consistent with being a
+general-purpose Python framework rather than one built around raw solve-loop throughput. Interestingly, on
+`case_illinois200` (one of the two harder cases where gridoxide and PGM converge to visibly different
+voltages), VeraGrid's own converged voltage lands much closer to PGM's than to gridoxide's — a third
+independent data point suggesting that specific case has more than one plausible solution basin reachable by
+flat-start Newton-Raphson, not that any one tool's implementation is simply wrong.
 
 ## Profiling
 
