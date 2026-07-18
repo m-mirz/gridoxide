@@ -208,20 +208,20 @@ standalone, for benchmarking or debugging one case/tool at a time.
 Every tool's own warm-run mean (5 timed calls on one persistent model/solver object, `time.perf_counter()`),
 gridoxide included (`bench_gridoxide_native.py`/`PowerFlowModel`, always warm — see "Python bindings" above):
 
-| case | buses | scalar | block | klu | klu_native | pardiso | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
+| case | buses | scalar | block | klu | klu_native | pardiso⁵ | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
 |---|---|---|---|---|---|---|---|---|---|---|
-| case14 | 15 | 0.103 | 0.039 | 0.027 | 0.031 | not run⁵ | 0.224 | 0.026 | 1.462 | 14.733 |
-| case118 | 119 | 0.232 | 0.218 | 0.100 | 0.113 | not run⁵ | FAILED¹ | 0.152 | 5.867 | 16.642 |
-| case_illinois200 | 201 | 0.590 | 0.306 | 0.329 | 0.370 | not run⁵ | 0.588 | 0.301 | 6.429 | 16.365 |
-| case300 | 301 | 1.640 | 0.632 | 0.697 | 0.525 | not run⁵ | FAILED¹ | 0.525 | 7.676 | 18.441 |
-| case1354pegase | 1355 | 6.828 | 3.070 | 2.386 | 2.552 | not run⁵ | FAILED² | 2.894 | 40.901 | 24.354 |
-| case1888rte | 1889 | 11.223 | 3.847 | 3.300 | 4.359 | not run⁵ | FAILED¹ | FAILED³ | FAILED⁴ | 29.184 |
-| case2848rte | 2849 | 17.722 | 6.035 | 5.129 | 5.850 | not run⁵ | FAILED¹ | 7.829 | FAILED⁴ | 34.919 |
-| case2869pegase | 2870 | 19.226 | 7.690 | 7.042 | 6.451 | not run⁵ | FAILED² | 6.830 | 104.080 | 37.113 |
-| case3120sp | 3121 | 23.890 | 7.710 | 6.439 | 8.073 | not run⁵ | FAILED² | 6.601 | 93.190 | 41.887 |
-| case6495rte | 6496 | 67.302 | 21.278 | 18.390 | 21.591 | not run⁵ | FAILED² | FAILED³ | FAILED⁴ | 149.624 |
-| case6515rte | 6516 | 88.197 | 27.414 | 25.107 | 25.419 | not run⁵ | FAILED² | FAILED³ | FAILED⁴ | 58.595 |
-| case9241pegase | 9242 | 117.147 | 39.824 | 29.654 | 36.363 | not run⁵ | FAILED² | 25.625 | 434.922 | 86.479 |
+| case14 | 15 | 0.103 | 0.039 | 0.027 | 0.031 | 0.072 | 0.224 | 0.026 | 1.462 | 14.733 |
+| case118 | 119 | 0.232 | 0.218 | 0.100 | 0.113 | 0.354 | FAILED¹ | 0.152 | 5.867 | 16.642 |
+| case_illinois200 | 201 | 0.590 | 0.306 | 0.329 | 0.370 | 0.647 | 0.588 | 0.301 | 6.429 | 16.365 |
+| case300 | 301 | 1.640 | 0.632 | 0.697 | 0.525 | 1.603 | FAILED¹ | 0.525 | 7.676 | 18.441 |
+| case1354pegase | 1355 | 6.828 | 3.070 | 2.386 | 2.552 | 3.618 | FAILED² | 2.894 | 40.901 | 24.354 |
+| case1888rte | 1889 | 11.223 | 3.847 | 3.300 | 4.359 | 4.513 | FAILED¹ | FAILED³ | FAILED⁴ | 29.184 |
+| case2848rte | 2849 | 17.722 | 6.035 | 5.129 | 5.850 | 7.545 | FAILED¹ | 7.829 | FAILED⁴ | 34.919 |
+| case2869pegase | 2870 | 19.226 | 7.690 | 7.042 | 6.451 | 8.412 | FAILED² | 6.830 | 104.080 | 37.113 |
+| case3120sp | 3121 | 23.890 | 7.710 | 6.439 | 8.073 | 7.358 | FAILED² | 6.601 | 93.190 | 41.887 |
+| case6495rte | 6496 | 67.302 | 21.278 | 18.390 | 21.591 | 21.257 | FAILED² | FAILED³ | FAILED⁴ | 149.624 |
+| case6515rte | 6516 | 88.197 | 27.414 | 25.107 | 25.419 | 25.374 | FAILED² | FAILED³ | FAILED⁴ | 58.595 |
+| case9241pegase | 9242 | 117.147 | 39.824 | 29.654 | 36.363 | 36.304 | FAILED² | 25.625 | 434.922 | 86.479 |
 
 `klu_native` (`src/klu_native/`, the from-scratch Rust port — see the top-level README's "Experimental
 backends") converges to the same voltages as every other gridoxide backend on all 12 cases, and lands close
@@ -236,6 +236,15 @@ backed by a `RefactorScratch` buffer reused across every solve (`KluNativeSystem
 lifetime), eliminated nearly all of that churn — `case9241pegase`'s glibc allocator functions (`_int_malloc`,
 `_int_free_merge_chunk`, `realloc`, ...) dropped from ~32% of `newton_raphson` self-time to effectively
 absent from the profile.
+
+`pardiso` (Intel oneMKL, `src/sparse_pardiso.rs`) converges to the same voltages as every other gridoxide
+backend on all 12 cases (`case14`'s `voltage_mag` matches the others exactly: 1.010000/1.090000), but its
+gap to `klu` shrinks sharply with problem size — from ~2.7-3.5x slower on the two smallest cases (`case14`,
+`case118`) down to roughly parity by the largest (`case6515rte`: 25.37ms vs 25.11ms, ~1.01x;
+`case9241pegase`: 36.30ms vs 29.65ms, ~1.22x). This matches the pattern already seen on the synthetic grids
+in the top-level README's "Experimental backends" section: PARDISO's default nonsymmetric matching/scaling
+preprocessing carries a largely size-independent fixed cost per solve, which dominates on small systems but
+is proportionally far less significant once the actual factorization work is large enough to amortize it.
 
 PGM's numbers above needed a workaround to get at all: once `matpower_to_pgm.py` started writing real
 `q_min`/`q_max` onto `voltage_regulator` (see that script's docstring), every one of these 12 inputs started
@@ -273,12 +282,11 @@ before any iteration runs.
 phase-shift-zeroing workaround that repo's own `MatpowerUtil.java` applies before benchmarking these same
 three cases (confirmed directly: applying that workaround via `pypowsybl` does make powsybl-open-loadflow
 converge on all three, in ~4 iterations each — see matpower_to_pgm.py's docstring).
-⁵ `pardiso` wasn't run as part of this table — reproducing it needs the extension built with `--features
-python,pardiso` and a local Intel oneMKL install (`MKLROOT` set), on top of every other tool's own
-environment already required here. See the top-level README's "Experimental backends" section for `pardiso`
-measured on the three smaller synthetic grids from step 1 instead, where it landed 2-4.7x slower than `klu`.
+⁵ `pardiso`'s numbers need the extension built with `--features python,pardiso` and a local Intel oneMKL
+install (`MKLROOT` set) — not part of the `--features python,klu` build command above, so build that
+separately if reproducing this column specifically.
 
-gridoxide (`scalar`/`block`/`klu`/`klu_native`) and pandapower (its own native, no-cross-tool-conversion
+gridoxide (`scalar`/`block`/`klu`/`klu_native`/`pardiso`) and pandapower (its own native, no-cross-tool-conversion
 path) are the only two of five tools that converge on **all 12** cases. `case1888rte`, `case6495rte`, and
 `case6515rte` are
 hard for every tool that doesn't special-case them — a genuine property of those three cases' data (RTE's own

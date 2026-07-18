@@ -239,9 +239,14 @@ real generator PV (voltage-controlled) buses, not just the slack/PQ split descri
 `newton_raphson_klu`'s existing PV handling, now actually reachable from PGM JSON input — and to fixing a
 real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping (`src/network.rs`).
 
-`Pardiso` is not included in this second, real-MATPOWER-case benchmark (only measured on the three synthetic
-grids in the "Experimental backends" table above) — reproducing it needs the same local MKL install as
-everywhere else `pardiso` is used, on top of the PGM/lightsim2grid/pypowsybl/pandapower Python environments
+`Pardiso` also converges to the same voltages as every other gridoxide backend on all 12 of these real
+MATPOWER cases, but with a gap to `Klu` that shrinks sharply with problem size — from ~2.7-3.5x slower on the
+two smallest cases down to roughly parity on the largest (`case6515rte`: ~1.01x; `case9241pegase`: ~1.22x) —
+see `scripts/bench/README.md`'s results table for the full per-case numbers. This matches the fixed-overhead
+pattern already seen on the synthetic grids above: PARDISO's default matching/scaling preprocessing costs
+about the same regardless of matrix size, so it matters far less once there's enough real factorization work
+to amortize it against. Reproducing this column needs the same local MKL install as everywhere else
+`pardiso` is used, on top of the PGM/lightsim2grid/pypowsybl/pandapower Python environments
 that benchmark already requires.
 
 ## Profiling
