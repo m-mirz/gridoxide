@@ -321,10 +321,14 @@ solver, the two are roughly competitive: `klu` is faster on most cases (e.g. `ca
 0.028ms, though at `case14`'s sub-millisecond scale that gap is close to run-to-run timing noise). This is
 the *warm* comparison (both gridoxide's `PowerFlowModel` and lightsim2grid's `GridModel` reuse one persistent
 solver object across their 5 timed calls — see the top-level README's "Reusing factorization across repeated
-solves"); the earlier `cold` numbers (fresh symbolic factorization every repeat) made gridoxide look 1.3–1.7x
-*slower* across the board, which `perf`-profiling one case (`case9241pegase`) traced to that
-redone-every-time ordering step, something lightsim2grid's own benchmark never does — not a genuine
-solver-speed gap. `pypowsybl`, `pandapower`, and `VeraGrid` are all markedly slower than every C/Rust-backed
+solves" for the `PersistentSolver` feature itself); the earlier `cold` numbers (fresh symbolic factorization
+every repeat) made gridoxide look 1.3–1.7x *slower* across the board, which `perf`-profiling `case9241pegase`
+traced to that redone-every-time ordering step, something lightsim2grid's own benchmark never does — not a
+genuine solver-speed gap. Measured directly on that same 9,241-bus case: reusing factorization across
+repeated solves (`warm` mode) cut per-solve `klu` time by ~45% relative to `cold`, with `perf` showing
+COLAMD/AMD/BTF ordering — the fill-reducing step a cold solve redoes every time — responsible for roughly a
+third of total solve time when redone from scratch on every call. `pypowsybl`, `pandapower`, and `VeraGrid`
+are all markedly slower than every C/Rust-backed
 solver here (`klu`/`klu_native`/`block`/lightsim2grid), consistent with being heavier, more general-purpose
 Python frameworks not specifically tuned for repeated single-scenario power flow — `VeraGrid`'s own numerical
 kernels are numba-JIT-compiled, so this comparison is already its *warm*, post-JIT-warmup number (see

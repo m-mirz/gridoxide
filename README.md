@@ -93,12 +93,12 @@ for scenario in scenarios {
 }
 ```
 
-Measured on a 9,241-bus real-world grid (see the real-test-case benchmark below): reusing factorization
-across repeated solves cut per-solve `Klu` time by ~45% (`perf` showed COLAMD/AMD/BTF ordering — the
-fill-reducing step a cold solve redoes every time — responsible for roughly a third of total solve time on
-that case). `examples/bench_network.rs` exposes this as an optional `warm` mode (its default `cold` mode
-still measures "N independent flat-start solves with no shared state," a different, also-legitimate number)
-— see `scripts/bench/README.md`.
+Reusing factorization across repeated solves is a meaningful win on real-world grids, since a cold solve's
+fill-reducing ordering step (COLAMD/AMD/BTF) is redone from scratch every call otherwise.
+`examples/bench_network.rs` exposes this as an optional `warm` mode (its default `cold` mode still measures
+"N independent flat-start solves with no shared state," a different, also-legitimate number) — see
+`scripts/bench/README.md`'s "Benchmark against real power-system test-case grids" section for the measured
+warm-vs-cold numbers.
 
 ## Python bindings
 
@@ -144,7 +144,7 @@ experiments selectable via `solver::JacobianBackend` (`newton_raphson_with_backe
 - **`JacobianBackend::Block`** (`src/block_sparse.rs`, no extra build requirements) — groups each bus's own
   (angle, voltage-magnitude) unknowns into one dense 2×2 block, mirroring power-grid-model's block-per-bus
   matrix structure, with a hand-written Gilbert-Peierls sparse block LU (`block_sparse::BlockLu`). Symmetric
-  power flow only. **1.6-3x faster than `Scalar`** at every benchmarked scale.
+  power flow only. Consistently faster than `Scalar` (see `scripts/bench/README.md` for exact numbers).
 - **`JacobianBackend::Klu`** (`src/sparse_klu.rs`, needs `cargo build --features klu`) — the same scalar
   Jacobian as `Scalar`, solved by [SuiteSparse's KLU](https://github.com/DrTimothyAldenDavis/SuiteSparse)
   instead of `faer`, vendored and compiled from source (`vendor/suitesparse/`, see
@@ -152,8 +152,8 @@ experiments selectable via `solver::JacobianBackend` (`newton_raphson_with_backe
   compiler and `libclang` (for `bindgen`) at build time. **KLU and BTF (one of KLU's own dependencies) are
   LGPL-2.1-or-later** — this is why the `klu` feature is opt-in rather than always built; a `klu-dynamic`
   sub-feature links a system-installed `libklu.so` instead of compiling the vendored copy statically, for
-  anyone who needs strict LGPL relinking compliance. Matches or beats `Block`'s performance at every
-  benchmarked scale.
+  anyone who needs strict LGPL relinking compliance. At least as fast as `Block` at every benchmarked scale
+  (see `scripts/bench/README.md`).
 - **`JacobianBackend::KluNative`** (`src/klu_native/`, no extra build requirements) — a from-scratch Rust
   *translation* of the same KLU algorithm `Klu` links over FFI: BTF block-triangular preprocessing,
   per-block AMD ordering, a partial-pivoting Gilbert-Peierls LU kernel with Eisenstat-Liu pruning, and
@@ -183,78 +183,39 @@ All four are strictly parallel to `Scalar`, not replacements — a bug in any of
 opts into a different backend (see `tests/block_jacobian_test.rs`, `tests/klu_jacobian_test.rs`,
 `tests/klu_native_jacobian_test.rs`, `tests/pardiso_jacobian_test.rs`).
 
-Measured with `examples/bench_network.rs --backend {scalar,block,klu,klu_native,pardiso} warm` (see
-`scripts/bench/README.md` for how to reproduce these numbers, including generating the benchmark grids and
-running the power-grid-model comparison from the section above):
-
-| Nodes | Scalar | Block | Klu | KluNative | Pardiso | PGM (warm) |
-|---|---|---|---|---|---|---|
-| 192 | 1.28 ms | 0.52 ms | 0.44 ms | 0.45 ms | 2.06 ms | 0.42 ms |
-| 1,003 | 7.86 ms | 2.80 ms | 2.52 ms | 2.69 ms | 5.06 ms | 0.93 ms |
-| 2,605 | 20.97 ms | 6.81 ms | 6.04 ms | 6.56 ms | 11.73 ms | 2.49 ms |
-
 All five gridoxide backends produce identical converged voltages at every scale — these are purely
-performance comparisons, not correctness trade-offs. `KluNative` lands close to `Klu` (1.02-1.09x) across
-this whole range of scales. `Pardiso` is 2-4.7x slower than `Klu` at every scale, and slower than even
-`Scalar` at the smallest size (192 nodes) — its default nonsymmetric preprocessing (maximum weighted
-matching + scaling) carries a largely size-independent fixed setup cost per solve that dominates at these
-small problem sizes; it does scale somewhat better than the naive `Scalar`/`faer` path as node count grows
-(overtaking `Scalar` by 2,605 nodes), but never catches up to `Klu`/`Block`/`KluNative` in this range. This
-isn't a gridoxide-specific gap — PARDISO's general-purpose machinery (multi-threading support, iterative
-refinement, pivoting robustness for a much broader class of matrices than KLU targets) is understood to pay
-off more at larger/denser problems than these small radial-distribution grids, not at this scale.
-`perf`-profiling traced that gap to allocator churn, not anything algorithmic: `kernel::refactor_block`
-allocated two new `Vec`s per column on *every* Newton iteration's refactor (tens of millions of allocations
-across a timed benchmark run on the larger real-world cases below), where real KLU's own `klu_refactor.c`
-overwrites one already-allocated buffer in place and allocates nothing at all during a refactor. Rewriting
-`refactor_block`/`refactor::refactor` to mutate the existing factorization in place, backed by a
-`RefactorScratch` buffer `KluNativeSystem` reuses across every solve, eliminated nearly all of that churn —
-see `src/klu_native/kernel.rs`'s `refactor_block_in_place` doc comment and `scripts/bench/README.md`'s
-"Benchmark against real power-system test-case grids" section for the full before/after profiling story.
-PGM is clearly faster than any gridoxide backend on *this* synthetic radial distribution/LV topology, even
-with gridoxide's own factorization reuse now doing the same warm-solve trick PGM's own `PowerGridModel`
-does — a real, standing gap, not one this project has closed. (Interestingly, that gap doesn't hold
-universally: on the real-world *transmission*-topology grids in the next benchmark, gridoxide's `Klu`
-backend is frequently faster than
-lightsim2grid's own KLU-backed C++ solver — the comparison depends on topology, not just implementation
-language.)
+performance comparisons, not correctness trade-offs. In rough terms: `Block`/`Klu`/`KluNative` are all
+meaningfully faster than `Scalar`, with `Klu`/`KluNative` landing close to each other and slightly ahead of
+`Block`; `Pardiso` carries a largely size-independent fixed setup cost from its default matching/scaling
+preprocessing that makes it the slowest backend at small problem sizes (even behind `Scalar`), though it
+scales better than `Scalar` as node count grows. PGM is clearly faster than any gridoxide backend on this
+particular synthetic radial-distribution/LV topology — a real, standing gap this project hasn't closed
+(interestingly, that gap doesn't hold universally: on the real-world *transmission*-topology grids in the
+next benchmark, gridoxide's `Klu` backend is frequently faster than lightsim2grid's own KLU-backed C++
+solver — the comparison depends on topology, not just implementation language). **See
+`scripts/bench/README.md`'s "Experimental backends"/"Interpreting results" sections for the full measured
+numbers, exact ratios, and how to reproduce them** — including the `klu_native` allocator-churn story and
+its fix (`src/klu_native/kernel.rs`'s `refactor_block_in_place` doc comment has the code-level detail).
 
 A second, separate benchmark compares gridoxide against five other independent solvers — PGM,
 [lightsim2grid](https://github.com/m-mirz/lightsim2grid), RTE's
 [powsybl-open-loadflow](https://github.com/powsybl/powsybl-open-loadflow) (via `pypowsybl`), pandapower's own
 default solver, and [VeraGrid](https://github.com/SanPen/VeraGrid) — on 12 real IEEE/MATPOWER power-system
-test-case grids (14 to 9,241 buses) — see `scripts/bench/README.md`'s "Benchmark against real power-system
-test-case grids" section for the full results table and methodology. gridoxide and pandapower's own native
-path are the only two of the six that converge on all 12; the other four each fail on a subset of the same
-handful of genuinely hard cases (RTE's own real production grids), confirmed by cross-checking against
-`powsybl-open-loadflow` directly, not a gridoxide gap. Once compared warm-vs-warm (`PersistentSolver`, see
-above — the earlier `cold` comparison made gridoxide look 1.3-1.7x slower across the board, an artifact of
-redoing symbolic factorization every repeat that lightsim2grid's own benchmark never does), `Klu` is
-frequently *faster* than lightsim2grid's own KLU-backed C++ solver on this real transmission-topology data —
-even though PGM still clearly beats every gridoxide backend on the synthetic radial-distribution topology
-above, so the comparison genuinely depends on grid topology, not just implementation language. This benchmark
-is also what led to `src/pgm.rs` parsing PGM's `voltage_regulator` component:
-real generator PV (voltage-controlled) buses, not just the slack/PQ split described above — see
-`types::BusType::PV` and `solver::newton_raphson_scalar`/
-`newton_raphson_klu`'s existing PV handling, now actually reachable from PGM JSON input — and to fixing a
-real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping (`src/network.rs`).
-
-`Pardiso` also converges to the same voltages as every other gridoxide backend on all 12 of these real
-MATPOWER cases. Its gap to `Klu` ranges from ~1.2x up to ~3.2x depending on case, without as clean a
-shrinks-monotonically-with-size trend as the synthetic grids above show — these real cases vary more in
-topology and conditioning — though the largest cases still settle in a similar 1.2-1.4x range (`case9241pegase`:
-~1.22x) — see `scripts/bench/README.md`'s results table for the full per-case numbers. Reproducing this
-column needs the same local MKL install as everywhere else `pardiso` is used, on top of the
-PGM/lightsim2grid/pypowsybl/pandapower/VeraGrid Python environments that benchmark already requires.
-
-`VeraGrid` (Python, numba-JIT-backed) converges on 9 of the 12 cases — failing on the same three RTE cases
-every other tool here besides gridoxide and pandapower also fails on — and is markedly slower than every
-C/Rust-backed solver in this comparison (roughly on par with `pypowsybl`), consistent with being a
-general-purpose Python framework rather than one built around raw solve-loop throughput. Interestingly, on
-`case_illinois200` (one of the two harder cases where gridoxide and PGM converge to visibly different
-voltages), VeraGrid's own converged voltage lands much closer to PGM's than to gridoxide's — a third
-independent data point suggesting that specific case has more than one plausible solution basin reachable by
-flat-start Newton-Raphson, not that any one tool's implementation is simply wrong.
+test-case grids (14 to 9,241 buses). gridoxide and pandapower's own native path are the only two of the six
+that converge on all 12; the other four each fail on a subset of the same handful of genuinely hard cases
+(RTE's own real production grids), confirmed by cross-checking against `powsybl-open-loadflow` directly, not
+a gridoxide gap. Once compared warm-vs-warm (`PersistentSolver`, see above), `Klu` is frequently *faster*
+than lightsim2grid's own KLU-backed C++ solver on this real transmission-topology data — even though PGM
+still clearly beats every gridoxide backend on the synthetic radial-distribution topology above, so the
+comparison genuinely depends on grid topology, not just implementation language. This benchmark is also what
+led to `src/pgm.rs` parsing PGM's `voltage_regulator` component: real generator PV (voltage-controlled)
+buses, not just the slack/PQ split described above — see `types::BusType::PV` and
+`solver::newton_raphson_scalar`/`newton_raphson_klu`'s existing PV handling, now actually reachable from PGM
+JSON input — and to fixing a real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping
+(`src/network.rs`). **See `scripts/bench/README.md`'s "Benchmark against real power-system test-case grids"
+section for the full 12-case results table, per-case `Pardiso`/`VeraGrid` numbers, and methodology** — that
+file is the single source of truth for every benchmark number in this project; this README only summarizes
+the qualitative findings.
 
 ## Profiling
 
