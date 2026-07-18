@@ -50,6 +50,7 @@ mod analyze;
 mod kernel;
 mod factor;
 mod scale;
+mod refactor;
 
 #[cfg(all(test, feature = "klu"))]
 mod ffi_oracle;

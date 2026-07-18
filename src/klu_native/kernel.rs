@@ -409,6 +409,87 @@ pub fn factor_block(
     Some(BlockFactor { l_cols, u_cols, udiag, p, pinv })
 }
 
+/// Re-factors one BTF diagonal block against new numeric values, reusing an
+/// *existing* `BlockFactor`'s pattern and pivot choices unchanged — ports
+/// `klu_refactor.c`'s per-block loop (its `nk == 1`/`nk > 1` branches
+/// collapse into one path here for the same reason `factor.rs`'s own doc
+/// comment gives for `factor_block`: tracing the `nk == 1` case by hand
+/// through this general loop produces the identical result a dedicated
+/// singleton fast path would).
+///
+/// **No pivoting happens here** (`klu_refactor.c`'s own doc comment: "This
+/// routine cannot do any numerical pivoting" — the caller's `column_entries`
+/// must supply the *same sparsity pattern* `factor_block` originally saw,
+/// just with new values, matching `KLU_refactor`'s own precondition). So
+/// `prev.p`/`prev.pinv` (the row permutation) and every column's row *set*
+/// (`prev.l_cols[k]`/`prev.u_cols[k]`, iterated in their already-recorded
+/// order) are reused verbatim — only the numeric values change. Critically,
+/// `prev.u_cols[k]`'s stored order is *already* a valid topological order
+/// for this column's Doolittle-style elimination (it came from
+/// `lsolve_symbolic`'s DFS, which only ever visits already-pivotal
+/// ancestors before their dependents), so no fresh symbolic pass is needed —
+/// exactly why `KLU_refactor` itself never calls `dfs`/`lsolve_symbolic` at
+/// all, unlike `KLU_kernel`.
+///
+/// Returns `None` if any diagonal pivot lands on exactly zero (numerically
+/// singular — `halt_if_singular` is always true for gridoxide's fixed
+/// `Options`, same contract as `factor_block`).
+pub fn refactor_block(
+    nk: usize,
+    prev: &BlockFactor,
+    mut column_entries: impl FnMut(usize) -> Vec<(i64, f64)>,
+    off_diagonal_out: &mut [Vec<(i64, f64)>],
+) -> Option<BlockFactor> {
+    let mut l_cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(nk);
+    let mut u_cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(nk);
+    let mut udiag = vec![0.0f64; nk];
+    let mut x = vec![0.0f64; nk];
+
+    for k in 0..nk {
+        let raw_entries = column_entries(k);
+        let mut off_diag = std::mem::take(&mut off_diagonal_out[k]);
+        construct_column(&mut x, &raw_entries, &mut off_diag);
+        off_diagonal_out[k] = off_diag;
+
+        // Compute column k of U, updating column k of A in place -- same
+        // order as originally recorded, so this is a valid elimination.
+        // Crucially, `j` is always < k (a valid topological order), so
+        // `l_cols[j]` here is *this* refactor call's freshly-recomputed
+        // column j, not `prev`'s stale one -- matches `klu_refactor.c`,
+        // which overwrites the shared LU buffer column-by-column in place,
+        // so its own `GET_POINTER(LU, Lip, Llen, Li, Lx, j, ...)` for j < k
+        // always reads values already refactored earlier in this same call.
+        let mut u_col_k: Vec<(usize, f64)> = Vec::with_capacity(prev.u_cols[k].len());
+        for &(j, _) in &prev.u_cols[k] {
+            let ujk = x[j];
+            x[j] = 0.0;
+            u_col_k.push((j, ujk));
+            for &(row, lij) in &l_cols[j] {
+                x[row] -= lij * ujk;
+            }
+        }
+
+        let ukk = x[k];
+        x[k] = 0.0;
+        if ukk == 0.0 {
+            return None;
+        }
+        udiag[k] = ukk;
+
+        // Gather and divide by the pivot to get column k of L.
+        let mut l_col_k: Vec<(usize, f64)> = Vec::with_capacity(prev.l_cols[k].len());
+        for &(row, _) in &prev.l_cols[k] {
+            l_col_k.push((row, x[row] / ukk));
+            x[row] = 0.0;
+        }
+
+        l_cols.push(l_col_k);
+        u_cols.push(u_col_k);
+    }
+
+    Some(BlockFactor { l_cols, u_cols, udiag, p: prev.p.clone(), pinv: prev.pinv.clone() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +660,118 @@ mod tests {
         }
         let mut off = vec![Vec::new(); n];
         assert!(factor_block(n, 1e-3, |k| by_col[k].clone(), &mut off).is_none());
+    }
+
+    fn refactor_dense(n: usize, prev: &BlockFactor, entries: &[(usize, usize, f64)]) -> BlockFactor {
+        let mut by_col: Vec<Vec<(i64, f64)>> = vec![Vec::new(); n];
+        for &(r, c, v) in entries {
+            by_col[c].push((r as i64, v));
+        }
+        let mut off = vec![Vec::new(); n];
+        refactor_block(n, prev, |k| by_col[k].clone(), &mut off).expect("should not be singular")
+    }
+
+    #[test]
+    fn refactor_with_identical_values_matches_original() {
+        let n = 4;
+        let entries = vec![
+            (0, 0, 6.0),
+            (1, 1, 7.0),
+            (2, 2, 8.0),
+            (3, 3, 5.0),
+            (0, 1, -0.9),
+            (1, 0, -0.5),
+            (1, 2, -0.6),
+            (2, 1, -0.3),
+            (2, 3, 0.4),
+            (3, 2, -0.2),
+            (0, 3, 0.1),
+            (3, 0, 0.15),
+        ];
+        let bf = factor_dense(n, &entries);
+        let refactored = refactor_dense(n, &bf, &entries);
+
+        // Same pattern (unchanged pivot order) and, since the arithmetic is
+        // identical, the exact same values -- not just numerically close.
+        assert_eq!(refactored.p, bf.p);
+        assert_eq!(refactored.pinv, bf.pinv);
+        for k in 0..n {
+            assert_eq!(refactored.l_cols[k], bf.l_cols[k], "L column {k}");
+            assert_eq!(refactored.u_cols[k], bf.u_cols[k], "U column {k}");
+        }
+        assert_eq!(refactored.udiag, bf.udiag);
+    }
+
+    #[test]
+    fn refactor_with_new_values_matches_independent_dense_solve() {
+        // Same sparsity pattern as the fixture above, different (still
+        // diagonally-dominant, so no singular pivot) values -- mirrors
+        // `sparse_klu.rs`'s own `real_sparse_system_refactor_reuses_
+        // symbolic` fixture shape. The refactored solve must match an
+        // independent dense solve of the *new* matrix -- Ax=b has a unique
+        // solution regardless of which pivot order the factorization used,
+        // so this doesn't depend on refactor happening to reuse a pivot
+        // order a from-scratch factorization would also have chosen.
+        let n = 4;
+        let original = vec![
+            (0, 0, 6.0),
+            (1, 1, 7.0),
+            (2, 2, 8.0),
+            (3, 3, 5.0),
+            (0, 1, -0.9),
+            (1, 0, -0.5),
+            (1, 2, -0.6),
+            (2, 1, -0.3),
+            (2, 3, 0.4),
+            (3, 2, -0.2),
+            (0, 3, 0.1),
+            (3, 0, 0.15),
+        ];
+        let bf = factor_dense(n, &original);
+
+        let updated = vec![
+            (0, 0, 9.0),
+            (1, 1, 4.0),
+            (2, 2, 6.5),
+            (3, 3, 3.0),
+            (0, 1, -1.2),
+            (1, 0, -0.2),
+            (1, 2, -0.4),
+            (2, 1, -0.1),
+            (2, 3, 0.9),
+            (3, 2, -0.3),
+            (0, 3, 0.05),
+            (3, 0, 0.4),
+        ];
+        let refactored = refactor_dense(n, &bf, &updated);
+
+        let a = dense_from_entries(n, &updated);
+        let b = vec![1.0, 2.0, -1.0, 0.5];
+        let x = solve_with_factor(&refactored, &b);
+        let expected = dense_solve(&a, &b);
+        for i in 0..n {
+            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+        }
+    }
+
+    #[test]
+    fn refactor_detects_new_singularity() {
+        // Same pattern as the diagonal fixture, but this time the new
+        // values make the block genuinely singular (a diagonal entry
+        // reaches exactly zero during elimination) -- refactor must report
+        // that (`None`), matching KLU_refactor's own IS_ZERO(ukk) check
+        // rather than silently dividing by zero.
+        let n = 2;
+        let entries = vec![(0, 0, 4.0), (0, 1, 2.0), (1, 0, 3.0), (1, 1, 1.0)];
+        let bf = factor_dense(n, &entries);
+
+        let singular = vec![(0, 0, 0.0), (0, 1, 2.0), (1, 0, 3.0), (1, 1, 0.0)];
+        let mut by_col: Vec<Vec<(i64, f64)>> = vec![Vec::new(); n];
+        for &(r, c, v) in &singular {
+            by_col[c].push((r as i64, v));
+        }
+        let mut off = vec![Vec::new(); n];
+        assert!(refactor_block(n, &bf, |k| by_col[k].clone(), &mut off).is_none());
     }
 
     #[cfg(feature = "klu")]
