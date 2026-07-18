@@ -105,7 +105,7 @@ pub fn solve(sym: &Symbolic, num: &Numeric, rs: Option<&[f64]>, b: &[f64]) -> Ve
 mod tests {
     use super::super::analyze::analyze;
     use super::super::factor::factor;
-    use super::super::refactor::refactor;
+    use super::super::refactor::{refactor, RefactorScratch};
     use super::*;
 
     fn dense_solve(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
@@ -231,14 +231,15 @@ mod tests {
             vec![(0, 0, 6.0), (1, 1, 7.0), (2, 2, 8.0), (3, 3, 5.0), (0, 1, -0.9), (1, 0, -0.5), (2, 3, 0.4), (3, 2, -0.2)];
         let (col_ptr, row_idx, values) = to_csc(n, &base);
         let sym = analyze(n, &col_ptr, &row_idx);
-        let num1 = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
+        let mut num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
+        let mut scratch = RefactorScratch::new(n);
 
         let updated: Vec<(usize, usize, f64)> = base.iter().map(|&(r, c, v)| (r, c, v * 1.7 + 0.1)).collect();
         let (col_ptr2, row_idx2, values2) = to_csc(n, &updated);
-        let num2 = refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &num1).unwrap();
+        assert!(refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &mut num, &mut scratch));
 
         let b = vec![1.0, 2.0, -1.0, 0.5];
-        let x = solve(&sym, &num2, None, &b);
+        let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &updated), &b);
         for i in 0..n {
             assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);

@@ -199,20 +199,37 @@ standalone, for benchmarking or debugging one case/tool at a time.
 Every tool's own warm-run mean (5 timed calls on one persistent model/solver object, `time.perf_counter()`),
 gridoxide included (`bench_gridoxide_native.py`/`PowerFlowModel`, always warm — see "Python bindings" above):
 
-| case | buses | scalar | block | klu | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
-|---|---|---|---|---|---|---|---|---|
-| case14 | 15 | 0.043 | 0.044 | 0.026 | 0.226 | 0.026 | 1.665 | 17.377 |
-| case118 | 119 | 0.202 | 0.171 | 0.106 | FAILED¹ | 0.157 | 4.844 | 15.976 |
-| case_illinois200 | 201 | 0.662 | 0.306 | 0.257 | 0.360 | 0.309 | 7.013 | 16.418 |
-| case300 | 301 | 1.701 | 0.607 | 0.596 | FAILED¹ | 0.538 | 8.326 | 18.117 |
-| case1354pegase | 1355 | 6.820 | 3.074 | 2.413 | FAILED² | 2.556 | 37.686 | 25.496 |
-| case1888rte | 1889 | 11.505 | 3.895 | 3.562 | FAILED¹ | FAILED³ | FAILED⁴ | 28.751 |
-| case2848rte | 2849 | 20.224 | 6.372 | 5.274 | FAILED¹ | 7.996 | FAILED⁴ | 33.078 |
-| case2869pegase | 2870 | 26.854 | 8.852 | 7.820 | FAILED² | 6.660 | 107.720 | 34.977 |
-| case3120sp | 3121 | 19.025 | 6.887 | 5.397 | FAILED² | 6.572 | 83.408 | 33.200 |
-| case6495rte | 6496 | 66.981 | 19.588 | 17.621 | FAILED² | FAILED³ | FAILED⁴ | 152.003 |
-| case6515rte | 6516 | 77.745 | 23.947 | 21.146 | FAILED² | FAILED³ | FAILED⁴ | 58.419 |
-| case9241pegase | 9242 | 116.537 | 37.282 | 29.545 | FAILED² | 25.732 | 404.777 | 87.930 |
+| case | buses | scalar | block | klu | klu_native | PGM | lightsim2grid (KLU) | pypowsybl | pandapower |
+|---|---|---|---|---|---|---|---|---|---|
+| case14 | 15 | 0.043 | 0.044 | 0.026 | 0.029 | 0.226 | 0.026 | 1.665 | 17.377 |
+| case118 | 119 | 0.202 | 0.171 | 0.106 | 0.112 | FAILED¹ | 0.157 | 4.844 | 15.976 |
+| case_illinois200 | 201 | 0.662 | 0.306 | 0.257 | 0.306 | 0.360 | 0.309 | 7.013 | 16.418 |
+| case300 | 301 | 1.701 | 0.607 | 0.596 | 0.568 | FAILED¹ | 0.538 | 8.326 | 18.117 |
+| case1354pegase | 1355 | 6.820 | 3.074 | 2.413 | 2.641 | FAILED² | 2.556 | 37.686 | 25.496 |
+| case1888rte | 1889 | 11.505 | 3.895 | 3.562 | 3.513 | FAILED¹ | FAILED³ | FAILED⁴ | 28.751 |
+| case2848rte | 2849 | 20.224 | 6.372 | 5.274 | 6.540 | FAILED¹ | 7.996 | FAILED⁴ | 33.078 |
+| case2869pegase | 2870 | 26.854 | 8.852 | 7.820 | 6.474 | FAILED² | 6.660 | 107.720 | 34.977 |
+| case3120sp | 3121 | 19.025 | 6.887 | 5.397 | 7.255 | FAILED² | 6.572 | 83.408 | 33.200 |
+| case6495rte | 6496 | 66.981 | 19.588 | 17.621 | 20.123 | FAILED² | FAILED³ | FAILED⁴ | 152.003 |
+| case6515rte | 6516 | 77.745 | 23.947 | 21.146 | 26.496 | FAILED² | FAILED³ | FAILED⁴ | 58.419 |
+| case9241pegase | 9242 | 116.537 | 37.282 | 29.545 | 36.317 | FAILED² | 25.732 | 404.777 | 87.930 |
+
+`klu_native` (`src/klu_native/`, the from-scratch Rust port — see the top-level README's "Experimental
+backends") measured separately (own run, same methodology, same cached case files) and added as a column
+rather than folded into the same run as the other seven columns above — its numbers are directly comparable
+to `klu`'s in the same row, less so across columns against numbers from a different run. It converges to the
+same voltages as every other gridoxide backend on all 12 cases, and lands close to `klu` throughout (mostly
+1.0-1.2x, `case3120sp`/`case6515rte` closer to 1.2-1.3x) — a large improvement from an earlier, unoptimized
+version of this port that ran a consistent ~1.9-2x slower across every scale. `perf`-profiling
+`case9241pegase` traced that gap to allocator churn, not algorithmic overhead: `kernel::refactor_block`
+allocated two new heap-backed `Vec`s per column on *every* Newton iteration's refactor (for this case, tens
+of millions of allocations across a timed run), while real KLU's own `klu_refactor.c` overwrites one
+already-allocated buffer in place and allocates nothing at all during a refactor. Rewriting
+`refactor_block`/`refactor::refactor` to mutate the existing factorization in place, backed by a
+`RefactorScratch` buffer reused across every solve (`KluNativeSystem` owns one for its whole lifetime),
+eliminated nearly all of that churn — `case9241pegase`'s glibc allocator functions (`_int_malloc`,
+`_int_free_merge_chunk`, `realloc`, ...) dropped from ~32% of `newton_raphson` self-time to effectively
+absent from the profile.
 
 `block` used to show `N/A` here — it panicked on any bus modeled as `PV` (via PGM's `voltage_regulator`,
 which every one of these 12 real cases uses for its generators), since its 2×2-block-per-bus indexing
@@ -241,8 +258,9 @@ phase-shift-zeroing workaround that repo's own `MatpowerUtil.java` applies befor
 three cases (confirmed directly: applying that workaround via `pypowsybl` does make powsybl-open-loadflow
 converge on all three, in ~4 iterations each — see matpower_to_pgm.py's docstring).
 
-gridoxide (`scalar`/`block`/`klu`) and pandapower (its own native, no-cross-tool-conversion path) are the
-only two of five tools that converge on **all 12** cases. `case1888rte`, `case6495rte`, and `case6515rte` are
+gridoxide (`scalar`/`block`/`klu`/`klu_native`) and pandapower (its own native, no-cross-tool-conversion
+path) are the only two of five tools that converge on **all 12** cases. `case1888rte`, `case6495rte`, and
+`case6515rte` are
 hard for every tool that doesn't special-case them — a genuine property of those three cases' data (RTE's own
 real production grid, per the case names), not a gridoxide-, PGM-, lightsim2grid-, or pypowsybl-specific gap.
 

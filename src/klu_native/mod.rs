@@ -133,6 +133,11 @@ pub struct KluNativeSystem {
     groups: Vec<Vec<usize>>,
     sym: analyze::Symbolic,
     num: factor::Numeric,
+    /// Reused across every `factor_and_solve` call (see
+    /// `refactor::RefactorScratch`'s own doc comment) — keeping this alive
+    /// for the system's whole lifetime, instead of creating one per call,
+    /// is most of what makes repeat solves allocation-light.
+    scratch: refactor::RefactorScratch,
 }
 
 impl KluNativeSystem {
@@ -151,8 +156,9 @@ impl KluNativeSystem {
 
         let sym = analyze::analyze(n, &col_ptr, &row_idx);
         let num = factor::factor(n, &col_ptr, &row_idx, &values, &sym, types::Options::default().tol)?;
+        let scratch = refactor::RefactorScratch::new(n);
 
-        Some(Self { n, col_ptr, row_idx, groups, sym, num })
+        Some(Self { n, col_ptr, row_idx, groups, sym, num, scratch })
     }
 
     /// Numeric-only refactorization against the cached symbolic pattern,
@@ -164,8 +170,10 @@ impl KluNativeSystem {
     /// that a fixed pattern still let through).
     pub fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
         let values = pack_values(entries, &self.groups);
-        let num = refactor::refactor(self.n, &self.col_ptr, &self.row_idx, &values, &self.sym, &self.num)?;
-        self.num = num;
+        let ok = refactor::refactor(self.n, &self.col_ptr, &self.row_idx, &values, &self.sym, &mut self.num, &mut self.scratch);
+        if !ok {
+            return None;
+        }
 
         let x = solve::solve(&self.sym, &self.num, None, rhs);
         if x.iter().any(|v| !v.is_finite()) {

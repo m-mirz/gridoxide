@@ -32,8 +32,9 @@ fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
             "the 'klu' backend needs the crate's `klu` Cargo feature enabled too \
              (maturin develop --features python,klu)",
         )),
+        "klu_native" => Ok(JacobianBackend::KluNative),
         other => Err(PyValueError::new_err(format!(
-            "unknown backend '{other}', expected 'scalar', 'block', or 'klu'"
+            "unknown backend '{other}', expected 'scalar', 'block', 'klu', or 'klu_native'"
         ))),
     }
 }
@@ -67,8 +68,9 @@ impl PowerFlowModel {
     /// Loads a PGM-format JSON file (the same format `examples/bench_network.rs`
     /// and `matpower_to_pgm.py`/`convert_pandapower_case.py` produce).
     ///
-    /// `backend` is `"scalar"` (default), `"block"`, or `"klu"` (needs the
-    /// crate's `klu` feature built in too). `s_base_va`/`freq_hz` match
+    /// `backend` is `"scalar"` (default), `"block"`, `"klu"` (needs the
+    /// crate's `klu` feature built in too), or `"klu_native"`.
+    /// `s_base_va`/`freq_hz` match
     /// `pgm::pgm_to_buses_and_branches`'s own defaults used elsewhere in
     /// this project (1e6 VA, 50 Hz) unless overridden.
     #[staticmethod]

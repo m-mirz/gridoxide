@@ -170,12 +170,12 @@ def main() -> None:
         print(f"=== {case_name} ===", file=sys.stderr)
         m_path, json_path, conv_err = convert_case(args.python, case_name, args.cache_dir)
         if json_path is None:
-            rows.append((case_name, "-", f"FAILED ({conv_err})", "-", "-", "-", "-", "-", "-"))
+            rows.append((case_name, "-", f"FAILED ({conv_err})", "-", "-", "-", "-", "-", "-", "-"))
             continue
 
         n_nodes = None
         backend_times = {}
-        for backend in ("scalar", "block", "klu"):
+        for backend in ("scalar", "block", "klu", "klu_native"):
             t, n, err = run_gridoxide(args.python, json_path, backend)
             n_nodes = n_nodes or n
             backend_times[backend] = fmt(t, err)
@@ -191,13 +191,14 @@ def main() -> None:
             backend_times["scalar"],
             backend_times["block"],
             backend_times["klu"],
+            backend_times["klu_native"],
             fmt(pgm_time, pgm_err),
             fmt(ls2g_time, ls2g_err),
             fmt(pypowsybl_time, pypowsybl_err),
             fmt(pandapower_time, pandapower_err),
         ))
 
-    header = ["case", "buses", "gridoxide scalar", "gridoxide block", "gridoxide klu",
+    header = ["case", "buses", "gridoxide scalar", "gridoxide block", "gridoxide klu", "gridoxide klu_native",
               "PGM", "lightsim2grid (KLU)", "pypowsybl", "pandapower"]
     lines = [
         "| " + " | ".join(header) + " |",

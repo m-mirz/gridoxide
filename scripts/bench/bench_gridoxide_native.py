@@ -9,9 +9,10 @@ parsing its stdout at all.
 
 Usage: python3 bench_gridoxide_native.py <input.json> [backend]
 
-`backend` (default "scalar") selects `scalar`, `block`, or `klu` — the
-`gridoxide` module must have been built with the matching Cargo feature
-(`klu` needs `maturin develop --features python,klu`; see this directory's
+`backend` (default "scalar") selects `scalar`, `block`, `klu`, or
+`klu_native` — the `gridoxide` module must have been built with the
+matching Cargo feature (`klu` needs `maturin develop --features
+python,klu`; `klu_native` needs no extra feature; see this directory's
 README for the exact command).
 
 Build the bindings first:

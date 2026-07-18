@@ -296,12 +296,18 @@ fn prune(lpend: &mut [i64], pinv: &[i64], u_col_k: &[(usize, f64)], pivrow: usiz
 /// (`factor.rs`) composes this with the block's own symbolic column order
 /// to get the final global permutation, mirroring `KLU_factor`'s own
 /// `Pnum[k+k1] = P[Pblock[k]+k1]` composition.
+#[derive(Clone)]
 pub struct BlockFactor {
     pub l_cols: Vec<Vec<(usize, f64)>>,
     pub u_cols: Vec<Vec<(usize, f64)>>,
     pub udiag: Vec<f64>,
+    /// The block-local numeric row permutation this block's partial
+    /// pivoting chose. The block-local *inverse* (`pinv`) is deliberately
+    /// not stored here — it's only ever needed as a local variable during
+    /// this function's own renumbering pass (see below); nothing
+    /// downstream (`factor.rs`'s composition into the global permutation,
+    /// `refactor.rs`, `solve.rs`) reads a block-local `pinv` instead of `p`.
     pub p: Vec<i64>,
-    pub pinv: Vec<i64>,
 }
 
 /// Factors one `nk`-by-`nk` diagonal block — ports `KLU_kernel`'s main
@@ -406,7 +412,7 @@ pub fn factor_block(
         }
     }
 
-    Some(BlockFactor { l_cols, u_cols, udiag, p, pinv })
+    Some(BlockFactor { l_cols, u_cols, udiag, p })
 }
 
 /// Re-factors one BTF diagonal block against new numeric values, reusing an
@@ -418,53 +424,83 @@ pub fn factor_block(
 /// singleton fast path would).
 ///
 /// **No pivoting happens here** (`klu_refactor.c`'s own doc comment: "This
-/// routine cannot do any numerical pivoting" — the caller's `column_entries`
-/// must supply the *same sparsity pattern* `factor_block` originally saw,
-/// just with new values, matching `KLU_refactor`'s own precondition). So
-/// `prev.p`/`prev.pinv` (the row permutation) and every column's row *set*
-/// (`prev.l_cols[k]`/`prev.u_cols[k]`, iterated in their already-recorded
+/// routine cannot do any numerical pivoting" — the caller's `columns` must
+/// supply the *same sparsity pattern* `factor_block` originally saw, just
+/// with new values, matching `KLU_refactor`'s own precondition). So
+/// `block.p` (the row permutation) and every column's row *set*
+/// (`block.l_cols[k]`/`block.u_cols[k]`, iterated in their already-recorded
 /// order) are reused verbatim — only the numeric values change. Critically,
-/// `prev.u_cols[k]`'s stored order is *already* a valid topological order
+/// `block.u_cols[k]`'s stored order is *already* a valid topological order
 /// for this column's Doolittle-style elimination (it came from
 /// `lsolve_symbolic`'s DFS, which only ever visits already-pivotal
 /// ancestors before their dependents), so no fresh symbolic pass is needed —
 /// exactly why `KLU_refactor` itself never calls `dfs`/`lsolve_symbolic` at
 /// all, unlike `KLU_kernel`.
 ///
-/// Returns `None` if any diagonal pivot lands on exactly zero (numerically
+/// Returns `false` if any diagonal pivot lands on exactly zero (numerically
 /// singular — `halt_if_singular` is always true for gridoxide's fixed
 /// `Options`, same contract as `factor_block`).
-pub fn refactor_block(
+///
+/// **In place, allocation-free** (unlike `factor_block`, which only runs
+/// once per `PersistentSolver` lifetime): `block.p` and every column's row
+/// *pattern* — `block.l_cols[k]`/`block.u_cols[k]`'s existing `.0` (row)
+/// fields — are left completely untouched; only the `.1` (value) fields are
+/// overwritten, iterating each column's existing entries via `.iter_mut()`
+/// instead of building new `Vec`s. This is safe precisely because no
+/// pivoting happens here (see above) — the row pattern this function reads
+/// (to know *which* entries to overwrite) is exactly the pattern it also
+/// writes into, so an in-place pass is a faithful translation of the same
+/// math a build-fresh-`Vec`s version would do, just without the two
+/// per-column heap allocations (`u_col_k`, `l_col_k`) that version needed.
+/// Profiling showed those two allocations, repeated for every column on
+/// every Newton iteration's refactor, as the dominant reason `KluNative`
+/// ran ~2x slower than the FFI `Klu` backend — real KLU's own
+/// `klu_refactor.c` overwrites its one packed buffer in place and
+/// allocates nothing at all during a refactor.
+///
+/// `x` is `nk`-sized reusable scratch (the caller's own persistent buffer —
+/// see `refactor::RefactorScratch` — sliced down to this block's size).
+/// Like real KLU's own `Numeric->Xwork`, it's guaranteed all-zero on entry
+/// and guaranteed all-zero again on return, for the *same reason* `Xwork`
+/// is safe to reuse across every block and every call: every position
+/// `construct_column` scatters a value into is always later read-and-
+/// cleared during this same column's own U/L processing, by construction
+/// of the elimination itself (never left dangling for a future call to
+/// trip over).
+///
+/// `columns[k]` gives block-local column `k`'s raw entries (same contract
+/// `factor_block`'s `column_entries(k)` closure had, just as a plain slice
+/// instead of a closure — the caller already has to build this once into
+/// its own reusable buffer to avoid *its* own allocation, so a closure
+/// indirection here would add nothing).
+pub fn refactor_block_in_place(
     nk: usize,
-    prev: &BlockFactor,
-    mut column_entries: impl FnMut(usize) -> Vec<(i64, f64)>,
+    block: &mut BlockFactor,
+    x: &mut [f64],
+    columns: &[Vec<(i64, f64)>],
     off_diagonal_out: &mut [Vec<(i64, f64)>],
-) -> Option<BlockFactor> {
-    let mut l_cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(nk);
-    let mut u_cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(nk);
-    let mut udiag = vec![0.0f64; nk];
-    let mut x = vec![0.0f64; nk];
+) -> bool {
+    let BlockFactor { l_cols, u_cols, udiag, .. } = block;
 
     for k in 0..nk {
-        let raw_entries = column_entries(k);
         let mut off_diag = std::mem::take(&mut off_diagonal_out[k]);
-        construct_column(&mut x, &raw_entries, &mut off_diag);
+        construct_column(x, &columns[k], &mut off_diag);
         off_diagonal_out[k] = off_diag;
 
         // Compute column k of U, updating column k of A in place -- same
         // order as originally recorded, so this is a valid elimination.
-        // Crucially, `j` is always < k (a valid topological order), so
-        // `l_cols[j]` here is *this* refactor call's freshly-recomputed
-        // column j, not `prev`'s stale one -- matches `klu_refactor.c`,
-        // which overwrites the shared LU buffer column-by-column in place,
-        // so its own `GET_POINTER(LU, Lip, Llen, Li, Lx, j, ...)` for j < k
-        // always reads values already refactored earlier in this same call.
-        let mut u_col_k: Vec<(usize, f64)> = Vec::with_capacity(prev.u_cols[k].len());
-        for &(j, _) in &prev.u_cols[k] {
+        // `j` is always < k (a valid topological order), so `l_cols[j]`
+        // here already holds *this* refactor call's freshly-overwritten
+        // column j, not a stale one -- matches `klu_refactor.c`, which
+        // overwrites the shared LU buffer column-by-column in place, so its
+        // own `GET_POINTER(LU, Lip, Llen, Li, Lx, j, ...)` for j < k always
+        // reads values already refactored earlier in this same call.
+        for entry in u_cols[k].iter_mut() {
+            let j = entry.0;
             let ujk = x[j];
             x[j] = 0.0;
-            u_col_k.push((j, ujk));
-            for &(row, lij) in &l_cols[j] {
+            entry.1 = ujk;
+            for &(row, lij) in l_cols[j].iter() {
                 x[row] -= lij * ujk;
             }
         }
@@ -472,22 +508,19 @@ pub fn refactor_block(
         let ukk = x[k];
         x[k] = 0.0;
         if ukk == 0.0 {
-            return None;
+            return false;
         }
         udiag[k] = ukk;
 
-        // Gather and divide by the pivot to get column k of L.
-        let mut l_col_k: Vec<(usize, f64)> = Vec::with_capacity(prev.l_cols[k].len());
-        for &(row, _) in &prev.l_cols[k] {
-            l_col_k.push((row, x[row] / ukk));
+        // Gather and divide by the pivot to overwrite column k of L.
+        for entry in l_cols[k].iter_mut() {
+            let row = entry.0;
+            entry.1 = x[row] / ukk;
             x[row] = 0.0;
         }
-
-        l_cols.push(l_col_k);
-        u_cols.push(u_col_k);
     }
 
-    Some(BlockFactor { l_cols, u_cols, udiag, p: prev.p.clone(), pinv: prev.pinv.clone() })
+    true
 }
 
 #[cfg(test)]
@@ -668,7 +701,10 @@ mod tests {
             by_col[c].push((r as i64, v));
         }
         let mut off = vec![Vec::new(); n];
-        refactor_block(n, prev, |k| by_col[k].clone(), &mut off).expect("should not be singular")
+        let mut x = vec![0.0; n];
+        let mut block = prev.clone();
+        assert!(refactor_block_in_place(n, &mut block, &mut x, &by_col, &mut off), "should not be singular");
+        block
     }
 
     #[test]
@@ -694,7 +730,6 @@ mod tests {
         // Same pattern (unchanged pivot order) and, since the arithmetic is
         // identical, the exact same values -- not just numerically close.
         assert_eq!(refactored.p, bf.p);
-        assert_eq!(refactored.pinv, bf.pinv);
         for k in 0..n {
             assert_eq!(refactored.l_cols[k], bf.l_cols[k], "L column {k}");
             assert_eq!(refactored.u_cols[k], bf.u_cols[k], "U column {k}");
@@ -771,7 +806,9 @@ mod tests {
             by_col[c].push((r as i64, v));
         }
         let mut off = vec![Vec::new(); n];
-        assert!(refactor_block(n, &bf, |k| by_col[k].clone(), &mut off).is_none());
+        let mut x = vec![0.0; n];
+        let mut block = bf.clone();
+        assert!(!refactor_block_in_place(n, &mut block, &mut x, &by_col, &mut off));
     }
 
     #[cfg(feature = "klu")]

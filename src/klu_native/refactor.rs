@@ -9,29 +9,78 @@
 //!
 //! No new BTF/AMD ordering or partial pivoting happens here — `analyze`'s
 //! `Symbolic` (unchanged) and the previous `factor::Numeric`'s row
-//! permutation (`prev.pinv`) drive the same block-local row extraction
-//! `factor::factor` does, just feeding `kernel::refactor_block` instead of
-//! `kernel::factor_block` per block.
+//! permutation (`num.pinv`, itself never modified here) drive the same
+//! block-local row extraction `factor::factor` does, just feeding
+//! `kernel::refactor_block_in_place` instead of `kernel::factor_block` per
+//! block.
+//!
+//! **In place, allocation-light** (see `kernel::refactor_block_in_place`'s
+//! own doc comment for the profiling story behind this): `num` is mutated
+//! directly rather than rebuilt, and the per-block column-entry scratch
+//! (`RefactorScratch::columns`, `RefactorScratch::x`) persists across
+//! repeated calls on the same `RefactorScratch` — the caller
+//! (`KluNativeSystem`) keeps one alive for the system's whole lifetime
+//! rather than creating a fresh one per solve. `num.pnum`/`num.pinv` aren't
+//! touched at all (previously needlessly `.clone()`d into a discarded
+//! result even though refactor never changes them). `num.off_p`/`off_i`/
+//! `off_x` are still rebuilt fresh each call — proportional to `nzoff`
+//! (cross-BTF-block nonzeros), which is zero for the common case of a
+//! single strongly-connected power system (one BTF block), so this
+//! remaining allocation is off the hot path for gridoxide's own real
+//! Jacobians; revisit if a topology with genuine BTF structure ever makes
+//! it show up in a profile.
 
 use super::analyze::Symbolic;
 use super::factor::Numeric;
-use super::kernel::refactor_block;
+use super::kernel::refactor_block_in_place;
 use super::types::flip;
+
+/// Reusable scratch space for repeated `refactor` calls against the same
+/// `n`-by-`n` sparsity pattern — owned by `KluNativeSystem` for its whole
+/// lifetime (see `mod.rs`), not recreated per call.
+pub struct RefactorScratch {
+    /// Dense workspace, reused across every block and every call — see
+    /// `kernel::refactor_block_in_place`'s doc comment for why this is
+    /// always safely all-zero on entry.
+    x: Vec<f64>,
+    /// `columns[k]` = global column `k`'s raw entries for the current call,
+    /// `.clear()`-then-repopulated each `refactor` call rather than
+    /// rebuilt from `Vec::new()` — keeps each column's already-grown
+    /// capacity across calls, matching the sparsity pattern being fixed.
+    columns: Vec<Vec<(i64, f64)>>,
+}
+
+impl RefactorScratch {
+    pub fn new(n: usize) -> Self {
+        Self { x: vec![0.0; n], columns: vec![Vec::new(); n] }
+    }
+}
 
 /// Re-factors the whole `n`-by-`n` matrix (CSC: `col_ptr`/`row_idx`/`values`)
 /// against a previous `Numeric` from the *same* sparsity pattern and the
-/// same `Symbolic` analysis. Returns `None` if any block is numerically
-/// singular (`halt_if_singular` is always true for gridoxide's fixed
-/// `Options`, matching `kernel::refactor_block`'s own contract).
-pub fn refactor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym: &Symbolic, prev: &Numeric) -> Option<Numeric> {
+/// same `Symbolic` analysis, mutating `num` in place. Returns `false` if any
+/// block is numerically singular (`halt_if_singular` is always true for
+/// gridoxide's fixed `Options`, matching `kernel::refactor_block_in_place`'s
+/// own contract) — `num`'s contents are left partially updated in that case
+/// (matching `KLU_refactor`'s own "return FALSE, `Numeric` in an
+/// unspecified state" contract; the caller is expected to treat the whole
+/// solve as failed, not to keep using `num`).
+pub fn refactor(
+    n: usize,
+    col_ptr: &[i64],
+    row_idx: &[i64],
+    values: &[f64],
+    sym: &Symbolic,
+    num: &mut Numeric,
+    scratch: &mut RefactorScratch,
+) -> bool {
     // Row mapping uses the *final numeric* permutation from the previous
-    // factorization (`prev.pinv`), not the symbolic-only `pinv_sym`
+    // factorization (`num.pinv`), not the symbolic-only `pinv_sym`
     // `factor::factor` itself starts from -- by now, block-local row
     // position and global pivotal position coincide, since no further
     // pivoting will move any row. Mirrors `klu_refactor.c`'s own
     // `newrow = Pinv[Ai[p]] - k1` where `Pinv = Numeric->Pinv`.
     let nblocks = sym.nblocks();
-    let mut blocks = Vec::with_capacity(nblocks);
 
     let mut off_p = vec![0i64; n + 1];
     let mut off_i: Vec<i64> = Vec::new();
@@ -43,13 +92,13 @@ pub fn refactor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym:
         let k2 = sym.r[block + 1];
         let nk = k2 - k1;
 
-        let mut cols: Vec<Vec<(i64, f64)>> = Vec::with_capacity(nk);
         for k in 0..nk {
             let oldcol = sym.q[k + k1];
-            let mut entries = Vec::new();
+            let entries = &mut scratch.columns[k + k1];
+            entries.clear();
             for p in col_ptr[oldcol] as usize..col_ptr[oldcol + 1] as usize {
                 let oldrow = row_idx[p];
-                let newrow = prev.pinv[oldrow as usize];
+                let newrow = num.pinv[oldrow as usize];
                 let value = values[p];
                 if (newrow as usize) < k1 {
                     entries.push((flip(oldrow), value));
@@ -57,11 +106,19 @@ pub fn refactor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym:
                     entries.push((newrow - k1 as i64, value));
                 }
             }
-            cols.push(entries);
         }
 
         let mut off_diag_out: Vec<Vec<(i64, f64)>> = vec![Vec::new(); nk];
-        let bf = refactor_block(nk, &prev.blocks[block], |k| cols[k].clone(), &mut off_diag_out)?;
+        let ok = refactor_block_in_place(
+            nk,
+            &mut num.blocks[block],
+            &mut scratch.x[..nk],
+            &scratch.columns[k1..k2],
+            &mut off_diag_out,
+        );
+        if !ok {
+            return false;
+        }
 
         for (k, entries) in off_diag_out.into_iter().enumerate() {
             let global_col = k + k1;
@@ -72,25 +129,26 @@ pub fn refactor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym:
             }
             off_p[global_col + 1] = poff;
         }
-
-        blocks.push(bf);
     }
 
-    // No new pivoting -- Pnum/Pinv are exactly what the previous
-    // factorization established, matching KLU_refactor's own behavior
-    // (Numeric->Pnum/Pinv are read, never rewritten, aside from the
-    // pre-existing scale-factor permutation this port hasn't wired in yet
-    // -- see scale.rs's module doc comment on Phase 7).
-    let pnum = prev.pnum.clone();
-    let pinv = prev.pinv.clone();
-
+    // No new pivoting -- num.pnum/num.pinv are exactly what the previous
+    // factorization established and are left untouched, matching
+    // KLU_refactor's own behavior (Numeric->Pnum/Pinv are read, never
+    // rewritten, aside from the pre-existing scale-factor permutation this
+    // port hasn't wired in yet -- see scale.rs's module doc comment on
+    // Phase 7).
+    //
     // Apply the (unchanged) final numeric pivot row permutation to the new
     // off-diagonal entries, exactly as `factor::factor` does for its own.
     for i in off_i.iter_mut() {
-        *i = pinv[*i as usize];
+        *i = num.pinv[*i as usize];
     }
 
-    Some(Numeric { blocks, pnum, pinv, off_p, off_i, off_x })
+    num.off_p = off_p;
+    num.off_i = off_i;
+    num.off_x = off_x;
+
+    true
 }
 
 #[cfg(test)]
@@ -182,7 +240,7 @@ mod tests {
         let (col_ptr, row_idx, values) = to_csc(n, &original);
         let sym = analyze(n, &col_ptr, &row_idx);
         assert!(sym.nblocks() >= 2, "fixture should produce multiple BTF blocks, got {}", sym.nblocks());
-        let num1 = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
+        let mut num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
 
         let updated = vec![
             (0, 0, 5.5),
@@ -202,10 +260,11 @@ mod tests {
         assert_eq!(col_ptr, col_ptr2, "fixture must keep the same sparsity pattern");
         assert_eq!(row_idx, row_idx2, "fixture must keep the same sparsity pattern");
 
-        let num2 = refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &num1).unwrap();
+        let mut scratch = RefactorScratch::new(n);
+        assert!(refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &mut num, &mut scratch));
 
         let b = vec![1.0, -2.0, 0.5, 3.0, -1.0];
-        let x = solve(&sym, &num2, None, &b);
+        let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &updated), &b);
         for i in 0..n {
             assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
@@ -224,12 +283,13 @@ mod tests {
         let (col_ptr, row_idx, values) = to_csc(n, &base);
         let sym = analyze(n, &col_ptr, &row_idx);
         let mut num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
+        let mut scratch = RefactorScratch::new(n);
 
         for trial in 0..5 {
             let scale = 1.0 + trial as f64 * 0.3;
             let updated: Vec<(usize, usize, f64)> = base.iter().map(|&(r, c, v)| (r, c, v * scale)).collect();
             let (cp, ri, vals) = to_csc(n, &updated);
-            num = refactor(n, &cp, &ri, &vals, &sym, &num).unwrap();
+            assert!(refactor(n, &cp, &ri, &vals, &sym, &mut num, &mut scratch), "trial {trial}");
 
             let b = vec![1.0, 2.0, -1.0, 0.5];
             let x = solve(&sym, &num, None, &b);
@@ -287,16 +347,19 @@ mod tests {
             let entries1 = make_values(&mut next_f64);
             let (col_ptr, row_idx, values) = to_csc(n, &entries1);
             let sym = analyze(n, &col_ptr, &row_idx);
-            let num1 = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3)
+            let mut num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3)
                 .unwrap_or_else(|| panic!("trial {trial} (n={n}): unexpectedly singular (factor)"));
+            let mut scratch = RefactorScratch::new(n);
 
             let entries2 = make_values(&mut next_f64);
             let (col_ptr2, row_idx2, values2) = to_csc(n, &entries2);
-            let num2 = refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &num1)
-                .unwrap_or_else(|| panic!("trial {trial} (n={n}): unexpectedly singular (refactor)"));
+            assert!(
+                refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &mut num, &mut scratch),
+                "trial {trial} (n={n}): unexpectedly singular (refactor)"
+            );
 
             let b: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.3).collect();
-            let rust_x = solve(&sym, &num2, None, &b);
+            let rust_x = solve(&sym, &num, None, &b);
 
             let mut klu_sys = crate::sparse_klu::KluRealSystem::new(n, &entries1).unwrap();
             let _ = klu_sys.factor_and_solve(&entries1, &b).unwrap();

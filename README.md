@@ -177,20 +177,26 @@ running the power-grid-model comparison from the section above):
 
 | Nodes | Scalar | Block | Klu | KluNative | PGM (warm) |
 |---|---|---|---|---|---|
-| 192 | 1.50 ms | 0.67 ms | 0.45 ms | 0.98 ms | 0.42 ms |
-| 1,003 | 8.38 ms | 3.15 ms | 2.47 ms | 5.35 ms | 0.93 ms |
-| 2,605 | 21.67 ms | 8.10 ms | 6.71 ms | 13.69 ms | 2.49 ms |
+| 192 | 1.50 ms | 0.67 ms | 0.45 ms | 0.48 ms | 0.42 ms |
+| 1,003 | 8.38 ms | 3.15 ms | 2.47 ms | 2.68 ms | 0.93 ms |
+| 2,605 | 21.67 ms | 8.10 ms | 6.71 ms | 7.13 ms | 2.49 ms |
 
 All four gridoxide backends produce identical converged voltages at every scale — these are purely
-performance comparisons, not correctness trade-offs. `KluNative` lands consistently around 2x slower than
-`Klu` (the same algorithm, but linked as vendored C via FFI instead of translated to Rust) across this whole
-range of scales — likely the cost of `klu_native::kernel`'s per-column `Vec<Vec<(usize, f64)>>` storage
-(chosen for safety/clarity over C's packed flat buffer, see that module's own doc comment) rather than
-anything algorithmic, though this hasn't been profiled to confirm. PGM is clearly faster than any gridoxide
-backend on *this* synthetic radial distribution/LV topology, even with gridoxide's own factorization reuse
-now doing the same warm-solve trick PGM's own `PowerGridModel` does — a real, standing gap, not one this
-project has closed. (Interestingly, that gap doesn't hold universally: on the real-world
-*transmission*-topology grids in the next benchmark, gridoxide's `Klu` backend is frequently faster than
+performance comparisons, not correctness trade-offs. `KluNative` now lands close to `Klu` (1.06-1.15x) across
+this whole range of scales — down from an earlier version of this port that ran a consistent ~2x slower.
+`perf`-profiling traced that gap to allocator churn, not anything algorithmic: `kernel::refactor_block`
+allocated two new `Vec`s per column on *every* Newton iteration's refactor (tens of millions of allocations
+across a timed benchmark run on the larger real-world cases below), where real KLU's own `klu_refactor.c`
+overwrites one already-allocated buffer in place and allocates nothing at all during a refactor. Rewriting
+`refactor_block`/`refactor::refactor` to mutate the existing factorization in place, backed by a
+`RefactorScratch` buffer `KluNativeSystem` reuses across every solve, eliminated nearly all of that churn —
+see `src/klu_native/kernel.rs`'s `refactor_block_in_place` doc comment and `scripts/bench/README.md`'s
+"Benchmark against real power-system test-case grids" section for the full before/after profiling story.
+PGM is clearly faster than any gridoxide backend on *this* synthetic radial distribution/LV topology, even
+with gridoxide's own factorization reuse now doing the same warm-solve trick PGM's own `PowerGridModel`
+does — a real, standing gap, not one this project has closed. (Interestingly, that gap doesn't hold
+universally: on the real-world *transmission*-topology grids in the next benchmark, gridoxide's `Klu`
+backend is frequently faster than
 lightsim2grid's own KLU-backed C++ solver — the comparison depends on topology, not just implementation
 language.)
 
