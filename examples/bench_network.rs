@@ -10,9 +10,11 @@
 //! tens of milliseconds, too short to sample meaningfully.
 //!
 //! `backend` (default "scalar") selects `scalar` (the default `faer`-backed
-//! path), `block` (the experimental block-per-bus path, symmetric only), or
-//! `klu` (the experimental vendored-KLU path, only available when built with
-//! `--features klu`) for a head-to-head comparison on the same network.
+//! path), `block` (the experimental block-per-bus path, symmetric only),
+//! `klu` (the experimental vendored-KLU-via-FFI path, only available when
+//! built with `--features klu`), or `klu_native` (the experimental
+//! from-scratch Rust port of the same KLU algorithm, no feature flag needed)
+//! for a head-to-head comparison on the same network.
 //!
 //! `mode` (default "cold") selects `cold` (each repeat calls
 //! `newton_raphson_with_backend` fresh — no state carries over between
@@ -47,7 +49,8 @@ fn main() {
         "klu" => JacobianBackend::Klu,
         #[cfg(not(feature = "klu"))]
         "klu" => panic!("the 'klu' backend needs `cargo run --features klu ...` (see the README's \"Sparse solver\" section)"),
-        other => panic!("unknown backend '{other}', expected 'scalar', 'block', or 'klu'"),
+        "klu_native" => JacobianBackend::KluNative,
+        other => panic!("unknown backend '{other}', expected 'scalar', 'block', 'klu', or 'klu_native'"),
     };
     let mode_arg = args.next().unwrap_or_else(|| "cold".to_string());
     let warm = match mode_arg.as_str() {

@@ -34,6 +34,11 @@
 /// duplicate-rejection path is directly testable, mirroring the real
 /// `KLU_scale`'s behavior when `KLU_factor`/`KLU_refactor` pass their `W`
 /// workspace (which they always do).
+///
+/// Not yet called from `KluNativeSystem` — see `mod.rs`'s module doc
+/// comment on why row scaling isn't wired in yet (a documented, deliberate
+/// gap, not dead code left behind by accident).
+#[allow(dead_code)]
 pub fn scale(
     scale: i32,
     n: usize,

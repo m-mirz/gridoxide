@@ -38,12 +38,18 @@ pub struct Symbolic {
     /// Block boundaries from BTF: block `b` spans rows/columns
     /// `r[b]..r[b+1]` of the permuted matrix. `r.len() - 1` blocks total.
     pub r: Vec<usize>,
-    /// Per-block estimate of nnz(L) (including the diagonal), from AMD's
-    /// own `Info[AMD_LNZ]` — used only to size the initial `Vec::with_
-    /// capacity` hint for that block's L/U columns in `kernel::factor_block`
-    /// (a non-load-bearing performance hint, unlike `amd_2.c`'s own use of
-    /// this same estimate to size a *fixed* shared buffer it cannot grow
-    /// cheaply).
+    /// Per-block estimate of nnz(L) (including the diagonal). In real KLU
+    /// (`klu_factor.c`'s own `Lnz[block]`), this sizes the initial
+    /// allocation for the block's shared LU buffer, since that buffer can't
+    /// grow cheaply. This port's `kernel::factor_block` uses
+    /// `Vec<Vec<(usize, f64)>>` instead (see `kernel.rs`'s module doc
+    /// comment), whose per-column `Vec::push` growth makes that upfront
+    /// sizing purely optional -- so `lnz` is computed (matching
+    /// `analyze_worker`'s own formula) but not currently consumed anywhere.
+    /// Kept on `Symbolic` rather than dropped outright since it's cheap to
+    /// compute and documents what real KLU derives it for, should a future
+    /// capacity-hint optimization want it.
+    #[allow(dead_code)]
     pub lnz: Vec<f64>,
 }
 
