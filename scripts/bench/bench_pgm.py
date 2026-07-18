@@ -8,6 +8,21 @@ Usage: python3 bench_pgm.py <input.json>
 Requires the `power-grid-model` package (a prebuilt wheel, no C++ build
 needed): `pip install power-grid-model` (in a venv, e.g. `python3 -m venv
 .venv && .venv/bin/pip install power-grid-model`).
+
+Calls the private `_calculate_power_flow` (not the public `calculate_power_flow`)
+with `experimental_features="enabled"`, deliberately: since `matpower_to_pgm.py`
+started writing real `q_min`/`q_max` onto `voltage_regulator` (see that script's
+docstring), every one of these input files now trips PGM's own
+`ExperimentalFeature` error ("Voltage Regulator with Qmin/Qmax limits is an
+experimental feature") when run through the public API — confirmed directly
+(installed version 1.13.120) that `experimental_features` is a real parameter
+of `_calculate_power_flow` but the public `calculate_power_flow` wrapper never
+forwards it, so there is currently no supported way to opt in other than
+calling the private method. This reproduces the exact same converged voltages
+the public API produced before `matpower_to_pgm.py` started including Q-limits
+(`case14`: `u_pu` 1.01/1.09, matching `scripts/bench/README.md`'s own footnote) —
+confirmed directly, not assumed. Revisit once a future power-grid-model release
+stabilizes this and threads the flag through the public API.
 """
 import sys
 import time
@@ -27,13 +42,17 @@ t1 = time.perf_counter()
 print(f"model construction: {(t1 - t0) * 1e3:.3f} ms", file=sys.stderr)
 
 # Warm-up (first-call overhead), then timed runs.
-model.calculate_power_flow(calculation_method=CalculationMethod.newton_raphson, symmetric=True)
+model._calculate_power_flow(  # noqa: SLF001
+    calculation_method=CalculationMethod.newton_raphson, symmetric=True, experimental_features="enabled"
+)
 
 n_node = len(dataset["node"])
 times = []
 for _ in range(5):
     t0 = time.perf_counter()
-    result = model.calculate_power_flow(calculation_method=CalculationMethod.newton_raphson, symmetric=True)
+    result = model._calculate_power_flow(  # noqa: SLF001
+        calculation_method=CalculationMethod.newton_raphson, symmetric=True, experimental_features="enabled"
+    )
     t1 = time.perf_counter()
     times.append(t1 - t0)
 
@@ -49,6 +68,8 @@ print(f"u_pu min/max = {u_pu.min():.6f} / {u_pu.max():.6f}")
 # (parse + build + solve) figure.
 t0 = time.perf_counter()
 model2 = PowerGridModel(dataset)
-model2.calculate_power_flow(calculation_method=CalculationMethod.newton_raphson, symmetric=True)
+model2._calculate_power_flow(  # noqa: SLF001
+    calculation_method=CalculationMethod.newton_raphson, symmetric=True, experimental_features="enabled"
+)
 t1 = time.perf_counter()
 print(f"cold (construct+calc): {(t1 - t0) * 1e3:.3f} ms")
