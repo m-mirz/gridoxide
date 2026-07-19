@@ -3,8 +3,9 @@
 matrix format, or `.m`, MATPOWER's plain-text case-file format) directly
 into PGM-format JSON. This is run_case_suite.py's converter for all 12 of
 its real power-system test-case grids — see cases.py for the case list and
-the `.m` filename for each (fetched from
-https://github.com/m-mirz/matpower/tree/master/data).
+the `.m` filename for each (vendored in the `benchmark-grids` git submodule,
+`tests/data/benchmark-grids/matpower/` — see that submodule's own
+PROVENANCE.md for where they originally come from).
 
 Usage: python3 matpower_to_pgm.py <input.mat-or-.m> <output.json>
 

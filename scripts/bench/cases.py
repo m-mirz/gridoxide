@@ -9,11 +9,12 @@ and is excluded here for the same reason.
 
 Each name is also a function in `pandapower.networks` (used by
 bench_lightsim2grid.py, since lightsim2grid needs a pandapower net directly)
-and, via MATPOWER_FILENAMES, a case file fetched from
-https://github.com/m-mirz/matpower/tree/master/data (used by
-matpower_to_pgm.py — see that script's docstring for why gridoxide's PGM
-JSON is derived directly from MATPOWER's own case files rather than through
-pandapower's MATPOWER importer).
+and, via MATPOWER_FILENAMES, a case file vendored in the `benchmark-grids`
+git submodule (`tests/data/benchmark-grids/matpower/`, originally from
+https://github.com/m-mirz/matpower/tree/master/data — see that submodule's
+own PROVENANCE.md) used by matpower_to_pgm.py — see that script's docstring
+for why gridoxide's PGM JSON is derived directly from MATPOWER's own case
+files rather than through pandapower's MATPOWER importer.
 """
 
 CASE_NAMES = [

@@ -152,7 +152,8 @@ free there with no extra conversion step (see bench_veragrid.py). PGM's `voltage
 voltage magnitude.
 
 gridoxide's and PGM's side are converted straight from MATPOWER's own `.m` case files (`matpower_to_pgm.py`,
-fetched from a fork of MATPOWER's repo, https://github.com/m-mirz/matpower/tree/master/data), not through
+vendored in the `benchmark-grids` git submodule at `tests/data/benchmark-grids/matpower/` — see that
+submodule's own `PROVENANCE.md` for exactly where they come from and licensing), not through
 pandapower's own MATPOWER importer. This isn't cosmetic: three of these twelve cases (`case1888rte`,
 `case6495rte`, `case6515rte`) would not converge at all through pandapower's importer, root-caused by
 comparing directly against `references/powsybl-open-loadflow` via `pypowsybl` — pandapower's importer assigns
@@ -183,6 +184,7 @@ and timing repeated `solve()`/`ac_pf()`/`calculate_power_flow()`/`runpp()` calls
 `time.perf_counter()`.
 
 ```bash
+git submodule update --init tests/data/benchmark-grids
 python3 -m venv .venv-case-suite
 .venv-case-suite/bin/pip install maturin numpy scipy power-grid-model pandapower lightsim2grid pypowsybl \
     VeraGridEngine
@@ -190,8 +192,9 @@ VIRTUAL_ENV=.venv-case-suite .venv-case-suite/bin/maturin develop --release --fe
 .venv-case-suite/bin/python3 scripts/bench/run_case_suite.py --python .venv-case-suite/bin/python3
 ```
 
-This loops all 12 cases, fetching each MATPOWER `.m` file and converting it to PGM JSON on first use (cached
-under `scripts/bench/.case-cache/`, gitignored — delete it to force re-fetch/reconversion), running
+This loops all 12 cases, reading each MATPOWER `.m` file from the `benchmark-grids` submodule and converting
+it to PGM JSON on first use (cached under `scripts/bench/.case-cache/`, gitignored — delete it to force
+reconversion), running
 gridoxide's `scalar`, `block`, `klu`, `klu_native`, and `pardiso` backends (`pardiso` needs the extension
 built with `--features python,pardiso` and `MKLROOT` set — see "Python bindings" above; otherwise every
 `pardiso` cell reports its own build/load error rather than a timing), PGM, lightsim2grid with

@@ -54,7 +54,6 @@ import argparse
 import re
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
 from cases import CASE_NAMES, matpower_filename
@@ -68,27 +67,30 @@ LS2G_SCRIPT = SCRIPT_DIR / "bench_lightsim2grid.py"
 PYPOWSYBL_SCRIPT = SCRIPT_DIR / "bench_pypowsybl.py"
 PANDAPOWER_SCRIPT = SCRIPT_DIR / "bench_pandapower.py"
 VERAGRID_SCRIPT = SCRIPT_DIR / "bench_veragrid.py"
-MATPOWER_RAW_URL = "https://raw.githubusercontent.com/m-mirz/matpower/master/data/{filename}"
+# Vendored via the benchmark-grids git submodule (tests/data/benchmark-grids)
+# rather than fetched from a live URL at benchmark time — see that
+# submodule's own PROVENANCE.md for where these case files actually come
+# from and their licensing.
+MATPOWER_DIR = REPO_ROOT / "tests" / "data" / "benchmark-grids" / "matpower"
 
 MEAN_RE = re.compile(r"min=[\d.]+ms mean=([\d.]+)ms")
 NODES_RE = re.compile(r"nodes=(\d+)")
 
 
-def fetch_matpower_case(case_name: str, cache_dir: Path) -> tuple[Path | None, str | None]:
+def fetch_matpower_case(case_name: str) -> tuple[Path | None, str | None]:
     filename = matpower_filename(case_name)
-    m_path = cache_dir / filename
-    if m_path.exists():
-        return m_path, None
-    try:
-        urllib.request.urlretrieve(MATPOWER_RAW_URL.format(filename=filename), m_path)
-    except OSError as e:
-        return None, f"download failed: {e}"
+    m_path = MATPOWER_DIR / filename
+    if not m_path.exists():
+        return None, (
+            f"{m_path} not found — run "
+            "`git submodule update --init tests/data/benchmark-grids`"
+        )
     return m_path, None
 
 
 def convert_case(python: str, case_name: str, cache_dir: Path) -> tuple[Path | None, Path | None, str | None]:
     """Returns (matpower_path, pgm_json_path, error)."""
-    m_path, fetch_err = fetch_matpower_case(case_name, cache_dir)
+    m_path, fetch_err = fetch_matpower_case(case_name)
     if m_path is None:
         return None, None, fetch_err
     out_path = cache_dir / f"{case_name}.json"
