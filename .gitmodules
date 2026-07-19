@@ -1,3 +1,6 @@
 [submodule "tests/data/CGMES-Test-Configurations"]
 	path = tests/data/CGMES-Test-Configurations
 	url = https://github.com/m-mirz/CGMES-Test-Configurations.git
+[submodule "tests/data/benchmark-grids"]
+	path = tests/data/benchmark-grids
+	url = https://github.com/m-mirz/benchmark-grids.git
