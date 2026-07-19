@@ -1,0 +1,3 @@
+[submodule "tests/data/CGMES-Test-Configurations"]
+	path = tests/data/CGMES-Test-Configurations
+	url = https://github.com/m-mirz/CGMES-Test-Configurations.git

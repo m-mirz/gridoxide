@@ -97,3 +97,8 @@ required-features = ["pardiso"]
 name = "cgmes_smoke_test"
 path = "tests/cgmes_smoke_test.rs"
 required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_microgrid_be_test"
+path = "tests/cgmes_microgrid_be_test.rs"
+required-features = ["cgmes"]
