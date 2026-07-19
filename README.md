@@ -217,6 +217,43 @@ section for the full 12-case results table, per-case `Pardiso`/`VeraGrid` number
 file is the single source of truth for every benchmark number in this project; this README only summarizes
 the qualitative findings.
 
+## CGMES input (optional)
+
+`cargo build --features cgmes` builds `src/cgmes.rs`, a third network-input path (alongside the native JSON
+format and PGM-JSON) reading CGMES (Common Grid Model Exchange Standard) RDF/XML — the IEC 61970/61968
+interchange format ENTSO-E and TSOs use. It's built on [cimoxide](https://github.com/m-mirz/cimoxide) (a
+separate Rust project by the same author) for RDF/XML decoding, via a pinned git dependency rather than
+crates.io — see `CIMOXIDE_PROVENANCE.md` for why. Opt-in since most gridoxide users only need PGM-JSON input
+and shouldn't pay for `cimdecoder`'s own dependency tree or build time.
+
+```rust
+use gridoxide::cgmes::{load_profiles, cgmes_to_buses_and_branches};
+use gridoxide::network::{build_ybus, stamp_shunts};
+use gridoxide::run_power_flow_analysis_from_ybus;
+
+let ds = load_profiles(&[&eq_path, &ssh_path, &tp_path, &sv_path])?;
+let (buses, lines, transformers, shunts) = cgmes_to_buses_and_branches(&ds, 100e6)?;
+let mut ybus = build_ybus(buses.len(), &lines, &transformers);
+stamp_shunts(&mut ybus, &shunts);
+let result = run_power_flow_analysis_from_ybus(buses, ybus);
+```
+
+Requires the TP profile (`TopologicalNode` is used directly as gridoxide's `Bus`, so switch-state topology
+processing is assumed already resolved upstream — the standard EQ+SSH+TP+SV "solved case" profile bundle) and
+an SV profile with a populated `TopologicalIsland.AngleRefTopologicalNode` (used as the slack bus). Handles
+`EnergyConsumer`/`EquivalentInjection` loads, `ACLineSegment`/`SeriesCompensator` lines, 2- and 3-winding
+`PowerTransformer`s (`RatioTapChanger` and `PhaseTapChangerAsymmetrical`/`Symmetrical`, the latter two
+formulas cross-checked against `references/powsybl-core`'s own CGMES importer source), `LinearShuntCompensator`/`NonlinearShuntCompensator`
+shunts, and `SynchronousMachine`+`RegulatingControl`-driven PV buses. Validated end-to-end against ENTSO-E's
+real MicroGrid-BE-MAS conformance case (`tests/cgmes_microgrid_be_test.rs`, fixture referenced via a git
+submodule — see `tests/data/cgmes/README.md`) — converges cleanly and matches the case's own published SV
+voltages within a few percent, a gap cross-checked against `pypowsybl`'s own independent CGMES import + AC
+load flow on the same case (which shows a comparable deviation from the same published values), confirming
+it's inherent to solving a boundary-truncated area file with fixed-injection equivalents rather than a
+correctness bug — aside from one known, documented limitation: `types::Line` has no tap ratio, so it can't
+absorb the small nominal-voltage mismatch CGMES explicitly allows at boundary tie points. **Not built or
+tested in CI** — same local/manual-verification posture as `klu`/`pardiso`.
+
 ## Profiling
 
 For profiling with perf, set
