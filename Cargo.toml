@@ -27,6 +27,12 @@ num-complex = { version = "0.4.6", features = ["serde"] }
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Neither crate is published to crates.io, so this pins the `vendor/gridoxide`
+# branch/tag of cimoxide (https://github.com/m-mirz/cimoxide) — a fork of
+# `main` with its normally-gitignored generated sources committed, created
+# specifically to make this dependency possible. See CIMOXIDE_PROVENANCE.md.
+cimdecoder = { git = "https://github.com/m-mirz/cimoxide", tag = "v0.1.1-gridoxide.1", optional = true }
+cimstructs = { git = "https://github.com/m-mirz/cimoxide", tag = "v0.1.1-gridoxide.1", optional = true }
 
 [build-dependencies]
 cc = { version = "1.0", optional = true }
@@ -68,6 +74,14 @@ python = ["dep:pyo3"]
 # /opt/intel/oneapi/setvars.sh`). Not built or tested in CI — no CI runner
 # has MKL installed — so this is a local/manual-verification-only backend.
 pardiso = ["dep:bindgen"]
+# Builds CGMES (Common Grid Model Exchange Standard) RDF/XML dataset support
+# (src/cgmes.rs), converting a CGMES EQ+SSH+TP+SV profile set into gridoxide's
+# own Bus/Line/Transformer model. Depends on cimoxide's cimdecoder/cimstructs
+# crates via a pinned git tag (see CIMOXIDE_PROVENANCE.md for why — they
+# aren't published to crates.io). Opt-in since most gridoxide users only need
+# PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
+# build time.
+cgmes = ["dep:cimdecoder", "dep:cimstructs"]
 
 [[test]]
 name = "klu_jacobian_test"
@@ -78,3 +92,8 @@ required-features = ["klu"]
 name = "pardiso_jacobian_test"
 path = "tests/pardiso_jacobian_test.rs"
 required-features = ["pardiso"]
+
+[[test]]
+name = "cgmes_smoke_test"
+path = "tests/cgmes_smoke_test.rs"
+required-features = ["cgmes"]
