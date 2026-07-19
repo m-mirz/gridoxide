@@ -189,6 +189,25 @@ pub fn tap_ratio_from_voltages(u_num: f64, u_denom: f64, clock: i32) -> Complex<
     Complex::from_polar(u_num / u_denom, clock as f64 * std::f64::consts::PI / 6.0)
 }
 
+/// The effective shunt admittance seen at a half-open transformer's
+/// connected end: `y_shunt/2 + 1/(1/y_series + 2/y_shunt)`. Mathematically,
+/// this expression's limit as `y_shunt → 0` is exactly `0` (with no
+/// magnetizing branch at all, opening one end truly isolates the connected
+/// side — there's no other path for current to flow), but literal complex
+/// division by `y_shunt = 0+0j` hits a `0/0` pattern and evaluates to `NaN`
+/// instead of that limit. `y_shunt == 0` exactly is common in practice
+/// (magnetizing admittance is often left unspecified/zero, e.g. in real
+/// CGMES transformer data far more often than gridoxide's own PGM test
+/// fixtures happen to combine with a half-open status), so this needs an
+/// explicit guard, not just trusting the formula.
+fn half_open_branch_shunt(y_series: Complex<f64>, y_shunt: Complex<f64>) -> Complex<f64> {
+    if y_shunt == Complex::new(0.0, 0.0) {
+        return Complex::new(0.0, 0.0);
+    }
+    let one = Complex::new(1.0, 0.0);
+    y_shunt * 0.5 + one / (one / y_series + Complex::new(2.0, 0.0) / y_shunt)
+}
+
 /// Computes the four branch admittance entries `[yff, yft, ytf, ytt]` for a
 /// two-winding transformer branch. Implements PGM's π-equivalent model:
 /// `y_shunt` is split equally between both terminals. The complex tap ratio
@@ -205,7 +224,6 @@ pub fn branch_calc_param(
     from_status: u8, to_status: u8,
 ) -> [Complex<f64>; 4] {
     let zero = Complex::new(0.0, 0.0);
-    let one = Complex::new(1.0, 0.0);
     let k = tap.norm();
     match (from_status, to_status) {
         (1, 1) => {
@@ -213,13 +231,11 @@ pub fn branch_calc_param(
             [y_diag / (k * k), -y_series / tap.conj(), -y_series / tap, y_diag]
         }
         (1, 0) => {
-            let branch_shunt = y_shunt * 0.5
-                + one / (one / y_series + Complex::new(2.0, 0.0) / y_shunt);
+            let branch_shunt = half_open_branch_shunt(y_series, y_shunt);
             [branch_shunt / (k * k), zero, zero, zero]
         }
         (0, 1) => {
-            let branch_shunt = y_shunt * 0.5
-                + one / (one / y_series + Complex::new(2.0, 0.0) / y_shunt);
+            let branch_shunt = half_open_branch_shunt(y_series, y_shunt);
             [zero, zero, zero, branch_shunt]
         }
         _ => [zero, zero, zero, zero],

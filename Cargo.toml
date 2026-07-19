@@ -102,3 +102,8 @@ required-features = ["cgmes"]
 name = "cgmes_microgrid_be_test"
 path = "tests/cgmes_microgrid_be_test.rs"
 required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_realgrid_test"
+path = "tests/cgmes_realgrid_test.rs"
+required-features = ["cgmes"]

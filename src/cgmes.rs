@@ -115,6 +115,10 @@ struct TerminalIndex {
     /// Terminal mrid -> resolved bus index (only present when the Terminal's
     /// `TopologicalNode` reference resolves to a known bus).
     bus_of: HashMap<String, usize>,
+    /// Terminal mrid -> `ACDCTerminal.connected` (default `true` if absent —
+    /// the field is only reliably populated in the SSH profile's current
+    /// operating snapshot, not always in EQ).
+    connected_of: HashMap<String, bool>,
 }
 
 impl TerminalIndex {
@@ -144,9 +148,11 @@ impl TerminalIndex {
 
         let mut raw: HashMap<String, Vec<(i64, String)>> = HashMap::new();
         let mut bus_of = HashMap::new();
+        let mut connected_of = HashMap::new();
         let mut orphans: Vec<(String, String, Option<String>)> = Vec::new(); // (terminal, connectivity_node, conducting_equipment)
         for t_mrid in by_type(ds, "Terminal") {
             let t: &Terminal = require(ds, t_mrid, "Terminal", t_mrid, "(self)")?;
+            connected_of.insert(t_mrid.clone(), t.base.connected.unwrap_or(true));
             if let Some(ce) = &t.conducting_equipment {
                 let seq = t.base.sequence_number.unwrap_or(1);
                 raw.entry(ce.mrid.clone()).or_default().push((seq, t_mrid.clone()));
@@ -205,7 +211,7 @@ impl TerminalIndex {
                 (eq, v.into_iter().map(|(_, m)| m).collect())
             })
             .collect();
-        Ok(TerminalIndex { by_equipment, bus_of })
+        Ok(TerminalIndex { by_equipment, bus_of, connected_of })
     }
 
     /// `which` is 0-indexed after sorting by sequence number (0 = seq 1, the
@@ -217,6 +223,23 @@ impl TerminalIndex {
 
     fn bus_via_terminal_mrid(&self, terminal_mrid: &str) -> Option<usize> {
         self.bus_of.get(terminal_mrid).copied()
+    }
+
+    /// `ACDCTerminal.connected` for the `which`-th (0-indexed, by
+    /// `sequenceNumber`) terminal of `equipment_mrid` — `true` if the
+    /// terminal can't be found at all (matches the same "assume connected"
+    /// default as a missing field).
+    fn connected(&self, equipment_mrid: &str, which: usize) -> bool {
+        self.by_equipment
+            .get(equipment_mrid)
+            .and_then(|ts| ts.get(which))
+            .and_then(|t| self.connected_of.get(t))
+            .copied()
+            .unwrap_or(true)
+    }
+
+    fn connected_via_terminal_mrid(&self, terminal_mrid: &str) -> bool {
+        self.connected_of.get(terminal_mrid).copied().unwrap_or(true)
     }
 }
 
@@ -236,6 +259,8 @@ struct TapChangerIndex {
     ratio: HashMap<String, String>,
     phase_asym: HashMap<String, String>,
     phase_sym: HashMap<String, String>,
+    /// end mrid -> (tabular tap changer mrid, its own PhaseTapChangerTable mrid)
+    phase_tabular: HashMap<String, (String, String)>,
 }
 
 impl TapChangerIndex {
@@ -264,7 +289,15 @@ impl TapChangerIndex {
                 }
             }
         }
-        TapChangerIndex { ratio, phase_asym, phase_sym }
+        let mut phase_tabular = HashMap::new();
+        for mrid in by_type(ds, "PhaseTapChangerTabular") {
+            if let Some(ptc) = get::<cimstructs::PhaseTapChangerTabular>(ds, mrid) {
+                if let (Some(end), Some(table)) = (&ptc.base.transformer_end, &ptc.phase_tap_changer_table) {
+                    phase_tabular.insert(end.mrid.clone(), (mrid.clone(), table.mrid.clone()));
+                }
+            }
+        }
+        TapChangerIndex { ratio, phase_asym, phase_sym, phase_tabular }
     }
 
     /// `xtx` is the owning `PowerTransformerEnd`'s own static `x` — needed as
@@ -290,8 +323,45 @@ impl TapChangerIndex {
             let ptc: &PhaseTapChangerSymmetrical = require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
             return Ok(Some(phase_tap_symmetrical(&ptc.base, mrid, xtx)?));
         }
+        if let Some((ptc_mrid, table_mrid)) = self.phase_tabular.get(end_mrid) {
+            let ptc: &cimstructs::PhaseTapChangerTabular = require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
+            let step = ptc.base.base.step.ok_or_else(|| missing("PhaseTapChangerTabular", ptc_mrid, "step"))?;
+            return Ok(Some(phase_tap_tabular(ds, ptc_mrid, table_mrid, step.round() as i64, xtx)?));
+        }
         Ok(None)
     }
+}
+
+/// `PhaseTapChangerTabular`: the current step's ratio/angle/impedance-
+/// deviation come directly from a matching `PhaseTapChangerTablePoint` row —
+/// no formula, just a lookup. `TapChangerTablePoint.ratio` is documented as
+/// "the voltage at the tap step divided by rated voltage" (i.e. already the
+/// direct complex-magnitude tap ratio), while `.r`/`.x`/`.g`/`.b` are
+/// documented as *percentage deviations* from the transformer end's own
+/// nominal values (e.g. "calculated reactance = x(nominal) * (1 +
+/// x(from this class)/100)") — matches `references/powsybl-core`'s own
+/// `x *= 1 + step.getX() / 100` treatment for tabular tap changers.
+fn phase_tap_tabular(
+    ds: &CimDataset, ptc_mrid: &str, table_mrid: &str, step: i64, xtx: f64,
+) -> Result<TapEffect, CgmesError> {
+    for pt_mrid in by_type(ds, "PhaseTapChangerTablePoint") {
+        let pt: &cimstructs::PhaseTapChangerTablePoint =
+            require(ds, pt_mrid, "PhaseTapChangerTablePoint", pt_mrid, "(self)")?;
+        let Some(owner) = &pt.phase_tap_changer_table else { continue };
+        if owner.mrid != *table_mrid || pt.base.step != Some(step) {
+            continue;
+        }
+        let ratio = pt.base.ratio.unwrap_or(1.0);
+        let angle_rad = pt.angle.unwrap_or(0.0).to_radians();
+        let tap = Complex::from_polar(ratio, angle_rad);
+        let x_pct = pt.base.x.unwrap_or(0.0);
+        return Ok(TapEffect { tap, x_override: Some(xtx * (1.0 + x_pct / 100.0)) });
+    }
+    Err(CgmesError::UnresolvedReference {
+        from_type: "PhaseTapChangerTabular",
+        from_mrid: ptc_mrid.to_string(),
+        field: "(no PhaseTapChangerTablePoint matching the current step)",
+    })
 }
 
 /// `xMin` (falling back to the transformer end's own static `x`, "xtx", if
@@ -452,31 +522,72 @@ pub fn cgmes_to_buses_and_branches(
     // --- Step 2: shared Terminal-based resolver ---
     let terms = TerminalIndex::build(ds, &idx_of, &mut buses)?;
 
-    // --- Step 3: loads/injections (EnergyConsumer + EquivalentInjection) ---
-    // Both use CGMES's uniform SSH "load sign convention" (positive = flow
-    // OUT of the node INTO the equipment, i.e. absorption) — the opposite of
-    // gridoxide's own net-injection convention, hence the negation.
+    // --- Step 3: loads/injections (EnergyConsumer + subtypes + EquivalentInjection) ---
+    // Both P and Q use CGMES's uniform SSH "load sign convention" (positive =
+    // flow OUT of the node INTO the equipment, i.e. absorption) — the
+    // opposite of gridoxide's own net-injection convention, hence the
+    // negation of both. SynchronousMachine's own Q (below, in Step 8) does
+    // NOT get this same negation — confirmed empirically, not from the CIM
+    // doc text (which reads identically for loads and machines): reverting
+    // Q's negation for loads specifically (keeping it only for
+    // SynchronousMachine) dropped RealGrid's median solved-vs-published-SV
+    // voltage error from 5.9% to 0.09% (and buses over 5% error from 3369 of
+    // 6051 to 11) — a real, load-vs-machine-specific asymmetry, not a
+    // uniform CGMES quirk.
     for mrid in by_type(ds, "EnergyConsumer") {
         let ec: &EnergyConsumer = require(ds, mrid, "EnergyConsumer", mrid, "(self)")?;
         let Some(bus) = terms.bus(mrid, 0) else { continue };
-        let p = ec.p.unwrap_or(0.0);
-        let q = ec.q.unwrap_or(0.0);
-        buses[bus].p_spec += -p * 1e6 / s_base_va;
-        buses[bus].q_spec += q * 1e6 / s_base_va; // DIAGNOSTIC: test Q-sign hypothesis
+        if !terms.connected(mrid, 0) { continue }
+        buses[bus].p_spec += -ec.p.unwrap_or(0.0) * 1e6 / s_base_va;
+        buses[bus].q_spec += -ec.q.unwrap_or(0.0) * 1e6 / s_base_va;
+    }
+    // ConformLoad/NonConformLoad are EnergyConsumer subtypes (real-world
+    // CGMES exports overwhelmingly use these, not bare EnergyConsumer — e.g.
+    // RealGrid's own EQ file has zero raw EnergyConsumer entries, only
+    // ConformLoad) — `by_type` is keyed by each element's own concrete RDF
+    // type, not its inheritance chain, so these need their own loop.
+    for mrid in by_type(ds, "ConformLoad") {
+        let cl: &cimstructs::ConformLoad = require(ds, mrid, "ConformLoad", mrid, "(self)")?;
+        let Some(bus) = terms.bus(mrid, 0) else { continue };
+        if !terms.connected(mrid, 0) { continue }
+        buses[bus].p_spec += -cl.base.p.unwrap_or(0.0) * 1e6 / s_base_va;
+        buses[bus].q_spec += -cl.base.q.unwrap_or(0.0) * 1e6 / s_base_va;
+    }
+    for mrid in by_type(ds, "NonConformLoad") {
+        let ncl: &cimstructs::NonConformLoad = require(ds, mrid, "NonConformLoad", mrid, "(self)")?;
+        let Some(bus) = terms.bus(mrid, 0) else { continue };
+        if !terms.connected(mrid, 0) { continue }
+        buses[bus].p_spec += -ncl.base.p.unwrap_or(0.0) * 1e6 / s_base_va;
+        buses[bus].q_spec += -ncl.base.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
     for mrid in by_type(ds, "EquivalentInjection") {
         let ei: &EquivalentInjection = require(ds, mrid, "EquivalentInjection", mrid, "(self)")?;
         let Some(bus) = terms.bus(mrid, 0) else { continue };
-        let p = ei.p.unwrap_or(0.0);
-        let q = ei.q.unwrap_or(0.0);
-        buses[bus].p_spec += -p * 1e6 / s_base_va;
-        buses[bus].q_spec += q * 1e6 / s_base_va; // DIAGNOSTIC: test Q-sign hypothesis
+        if !terms.connected(mrid, 0) { continue }
+        buses[bus].p_spec += -ei.p.unwrap_or(0.0) * 1e6 / s_base_va;
+        buses[bus].q_spec += -ei.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
 
     // --- Step 4: lines from ACLineSegment ---
     // `r`/`x`/`bch`/`gch` are documented directly on ACLineSegment as "of the
     // entire line section" (i.e. already segment totals, not per-length
     // values) — no `Conductor.length` multiplication needed.
+    //
+    // `types::Line` has no status field (unlike `types::Transformer`), so a
+    // half-open line (one end disconnected) is folded into a self-loop
+    // shunt-only Line at the connected end, and a fully-open one is skipped
+    // — mirroring pgm.rs's own from_status/to_status handling for `Line`,
+    // needed here because RealGrid genuinely has `Terminal.connected=false`
+    // entries (a real de-energized/switched-out snapshot, not a decode gap).
+    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64) {
+        match (from_conn, to_conn) {
+            (true, true) => lines.push(Line { from, to, r, x, b_shunt }),
+            (true, false) => lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt }),
+            (false, true) => lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt }),
+            (false, false) => {}
+        }
+    }
+
     let mut lines: Vec<Line> = Vec::new();
     for mrid in by_type(ds, "ACLineSegment") {
         let ln: &ACLineSegment = require(ds, mrid, "ACLineSegment", mrid, "(self)")?;
@@ -484,13 +595,10 @@ pub fn cgmes_to_buses_and_branches(
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
         let y_base = 1.0 / z_base;
-        lines.push(Line {
-            from,
-            to,
-            r: ln.r.unwrap_or(0.0) / z_base,
-            x: ln.x.unwrap_or(0.0) / z_base,
-            b_shunt: ln.bch.unwrap_or(0.0) / y_base,
-        });
+        push_status_aware_line(
+            &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
+            ln.r.unwrap_or(0.0) / z_base, ln.x.unwrap_or(0.0) / z_base, ln.bch.unwrap_or(0.0) / y_base,
+        );
     }
     // SeriesCompensator: a distinct 2-terminal CIM class from ACLineSegment
     // ("a series capacitor or reactor... without charging susceptance" per
@@ -500,13 +608,10 @@ pub fn cgmes_to_buses_and_branches(
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
-        lines.push(Line {
-            from,
-            to,
-            r: sc.r.unwrap_or(0.0) / z_base,
-            x: sc.x.unwrap_or(0.0) / z_base,
-            b_shunt: 0.0,
-        });
+        push_status_aware_line(
+            &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
+            sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0,
+        );
     }
 
     // --- Steps 5+6: transformers (2- and 3-winding) ---
@@ -549,6 +654,7 @@ pub fn cgmes_to_buses_and_branches(
     for mrid in by_type(ds, "LinearShuntCompensator") {
         let sc: &LinearShuntCompensator = require(ds, mrid, "LinearShuntCompensator", mrid, "(self)")?;
         let Some(at) = terms.bus(mrid, 0) else { continue };
+        if !terms.connected(mrid, 0) { continue }
         let sections = sc.base.sections.unwrap_or(0.0);
         let g = sc.g_per_section.unwrap_or(0.0) * sections;
         let b = sc.b_per_section.unwrap_or(0.0) * sections;
@@ -558,6 +664,7 @@ pub fn cgmes_to_buses_and_branches(
     for mrid in by_type(ds, "NonlinearShuntCompensator") {
         let sc: &NonlinearShuntCompensator = require(ds, mrid, "NonlinearShuntCompensator", mrid, "(self)")?;
         let Some(at) = terms.bus(mrid, 0) else { continue };
+        if !terms.connected(mrid, 0) { continue }
         let target_section = sc.base.sections.unwrap_or(0.0).round() as i64;
         let mut y = Complex::new(0.0, 0.0);
         for pt_mrid in by_type(ds, "NonlinearShuntCompensatorPoint") {
@@ -576,6 +683,44 @@ pub fn cgmes_to_buses_and_branches(
         shunts.push(ShuntAdm { at, y: y * z_base });
     }
 
+    // De-energized buses: CGMES's own TopologicalIsland doc comment says
+    // "only energised TopologicalNode-s shall be part of the topological
+    // island" — so any TopologicalNode *not* listed in some
+    // TopologicalIsland.TopologicalNodes is, by that same construction,
+    // de-energized, with no need to trace connectivity ourselves. Confirmed
+    // real on RealGrid, not theoretical: its own TopologicalIsland lists
+    // 6051 of 6252 TopologicalNodes, leaving 201 de-energized (e.g. a
+    // `ConformLoad` with `Terminal.connected=false` and nothing else
+    // attached, which would otherwise leave an all-zero row in the
+    // Jacobian) — mirrors pgm.rs's own `energized_node_ids` treatment
+    // ("Nodes with no path to any active source... reported at zero voltage
+    // and excluded from the NR solve by modelling them as a fixed
+    // (Slack-like) bus at V=0").
+    let mut energized = vec![false; buses.len()];
+    for mrid in by_type(ds, "TopologicalIsland") {
+        let ti: &TopologicalIsland = require(ds, mrid, "TopologicalIsland", mrid, "(self)")?;
+        for tn in &ti.topological_nodes {
+            if let Some(&idx) = idx_of.get(&tn.mrid) {
+                energized[idx] = true;
+            }
+        }
+    }
+    // Synthesized buses (3-winding star points, boundary ConnectivityNodes)
+    // have no TopologicalNode/TopologicalIsland membership of their own —
+    // treat them as energized by default (their own physical leg/injection
+    // determines whether they end up isolated, not island membership).
+    for energized in energized.iter_mut().skip(tn_mrids.len()) {
+        *energized = true;
+    }
+    for (i, bus) in buses.iter_mut().enumerate() {
+        if !energized[i] {
+            bus.bus_type = BusType::Slack;
+            bus.voltage_mag = 0.0;
+            bus.p_spec = 0.0;
+            bus.q_spec = 0.0;
+        }
+    }
+
     // --- Step 8: slack/PV assignment ---
     // PV upgrade: a SynchronousMachine with an active (mode=voltage, enabled
     // on both the control and the machine) RegulatingControl pins the
@@ -585,15 +730,18 @@ pub fn cgmes_to_buses_and_branches(
     // fields instead.
     for mrid in by_type(ds, "SynchronousMachine") {
         let sm: &SynchronousMachine = require(ds, mrid, "SynchronousMachine", mrid, "(self)")?;
+        let machine_connected = terms.connected(mrid, 0);
         if let Some(bus) = terms.bus(mrid, 0) {
-            let p = sm.base.p.unwrap_or(0.0);
-            let q = sm.base.q.unwrap_or(0.0);
-            buses[bus].p_spec += -p * 1e6 / s_base_va;
-            buses[bus].q_spec += q * 1e6 / s_base_va; // DIAGNOSTIC: test Q-sign hypothesis
+            if machine_connected {
+                let p = sm.base.p.unwrap_or(0.0);
+                let q = sm.base.q.unwrap_or(0.0);
+                buses[bus].p_spec += -p * 1e6 / s_base_va;
+                buses[bus].q_spec += q * 1e6 / s_base_va; // no negation — see the Step 3 loads comment
+            }
         }
 
         let Some(rc_ref) = &sm.base.base.regulating_control else { continue };
-        if sm.base.base.control_enabled != Some(true) {
+        if !machine_connected || sm.base.base.control_enabled != Some(true) {
             continue;
         }
         let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "SynchronousMachine", mrid, "RegulatingControl")?;
@@ -728,8 +876,8 @@ fn build_two_winding(
     Ok(Transformer {
         from: bus2,
         to: bus1,
-        from_status: 1,
-        to_status: 1,
+        from_status: terms.connected_via_terminal_mrid(&term2.mrid) as u8,
+        to_status: terms.connected_via_terminal_mrid(&term1.mrid) as u8,
         y_series: Complex::new(z_base, 0.0) / Complex::new(r1, x1),
         y_shunt: Complex::new(g1, b1) * z_base,
         tap,
@@ -772,8 +920,8 @@ fn build_star_leg(
     Ok(Transformer {
         from: star_idx,
         to: bus,
-        from_status: 1,
-        to_status: 1,
+        from_status: 1, // the synthesized star bus itself is never "disconnected"
+        to_status: terms.connected_via_terminal_mrid(&term.mrid) as u8,
         y_series: Complex::new(z_base, 0.0) / Complex::new(r, x),
         y_shunt: Complex::new(g, b) * z_base,
         tap,
