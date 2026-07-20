@@ -1,6 +1,11 @@
-//! PyO3 bindings — the `gridoxide` Python extension module. Only built via
-//! `maturin` (`maturin develop --features python`), never via a plain
-//! `cargo build`/`cargo test` — see the `python` feature's doc comment in
+//! PyO3 bindings, built into the private `gridoxide._gridoxide` compiled
+//! extension module and re-exported by `python/gridoxide/__init__.py` — this
+//! is a mixed Rust/Python maturin project (`pyproject.toml`'s
+//! `python-source = "python"` + `module-name = "gridoxide._gridoxide"`) so
+//! that `python/gridoxide/matpower.py` can ship alongside this compiled
+//! extension in the same installed package. Only built via `maturin`
+//! (`maturin develop --features python`), never via a plain `cargo
+//! build`/`cargo test` — see the `python` feature's doc comment in
 //! Cargo.toml for why.
 //!
 //! Mirrors `solver::PersistentSolver`'s "construct once per topology, call
@@ -158,8 +163,13 @@ impl PowerFlowModel {
     }
 }
 
+/// The extension module's Rust function name must match `pyproject.toml`'s
+/// `module-name = "gridoxide._gridoxide"` (its last dotted segment) — maturin
+/// links this as `PyInit__gridoxide`, loaded by `python/gridoxide/__init__.py`
+/// via `from ._gridoxide import PowerFlowModel`, not imported directly by
+/// end users.
 #[pymodule]
-fn gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     Ok(())
 }

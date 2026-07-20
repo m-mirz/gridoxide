@@ -6,15 +6,33 @@ build-backend = "maturin"
 name = "gridoxide"
 version = "0.0.1"
 description = "AC power flow analysis (Newton-Raphson) — Python bindings"
+readme = "python/README.md"
 requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 
+# `gridoxide.matpower` (python/gridoxide/matpower.py) needs numpy/scipy for
+# `.mat` reading, kept as an optional extra, separate from the core
+# `PowerFlowModel` bindings, which have no Python-level dependencies of
+# their own. `gridoxide.generate_grid` needs no extra (pure stdlib), so it
+# isn't listed here. 
+[project.optional-dependencies]
+matpower = ["numpy>=1.24", "scipy>=1.10"]
+
+[project.scripts]
+gridoxide-matpower = "gridoxide.matpower:main"
+gridoxide-generate-grid = "gridoxide.generate_grid:main"
+
 [tool.maturin]
 # `src/python.rs`'s bindings — only ever built via maturin, never combined
 # with a plain `cargo build`/`cargo test` (see Cargo.toml's `python` feature
-# doc comment for why).
+# doc comment for why). Mixed Rust/Python layout: pure-Python package code
+# (`__init__.py`, `matpower.py`, `generate_grid.py`) lives in
+# `python/gridoxide/`, alongside the compiled extension built as the
+# private `gridoxide._gridoxide` submodule (see src/python.rs's module doc
+# comment) so both ship in the same wheel.
 features = ["python"]
-module-name = "gridoxide"
+python-source = "python"
+module-name = "gridoxide._gridoxide"

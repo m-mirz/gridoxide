@@ -102,10 +102,13 @@ warm-vs-cold numbers.
 
 ## Python bindings
 
-`src/python.rs` exposes `PersistentSolver` (and PGM-JSON loading) as a `gridoxide` Python extension module,
-built with [maturin](https://www.maturin.rs/) (`maturin develop --release --features python,klu`) — gated
-entirely behind the opt-in `python` Cargo feature, compiled by nothing else, so a plain `cargo build`/`cargo
-test` never touches it.
+`src/python.rs` exposes `PersistentSolver` (and PGM-JSON loading) as `gridoxide._gridoxide`, a private
+compiled extension module built with [maturin](https://www.maturin.rs/) (`maturin develop --release
+--features python,klu`) — gated entirely behind the opt-in `python` Cargo feature, compiled by nothing else,
+so a plain `cargo build`/`cargo test` never touches it. This is a mixed Rust/Python maturin project
+(`pyproject.toml`'s `python-source = "python"` + `module-name = "gridoxide._gridoxide"`): pure-Python code
+lives in `python/gridoxide/` and ships in the same wheel as the compiled extension, re-exported through
+`python/gridoxide/__init__.py` so callers only ever write `import gridoxide`.
 
 ```python
 import gridoxide
@@ -123,13 +126,27 @@ comparison in pure Python (`scripts/bench/bench_gridoxide_native.py`), timing gr
 Rust binary and parsing its stdout. See `scripts/bench/README.md`'s "Python bindings" section for build
 details and the constraint on never combining the `python` feature with a plain `cargo` invocation.
 
-`python/tests/` has a small pytest suite (`scalar`/`block` only — no `klu`, matching what's published, see
-below) checked against this project's own committed PGM reference fixtures, run by
-`.github/workflows/python.yml` on every push/PR. `.github/workflows/pypi.yml` builds wheels (Linux/Windows/
-macOS) plus an sdist and publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/)
-on `v*` tags — **the published wheel deliberately doesn't include the `klu` backend** (LGPL-2.1-or-later
-vendored SuiteSparse source, and a C compiler + libclang needed on every target platform — see Cargo.toml's
-`python`/`klu` feature doc comments); build from source with `--features python,klu` for that backend.
+Alongside `PowerFlowModel`, `python/gridoxide/` ships two input-building helpers that used to live only in
+`scripts/bench/` — general-purpose enough that they're now part of the pip package itself, not tied to the
+benchmark suite:
+
+- `gridoxide.generate_grid` — synthetic radial MV/LV distribution grid generator (pure stdlib, no extra).
+- `gridoxide.matpower` (needs `pip install gridoxide[matpower]`) — converts a raw MATPOWER `.m`/`.mat` case
+  into PGM JSON.
+
+Each is also installed as a console script (`gridoxide-generate-grid`, `gridoxide-matpower`).
+`scripts/bench/generate_grid.py` and `matpower_to_pgm.py` are now thin CLI wrappers delegating to these same
+package modules, so the conversion logic itself only lives in one place. See `python/README.md` for usage
+examples. 
+
+`python/tests/` has a pytest suite (`scalar`/`block` only — no `klu`, matching what's published, see below)
+checked against this project's own committed PGM reference fixtures, run by `.github/workflows/python.yml`
+on every push/PR (that workflow installs the `matpower` extra's dependencies too). `.github/workflows/pypi.yml`
+builds wheels (Linux/Windows/macOS) plus an sdist and publishes to PyPI via
+[trusted publishing](https://docs.pypi.org/trusted-publishers/) on `v*` tags — **the published wheel
+deliberately doesn't include the `klu` backend** (LGPL-2.1-or-later vendored SuiteSparse source, and a C
+compiler + libclang needed on every target platform — see Cargo.toml's `python`/`klu` feature doc comments);
+build from source with `--features python,klu` for that backend.
 
 See `src/sparse.rs` for the thin backend wrapper around `faer` — it's intentionally the only file that
 imports `faer` types directly, so a different sparse-solver backend can be swapped in behind the same

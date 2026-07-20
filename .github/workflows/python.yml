@@ -34,7 +34,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest
+          .venv/bin/pip install maturin pytest numpy scipy
 
       - name: Build Python extension
         # No `klu` here — the published wheel doesn't ship it either (see
