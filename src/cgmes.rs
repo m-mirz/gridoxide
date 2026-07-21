@@ -317,6 +317,11 @@ impl TapChangerIndex {
         if let Some(mrid) = self.ratio.get(end_mrid) {
             let rtc: &RatioTapChanger = require(ds, mrid, "RatioTapChanger", mrid, "(self)")?;
             let step = rtc.base.step.ok_or_else(|| missing("RatioTapChanger", mrid, "step"))?;
+            if let Some(table_ref) = &rtc.ratio_tap_changer_table {
+                if let Some(effect) = ratio_tap_table(ds, &table_ref.mrid, step.round() as i64, xtx) {
+                    return Ok(Some(effect));
+                }
+            }
             let neutral = rtc.base.neutral_step.unwrap_or(0) as f64;
             let inc = rtc.step_voltage_increment.unwrap_or(0.0);
             let ratio = 1.0 + (step - neutral) * inc / 100.0;
@@ -376,6 +381,33 @@ fn phase_tap_tabular(
         from_mrid: ptc_mrid.to_string(),
         field: "(no PhaseTapChangerTablePoint matching the current step)",
     })
+}
+
+/// `RatioTapChanger.RatioTapChangerTable`: unlike `PhaseTapChangerTabular`
+/// (a distinct CGMES class with no fallback formula of its own),
+/// `RatioTapChangerTable` is just an *optional* reference a plain
+/// `RatioTapChanger` may or may not carry alongside its own
+/// `stepVoltageIncrement` — so this returns `None` (rather than erroring)
+/// when the table or a matching point isn't found, letting the caller fall
+/// back to the linear formula, mirroring
+/// `CgmesRatioTapChangerBuilder.addSteps`'s own
+/// `tablePoints.isEmpty()`/`isTableValid` fallback (simplified to a
+/// per-step lookup, since gridoxide only ever needs the *current* step's
+/// effect, not a full exported step table). Same caveat as
+/// `phase_tap_tabular`: only `ratio` and `x` are read — `r`/`g`/`b`
+/// deviations have no representation in `TapEffect`.
+fn ratio_tap_table(ds: &CimDataset, table_mrid: &str, step: i64, xtx: f64) -> Option<TapEffect> {
+    for pt_mrid in by_type(ds, "RatioTapChangerTablePoint") {
+        let pt: &cimstructs::RatioTapChangerTablePoint = get(ds, pt_mrid)?;
+        let Some(owner) = &pt.ratio_tap_changer_table else { continue };
+        if owner.mrid != *table_mrid || pt.base.step != Some(step) {
+            continue;
+        }
+        let ratio = pt.base.ratio.unwrap_or(1.0);
+        let x_pct = pt.base.x.unwrap_or(0.0);
+        return Some(TapEffect { tap: Complex::new(ratio, 0.0), x_override: Some(xtx * (1.0 + x_pct / 100.0)) });
+    }
+    None
 }
 
 /// `xMin` (falling back to the transformer end's own static `x`, "xtx", if
@@ -691,14 +723,22 @@ pub fn cgmes_to_buses_and_branches(
     }
 
     let mut transformers: Vec<Transformer> = Vec::new();
-    let mut star_bus_count = 0usize;
     for (pt_mrid, mut ends) in ends_by_pt {
         ends.sort_by_key(|e| e.base.end_number.unwrap_or(0));
         match ends.len() {
             2 => transformers.push(build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?),
             3 => {
-                let star_idx = buses.len() + star_bus_count;
-                star_bus_count += 1;
+                // `buses.len()` alone is the next free index — it already
+                // reflects every star bus pushed by a *previous* iteration
+                // of this same loop, so adding a separate running counter
+                // on top (as this used to) double-counts them: the second
+                // 3-winding transformer in a model with more than one would
+                // get a star bus index one past the actual end of `buses`,
+                // corrupting the Y-bus with an out-of-range reference
+                // (confirmed via MiniGrid's own conformance fixture, the
+                // first real multi-3-winding-transformer case this
+                // converter was tried against).
+                let star_idx = buses.len();
                 buses.push(Bus {
                     idx: star_idx, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
                     p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY,
@@ -874,6 +914,52 @@ pub fn cgmes_to_buses_and_branches(
         buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = sc.inductive_rating.unwrap_or(-f64::INFINITY);
         let q_max = sc.capacitive_rating.unwrap_or(f64::INFINITY);
+        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
+        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+    }
+
+    // ExternalNetworkInjection: CIM describes it as "used for IEC 60909
+    // [short-circuit] calculations", but it also carries load-flow P/Q and
+    // an optional RegulatingControl — cross-checked against
+    // `references/powsybl-core`'s own `ExternalNetworkInjectionConversion`,
+    // which negates *both* P and Q (`targetP = -p, targetQ = -q`). That's
+    // `EquivalentInjection`'s convention (Step 3 above), not
+    // SynchronousMachine's Q exception: an ExternalNetworkInjection stands
+    // in for "the rest of the interconnected system", the same conceptual
+    // role EquivalentInjection plays, not a physical rotating machine.
+    for mrid in by_type(ds, "ExternalNetworkInjection") {
+        let eni: &cimstructs::ExternalNetworkInjection = require(ds, mrid, "ExternalNetworkInjection", mrid, "(self)")?;
+        let eni_connected = terms.connected(mrid, 0);
+        if let Some(bus) = terms.bus(mrid, 0) {
+            if eni_connected {
+                buses[bus].p_spec += -eni.p.unwrap_or(0.0) * 1e6 / s_base_va;
+                buses[bus].q_spec += -eni.q.unwrap_or(0.0) * 1e6 / s_base_va;
+            }
+        }
+
+        let Some(rc_ref) = &eni.base.regulating_control else { continue };
+        if !eni_connected || eni.base.control_enabled != Some(true) {
+            continue;
+        }
+        let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "ExternalNetworkInjection", mrid, "RegulatingControl")?;
+        if rc.enabled != Some(true) {
+            continue;
+        }
+        let is_voltage_mode = rc.mode.as_ref().is_some_and(|m| m.uri.ends_with(".voltage"));
+        if !is_voltage_mode {
+            continue;
+        }
+        let Some(term_ref) = &rc.terminal else { continue };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else { continue };
+        let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
+        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+
+        if buses[controlled_bus].bus_type == BusType::PQ {
+            buses[controlled_bus].bus_type = BusType::PV;
+        }
+        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
+        let q_min = eni.min_q.unwrap_or(-f64::INFINITY);
+        let q_max = eni.max_q.unwrap_or(f64::INFINITY);
         buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
         buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
     }

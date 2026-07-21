@@ -91,11 +91,10 @@ fn test_cgmes_realgrid() {
 /// MicroGrid-BE-MAS's small, fully-modeled fixture, where no bus has a
 /// plausible reason to be an outlier), RealGrid is large enough that a
 /// handful of genuine, small, known gaps are expected to show up as
-/// per-bus outliers without indicating a systemic problem: 3
-/// `StaticVarCompensator`s aren't converted at all (no CIM handling for that
-/// class yet), and plain `newton_raphson` doesn't enforce
-/// `SynchronousMachine` reactive-capability limits the way
-/// `solver::newton_raphson_enforcing_q_limits` does. A percentile-based
+/// per-bus outliers without indicating a systemic problem: plain
+/// `newton_raphson` doesn't enforce `SynchronousMachine`/`StaticVarCompensator`
+/// reactive-capability limits the way `solver::newton_raphson_enforcing_q_limits`
+/// does. A percentile-based
 /// check is the honest bar for this scale: overwhelmingly precise
 /// (median/p90), with a small, bounded outlier allowance (p99), rather than
 /// either a misleadingly loose uniform tolerance or an unrealistic zero-

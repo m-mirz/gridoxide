@@ -258,18 +258,22 @@ let result = run_power_flow_analysis_from_ybus(buses, ybus);
 Requires the TP profile (`TopologicalNode` is used directly as gridoxide's `Bus`, so switch-state topology
 processing is assumed already resolved upstream — the standard EQ+SSH+TP+SV "solved case" profile bundle) and
 an SV profile with a populated `TopologicalIsland.AngleRefTopologicalNode` (used as the slack bus). Handles
-`EnergyConsumer`/`ConformLoad`/`NonConformLoad`/`EquivalentInjection` loads, `ACLineSegment`/`SeriesCompensator`
-lines (including `ACLineSegment.gch`, real shunt conductance — not just `bch`'s reactive charging), 2- and
-3-winding `PowerTransformer`s (`RatioTapChanger` and all four `PhaseTapChanger` variants — `Linear`,
-`Symmetrical`, `Asymmetrical`, `Tabular` — the non-`Linear`/`Tabular` formulas cross-checked against
-`references/powsybl-core`'s own CGMES importer source), `LinearShuntCompensator`/`NonlinearShuntCompensator`
-shunts, `SynchronousMachine`+`RegulatingControl`-driven PV buses, and `StaticVarCompensator` (same
-`RegulatingControl`-driven PV-bus mechanism, minus the active-power term). Validated end-to-end against three
-ENTSO-E conformance cases: MicroGrid-BE-MAS (`tests/cgmes_microgrid_be_test.rs`), the `PhaseTapChangerLinear`
-PST cases (`tests/cgmes_pst_phase_tap_changer_linear_test.rs`, matching published SV values to ~1e-3), and
-RealGrid, a large real transmission+distribution model (`tests/cgmes_realgrid_test.rs`, 6252 buses) — fixtures
-referenced via a git submodule, see `tests/data/cgmes/README.md`. MicroGrid-BE-MAS converges cleanly but
-matches its own published SV voltages only within a few percent, a gap cross-checked against `pypowsybl`'s own
+`EnergyConsumer`/`ConformLoad`/`NonConformLoad`/`EquivalentInjection`/`ExternalNetworkInjection` loads,
+`ACLineSegment`/`SeriesCompensator` lines (including `ACLineSegment.gch`, real shunt conductance — not just
+`bch`'s reactive charging), 2- and 3-winding `PowerTransformer`s (`RatioTapChanger` — including its optional
+`RatioTapChangerTable` per-step override, falling back to the linear `stepVoltageIncrement` formula when absent
+— and all four `PhaseTapChanger` variants: `Linear`, `Symmetrical`, `Asymmetrical`, `Tabular`; the non-`Linear`
+formulas cross-checked against `references/powsybl-core`'s own CGMES importer source),
+`LinearShuntCompensator`/`NonlinearShuntCompensator` shunts, `SynchronousMachine`+`RegulatingControl`-driven PV
+buses, and `StaticVarCompensator`/`ExternalNetworkInjection` (same `RegulatingControl`-driven PV-bus mechanism,
+minus the active-power term for the former). Validated end-to-end against four ENTSO-E conformance cases:
+MicroGrid-BE-MAS (`tests/cgmes_microgrid_be_test.rs`), MiniGrid (`tests/cgmes_minigrid_test.rs`, the first
+fixture with more than one 3-winding transformer — which exposed and fixed a real star-bus-indexing bug), the
+`PhaseTapChangerLinear` PST cases (`tests/cgmes_pst_phase_tap_changer_linear_test.rs`, matching published SV
+values to ~1e-3), and RealGrid, a large real transmission+distribution model
+(`tests/cgmes_realgrid_test.rs`, 6252 buses) — fixtures referenced via a git submodule, see
+`tests/data/cgmes/README.md`. MicroGrid-BE-MAS and MiniGrid converge cleanly but match their own published SV
+voltages only within a few percent, a gap cross-checked (for MicroGrid-BE-MAS) against `pypowsybl`'s own
 independent CGMES import + AC load flow on the same case (which shows a comparable deviation from the same
 published values, see `scripts/bench/cross_validate_cgmes_microgrid_be.py`), confirming it's inherent to
 solving a boundary-truncated area file with fixed-injection equivalents rather than a correctness bug — aside
