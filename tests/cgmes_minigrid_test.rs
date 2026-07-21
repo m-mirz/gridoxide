@@ -18,7 +18,16 @@ use gridoxide::run_power_flow_analysis_from_ybus;
 /// `ExternalNetworkInjection` (its P/Q negation cross-checked against
 /// `references/powsybl-core`'s own `ExternalNetworkInjectionConversion`,
 /// which is unfortunately numerically silent here — both of this fixture's
-/// instances happen to have P=Q=0 in this snapshot).
+/// instances happen to have P=Q=0 in this snapshot) and `AsynchronousMachine`
+/// (3 real induction motors, ~9 MW/~5 MVAr total — *not* numerically
+/// silent: adding this dropped the worst per-bus voltage deviation from
+/// 4.52% to 3.93%. Sign convention cross-checked against
+/// `references/powsybl-core`'s own `AsynchronousMachineConversion`, which
+/// converts it to a plain `Load` with no sign flip at all — i.e. gridoxide's
+/// own load-style *both-negated* convention, not `SynchronousMachine`'s Q
+/// exception; empirically confirmed too, since the Q-exception convention
+/// makes this fixture's worst deviation *worse* than not modeling
+/// `AsynchronousMachine` at all, 5.05% vs 4.52%).
 ///
 /// Tolerance matches MicroGrid-BE-MAS's own (boundary-truncated, simple
 /// fixed-injection equivalents standing in for the rest of the

@@ -258,7 +258,9 @@ let result = run_power_flow_analysis_from_ybus(buses, ybus);
 Requires the TP profile (`TopologicalNode` is used directly as gridoxide's `Bus`, so switch-state topology
 processing is assumed already resolved upstream — the standard EQ+SSH+TP+SV "solved case" profile bundle) and
 an SV profile with a populated `TopologicalIsland.AngleRefTopologicalNode` (used as the slack bus). Handles
-`EnergyConsumer`/`ConformLoad`/`NonConformLoad`/`EquivalentInjection`/`ExternalNetworkInjection` loads,
+`EnergyConsumer`/`ConformLoad`/`NonConformLoad`/`EquivalentInjection`/`ExternalNetworkInjection`/
+`AsynchronousMachine` loads (the last converted like a plain load — both P and Q negated — per
+`references/powsybl-core`'s own `AsynchronousMachineConversion`, not `SynchronousMachine`'s Q exception),
 `ACLineSegment`/`SeriesCompensator` lines (including `ACLineSegment.gch`, real shunt conductance — not just
 `bch`'s reactive charging), 2- and 3-winding `PowerTransformer`s (`RatioTapChanger` — including its optional
 `RatioTapChangerTable` per-step override, falling back to the linear `stepVoltageIncrement` formula when absent
@@ -268,7 +270,8 @@ formulas cross-checked against `references/powsybl-core`'s own CGMES importer so
 buses, and `StaticVarCompensator`/`ExternalNetworkInjection` (same `RegulatingControl`-driven PV-bus mechanism,
 minus the active-power term for the former). Validated end-to-end against four ENTSO-E conformance cases:
 MicroGrid-BE-MAS (`tests/cgmes_microgrid_be_test.rs`), MiniGrid (`tests/cgmes_minigrid_test.rs`, the first
-fixture with more than one 3-winding transformer — which exposed and fixed a real star-bus-indexing bug), the
+fixture with more than one 3-winding transformer — which exposed and fixed a real star-bus-indexing bug —
+and with real `AsynchronousMachine` loads, ~9 MW/~5 MVAr worth), the
 `PhaseTapChangerLinear` PST cases (`tests/cgmes_pst_phase_tap_changer_linear_test.rs`, matching published SV
 values to ~1e-3), and RealGrid, a large real transmission+distribution model
 (`tests/cgmes_realgrid_test.rs`, 6252 buses) — fixtures referenced via a git submodule, see

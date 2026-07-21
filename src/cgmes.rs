@@ -646,6 +646,23 @@ pub fn cgmes_to_buses_and_branches(
         buses[bus].p_spec += -ncl.base.p.unwrap_or(0.0) * 1e6 / s_base_va;
         buses[bus].q_spec += -ncl.base.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
+    // AsynchronousMachine (an induction motor/generator): grouped here with
+    // the loads, not with SynchronousMachine down in Step 8, despite sharing
+    // the same RotatingMachine base — cross-checked against
+    // references/powsybl-core's own AsynchronousMachineConversion, which
+    // converts it to a plain IIDM Load ("we make no difference based on the
+    // type (motor/generator)") with *no* sign flip at all on P0/Q0, because
+    // IIDM's own Load.p0/q0 already share CGMES's load-sign convention. That
+    // makes this the load-style *both-negated* case, not SynchronousMachine's
+    // Q exception (which exists only because a machine is normally a source,
+    // not a sink).
+    for mrid in by_type(ds, "AsynchronousMachine") {
+        let am: &cimstructs::AsynchronousMachine = require(ds, mrid, "AsynchronousMachine", mrid, "(self)")?;
+        let Some(bus) = terms.bus(mrid, 0) else { continue };
+        if !terms.connected(mrid, 0) { continue }
+        buses[bus].p_spec += -am.base.p.unwrap_or(0.0) * 1e6 / s_base_va;
+        buses[bus].q_spec += -am.base.q.unwrap_or(0.0) * 1e6 / s_base_va;
+    }
     for mrid in by_type(ds, "EquivalentInjection") {
         let ei: &EquivalentInjection = require(ds, mrid, "EquivalentInjection", mrid, "(self)")?;
         let Some(bus) = terms.bus(mrid, 0) else { continue };
@@ -885,7 +902,8 @@ pub fn cgmes_to_buses_and_branches(
     for mrid in by_type(ds, "StaticVarCompensator") {
         let sc: &StaticVarCompensator = require(ds, mrid, "StaticVarCompensator", mrid, "(self)")?;
         let svc_connected = terms.connected(mrid, 0);
-        if let Some(bus) = terms.bus(mrid, 0) {
+        let own_bus = terms.bus(mrid, 0);
+        if let Some(bus) = own_bus {
             if svc_connected {
                 buses[bus].q_spec += sc.q.unwrap_or(0.0) * 1e6 / s_base_va;
             }
@@ -912,10 +930,33 @@ pub fn cgmes_to_buses_and_branches(
             buses[controlled_bus].bus_type = BusType::PV;
         }
         buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
-        let q_min = sc.inductive_rating.unwrap_or(-f64::INFINITY);
-        let q_max = sc.capacitive_rating.unwrap_or(f64::INFINITY);
-        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
-        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+
+        // capacitiveRating/inductiveRating are REACTANCE ratings in ohms,
+        // not MVAr — despite the doc text reading "at maximum ... reactive
+        // power", cross-checked directly against references/powsybl-core's
+        // own StaticVarCompensatorConversion.getB(), which computes
+        // susceptance as `1 / rating` before ever reaching a power
+        // quantity (confirmed empirically too: treating a real BE-MAS
+        // fixture's 5062.5 as already-MVAr gives an absurd ~5 GVAr rating
+        // for a single substation SVC; treating it as ohms gives a
+        // physically sensible ~10 MVAr). Converted to a per-unit Q rating
+        // via Q ≈ V²·B ≈ B_pu at V≈1pu (the same flat-voltage
+        // approximation SynchronousMachine's own min_q/max_q already make
+        // above), using z_base anchored to the SVC's *own* physical bus —
+        // not necessarily `controlled_bus`, if regulation is remote.
+        let z_base = own_bus.map(|b| buses[b].u_rated * buses[b].u_rated / s_base_va);
+        // Already per-unit (z_base/x is a dimensionless ohm/ohm ratio) —
+        // unlike SynchronousMachine's/StaticVarCompensator's own P/Q
+        // injection above, no further `* 1e6 / s_base_va` MVAr-to-pu
+        // conversion applies here.
+        buses[controlled_bus].q_min = match (sc.inductive_rating, z_base) {
+            (Some(x), Some(zb)) if x != 0.0 => zb / x,
+            _ => -f64::INFINITY,
+        };
+        buses[controlled_bus].q_max = match (sc.capacitive_rating, z_base) {
+            (Some(x), Some(zb)) if x != 0.0 => zb / x,
+            _ => f64::INFINITY,
+        };
     }
 
     // ExternalNetworkInjection: CIM describes it as "used for IEC 60909
