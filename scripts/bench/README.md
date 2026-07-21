@@ -337,3 +337,27 @@ Python frameworks not specifically tuned for repeated single-scenario power flow
 kernels are numba-JIT-compiled, so this comparison is already its *warm*, post-JIT-warmup number (see
 bench_veragrid.py's docstring); its *first* call on a case this size costs low-single-digit seconds, not
 milliseconds, entirely JIT-compilation overhead unrelated to the power-flow algorithm itself.
+
+## 5. Cross-validate CGMES import against pypowsybl
+
+`cross_validate_cgmes_microgrid_be.py` checks gridoxide's CGMES import + solve against pypowsybl's own,
+independent CGMES import + AC load flow, on the same ENTSO-E MicroGrid-BE-MAS conformance files
+`tests/cgmes_microgrid_be_test.rs` already checks against that fixture's own published `SvVoltage` values.
+That Rust test's doc comment already claimed pypowsybl "also deviates from this fixture's published SV
+values by a comparable few percent" as a one-off manual finding — this script is what actually computes and
+asserts it:
+
+```bash
+pip install pypowsybl
+python3 scripts/bench/cross_validate_cgmes_microgrid_be.py
+```
+
+It runs `examples/cgmes_microgrid_be_dump.rs` (`cargo run --release --example cgmes_microgrid_be_dump
+--features cgmes`) as a subprocess to get gridoxide's own per-`TopologicalNode` solved voltages — there's no
+Python binding for CGMES import, only for PGM-JSON (`src/python.rs`) — then zips the same BE-MAS + boundary
+files together for pypowsybl (its CGMES importer needs one archive, not a directory) and solves with the
+same "BASIC" `LoadFlowParameters` `bench_pypowsybl.py` already uses. See the script's own docstring for how
+pypowsybl's bus IDs (not TopologicalNode mRIDs) get matched back to gridoxide's, and for how angles are made
+comparable despite the two tools not natively sharing a reference bus (pypowsybl's OpenLoadFlow is pinned, via
+the `slackBusesIds` provider parameter, to the same bus gridoxide uses as its own slack). Worst observed
+per-bus deviation is now ~0.22% voltage / ~0.3° angle; `--tol`/`--angle-tol` default to 0.01 (1%) / 0.3°.

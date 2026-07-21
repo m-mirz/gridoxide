@@ -23,9 +23,9 @@ fn three_bus_tight_q_min() -> (Vec<Bus>, Vec<Line>) {
         },
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03 },
-        Line { from: 0, to: 2, r: 0.08, x: 0.24, b_shunt: 0.025 },
-        Line { from: 1, to: 2, r: 0.06, x: 0.18, b_shunt: 0.02 },
+        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03, g_shunt: 0.0 },
+        Line { from: 0, to: 2, r: 0.08, x: 0.24, b_shunt: 0.025, g_shunt: 0.0 },
+        Line { from: 1, to: 2, r: 0.06, x: 0.18, b_shunt: 0.02, g_shunt: 0.0 },
     ];
     (buses, lines)
 }
@@ -96,9 +96,9 @@ fn test_q_limit_enforcement_no_violation_matches_unconstrained() {
         },
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03 },
-        Line { from: 0, to: 2, r: 0.08, x: 0.24, b_shunt: 0.025 },
-        Line { from: 1, to: 2, r: 0.06, x: 0.18, b_shunt: 0.02 },
+        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03, g_shunt: 0.0 },
+        Line { from: 0, to: 2, r: 0.08, x: 0.24, b_shunt: 0.025, g_shunt: 0.0 },
+        Line { from: 1, to: 2, r: 0.06, x: 0.18, b_shunt: 0.02, g_shunt: 0.0 },
     ];
     let ybus = build_ybus(3, &lines, &[]).finish();
     linear_initial_guess(&mut buses, &ybus);

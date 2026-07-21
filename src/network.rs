@@ -110,17 +110,17 @@ pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> YBu
     for ln in lines {
         // Self-loop: pure shunt element (no series branch).
         if ln.from == ln.to {
-            y.add(ln.from, ln.from, Complex::new(0.0, ln.b_shunt));
+            y.add(ln.from, ln.from, Complex::new(ln.g_shunt, ln.b_shunt));
             continue;
         }
         let z = Complex::new(ln.r, ln.x);
         // series admittance
         let y_line = Complex::new(1.0, 0.0) / z;
-        // split shunt susceptance equally to both ends of line
-        let b2 = Complex::new(0.0, ln.b_shunt / 2.0);
+        // split shunt admittance (conductance + susceptance) equally to both ends of line
+        let y_shunt_half = Complex::new(ln.g_shunt / 2.0, ln.b_shunt / 2.0);
         // diagonal elements
-        y.add(ln.from, ln.from, y_line + b2);
-        y.add(ln.to, ln.to, y_line + b2);
+        y.add(ln.from, ln.from, y_line + y_shunt_half);
+        y.add(ln.to, ln.to, y_line + y_shunt_half);
         // off-diagonal elements
         y.add(ln.from, ln.to, -y_line);
         y.add(ln.to, ln.from, -y_line);

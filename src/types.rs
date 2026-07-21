@@ -48,6 +48,8 @@ pub struct Line {
     pub r: f64,
     pub x: f64,
     pub b_shunt: f64, // total line charging
+    #[serde(default)]
+    pub g_shunt: f64, // total shunt conductance (CGMES ACLineSegment.gch; usually 0)
 }
 
 /// Two-winding transformer parameters in per-unit (system base, to-side voltage base).

@@ -497,19 +497,20 @@ pub fn pgm_to_buses_and_branches(
                     r: ln.r1 / z_base,
                     x: ln.x1 / z_base,
                     b_shunt: omega * ln.c1 * z_base,
+                    g_shunt: 0.0, // PgmLine has no tan1 (loss-tangent) field to derive this from
                 });
             }
             (1, 0) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.from_node];
                 lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
-                    b_shunt: omega * ln.c1 * z_base });
+                    b_shunt: omega * ln.c1 * z_base, g_shunt: 0.0 });
             }
             (0, 1) => {
                 let z_base = id_to_u_rated[&ln.to_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.to_node];
                 lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
-                    b_shunt: omega * ln.c1 * z_base });
+                    b_shunt: omega * ln.c1 * z_base, g_shunt: 0.0 });
             }
             _ => {}
         }
@@ -620,7 +621,7 @@ pub fn pgm_to_buses_and_branches(
             u_rated: id_to_u_rated[&src.node],
             zip_terms: Vec::new(),
         });
-        lines.push(Line { from: virtual_idx, to: id_to_idx[&src.node], r: r_s, x: x_s, b_shunt: 0.0 });
+        lines.push(Line { from: virtual_idx, to: id_to_idx[&src.node], r: r_s, x: x_s, b_shunt: 0.0, g_shunt: 0.0 });
     }
 
     (buses, lines, transformers)

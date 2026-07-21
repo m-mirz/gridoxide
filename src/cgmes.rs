@@ -18,7 +18,8 @@ use cimstructs::{
     ACLineSegment, BaseVoltage, EnergyConsumer, EquivalentInjection, LinearShuntCompensator,
     NonlinearShuntCompensator, NonlinearShuntCompensatorPoint, PhaseTapChangerAsymmetrical,
     PhaseTapChangerNonLinear, PhaseTapChangerSymmetrical, PowerTransformerEnd, RatioTapChanger,
-    RegulatingControl, SynchronousMachine, Terminal, TopologicalIsland, TopologicalNode,
+    RegulatingControl, StaticVarCompensator, SynchronousMachine, Terminal, TopologicalIsland,
+    TopologicalNode,
 };
 
 use crate::network::ShuntAdm;
@@ -571,7 +572,16 @@ pub fn cgmes_to_buses_and_branches(
     // --- Step 4: lines from ACLineSegment ---
     // `r`/`x`/`bch`/`gch` are documented directly on ACLineSegment as "of the
     // entire line section" (i.e. already segment totals, not per-length
-    // values) — no `Conductor.length` multiplication needed.
+    // values) — no `Conductor.length` multiplication needed. `gch` is 0 (or
+    // absent) on most real lines, but not universally: MicroGrid-BE-MAS's
+    // own BE-Line_6/BE-Line_2 carry non-negligible values (several MW of
+    // real power each at nominal voltage) that were silently dropped before
+    // `Line` gained a `g_shunt` field — confirmed via
+    // `scripts/bench/cross_validate_cgmes_microgrid_be.py`'s pypowsybl
+    // cross-check, where the missing MW surfaced as slack-relative-angle
+    // error at the electrically-downstream StaticVarCompensator bus (a
+    // voltage-magnitude-pinned bus has no equivalent slack for an active-
+    // power mismatch, only a reactive one).
     //
     // `types::Line` has no status field (unlike `types::Transformer`), so a
     // half-open line (one end disconnected) is folded into a self-loop
@@ -579,11 +589,11 @@ pub fn cgmes_to_buses_and_branches(
     // — mirroring pgm.rs's own from_status/to_status handling for `Line`,
     // needed here because RealGrid genuinely has `Terminal.connected=false`
     // entries (a real de-energized/switched-out snapshot, not a decode gap).
-    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64) {
+    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) {
         match (from_conn, to_conn) {
-            (true, true) => lines.push(Line { from, to, r, x, b_shunt }),
-            (true, false) => lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt }),
-            (false, true) => lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt }),
+            (true, true) => lines.push(Line { from, to, r, x, b_shunt, g_shunt }),
+            (true, false) => lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt }),
+            (false, true) => lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt }),
             (false, false) => {}
         }
     }
@@ -597,12 +607,14 @@ pub fn cgmes_to_buses_and_branches(
         let y_base = 1.0 / z_base;
         push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
-            ln.r.unwrap_or(0.0) / z_base, ln.x.unwrap_or(0.0) / z_base, ln.bch.unwrap_or(0.0) / y_base,
+            ln.r.unwrap_or(0.0) / z_base, ln.x.unwrap_or(0.0) / z_base,
+            ln.bch.unwrap_or(0.0) / y_base, ln.gch.unwrap_or(0.0) / y_base,
         );
     }
     // SeriesCompensator: a distinct 2-terminal CIM class from ACLineSegment
     // ("a series capacitor or reactor... without charging susceptance" per
-    // its own doc comment) — same conversion, minus the shunt term.
+    // its own doc comment) — same conversion, minus the shunt terms (it has
+    // no bch/gch fields at all, unlike ACLineSegment).
     for mrid in by_type(ds, "SeriesCompensator") {
         let sc: &cimstructs::SeriesCompensator = require(ds, mrid, "SeriesCompensator", mrid, "(self)")?;
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
@@ -610,7 +622,7 @@ pub fn cgmes_to_buses_and_branches(
         let z_base = u_rated * u_rated / s_base_va;
         push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
-            sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0,
+            sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
     }
 
@@ -763,6 +775,52 @@ pub fn cgmes_to_buses_and_branches(
         buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = sm.min_q.unwrap_or(-f64::INFINITY);
         let q_max = sm.max_q.unwrap_or(f64::INFINITY);
+        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
+        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+    }
+
+    // StaticVarCompensator: same RegulatingCondEq/RegulatingControl pattern as
+    // SynchronousMachine above (a voltage-mode, enabled RegulatingControl
+    // pins the *controlled* bus's voltage), minus any active-power term — an
+    // SVC is a pure reactive-power device. Falls back to a fixed Q injection
+    // (using SynchronousMachine's empirically-determined sign, not the
+    // negation loads get — see the Step 3 comment: StaticVarCompensator.q's
+    // doc text is character-for-character identical to RotatingMachine.q's,
+    // which was proven unreliable, and both are shunt-connected
+    // RegulatingCondEq sources rather than consuming loads) when the SVC
+    // isn't actively voltage-regulating.
+    for mrid in by_type(ds, "StaticVarCompensator") {
+        let sc: &StaticVarCompensator = require(ds, mrid, "StaticVarCompensator", mrid, "(self)")?;
+        let svc_connected = terms.connected(mrid, 0);
+        if let Some(bus) = terms.bus(mrid, 0) {
+            if svc_connected {
+                buses[bus].q_spec += sc.q.unwrap_or(0.0) * 1e6 / s_base_va;
+            }
+        }
+
+        let Some(rc_ref) = &sc.base.regulating_control else { continue };
+        if !svc_connected || sc.base.control_enabled != Some(true) {
+            continue;
+        }
+        let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "StaticVarCompensator", mrid, "RegulatingControl")?;
+        if rc.enabled != Some(true) {
+            continue;
+        }
+        let is_voltage_mode = rc.mode.as_ref().is_some_and(|m| m.uri.ends_with(".voltage"));
+        if !is_voltage_mode {
+            continue;
+        }
+        let Some(term_ref) = &rc.terminal else { continue };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else { continue };
+        let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
+        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+
+        if buses[controlled_bus].bus_type == BusType::PQ {
+            buses[controlled_bus].bus_type = BusType::PV;
+        }
+        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
+        let q_min = sc.inductive_rating.unwrap_or(-f64::INFINITY);
+        let q_max = sc.capacitive_rating.unwrap_or(f64::INFINITY);
         buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
         buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
     }
