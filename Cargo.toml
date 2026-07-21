@@ -108,6 +108,11 @@ name = "cgmes_realgrid_test"
 path = "tests/cgmes_realgrid_test.rs"
 required-features = ["cgmes"]
 
+[[test]]
+name = "cgmes_pst_phase_tap_changer_linear_test"
+path = "tests/cgmes_pst_phase_tap_changer_linear_test.rs"
+required-features = ["cgmes"]
+
 [[example]]
 name = "cgmes_microgrid_be_dump"
 path = "examples/cgmes_microgrid_be_dump.rs"

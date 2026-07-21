@@ -260,6 +260,7 @@ struct TapChangerIndex {
     ratio: HashMap<String, String>,
     phase_asym: HashMap<String, String>,
     phase_sym: HashMap<String, String>,
+    phase_linear: HashMap<String, String>,
     /// end mrid -> (tabular tap changer mrid, its own PhaseTapChangerTable mrid)
     phase_tabular: HashMap<String, (String, String)>,
 }
@@ -290,6 +291,14 @@ impl TapChangerIndex {
                 }
             }
         }
+        let mut phase_linear = HashMap::new();
+        for mrid in by_type(ds, "PhaseTapChangerLinear") {
+            if let Some(ptc) = get::<cimstructs::PhaseTapChangerLinear>(ds, mrid) {
+                if let Some(end) = &ptc.base.transformer_end {
+                    phase_linear.insert(end.mrid.clone(), mrid.clone());
+                }
+            }
+        }
         let mut phase_tabular = HashMap::new();
         for mrid in by_type(ds, "PhaseTapChangerTabular") {
             if let Some(ptc) = get::<cimstructs::PhaseTapChangerTabular>(ds, mrid) {
@@ -298,7 +307,7 @@ impl TapChangerIndex {
                 }
             }
         }
-        TapChangerIndex { ratio, phase_asym, phase_sym, phase_tabular }
+        TapChangerIndex { ratio, phase_asym, phase_sym, phase_linear, phase_tabular }
     }
 
     /// `xtx` is the owning `PowerTransformerEnd`'s own static `x` — needed as
@@ -323,6 +332,10 @@ impl TapChangerIndex {
         if let Some(mrid) = self.phase_sym.get(end_mrid) {
             let ptc: &PhaseTapChangerSymmetrical = require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
             return Ok(Some(phase_tap_symmetrical(&ptc.base, mrid, xtx)?));
+        }
+        if let Some(mrid) = self.phase_linear.get(end_mrid) {
+            let ptc: &cimstructs::PhaseTapChangerLinear = require(ds, mrid, "PhaseTapChangerLinear", mrid, "(self)")?;
+            return Ok(Some(phase_tap_linear(ptc, mrid, xtx)?));
         }
         if let Some((ptc_mrid, table_mrid)) = self.phase_tabular.get(end_mrid) {
             let ptc: &cimstructs::PhaseTapChangerTabular = require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
@@ -370,11 +383,14 @@ fn phase_tap_tabular(
 /// "PowerTransformerEnd.x shall be consistent with ...xMin... In case of
 /// inconsistency, PowerTransformerEnd.x shall be used") and `xMax`, or `None`
 /// if either is missing/non-finite — mirrors
-/// `CgmesPhaseTapChangerBuilder.getXMin()`/`getXMax()` exactly.
-fn x_min_max(base: &PhaseTapChangerNonLinear, xtx: f64) -> Option<(f64, f64)> {
-    let x_min_raw = base.x_min.unwrap_or(0.0);
+/// `CgmesPhaseTapChangerBuilder.getXMin()`/`getXMax()` exactly. Takes the raw
+/// `xMin`/`xMax` fields directly (rather than a `PhaseTapChangerNonLinear`)
+/// so `PhaseTapChangerLinear` — a distinct CGMES class with its own
+/// same-named fields, not a `PhaseTapChangerNonLinear` subtype — can share it.
+fn x_min_max(x_min: Option<f64>, x_max: Option<f64>, xtx: f64) -> Option<(f64, f64)> {
+    let x_min_raw = x_min.unwrap_or(0.0);
     let x_min = if x_min_raw <= 0.0 { xtx } else { x_min_raw };
-    let x_max = base.x_max?;
+    let x_max = x_max?;
     if !(x_min.is_finite() && x_max.is_finite()) || x_min < 0.0 || x_max <= 0.0 || x_min > x_max {
         return None;
     }
@@ -425,7 +441,7 @@ fn phase_tap_asymmetrical(
     let tap = Complex::from_polar(ratio_at(step), alpha);
 
     let alpha_max = (low..=high).map(|s| angle_rad_at(s as f64)).fold(f64::MIN, f64::max);
-    let x_override = match (x_min_max(base, xtx), alpha_max != 0.0) {
+    let x_override = match (x_min_max(base.x_min, base.x_max, xtx), alpha_max != 0.0) {
         (Some((x_min, x_max)), true) => {
             let numer = theta.sin() - alpha_max.tan() * theta.cos();
             let denom = theta.sin() - alpha.tan() * theta.cos();
@@ -466,7 +482,44 @@ fn phase_tap_symmetrical(base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64) 
     let tap = Complex::from_polar(1.0, alpha);
 
     let alpha_max = (low..=high).map(|s| angle_rad_at(s as f64)).fold(f64::MIN, f64::max);
-    let x_override = match (x_min_max(base, xtx), alpha_max != 0.0) {
+    let x_override = match (x_min_max(base.x_min, base.x_max, xtx), alpha_max != 0.0) {
+        (Some((x_min, x_max)), true) => {
+            let ratio = (alpha / 2.0).sin() / (alpha_max / 2.0).sin();
+            Some(x_min + (x_max - x_min) * ratio * ratio)
+        }
+        (Some(_), false) => Some(0.0),
+        (None, _) => None,
+    };
+
+    Ok(TapEffect { tap, x_override })
+}
+
+/// `PhaseTapChangerLinear`: cross-checked against powsybl-core's
+/// `addStepsLinear` (see `phase_tap_asymmetrical`'s doc comment for the
+/// shared provenance note). A distinct CGMES class from
+/// `PhaseTapChangerNonLinear`'s Symmetrical/Asymmetrical/Tabular subtypes,
+/// not a sibling of them — its own `base` is `PhaseTapChanger` directly, one
+/// level shallower. Ratio is always exactly 1.0 (a pure phase shifter, no
+/// magnitude change); angle is *linear* in step
+/// (`(step−neutralStep)·stepPhaseShiftIncrement`, in degrees) rather than
+/// Symmetrical's `2·atan(du/2)` curve. Reactance follows the identical
+/// `sin(alpha/2)²` interpolation Symmetrical uses — the Java reference
+/// shares one `getStepXforLinearAndSymmetrical` helper between both types.
+fn phase_tap_linear(ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f64) -> Result<TapEffect, CgmesError> {
+    let tc = &ptc.base.base;
+    let step = tc.step.ok_or_else(|| missing("PhaseTapChangerLinear", mrid, "step"))?;
+    let neutral = tc.neutral_step.unwrap_or(0) as f64;
+    let low = tc.low_step.unwrap_or(0);
+    let high = tc.high_step.unwrap_or(0);
+    let inc_deg = ptc.step_phase_shift_increment.unwrap_or(0.0);
+
+    let angle_rad_at = |s: f64| -> f64 { ((s - neutral) * inc_deg).to_radians() };
+
+    let alpha = angle_rad_at(step);
+    let tap = Complex::from_polar(1.0, alpha);
+
+    let alpha_max = (low..=high).map(|s| angle_rad_at(s as f64)).fold(f64::MIN, f64::max);
+    let x_override = match (x_min_max(ptc.x_min, ptc.x_max, xtx), alpha_max != 0.0) {
         (Some((x_min, x_max)), true) => {
             let ratio = (alpha / 2.0).sin() / (alpha_max / 2.0).sin();
             Some(x_min + (x_max - x_min) * ratio * ratio)
