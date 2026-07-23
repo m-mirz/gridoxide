@@ -1,5 +1,8 @@
 use super::types::{Bus, BusType};
-use super::network::{effective_injection, power_injections, YBusSparse};
+use super::network::{
+    classify, connected_components, effective_injection, mark_unreferenced_islands,
+    power_injections, Classified, Verdict, YBusSparse,
+};
 use super::sparse::RealSparseSystem;
 use super::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
 #[cfg(feature = "klu")]
@@ -73,26 +76,197 @@ pub enum SolveStatus {
     Singular,
 }
 
-pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
-    newton_raphson_with_backend(buses, ybus, tol, max_iter, JacobianBackend::Scalar);
+/// Per-connected-component outcome of a multi-island power-flow solve (see
+/// `network::connected_components`/`classify`) — one shared Newton-Raphson
+/// call across every solvable component's unknowns at once (the Y-bus has
+/// no coupling between disconnected components, so this is mathematically
+/// equivalent, iteration for iteration, to solving each independently), with
+/// per-component status recovered afterward rather than tracked live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IslandStatus {
+    /// This component's own mismatch is below `tol` in the final `buses`
+    /// state, regardless of the overall multi-component solve's status.
+    Converged,
+    /// The overall solve ran out of iterations, and this component's own
+    /// mismatch is still above `tol`.
+    MaxIterationsReached,
+    /// The overall solve hit a singular Jacobian, and this component's own
+    /// mismatch is still above `tol`. Best-effort, not precise: every
+    /// backend solves one combined sparse factorization and detects
+    /// singularity via a finiteness check on the *result* vector (see
+    /// `sparse.rs`), not a specific failing pivot/row — there is no way to
+    /// attribute a singular failure to one particular component in general,
+    /// so every still-unconverged component is marked `Singular` when the
+    /// overall result is `Singular`, whether or not it was the actual cause.
+    Singular,
+    /// This component had no `Slack` bus at all — every member bus was
+    /// pinned to a fixed `V = 0`, `P = Q = 0` placeholder
+    /// (`network::mark_unreferenced_islands`) instead of being solved; its
+    /// bus values are not a power-flow result, just the marker value.
+    /// There is no principled way to fabricate a reference bus for a
+    /// genuinely sourceless island, so this is never attempted.
+    NoReferenceBus,
+    /// This component had more than one `Slack` bus. Left in the shared
+    /// solve unmodified (its non-slack buses are still live unknowns): two
+    /// independently-fixed slack voltages in one connected component is
+    /// physically over-determined, not necessarily numerically singular, so
+    /// Newton-Raphson can converge to a result that satisfies neither
+    /// slack's true power balance. This verdict is decided once, before the
+    /// solve, and is never overwritten by a numerically-convergent-looking
+    /// post-hoc mismatch check.
+    AmbiguousReferenceBus,
 }
 
+/// One connected component's power-flow outcome — see `IslandStatus`.
+#[derive(Debug)]
+pub struct IslandReport {
+    pub bus_indices: Vec<usize>,
+    /// The `Slack` bus(es) originally found in this component: empty for
+    /// `NoReferenceBus`, exactly one for a normally-solved island,
+    /// two-or-more for `AmbiguousReferenceBus`.
+    pub slack_indices: Vec<usize>,
+    pub status: IslandStatus,
+}
+
+/// Computes each still-undecided (`Solvable`-verdict) component's own P/Q
+/// mismatch against `tol`, using the same `power_injections`/
+/// `effective_injection` primitives — restricted to that component's own
+/// bus indices — that `newton_raphson_scalar_cached`'s own convergence
+/// check uses. Safe to call even after an overall `Singular` result: every
+/// backend returns `Singular` *before* applying that iteration's update (see
+/// e.g. `newton_raphson_scalar_cached`/`newton_raphson_block_cached` below),
+/// so `buses` always holds the last fully-applied, fully-finite iterate.
+fn resolve_pending(
+    pending: Vec<(Vec<usize>, Vec<usize>)>,
+    buses: &[Bus],
+    ybus: &YBusSparse,
+    overall: SolveStatus,
+    tol: f64,
+) -> Vec<IslandReport> {
+    let (p_calc, q_calc) = power_injections(buses, ybus);
+    pending
+        .into_iter()
+        .map(|(bus_indices, slack_indices)| {
+            let mut max_mis = 0.0f64;
+            for &i in &bus_indices {
+                if buses[i].bus_type == BusType::Slack {
+                    continue;
+                }
+                let (p_eff, q_eff) = effective_injection(&buses[i]);
+                max_mis = max_mis.max((p_eff - p_calc[i]).abs());
+                if buses[i].bus_type == BusType::PQ {
+                    max_mis = max_mis.max((q_eff - q_calc[i]).abs());
+                }
+            }
+            let status = if max_mis < tol {
+                IslandStatus::Converged
+            } else if overall == SolveStatus::Singular {
+                IslandStatus::Singular
+            } else {
+                IslandStatus::MaxIterationsReached
+            };
+            IslandReport { bus_indices, slack_indices, status }
+        })
+        .collect()
+}
+
+/// Turns each component's classify-time `Verdict` into a final
+/// `IslandReport`, in the same order `classify` produced them: `NoReferenceBus`/
+/// `AmbiguousReferenceBus` verdicts become their matching `IslandStatus`
+/// immediately (never touched by the post-hoc mismatch check — see
+/// `IslandStatus::AmbiguousReferenceBus`'s doc comment for why), while
+/// `Solvable` components are resolved via `resolve_pending` against the
+/// `buses`/`ybus` state left by the shared solve.
+pub(crate) fn finish_island_reports(
+    classified: Vec<Classified>,
+    buses: &[Bus],
+    ybus: &YBusSparse,
+    overall: SolveStatus,
+    tol: f64,
+) -> Vec<IslandReport> {
+    let mut reports: Vec<Option<IslandReport>> = Vec::with_capacity(classified.len());
+    let mut pending: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+    for (pos, c) in classified.into_iter().enumerate() {
+        match c.verdict {
+            Verdict::NoReferenceBus => reports.push(Some(IslandReport {
+                bus_indices: c.bus_indices,
+                slack_indices: c.slack_indices,
+                status: IslandStatus::NoReferenceBus,
+            })),
+            Verdict::AmbiguousReferenceBus => reports.push(Some(IslandReport {
+                bus_indices: c.bus_indices,
+                slack_indices: c.slack_indices,
+                status: IslandStatus::AmbiguousReferenceBus,
+            })),
+            Verdict::Solvable => {
+                pending.push((pos, c.bus_indices, c.slack_indices));
+                reports.push(None);
+            }
+        }
+    }
+
+    let (positions, pending): (Vec<usize>, Vec<(Vec<usize>, Vec<usize>)>) = pending
+        .into_iter()
+        .map(|(pos, bus_indices, slack_indices)| (pos, (bus_indices, slack_indices)))
+        .unzip();
+    let resolved = resolve_pending(pending, buses, ybus, overall, tol);
+    for (pos, report) in positions.into_iter().zip(resolved) {
+        reports[pos] = Some(report);
+    }
+
+    reports.into_iter().map(|r| r.expect("every component classified exactly once")).collect()
+}
+
+pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) -> Vec<IslandReport> {
+    newton_raphson_with_backend(buses, ybus, tol, max_iter, JacobianBackend::Scalar)
+}
+
+/// Partitions `buses` into connected components first (`network::
+/// connected_components`/`classify`/`mark_unreferenced_islands` — see
+/// `docs/src/multi_island.md`), so a disconnected, sourceless region can
+/// never make the *whole* Jacobian singular, then solves every component in
+/// one shared Newton-Raphson call and returns each one's own outcome. This
+/// is gridoxide's one canonical way to run a solve — [`PersistentSolver::solve`]
+/// and [`newton_raphson_enforcing_q_limits`] below share this exact same
+/// partitioning step, so behavior is identical regardless of which entry
+/// point a caller uses.
 pub fn newton_raphson_with_backend(
     buses: &mut [Bus],
     ybus: &YBusSparse,
     tol: f64,
     max_iter: usize,
     backend: JacobianBackend,
-) {
-    match backend {
-        JacobianBackend::Scalar => newton_raphson_scalar(buses, ybus, tol, max_iter),
-        JacobianBackend::Block => newton_raphson_block(buses, ybus, tol, max_iter),
+) -> Vec<IslandReport> {
+    let components = connected_components(ybus);
+    let classified = classify(buses, &components);
+    mark_unreferenced_islands(buses, &classified);
+
+    let status = match backend {
+        JacobianBackend::Scalar => {
+            let mut cache = None;
+            newton_raphson_scalar_cached(buses, ybus, tol, max_iter, &mut cache)
+        }
+        JacobianBackend::Block => {
+            let mut cache = None;
+            newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut cache)
+        }
         #[cfg(feature = "klu")]
-        JacobianBackend::Klu => newton_raphson_klu(buses, ybus, tol, max_iter),
-        JacobianBackend::KluNative => newton_raphson_native_klu(buses, ybus, tol, max_iter),
+        JacobianBackend::Klu => {
+            let mut cache = None;
+            newton_raphson_klu_cached(buses, ybus, tol, max_iter, &mut cache)
+        }
+        JacobianBackend::KluNative => {
+            let mut cache = None;
+            newton_raphson_native_klu_cached(buses, ybus, tol, max_iter, &mut cache)
+        }
         #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => newton_raphson_pardiso(buses, ybus, tol, max_iter),
-    }
+        JacobianBackend::Pardiso => {
+            let mut cache = None;
+            newton_raphson_pardiso_cached(buses, ybus, tol, max_iter, &mut cache)
+        }
+    };
+
+    finish_island_reports(classified, buses, ybus, status, tol)
 }
 
 /// A Newton-Raphson solver that reuses its symbolic factorization (fill-
@@ -157,8 +331,18 @@ impl PersistentSolver {
     /// symbolic factorization from a previous `solve()` call on this same
     /// `PersistentSolver` when available. See the type-level doc comment
     /// for when a cached factorization stays valid.
-    pub fn solve(&mut self, buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) -> SolveStatus {
-        match self.backend {
+    ///
+    /// Like [`newton_raphson_with_backend`], partitions `buses` into
+    /// connected components first (`network::connected_components`/
+    /// `classify`/`mark_unreferenced_islands`) so a disconnected, sourceless
+    /// region can't make the whole Jacobian singular, and returns each
+    /// component's own outcome rather than one flat status.
+    pub fn solve(&mut self, buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) -> Vec<IslandReport> {
+        let components = connected_components(ybus);
+        let classified = classify(buses, &components);
+        mark_unreferenced_islands(buses, &classified);
+
+        let status = match self.backend {
             JacobianBackend::Scalar => newton_raphson_scalar_cached(buses, ybus, tol, max_iter, &mut self.scalar),
             JacobianBackend::Block => newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut self.block),
             #[cfg(feature = "klu")]
@@ -170,7 +354,9 @@ impl PersistentSolver {
             JacobianBackend::Pardiso => {
                 newton_raphson_pardiso_cached(buses, ybus, tol, max_iter, &mut self.pardiso)
             }
-        }
+        };
+
+        finish_island_reports(classified, buses, ybus, status, tol)
     }
 
     /// Discards any cached symbolic factorization. Call this before the
@@ -231,6 +417,15 @@ impl PersistentSolver {
 /// doc comment) — pinning `q_spec` to the violated limit exactly achieves
 /// that limit only if the bus carries no voltage-dependent `zip_terms` (no
 /// co-located ZIP-model load); the common case for a PV/generator bus.
+///
+/// Like [`newton_raphson_with_backend`]/[`PersistentSolver::solve`], returns
+/// each connected component's own [`IslandReport`] rather than one flat
+/// status — every `solver.solve()` call inside the outer loop already does
+/// the same island partitioning, so behavior is identical whichever entry
+/// point a caller uses. If any island is still `Singular`/`MaxIterationsReached`
+/// after an inner solve, this stops immediately and returns that pass's
+/// reports as-is — there's nothing further Q-limit switching can usefully
+/// do with a system that hasn't actually settled yet.
 pub fn newton_raphson_enforcing_q_limits(
     buses: &mut [Bus],
     ybus: &YBusSparse,
@@ -238,12 +433,16 @@ pub fn newton_raphson_enforcing_q_limits(
     max_iter: usize,
     backend: JacobianBackend,
     max_outer_iter: usize,
-) -> SolveStatus {
+) -> Vec<IslandReport> {
     let mut solver = PersistentSolver::new(backend);
+    let mut reports = Vec::new();
     for _ in 0..max_outer_iter {
-        let status = solver.solve(buses, ybus, tol, max_iter);
-        if status != SolveStatus::Converged {
-            return status;
+        reports = solver.solve(buses, ybus, tol, max_iter);
+        let all_settled = reports
+            .iter()
+            .all(|r| !matches!(r.status, IslandStatus::Singular | IslandStatus::MaxIterationsReached));
+        if !all_settled {
+            return reports;
         }
 
         let (_, q_calc) = power_injections(buses, ybus);
@@ -266,26 +465,23 @@ pub fn newton_raphson_enforcing_q_limits(
             }
         }
         if !switched {
-            return SolveStatus::Converged;
+            return reports;
         }
         solver.reset();
     }
 
     println!("Q-limit enforcement did not stabilize within {} outer iterations", max_outer_iter);
-    SolveStatus::MaxIterationsReached
+    reports
 }
 
-fn newton_raphson_scalar(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
-    let mut sparse_system: Option<RealSparseSystem> = None;
-    newton_raphson_scalar_cached(buses, ybus, tol, max_iter, &mut sparse_system);
-}
-
-/// Identical to `newton_raphson_scalar`, except the cached symbolic
-/// factorization lives in a caller-supplied `sparse_system` rather than a
-/// function-local variable (what lets `PersistentSolver` reuse it across
-/// repeated `solve()` calls on unchanged topology, not just across the
-/// iterations within a single call), and convergence status is returned
-/// rather than only printed.
+/// The cached symbolic factorization lives in a caller-supplied
+/// `sparse_system` rather than a function-local variable — what lets
+/// `PersistentSolver` reuse it across repeated `solve()` calls on unchanged
+/// topology, not just across the iterations within a single call.
+/// `newton_raphson_with_backend` calls this directly too, with a
+/// function-local, throwaway cache, since it needs the returned
+/// `SolveStatus` to build its own `IslandReport`s (there's no separate
+/// no-cache wrapper any more).
 fn newton_raphson_scalar_cached(
     buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
     sparse_system: &mut Option<RealSparseSystem>,
@@ -396,18 +592,11 @@ fn newton_raphson_scalar_cached(
     SolveStatus::MaxIterationsReached
 }
 
-/// Identical to `newton_raphson_scalar` except the sparse solve is backed by
-/// `sparse_klu::KluRealSystem` instead of `sparse::RealSparseSystem` — reuses
-/// `build_jacobian_triplets` unchanged, since `Klu` solves the same scalar
-/// Jacobian shape as `Scalar`, only the solver library differs.
-#[cfg(feature = "klu")]
-fn newton_raphson_klu(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
-    let mut sparse_system: Option<KluRealSystem> = None;
-    newton_raphson_klu_cached(buses, ybus, tol, max_iter, &mut sparse_system);
-}
-
-/// See `newton_raphson_scalar_cached` — same caller-supplied-cache pattern,
-/// for the `Klu` backend.
+/// The sparse solve is backed by `sparse_klu::KluRealSystem` instead of
+/// `sparse::RealSparseSystem` — reuses `build_jacobian_triplets` unchanged,
+/// since `Klu` solves the same scalar Jacobian shape as `Scalar`, only the
+/// solver library differs. See `newton_raphson_scalar_cached` — same
+/// caller-supplied-cache pattern, for the `Klu` backend.
 #[cfg(feature = "klu")]
 fn newton_raphson_klu_cached(
     buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
@@ -501,20 +690,12 @@ fn newton_raphson_klu_cached(
     SolveStatus::MaxIterationsReached
 }
 
-/// Identical to `newton_raphson_klu`, except the sparse solve is backed by
-/// `sparse_pardiso::PardisoRealSystem` — Intel oneMKL PARDISO, linked
-/// dynamically — instead of vendored KLU over FFI. Reuses
-/// `build_jacobian_triplets` unchanged, since `Pardiso` solves the same
-/// scalar Jacobian shape as `Scalar`/`Klu`/`KluNative`, only the solver
-/// library differs.
-#[cfg(feature = "pardiso")]
-fn newton_raphson_pardiso(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
-    let mut sparse_system: Option<PardisoRealSystem> = None;
-    newton_raphson_pardiso_cached(buses, ybus, tol, max_iter, &mut sparse_system);
-}
-
-/// See `newton_raphson_scalar_cached` — same caller-supplied-cache pattern,
-/// for the `Pardiso` backend.
+/// The sparse solve is backed by `sparse_pardiso::PardisoRealSystem` — Intel
+/// oneMKL PARDISO, linked dynamically — instead of vendored KLU over FFI.
+/// Reuses `build_jacobian_triplets` unchanged, since `Pardiso` solves the
+/// same scalar Jacobian shape as `Scalar`/`Klu`/`KluNative`, only the solver
+/// library differs. See `newton_raphson_scalar_cached` — same
+/// caller-supplied-cache pattern, for the `Pardiso` backend.
 #[cfg(feature = "pardiso")]
 fn newton_raphson_pardiso_cached(
     buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
@@ -608,19 +789,12 @@ fn newton_raphson_pardiso_cached(
     SolveStatus::MaxIterationsReached
 }
 
-/// Identical to `newton_raphson_klu`, except the sparse solve is backed by
-/// `klu_native::KluNativeSystem` — the pure-Rust port of the same KLU
-/// algorithm — instead of the FFI-linked vendored C. Reuses
-/// `build_jacobian_triplets` unchanged, since `KluNative` solves the same
-/// scalar Jacobian shape as `Scalar`/`Klu`, only the solver implementation
-/// differs.
-fn newton_raphson_native_klu(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
-    let mut sparse_system: Option<KluNativeSystem> = None;
-    newton_raphson_native_klu_cached(buses, ybus, tol, max_iter, &mut sparse_system);
-}
-
-/// See `newton_raphson_scalar_cached` — same caller-supplied-cache pattern,
-/// for the `KluNative` backend.
+/// The sparse solve is backed by `klu_native::KluNativeSystem` — the
+/// pure-Rust port of the same KLU algorithm — instead of the FFI-linked
+/// vendored C. Reuses `build_jacobian_triplets` unchanged, since `KluNative`
+/// solves the same scalar Jacobian shape as `Scalar`/`Klu`, only the solver
+/// implementation differs. See `newton_raphson_scalar_cached` — same
+/// caller-supplied-cache pattern, for the `KluNative` backend.
 fn newton_raphson_native_klu_cached(
     buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
     sparse_system: &mut Option<KluNativeSystem>,
@@ -814,15 +988,10 @@ fn build_jacobian_triplets(
 
 /// Experimental block-per-bus Newton-Raphson, backed by
 /// `block_sparse::BlockLu`. See `JacobianBackend::Block`'s doc comment for
-/// scope. Like `newton_raphson_scalar`'s `RealSparseSystem` reuse, the
-/// `colamd` ordering and elimination-graph reachability (`BlockSymbolic`)
-/// are computed once and reused via `BlockLu::refactor` for cheap
-/// numeric-only refactorization on every subsequent iteration.
-fn newton_raphson_block(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) {
-    let mut symbolic: Option<BlockSymbolic> = None;
-    newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut symbolic);
-}
-
+/// scope. Like `newton_raphson_scalar_cached`'s `RealSparseSystem` reuse,
+/// the `colamd` ordering and elimination-graph reachability
+/// (`BlockSymbolic`) are computed once and reused via `BlockLu::refactor`
+/// for cheap numeric-only refactorization on every subsequent iteration.
 /// See `newton_raphson_scalar_cached` — same caller-supplied-cache pattern,
 /// for the `Block` backend.
 fn newton_raphson_block_cached(
@@ -946,3 +1115,4 @@ fn build_jacobian_blocks(
 
     blocks
 }
+

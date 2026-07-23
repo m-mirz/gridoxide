@@ -99,7 +99,7 @@ fn main() {
         let t_nr0 = Instant::now();
         match persistent_solver.as_mut() {
             Some(solver) => { solver.solve(&mut buses, &ybus, 1e-6, 20); }
-            None => newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, backend),
+            None => { newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, backend); }
         }
         total_nr += t_nr0.elapsed();
     }

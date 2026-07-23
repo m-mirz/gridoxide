@@ -19,7 +19,7 @@ fn test_pgm_basic_node() {
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
     let n = buses.len();
     let ybus = build_ybus(n, &lines, &transformers);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let tol = 1e-5;
     for node_out in &expected.data.node {
@@ -37,7 +37,7 @@ fn test_pgm_node() {
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
     let n = buses.len();
     let ybus = build_ybus(n, &lines, &transformers);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let tol = 1e-5;
     for node_out in &expected.data.node {
@@ -54,7 +54,7 @@ fn test_pgm_asym_node() {
     let (buses, lines, id_to_idx) = pgm_to_3ph_network(input, 1e6, 50.0);
     let n_total = buses.len() / 3;
     let ybus = build_ybus_3ph(n_total, &lines);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let tol = 1e-4;
     for node_out in &expected.data.node {

@@ -1005,41 +1005,54 @@ pub fn cgmes_to_buses_and_branches(
         buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
     }
 
-    // Slack: the TopologicalIsland's own angle reference, applied last so it
-    // wins over any PV upgrade that happened to land on the same bus.
-    let mut angle_ref: Option<usize> = None;
+    // Slack: each TopologicalIsland's own angle reference, applied last so it
+    // wins over any PV upgrade that happened to land on the same bus. CGMES
+    // explicitly supports more than one TopologicalIsland in a single
+    // submitted model (e.g. genuinely separate synchronous areas), each with
+    // its own AngleRefTopologicalNode — so every one is marked here, not
+    // just the first found. (Previously this `break`d after the first
+    // resolvable reference, silently discarding any other island's own
+    // reference bus — a real bug, though one that happened to not affect any
+    // fixture validated so far, since none of them declare more than one
+    // island. Any island that ends up with no Slack bus at all — malformed
+    // data, not this fixture set — falls through to
+    // `network::mark_unreferenced_islands`'s generic handling downstream.)
+    let mut slack_indices: Vec<usize> = Vec::new();
     for mrid in by_type(ds, "TopologicalIsland") {
         let ti: &TopologicalIsland = require(ds, mrid, "TopologicalIsland", mrid, "(self)")?;
         if let Some(tn_ref) = &ti.angle_ref_topological_node {
             if let Some(&idx) = idx_of.get(&tn_ref.mrid) {
-                angle_ref = Some(idx);
-                break;
+                buses[idx].bus_type = BusType::Slack;
+                slack_indices.push(idx);
             }
         }
     }
-    let Some(slack_idx) = angle_ref else { return Err(CgmesError::NoAngleReference) };
-    buses[slack_idx].bus_type = BusType::Slack;
+    if slack_indices.is_empty() {
+        return Err(CgmesError::NoAngleReference);
+    }
 
-    // The slack bus's angle is an arbitrary global rotational reference in AC
-    // power flow — only relative angles between buses are physically
+    // Each slack bus's angle is an arbitrary global rotational reference in
+    // AC power flow — only relative angles between buses are physically
     // meaningful. A solved SV profile pins that choice to a specific value
     // (not necessarily 0°: this fixture's own reference bus is published at
     // 340.9585°, presumably to stay angle-consistent with the larger merged
-    // model this area submission is part of), so matching it here — rather
-    // than defaulting to 0° — is what actually reproduces the same solution,
-    // not a fixture-specific hack.
-    let slack_mrid = &tn_mrids[slack_idx];
-    for mrid in by_type(ds, "SvVoltage") {
-        let sv: &cimstructs::SvVoltage = require(ds, mrid, "SvVoltage", mrid, "(self)")?;
-        if sv.topological_node.as_ref().is_some_and(|tn| &tn.mrid == slack_mrid) {
-            if let Some(angle_deg) = sv.angle {
-                buses[slack_idx].voltage_ang = angle_deg.to_radians();
+    // model this area submission is part of), so matching it here for every
+    // slack bus — rather than defaulting to 0° — is what actually reproduces
+    // the same solution, not a fixture-specific hack.
+    for &slack_idx in &slack_indices {
+        let slack_mrid = &tn_mrids[slack_idx];
+        for mrid in by_type(ds, "SvVoltage") {
+            let sv: &cimstructs::SvVoltage = require(ds, mrid, "SvVoltage", mrid, "(self)")?;
+            if sv.topological_node.as_ref().is_some_and(|tn| &tn.mrid == slack_mrid) {
+                if let Some(angle_deg) = sv.angle {
+                    buses[slack_idx].voltage_ang = angle_deg.to_radians();
+                }
+                if let Some(v) = sv.v {
+                    // SvVoltage.v is also in kV, same conversion as nominalVoltage/ratedU.
+                    buses[slack_idx].voltage_mag = (v * 1e3) / buses[slack_idx].u_rated;
+                }
+                break;
             }
-            if let Some(v) = sv.v {
-                // SvVoltage.v is also in kV, same conversion as nominalVoltage/ratedU.
-                buses[slack_idx].voltage_mag = (v * 1e3) / buses[slack_idx].u_rated;
-            }
-            break;
         }
     }
 

@@ -23,7 +23,7 @@ use pyo3::prelude::*;
 
 use crate::network::{build_ybus, linear_initial_guess, YBusSparse};
 use crate::pgm::PgmInput;
-use crate::solver::{JacobianBackend, PersistentSolver, SolveStatus};
+use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver};
 use crate::types::Bus;
 
 fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
@@ -129,18 +129,32 @@ impl PowerFlowModel {
 
     /// Solves from a fresh flat/linear-initial-guess start, reusing this
     /// model's `PersistentSolver` cached factorization from any previous
-    /// `solve()` call. Raises `RuntimeError` if Newton-Raphson doesn't
-    /// converge within `max_iter` iterations.
+    /// `solve()` call. Every disconnected component of the network is
+    /// solved in this same call, not just the largest one (see
+    /// `solver::PersistentSolver::solve`'s own doc comment); a sourceless
+    /// component gets a fixed zero-voltage placeholder rather than raising
+    /// an error, the same non-error treatment de-energized PGM nodes
+    /// already got before this method had any island-level detail at all.
+    /// Raises `RuntimeError` only if some component's own Newton-Raphson
+    /// genuinely failed — didn't converge within `max_iter` iterations, or
+    /// hit a singular Jacobian.
     fn solve(&mut self) -> PyResult<()> {
         self.buses = self.buses_template.clone();
         linear_initial_guess(&mut self.buses, &self.ybus);
-        match self.solver.solve(&mut self.buses, &self.ybus, self.tol, self.max_iter) {
-            SolveStatus::Converged => Ok(()),
-            SolveStatus::MaxIterationsReached => Err(PyRuntimeError::new_err(format!(
-                "power flow did not converge within {} iterations", self.max_iter
-            ))),
-            SolveStatus::Singular => Err(PyRuntimeError::new_err("Jacobian is singular")),
+        let islands = self.solver.solve(&mut self.buses, &self.ybus, self.tol, self.max_iter);
+        for island in &islands {
+            match island.status {
+                IslandStatus::Converged | IslandStatus::NoReferenceBus | IslandStatus::AmbiguousReferenceBus => {}
+                IslandStatus::MaxIterationsReached => return Err(PyRuntimeError::new_err(format!(
+                    "power flow did not converge within {} iterations (component with buses {:?})",
+                    self.max_iter, island.bus_indices
+                ))),
+                IslandStatus::Singular => return Err(PyRuntimeError::new_err(format!(
+                    "Jacobian is singular (component with buses {:?})", island.bus_indices
+                ))),
+            }
         }
+        Ok(())
     }
 
     /// Discards cached symbolic factorization — call before the next

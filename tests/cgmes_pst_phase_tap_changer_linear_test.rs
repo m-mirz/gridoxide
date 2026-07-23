@@ -45,7 +45,7 @@ fn run_and_check(dir_name: &str, file_prefix: &str) {
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     cgmes_common::assert_matches_sv(&result, &tn_mrids, &expected, 1e-3);
 }

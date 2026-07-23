@@ -25,7 +25,7 @@ fn test_pgm_network_symmetric_transmission_case() {
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let tol = 1e-5;
     for node_out in &expected.data.node {
@@ -48,7 +48,7 @@ fn test_pgm_network_symmetric_distribution_case() {
         let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
         let n = buses.len();
         let ybus = build_ybus(n, &lines, &transformers);
-        let result = run_power_flow_analysis_from_ybus(buses, ybus);
+        let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
         // Transformer result values aren't validated against pandapower in this
         // fixture (modelling differences, per its README) — only node voltages.
@@ -73,7 +73,7 @@ fn test_pgm_network_asymmetric_transmission_case() {
     let mut ybus = build_ybus_3ph(n_total, &lines);
     stamp_shunts_3ph(&mut ybus, &shunts);
     stamp_transformers_3ph(&mut ybus, &transformers);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let tol = 1e-5;
     // Shunt results aren't present in this fixture's expected output even
@@ -101,7 +101,7 @@ fn test_pgm_network_asymmetric_distribution_case() {
         let n_total = buses.len() / 3;
         let mut ybus = build_ybus_3ph(n_total, &lines);
         stamp_transformers_3ph(&mut ybus, &transformers);
-        let result = run_power_flow_analysis_from_ybus(buses, ybus);
+        let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
         // Transformer result values aren't present in this fixture's expected
         // output (modelling differences) — only node voltages are validated.

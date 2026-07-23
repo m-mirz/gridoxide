@@ -22,7 +22,7 @@ fn test_pgm_transformer_power_flow() {
         let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
         let n = buses.len();
         let ybus = build_ybus(n, &lines, &transformers);
-        let result = run_power_flow_analysis_from_ybus(buses, ybus);
+        let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
         for node_out in &expected_scenario.node {
             common::assert_sym_node(&result, &id_to_idx, node_out, tol);

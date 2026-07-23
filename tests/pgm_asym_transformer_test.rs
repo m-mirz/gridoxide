@@ -26,7 +26,7 @@ fn test_pgm_asym_transformer_batch() {
         let n_total = buses.len() / 3;
         let mut ybus = build_ybus_3ph(n_total, &lines);
         stamp_transformers_3ph(&mut ybus, &transformers);
-        let result = run_power_flow_analysis_from_ybus(buses, ybus);
+        let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
         for node_out in &expected_scenario.node {
             common::assert_asym_node(&result, &id_to_idx, node_out, tol);

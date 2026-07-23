@@ -21,7 +21,7 @@ fn test_pgm_shunt_sym() {
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let tol = 1e-5;
     for node_out in &expected.data.node {
@@ -41,7 +41,7 @@ fn test_pgm_shunt_asym() {
     let n_total = buses.len() / 3;
     let mut ybus = build_ybus_3ph(n_total, &lines);
     stamp_shunts_3ph(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let tol = 1e-5;
     for node_out in &expected.data.node {

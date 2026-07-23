@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use serde::Deserialize;
 use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use super::network::{
@@ -257,53 +257,6 @@ pub struct PgmNodeAsymOutput {
 
 // ── Public helpers ────────────────────────────────────────────────────────────
 
-/// Returns the set of node IDs reachable from an active source via fully-closed
-/// (`from_status == 1 && to_status == 1`) lines/transformers. Nodes outside this
-/// set are "de-energized" (PGM's term for a node with no path to any source) and
-/// are reported with zero voltage rather than solved as an ordinary PQ bus.
-fn energized_node_ids(input: &PgmInput) -> HashSet<u64> {
-    let mut adj: HashMap<u64, Vec<u64>> = HashMap::new();
-    for ln in &input.data.line {
-        if ln.from_status == 1 && ln.to_status == 1 {
-            adj.entry(ln.from_node).or_default().push(ln.to_node);
-            adj.entry(ln.to_node).or_default().push(ln.from_node);
-        }
-    }
-    for t in &input.data.transformer {
-        if t.from_status == 1 && t.to_status == 1 {
-            adj.entry(t.from_node).or_default().push(t.to_node);
-            adj.entry(t.to_node).or_default().push(t.from_node);
-        }
-    }
-    for t in &input.data.three_winding_transformer {
-        let sides = [(t.node_1, t.status_1), (t.node_2, t.status_2), (t.node_3, t.status_3)];
-        for i in 0..3 {
-            for j in (i + 1)..3 {
-                let (ni, si) = sides[i];
-                let (nj, sj) = sides[j];
-                if si == 1 && sj == 1 {
-                    adj.entry(ni).or_default().push(nj);
-                    adj.entry(nj).or_default().push(ni);
-                }
-            }
-        }
-    }
-
-    let mut visited: HashSet<u64> = HashSet::new();
-    let mut stack: Vec<u64> = input.data.source.iter()
-        .filter(|s| s.status != 0)
-        .map(|s| s.node)
-        .collect();
-    while let Some(n) = stack.pop() {
-        if visited.insert(n) {
-            if let Some(neighbors) = adj.get(&n) {
-                stack.extend(neighbors.iter().filter(|nb| !visited.contains(nb)));
-            }
-        }
-    }
-    visited
-}
-
 /// Returns a stable node-ID → 0-based-index map (sorted by node ID).
 pub fn node_id_to_idx(input: &PgmInput) -> HashMap<u64, usize> {
     let mut ids: Vec<u64> = input.data.node.iter().map(|n| n.id).collect();
@@ -442,21 +395,23 @@ pub fn pgm_to_buses_and_branches(
         accumulate(agen.node, agen.load_type, p, q, 1.0);
     }
 
-    // Physical PQ buses. Nodes with no path to any active source are
-    // "de-energized" — reported at zero voltage and excluded from the NR solve
-    // by modelling them as a fixed (Slack-like) bus at V=0.
-    let energized = energized_node_ids(&input);
+    // Physical PQ buses. Nodes with no path to any active source (PGM calls
+    // these "de-energized") aren't special-cased here — every active source
+    // already becomes its own real `Slack` bus wired in via a genuine Line
+    // (below), so `network::connected_components`/`classify` downstream
+    // (run inside the solver entry points themselves) correctly discovers
+    // such a node's component has no reference bus and pins it to a V=0
+    // placeholder without this function needing to duplicate that graph walk.
     let n_nodes = input.data.node.len();
     let mut sorted_ids: Vec<u64> = input.data.node.iter().map(|n| n.id).collect();
     sorted_ids.sort_unstable();
     let mut opt_buses = vec![None::<Bus>; n_nodes];
     for id in &sorted_ids {
         let idx = id_to_idx[id];
-        let is_energized = energized.contains(id);
         opt_buses[idx] = Some(Bus {
             idx,
-            bus_type: if is_energized { BusType::PQ } else { BusType::Slack },
-            voltage_mag: if is_energized { 1.0 } else { 0.0 },
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
             voltage_ang: 0.0,
             p_spec: *p_inj.get(id).unwrap_or(&0.0),
             q_spec: *q_inj.get(id).unwrap_or(&0.0),
@@ -720,10 +675,8 @@ pub fn pgm_to_3ph_network(
             zip_terms: Vec::new(),
         });
     }
-    let energized = energized_node_ids(&input);
     for id in &sorted_ids {
         let phys = id_to_idx[id];
-        let is_energized = energized.contains(id);
         let p_arr = p_inj.get(id).copied().unwrap_or([0.0; 3]);
         let q_arr = q_inj.get(id).copied().unwrap_or([0.0; 3]);
         let mut zip_arr = zip_map.remove(id).unwrap_or_default();
@@ -731,9 +684,9 @@ pub fn pgm_to_3ph_network(
             let bus_idx = 3 * phys + ph;
             buses[bus_idx] = Bus {
                 idx: bus_idx,
-                bus_type: if is_energized { BusType::PQ } else { BusType::Slack },
-                voltage_mag: if is_energized { 1.0 } else { 0.0 },
-                voltage_ang: if is_energized { phase_ang[ph] } else { 0.0 },
+                bus_type: BusType::PQ,
+                voltage_mag: 1.0,
+                voltage_ang: phase_ang[ph],
                 p_spec: p_arr[ph],
                 q_spec: q_arr[ph],
                 q_min: -f64::INFINITY,

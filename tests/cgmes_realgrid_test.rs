@@ -78,7 +78,7 @@ fn test_cgmes_realgrid() {
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     for (i, b) in result.iter().enumerate() {
         assert!(b.voltage_mag.is_finite() && b.voltage_ang.is_finite(), "non-finite solved voltage at bus {i}");

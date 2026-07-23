@@ -1,5 +1,5 @@
 use gridoxide::network::{build_ybus, linear_initial_guess, power_injections};
-use gridoxide::solver::{newton_raphson, newton_raphson_enforcing_q_limits, JacobianBackend, SolveStatus};
+use gridoxide::solver::{newton_raphson, newton_raphson_enforcing_q_limits, IslandStatus, JacobianBackend};
 use gridoxide::types::{Bus, BusType, Line};
 
 /// The same 3-bus slack/PV/PQ network as `tests/powerflow_test.rs`, except
@@ -57,9 +57,10 @@ fn test_q_limit_enforcement_switches_pv_to_pq() {
         let (mut buses, lines) = three_bus_tight_q_min();
         let ybus = build_ybus(3, &lines, &[]).finish();
         linear_initial_guess(&mut buses, &ybus);
-        let status = newton_raphson_enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, backend, 10);
+        let islands = newton_raphson_enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, backend, 10);
 
-        assert_eq!(status, SolveStatus::Converged, "backend {backend:?}");
+        assert_eq!(islands.len(), 1, "backend {backend:?}");
+        assert_eq!(islands[0].status, IslandStatus::Converged, "backend {backend:?}");
         assert_eq!(buses[1].bus_type, BusType::PQ, "bus 1 should switch PV -> PQ, backend {backend:?}");
         assert!((buses[1].q_spec - (-0.25)).abs() < 1e-12, "q_spec should be pinned at q_min, backend {backend:?}");
 
@@ -102,9 +103,10 @@ fn test_q_limit_enforcement_no_violation_matches_unconstrained() {
     ];
     let ybus = build_ybus(3, &lines, &[]).finish();
     linear_initial_guess(&mut buses, &ybus);
-    let status = newton_raphson_enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, JacobianBackend::Scalar, 10);
+    let islands = newton_raphson_enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, JacobianBackend::Scalar, 10);
 
-    assert_eq!(status, SolveStatus::Converged);
+    assert_eq!(islands.len(), 1);
+    assert_eq!(islands[0].status, IslandStatus::Converged);
     assert_eq!(buses[1].bus_type, BusType::PV, "no violation, should stay PV");
     // Same expected voltages as tests/powerflow_test.rs's unconstrained run.
     assert!((buses[1].voltage_mag - 1.04).abs() < 1e-5);

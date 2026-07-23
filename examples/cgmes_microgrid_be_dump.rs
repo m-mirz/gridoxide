@@ -50,7 +50,7 @@ fn main() {
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus);
+    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     // Only the physical TopologicalNode buses (tn_mrids.len() of them) —
     // synthesized buses (3-winding star points, boundary ConnectivityNodes)

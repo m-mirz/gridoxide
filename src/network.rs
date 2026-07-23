@@ -105,6 +105,123 @@ impl YBusSparse {
     }
 }
 
+/// Groups buses into connected components via the Y-bus's actual admittance
+/// graph — two buses are in the same component iff there's a path of
+/// nonzero off-diagonal Y-bus entries between them (`row(i)`'s own diagonal
+/// self-entry, `j == i`, is skipped, since it's a shunt term, not a branch
+/// to another bus). Each returned `Vec<usize>` is one component's member
+/// bus indices, sorted ascending; components are returned in ascending
+/// order of their first (lowest-index) member.
+///
+/// Generic over the *finished* Y-bus rather than any particular input
+/// format's own `Line`/`Transformer`/branch-status representation, so it
+/// applies uniformly to native JSON, PGM-JSON, and CGMES input with no
+/// format-specific code — see `classify`/`mark_unreferenced_islands` for
+/// what this partition is used for.
+pub fn connected_components(ybus: &YBusSparse) -> Vec<Vec<usize>> {
+    let n = ybus.n();
+    let mut visited = vec![false; n];
+    let mut components = Vec::new();
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+        let mut members = Vec::new();
+        let mut stack = vec![start];
+        visited[start] = true;
+        while let Some(i) = stack.pop() {
+            members.push(i);
+            for &(j, _) in ybus.row(i) {
+                if j != i && !visited[j] {
+                    visited[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        members.sort_unstable();
+        components.push(members);
+    }
+    components
+}
+
+/// A single connected component's slack-bus classification, computed once
+/// up front and trusted unconditionally thereafter — see
+/// `mark_unreferenced_islands`'s doc comment for why an `AmbiguousReferenceBus`
+/// verdict is never later overwritten by a numerically-convergent-looking
+/// post-hoc mismatch check. `pub(crate)`, not part of the public API: it's
+/// an intermediate value `lib.rs`'s orchestration passes to
+/// `solver::finish_island_reports`, not something downstream users are
+/// meant to construct or match on directly — they get `solver::IslandReport`
+/// instead.
+pub(crate) enum Verdict {
+    NoReferenceBus,
+    AmbiguousReferenceBus,
+    Solvable,
+}
+
+pub(crate) struct Classified {
+    pub(crate) bus_indices: Vec<usize>,
+    /// The `Slack` bus(es) found in this component, captured *before*
+    /// `mark_unreferenced_islands` runs: empty for `NoReferenceBus`, exactly
+    /// one for `Solvable`, two-or-more for `AmbiguousReferenceBus`.
+    pub(crate) slack_indices: Vec<usize>,
+    pub(crate) verdict: Verdict,
+}
+
+/// Classifies each connected component (from `connected_components`) by how
+/// many `Slack` buses it already contains. Exactly one is the normal,
+/// solvable case; the other two counts are the situations
+/// `mark_unreferenced_islands`/`solver::finish_island_reports` need to
+/// handle specially.
+pub(crate) fn classify(buses: &[Bus], components: &[Vec<usize>]) -> Vec<Classified> {
+    components
+        .iter()
+        .map(|members| {
+            let slack_indices: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&i| buses[i].bus_type == BusType::Slack)
+                .collect();
+            let verdict = match slack_indices.len() {
+                0 => Verdict::NoReferenceBus,
+                1 => Verdict::Solvable,
+                _ => Verdict::AmbiguousReferenceBus,
+            };
+            Classified { bus_indices: members.clone(), slack_indices, verdict }
+        })
+        .collect()
+}
+
+/// For every component with no `Slack` bus of its own, pins every member
+/// bus to a fixed, zero-injection placeholder (`V = 0`, no P/Q) rather than
+/// solving it as an ordinary PQ region — mirrors `cgmes.rs`'s existing
+/// de-energized-bus handling exactly. Deliberately does **not** auto-promote
+/// any PV/PQ bus in such a component to `Slack`: there is no principled way
+/// to fabricate a reference voltage/angle for a genuinely sourceless
+/// island, and every unit/sign-convention bug this project has actually
+/// fixed got fixed by matching verified physical or reference-implementation
+/// behavior, never by guessing — inventing a slack here would repeat that
+/// same mistake class.
+///
+/// `AmbiguousReferenceBus` components are deliberately left untouched here
+/// (not mutated at all): their non-slack buses stay fully live in the
+/// shared Newton-Raphson system, since there's no safe placeholder value for
+/// them either. See `solver::IslandStatus::AmbiguousReferenceBus`'s doc
+/// comment for the resulting caveat.
+pub(crate) fn mark_unreferenced_islands(buses: &mut [Bus], classified: &[Classified]) {
+    for c in classified {
+        if matches!(c.verdict, Verdict::NoReferenceBus) {
+            for &i in &c.bus_indices {
+                buses[i].bus_type = BusType::Slack;
+                buses[i].voltage_mag = 0.0;
+                buses[i].voltage_ang = 0.0;
+                buses[i].p_spec = 0.0;
+                buses[i].q_spec = 0.0;
+            }
+        }
+    }
+}
+
 pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> YBus {
     let mut y = YBus::new(n);
     for ln in lines {
@@ -581,4 +698,120 @@ pub fn power_injections(
     }
 
     (p, q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connected_components_single_cluster() {
+        // 0-1-2 all tied together by ordinary series branches.
+        let mut y = YBus::new(3);
+        y.add(0, 1, Complex::new(1.0, -2.0));
+        y.add(1, 0, Complex::new(1.0, -2.0));
+        y.add(1, 2, Complex::new(1.0, -2.0));
+        y.add(2, 1, Complex::new(1.0, -2.0));
+        let ybus = y.finish();
+        let components = connected_components(&ybus);
+        assert_eq!(components, vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn connected_components_multiple_clusters() {
+        // {0,1} tied together, {2} a singleton (shunt-only diagonal entry,
+        // no off-diagonal edge — must not be treated as connected to
+        // anything), {3,4} tied together.
+        let mut y = YBus::new(5);
+        y.add(0, 1, Complex::new(1.0, -2.0));
+        y.add(1, 0, Complex::new(1.0, -2.0));
+        y.add(2, 2, Complex::new(0.0, 1e-6)); // pure shunt, no branch
+        y.add(3, 4, Complex::new(1.0, -2.0));
+        y.add(4, 3, Complex::new(1.0, -2.0));
+        let ybus = y.finish();
+        let components = connected_components(&ybus);
+        assert_eq!(components, vec![vec![0, 1], vec![2], vec![3, 4]]);
+    }
+
+    #[test]
+    fn connected_components_bus_with_no_ybus_entries_at_all() {
+        // A bus that never got any `y.add(i, ...)` call at all (not even a
+        // self-shunt) must still surface as its own singleton, not panic.
+        let mut y = YBus::new(2);
+        y.add(0, 0, Complex::new(0.0, 1e-6));
+        let ybus = y.finish();
+        let components = connected_components(&ybus);
+        assert_eq!(components, vec![vec![0], vec![1]]);
+    }
+
+    fn test_bus(idx: usize, bus_type: BusType) -> Bus {
+        Bus {
+            idx, bus_type, voltage_mag: 1.0, voltage_ang: 0.0,
+            p_spec: 0.3, q_spec: 0.1, q_min: -f64::INFINITY, q_max: f64::INFINITY,
+            u_rated: 0.0, zip_terms: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn classify_exactly_one_slack_is_solvable() {
+        let buses = vec![test_bus(0, BusType::Slack), test_bus(1, BusType::PQ)];
+        let classified = classify(&buses, &[vec![0, 1]]);
+        assert_eq!(classified.len(), 1);
+        assert!(matches!(classified[0].verdict, Verdict::Solvable));
+        assert_eq!(classified[0].slack_indices, vec![0]);
+    }
+
+    #[test]
+    fn classify_zero_slack_is_no_reference_bus() {
+        let buses = vec![test_bus(0, BusType::PQ), test_bus(1, BusType::PV)];
+        let classified = classify(&buses, &[vec![0, 1]]);
+        assert!(matches!(classified[0].verdict, Verdict::NoReferenceBus));
+        assert!(classified[0].slack_indices.is_empty());
+    }
+
+    #[test]
+    fn classify_two_slack_is_ambiguous() {
+        let buses = vec![test_bus(0, BusType::Slack), test_bus(1, BusType::Slack)];
+        let classified = classify(&buses, &[vec![0, 1]]);
+        assert!(matches!(classified[0].verdict, Verdict::AmbiguousReferenceBus));
+        assert_eq!(classified[0].slack_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn mark_unreferenced_islands_zeroes_no_reference_component_only() {
+        let mut buses = vec![
+            test_bus(0, BusType::PQ),  // component 0: no slack
+            test_bus(1, BusType::PV),  // component 0: no slack
+            test_bus(2, BusType::Slack), // component 1: solvable, untouched
+            test_bus(3, BusType::PQ),    // component 1: solvable, untouched
+        ];
+        let components = vec![vec![0, 1], vec![2, 3]];
+        let classified = classify(&buses, &components);
+        mark_unreferenced_islands(&mut buses, &classified);
+
+        for &i in &[0, 1] {
+            assert_eq!(buses[i].bus_type, BusType::Slack);
+            assert_eq!(buses[i].voltage_mag, 0.0);
+            assert_eq!(buses[i].voltage_ang, 0.0);
+            assert_eq!(buses[i].p_spec, 0.0);
+            assert_eq!(buses[i].q_spec, 0.0);
+        }
+        // Component 1 (already solvable) must be untouched.
+        assert_eq!(buses[2].bus_type, BusType::Slack);
+        assert_eq!(buses[3].bus_type, BusType::PQ);
+        assert_eq!(buses[3].p_spec, 0.3);
+        assert_eq!(buses[3].q_spec, 0.1);
+    }
+
+    #[test]
+    fn mark_unreferenced_islands_leaves_ambiguous_component_untouched() {
+        let mut buses = vec![test_bus(0, BusType::Slack), test_bus(1, BusType::Slack), test_bus(2, BusType::PQ)];
+        let components = vec![vec![0, 1, 2]];
+        let classified = classify(&buses, &components);
+        mark_unreferenced_islands(&mut buses, &classified);
+        // Ambiguous components aren't mutated at all — bus 2 keeps its
+        // original PQ spec rather than being zeroed like a NoReferenceBus one.
+        assert_eq!(buses[2].bus_type, BusType::PQ);
+        assert_eq!(buses[2].p_spec, 0.3);
+    }
 }
