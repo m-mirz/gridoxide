@@ -1,6 +1,6 @@
 mod cgmes_common;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, load_profiles};
+use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -46,7 +46,6 @@ fn test_cgmes_microgrid_be_mas() {
     let sv = dir.join("20210325T1530Z_1D_BE_SV_001.xml");
     let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
-    let tn_mrids = ds.by_type["TopologicalNode"].clone();
     let expected = cgmes_common::expected_voltages(&ds);
     assert_eq!(expected.len(), 7, "fixture should have 7 SvVoltage entries");
 
@@ -62,5 +61,6 @@ fn test_cgmes_microgrid_be_mas() {
     stamp_shunts(&mut ybus, &shunts);
     let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
-    cgmes_common::assert_matches_sv(&result, &tn_mrids, &expected, 4e-2);
+    let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
+    cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 4e-2);
 }

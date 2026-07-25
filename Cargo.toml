@@ -118,6 +118,51 @@ name = "cgmes_minigrid_test"
 path = "tests/cgmes_minigrid_test.rs"
 required-features = ["cgmes"]
 
+[[test]]
+name = "cgmes_microgrid_hvdc_test"
+path = "tests/cgmes_microgrid_hvdc_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_smallgrid_test"
+path = "tests/cgmes_smallgrid_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_svedala_test"
+path = "tests/cgmes_svedala_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_powerflow_test"
+path = "tests/cgmes_powerflow_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_pst_phase_tap_changer_table_test"
+path = "tests/cgmes_pst_phase_tap_changer_table_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_microgrid_nl_test"
+path = "tests/cgmes_microgrid_nl_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_microgrid_type1_test"
+path = "tests/cgmes_microgrid_type1_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_microgrid_type2_test"
+path = "tests/cgmes_microgrid_type2_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_microgrid_type3_test"
+path = "tests/cgmes_microgrid_type3_test.rs"
+required-features = ["cgmes"]
+
 [[example]]
 name = "cgmes_microgrid_be_dump"
 path = "examples/cgmes_microgrid_be_dump.rs"

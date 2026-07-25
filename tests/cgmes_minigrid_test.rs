@@ -2,7 +2,7 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, load_profiles};
+use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -67,5 +67,6 @@ fn test_cgmes_minigrid() {
     stamp_shunts(&mut ybus, &shunts);
     let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
-    cgmes_common::assert_matches_sv(&result, &tn_mrids, &expected, 5e-2);
+    let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
+    cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 5e-2);
 }

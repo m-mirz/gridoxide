@@ -2,7 +2,7 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, load_profiles};
+use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -71,7 +71,6 @@ fn test_cgmes_realgrid() {
     let n_deenergized = buses.iter().filter(|b| matches!(b.bus_type, gridoxide::types::BusType::Slack)).count() - 1;
     assert_eq!(n_deenergized, 201, "TopologicalIsland lists 6051 of 6252 TopologicalNodes as energized");
 
-    let tn_mrids = ds.by_type["TopologicalNode"].clone();
     let expected = cgmes_common::expected_voltages(&ds);
     assert_eq!(expected.len(), 6051, "one SvVoltage per energized TopologicalNode");
 
@@ -84,37 +83,12 @@ fn test_cgmes_realgrid() {
         assert!(b.voltage_mag.is_finite() && b.voltage_ang.is_finite(), "non-finite solved voltage at bus {i}");
     }
 
-    assert_voltage_match(&result, &tn_mrids, &expected);
-}
-
-/// Unlike `cgmes_common::assert_matches_sv`'s hard per-bus check (right for
-/// MicroGrid-BE-MAS's small, fully-modeled fixture, where no bus has a
-/// plausible reason to be an outlier), RealGrid is large enough that a
-/// handful of genuine, small, known gaps are expected to show up as
-/// per-bus outliers without indicating a systemic problem: plain
-/// `newton_raphson` doesn't enforce `SynchronousMachine`/`StaticVarCompensator`
-/// reactive-capability limits the way `solver::newton_raphson_enforcing_q_limits`
-/// does. A percentile-based
-/// check is the honest bar for this scale: overwhelmingly precise
-/// (median/p90), with a small, bounded outlier allowance (p99), rather than
-/// either a misleadingly loose uniform tolerance or an unrealistic zero-
-/// outlier requirement.
-fn assert_voltage_match(result: &[gridoxide::types::Bus], tn_mrids: &[String], expected: &[cgmes_common::ExpectedVoltage]) {
-    let mut errs: Vec<f64> = Vec::new();
-    for exp in expected {
-        let Some(idx) = tn_mrids.iter().position(|m| *m == exp.tn_mrid) else { continue };
-        let bus = &result[idx];
-        let expected_v_pu = (exp.v * 1e3) / bus.u_rated;
-        errs.push((bus.voltage_mag - expected_v_pu).abs());
-    }
-    errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = errs.len();
-    let median = errs[n / 2];
-    let p90 = errs[n * 9 / 10];
-    let p99 = errs[n * 99 / 100];
-    eprintln!("voltage_mag abs error (pu): n={n} median={median:.5} p90={p90:.5} p99={p99:.5} max={:.5}", errs[n - 1]);
-
-    assert!(median < 5e-3, "median voltage_mag error {median} too high (expected < 0.5%)");
-    assert!(p90 < 2e-2, "p90 voltage_mag error {p90} too high (expected < 2%)");
-    assert!(p99 < 5e-1, "p99 voltage_mag error {p99} too high (expected < 50%, generously bounding the known StaticVarCompensator/Q-limit gaps)");
+    // Percentile-based check (see `cgmes_common::assert_matches_sv_percentile`'s
+    // own doc comment for why, at this scale): overwhelmingly precise
+    // (median/p90), with a small, bounded outlier allowance (p99 generously
+    // bounding the known StaticVarCompensator/Q-limit gaps plain
+    // `newton_raphson` doesn't enforce), rather than either a misleadingly
+    // loose uniform tolerance or an unrealistic zero-outlier requirement.
+    let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
+    cgmes_common::assert_matches_sv_percentile(&result, &bus_index, &expected, 5e-3, 2e-2, 5e-1);
 }

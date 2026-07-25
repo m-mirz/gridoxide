@@ -719,9 +719,22 @@ fn phase_tap_linear(ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f6
 /// CGMES's pervasive field optionality and cross-reference resolution are
 /// much likelier to hit genuinely malformed/incomplete input than PGM-JSON's
 /// already-schema-validated shape.
-pub fn cgmes_to_buses_and_branches(
-    ds: &CimDataset, s_base_va: f64,
-) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
+/// Steps 1+2+2.5: bus skeleton from `TopologicalNode`, the shared
+/// `Terminal`-based resolver, and the closed-switch topological merge —
+/// shared by `cgmes_to_buses_and_branches` itself, `cgmes_resolve_dc_converters`
+/// (to resolve a converter's AC `pcc_terminal`/own terminal to a bus index),
+/// and `cgmes_topological_node_bus_index` (the public mrid -> bus-index
+/// lookup other callers, including test code, need — bus indices are *not*
+/// 1:1 with `by_type(ds, "TopologicalNode")`'s own order once Step 2.5
+/// merges anything, confirmed a real, live bug on SmallGrid: naively
+/// resolving `tn_mrids.iter().position(...)` against the *returned* `buses`
+/// silently indexes the wrong bus, or panics outright once enough merging
+/// shrinks `buses.len()` below the stale position).
+///
+/// Returns the post-merge `buses` plus `idx_of`, already remapped from
+/// pre-merge to post-merge indices (unlike `merge_closed_switches`'s own
+/// return value, which is a raw remap table, not a finished mrid map).
+fn build_ac_bus_skeleton(ds: &CimDataset) -> Result<(Vec<Bus>, HashMap<String, usize>, TerminalIndex), CgmesError> {
     // --- Step 1: buses from TopologicalNode ---
     let tn_mrids = by_type(ds, "TopologicalNode");
     if tn_mrids.is_empty() {
@@ -758,13 +771,31 @@ pub fn cgmes_to_buses_and_branches(
     let mut terms = TerminalIndex::build(ds, &idx_of, &mut buses)?;
 
     // --- Step 2.5: merge buses tied together by a closed switch ---
-    let (mut buses, switch_merge_remap) = merge_closed_switches(ds, buses, &mut terms)?;
+    let (buses, switch_merge_remap) = merge_closed_switches(ds, buses, &mut terms)?;
     // `idx_of` is keyed by TopologicalNode mrid -> pre-merge index; every
-    // later use of it (TopologicalIsland energization/angle-reference below)
-    // needs the same post-merge index `terms`/`buses` now use.
+    // later use of it needs the same post-merge index `terms`/`buses` now use.
     for v in idx_of.values_mut() {
         *v = switch_merge_remap[*v];
     }
+
+    Ok((buses, idx_of, terms))
+}
+
+/// The final (post-Step-2.5-merge) bus index for every `TopologicalNode` in
+/// `ds`, keyed by its own mrid. Needed by any caller that wants to look up a
+/// specific bus by mrid against `cgmes_to_buses_and_branches`'s own returned
+/// `buses` — see `build_ac_bus_skeleton`'s doc comment for why naively using
+/// `by_type(ds, "TopologicalNode")`'s own list position is unsafe once any
+/// closed-switch merging happens.
+pub fn cgmes_topological_node_bus_index(ds: &CimDataset) -> Result<HashMap<String, usize>, CgmesError> {
+    let (_, idx_of, _) = build_ac_bus_skeleton(ds)?;
+    Ok(idx_of)
+}
+
+pub fn cgmes_to_buses_and_branches(
+    ds: &CimDataset, s_base_va: f64,
+) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
+    let (mut buses, idx_of, terms) = build_ac_bus_skeleton(ds)?;
 
     // --- Step 3: loads/injections (EnergyConsumer + subtypes + EquivalentInjection) ---
     // Both P and Q use CGMES's uniform SSH "load sign convention" (positive =
@@ -1649,25 +1680,17 @@ pub fn cgmes_resolve_dc_converters(
     }
 
     // Rebuilds exactly the same Steps 1+2+2.5 `cgmes_to_buses_and_branches`
-    // itself runs (bus skeleton, `TerminalIndex`, closed-switch merge) so a
-    // converter's `PccTerminal` resolves to the same AC bus index that call
+    // itself runs (bus skeleton, `TerminalIndex`, closed-switch merge) via
+    // the shared `build_ac_bus_skeleton` helper, so a converter's
+    // `PccTerminal`/own terminal resolves to the same AC bus index that call
     // already produced — deterministic given the same `ds`, since every step
     // involved (`by_type` ordering, `TerminalIndex::build`, the union-find
     // merge) depends only on `ds`'s own contents, not on anything from that
     // other call's own local state. Only `ac_terms` (for
-    // `bus_via_terminal_mrid`) is kept; the rebuilt bus skeleton itself is
-    // discarded — this function only ever writes into the caller's own
-    // already-merged `buses`.
-    let ac_tn_mrids = by_type(ds, "TopologicalNode");
-    let ac_idx_of: HashMap<String, usize> = ac_tn_mrids.iter().enumerate()
-        .map(|(i, mrid)| (mrid.clone(), i)).collect();
-    let mut ac_bus_skeleton: Vec<Bus> = (0..ac_tn_mrids.len()).map(|idx| Bus {
-        idx, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-        p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY,
-        u_rated: 0.0, zip_terms: Vec::new(),
-    }).collect();
-    let mut ac_terms = TerminalIndex::build(ds, &ac_idx_of, &mut ac_bus_skeleton)?;
-    merge_closed_switches(ds, ac_bus_skeleton, &mut ac_terms)?;
+    // `bus_via_terminal_mrid`/`bus`) is kept; the rebuilt bus skeleton and
+    // `idx_of` are discarded — this function only ever writes into the
+    // caller's own already-merged `buses`.
+    let (_, _, ac_terms) = build_ac_bus_skeleton(ds)?;
 
     let dc_idx_of: HashMap<String, usize> = dctn_mrids.iter().enumerate()
         .map(|(i, mrid)| (mrid.clone(), i)).collect();
@@ -1753,11 +1776,18 @@ pub fn cgmes_resolve_dc_converters(
         }
     }
 
+    // `ACDCConverter.PccTerminal` is optional in CIM and, confirmed on
+    // MicroGrid-Type2-HVDC-MAS, genuinely absent from some real exports —
+    // the point of common coupling then defaults to the converter's own
+    // regular (AC-side) `Terminal`, sequence 1, exactly like every other
+    // `ConductingEquipment` in this file resolves its own connection point.
     let mut converters: Vec<ConverterInfo> = Vec::new();
     for mrid in by_type(ds, "VsConverter") {
         let vc: &VsConverter = require(ds, mrid, "VsConverter", mrid, "(self)")?;
-        let (Some(&dc_bus), Some(pcc_ref)) = (positive_pole_of.get(mrid), &vc.base.pcc_terminal) else { continue };
-        let Some(ac_bus) = ac_terms.bus_via_terminal_mrid(&pcc_ref.mrid) else { continue };
+        let Some(&dc_bus) = positive_pole_of.get(mrid) else { continue };
+        let Some(ac_bus) = vc.base.pcc_terminal.as_ref()
+            .and_then(|r| ac_terms.bus_via_terminal_mrid(&r.mrid))
+            .or_else(|| ac_terms.bus(mrid, 0)) else { continue };
         converters.push(ConverterInfo {
             ac_bus, dc_bus,
             role: classify_vs_converter(vc, mrid)?,
@@ -1771,8 +1801,10 @@ pub fn cgmes_resolve_dc_converters(
     }
     for mrid in by_type(ds, "CsConverter") {
         let cc: &CsConverter = require(ds, mrid, "CsConverter", mrid, "(self)")?;
-        let (Some(&dc_bus), Some(pcc_ref)) = (positive_pole_of.get(mrid), &cc.base.pcc_terminal) else { continue };
-        let Some(ac_bus) = ac_terms.bus_via_terminal_mrid(&pcc_ref.mrid) else { continue };
+        let Some(&dc_bus) = positive_pole_of.get(mrid) else { continue };
+        let Some(ac_bus) = cc.base.pcc_terminal.as_ref()
+            .and_then(|r| ac_terms.bus_via_terminal_mrid(&r.mrid))
+            .or_else(|| ac_terms.bus(mrid, 0)) else { continue };
         converters.push(ConverterInfo {
             ac_bus, dc_bus,
             role: classify_cs_converter(cc, mrid)?,
