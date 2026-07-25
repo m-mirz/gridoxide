@@ -76,13 +76,34 @@ tap step here (`tap_min = tap_max = tap_pos = 1`, `tap_nom = 0`, `tap_size =
 u1 * (ratio - 1)`) instead of by scaling `u1` directly, which
 `transformer_tap` would ignore.
 
-Known lossy step: PGM's `transformer.clock` is quantized to 30-degree
-increments (real nameplate transformer vector groups only exist in fixed
-clock-hour groups) — MATPOWER's `angle` is a continuous degree value with no
-such constraint. `angle` is rounded to the nearest 30-degree multiple here;
-for unusual near-zero-impedance phase-shifting branches this is a real,
-bounded approximation, not a bug — the same constraint any correct
-MATPOWER-to-PGM converter faces.
+Known lossy step, and it is lossier than "quantization" suggests: PGM's
+`transformer.clock` is quantized to 30-degree increments (real nameplate
+transformer vector groups only exist in fixed clock-hour groups), and PGM
+rejects an *odd* clock for the wye-wye winding pair used here, so `angle` is
+rounded to the nearest **60**-degree multiple. MATPOWER's `angle` is a
+continuous degree value with no such constraint, and every phase shift
+appearing in the 12 benchmark cases is far below 30 degrees — so in practice
+**every phase shift is rounded to zero**, i.e. dropped, not approximated:
+6 branches in case1354pegase (max 0.09 deg), 4 in case1888rte (max 9.95 deg),
+6 in case2848rte (6.32 deg), 12 in case2869pegase, 17 in case6495rte and 16 in
+case6515rte (16.60 deg each), 66 in case9241pegase.
+
+This is a genuine limitation of the PGM `transformer` model as a MATPOWER
+target, not something this converter can fix on its own — but it is *not*
+harmless, and two consequences matter when interpreting any benchmark built
+on this output:
+
+- Zeroing a phase shift is exactly the workaround powsybl's own
+  `MatpowerUtil.java` applies before benchmarking `case1888rte`/`case6495rte`/
+  `case6515rte`, the three cases most other tools fail to converge on. Any
+  "converges where other tools don't" claim resting on this conversion is
+  therefore comparing against an easier problem, not demonstrating a more
+  robust solver.
+- A solution to the zeroed-shift network does not satisfy the original case's
+  power-balance equations at the affected branches' endpoints. On case1888rte
+  that shows up as a five-figure MVA residual across one near-zero-impedance
+  9.95-degree shifter (its small |z| amplifies the missing angle into a huge
+  flow error).
 """
 import json
 import math
@@ -213,12 +234,16 @@ def convert(mat_path: Path, output_path: Path) -> None:
     # already being summed across every load/gen at a node.
     gen_qmin_by_bus: dict[int, float] = {}
     gen_qmax_by_bus: dict[int, float] = {}
+    # Only used for a generator at a bus MATPOWER types PQ, not PV — see where
+    # `q_specified` is written below for why those two cases differ.
+    gen_q_by_bus: dict[int, float] = {}
     first_active_gen_by_bus: dict[int, int] = {}
     for g in range(len(gen)):
         if gen[g, GEN_STATUS] <= 0:
             continue
         node_id = int(gen[g, GEN_BUS])
         gen_p_by_bus[node_id] = gen_p_by_bus.get(node_id, 0.0) + gen[g, PG]
+        gen_q_by_bus[node_id] = gen_q_by_bus.get(node_id, 0.0) + gen[g, QG]
         gen_qmin_by_bus[node_id] = gen_qmin_by_bus.get(node_id, 0.0) + gen[g, QMIN]
         gen_qmax_by_bus[node_id] = gen_qmax_by_bus.get(node_id, 0.0) + gen[g, QMAX]
         first_active_gen_by_bus.setdefault(node_id, g)
@@ -236,8 +261,21 @@ def convert(mat_path: Path, output_path: Path) -> None:
         if p_mw is None:
             continue
         gen_id = next_id()
+        # A generator at a bus MATPOWER types PV gets a `voltage_regulator`
+        # below, which makes its reactive output a free variable of the solve —
+        # `q_specified` must stay 0 there, or the bus would inject that Q *on
+        # top of* whatever the voltage control calls for.
+        #
+        # A generator at a bus typed PQ gets no regulator: the bus is not
+        # voltage-controlled, so MATPOWER honors the generator's `Qg` as a fixed
+        # reactive injection exactly like a negative load, and so must this. It
+        # is unusual but real — case1888rte's bus 1005 (Qg = -19 MVAr),
+        # case2848rte's 2534 (-6.54) and 642 (two gens, +0.22 each) — and
+        # hardcoding 0.0 here silently dropped it, leaving those buses' reactive
+        # balance off by exactly `Qg` against MATPOWER's own equations.
+        q_mvar = 0.0 if btype == PV else gen_q_by_bus.get(node_id, 0.0)
         sym_gens.append({"id": gen_id, "node": node_id, "status": 1, "type": 0,
-                          "p_specified": p_mw * 1e6, "q_specified": 0.0})
+                          "p_specified": p_mw * 1e6, "q_specified": q_mvar * 1e6})
         if btype == PV:
             g = first_active_gen_by_bus[node_id]
             vr = {"id": next_id(), "regulated_object": gen_id, "status": 1, "u_ref": gen[g, VG]}
@@ -295,6 +333,18 @@ def convert(mat_path: Path, output_path: Path) -> None:
         sn = s_base_va
         z_abs = np.hypot(r_ohm, x_ohm)
         uk = z_abs * sn / (U_RATED_UNIFORM ** 2)
+        # `hypot` is unsigned, so a series-capacitive branch (x < 0 — real
+        # series compensation, present on 10 transformer-path branches in
+        # case3120sp and ~40 in each RTE case) would come out inductive, its
+        # reactance sign silently flipped. `uk` carries that sign:
+        # `network::transformer_admittances_ex` takes |uk| for the impedance
+        # magnitude and applies `sign(uk)` to the recovered reactance (matching
+        # PGM's own `transformer_params()`, which produces negative uk/pk from
+        # its three-winding delta->wye conversion), so a negative uk round-trips
+        # to a negative x exactly. Without this, case3120sp's solution missed
+        # MATPOWER's own power balance by ~537 MVA across one such branch.
+        if x_ohm < 0.0:
+            uk = -uk
         pk = r_ohm * sn * sn / (U_RATED_UNIFORM ** 2)
         # PGM only allows *even* clock values for a wye-wye transformer
         # (winding_from == winding_to == 1 below) — confirmed empirically:
@@ -328,6 +378,26 @@ def convert(mat_path: Path, output_path: Path) -> None:
             "winding_from": 1, "winding_to": 1, "clock": clock,
             "tap_side": 0, "tap_pos": tap_pos, "tap_min": 0, "tap_max": 1, "tap_nom": tap_nom, "tap_size": tap_size,
         })
+
+        # A MATPOWER branch's charging susceptance `b` survives the conversion
+        # even on the transformer path, where PGM's `transformer` has no field
+        # for it (only `i0`/`p0`, a magnetizing branch on one side, which can't
+        # represent a symmetric pi-model charging). `makeYbus.m` folds it into
+        # `Ytt = ys + j*b/2` and `Yff = Ytt / |tap|^2`, leaving the series terms
+        # (`-ys/conj(tap)`, `-ys/tap`) untouched — so it decomposes exactly into
+        # two ordinary `shunt` components, `b/2` at the to-side node and
+        # `b/2 / ratio^2` at the tap (from) side. Dropping it instead, as this
+        # converter used to, silently understates reactive injection at both
+        # endpoints of every such branch (4 branches in case300, 52 in
+        # case3120sp) and showed up as a real 1-3 MVAr per-bus power-balance
+        # residual against MATPOWER's own equations.
+        bc = branch[row, BR_B]
+        if bc != 0.0:
+            base_y = s_base_va / (U_RATED_UNIFORM ** 2)
+            for node_id, half in ((t_id, bc / 2.0), (f_id, bc / 2.0 / (effective_ratio ** 2))):
+                shunts.append({"id": next_id(), "node": node_id, "status": 1,
+                               "g1": 0.0, "b1": half * base_y,
+                               "g0": 0.0, "b0": half * base_y})
 
     output = {
         "version": "1.0", "type": "input", "is_batch": False, "attributes": {},

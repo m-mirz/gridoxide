@@ -35,8 +35,8 @@ use std::env;
 use std::fs;
 use std::time::Instant;
 
-use gridoxide::network::{build_ybus, linear_initial_guess};
-use gridoxide::pgm::pgm_to_buses_and_branches;
+use gridoxide::network::{build_ybus, linear_initial_guess, stamp_shunts};
+use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
 use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend, PersistentSolver};
 
 fn main() {
@@ -72,9 +72,15 @@ fn main() {
 
     let t_parse0 = Instant::now();
     let input = serde_json::from_str(&raw).expect("parse PGM input JSON");
+    // Shunts are self-admittances, not branches: convert them before
+    // `pgm_to_buses_and_branches` consumes `input`, then stamp them onto the
+    // Y-bus diagonal, since `build_ybus` only ever sees lines/transformers.
+    let id_to_idx = node_id_to_idx(&input);
+    let shunts = pgm_shunts_1ph(&input, &id_to_idx, 1e6);
     let (buses_template, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
     let n = buses_template.len();
-    let ybus = build_ybus(n, &lines, &transformers);
+    let mut ybus = build_ybus(n, &lines, &transformers);
+    stamp_shunts(&mut ybus, &shunts);
     let t_parse = t_parse0.elapsed();
 
     println!("nodes={} lines={} transformers={}", n, lines.len(), transformers.len());

@@ -1107,7 +1107,18 @@ pub fn cgmes_to_buses_and_branches(
     // fields instead.
     for mrid in by_type(ds, "SynchronousMachine") {
         let sm: &SynchronousMachine = require(ds, mrid, "SynchronousMachine", mrid, "(self)")?;
-        let machine_connected = terms.connected(mrid, 0);
+        // `Equipment.inService` is independent of terminal connectivity, and a
+        // machine can be out of service while its terminals stay connected and
+        // its `RegulatingCondEq.controlEnabled` stays `true` — Svedala's
+        // `_f4cde1f4` is exactly that (`inService=false`, `controlEnabled=true`,
+        // `p=q=0`, a 21 kV target still recorded on its RegulatingControl).
+        // A machine that isn't in service can't hold a voltage setpoint, so
+        // honoring `controlEnabled` alone pinned that bus to 21.000 kV against
+        // the fixture's own published 20.134 kV — Svedala's single worst bus.
+        // The same applies to its P/Q injection, hence gating both.
+        let machine_in_service = equipment_in_service(
+            sm.base.base.base.base.base.in_service, sm.base.base.base.base.base.normally_in_service);
+        let machine_connected = terms.connected(mrid, 0) && machine_in_service;
         if let Some(bus) = terms.bus(mrid, 0) {
             if machine_connected {
                 let p = sm.base.p.unwrap_or(0.0);
@@ -1384,11 +1395,31 @@ fn build_two_winding(
     let b1 = end1.b.unwrap_or(0.0);
     let u1 = end1.rated_u.ok_or_else(|| missing("PowerTransformerEnd", end1.mrid_str(), "ratedU"))? * 1e3;
     let z_base = u1 * u1 / s_base_va;
-    // Structural ratio: end1's nameplate vs bus1's actual system base. This
-    // is a "to"-side-inherent effect, so — mirroring the same reciprocal
-    // convention applied above for a to-side tap changer — it enters as a
-    // reciprocal on top of whatever the tap changer itself contributes.
-    let structural = u1 / buses[bus1].u_rated;
+    // Structural ratio: each end's own nameplate `ratedU` against the system
+    // base voltage of the bus it actually sits on. Both ends contribute, and
+    // for the same reason — a nameplate that differs from its bus's system
+    // nominal *is* an off-nominal ideal-transformer ratio, independent of any
+    // tap changer.
+    //
+    // Deriving it, with `from` = bus2 and `to` = bus1: at no load the physical
+    // ratio across the device is `V_from / V_to = u2 / u1`, and `tap` is that
+    // ratio expressed per-unit, so
+    //
+    //   tap = (V_from / base2) / (V_to / base1) = (u2 / base2) / (u1 / base1)
+    //
+    // i.e. exactly the reciprocal of `structural` below. Only the `u1 / base1`
+    // half used to be applied here, which silently dropped end2's own
+    // contribution whenever its nameplate differed from its bus's base — no
+    // effect on a fixture where every `ratedU` equals its bus's `nominalVoltage`
+    // (all of this project's hand-authored ones), but pervasive on real data:
+    // 666 of RealGrid's 1,509 two-winding transformers and 4 of Svedala's 53,
+    // by up to 7.2%, which showed up directly as a ~7% solved-voltage error on
+    // the affected buses.
+    let structural_1 = u1 / buses[bus1].u_rated;
+    // A missing end2 `ratedU` means "no nameplate of its own to disagree with",
+    // i.e. a unity contribution — not an error, since end2 carries no impedance.
+    let structural_2 = end2.rated_u.map_or(1.0, |u2| (u2 * 1e3) / buses[bus2].u_rated);
+    let structural = structural_1 / structural_2;
     let tap = tap / structural;
 
     Ok(Transformer {

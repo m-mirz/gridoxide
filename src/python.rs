@@ -21,10 +21,14 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::network::{build_ybus, linear_initial_guess, YBusSparse};
+use crate::network::{build_ybus, linear_initial_guess, stamp_shunts, YBusSparse};
 use crate::pgm::PgmInput;
 use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver};
 use crate::types::Bus;
+#[cfg(feature = "cgmes")]
+use crate::cgmes::{
+    cgmes_resolve_dc_converters, cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 
 fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
     match name {
@@ -78,6 +82,13 @@ struct PowerFlowModel {
     solver: PersistentSolver,
     tol: f64,
     max_iter: usize,
+    /// `TopologicalNode` mrid -> bus index, populated by `from_cgmes` (empty
+    /// for `from_pgm_json`, which has no mrid concept at all) — lets Python
+    /// callers look up a specific bus's solved voltage by mrid to compare
+    /// against a CGMES fixture's own published `SvVoltage`, without needing
+    /// to separately re-derive `cgmes::cgmes_topological_node_bus_index`'s
+    /// own post-switch-merge index remapping themselves.
+    tn_bus_index: std::collections::HashMap<String, usize>,
 }
 
 #[pymethods]
@@ -106,9 +117,16 @@ impl PowerFlowModel {
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
         let input: PgmInput = serde_json::from_str(&raw)
             .map_err(|e| PyValueError::new_err(format!("parsing {path} as PGM JSON: {e}")))?;
+        // `shunt` entries have to be converted before `pgm_to_buses_and_branches`
+        // consumes `input`, then stamped onto the Y-bus diagonal — a PGM `shunt`
+        // is a self-admittance, not a branch, so `build_ybus` never sees it.
+        let id_to_idx = crate::pgm::node_id_to_idx(&input);
+        let shunts = crate::pgm::pgm_shunts_1ph(&input, &id_to_idx, s_base_va);
         let (buses_template, lines, transformers) =
             crate::pgm::pgm_to_buses_and_branches(input, s_base_va, freq_hz);
-        let ybus = build_ybus(buses_template.len(), &lines, &transformers).finish();
+        let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let ybus = ybus.finish();
         let backend = parse_backend(backend)?;
         Ok(Self {
             buses: buses_template.clone(),
@@ -117,6 +135,54 @@ impl PowerFlowModel {
             solver: PersistentSolver::new(backend),
             tol,
             max_iter,
+            tn_bus_index: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Loads a CGMES profile bundle (any number of EQ/EQBD/SSH/TP/SV files,
+    /// in any order — `cgmes::load_profiles` merges them by mRID regardless
+    /// of which file each element came from, the same way `references/`'s
+    /// own CGMES-capable tool, powsybl, merges a profile set). Resolves any
+    /// HVDC converters found (`cgmes_resolve_dc_converters`) into fixed AC
+    /// bus injections before the model is built, exactly like every native
+    /// CGMES test in `tests/cgmes_*_test.rs` already does — this binding is
+    /// a thin wrapper around that same conversion pipeline, not a separate
+    /// code path, so results match the Rust-side tests bus-for-bus.
+    ///
+    /// Only built when the crate's `cgmes` feature is enabled too
+    /// (`maturin develop --features python,cgmes`) — see `CIMOXIDE_PROVENANCE.md`
+    /// for why that dependency is opt-in.
+    #[cfg(feature = "cgmes")]
+    #[staticmethod]
+    #[pyo3(signature = (paths, backend="scalar", tol=1e-6, max_iter=20, s_base_va=100e6))]
+    fn from_cgmes(
+        paths: Vec<String>,
+        backend: &str,
+        tol: f64,
+        max_iter: usize,
+        s_base_va: f64,
+    ) -> PyResult<Self> {
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
+        let ds = load_profiles(&path_refs)
+            .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))?;
+        let (mut buses_template, lines, transformers, shunts) = cgmes_to_buses_and_branches(&ds, s_base_va)
+            .map_err(|e| PyRuntimeError::new_err(format!("converting CGMES model: {e}")))?;
+        cgmes_resolve_dc_converters(&ds, &mut buses_template, s_base_va)
+            .map_err(|e| PyRuntimeError::new_err(format!("resolving CGMES HVDC converters: {e}")))?;
+        let tn_bus_index = cgmes_topological_node_bus_index(&ds)
+            .map_err(|e| PyRuntimeError::new_err(format!("resolving CGMES bus index: {e}")))?;
+        let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let ybus = ybus.finish();
+        let backend = parse_backend(backend)?;
+        Ok(Self {
+            buses: buses_template.clone(),
+            buses_template,
+            ybus,
+            solver: PersistentSolver::new(backend),
+            tol,
+            max_iter,
+            tn_bus_index,
         })
     }
 
@@ -125,6 +191,24 @@ impl PowerFlowModel {
     #[getter]
     fn n_nodes(&self) -> usize {
         self.buses.len()
+    }
+
+    /// The bus index for a given `TopologicalNode` mrid, or `None` if this
+    /// model wasn't built via `from_cgmes` or the mrid isn't a bus in it.
+    /// Lets a Python caller compare `voltage_mag()[idx]` against a
+    /// fixture's own published `SvVoltage` for a specific mrid.
+    ///
+    /// `mrid` must include the leading `_` CGMES's own `rdf:ID`/`rdf:about`
+    /// values always carry (e.g. `"_1234abcd-..."`, not `"1234abcd-..."`) —
+    /// `CimElement::mrid()` (what `cgmes_topological_node_bus_index` keys
+    /// this map by) returns that raw XML attribute value unmodified, so a
+    /// stripped-underscore mrid would silently never match here. A
+    /// `TopologicalNode`'s `SvVoltage.TopologicalNode` reference in the SV
+    /// profile already carries this same underscore-prefixed form, so a
+    /// caller comparing against published values doesn't need to strip or
+    /// add one either way.
+    fn bus_index_for_mrid(&self, mrid: &str) -> Option<usize> {
+        self.tn_bus_index.get(mrid).copied()
     }
 
     /// Solves from a fresh flat/linear-initial-guess start, reusing this
@@ -174,6 +258,14 @@ impl PowerFlowModel {
     /// Per-bus voltage angle in radians, in node order.
     fn voltage_ang(&self) -> Vec<f64> {
         self.buses.iter().map(|b| b.voltage_ang).collect()
+    }
+
+    /// Per-bus voltage magnitude in kV (line-to-line), in node order —
+    /// `voltage_mag() * u_rated`, converted to the same unit CGMES's own
+    /// `SvVoltage.v` uses, so a caller comparing against a fixture's
+    /// published values doesn't need `u_rated` (not itself exposed) at all.
+    fn voltage_kv(&self) -> Vec<f64> {
+        self.buses.iter().map(|b| b.voltage_mag * b.u_rated / 1e3).collect()
     }
 }
 

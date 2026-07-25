@@ -63,8 +63,17 @@ fn test_cgmes_svedala() {
     assert_eq!(transformers.len(), 53, "expected 53 two-winding transformers");
     assert_eq!(shunts.len(), 46, "expected 46 LinearShuntCompensator shunts");
 
+    // This fixture's own TopologicalIsland lists 108 of its 191 buses, so 83
+    // are de-energized. This used to assert 78, which was five buses short:
+    // all six of Svedala's `inService=false` SynchronousMachines also carry
+    // `controlEnabled=true`, and the machine loop (which runs after the
+    // de-energized marking) used to gate only on `controlEnabled`, so those
+    // machines re-typed their own already-de-energized buses back to PV. One
+    // of them, `_f4cde1f4`, regulates a *remote* terminal, so it also pinned
+    // an energized bus to its 21 kV target against the fixture's own published
+    // 20.134 kV — Svedala's single worst deviation before this was fixed.
     let n_deenergized = buses.iter().filter(|b| b.bus_type == BusType::Slack && b.voltage_mag == 0.0).count();
-    assert_eq!(n_deenergized, 78, "expected 78 de-energized (TopologicalIsland-absent) buses");
+    assert_eq!(n_deenergized, 83, "expected 83 de-energized (TopologicalIsland-absent) buses");
 
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);
