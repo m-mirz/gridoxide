@@ -610,6 +610,69 @@ pub fn effective_injection(bus: &Bus) -> (f64, f64) {
     (s.re, s.im)
 }
 
+/// Classic "DC power flow" linear approximation: solves an initial voltage
+/// **angle** for every non-`Slack` bus (`PV` *and* `PQ`) from the reactive
+/// part of the Y-bus alone (`P_i ≈ -Σ_j Im(Y_ij)·θ_j`, the standard small-
+/// angle/flat-magnitude DC linearization), leaving voltage *magnitude*
+/// untouched — unlike [`linear_initial_guess`]'s own complex linear solve
+/// just below, which only ever has unknowns for `PQ` buses (a `PV` bus's
+/// magnitude is fixed by definition, so it was never included there), this
+/// runs first and is the *only* initial-guess treatment `PV` buses get.
+///
+/// Without this, every `PV` bus starts Newton-Raphson at the `Bus` struct's
+/// own default `voltage_ang = 0.0` — fine when `PV` buses are electrically
+/// distant from each other, but a real problem when several sit close
+/// together across very-high-admittance branches (confirmed on CGMES
+/// FullGrid: parallel low-impedance transformers plus a short line cluster
+/// several `PV` buses this way): a high-admittance branch turns even a
+/// small first-iteration angle correction into a huge power-mismatch swing,
+/// and with *every* clustered `PV` bus starting from the identical flat
+/// angle, Newton-Raphson has to discover their true (and possibly quite
+/// different) relative angles from scratch — exactly the kind of stiffness
+/// that made FullGrid's own AC solve oscillate indefinitely rather than
+/// converge, even from 300 iterations, on every backend tried.
+fn dc_angle_guess(buses: &mut [Bus], ybus: &YBusSparse) {
+    let n = buses.len();
+    let unknown_idx: Vec<usize> = (0..n).filter(|&i| !matches!(buses[i].bus_type, BusType::Slack)).collect();
+    if unknown_idx.is_empty() {
+        return;
+    }
+    let m = unknown_idx.len();
+    let mut reduced_pos: Vec<Option<usize>> = vec![None; n];
+    for (r, &i) in unknown_idx.iter().enumerate() {
+        reduced_pos[i] = Some(r);
+    }
+
+    // Sparse triplets accumulating `-Im(Y_ij)` for every unknown-to-unknown
+    // pair, walking only each bus's actual Y-bus neighbors — same reasoning
+    // as `linear_initial_guess`'s own complex solve just below: RealGrid-
+    // scale networks (~6000 buses) need this to stay sparse, not the dense
+    // Gaussian elimination `dc::solve_dc_network` uses at HVDC-subsystem
+    // scale (confirmed: a first, dense-matrix version of this function blew
+    // RealGrid's own test time up from ~9s to ~34s).
+    let mut triplets: Vec<(usize, usize, Complex<f64>)> = Vec::new();
+    let mut rhs = vec![Complex::new(0.0, 0.0); m];
+    for (r, &i) in unknown_idx.iter().enumerate() {
+        let (p, _) = effective_injection(&buses[i]);
+        rhs[r] = Complex::new(p, 0.0);
+        // Slack buses (θ fixed at 0 by definition) contribute nothing to
+        // the RHS here — the classic DC approximation has no G/loss term
+        // linking a slack's fixed angle into other buses' P equations,
+        // unlike the complex solve's own Y'_ns·U_s term.
+        for &(j, y_ij) in ybus.row(i) {
+            if let Some(c) = reduced_pos[j] {
+                triplets.push((r, c, Complex::new(-y_ij.im, 0.0)));
+            }
+        }
+    }
+
+    if let Some(theta) = sparse::solve_complex(m, &triplets, &rhs) {
+        for (r, &i) in unknown_idx.iter().enumerate() {
+            buses[i].voltage_ang = theta[r].re;
+        }
+    }
+}
+
 /// Computes a smarter-than-flat-start initial voltage guess for Newton-Raphson
 /// by solving one linearized constant-admittance system, mirroring PGM's
 /// `NewtonRaphsonPFSolver::initialize_derived_solver`. Each energized (`PQ`)
@@ -625,6 +688,8 @@ pub fn effective_injection(bus: &Bus) -> (f64, f64) {
 /// its only robustness mechanism, needed on networks combining weak sources
 /// with large transformer phase shifts where plain flat-start NR diverges.
 pub fn linear_initial_guess(buses: &mut [Bus], ybus: &YBusSparse) {
+    dc_angle_guess(buses, ybus);
+
     let n = buses.len();
     let unknown_idx: Vec<usize> = (0..n).filter(|&i| matches!(buses[i].bus_type, BusType::PQ)).collect();
     if unknown_idx.is_empty() {

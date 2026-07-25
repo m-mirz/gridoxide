@@ -1,6 +1,7 @@
 pub mod types;
 pub mod network;
 pub mod solver;
+pub mod dc;
 pub mod json;
 pub mod pgm;
 pub mod sparse;

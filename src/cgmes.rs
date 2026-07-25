@@ -15,13 +15,16 @@ use num_complex::Complex;
 
 pub use cimdecoder::CimDataset;
 use cimstructs::{
-    ACLineSegment, BaseVoltage, EnergyConsumer, EquivalentInjection, LinearShuntCompensator,
-    NonlinearShuntCompensator, NonlinearShuntCompensatorPoint, PhaseTapChangerAsymmetrical,
-    PhaseTapChangerNonLinear, PhaseTapChangerSymmetrical, PowerTransformerEnd, RatioTapChanger,
+    ACDCConverterDCTerminal, ACLineSegment, BaseVoltage, CsConverter, DCBreaker, DCDisconnector,
+    DCGround, DCLineSegment, DCSeriesDevice, DCShunt, DCSwitch, DCTerminal, EnergyConsumer,
+    EquivalentInjection, LinearShuntCompensator, NonlinearShuntCompensator,
+    NonlinearShuntCompensatorPoint, PhaseTapChangerAsymmetrical, PhaseTapChangerNonLinear,
+    PhaseTapChangerSymmetrical, PowerElectronicsConnection, PowerTransformerEnd, RatioTapChanger,
     RegulatingControl, StaticVarCompensator, SynchronousMachine, Terminal, TopologicalIsland,
-    TopologicalNode,
+    TopologicalNode, VsConverter,
 };
 
+use crate::dc::{injected_currents, solve_dc_network, DcBus, DcBusRole, DcLine, DcSolveStatus};
 use crate::network::ShuntAdm;
 use crate::types::{Bus, BusType, Line, Transformer};
 
@@ -50,6 +53,15 @@ pub enum CgmesError {
     /// v1 converter doesn't attempt to guess at (e.g. tap changers on both
     /// ends of the same 2-winding transformer).
     UnsupportedTransformer { mrid: String, reason: String },
+    /// A `VsConverter`/`CsConverter` whose `pPccControl` mode isn't one of
+    /// the ones `cgmes_resolve_dc_converters` handles (`udc`/`dcVoltage`,
+    /// `pPcc`/`activePower`, `dcCurrent`) — e.g. a droop or phase-control
+    /// mode. An honest, explicit limitation rather than a silently wrong
+    /// power flow, mirroring `UnsupportedTransformer` above.
+    UnsupportedConverterControl { mrid: String, mode: String },
+    /// `dc::solve_dc_network` didn't converge while resolving a converter's
+    /// `pPcc`/`activePower` target through its loss curve.
+    DcNetworkDidNotConverge,
 }
 
 impl std::fmt::Display for CgmesError {
@@ -69,6 +81,12 @@ impl std::fmt::Display for CgmesError {
             }
             CgmesError::UnsupportedTransformer { mrid, reason } => {
                 write!(f, "PowerTransformer {mrid}: {reason}")
+            }
+            CgmesError::UnsupportedConverterControl { mrid, mode } => {
+                write!(f, "ACDCConverter {mrid}: unsupported pPccControl mode {mode:?}")
+            }
+            CgmesError::DcNetworkDidNotConverge => {
+                write!(f, "DC network solve did not converge")
             }
         }
     }
@@ -242,6 +260,137 @@ impl TerminalIndex {
     fn connected_via_terminal_mrid(&self, terminal_mrid: &str) -> bool {
         self.connected_of.get(terminal_mrid).copied().unwrap_or(true)
     }
+}
+
+/// Minimal path-compressing union-find, used only by `merge_closed_switches`
+/// below (small enough — at most a few hundred buses — that union-by-rank
+/// isn't worth the extra bookkeeping).
+struct UnionFind {
+    parent: Vec<usize>,
+}
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        UnionFind { parent: (0..n).collect() }
+    }
+    fn find(&mut self, x: usize) -> usize {
+        if self.parent[x] != x {
+            self.parent[x] = self.find(self.parent[x]);
+        }
+        self.parent[x]
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.parent[ra] = rb;
+        }
+    }
+}
+
+/// Merges buses tied together by a *closed*, in-service switch (`Breaker`,
+/// `Switch`, `Disconnector`, `LoadBreakSwitch`, `DisconnectingCircuitBreaker`,
+/// `GroundDisconnector`, `Jumper`, `Cut`, `Fuse`) into one bus each, before
+/// any equipment loop below ever calls `terms.bus(...)` — approach #1 from
+/// `docs/src/zero_impedance_branches.md` ("topological reduction... the most
+/// direct fix"), not approach #2 (an extreme-admittance branch): this file's
+/// own top doc comment already commits to `TopologicalNode` *being* the
+/// fully-resolved bus everywhere downstream, so stamping switches as
+/// near-zero-impedance `Line`s instead would fight that assumption — and,
+/// confirmed empirically on FullGrid, is numerically unstable (the AC
+/// Newton-Raphson solve diverged with 20+ such branches active at once,
+/// exactly the conditioning cost `zero_impedance_branches.md` warns
+/// large-admittance regularization carries). Nothing downstream needs the
+/// two original terminals to stay numerically distinct (no per-side flow
+/// reporting), so the merge has no real downside here.
+///
+/// This converter's original assumption — that CGMES's TP profile always
+/// pre-merges a closed switch's two ends into one `TopologicalNode`, making
+/// switches topologically invisible — held for MiniGrid/MicroGrid-BE/
+/// RealGrid, but is FALSE for FullGrid specifically: its own plain `Switch`
+/// instance is `open=false` in SSH yet resolves to two distinct
+/// `TopologicalNode`s in TP. Real exporters don't universally do this
+/// reduction, so gridoxide does it itself when needed.
+/// Returns the merged buses plus the pre-merge -> post-merge index remap
+/// (so callers can fix up any *other* pre-merge-indexed mapping they hold —
+/// `cgmes_to_buses_and_branches`'s own `idx_of` in particular).
+fn merge_closed_switches(ds: &CimDataset, buses: Vec<Bus>, terms: &mut TerminalIndex) -> Result<(Vec<Bus>, Vec<usize>), CgmesError> {
+    let mut uf = UnionFind::new(buses.len());
+
+    fn union_pair(uf: &mut UnionFind, terms: &TerminalIndex, mrid: &str, in_service: bool, open: bool) {
+        if !in_service || open {
+            return;
+        }
+        if let (Some(a), Some(b)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) {
+            uf.union(a, b);
+        }
+    }
+
+    for mrid in by_type(ds, "Switch") {
+        let sw: &cimstructs::Switch = require(ds, mrid, "Switch", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service), sw.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Breaker") {
+        let br: &cimstructs::Breaker = require(ds, mrid, "Breaker", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(br.base.base.base.base.in_service, br.base.base.base.base.normally_in_service), br.base.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "LoadBreakSwitch") {
+        let lbs: &cimstructs::LoadBreakSwitch = require(ds, mrid, "LoadBreakSwitch", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(lbs.base.base.base.base.in_service, lbs.base.base.base.base.normally_in_service), lbs.base.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "DisconnectingCircuitBreaker") {
+        let dcb: &cimstructs::DisconnectingCircuitBreaker = require(ds, mrid, "DisconnectingCircuitBreaker", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(dcb.base.base.base.base.base.in_service, dcb.base.base.base.base.base.normally_in_service), dcb.base.base.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Disconnector") {
+        let d: &cimstructs::Disconnector = require(ds, mrid, "Disconnector", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(d.base.base.base.in_service, d.base.base.base.normally_in_service), d.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "GroundDisconnector") {
+        let g: &cimstructs::GroundDisconnector = require(ds, mrid, "GroundDisconnector", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(g.base.base.base.in_service, g.base.base.base.normally_in_service), g.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Jumper") {
+        let j: &cimstructs::Jumper = require(ds, mrid, "Jumper", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), j.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Cut") {
+        let c: &cimstructs::Cut = require(ds, mrid, "Cut", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(c.base.base.base.in_service, c.base.base.base.normally_in_service), c.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Fuse") {
+        let f: &cimstructs::Fuse = require(ds, mrid, "Fuse", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(f.base.base.base.in_service, f.base.base.base.normally_in_service), f.base.open.unwrap_or(false));
+    }
+    // Junction: CIM's own doc text calls it "a point where one or more
+    // conducting equipment are connected with zero impedance" — always a
+    // permanent zero-impedance tie, no `open`/switchable state at all
+    // (unlike every other class in this function), so it's merged
+    // unconditionally whenever in-service.
+    for mrid in by_type(ds, "Junction") {
+        let j: &cimstructs::Junction = require(ds, mrid, "Junction", mrid, "(self)")?;
+        union_pair(&mut uf, terms, mrid, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), false);
+    }
+
+    // Compact each union-find group into one final bus, keyed by whichever
+    // index its group's root happens to land on (arbitrary but
+    // deterministic) — a closed switch always ties nodes at the same
+    // nominal voltage, so taking that representative bus's own fields
+    // (`u_rated` in particular) for the merged bus is safe.
+    let mut remap = vec![usize::MAX; buses.len()];
+    let mut merged: Vec<Bus> = Vec::new();
+    for i in 0..buses.len() {
+        let root = uf.find(i);
+        if remap[root] == usize::MAX {
+            remap[root] = merged.len();
+            let mut b = buses[root].clone();
+            b.idx = merged.len();
+            merged.push(b);
+        }
+        remap[i] = remap[root];
+    }
+    for v in terms.bus_of.values_mut() {
+        *v = remap[*v];
+    }
+    Ok((merged, remap))
 }
 
 /// The result of resolving whichever tap changer (if any) is attached to a
@@ -606,7 +755,16 @@ pub fn cgmes_to_buses_and_branches(
     }
 
     // --- Step 2: shared Terminal-based resolver ---
-    let terms = TerminalIndex::build(ds, &idx_of, &mut buses)?;
+    let mut terms = TerminalIndex::build(ds, &idx_of, &mut buses)?;
+
+    // --- Step 2.5: merge buses tied together by a closed switch ---
+    let (mut buses, switch_merge_remap) = merge_closed_switches(ds, buses, &mut terms)?;
+    // `idx_of` is keyed by TopologicalNode mrid -> pre-merge index; every
+    // later use of it (TopologicalIsland energization/angle-reference below)
+    // needs the same post-merge index `terms`/`buses` now use.
+    for v in idx_of.values_mut() {
+        *v = switch_merge_remap[*v];
+    }
 
     // --- Step 3: loads/injections (EnergyConsumer + subtypes + EquivalentInjection) ---
     // Both P and Q use CGMES's uniform SSH "load sign convention" (positive =
@@ -670,6 +828,48 @@ pub fn cgmes_to_buses_and_branches(
         buses[bus].p_spec += -ei.p.unwrap_or(0.0) * 1e6 / s_base_va;
         buses[bus].q_spec += -ei.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
+    // PowerElectronicsConnection: a renewable/inverter-based generation
+    // source (wind/solar/battery via power electronics rather than a
+    // rotating machine). Its `p`/`q` doc text is character-for-character
+    // EquivalentInjection's ("Load sign convention... positive sign means
+    // flow out from a node"), not SynchronousMachine's — so both get
+    // negated, EquivalentInjection-style, not the machine's Q exception.
+    for mrid in by_type(ds, "PowerElectronicsConnection") {
+        let pec: &PowerElectronicsConnection = require(ds, mrid, "PowerElectronicsConnection", mrid, "(self)")?;
+        let pec_connected = terms.connected(mrid, 0);
+        if let Some(bus) = terms.bus(mrid, 0) {
+            if pec_connected {
+                buses[bus].p_spec += -pec.p.unwrap_or(0.0) * 1e6 / s_base_va;
+                buses[bus].q_spec += -pec.q.unwrap_or(0.0) * 1e6 / s_base_va;
+            }
+        }
+
+        let Some(rc_ref) = &pec.base.regulating_control else { continue };
+        if !pec_connected || pec.base.control_enabled != Some(true) {
+            continue;
+        }
+        let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "PowerElectronicsConnection", mrid, "RegulatingControl")?;
+        if rc.enabled != Some(true) {
+            continue;
+        }
+        let is_voltage_mode = rc.mode.as_ref().is_some_and(|m| m.uri.ends_with(".voltage"));
+        if !is_voltage_mode {
+            continue;
+        }
+        let Some(term_ref) = &rc.terminal else { continue };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else { continue };
+        let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
+        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+
+        if buses[controlled_bus].bus_type == BusType::PQ {
+            buses[controlled_bus].bus_type = BusType::PV;
+        }
+        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
+        let q_min = pec.min_q.unwrap_or(-f64::INFINITY);
+        let q_max = pec.max_q.unwrap_or(f64::INFINITY);
+        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
+        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+    }
 
     // --- Step 4: lines from ACLineSegment ---
     // `r`/`x`/`bch`/`gch` are documented directly on ACLineSegment as "of the
@@ -725,6 +925,21 @@ pub fn cgmes_to_buses_and_branches(
         push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
+        );
+    }
+    // EquivalentBranch: a simplified series-impedance stand-in for a
+    // reduced/boundary part of the network (an `EquivalentNetwork`
+    // container) — same shape as ACLineSegment, using the primary `r`/`x`
+    // (not the `r21`/`x21`/`negative*`/`zero*` directional variants, which
+    // FullGrid's own instance leaves equal to `r`/`x` anyway).
+    for mrid in by_type(ds, "EquivalentBranch") {
+        let eb: &cimstructs::EquivalentBranch = require(ds, mrid, "EquivalentBranch", mrid, "(self)")?;
+        let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
+        let u_rated = buses[from].u_rated;
+        let z_base = u_rated * u_rated / s_base_va;
+        push_status_aware_line(
+            &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
+            eb.r.unwrap_or(0.0) / z_base, eb.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
     }
 
@@ -831,8 +1046,17 @@ pub fn cgmes_to_buses_and_branches(
     // have no TopologicalNode/TopologicalIsland membership of their own —
     // treat them as energized by default (their own physical leg/injection
     // determines whether they end up isolated, not island membership).
-    for energized in energized.iter_mut().skip(tn_mrids.len()) {
-        *energized = true;
+    // Identified by NOT being any `idx_of` value (i.e. no real
+    // `TopologicalNode` maps to that bus index) rather than by position
+    // (`buses.len()..tn_mrids.len()` used to be exactly the synthesized
+    // range, back when every real `TopologicalNode` bus kept its own
+    // distinct index — no longer true once Step 2.5 merges some of them
+    // together, which can leave a synthesized bus's index anywhere).
+    let tn_backed_indices: std::collections::HashSet<usize> = idx_of.values().copied().collect();
+    for (i, energized) in energized.iter_mut().enumerate() {
+        if !tn_backed_indices.contains(&i) {
+            *energized = true;
+        }
     }
     for (i, bus) in buses.iter_mut().enumerate() {
         if !energized[i] {
@@ -1018,12 +1242,25 @@ pub fn cgmes_to_buses_and_branches(
     // data, not this fixture set — falls through to
     // `network::mark_unreferenced_islands`'s generic handling downstream.)
     let mut slack_indices: Vec<usize> = Vec::new();
+    // Paired with each slack bus's own *original* AngleRefTopologicalNode
+    // mrid (not re-derived from `tn_mrids[idx]` below — `idx` is a
+    // post-Step-2.5 (post-switch-merge) index, and `tn_mrids` is still the
+    // pre-merge list in its original order, so indexing it with a post-merge
+    // idx picks out an unrelated TopologicalNode whenever any merging
+    // happened at all. A real bug, caught on FullGrid: it fed some other
+    // bus's `SvVoltage.v` into the slack's `voltage_mag`, producing a
+    // nonsensical ~10-20x-scale starting voltage — and since which
+    // TopologicalNode landed at that numeric index depended on de-
+    // duplicated `HashMap`-iteration-order effects elsewhere, WHICH bus
+    // ended up corrupted varied from run to run.)
+    let mut slack_angle_ref_mrid: Vec<String> = Vec::new();
     for mrid in by_type(ds, "TopologicalIsland") {
         let ti: &TopologicalIsland = require(ds, mrid, "TopologicalIsland", mrid, "(self)")?;
         if let Some(tn_ref) = &ti.angle_ref_topological_node {
             if let Some(&idx) = idx_of.get(&tn_ref.mrid) {
                 buses[idx].bus_type = BusType::Slack;
                 slack_indices.push(idx);
+                slack_angle_ref_mrid.push(tn_ref.mrid.clone());
             }
         }
     }
@@ -1039,8 +1276,7 @@ pub fn cgmes_to_buses_and_branches(
     // model this area submission is part of), so matching it here for every
     // slack bus — rather than defaulting to 0° — is what actually reproduces
     // the same solution, not a fixture-specific hack.
-    for &slack_idx in &slack_indices {
-        let slack_mrid = &tn_mrids[slack_idx];
+    for (&slack_idx, slack_mrid) in slack_indices.iter().zip(slack_angle_ref_mrid.iter()) {
         for mrid in by_type(ds, "SvVoltage") {
             let sv: &cimstructs::SvVoltage = require(ds, mrid, "SvVoltage", mrid, "(self)")?;
             if sv.topological_node.as_ref().is_some_and(|tn| &tn.mrid == slack_mrid) {
@@ -1188,4 +1424,427 @@ impl MridStr for PowerTransformerEnd {
     fn mrid_str(&self) -> &str {
         cimstructs::base::CimElement::mrid(self)
     }
+}
+
+// ============================================================================
+// HVDC (VsConverter/CsConverter + DC network) support
+// ============================================================================
+//
+// Unlike every other Step above, DC resolution isn't folded into
+// `cgmes_to_buses_and_branches` itself — it runs as a separate pass,
+// `cgmes_resolve_dc_converters`, called after it, mutating the AC `buses` it
+// returned in place. This is deliberate, not a layering shortcut: every
+// converter control mode FullGrid actually uses (`udc`/`dcVoltage` DC-voltage
+// slack, `dcCurrent` fixed DC current, `pPcc`/`activePower` fixed AC-side
+// power) has its DC-side target either fully static (straight from the SSH
+// profile) or a direct result of solving the DC network — none of them make
+// a converter's DC-side behavior depend on the AC network's own solved
+// state. So the whole DC network can be solved once, standalone, before the
+// AC Newton-Raphson solve ever runs, rather than needing a generic outer
+// AC<->DC coupling loop that repeatedly re-solves both sides. (A control mode
+// that genuinely coupled the two — e.g. `pPccAndUdcDroop` — would need one;
+// FullGrid doesn't use any, so `UnsupportedConverterControl` covers that gap
+// honestly instead of silently guessing.)
+//
+// Once the DC network is solved, every converter's final AC-side power is
+// recovered by one identity, valid for every role (slack or follower) and
+// every direction (rectifying or inverting) via simple energy conservation:
+//
+//   Pac_absorbed = P_dc_injected + loss(Idc)
+//
+// where `Pac_absorbed` is in CIM's own "load sign convention" (positive =
+// power flowing OUT of the AC node INTO the converter), `P_dc_injected` is
+// the power the converter pushes out of its own DC terminal into the DC
+// network (`V_dc * Idc`, `dc::injected_currents`' own sign convention), and
+// `loss` is always >= 0 regardless of direction (it depends on `|Idc|`/
+// `Idc^2`). No rectifier/inverter branch is needed anywhere in this code.
+
+/// Ideal-switch resistance stamped for closed DC switches/breakers/
+/// disconnectors, which carry no resistance field in CIM at all — small
+/// relative to FullGrid's real `DCLineSegment` resistance (2.5 Ω) so it's
+/// numerically negligible without ill-conditioning the small (<20-bus) dense
+/// Newton solve in `dc::solve_dc_network`. Mirrors the same "ideal switch as
+/// a tiny resistance" approach `docs/src/zero_impedance_branches.md`
+/// documents for AC.
+const DC_SWITCH_R: f64 = 1e-4;
+
+/// Absolute mismatch tolerance for `dc::solve_dc_network` calls below (MW/kA
+/// scale, not `newton_raphson`'s p.u.-scale `1e-6`/`1e-9`). Looser than the
+/// dc.rs unit tests' own `1e-9`, deliberately: those synthetic networks have
+/// no `DC_SWITCH_R`-scale branches, so they're well-conditioned enough for
+/// `1e-9` to be reachable in double precision. A real CGMES DC network mixes
+/// `DC_SWITCH_R` (1e-4 Ω, G≈10,000) with real line resistances (2.5 Ω here,
+/// G≈0.4) — a ~25,000:1 conductance ratio that amplifies rounding error
+/// enough through Gaussian elimination that `1e-9` is empirically
+/// unreachable on FullGrid (confirmed: it ran to `max_iter` without
+/// technically converging, even though the solved voltages were already
+/// correct to 6 decimal places by iteration 3 at this looser tolerance).
+const DC_SOLVE_TOL: f64 = 1e-6;
+
+fn equipment_in_service(in_service: Option<bool>, normally_in_service: Option<bool>) -> bool {
+    in_service.or(normally_in_service).unwrap_or(true)
+}
+
+/// `pole_loss_p = idleLoss + switchingLoss*|Idc_pu| + resistiveLoss*Idc_pu^2`,
+/// per `ACDCConverter.poleLossP`'s own doc text. `Idc_pu` normalizes `idc_amps`
+/// by a base current `I_base = baseS*1000/ratedUdc` (MVA*1000/kV = A) —
+/// cross-validated against FullGrid's own data, not assumed: the Inverter
+/// CsConverter's `baseS=334.6`/`ratedUdc=167.3` gives `I_base≈2000.0`,
+/// matching its own explicit `CsConverter.ratedIdc=2000` almost exactly.
+/// Treating `idc_amps` as already-per-unit (skipping this normalization)
+/// gives an absurd ~50,000 MW "loss" at FullGrid's real Idc values (hundreds
+/// of amps) — confirming the coefficients are meant to be applied to a
+/// per-unit, not raw-Amp, current.
+fn converter_loss_mw(idle: f64, switching: f64, resistive: f64, base_s: f64, rated_udc: f64, idc_amps: f64) -> f64 {
+    let i_base = base_s * 1000.0 / rated_udc;
+    let idc_pu = if i_base > 0.0 { idc_amps / i_base } else { 0.0 };
+    idle + switching * idc_pu.abs() + resistive * idc_pu * idc_pu
+}
+
+/// What a converter's `pPccControl` mode fixes, before it's translated into
+/// a `dc::DcBusRole` (which needs unit conversion — kV/kA vs. CIM's kV/A —
+/// and, for `FixedAc`, the loss-curve self-consistency loop below).
+#[derive(Clone, Copy)]
+enum ConverterRole {
+    /// `udc`/`dcVoltage`: DC voltage fixed, in kV (`ACDCConverter.targetUdc`).
+    UdcSlack(f64),
+    /// `dcCurrent`: DC current fixed, in A, already signed by
+    /// `CsConverter.operatingMode` (positive = injecting into the DC
+    /// network, i.e. rectifying).
+    FixedIdc(f64),
+    /// `pPcc`/`activePower`: AC-side power fixed, in MW, CIM load-sign
+    /// convention (`ACDCConverter.targetPpcc`).
+    FixedAc(f64),
+}
+
+fn classify_vs_converter(vc: &VsConverter, mrid: &str) -> Result<ConverterRole, CgmesError> {
+    let suffix = vc.p_pcc_control.as_ref().and_then(|u| u.uri.rsplit('.').next());
+    match suffix {
+        Some("udc") => Ok(ConverterRole::UdcSlack(vc.base.target_udc.ok_or_else(|| missing("VsConverter", mrid, "targetUdc"))?)),
+        Some("pPcc") => Ok(ConverterRole::FixedAc(vc.base.target_ppcc.ok_or_else(|| missing("VsConverter", mrid, "targetPpcc"))?)),
+        other => Err(CgmesError::UnsupportedConverterControl { mrid: mrid.to_string(), mode: other.unwrap_or("(none)").to_string() }),
+    }
+}
+
+fn classify_cs_converter(cc: &CsConverter, mrid: &str) -> Result<ConverterRole, CgmesError> {
+    let suffix = cc.p_pcc_control.as_ref().and_then(|u| u.uri.rsplit('.').next());
+    match suffix {
+        Some("dcVoltage") => Ok(ConverterRole::UdcSlack(cc.base.target_udc.ok_or_else(|| missing("CsConverter", mrid, "targetUdc"))?)),
+        Some("dcCurrent") => {
+            let idc = cc.target_idc.ok_or_else(|| missing("CsConverter", mrid, "targetIdc"))?;
+            let is_rectifier = cc.operating_mode.as_ref().is_some_and(|m| m.uri.ends_with(".rectifier"));
+            Ok(ConverterRole::FixedIdc(if is_rectifier { idc } else { -idc }))
+        }
+        Some("activePower") => Ok(ConverterRole::FixedAc(cc.base.target_ppcc.ok_or_else(|| missing("CsConverter", mrid, "targetPpcc"))?)),
+        other => Err(CgmesError::UnsupportedConverterControl { mrid: mrid.to_string(), mode: other.unwrap_or("(none)").to_string() }),
+    }
+}
+
+struct ConverterInfo {
+    ac_bus: usize,
+    dc_bus: usize,
+    role: ConverterRole,
+    idle_loss: f64,
+    switching_loss: f64,
+    resistive_loss: f64,
+    base_s: f64,
+    rated_udc: f64,
+    q_mw: f64,
+}
+
+/// Equipment mrid -> its own (sorted-by-sequence) plain `DCTerminal` mrids,
+/// each resolved to a `dc::DcBus` index — the DC-side analogue of
+/// `TerminalIndex`, scoped to plain `DCTerminal` (lines/switches/ground/
+/// shunt) only. Converters use `ACDCConverterDCTerminal` instead, resolved
+/// separately below since they additionally need `polarity`.
+struct DcTerminalIndex {
+    by_equipment: HashMap<String, Vec<String>>,
+    bus_of: HashMap<String, usize>,
+}
+
+impl DcTerminalIndex {
+    fn build(ds: &CimDataset, dc_idx_of: &HashMap<String, usize>) -> Self {
+        let mut raw: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+        let mut bus_of = HashMap::new();
+        for t_mrid in by_type(ds, "DCTerminal") {
+            let Some(t) = get::<DCTerminal>(ds, t_mrid) else { continue };
+            if let Some(ce) = &t.dc_conducting_equipment {
+                let seq = t.base.base.sequence_number.unwrap_or(1);
+                raw.entry(ce.mrid.clone()).or_default().push((seq, t_mrid.clone()));
+            }
+            // Direct `DCTopologicalNode` reference, merged in from the TP
+            // profile onto the same terminal mrid — confirmed present on
+            // every DCTerminal instance in FullGrid's TP file, but a
+            // `DCNode`-mediated fallback isn't added here since it's never
+            // exercised; keeping this as direct-only mirrors what's actually
+            // used rather than speculatively guessing at an untested path.
+            if let Some(tn) = &t.base.dc_topological_node {
+                if let Some(&idx) = dc_idx_of.get(&tn.mrid) {
+                    bus_of.insert(t_mrid.clone(), idx);
+                }
+            }
+        }
+        let by_equipment = raw.into_iter().map(|(eq, mut v)| {
+            v.sort_by_key(|(seq, _)| *seq);
+            (eq, v.into_iter().map(|(_, m)| m).collect())
+        }).collect();
+        DcTerminalIndex { by_equipment, bus_of }
+    }
+
+    /// The two DC buses a two-terminal piece of DC equipment connects, in
+    /// terminal-sequence order (order doesn't matter for a plain resistor).
+    fn line(&self, equipment_mrid: &str) -> Option<(usize, usize)> {
+        let ts = self.by_equipment.get(equipment_mrid)?;
+        if ts.len() < 2 {
+            return None;
+        }
+        Some((*self.bus_of.get(&ts[0])?, *self.bus_of.get(&ts[1])?))
+    }
+
+    /// The single DC bus a one-terminal piece of DC equipment (DCGround,
+    /// DCShunt) connects to.
+    fn single_bus(&self, equipment_mrid: &str) -> Option<usize> {
+        let ts = self.by_equipment.get(equipment_mrid)?;
+        self.bus_of.get(ts.first()?).copied()
+    }
+}
+
+/// The outcome of resolving a dataset's HVDC equipment: every
+/// `DCTopologicalNode`'s solved voltage (kV) and the underlying DC network
+/// solve status. `dc_bus_mrids[i]`/`voltages_kv[i]` are index-aligned.
+///
+/// The whole dataset's DC equipment is solved as one combined graph rather
+/// than split per-link: `dc::solve_dc_network`'s own connected-components
+/// handling already solves every electrically independent HVDC link (and
+/// isolates a dead/disconnected subgraph, like FullGrid's spare switchyard
+/// branch) correctly in a single call — exactly as AC's own multi-island
+/// support solves every component in one shared Newton-Raphson call. So
+/// there's one `DcResolution` for the whole dataset, not one per link.
+pub struct DcResolution {
+    pub dc_bus_mrids: Vec<String>,
+    pub voltages_kv: Vec<f64>,
+    pub status: DcSolveStatus,
+}
+
+/// Resolves every `VsConverter`/`CsConverter` in `ds` into fixed `p_spec`/
+/// `q_spec` contributions on `buses` (the AC buses `cgmes_to_buses_and_branches`
+/// already returned — this is meant to run immediately after it, over that
+/// same `buses`, before it's passed to the AC power-flow solve). Returns
+/// `None` if the dataset has no `DCTopologicalNode`s at all (no HVDC
+/// equipment, or the TP profile hasn't been loaded for it).
+///
+/// `q_spec` is taken directly from each converter's static SSH `q` (CIM's
+/// own "starting value for a steady state solution in the case a simplified
+/// power flow model is used" language) rather than solved dynamically — a
+/// deliberate, documented scope cut: implementing `qPccControl`/droop as a
+/// genuine control mode is a comparably-sized second project, and FullGrid's
+/// own converters have static, non-dynamic Q targets, so this doesn't cost
+/// accuracy in the fixture used to validate this function.
+pub fn cgmes_resolve_dc_converters(
+    ds: &CimDataset, buses: &mut [Bus], s_base_va: f64,
+) -> Result<Option<DcResolution>, CgmesError> {
+    let dctn_mrids = by_type(ds, "DCTopologicalNode");
+    if dctn_mrids.is_empty() {
+        return Ok(None);
+    }
+
+    // Rebuilds exactly the same Steps 1+2+2.5 `cgmes_to_buses_and_branches`
+    // itself runs (bus skeleton, `TerminalIndex`, closed-switch merge) so a
+    // converter's `PccTerminal` resolves to the same AC bus index that call
+    // already produced — deterministic given the same `ds`, since every step
+    // involved (`by_type` ordering, `TerminalIndex::build`, the union-find
+    // merge) depends only on `ds`'s own contents, not on anything from that
+    // other call's own local state. Only `ac_terms` (for
+    // `bus_via_terminal_mrid`) is kept; the rebuilt bus skeleton itself is
+    // discarded — this function only ever writes into the caller's own
+    // already-merged `buses`.
+    let ac_tn_mrids = by_type(ds, "TopologicalNode");
+    let ac_idx_of: HashMap<String, usize> = ac_tn_mrids.iter().enumerate()
+        .map(|(i, mrid)| (mrid.clone(), i)).collect();
+    let mut ac_bus_skeleton: Vec<Bus> = (0..ac_tn_mrids.len()).map(|idx| Bus {
+        idx, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
+        p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY,
+        u_rated: 0.0, zip_terms: Vec::new(),
+    }).collect();
+    let mut ac_terms = TerminalIndex::build(ds, &ac_idx_of, &mut ac_bus_skeleton)?;
+    merge_closed_switches(ds, ac_bus_skeleton, &mut ac_terms)?;
+
+    let dc_idx_of: HashMap<String, usize> = dctn_mrids.iter().enumerate()
+        .map(|(i, mrid)| (mrid.clone(), i)).collect();
+    let mut dc_buses: Vec<DcBus> = (0..dctn_mrids.len()).map(|idx| DcBus {
+        idx, role: DcBusRole::Passive, udc_fixed: 0.0, voltage: 0.0, shunt_g: 0.0,
+    }).collect();
+
+    let terms = DcTerminalIndex::build(ds, &dc_idx_of);
+
+    // --- DC branches ---
+    let mut dc_lines: Vec<DcLine> = Vec::new();
+    for mrid in by_type(ds, "DCLineSegment") {
+        let seg: &DCLineSegment = require(ds, mrid, "DCLineSegment", mrid, "(self)")?;
+        if !equipment_in_service(seg.base.base.in_service, seg.base.base.normally_in_service) { continue }
+        let Some((a, b)) = terms.line(mrid) else { continue };
+        let r = seg.resistance.ok_or_else(|| missing("DCLineSegment", mrid, "resistance"))?;
+        dc_lines.push(DcLine { from: a, to: b, r });
+    }
+    for mrid in by_type(ds, "DCSeriesDevice") {
+        let dev: &DCSeriesDevice = require(ds, mrid, "DCSeriesDevice", mrid, "(self)")?;
+        if !equipment_in_service(dev.base.base.in_service, dev.base.base.normally_in_service) { continue }
+        let Some((a, b)) = terms.line(mrid) else { continue };
+        let r = dev.resistance.ok_or_else(|| missing("DCSeriesDevice", mrid, "resistance"))?;
+        dc_lines.push(DcLine { from: a, to: b, r });
+    }
+    for mrid in by_type(ds, "DCBreaker") {
+        let br: &DCBreaker = require(ds, mrid, "DCBreaker", mrid, "(self)")?;
+        if !equipment_in_service(br.base.base.base.in_service, br.base.base.base.normally_in_service) { continue }
+        let Some((a, b)) = terms.line(mrid) else { continue };
+        dc_lines.push(DcLine { from: a, to: b, r: DC_SWITCH_R });
+    }
+    for mrid in by_type(ds, "DCDisconnector") {
+        let dc: &DCDisconnector = require(ds, mrid, "DCDisconnector", mrid, "(self)")?;
+        if !equipment_in_service(dc.base.base.base.in_service, dc.base.base.base.normally_in_service) { continue }
+        let Some((a, b)) = terms.line(mrid) else { continue };
+        dc_lines.push(DcLine { from: a, to: b, r: DC_SWITCH_R });
+    }
+    for mrid in by_type(ds, "DCSwitch") {
+        let sw: &DCSwitch = require(ds, mrid, "DCSwitch", mrid, "(self)")?;
+        if !equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service) { continue }
+        let Some((a, b)) = terms.line(mrid) else { continue };
+        dc_lines.push(DcLine { from: a, to: b, r: DC_SWITCH_R });
+    }
+
+    // --- DCGround (fixes its bus at 0 kV) / DCShunt (adds shunt conductance) ---
+    // `DCBusbar`/`DCChopper` get no code at all: a busbar is `Passive` by
+    // default (the role every DcBus starts with), and CIM defines no
+    // steady-state resistance for a chopper (a transient overvoltage-
+    // protection device) — both documented limitations, harmless for
+    // FullGrid since the branch feeding its own spare busbar/chopper is
+    // already out of service and gets isolated by dead-subgraph detection.
+    for mrid in by_type(ds, "DCGround") {
+        let g: &DCGround = require(ds, mrid, "DCGround", mrid, "(self)")?;
+        if !equipment_in_service(g.base.base.in_service, g.base.base.normally_in_service) { continue }
+        let Some(bus) = terms.single_bus(mrid) else { continue };
+        // `DCGround.r` (a real grounding resistance) is 0 in every FullGrid
+        // instance; a nonzero value isn't modeled as a resistor-to-earth
+        // here (there's no separate "earth" bus in this graph) — a known
+        // simplification, not silently wrong for this fixture specifically.
+        dc_buses[bus].role = DcBusRole::Ground;
+        dc_buses[bus].udc_fixed = 0.0;
+    }
+    for mrid in by_type(ds, "DCShunt") {
+        let sh: &DCShunt = require(ds, mrid, "DCShunt", mrid, "(self)")?;
+        if !equipment_in_service(sh.base.base.in_service, sh.base.base.normally_in_service) { continue }
+        let Some(bus) = terms.single_bus(mrid) else { continue };
+        if let Some(r) = sh.resistance {
+            if r != 0.0 {
+                dc_buses[bus].shunt_g += 1.0 / r;
+            }
+        }
+    }
+
+    // --- Converters: resolve each to its own positive-pole DC bus ---
+    let mut positive_pole_of: HashMap<String, usize> = HashMap::new();
+    for t_mrid in by_type(ds, "ACDCConverterDCTerminal") {
+        let Some(t) = get::<ACDCConverterDCTerminal>(ds, t_mrid) else { continue };
+        let is_positive = t.polarity.as_ref().is_some_and(|p| p.uri.ends_with(".positive"));
+        if !is_positive { continue }
+        let (Some(ce), Some(tn)) = (&t.dc_conducting_equipment, &t.base.dc_topological_node) else { continue };
+        if let Some(&bus) = dc_idx_of.get(&tn.mrid) {
+            positive_pole_of.insert(ce.mrid.clone(), bus);
+        }
+    }
+
+    let mut converters: Vec<ConverterInfo> = Vec::new();
+    for mrid in by_type(ds, "VsConverter") {
+        let vc: &VsConverter = require(ds, mrid, "VsConverter", mrid, "(self)")?;
+        let (Some(&dc_bus), Some(pcc_ref)) = (positive_pole_of.get(mrid), &vc.base.pcc_terminal) else { continue };
+        let Some(ac_bus) = ac_terms.bus_via_terminal_mrid(&pcc_ref.mrid) else { continue };
+        converters.push(ConverterInfo {
+            ac_bus, dc_bus,
+            role: classify_vs_converter(vc, mrid)?,
+            idle_loss: vc.base.idle_loss.unwrap_or(0.0),
+            switching_loss: vc.base.switching_loss.unwrap_or(0.0),
+            resistive_loss: vc.base.resistive_loss.unwrap_or(0.0),
+            base_s: vc.base.base_s.ok_or_else(|| missing("VsConverter", mrid, "baseS"))?,
+            rated_udc: vc.base.rated_udc.ok_or_else(|| missing("VsConverter", mrid, "ratedUdc"))?,
+            q_mw: vc.base.q.unwrap_or(0.0),
+        });
+    }
+    for mrid in by_type(ds, "CsConverter") {
+        let cc: &CsConverter = require(ds, mrid, "CsConverter", mrid, "(self)")?;
+        let (Some(&dc_bus), Some(pcc_ref)) = (positive_pole_of.get(mrid), &cc.base.pcc_terminal) else { continue };
+        let Some(ac_bus) = ac_terms.bus_via_terminal_mrid(&pcc_ref.mrid) else { continue };
+        converters.push(ConverterInfo {
+            ac_bus, dc_bus,
+            role: classify_cs_converter(cc, mrid)?,
+            idle_loss: cc.base.idle_loss.unwrap_or(0.0),
+            switching_loss: cc.base.switching_loss.unwrap_or(0.0),
+            resistive_loss: cc.base.resistive_loss.unwrap_or(0.0),
+            base_s: cc.base.base_s.ok_or_else(|| missing("CsConverter", mrid, "baseS"))?,
+            rated_udc: cc.base.rated_udc.ok_or_else(|| missing("CsConverter", mrid, "ratedUdc"))?,
+            q_mw: cc.base.q.unwrap_or(0.0),
+        });
+    }
+
+    // --- Apply UdcSlack/FixedIdc roles directly: both are already DC-native
+    // targets straight from SSH, no translation needed. ---
+    for c in &converters {
+        match c.role {
+            ConverterRole::UdcSlack(udc_kv) => {
+                dc_buses[c.dc_bus].role = DcBusRole::UdcSlack;
+                dc_buses[c.dc_bus].udc_fixed = udc_kv;
+            }
+            // A/1000 -> kA, matching dc::solve_dc_network's implied units
+            // (kV buses, Ω lines => kA currents, MW powers).
+            ConverterRole::FixedIdc(idc_amps) => {
+                dc_buses[c.dc_bus].role = DcBusRole::FixedIdc { idc_spec: idc_amps / 1000.0 };
+            }
+            ConverterRole::FixedAc(_) => {} // resolved below
+        }
+    }
+
+    // --- FixedAc (AC-side-target) followers: self-consistently translate
+    // the static AC target into a DC-side power via the loss curve. This
+    // loop is entirely self-contained (only ever calls solve_dc_network,
+    // never touches the AC solver) because the AC target is already a known
+    // static SSH value, not something derived from AC network state — the
+    // only unknown is the converter's own Idc, needed for the loss term,
+    // which the DC solve itself produces. ---
+    for c in &converters {
+        let ConverterRole::FixedAc(pac_absorbed_target) = c.role else { continue };
+        let mut idc_amps = 0.0;
+        for _ in 0..20 {
+            let loss = converter_loss_mw(c.idle_loss, c.switching_loss, c.resistive_loss, c.base_s, c.rated_udc, idc_amps);
+            dc_buses[c.dc_bus].role = DcBusRole::FixedP { p_spec: pac_absorbed_target - loss };
+            let status = solve_dc_network(&mut dc_buses, &dc_lines, DC_SOLVE_TOL, 100);
+            if !status.converged {
+                return Err(CgmesError::DcNetworkDidNotConverge);
+            }
+            let currents = injected_currents(&dc_buses, &dc_lines);
+            let idc_new = currents[c.dc_bus].abs() * 1000.0; // kA -> A
+            let converged = (idc_new - idc_amps).abs() < 1e-6;
+            idc_amps = idc_new;
+            if converged {
+                break;
+            }
+        }
+    }
+
+    // --- Final solve (also the only solve needed if there were no FixedAc
+    // followers at all) and universal AC-side power recovery. ---
+    let status = solve_dc_network(&mut dc_buses, &dc_lines, DC_SOLVE_TOL, 100);
+    let currents = injected_currents(&dc_buses, &dc_lines);
+    for c in &converters {
+        let p_dc_injected = dc_buses[c.dc_bus].voltage * currents[c.dc_bus];
+        let idc_amps = currents[c.dc_bus].abs() * 1000.0;
+        let loss = converter_loss_mw(c.idle_loss, c.switching_loss, c.resistive_loss, c.base_s, c.rated_udc, idc_amps);
+        let pac_absorbed = p_dc_injected + loss;
+        buses[c.ac_bus].p_spec += -pac_absorbed * 1e6 / s_base_va;
+        buses[c.ac_bus].q_spec += -c.q_mw * 1e6 / s_base_va;
+    }
+
+    Ok(Some(DcResolution {
+        dc_bus_mrids: dctn_mrids.to_vec(),
+        voltages_kv: dc_buses.iter().map(|b| b.voltage).collect(),
+        status,
+    }))
 }
