@@ -545,6 +545,77 @@ demonstrated benefit anywhere in this repo while silently breaking a previously-
 case. Removed outright (not patched around) in `src/network.rs`; every backend now converges on
 `case3120sp` again, matching its pre-regression iteration trace exactly.
 
+## 4b. Batched power flow — the multi-core CPU baseline
+
+`bench_batch.py` measures `batch::BatchSolver`: one topology, many injection scenarios, solved
+across cores. This is the time-series / QSTS / Monte Carlo shape, and it exists specifically to be
+the baseline that any future GPU work has to beat — `plans/GPU_PLAN.md` §6 is explicit that beating
+a *single-threaded* CPU solver is not a result.
+
+```bash
+maturin develop --release --features python,klu
+python3 scripts/bench/bench_batch.py .case-cache/case9241pegase.json klu 256
+```
+
+Scenarios are ±20% uniform load scalings from a fixed seed. The script asserts that voltages agree
+across every thread count to < 1e-12, so a scaling number is never reported without the
+corresponding correctness check.
+
+**case9241pegase, 256 scenarios, `klu` backend, AMD Ryzen 7 250 (8 physical cores / 16 SMT threads,
+16 MiB shared L3).** These are *steady-state* numbers — reproducible across repeated runs on an
+already-warm machine:
+
+| threads | batch (ms) | per solve (ms) | solves/s | speedup |
+|---|---|---|---|---|
+| 1 | 7,974 | 31.15 | 32.1 | 1.00x |
+| 2 | 4,977 | 19.44 | 51.4 | 1.60x |
+| 4 | 3,475 | 13.57 | 73.7 | 2.29x |
+| 8 | 2,727 | 10.65 | 93.9 | **2.92x** |
+| 16 | 2,816 | 11.00 | 90.9 | 2.83x (SMT — *slower* than 8) |
+
+On a **cold** machine the same benchmark reaches 3.65x at 8 threads and 3.91x at 16 (125 solves/s),
+but that is a first-run figure and does not survive a second run. The steady-state table is the one
+to quote. Note also that at 16 threads SMT is a net *loss* once the part is warm: two hyperthreads
+contending for one core's memory pipeline, at a lower all-core clock, is worse than one.
+
+**case1354pegase, same setup:** 1.95x / 3.32x / 5.03x at 2 / 4 / 8 threads (2,242 solves/s at 16) —
+markedly better scaling, on a working set that largely fits in L3.
+
+### Why this is sub-linear, and why that is not a solver defect
+
+Scaling gets *worse* as the grid gets bigger (63% parallel efficiency at 8 cores on case1354pegase,
+46% on case9241pegase), which is the signature of a memory-bound kernel rather than a contention
+bug. Three effects stack:
+
+| Factor | Effect | Cumulative ceiling |
+|---|---|---|
+| 8 physical cores (16 logical is SMT2) | 8x | 8.0x |
+| All-core clock throttle (2,977 -> 2,236 MHz, measured from `/proc/cpuinfo` under load) | x0.75 | 6.0x |
+| Shared-L3 / memory-bandwidth contention | remainder | **2.9x–3.9x observed** |
+
+The last row was isolated by running **8 single-threaded processes concurrently** instead of 8
+threads: separate address spaces share no allocator arenas, no locks and no false sharing, so if
+in-process contention were the cause, processes would scale noticeably better. They did not —
+3.96x for processes vs. 3.91x for threads, measured back to back. The ceiling is hardware, not the
+batch solver. case9241pegase's LU factors far exceed the 16 MiB shared L3, so eight workers each
+streaming their own factors saturate the memory subsystem; case1354pegase's smaller working set
+largely fits, and loses much less.
+
+**This machine is a poor benchmark device for this workload.** It is a thermally constrained laptop
+APU: the 8-thread speedup drifts between 2.9x and 3.65x purely as a function of how hot the part
+already was, and SMT flips from a small gain to a small loss over the same range. Re-measure on a
+desktop or server part before quoting any of this anywhere load-bearing. The same caveat
+`plans/GPU_PLAN.md` §5 raises about this machine's *GPU* applies just as much to its CPU.
+
+### What this implies for the GPU plan
+
+The CPU batch path is **memory-bandwidth bound, not compute bound**. That is an argument *for* the
+GPU direction rather than against it: bandwidth is precisely what datacenter GPUs have in bulk (an
+MI300X has roughly two orders of magnitude more than this APU's LPDDR). It also sharpens what a GPU
+claim has to say — the number to beat on this machine is ~94 solves/s steady-state, but a
+publishable claim needs a *server* CPU baseline, since this part is throttle- and bandwidth-limited
+in a way a desktop or EPYC/Xeon host would not be.
+
 ## 5. Cross-validate CGMES import against pypowsybl
 
 `cross_validate_cgmes_microgrid_be.py` checks gridoxide's CGMES import + solve against pypowsybl's own,

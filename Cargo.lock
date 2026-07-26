@@ -517,6 +517,7 @@ dependencies = [
  "faer",
  "num-complex",
  "pyo3",
+ "rayon",
  "serde",
  "serde_json",
 ]

@@ -21,9 +21,10 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+use crate::batch::{uniform_load_scaling, BatchSolver, BusOverride, Scenario};
 use crate::network::{build_ybus, linear_initial_guess, stamp_shunts, YBusSparse};
 use crate::pgm::PgmInput;
-use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver};
+use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, SolveStatus};
 use crate::types::Bus;
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
@@ -55,6 +56,27 @@ fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
     }
 }
 
+/// One scenario's outcome from [`PowerFlowModel::solve_batch`]. Carries
+/// voltages plus the convergence detail `solver::SolveStats` now returns
+/// instead of printing.
+#[pyclass]
+struct BatchResult {
+    /// Per-bus voltage magnitude in per-unit, in node order.
+    #[pyo3(get)]
+    voltage_mag: Vec<f64>,
+    /// Per-bus voltage angle in radians, in node order.
+    #[pyo3(get)]
+    voltage_ang: Vec<f64>,
+    /// Newton iterations this scenario used.
+    #[pyo3(get)]
+    iterations: usize,
+    #[pyo3(get)]
+    converged: bool,
+    /// Max |mismatch| at the final iteration.
+    #[pyo3(get)]
+    max_mismatch: f64,
+}
+
 /// A power flow model loaded from a PGM-format JSON file, solved via a
 /// persistent `solver::PersistentSolver` — repeated `solve()` calls on the
 /// same `PowerFlowModel` reuse cached symbolic factorization exactly the
@@ -80,6 +102,11 @@ struct PowerFlowModel {
     buses: Vec<Bus>,
     ybus: YBusSparse,
     solver: PersistentSolver,
+    backend: JacobianBackend,
+    /// Thread count paired with the `BatchSolver` built for it. Cached so
+    /// repeated `solve_batch` calls at one thread count reuse a single rayon
+    /// pool instead of respawning workers per call.
+    batch: Option<(usize, BatchSolver)>,
     tol: f64,
     max_iter: usize,
     /// `TopologicalNode` mrid -> bus index, populated by `from_cgmes` (empty
@@ -133,6 +160,8 @@ impl PowerFlowModel {
             buses_template,
             ybus,
             solver: PersistentSolver::new(backend),
+            backend,
+            batch: None,
             tol,
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
@@ -180,6 +209,8 @@ impl PowerFlowModel {
             buses_template,
             ybus,
             solver: PersistentSolver::new(backend),
+            backend,
+            batch: None,
             tol,
             max_iter,
             tn_bus_index,
@@ -249,6 +280,70 @@ impl PowerFlowModel {
         self.solver.reset();
     }
 
+    /// Solves many injection scenarios over this model's topology in
+    /// parallel, returning one `BatchResult` per scenario **in scenario
+    /// order**. See `batch::BatchSolver`.
+    ///
+    /// `scenarios` is a list of per-scenario override lists, each entry a
+    /// `(bus_index, p_spec, q_spec)` triple in per-unit. Buses not mentioned
+    /// keep the model's own loaded values.
+    ///
+    /// `threads` defaults to rayon's global thread count. The underlying
+    /// pool is cached per thread count, so repeated calls at one setting
+    /// never respawn workers.
+    ///
+    /// A scenario that fails to converge is reported via
+    /// `BatchResult.converged`, not raised — unlike `solve()`, which raises.
+    /// Divergent scenarios are expected in contingency and Monte Carlo
+    /// sweeps and must not abort the batch.
+    ///
+    /// **GIL:** this holds the GIL for the whole batch. `PowerFlowModel` is
+    /// `unsendable`, so `Python::allow_threads` (whose closure must be
+    /// `Send`) is unavailable. The rayon workers never touch Python, so this
+    /// is correct — it only blocks *other* Python threads meanwhile, which
+    /// is acceptable for the benchmark/analysis use this binding exists for.
+    #[pyo3(signature = (scenarios, threads=None))]
+    fn solve_batch(
+        &mut self,
+        scenarios: Vec<Vec<(usize, f64, f64)>>,
+        threads: Option<usize>,
+    ) -> PyResult<Vec<BatchResult>> {
+        let scenarios: Vec<Scenario> = scenarios
+            .into_iter()
+            .map(|overrides| {
+                Scenario::new(
+                    overrides
+                        .into_iter()
+                        .map(|(bus, p, q)| BusOverride::new(bus).p(p).q(q))
+                        .collect(),
+                )
+            })
+            .collect();
+        self.run_batch(scenarios, threads)
+    }
+
+    /// `solve_batch` for the common time-series/QSTS shape: each entry of
+    /// `scales` becomes one scenario with every bus's `p_spec`/`q_spec`
+    /// multiplied by that factor. Drives `scripts/bench/bench_batch.py`.
+    #[pyo3(signature = (scales, threads=None))]
+    fn solve_batch_scaled(
+        &mut self,
+        scales: Vec<f64>,
+        threads: Option<usize>,
+    ) -> PyResult<Vec<BatchResult>> {
+        let scenarios: Vec<Scenario> = scales
+            .into_iter()
+            .map(|f| uniform_load_scaling(&self.buses_template, f))
+            .collect();
+        self.run_batch(scenarios, threads)
+    }
+
+    /// Workers the next `solve_batch` call would use with `threads=None`.
+    #[staticmethod]
+    fn default_threads() -> usize {
+        rayon::current_num_threads()
+    }
+
     /// Per-bus voltage magnitude in per-unit, in node order — `None` before
     /// the first `solve()` call.
     fn voltage_mag(&self) -> Vec<f64> {
@@ -269,6 +364,41 @@ impl PowerFlowModel {
     }
 }
 
+/// Not `#[pymethods]` — internal helper shared by `solve_batch` and
+/// `solve_batch_scaled`, deliberately not exposed to Python.
+impl PowerFlowModel {
+    fn run_batch(
+        &mut self,
+        scenarios: Vec<Scenario>,
+        threads: Option<usize>,
+    ) -> PyResult<Vec<BatchResult>> {
+        let want = threads.unwrap_or_else(rayon::current_num_threads).max(1);
+        if self.batch.as_ref().map(|(n, _)| *n) != Some(want) {
+            let solver = BatchSolver::with_threads(self.backend, want)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.batch = Some((want, solver));
+        }
+
+        // Disjoint field borrows: `batch` immutably, `buses_template`/`ybus`
+        // immutably. Nothing here needs `&mut self`.
+        let (_, batch) = self.batch.as_ref().expect("just populated above");
+        let reports = batch
+            .solve(&self.buses_template, &self.ybus, &scenarios, self.tol, self.max_iter)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(reports
+            .into_iter()
+            .map(|r| BatchResult {
+                voltage_mag: r.buses.iter().map(|b| b.voltage_mag).collect(),
+                voltage_ang: r.buses.iter().map(|b| b.voltage_ang).collect(),
+                iterations: r.stats.iterations(),
+                converged: r.stats.status == SolveStatus::Converged,
+                max_mismatch: r.stats.final_mismatch(),
+            })
+            .collect())
+    }
+}
+
 /// The extension module's Rust function name must match `pyproject.toml`'s
 /// `module-name = "gridoxide._gridoxide"` (its last dotted segment) — maturin
 /// links this as `PyInit__gridoxide`, loaded by `python/gridoxide/__init__.py`
@@ -277,5 +407,6 @@ impl PowerFlowModel {
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
+    m.add_class::<BatchResult>()?;
     Ok(())
 }

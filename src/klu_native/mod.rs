@@ -183,6 +183,16 @@ impl KluNativeSystem {
     }
 }
 
+impl crate::solver::LinearSolver for KluNativeSystem {
+    fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        KluNativeSystem::new(n, entries)
+    }
+
+    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+        KluNativeSystem::factor_and_solve(self, entries, rhs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

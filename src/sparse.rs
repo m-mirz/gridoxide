@@ -115,6 +115,19 @@ impl RealSparseSystem {
     }
 }
 
+/// `factor_and_solve` is inherently `&self` here (faer keeps no mutable
+/// per-solve state), but the trait takes `&mut self` because the FFI-backed
+/// backends genuinely need it. Taking the stricter receiver costs nothing.
+impl crate::solver::LinearSolver for RealSparseSystem {
+    fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        RealSparseSystem::new(n, entries)
+    }
+
+    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+        RealSparseSystem::factor_and_solve(self, entries, rhs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

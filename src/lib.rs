@@ -1,6 +1,7 @@
 pub mod types;
 pub mod network;
 pub mod solver;
+pub mod batch;
 pub mod dc;
 pub mod json;
 pub mod pgm;
@@ -17,7 +18,7 @@ pub mod cgmes;
 mod python;
 
 use network::{build_ybus, linear_initial_guess, YBus};
-use solver::{IslandReport, JacobianBackend, PersistentSolver};
+use solver::{IslandReport, JacobianBackend, PersistentSolver, SolveStats};
 use json::NetworkData;
 use types::Bus;
 
@@ -25,9 +26,14 @@ use types::Bus;
 /// unreferenced islands) buses, plus a per-connected-component breakdown of
 /// how each one was resolved — see [`solver::IslandReport`]/
 /// [`solver::IslandStatus`].
+#[derive(Debug)]
 pub struct PowerFlowReport {
     pub buses: Vec<Bus>,
     pub islands: Vec<IslandReport>,
+    /// Iteration count and per-iteration convergence trace. The solver
+    /// itself prints nothing (see [`solver::SolveStats`]); `src/main.rs`
+    /// reconstructs the progress output from this.
+    pub stats: SolveStats,
 }
 
 pub fn run_power_flow_analysis(network_data: NetworkData) -> PowerFlowReport {
@@ -58,6 +64,6 @@ pub fn run_power_flow_analysis_from_ybus(
     let ybus = ybus.finish();
     linear_initial_guess(&mut buses, &ybus);
     let mut solver = PersistentSolver::new(JacobianBackend::Scalar);
-    let islands = solver.solve(&mut buses, &ybus, 1e-6, 20);
-    PowerFlowReport { buses, islands }
+    let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, 1e-6, 20);
+    PowerFlowReport { buses, islands, stats }
 }

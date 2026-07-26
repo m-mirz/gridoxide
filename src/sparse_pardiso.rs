@@ -220,6 +220,16 @@ impl PardisoRealSystem {
     }
 }
 
+impl crate::solver::LinearSolver for PardisoRealSystem {
+    fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        PardisoRealSystem::new(n, entries)
+    }
+
+    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+        PardisoRealSystem::factor_and_solve(self, entries, rhs)
+    }
+}
+
 impl Drop for PardisoRealSystem {
     fn drop(&mut self) {
         self.call(PHASE_RELEASE_MEMORY, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut());

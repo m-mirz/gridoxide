@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use gridoxide::json::NetworkData;
 use gridoxide::run_power_flow_analysis;
+use gridoxide::solver::SolveStatus;
 
 fn main() {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -10,6 +11,20 @@ fn main() {
     let network_data: NetworkData = serde_json::from_str(&network_json).expect("Unable to parse network.json");
 
     let report = run_power_flow_analysis(network_data);
+
+    // The solver itself is silent so it can be driven from many threads at
+    // once (see `batch::BatchSolver`); this reconstructs the progress output
+    // it used to print, from `SolveStats::mismatch_history`.
+    for (i, max_mis) in report.stats.mismatch_history.iter().enumerate() {
+        println!("iter {}: max mismatch = {:.6e}", i + 1, max_mis);
+    }
+    match report.stats.status {
+        SolveStatus::Converged => println!("Converged in {} iterations", report.stats.iterations()),
+        SolveStatus::MaxIterationsReached => {
+            println!("Failed to converge in {} iterations", report.stats.iterations())
+        }
+        SolveStatus::Singular => println!("Jacobian is singular. Failed to solve."),
+    }
 
     println!("Final voltages:");
     for b in report.buses.iter() {

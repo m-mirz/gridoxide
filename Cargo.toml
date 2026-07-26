@@ -24,6 +24,13 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 faer = "0.24.4"
 num-complex = { version = "0.4.6", features = ["serde"] }
+# Powers `src/batch.rs`'s across-scenario parallelism. Not a new build cost:
+# `faer` (and `gemm` beneath it) already pull rayon in, so this only promotes
+# an existing transitive dependency to a direct one. Sharing rayon's pool
+# rather than spawning raw OS threads is deliberate — it keeps any nested
+# parallelism inside faer from oversubscribing the machine, and it means a
+# batch never pays thread-creation cost per call.
+rayon = "1.12"
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

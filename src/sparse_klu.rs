@@ -176,6 +176,16 @@ impl KluRealSystem {
     }
 }
 
+impl crate::solver::LinearSolver for KluRealSystem {
+    fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        KluRealSystem::new(n, entries)
+    }
+
+    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+        KluRealSystem::factor_and_solve(self, entries, rhs)
+    }
+}
+
 impl Drop for KluRealSystem {
     fn drop(&mut self) {
         unsafe {
