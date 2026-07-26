@@ -74,6 +74,12 @@ fn pack_real_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> V
     groups.iter().map(|g| g.iter().map(|&i| entries[i].2).sum()).collect()
 }
 
+/// `pack_real_values` for callers that already hold just the values — see
+/// `solver::LinearSolver::factor_and_solve_values`.
+fn pack_real_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
+    groups.iter().map(|g| g.iter().map(|&i| values[i]).sum()).collect()
+}
+
 fn pack_complex_values(entries: &[(usize, usize, Complex<f64>)], groups: &[Vec<usize>]) -> Vec<f64> {
     let mut out = Vec::with_capacity(groups.len() * 2);
     for g in groups {
@@ -152,7 +158,13 @@ impl KluRealSystem {
     /// error" status-code convention. Mixing the two up here previously
     /// caused every successful refactor to be misread as a failure.
     pub fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
-        let mut values = pack_real_values(entries, &self.groups);
+        let values = pack_real_values(entries, &self.groups);
+        self.solve_packed(values, rhs)
+    }
+
+    /// Shared tail of both `factor_and_solve` paths, taking already-packed
+    /// CSC values.
+    fn solve_packed(&mut self, mut values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
         unsafe {
             klu_refactor(
                 self.col_ptr.as_mut_ptr(),
@@ -183,6 +195,10 @@ impl crate::solver::LinearSolver for KluRealSystem {
 
     fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
         KluRealSystem::factor_and_solve(self, entries, rhs)
+    }
+
+    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        self.solve_packed(pack_real_values_slice(values, &self.groups), rhs)
     }
 }
 

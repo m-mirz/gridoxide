@@ -581,6 +581,27 @@ contending for one core's memory pipeline, at a lower all-core clock, is worse t
 **case1354pegase, same setup:** 1.95x / 3.32x / 5.03x at 2 / 4 / 8 threads (2,242 solves/s at 16) —
 markedly better scaling, on a working set that largely fits in L3.
 
+### Precomputed Jacobian offsets
+
+`jacobian::JacobianPattern` derives the Jacobian's sparsity pattern and per-nonzero recipe once per
+topology, then refills one reused `Vec<f64>` each iteration instead of rebuilding a
+`Vec<(usize, usize, f64)>` from scratch. Every `LinearSolver` backend already discarded the
+`(row, col)` half after construction — each caches its own positional mapping into its CSC layout
+and reads nothing but `entries[i].2` — so `factor_and_solve_values` hands over just the values.
+
+Measured on case9241pegase, `klu`, single-threaded (the least thermally sensitive figure, since
+only one core is loaded):
+
+| | ms/solve |
+|---|---|
+| before | 31.15, 31.15 |
+| after | 27.44, 27.97, 28.29 |
+
+**~11% faster end-to-end**, from an assembly stage that `plans/GPU_PLAN.md` §1 measures at ~36% of
+iteration time — so roughly a third of assembly cost was allocation and index rebuilding rather
+than arithmetic. Values are bit-for-bit identical to the previous implementation
+(`src/jacobian.rs`'s tests compare `f64::to_bits`, not a tolerance).
+
 ### Why this is sub-linear, and why that is not a solver defect
 
 Scaling gets *worse* as the grid gets bigger (63% parallel efficiency at 8 cores on case1354pegase,

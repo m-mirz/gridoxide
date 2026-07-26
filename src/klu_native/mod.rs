@@ -117,6 +117,13 @@ fn pack_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> Vec<f6
     groups.iter().map(|g| g.iter().map(|&i| entries[i].2).sum()).collect()
 }
 
+/// `pack_values` for callers that already hold just the values, positionally
+/// matching the triplets `new` was given — see
+/// `solver::LinearSolver::factor_and_solve_values`.
+fn pack_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
+    groups.iter().map(|g| g.iter().map(|&i| values[i]).sum()).collect()
+}
+
 /// A real sparse system whose sparsity *pattern* is fixed across repeated
 /// solves — the pure-Rust twin of `sparse_klu::KluRealSystem`, same public
 /// shape (`new`/`factor_and_solve`) so `solver.rs` can dispatch to either
@@ -170,6 +177,12 @@ impl KluNativeSystem {
     /// that a fixed pattern still let through).
     pub fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
         let values = pack_values(entries, &self.groups);
+        self.solve_packed(values, rhs)
+    }
+
+    /// Shared tail of both `factor_and_solve` paths, taking already-packed
+    /// CSC values.
+    fn solve_packed(&mut self, values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
         let ok = refactor::refactor(self.n, &self.col_ptr, &self.row_idx, &values, &self.sym, &mut self.num, &mut self.scratch);
         if !ok {
             return None;
@@ -190,6 +203,10 @@ impl crate::solver::LinearSolver for KluNativeSystem {
 
     fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
         KluNativeSystem::factor_and_solve(self, entries, rhs)
+    }
+
+    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        self.solve_packed(pack_values_slice(values, &self.groups), rhs)
     }
 }
 

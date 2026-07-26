@@ -3,6 +3,7 @@ use super::network::{
     classify, connected_components, effective_injection, mark_unreferenced_islands,
     power_injections, Classified, Verdict, YBusSparse,
 };
+use super::jacobian::JacobianPattern;
 use super::sparse::RealSparseSystem;
 use super::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
 #[cfg(feature = "klu")]
@@ -28,8 +29,9 @@ use super::sparse_pardiso::PardisoRealSystem;
 /// exact same order as those passed to `new` — only the values may differ.
 /// Each backend caches a positional mapping from triplet index into its own
 /// CSC layout, so this is positional correspondence, not merely set equality.
-/// `build_jacobian_triplets` guarantees it by always emitting every
-/// topological neighbor regardless of computed value.
+/// `jacobian::JacobianPattern` guarantees it by construction: it emits every
+/// topological neighbor regardless of computed value, in a fixed order
+/// derived once from the topology.
 pub trait LinearSolver: Sized {
     /// Analyzes `entries`' sparsity pattern (fill-reducing ordering,
     /// elimination structure) and factors it once. `None` if the pattern is
@@ -39,6 +41,19 @@ pub trait LinearSolver: Sized {
     /// Numeric-only refactorization against the cached pattern, then solves
     /// `A x = b`. `None` if the matrix is singular at these values.
     fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>>;
+
+    /// As [`factor_and_solve`](Self::factor_and_solve), but taking only the
+    /// nonzero *values*, positionally matching the `entries` passed to
+    /// [`new`](Self::new).
+    ///
+    /// Every implementor already ignores the `(row, col)` half of `entries`
+    /// after construction — each caches its own positional mapping into its
+    /// CSC layout and reads nothing but `entries[i].2`. Handing over just the
+    /// values lets the Newton loop refill one reused `Vec<f64>` per iteration
+    /// via [`jacobian::JacobianPattern`](crate::jacobian::JacobianPattern)
+    /// instead of rebuilding a `Vec<(usize, usize, f64)>` from scratch, which
+    /// is 3x the bytes and a fresh allocation every time.
+    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>>;
 }
 
 /// Selects which sparse-LU backend `newton_raphson_with_backend` uses to
@@ -320,21 +335,21 @@ pub fn newton_raphson_with_backend(
 
     let stats = match backend {
         JacobianBackend::Scalar => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<RealSparseSystem>)
+            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<RealSparseSystem>, &mut None)
         }
         JacobianBackend::Block => {
             newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut None)
         }
         #[cfg(feature = "klu")]
         JacobianBackend::Klu => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<KluRealSystem>)
+            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<KluRealSystem>, &mut None)
         }
         JacobianBackend::KluNative => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<KluNativeSystem>)
+            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<KluNativeSystem>, &mut None)
         }
         #[cfg(feature = "pardiso")]
         JacobianBackend::Pardiso => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<PardisoRealSystem>)
+            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<PardisoRealSystem>, &mut None)
         }
     };
 
@@ -376,6 +391,11 @@ pub fn newton_raphson_with_backend(
 /// reset.
 pub struct PersistentSolver {
     backend: JacobianBackend,
+    /// Backend-independent: the Jacobian sparsity pattern and per-nonzero
+    /// recipe depend only on topology and bus types, so one cache serves
+    /// whichever backend is selected. Invalidated by `reset` alongside the
+    /// symbolic factorization, under the identical validity condition.
+    jacobian: Option<JacobianPattern>,
     scalar: Option<RealSparseSystem>,
     block: Option<BlockSymbolic>,
     #[cfg(feature = "klu")]
@@ -389,6 +409,7 @@ impl PersistentSolver {
     pub fn new(backend: JacobianBackend) -> Self {
         Self {
             backend,
+            jacobian: None,
             scalar: None,
             block: None,
             #[cfg(feature = "klu")]
@@ -429,16 +450,20 @@ impl PersistentSolver {
         mark_unreferenced_islands(buses, &classified);
 
         let stats = match self.backend {
-            JacobianBackend::Scalar => newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.scalar),
+            JacobianBackend::Scalar => {
+                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.scalar, &mut self.jacobian)
+            }
             JacobianBackend::Block => newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut self.block),
             #[cfg(feature = "klu")]
-            JacobianBackend::Klu => newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.klu),
+            JacobianBackend::Klu => {
+                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.klu, &mut self.jacobian)
+            }
             JacobianBackend::KluNative => {
-                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.klu_native)
+                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.klu_native, &mut self.jacobian)
             }
             #[cfg(feature = "pardiso")]
             JacobianBackend::Pardiso => {
-                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.pardiso)
+                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.pardiso, &mut self.jacobian)
             }
         };
 
@@ -450,6 +475,7 @@ impl PersistentSolver {
     /// next `solve()` if the topology (not just bus values) has changed
     /// since the last call.
     pub fn reset(&mut self) {
+        self.jacobian = None;
         self.scalar = None;
         self.block = None;
         #[cfg(feature = "klu")]
@@ -613,6 +639,7 @@ fn newton_raphson_cached<S: LinearSolver>(
     tol: f64,
     max_iter: usize,
     cache: &mut Option<S>,
+    pattern: &mut Option<JacobianPattern>,
 ) -> SolveStats {
     // Every non-slack bus carries an angle unknown; PQ buses additionally
     // carry a voltage-magnitude unknown.
@@ -627,24 +654,18 @@ fn newton_raphson_cached<S: LinearSolver>(
         .map(|b| b.idx)
         .collect();
 
-    let n_angle = non_slack_idx.len();
-    let n_vmag = pq_idx.len();
-    let n_unknowns = n_angle + n_vmag;
+    let n_unknowns = non_slack_idx.len() + pq_idx.len();
 
-    // Physical bus index -> position within non_slack_idx / pq_idx, for
-    // O(1) lookup while walking each bus's actual Y-bus neighbors (as
-    // opposed to the full non_slack_idx × non_slack_idx / pq_idx × pq_idx
-    // cross product the dense implementation used).
-    let mut non_slack_pos: Vec<Option<usize>> = vec![None; buses.len()];
-    for (pos, &i) in non_slack_idx.iter().enumerate() {
-        non_slack_pos[i] = Some(pos);
+    // Both the Jacobian's sparsity pattern and the per-nonzero recipe depend
+    // only on the topology and the bus-type assignment, so they are derived
+    // once here (or reused from a previous solve) rather than per iteration.
+    if pattern.is_none() {
+        *pattern = Some(JacobianPattern::analyze(buses, ybus));
     }
-    let mut pq_pos: Vec<Option<usize>> = vec![None; buses.len()];
-    for (pos, &i) in pq_idx.iter().enumerate() {
-        pq_pos[i] = Some(pos);
-    }
-    let triplet_capacity = jacobian_triplet_capacity(ybus, &non_slack_idx, &pq_idx);
+    let pattern = pattern.as_ref().expect("just populated above");
 
+    // Refilled in place every iteration — the allocation happens once.
+    let mut values: Vec<f64> = Vec::with_capacity(pattern.len());
     let mut history: Vec<f64> = Vec::with_capacity(max_iter);
 
     // The Jacobian's sparsity *pattern* is fixed across iterations (same
@@ -678,19 +699,19 @@ fn newton_raphson_cached<S: LinearSolver>(
             return SolveStats::from_loop(SolveStatus::Converged, history);
         }
 
-        // Build Jacobian (sparse triplets)
-        let triplets = build_jacobian_triplets(
-            buses, ybus, &non_slack_idx, &pq_idx, &non_slack_pos, &pq_pos, n_angle, &p_calc, &q_calc,
-            triplet_capacity,
-        );
+        // Refill the Jacobian's values at their precomputed offsets.
+        pattern.fill(buses, &p_calc, &q_calc, &mut values);
 
+        // The backend's symbolic analysis needs the `(row, col)` pairs, but
+        // only once per topology — every subsequent iteration hands over
+        // nothing but the values.
         if cache.is_none() {
-            *cache = S::new(n_unknowns, &triplets);
+            *cache = S::new(n_unknowns, &pattern.to_triplets(&values));
         }
         let Some(system) = cache.as_mut() else {
             return SolveStats::from_loop(SolveStatus::Singular, history);
         };
-        let Some(dx) = system.factor_and_solve(&triplets, &mismatch) else {
+        let Some(dx) = system.factor_and_solve_values(&values, &mismatch) else {
             return SolveStats::from_loop(SolveStatus::Singular, history);
         };
 
@@ -711,6 +732,50 @@ fn newton_raphson_cached<S: LinearSolver>(
     SolveStats::from_loop(SolveStatus::MaxIterationsReached, history)
 }
 
+/// Derives the index bookkeeping `build_jacobian_triplets` needs and calls
+/// it, so a caller holding only `(buses, ybus, p_calc, q_calc)` can obtain
+/// the Jacobian triplets directly.
+///
+/// Exists as the **reference oracle** for `jacobian::JacobianPattern`, whose
+/// precomputed-offset assembler must agree with this bit-for-bit (see
+/// `jacobian`'s own tests). Kept deliberately naive — it re-derives
+/// everything from scratch on every call, which is exactly the cost
+/// `JacobianPattern` was written to remove, and exactly what makes it a
+/// trustworthy oracle.
+#[cfg(test)]
+pub(crate) fn jacobian_triplets_reference(
+    buses: &[Bus],
+    ybus: &YBusSparse,
+    p_calc: &[f64],
+    q_calc: &[f64],
+) -> Vec<(usize, usize, f64)> {
+    let non_slack_idx: Vec<usize> = buses
+        .iter()
+        .filter(|b| !matches!(b.bus_type, BusType::Slack))
+        .map(|b| b.idx)
+        .collect();
+    let pq_idx: Vec<usize> = buses
+        .iter()
+        .filter(|b| matches!(b.bus_type, BusType::PQ))
+        .map(|b| b.idx)
+        .collect();
+
+    let n_angle = non_slack_idx.len();
+    let mut non_slack_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (pos, &i) in non_slack_idx.iter().enumerate() {
+        non_slack_pos[i] = Some(pos);
+    }
+    let mut pq_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (pos, &i) in pq_idx.iter().enumerate() {
+        pq_pos[i] = Some(pos);
+    }
+    let cap = jacobian_triplet_capacity(ybus, &non_slack_idx, &pq_idx);
+
+    build_jacobian_triplets(
+        buses, ybus, &non_slack_idx, &pq_idx, &non_slack_pos, &pq_pos, n_angle, p_calc, q_calc, cap,
+    )
+}
+
 /// Upper bound on `build_jacobian_triplets`' output length for a given
 /// topology — computed once per solve (not per iteration) and reused via
 /// `Vec::with_capacity`, since the sparsity pattern, and hence this bound,
@@ -718,12 +783,20 @@ fn newton_raphson_cached<S: LinearSolver>(
 /// itself starts a fresh `Vec` from scratch every iteration. Each Y-bus
 /// neighbor contributes at most 2 triplets to the H/N block (one per
 /// non-slack row) and at most 2 to the M/L block (one per PQ row).
+#[cfg(test)]
 fn jacobian_triplet_capacity(ybus: &YBusSparse, non_slack_idx: &[usize], pq_idx: &[usize]) -> usize {
     let non_slack_degree: usize = non_slack_idx.iter().map(|&i| ybus.row(i).len()).sum();
     let pq_degree: usize = pq_idx.iter().map(|&i| ybus.row(i).len()).sum();
     2 * non_slack_degree + 2 * pq_degree
 }
 
+/// The **reference implementation** of Jacobian assembly, retained as the
+/// oracle `jacobian::JacobianPattern` is checked against bit-for-bit. The
+/// Newton loop itself no longer calls this — it refills values at
+/// precomputed offsets instead — so this is compiled only under `cfg(test)`.
+/// Kept deliberately straightforward: its value is being obviously correct,
+/// not being fast.
+///
 /// Assembles the Newton-Raphson Jacobian's nonzero entries as `(row, col,
 /// value)` triplets, walking only each unknown bus's actual Y-bus neighbors
 /// (`ybus.row(i)`) instead of the full cross product of unknown-bus indices.
@@ -737,6 +810,7 @@ fn jacobian_triplet_capacity(ybus: &YBusSparse, non_slack_idx: &[usize], pq_idx:
 /// J = [ H  N ]   H = dP/d_ang, N = dP/d_vmag
 ///     [ M  L ]   M = dQ/d_ang, L = dQ/d_vmag
 /// ```
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_jacobian_triplets(
     buses: &[Bus],

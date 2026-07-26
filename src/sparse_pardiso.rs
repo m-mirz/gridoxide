@@ -99,6 +99,12 @@ fn pack_real_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> V
     groups.iter().map(|g| g.iter().map(|&i| entries[i].2).sum()).collect()
 }
 
+/// `pack_real_values` for callers that already hold just the values — see
+/// `solver::LinearSolver::factor_and_solve_values`.
+fn pack_real_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
+    groups.iter().map(|g| g.iter().map(|&i| values[i]).sum()).collect()
+}
+
 /// A real sparse system whose sparsity *pattern* is fixed across repeated
 /// solves — mirrors `sparse_klu::KluRealSystem`'s role but backed by Intel
 /// oneMKL PARDISO instead of vendored SuiteSparse KLU. Caches the symbolic
@@ -166,7 +172,13 @@ impl PardisoRealSystem {
     /// (see [`IPARM_NUM_PERTURBED_PIVOTS`]'s doc comment), or if the
     /// solution contains a non-finite value.
     pub fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
-        let mut values = pack_real_values(entries, &self.groups);
+        let values = pack_real_values(entries, &self.groups);
+        self.solve_packed(values, rhs)
+    }
+
+    /// Shared tail of both `factor_and_solve` paths, taking already-packed
+    /// CSC values.
+    fn solve_packed(&mut self, mut values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
         let a = values.as_mut_ptr() as *const c_void;
         if self.call(PHASE_NUMERICAL_FACTORIZATION, a, std::ptr::null_mut(), std::ptr::null_mut()) != 0
             || self.iparm[IPARM_NUM_PERTURBED_PIVOTS] != 0
@@ -227,6 +239,10 @@ impl crate::solver::LinearSolver for PardisoRealSystem {
 
     fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
         PardisoRealSystem::factor_and_solve(self, entries, rhs)
+    }
+
+    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        self.solve_packed(pack_real_values_slice(values, &self.groups), rhs)
     }
 }
 

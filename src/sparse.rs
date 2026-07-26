@@ -104,7 +104,14 @@ impl RealSparseSystem {
     /// explicit check).
     pub fn factor_and_solve(&self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
         let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
-        let mat = SparseColMat::new_from_argsort(self.symbolic_mat.clone(), &self.argsort, &vals).ok()?;
+        self.solve_values(&vals, rhs)
+    }
+
+    /// The body of [`factor_and_solve`](Self::factor_and_solve) once the
+    /// `(row, col)` half of the triplets has been dropped — which this
+    /// backend never needed after `new` built the argsort.
+    pub fn solve_values(&self, vals: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        let mat = SparseColMat::new_from_argsort(self.symbolic_mat.clone(), &self.argsort, vals).ok()?;
         let lu = Lu::try_new_with_symbolic(self.symbolic_lu.clone(), mat.as_ref()).ok()?;
         let b = Col::<f64>::from_fn(self.n, |i| rhs[i]);
         let x = lu.solve(&b);
@@ -125,6 +132,10 @@ impl crate::solver::LinearSolver for RealSparseSystem {
 
     fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
         RealSparseSystem::factor_and_solve(self, entries, rhs)
+    }
+
+    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        self.solve_values(values, rhs)
     }
 }
 
