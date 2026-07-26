@@ -562,24 +562,33 @@ across every thread count to < 1e-12, so a scaling number is never reported with
 corresponding correctness check.
 
 **case9241pegase, 256 scenarios, `klu` backend, AMD Ryzen 7 250 (8 physical cores / 16 SMT threads,
-16 MiB shared L3).** These are *steady-state* numbers — reproducible across repeated runs on an
-already-warm machine:
+16 MiB shared L3).** *Steady state* — the third of three consecutive runs, by which point the
+numbers are stable to within ~2%:
 
 | threads | batch (ms) | per solve (ms) | solves/s | speedup |
 |---|---|---|---|---|
-| 1 | 7,974 | 31.15 | 32.1 | 1.00x |
-| 2 | 4,977 | 19.44 | 51.4 | 1.60x |
-| 4 | 3,475 | 13.57 | 73.7 | 2.29x |
-| 8 | 2,727 | 10.65 | 93.9 | **2.92x** |
-| 16 | 2,816 | 11.00 | 90.9 | 2.83x (SMT — *slower* than 8) |
+| 1 | 7,177 | 28.04 | 35.7 | 1.00x |
+| 2 | 4,033 | 15.75 | 63.5 | 1.78x |
+| 4 | 2,643 | 10.33 | 96.8 | 2.72x |
+| 8 | 2,024 | 7.91 | 126.5 | **3.55x** |
+| 16 | 1,973 | 7.71 | 129.7 | 3.64x (SMT, not extra cores) |
 
-On a **cold** machine the same benchmark reaches 3.65x at 8 threads and 3.91x at 16 (125 solves/s),
-but that is a first-run figure and does not survive a second run. The steady-state table is the one
-to quote. Note also that at 16 threads SMT is a net *loss* once the part is warm: two hyperthreads
-contending for one core's memory pipeline, at a lower all-core clock, is worse than one.
+**case1354pegase, same setup:**
 
-**case1354pegase, same setup:** 1.95x / 3.32x / 5.03x at 2 / 4 / 8 threads (2,242 solves/s at 16) —
-markedly better scaling, on a working set that largely fits in L3.
+| threads | batch (ms) | per solve (ms) | solves/s | speedup |
+|---|---|---|---|---|
+| 1 | 610 | 2.384 | 419.5 | 1.00x |
+| 2 | 350 | 1.369 | 730.6 | 1.74x |
+| 4 | 234 | 0.914 | 1,094.4 | 2.61x |
+| 8 | 174 | 0.680 | 1,471.3 | **3.51x** |
+| 16 | 185 | 0.721 | 1,386.4 | 3.30x (SMT — *slower* than 8) |
+
+**Read absolute numbers on this machine with suspicion.** It is a thermally constrained laptop APU,
+and a cold first run reads far better than anything reproducible: the very first 8-thread
+case9241pegase measurement taken on this part was 3.65x, and it never recurred. Every table here is
+a steady-state reading, and any A/B comparison below was taken *interleaved* — old build, new
+build, old build, new build — because comparing two numbers captured minutes apart on this hardware
+measures the heatsink, not the code.
 
 ### Precomputed Jacobian offsets
 
@@ -589,53 +598,65 @@ topology, then refills one reused `Vec<f64>` each iteration instead of rebuildin
 `(row, col)` half after construction — each caches its own positional mapping into its CSC layout
 and reads nothing but `entries[i].2` — so `factor_and_solve_values` hands over just the values.
 
-Measured on case9241pegase, `klu`, single-threaded (the least thermally sensitive figure, since
-only one core is loaded):
+Measured by interleaved A/B — alternating `maturin develop` between the parent commit and this
+one, two rounds, min-of-3 each, so both builds see the same thermal state. ms/solve:
 
-| | ms/solve |
-|---|---|
-| before | 31.15, 31.15 |
-| after | 27.44, 27.97, 28.29 |
+| | case9241 t1 | case9241 t8 | case1354 t1 | case1354 t8 |
+|---|---|---|---|---|
+| before | 34.33 / 33.46 | 11.47 / 11.43 | 2.560 / 2.576 | 0.717 / 0.741 |
+| after | 29.95 / 30.09 | 10.63 / 10.56 | 2.395 / 2.365 | 0.690 / 0.693 |
+| **gain** | **11.4%** | **7.5%** | **7.3%** | **5.1%** |
 
-**~11% faster end-to-end**, from an assembly stage that `plans/GPU_PLAN.md` §1 measures at ~36% of
-iteration time — so roughly a third of assembly cost was allocation and index rebuilding rather
-than arithmetic. Values are bit-for-bit identical to the previous implementation
-(`src/jacobian.rs`'s tests compare `f64::to_bits`, not a tolerance).
+`plans/GPU_PLAN.md` §1 measures assembly at ~36% of iteration time, so on the large case
+single-threaded roughly a third of that stage was allocation and index rebuilding rather than
+arithmetic that matters.
+
+The gain is *smaller* at 8 threads than at 1 (7.5% vs 11.4%), not larger: once all cores are
+running, the solve is memory-stalled in the LU, so assembly is a smaller share of the total and
+speeding it up buys proportionally less. The gain is also smaller on the small case, where the
+triplet array (~20k nonzeros, ~0.5 MB) fits comfortably in cache and rebuilding it was never
+especially expensive; on case9241pegase it is ~150k nonzeros, ~3.6 MB, rebuilt every iteration.
+
+Values are bit-for-bit identical to the previous implementation — `src/jacobian.rs`'s tests compare
+`f64::to_bits`, not a tolerance.
 
 ### Why this is sub-linear, and why that is not a solver defect
 
-Scaling gets *worse* as the grid gets bigger (63% parallel efficiency at 8 cores on case1354pegase,
-46% on case9241pegase), which is the signature of a memory-bound kernel rather than a contention
-bug. Three effects stack:
+Both cases land at ~3.5x on 8 physical cores — 44% parallel efficiency. Two effects account for
+most of the gap:
 
 | Factor | Effect | Cumulative ceiling |
 |---|---|---|
 | 8 physical cores (16 logical is SMT2) | 8x | 8.0x |
 | All-core clock throttle (2,977 -> 2,236 MHz, measured from `/proc/cpuinfo` under load) | x0.75 | 6.0x |
-| Shared-L3 / memory-bandwidth contention | remainder | **2.9x–3.9x observed** |
+| Shared-L3 / memory-bandwidth contention | remainder | **~3.5x observed** |
 
 The last row was isolated by running **8 single-threaded processes concurrently** instead of 8
 threads: separate address spaces share no allocator arenas, no locks and no false sharing, so if
 in-process contention were the cause, processes would scale noticeably better. They did not —
-3.96x for processes vs. 3.91x for threads, measured back to back. The ceiling is hardware, not the
-batch solver. case9241pegase's LU factors far exceed the 16 MiB shared L3, so eight workers each
-streaming their own factors saturate the memory subsystem; case1354pegase's smaller working set
-largely fits, and loses much less.
+3.96x for processes vs. 3.91x for threads, measured back to back on an equally-warm machine. The
+ceiling is hardware, not the batch solver.
 
-**This machine is a poor benchmark device for this workload.** It is a thermally constrained laptop
-APU: the 8-thread speedup drifts between 2.9x and 3.65x purely as a function of how hot the part
-already was, and SMT flips from a small gain to a small loss over the same range. Re-measure on a
-desktop or server part before quoting any of this anywhere load-bearing. The same caveat
-`plans/GPU_PLAN.md` §5 raises about this machine's *GPU* applies just as much to its CPU.
+A caution against over-reading this: an earlier draft of this section claimed scaling degrades with
+grid size (63% efficiency on case1354pegase vs 46% on case9241pegase) and attributed it to
+case9241pegase's LU factors overflowing the 16 MiB L3. That was an artifact of comparing a
+cold-machine case1354pegase run against a warm case9241pegase one. Measured under equal thermal
+conditions the two cases scale within 0.05x of each other, and the tidy cache story does not
+survive. The working-set effect is real but shows up in the *Jacobian assembly* gain above (11.4%
+vs 7.3%), not in thread scaling.
+
+**This machine is a poor benchmark device for this workload.** Re-measure on a desktop or server
+part before quoting any of this anywhere load-bearing. The same caveat `plans/GPU_PLAN.md` §5
+raises about this machine's *GPU* applies just as much to its CPU.
 
 ### What this implies for the GPU plan
 
 The CPU batch path is **memory-bandwidth bound, not compute bound**. That is an argument *for* the
 GPU direction rather than against it: bandwidth is precisely what datacenter GPUs have in bulk (an
 MI300X has roughly two orders of magnitude more than this APU's LPDDR). It also sharpens what a GPU
-claim has to say — the number to beat on this machine is ~94 solves/s steady-state, but a
-publishable claim needs a *server* CPU baseline, since this part is throttle- and bandwidth-limited
-in a way a desktop or EPYC/Xeon host would not be.
+claim has to say — the number to beat on this machine is ~127 solves/s steady-state on
+case9241pegase, but a publishable claim needs a *server* CPU baseline, since this part is throttle-
+and bandwidth-limited in a way a desktop or EPYC/Xeon host would not be.
 
 ## 5. Cross-validate CGMES import against pypowsybl
 
