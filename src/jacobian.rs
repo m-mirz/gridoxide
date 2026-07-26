@@ -201,6 +201,13 @@ impl JacobianPattern {
     /// thread per entry.
     pub fn fill(&self, buses: &[Bus], p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
         values.clear();
+        self.fill_into(buses, p_calc, q_calc, values);
+    }
+
+    /// [`fill`](Self::fill) without the clear — *appends* this scenario's
+    /// values to `values`. What lets `bde::BlockDiagonal` concatenate B
+    /// scenarios' blocks into one flat array for a block-diagonal solve.
+    pub fn fill_into(&self, buses: &[Bus], p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
         values.reserve(self.entries.len());
 
         for e in &self.entries {
@@ -239,6 +246,28 @@ impl JacobianPattern {
                 }
             };
             values.push(v);
+        }
+    }
+
+    /// Appends an identity block in this pattern's own layout: `1.0` at every
+    /// stored diagonal position, `0.0` everywhere else.
+    ///
+    /// This is how `bde::BlockDiagonal` masks a converged or diverged
+    /// scenario out of a batch. Dropping its block outright would change the
+    /// stacked matrix's sparsity pattern and invalidate the cached symbolic
+    /// factorization — the whole reason batching is cheap. Writing an
+    /// identity into the *same* stored positions keeps the pattern
+    /// bit-identical while making that scenario's update exactly zero (with a
+    /// zero right-hand side), and identity is perfectly conditioned so it
+    /// cannot degrade the factorization.
+    ///
+    /// Every diagonal position is structurally present: `Hii` supplies
+    /// `(r, r)` for every angle row and `Lii` supplies it for every
+    /// magnitude row, so no fill-in is required to write this.
+    pub fn fill_identity_into(&self, values: &mut Vec<f64>) {
+        values.reserve(self.entries.len());
+        for k in 0..self.entries.len() {
+            values.push(if self.rows[k] == self.cols[k] { 1.0 } else { 0.0 });
         }
     }
 

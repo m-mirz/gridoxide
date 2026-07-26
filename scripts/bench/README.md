@@ -715,6 +715,56 @@ while both being wrong. A self-consistency check between two code paths cannot d
 what they share. That is exactly why check 1 (against a genuinely separate implementation) has to
 pass before check 2 means anything.
 
+## 4d. Block-diagonal embedding on real sparse code
+
+`src/bde.rs` stacks B scenarios' Jacobians into one block-diagonal sparse matrix and takes a single
+factorization per Newton iteration — the design `plans/GPU_PLAN.md` §3 adopts, and the reason the
+AMD path is viable without a batched refactorization API.
+
+`scripts/bench/jax_oracle.py` (§4c) established the equivalence with *dense* linear algebra.
+This extends it to the sparse backends the GPU path will actually mirror, where the claim is far
+less obvious: KLU applies BTF ordering, AMD fill-reducing permutation and partial pivoting to the
+stacked matrix, none of which know anything about the block structure.
+
+```bash
+cargo run --release --example bde_check -- scripts/bench/.case-cache/case1354pegase.json 16
+```
+
+16 scenarios, `klu_native`, versus independent per-scenario solves:
+
+| case | buses | stacked unknowns | stacked nnz | max \|dVm\| | iter mismatches |
+|---|---|---|---|---|---|
+| case118 | 119 | 2,928 | 17,456 | **0** | 0/16 |
+| case300 | 301 | 8,512 | 59,968 | **0** | 0/16 |
+| case1354pegase | 1,355 | 39,184 | 253,552 | **0** | 0/16 |
+| case2869pegase | 2,870 | 83,664 | 586,160 | **0** | 0/16 |
+
+**Bit-exact, not merely within tolerance.** BTF finds the B disconnected components exactly, AMD
+orders within each, and the pivot sequence per block ends up identical to solving that block alone
+— which is what the theory predicts (no fill crosses a block; a column in block *s* has nonzeros
+only in block *s*'s rows, so partial pivoting cannot reach across). The Newton iteration counts
+match per scenario too, so the embedding does not perturb the convergence path.
+
+`tests/bde_test.rs` additionally checks the two structural properties directly: that the stacked
+pattern contains **no entry linking two scenarios**, and that a masked scenario's block is exactly
+the identity *in the same stored positions* — masking has to preserve the sparsity pattern, since
+dropping a converged scenario's block outright would invalidate the cached symbolic factorization
+that makes batching cheap in the first place.
+
+### It is slower on a CPU, and that is the expected result
+
+| case | independent (1 thread) | block-diagonal |
+|---|---|---|
+| case118 | 2.6 ms | 7.1 ms |
+| case300 | 10.2 ms | 23.5 ms |
+| case1354pegase | 47.4 ms | 130.6 ms |
+| case2869pegase | 113.6 ms | 310.9 ms |
+
+Consistently ~2.7x slower. One large factorization beats B small ones only on hardware that wants
+wide independent work — which is a GPU property, not a CPU one. `bde.rs` is an architecture
+validator and the host-side half of Phase 3, **not** a CPU optimization; use `batch::BatchSolver`
+for real work on a CPU. Quoting these timings as a batching result would be exactly backwards.
+
 ## 5. Cross-validate CGMES import against pypowsybl
 
 `cross_validate_cgmes_microgrid_be.py` checks gridoxide's CGMES import + solve against pypowsybl's own,

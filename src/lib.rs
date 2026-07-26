@@ -3,6 +3,7 @@ pub mod network;
 pub mod solver;
 pub mod jacobian;
 pub mod batch;
+pub mod bde;
 pub mod dc;
 pub mod json;
 pub mod pgm;
