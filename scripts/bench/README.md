@@ -765,6 +765,77 @@ wide independent work — which is a GPU property, not a CPU one. `bde.rs` is an
 validator and the host-side half of Phase 3, **not** a CPU optimization; use `batch::BatchSolver`
 for real work on a CPU. Quoting these timings as a batching result would be exactly backwards.
 
+## 4e. GPU Jacobian assembly (CubeCL) — and what f32 actually costs
+
+`src/gpu.rs` (feature `gpu`) is the CubeCL transliteration of
+`JacobianPattern::fill`: one thread per (scenario, entry), coalesced writes, no branching beyond
+the eight-way dispatch on entry kind. `plans/GPU_PLAN.md` §3 property 4, "assembly becomes one flat
+kernel".
+
+```bash
+cargo test --features gpu --test gpu_assembly_test
+cargo run --release --features gpu --example gpu_assembly_check -- \
+    scripts/bench/.case-cache/case9241pegase.json 64
+```
+
+It runs on the **local Radeon 780M via wgpu/Vulkan** — the iGPU `plans/GPU_PLAN.md` §5 writes off
+for benchmarking. For *correctness* work it is perfectly usable, which is the point: kernel logic
+and plumbing get verified for free, leaving only f64 for rented hardware.
+
+### Is the kernel correct? Yes — but the naive measurement says otherwise
+
+Comparing GPU f32 against the CPU f64 reference, scaled by the result, looks alarming and gets
+worse with grid size:
+
+| case | gpu(f32) vs cpu(f64) | cpu(f32) vs cpu(f64) |
+|---|---|---|
+| case118 | 9.4e-7 | 3.0e-7 |
+| case1354pegase | 1.4e-4 | 3.9e-5 |
+| case2869pegase | 8.4e-3 | **8.4e-3** |
+| case9241pegase | 9.8e-3 | **9.8e-3** |
+
+The second column is the control: the *same formulas evaluated in f32 on the CPU*. On the two large
+cases it is identical to the GPU column to four digits — so at the worst entry, GPU and CPU-f32
+agree exactly and both lose to f32. That error is a property of the arithmetic, not of the GPU.
+
+Scaling by the **operands** instead of the result — the measure that isolates the kernel — is flat:
+
+| case | operand-scaled gpu(f32) vs cpu(f32) |
+|---|---|
+| case118 | 2.6e-7 |
+| case1354pegase | 3.3e-7 |
+| case2869pegase | 3.2e-7 |
+| case9241pegase | 3.3e-7 |
+
+~2.7 ULP of f32, constant from 119 to 9,242 buses, with the **median deviation exactly zero** over
+8.2 million values. That is what a correct f32 kernel looks like.
+
+### Where the f32 error comes from, and why it matters for Phase 4
+
+Per-kind breakdown on case9241pegase (result-scaled), which does *not* split along "uses sin/cos":
+
+| kind | expression | worst |
+|---|---|---|
+| Hii | `-Q - V²·B` | 1.2e-7 |
+| Lii | `Q/V - V·B` | 1.2e-7 |
+| Mii | `P - V²·G` | 4.7e-7 |
+| Hik, Lik | `G·sin - B·cos` | ~3.4e-7 |
+| **Nii** | `P/V + V·G` | **1.1e-5** |
+| **Nik, Mik** | `G·cos + B·sin` | **1.6e-4 – 2.1e-4** |
+
+The dividing line is **cancellation**, not transcendentals. In a transmission network |B| >> |G|,
+so `G·sin - B·cos` is dominated by `B·cos` and stays well-conditioned, while `G·cos + B·sin` has
+`B·sin` shrink toward `G·cos` at small angles and cancels. `Nii = P/V + V·G` cancels for the same
+reason; `Hii = -Q - V²·B` does not, because `B` dominates. Two f32 implementations whose `sin`/`cos`
+differ by one ULP then diverge by ~1e-4 there, on CPU as readily as on GPU.
+
+**This is measured support for a Phase 4 design decision.** `plans/GPU_PLAN.md` §3 proposes
+following SABLE: assemble the Jacobian in f64, run the linear solve in f32 with iterative
+refinement. These numbers say that split is the right one and is not merely conservative —
+assembling in f32 costs up to ~1e-2 relative error on case9241pegase entries, which a solver whose
+value proposition is 4-decimal agreement with five other implementations cannot absorb. §4.4's
+rejection of f32/emulated-f64 assembly now has a number attached to it.
+
 ## 5. Cross-validate CGMES import against pypowsybl
 
 `cross_validate_cgmes_microgrid_be.py` checks gridoxide's CGMES import + solve against pypowsybl's own,

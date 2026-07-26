@@ -4,6 +4,8 @@ pub mod solver;
 pub mod jacobian;
 pub mod batch;
 pub mod bde;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod dc;
 pub mod json;
 pub mod pgm;

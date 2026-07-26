@@ -31,6 +31,11 @@ num-complex = { version = "0.4.6", features = ["serde"] }
 # parallelism inside faer from oversubscribing the machine, and it means a
 # batch never pays thread-creation cost per call.
 rayon = "1.12"
+# Kernel DSL for `src/gpu.rs`, behind the `gpu` feature. JITs one `#[cube]`
+# function to CUDA, ROCm/HIP and WGSL, which is what lets a single kernel
+# codebase serve both vendor paths (see plans/GPU_PLAN.md §5). Alpha, with
+# documented API churn between minor versions — pinned exactly for that reason.
+cubecl = { version = "=0.10.0", features = ["wgpu"], optional = true }
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -89,6 +94,17 @@ pardiso = ["dep:bindgen"]
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]
+# Builds `src/gpu.rs`: the CubeCL Jacobian-assembly kernel (plans/GPU_PLAN.md
+# Phase 2). Opt-in because CubeCL pulls in a large graphics/compute dependency
+# tree and needs a working GPU driver at *runtime*.
+#
+# The wgpu backend targets WGSL, which has **no f64** — so this path assembles
+# in f32 and can only be validated to f32 tolerance. That is deliberate and
+# bounded: it proves kernel logic, indexing and host/device plumbing on
+# whatever GPU is present. The f64 exactness `plans/GPU_PLAN.md` Phase 2 asks
+# for needs a CUDA or ROCm backend, i.e. real hardware; see §5 and §4.4 (which
+# rejects f64 emulation in WGSL as costing 10-20x for ~f48 precision).
+gpu = ["dep:cubecl"]
 
 [[test]]
 name = "klu_jacobian_test"
@@ -174,3 +190,8 @@ required-features = ["cgmes"]
 name = "cgmes_microgrid_be_dump"
 path = "examples/cgmes_microgrid_be_dump.rs"
 required-features = ["cgmes"]
+
+[[example]]
+name = "gpu_assembly_check"
+path = "examples/gpu_assembly_check.rs"
+required-features = ["gpu"]
