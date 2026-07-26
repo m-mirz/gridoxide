@@ -344,6 +344,80 @@ impl PowerFlowModel {
         rayon::current_num_threads()
     }
 
+    /// The Y-bus as `(rows, cols, g, b)` triplets, one entry per stored
+    /// nonzero, row-major with columns ascending within a row.
+    ///
+    /// Exists so an external reimplementation — `scripts/bench/jax_oracle.py`
+    /// — can consume the *exact* admittance matrix this solver uses rather
+    /// than rebuilding one from the same input file. Without that, a
+    /// disagreement between the two could equally be a model-conversion
+    /// difference (tap ratios, shunt stamping, switch merging) as a solver
+    /// difference, and the comparison would prove nothing.
+    fn ybus_triplets(&self) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<f64>) {
+        let n = self.ybus.n();
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut g = Vec::new();
+        let mut b = Vec::new();
+        for i in 0..n {
+            for &(j, y) in self.ybus.row(i) {
+                rows.push(i);
+                cols.push(j);
+                g.push(y.re);
+                b.push(y.im);
+            }
+        }
+        (rows, cols, g, b)
+    }
+
+    /// Per-bus `(bus_type, p_spec, q_spec)` in node order, where `bus_type`
+    /// is 0 = Slack, 1 = PV, 2 = PQ. Injections are net (generation minus
+    /// load) in per-unit, matching `types::Bus`.
+    ///
+    /// `u32` rather than `u8` deliberately: PyO3 maps `Vec<u8>` to Python
+    /// `bytes`, not a list of ints, which silently turns `np.asarray(kinds)`
+    /// into a 0-d array and makes every downstream mask wrong instead of
+    /// raising.
+    fn bus_spec(&self) -> (Vec<u32>, Vec<f64>, Vec<f64>) {
+        let mut kinds = Vec::with_capacity(self.buses_template.len());
+        let mut p = Vec::with_capacity(self.buses_template.len());
+        let mut q = Vec::with_capacity(self.buses_template.len());
+        for bus in &self.buses_template {
+            kinds.push(match bus.bus_type {
+                crate::types::BusType::Slack => 0u32,
+                crate::types::BusType::PV => 1,
+                crate::types::BusType::PQ => 2,
+            });
+            p.push(bus.p_spec);
+            q.push(bus.q_spec);
+        }
+        (kinds, p, q)
+    }
+
+    /// `(voltage_mag, voltage_ang)` after `network::linear_initial_guess`,
+    /// i.e. the exact state this model's Newton loop starts its first
+    /// iteration from. Lets the oracle begin from the same point rather than
+    /// a flat start, so a mismatch cannot be blamed on landing in a different
+    /// basin.
+    fn initial_guess(&self) -> (Vec<f64>, Vec<f64>) {
+        let mut buses = self.buses_template.clone();
+        linear_initial_guess(&mut buses, &self.ybus);
+        (
+            buses.iter().map(|b| b.voltage_mag).collect(),
+            buses.iter().map(|b| b.voltage_ang).collect(),
+        )
+    }
+
+    /// Number of voltage-dependent ZIP terms on each bus.
+    ///
+    /// The oracle models constant-power injections only. It calls this to
+    /// *assert* every bus is pure constant-power rather than silently
+    /// producing a wrong answer on a network where `effective_injection`
+    /// contributes voltage-dependent terms the oracle does not implement.
+    fn zip_term_counts(&self) -> Vec<usize> {
+        self.buses_template.iter().map(|b| b.zip_terms.len()).collect()
+    }
+
     /// Per-bus voltage magnitude in per-unit, in node order — `None` before
     /// the first `solve()` call.
     fn voltage_mag(&self) -> Vec<f64> {

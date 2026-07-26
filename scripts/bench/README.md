@@ -658,6 +658,63 @@ claim has to say — the number to beat on this machine is ~127 solves/s steady-
 case9241pegase, but a publishable claim needs a *server* CPU baseline, since this part is throttle-
 and bandwidth-limited in a way a desktop or EPYC/Xeon host would not be.
 
+## 4c. JAX oracle — validating the block-diagonal embedding
+
+`jax_oracle.py` is an independent reimplementation of the batched AC power flow in JAX (f64, CPU,
+dense), written to answer questions the Rust solver cannot answer about itself. It is **not** a
+performance prototype — it is deliberately the slowest power flow in this repo and must never be
+quoted as a speed number.
+
+```bash
+python3 -m venv .venv-jax
+.venv-jax/bin/pip install jax numpy maturin
+VIRTUAL_ENV=$PWD/.venv-jax .venv-jax/bin/maturin develop --release --features python,klu
+.venv-jax/bin/python scripts/bench/jax_oracle.py .case-cache/case118.json 8
+```
+
+It consumes gridoxide's *own* Y-bus and bus arrays (`ybus_triplets`, `bus_spec`, `initial_guess`,
+`zip_term_counts`) rather than re-deriving the model from the input file. That is the point: if the
+oracle built its own model, a disagreement could equally be a tap-ratio or shunt-stamping
+difference in the converter as a solver bug, and the comparison would establish nothing about the
+solver.
+
+Three checks per case. Max |dVm| against `klu`:
+
+| case | buses | 1. oracle vs klu | 2. **BDE vs independent** | 3. oracle vs BatchSolver |
+|---|---|---|---|---|
+| case14 | 15 | 4.4e-16 | 4.4e-16 | 6.7e-16 |
+| case118 | 119 | 1.1e-15 | 1.3e-15 | 1.2e-15 |
+| case_illinois200 | 201 | 6.4e-15 | 2.7e-14 | 6.5e-11 |
+| case300 | 301 | 1.5e-14 | 3.5e-14 | 6.5e-14 |
+| case1354pegase | 1,355 | 3.9e-14 | 1.2e-13 | 7.5e-14 |
+| case1888rte | 1,889 | 1.4e-13 | 4.6e-13 | 3.1e-12 |
+
+**Column 2 is the one that matters.** `plans/GPU_PLAN.md` §3 property 2 claims that stacking B
+scenarios into one block-diagonal matrix and taking a single LU is equivalent to B independent
+solves — which is what lets the AMD path work without a batched refactorization API, and is the
+architectural load-bearing wall under Phases 3-5. It is now checked numerically rather than
+asserted: agreement is at machine precision, and the per-scenario iteration counts match exactly,
+on every case.
+
+Scope limits, stated rather than discovered later: constant-power injections only (ZIP terms are
+asserted absent, not handled); dense Jacobian, so B is auto-capped to bound the dense solve and
+case9241pegase is out of reach; no Q-limit enforcement or island partitioning, matching
+`PersistentSolver::solve`'s defaults.
+
+### A bug the oracle found in its own scaffolding
+
+The first run disagreed with `klu` by 1.1e-2 in |V| and 0.44 rad in angle. The cause was in the
+export, not either solver: PyO3 maps `Vec<u8>` to Python `bytes` rather than a list of ints, so
+`np.asarray(kinds)` produced a 0-d array, every bus mask collapsed to a single index, and the
+oracle "converged" in 4 iterations on a one-unknown problem. `bus_spec` now returns `Vec<u32>`, and
+the oracle validates the array's shape and value set on load instead of trusting it.
+
+Worth recording because of what it implies about check 2. In that broken run, BDE-vs-independent
+*passed* — both paths shared the same wrong indexing, so they agreed with each other perfectly
+while both being wrong. A self-consistency check between two code paths cannot detect a fault in
+what they share. That is exactly why check 1 (against a genuinely separate implementation) has to
+pass before check 2 means anything.
+
 ## 5. Cross-validate CGMES import against pypowsybl
 
 `cross_validate_cgmes_microgrid_be.py` checks gridoxide's CGMES import + solve against pypowsybl's own,
