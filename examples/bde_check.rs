@@ -10,6 +10,9 @@
 //!
 //! ```bash
 //! cargo run --release --example bde_check -- scripts/bench/.case-cache/case1354pegase.json 16
+//! # or, to exercise the device-resident cuDSS path (plans/GPU_PLAN.md Phase 3):
+//! cargo run --release --features gpu,cudss --example bde_check -- \
+//!     scripts/bench/.case-cache/case1354pegase.json 16
 //! ```
 
 use std::env;
@@ -18,10 +21,28 @@ use std::time::Instant;
 
 use gridoxide::batch::{BatchSolver, BusOverride, Scenario};
 use gridoxide::bde::{solve_batch_block_diagonal, BlockDiagonal};
+#[cfg(not(feature = "cudss"))]
 use gridoxide::klu_native::KluNativeSystem;
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
 use gridoxide::solver::{JacobianBackend, SolveStatus};
+
+/// The backend `solve_batch_block_diagonal` embeds against. With the `cudss`
+/// feature this is the GPU path this file is really meant to check; without
+/// it, `KluNativeSystem` still proves the embedding on a real case at scale
+/// (`tests/bde_test.rs` covers the small fixture unconditionally).
+#[cfg(feature = "cudss")]
+type EmbeddedSystem = gridoxide::sparse_cudss::CudssRealSystem;
+#[cfg(not(feature = "cudss"))]
+type EmbeddedSystem = KluNativeSystem;
+
+/// A GPU solver picks a different elimination order/pivoting than the CPU
+/// reference, so agreement lands at ~1e-9 rather than the CPU-vs-CPU
+/// backends' bit-identical-to-1e-11 — see `scripts/GPU_RUNBOOK.md` Phase 3.
+#[cfg(feature = "cudss")]
+const AGREEMENT_TOL: f64 = 1e-6;
+#[cfg(not(feature = "cudss"))]
+const AGREEMENT_TOL: f64 = 1e-9;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -67,7 +88,7 @@ fn main() {
     let t_indep = t0.elapsed();
 
     let t1 = Instant::now();
-    let embedded = solve_batch_block_diagonal::<KluNativeSystem>(&template, &ybus, &scenarios, 1e-8, 40);
+    let embedded = solve_batch_block_diagonal::<EmbeddedSystem>(&template, &ybus, &scenarios, 1e-8, 40);
     let t_bde = t1.elapsed();
 
     let mut worst_vm = 0.0f64;
@@ -97,7 +118,7 @@ fn main() {
     println!("iteration-count mismatches: {iter_mismatch}/{nb}");
     println!("non-converged scenarios:    {not_converged}/{nb}");
 
-    let ok = worst_vm < 1e-9 && worst_va < 1e-9 && iter_mismatch == 0 && not_converged == 0;
+    let ok = worst_vm < AGREEMENT_TOL && worst_va < AGREEMENT_TOL && iter_mismatch == 0 && not_converged == 0;
     println!();
     println!("RESULT: {}", if ok { "PASS" } else { "FAIL" });
     if !ok {

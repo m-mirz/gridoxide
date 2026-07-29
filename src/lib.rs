@@ -16,6 +16,8 @@ pub mod klu_native;
 pub mod sparse_klu;
 #[cfg(feature = "pardiso")]
 pub mod sparse_pardiso;
+#[cfg(feature = "cudss")]
+pub mod sparse_cudss;
 #[cfg(feature = "cgmes")]
 pub mod cgmes;
 #[cfg(feature = "python")]

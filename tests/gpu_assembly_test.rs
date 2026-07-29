@@ -1,19 +1,14 @@
 //! GPU Jacobian assembly vs. the CPU reference.
 //!
-//! Runs only with `--features gpu`, and needs a working GPU driver at runtime.
+//! Runs only with `--features gpu`, and needs a working GPU driver at runtime
+//! (CUDA — see `src/gpu.rs`'s `DefaultRuntime`).
 //!
-//! **This is an f32 check, deliberately.** CubeCL's wgpu backend emits WGSL,
-//! which has no f64, so this cannot meet `plans/GPU_PLAN.md` Phase 2's stated
-//! f64-exactness criterion — that needs a CUDA or ROCm backend and real
-//! hardware. What it does establish is that the kernel's arithmetic, its
-//! eight-way dispatch on entry kind, and the (scenario, entry) index
-//! arithmetic all agree with `JacobianPattern::fill`, which is the part that
-//! is fiddly to get right and cheap to verify here.
-//!
-//! The tolerance is relative and sized for f32 (~1e-7 relative precision,
-//! loosened for the sin/cos and cancellation in the H/N/M/L terms). A logic or
-//! indexing error produces a wildly wrong value, not a slightly wrong one, so
-//! this separates the two cases cleanly.
+//! **This is an f64 check.** `plans/GPU_PLAN.md` Phase 2's stated exit
+//! criterion is f64 exactness against `JacobianPattern::fill`'s CPU reference,
+//! reachable now that the kernel runs on CubeCL's CUDA backend instead of
+//! wgpu/WGSL (which has no f64 — see git history for that earlier version).
+//! The tolerance below is accordingly tight: near f64 machine epsilon, not the
+//! ~1e-5 an f32 kernel would need.
 
 #![cfg(feature = "gpu")]
 
@@ -86,12 +81,11 @@ fn gpu_assembly_matches_cpu_reference() {
 
     let mut worst_rel = 0.0f64;
     for (idx, (&g, &e)) in got.iter().zip(&expected).enumerate() {
-        let g = g as f64;
         let denom = e.abs().max(1.0);
         let rel = (g - e).abs() / denom;
         worst_rel = worst_rel.max(rel);
         assert!(
-            rel < 1e-5,
+            rel < 1e-9,
             "entry {idx} (scenario {}, slot {}): gpu {g} vs cpu {e} (rel {rel:.3e})",
             idx / pattern.len(),
             idx % pattern.len()

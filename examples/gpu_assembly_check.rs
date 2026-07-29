@@ -10,11 +10,11 @@
 //!     scripts/bench/.case-cache/case1354pegase.json 64
 //! ```
 //!
-//! **f32.** See `src/gpu.rs`'s module docs: the wgpu backend has no f64, so
-//! this validates kernel logic and plumbing, not the f64 exactness Phase 2
-//! ultimately requires. Timings here are not a speedup claim either — nothing
-//! is being compared against a CPU assembly baseline, and on an integrated GPU
-//! sharing system memory they would not mean much if it were.
+//! **f64, CUDA.** `src/gpu.rs` assembles in f64 on CubeCL's CUDA backend —
+//! see that module's doc comment. This is the real Phase 2 exit criterion:
+//! agreement with the f64 CPU reference to near machine epsilon, not just f32
+//! tolerance. Timings here are not a speedup claim either — nothing is being
+//! compared against a CPU assembly baseline.
 
 use std::env;
 use std::fs;
@@ -25,14 +25,11 @@ use gridoxide::jacobian::{EntryKind, JacobianPattern};
 use gridoxide::network::{build_ybus, linear_initial_guess, power_injections, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
 
-/// The identical formulas evaluated in **f32 on the CPU**.
-///
-/// This is the control that separates "the kernel is wrong" from "f32 is not
-/// enough". Several H/N/M/L terms are differences of similarly-sized
-/// quantities (`H_ii = -Q_i - V_i^2 B_ii`, and `B_ii` grows with a bus's
-/// degree), so on a large grid they cancel catastrophically in f32 regardless
-/// of where they are computed. Comparing the GPU against *this* isolates the
-/// kernel; comparing this against f64 measures what f32 costs.
+/// The identical formulas evaluated in **f32 on the CPU** — kept only as
+/// historical context for what the old wgpu/f32 path cost (see git history
+/// before the Phase 2 CUDA/f64 switch). Not used for pass/fail any more: the
+/// GPU is f64 now, so it is compared directly against the f64 CPU reference
+/// below.
 fn cpu_f32_reference(
     pattern: &JacobianPattern,
     states: &[Vec<gridoxide::types::Bus>],
@@ -73,14 +70,13 @@ fn cpu_f32_reference(
 }
 
 /// Distribution of relative deviation, not just the worst case. A kernel
-/// fault is systematic and moves the whole distribution; f32 cancellation
-/// affects a thin tail of entries whose true value is tiny relative to the
-/// operands that produced it.
-fn percentiles(a: &[f32], b: &[f64]) -> (f64, f64, f64) {
+/// fault is systematic and moves the whole distribution; isolated libm
+/// (sin/cos) rounding differences between GPU and CPU affect a thin tail.
+fn percentiles(a: &[f64], b: &[f64]) -> (f64, f64, f64) {
     let mut rels: Vec<f64> = a
         .iter()
         .zip(b)
-        .map(|(&x, &y)| ((x as f64) - y).abs() / y.abs().max(1.0))
+        .map(|(&x, &y)| (x - y).abs() / y.abs().max(1.0))
         .collect();
     rels.sort_by(|x, y| x.partial_cmp(y).unwrap());
     let at = |q: f64| rels[((rels.len() - 1) as f64 * q) as usize];
@@ -94,15 +90,15 @@ fn percentiles(a: &[f32], b: &[f64]) -> (f64, f64, f64) {
 /// sum of two products, and any of them can cancel: `Nii = P/V + V*G` cancels
 /// when the two are comparable, `Hii = -Q - V^2*B` does not because `B`
 /// dominates. Scaling by the result therefore reports cancellation, which is a
-/// property of f32 and of the network's R/X ratio, not of where the arithmetic
-/// ran. Scaling by the operands asks the question that isolates the kernel:
-/// did the GPU evaluate the same expression to f32 precision?
+/// property of the network's R/X ratio, not of where the arithmetic ran.
+/// Scaling by the operands asks the question that isolates the kernel: did the
+/// GPU evaluate the same expression to f64 precision?
 fn operand_scaled_worst(
     pattern: &JacobianPattern,
     states: &[Vec<gridoxide::types::Bus>],
     p_all: &[Vec<f64>],
     q_all: &[Vec<f64>],
-    a: &[f32],
+    a: &[f64],
     b: &[f64],
 ) -> (f64, usize) {
     let nnz = pattern.len();
@@ -119,7 +115,7 @@ fn operand_scaled_worst(
             + p_all[s][i].abs()
             + q_all[s][i].abs()
             + 1.0;
-        let d = ((a[slot] as f64) - b[slot]).abs() / scale;
+        let d = (a[slot] - b[slot]).abs() / scale;
         if d > worst {
             worst = d;
             idx = slot;
@@ -128,11 +124,11 @@ fn operand_scaled_worst(
     (worst, idx)
 }
 
-fn worst_rel(a: &[f32], b: &[f64]) -> (f64, usize) {
+fn worst_rel(a: &[f64], b: &[f64]) -> (f64, usize) {
     let mut worst = 0.0f64;
     let mut idx = 0usize;
     for (n, (&x, &y)) in a.iter().zip(b).enumerate() {
-        let r = ((x as f64) - y).abs() / y.abs().max(1.0);
+        let r = (x - y).abs() / y.abs().max(1.0);
         if r > worst {
             worst = r;
             idx = n;
@@ -203,31 +199,25 @@ fn main() {
     let cpu32_as_f64: Vec<f64> = cpu32.iter().map(|&v| v as f64).collect();
 
     let (gpu_vs_f64, i_a) = worst_rel(&got, &expected);
-    let (cpu32_vs_f64, _) = worst_rel(&cpu32, &expected);
-    let (gpu_vs_cpu32, i_c) = worst_rel(&got, &cpu32_as_f64);
+    let (cpu32_vs_f64, _) = worst_rel(&cpu32_as_f64, &expected);
 
     println!();
     println!("cpu assemble (f64):        {:.2} ms", t_cpu.as_secs_f64() * 1e3);
-    println!("gpu assemble (f32, warm):  {:.2} ms  [upload + launch + readback]", t_gpu.as_secs_f64() * 1e3);
+    println!("gpu assemble (f64, warm):  {:.2} ms  [upload + launch + readback]", t_gpu.as_secs_f64() * 1e3);
     println!();
     println!("worst relative deviation:");
     println!(
-        "  gpu(f32)  vs cpu(f64):  {gpu_vs_f64:.3e}   (scenario {}, slot {})",
+        "  gpu(f64)  vs cpu(f64):  {gpu_vs_f64:.3e}   (scenario {}, slot {})   <- the real Phase 2 result",
         i_a / pattern.len(),
         i_a % pattern.len()
     );
-    println!("  cpu(f32)  vs cpu(f64):  {cpu32_vs_f64:.3e}   <- what f32 costs, independent of the GPU");
-    println!(
-        "  gpu(f32)  vs cpu(f32):  {gpu_vs_cpu32:.3e}   <- kernel correctness  (scenario {}, slot {})",
-        i_c / pattern.len(),
-        i_c % pattern.len()
-    );
-    println!("  f32 machine epsilon:    {:.3e}", f32::EPSILON);
+    println!("  cpu(f32)  vs cpu(f64):  {cpu32_vs_f64:.3e}   <- what the old wgpu/f32 path cost, for context only");
+    println!("  f64 machine epsilon:    {:.3e}", f64::EPSILON);
 
-    // Deviation by entry kind. The four diagonal kinds use only arithmetic;
-    // the four off-diagonal kinds additionally call sin/cos. If the split
-    // falls exactly along that line, the cause is the GPU's transcendental
-    // precision rather than anything about this kernel.
+    // Deviation by entry kind, gpu(f64) vs cpu(f64) directly. Any remaining
+    // gap is now libm (sin/cos) rounding between GPU and CPU implementations,
+    // not f32 cancellation — the four off-diagonal kinds call sin/cos, the
+    // four diagonal kinds are pure arithmetic.
     {
         let names = ["Hii", "Nii", "Hik", "Nik", "Mii", "Lii", "Mik", "Lik"];
         let mut worst = [0.0f64; 8];
@@ -236,8 +226,7 @@ fn main() {
         for slot in 0..got.len() {
             let e = &pattern.entries()[slot % pattern.len()];
             let ki = e.kind as usize;
-            let d = ((got[slot] as f64) - cpu32_as_f64[slot]).abs()
-                / cpu32_as_f64[slot].abs().max(1.0);
+            let d = (got[slot] - expected[slot]).abs() / expected[slot].abs().max(1.0);
             count[ki] += 1;
             if d == 0.0 {
                 exact[ki] += 1;
@@ -247,7 +236,7 @@ fn main() {
             }
         }
         println!();
-        println!("gpu(f32) vs cpu(f32) by entry kind:");
+        println!("gpu(f64) vs cpu(f64) by entry kind:");
         for k in 0..8 {
             if count[k] == 0 {
                 continue;
@@ -264,58 +253,36 @@ fn main() {
         }
     }
 
-    let (p50, p9999, pmax) = percentiles(&got, &cpu32_as_f64);
+    let (p50, p9999, pmax) = percentiles(&got, &expected);
     println!();
-    println!("gpu(f32) vs cpu(f32) distribution over {} values:", got.len());
+    println!("gpu(f64) vs cpu(f64) distribution over {} values:", got.len());
     println!("  median   {p50:.3e}");
     println!("  p99.99   {p9999:.3e}");
     println!("  max      {pmax:.3e}");
     {
-        let e = expected[i_c];
-        let gv = got[i_c] as f64;
-        let cv = cpu32_as_f64[i_c];
-        println!(
-            "  worst slot: f64={e:.6e}  cpu_f32={cv:.6e}  gpu_f32={gv:.6e}  |abs diff|={:.3e}",
-            (gv - cv).abs()
-        );
-        println!("    (a tiny result from large operands is the cancellation signature)");
+        let e = expected[i_a];
+        let gv = got[i_a];
+        println!("  worst slot: cpu_f64={e:.6e}  gpu_f64={gv:.6e}  |abs diff|={:.3e}", (gv - e).abs());
     }
 
-    // The pass criterion tests *kernel correctness*, not f32's adequacy.
-    //
-    // Asserting on the worst gpu-vs-cpu(f32) deviation would be testing the
-    // wrong thing: in a power network |B| >> |G|, so `g*cos + b*sin` (the
-    // inner expression of Nik/Mik) suffers catastrophic cancellation at small
-    // angles — `b*sin` shrinks to meet `g*cos` — and the f32 rounding error in
-    // a `b` of magnitude ~100 is then large next to an O(1) result. Any two
-    // f32 implementations whose sin/cos differ by one ULP diverge there, on
-    // CPU as readily as on GPU. `g*sin - b*cos` (Hik/Lik) is dominated by
-    // `b*cos` and stays accurate, which is why the split falls along the
-    // *expression*, not along which kinds use trigonometry.
-    //
-    // What does prove the kernel: a majority of values bit-identical to the
-    // CPU, and the arithmetic-only kinds (no transcendentals, no cancellation)
-    // agreeing to a few ULP. A logic or indexing fault could not produce
-    // either.
-    let (op_worst, op_idx) = operand_scaled_worst(
-        &pattern, &states, &p_all, &q_all, &got, &cpu32_as_f64,
-    );
-    let (op_worst_f64, _) = operand_scaled_worst(
-        &pattern, &states, &p_all, &q_all, &got, &expected,
-    );
+    // Phase 2's real exit criterion (`scripts/GPU_RUNBOOK.md`): operand-scaled
+    // error near f64 machine epsilon, and the result-scaled worst case
+    // collapsing from the old f32 path's ~1e-2 to near zero. Anything looser
+    // means the kernel itself has a bug, not a precision limitation — there is
+    // no cancellation argument left to hide behind once both sides are f64.
+    let (op_worst, op_idx) = operand_scaled_worst(&pattern, &states, &p_all, &q_all, &got, &expected);
     println!();
     println!("operand-scaled error (the measure that isolates the kernel):");
     println!(
-        "  gpu(f32) vs cpu(f32):  {op_worst:.3e}   (scenario {}, slot {})",
+        "  gpu(f64) vs cpu(f64):  {op_worst:.3e}   (scenario {}, slot {})",
         op_idx / pattern.len(),
         op_idx % pattern.len()
     );
-    println!("  gpu(f32) vs cpu(f64):  {op_worst_f64:.3e}");
 
-    let ok = p50 == 0.0 && op_worst < 1e-6;
+    let ok = gpu_vs_f64 < 1e-9 && op_worst < 1e-9;
     println!();
     println!("RESULT: {}", if ok {
-        "PASS (kernel logic verified; f32 cancellation reported above is inherent, not a kernel fault)"
+        "PASS (f64 exactness confirmed: this is the real Phase 2 exit criterion, not the f32 approximation)"
     } else {
         "FAIL"
     });

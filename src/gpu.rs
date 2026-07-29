@@ -12,24 +12,29 @@
 //!
 //! # Precision, stated up front
 //!
-//! CubeCL's wgpu backend emits WGSL, which has **no f64**. This module
-//! therefore assembles in **f32**, and [`assemble_batch`] can only be checked
-//! against the CPU reference to f32 tolerance. `plans/GPU_PLAN.md` Phase 2's
-//! stated exit criterion is *f64* exactness, and that is not reachable through
-//! wgpu — §4.4 already rejected double-single emulation as costing 10-20x per
-//! operation for ~f48 precision, which is a bad trade for a solver whose value
-//! proposition is agreeing with five other implementations to 4+ decimals.
+//! This module assembles in **f64**, on CubeCL's CUDA backend
+//! (`DefaultRuntime`). The kernel logic and index arithmetic were first
+//! proven out in f32 against `wgpu` (WGSL has no f64) — see git history for
+//! that version — and this is the same kernel with the dtype and runtime
+//! switched, per `scripts/GPU_RUNBOOK.md` Phase 2. §4.4 of the plan already
+//! rejected double-single emulation for the wgpu path as costing 10-20x per
+//! operation for ~f48 precision; going to a real f64 backend instead of
+//! emulating it is exactly that tradeoff resolved correctly.
 //!
-//! What this module *does* establish, on whatever GPU is present:
+//! What this module establishes, on whatever CUDA-capable GPU is present:
 //!
-//! - the kernel's arithmetic and eight-way dispatch match the CPU reference,
+//! - the kernel's arithmetic and eight-way dispatch match the CPU reference
+//!   to f64 exactness,
 //! - the (scenario, entry) index arithmetic and the batch stride are right,
 //! - the host/device plumbing — buffer layout, upload, launch, readback —
 //!   works end to end.
 //!
-//! Those are the parts that are tedious to get right and cheap to verify here.
-//! Switching to `cubecl`'s CUDA or ROCm backend for f64 is a runtime and dtype
-//! change, not a rewrite of the kernel logic.
+//! [`GpuAssembler`] stays generic over `R: Runtime` — only [`DefaultRuntime`]
+//! and this module's dtype changed, not its structure. The dtype is fixed at
+//! f64 in the kernel and host buffers below, though, so `R = WgpuRuntime`
+//! (WGSL, no f64) will not run correctly any more; reverting to the f32/wgpu
+//! path for AMD-iGPU development per §5 means reverting the dtype too — see
+//! git history for the last commit before this switch.
 
 use cubecl::prelude::*;
 
@@ -76,13 +81,13 @@ fn assemble_kernel(
     kinds: &Array<u32>,
     bus_i: &Array<u32>,
     bus_k: &Array<u32>,
-    y_re: &Array<f32>,
-    y_im: &Array<f32>,
-    vm: &Array<f32>,
-    va: &Array<f32>,
-    p_calc: &Array<f32>,
-    q_calc: &Array<f32>,
-    values: &mut Array<f32>,
+    y_re: &Array<f64>,
+    y_im: &Array<f64>,
+    vm: &Array<f64>,
+    va: &Array<f64>,
+    p_calc: &Array<f64>,
+    q_calc: &Array<f64>,
+    values: &mut Array<f64>,
     nnz: u32,
     n_buses: u32,
 ) {
@@ -103,7 +108,7 @@ fn assemble_kernel(
     let b = y_im[e as usize];
     let vm_i = vm[i as usize];
 
-    let mut out = 0.0f32;
+    let mut out = 0.0f64;
 
     if kind == K_HII {
         out = -q_calc[i as usize] - vm_i * vm_i * b;
@@ -116,8 +121,8 @@ fn assemble_kernel(
     } else {
         let vm_k = vm[k as usize];
         let ang = va[i as usize] - va[k as usize];
-        let sin = f32::sin(ang);
-        let cos = f32::cos(ang);
+        let sin = f64::sin(ang);
+        let cos = f64::cos(ang);
 
         if kind == K_HIK {
             out = vm_i * vm_k * (g * sin - b * cos);
@@ -160,15 +165,15 @@ impl<R: Runtime> GpuAssembler<R> {
         let kinds: Vec<u32> = entries.iter().map(|e| kind_code(e.kind)).collect();
         let bus_i: Vec<u32> = entries.iter().map(|e| e.i).collect();
         let bus_k: Vec<u32> = entries.iter().map(|e| e.k).collect();
-        let y_re: Vec<f32> = entries.iter().map(|e| e.y.re as f32).collect();
-        let y_im: Vec<f32> = entries.iter().map(|e| e.y.im as f32).collect();
+        let y_re: Vec<f64> = entries.iter().map(|e| e.y.re).collect();
+        let y_im: Vec<f64> = entries.iter().map(|e| e.y.im).collect();
 
         Self {
             kinds: client.create_from_slice(u32::as_bytes(&kinds)),
             bus_i: client.create_from_slice(u32::as_bytes(&bus_i)),
             bus_k: client.create_from_slice(u32::as_bytes(&bus_k)),
-            y_re: client.create_from_slice(f32::as_bytes(&y_re)),
-            y_im: client.create_from_slice(f32::as_bytes(&y_im)),
+            y_re: client.create_from_slice(f64::as_bytes(&y_re)),
+            y_im: client.create_from_slice(f64::as_bytes(&y_im)),
             nnz: entries.len(),
             n_buses,
             client,
@@ -190,7 +195,7 @@ impl<R: Runtime> GpuAssembler<R> {
         states: &[Vec<Bus>],
         p_calc: &[Vec<f64>],
         q_calc: &[Vec<f64>],
-    ) -> Vec<f32> {
+    ) -> Vec<f64> {
         let nb = states.len();
         let n = self.n_buses;
         assert!(
@@ -203,19 +208,19 @@ impl<R: Runtime> GpuAssembler<R> {
         let mut p = Vec::with_capacity(nb * n);
         let mut q = Vec::with_capacity(nb * n);
         for s in 0..nb {
-            vm.extend(states[s].iter().map(|b| b.voltage_mag as f32));
-            va.extend(states[s].iter().map(|b| b.voltage_ang as f32));
-            p.extend(p_calc[s].iter().map(|&v| v as f32));
-            q.extend(q_calc[s].iter().map(|&v| v as f32));
+            vm.extend(states[s].iter().map(|b| b.voltage_mag));
+            va.extend(states[s].iter().map(|b| b.voltage_ang));
+            p.extend(p_calc[s].iter().copied());
+            q.extend(q_calc[s].iter().copied());
         }
 
-        let vm_h = self.client.create_from_slice(f32::as_bytes(&vm));
-        let va_h = self.client.create_from_slice(f32::as_bytes(&va));
-        let p_h = self.client.create_from_slice(f32::as_bytes(&p));
-        let q_h = self.client.create_from_slice(f32::as_bytes(&q));
+        let vm_h = self.client.create_from_slice(f64::as_bytes(&vm));
+        let va_h = self.client.create_from_slice(f64::as_bytes(&va));
+        let p_h = self.client.create_from_slice(f64::as_bytes(&p));
+        let q_h = self.client.create_from_slice(f64::as_bytes(&q));
 
         let total = nb * self.nnz;
-        let out = self.client.empty(total * size_of::<f32>());
+        let out = self.client.empty(total * size_of::<f64>());
 
         // One thread per (scenario, entry); round the grid up and let the
         // kernel's bounds check drop the tail.
@@ -243,16 +248,17 @@ impl<R: Runtime> GpuAssembler<R> {
         }
 
         let bytes = self.client.read_one_unchecked(out);
-        f32::from_bytes(&bytes).to_vec()
+        f64::from_bytes(&bytes).to_vec()
     }
 }
 
-/// The default runtime for this build: wgpu, which reaches Vulkan/Metal/DX12
-/// and therefore runs on essentially any GPU — including the unsupported-by-ROCm
-/// AMD iGPUs `plans/GPU_PLAN.md` §5 describes. **f32 only.**
-pub type DefaultRuntime = cubecl::wgpu::WgpuRuntime;
+/// The default runtime for this build: CubeCL's CUDA backend, in **f64** —
+/// `scripts/GPU_RUNBOOK.md` Phase 2. NVIDIA-only; see this module's doc
+/// comment for the portable f32/wgpu alternative used for AMD-iGPU
+/// development.
+pub type DefaultRuntime = cubecl::cuda::CudaRuntime;
 
-/// Convenience constructor for the default (wgpu) runtime.
+/// Convenience constructor for the default (CUDA) runtime.
 pub fn default_assembler(pattern: &JacobianPattern, n_buses: usize) -> GpuAssembler<DefaultRuntime> {
     let client = <DefaultRuntime as Runtime>::client(&Default::default());
     GpuAssembler::new(client, pattern, n_buses)

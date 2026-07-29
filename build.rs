@@ -3,6 +3,8 @@ fn main() {
     klu::build();
     #[cfg(feature = "pardiso")]
     pardiso::build();
+    #[cfg(feature = "cudss")]
+    cudss::build();
 }
 
 /// Compiles the vendored SuiteSparse KLU solver (`vendor/suitesparse/`) and
@@ -200,6 +202,127 @@ mod pardiso {
         bindings
             .write_to_file(out_dir.join("pardiso_bindings.rs"))
             .expect("failed to write PARDISO FFI bindings");
+    }
+
+    fn find_gcc_builtin_include() -> Option<PathBuf> {
+        let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        path.is_dir().then_some(path)
+    }
+}
+
+/// Links NVIDIA cuDSS — a batched-capable sparse direct solver, and the
+/// `LinearSolver` this crate's device-resident block-diagonal path
+/// (`src/sparse_cudss.rs`, `plans/GPU_PLAN.md` Phase 3) is built on. Same
+/// posture as `pardiso` above: cuDSS is a separate, proprietary NVIDIA
+/// download (<https://developer.nvidia.com/cudss>, or the CUDA apt repo's
+/// own `libcudss0-dev-cuda-*` package — see `scripts/gpu-setup.sh`), so
+/// nothing is vendored, only a system install is linked and bound via
+/// `bindgen` against *that install's own* `cudss.h`. `CUDSS_ROOT` (default
+/// `/usr`, matching the apt package's layout) locates it; `CUDA_HOME`/
+/// `CUDA_PATH` (default `/usr/local/cuda`) locates the CUDA runtime headers
+/// `cudss.h` itself `#include`s and the `libcudart` this module also links,
+/// since `src/sparse_cudss.rs` calls `cudaMalloc`/`cudaMemcpy`/`cudaFree`
+/// directly to manage the device-resident CSR buffers cuDSS operates on.
+#[cfg(feature = "cudss")]
+mod cudss {
+    use std::env;
+    use std::path::{Path, PathBuf};
+
+    pub fn build() {
+        let cudss_root = PathBuf::from(env::var("CUDSS_ROOT").unwrap_or_else(|_| "/usr".to_string()));
+        let cuda_home = PathBuf::from(
+            env::var("CUDA_HOME").or_else(|_| env::var("CUDA_PATH")).unwrap_or_else(|_| "/usr/local/cuda".to_string()),
+        );
+
+        let header = find_file(&cudss_root, "cudss.h").unwrap_or_else(|| {
+            panic!(
+                "couldn't find cudss.h under CUDSS_ROOT ({}) — cuDSS ships separately from the \
+                 CUDA toolkit; see scripts/GPU_RUNBOOK.md Phase 0 / scripts/gpu-setup.sh",
+                cudss_root.display()
+            )
+        });
+        let lib = find_file(&cudss_root, "libcudss.so").unwrap_or_else(|| {
+            panic!("couldn't find libcudss.so under CUDSS_ROOT ({})", cudss_root.display())
+        });
+        let lib_dir = lib.parent().expect("libcudss.so has a parent directory");
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=cudss");
+
+        let cuda_lib_dir = [cuda_home.join("lib64"), cuda_home.join("lib")]
+            .into_iter()
+            .find(|p| p.join("libcudart.so").is_file())
+            .unwrap_or_else(|| {
+                panic!("couldn't find libcudart.so under {}/lib64 or {}/lib", cuda_home.display(), cuda_home.display())
+            });
+        println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=cudart");
+
+        generate_bindings(&header, &cuda_home);
+
+        println!("cargo:rerun-if-env-changed=CUDSS_ROOT");
+        println!("cargo:rerun-if-env-changed=CUDA_HOME");
+        println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    }
+
+    /// Shallow recursive search for a file by name, bounded in depth — cuDSS's
+    /// apt packaging (`libcudss0-dev-cuda-13`) puts headers/libs at a
+    /// versioned path (`/usr/include/libcudss/13/cudss.h`) rather than a
+    /// fixed layout, so this mirrors `scripts/gpu-setup.sh`'s own `find
+    /// -maxdepth` discovery instead of assuming one.
+    fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
+        fn walk(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+            if depth == 0 {
+                return None;
+            }
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                if path.file_name().is_some_and(|f| f == name) {
+                    return Some(path);
+                }
+            }
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(&path, name, depth - 1) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        walk(root, name, 6)
+    }
+
+    fn generate_bindings(header: &Path, cuda_home: &Path) {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let mut builder = bindgen::Builder::default()
+            .header(header.to_str().unwrap())
+            .clang_arg(format!("-I{}", header.parent().unwrap().display()))
+            .clang_arg(format!("-I{}", cuda_home.join("include").display()))
+            .allowlist_function("cudss.*")
+            .allowlist_type("cudss.*")
+            .allowlist_var("CUDSS_.*")
+            .allowlist_function("cudaMalloc|cudaFree|cudaMemcpy|cudaDeviceSynchronize|cudaGetErrorString")
+            .allowlist_type("cudaError.*|cudaMemcpyKind|cudaStream_t")
+            .allowlist_var("cudaSuccess.*");
+
+        // Same libclang-without-a-full-clang-toolchain fallback `klu`/`pardiso`
+        // need — see `klu::find_gcc_builtin_include`.
+        if let Some(gcc_builtin_include) = find_gcc_builtin_include() {
+            builder = builder.clang_arg(format!("-I{}", gcc_builtin_include.display()));
+        }
+
+        let bindings = builder.generate().expect("failed to generate cuDSS FFI bindings");
+
+        bindings
+            .write_to_file(out_dir.join("cudss_bindings.rs"))
+            .expect("failed to write cuDSS FFI bindings");
     }
 
     fn find_gcc_builtin_include() -> Option<PathBuf> {

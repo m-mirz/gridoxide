@@ -206,3 +206,44 @@ fn empty_batch_is_empty() {
     let out = solve_batch_block_diagonal::<KluNativeSystem>(&template, &ybus, &[], 1e-8, 20);
     assert!(out.is_empty());
 }
+
+/// Same central claim as `assert_bde_matches_independent`, but against
+/// `CudssRealSystem` — a genuinely different sparse LU (cuDSS's own
+/// reordering and pivoting, on a GPU) rather than another CPU backend.
+/// Deliberately not reusing that helper's 1e-11 tolerance:
+/// `scripts/GPU_RUNBOOK.md` Phase 3 expects agreement at ~1e-9, not
+/// bit-identical last digits, since cuDSS picks a different elimination
+/// order than KLU. Looser than ~1e-6 would mean something is actually wrong.
+#[cfg(feature = "cudss")]
+#[test]
+fn bde_matches_independent_cudss() {
+    use gridoxide::sparse_cudss::CudssRealSystem;
+
+    let (template, ybus) = load_network();
+    let scs = scenarios(&template, 12);
+
+    let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 1).expect("build pool");
+    let independent = batch.solve(&template, &ybus, &scs, 1e-8, 40).expect("independent solves");
+
+    let embedded = solve_batch_block_diagonal::<CudssRealSystem>(&template, &ybus, &scs, 1e-8, 40);
+
+    assert_eq!(embedded.len(), scs.len());
+    for (k, (emb, indep)) in embedded.iter().zip(&independent).enumerate() {
+        assert_eq!(emb.stats.status, SolveStatus::Converged, "cudss: scenario {k} status");
+        assert_eq!(indep.stats.status, SolveStatus::Converged, "cudss: scenario {k} reference status");
+        for (i, (e, r)) in emb.buses.iter().zip(&indep.buses).enumerate() {
+            assert!(
+                (e.voltage_mag - r.voltage_mag).abs() < 1e-6,
+                "cudss: scenario {k} bus {i} |V|: {} vs {}",
+                e.voltage_mag,
+                r.voltage_mag
+            );
+            assert!(
+                (e.voltage_ang - r.voltage_ang).abs() < 1e-6,
+                "cudss: scenario {k} bus {i} angle: {} vs {}",
+                e.voltage_ang,
+                r.voltage_ang
+            );
+        }
+    }
+}

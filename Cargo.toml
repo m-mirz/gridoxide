@@ -35,7 +35,10 @@ rayon = "1.12"
 # function to CUDA, ROCm/HIP and WGSL, which is what lets a single kernel
 # codebase serve both vendor paths (see plans/GPU_PLAN.md §5). Alpha, with
 # documented API churn between minor versions — pinned exactly for that reason.
-cubecl = { version = "=0.10.0", features = ["wgpu"], optional = true }
+# `cuda` is the backend in active use (GPU_RUNBOOK.md Phase 2, NVIDIA session);
+# `wgpu` stays enabled too so the portable/AMD-iGPU dev path in `plans/
+# GPU_PLAN.md` §5 still builds without a Cargo.toml edit.
+cubecl = { version = "=0.10.0", features = ["wgpu", "cuda"], optional = true }
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -98,13 +101,26 @@ cgmes = ["dep:cimdecoder", "dep:cimstructs"]
 # Phase 2). Opt-in because CubeCL pulls in a large graphics/compute dependency
 # tree and needs a working GPU driver at *runtime*.
 #
-# The wgpu backend targets WGSL, which has **no f64** — so this path assembles
-# in f32 and can only be validated to f32 tolerance. That is deliberate and
-# bounded: it proves kernel logic, indexing and host/device plumbing on
-# whatever GPU is present. The f64 exactness `plans/GPU_PLAN.md` Phase 2 asks
-# for needs a CUDA or ROCm backend, i.e. real hardware; see §5 and §4.4 (which
-# rejects f64 emulation in WGSL as costing 10-20x for ~f48 precision).
+# `DefaultRuntime` (src/gpu.rs) targets CubeCL's CUDA backend, in f64 — see
+# scripts/GPU_RUNBOOK.md Phase 2. `GpuAssembler` stays generic over `R:
+# Runtime`, so the portable wgpu backend (WGSL, no f64 — f32-only, ~1e-5
+# tolerance) is still reachable by instantiating it with `cubecl::wgpu::
+# WgpuRuntime` directly, for AMD-iGPU development per §5.
 gpu = ["dep:cubecl"]
+# Builds `src/sparse_cudss.rs`: a sixth, opt-in `LinearSolver` backed by
+# NVIDIA cuDSS — the device-resident sparse direct solver
+# `plans/GPU_PLAN.md` Phase 3's block-diagonal-embedding path (`src/bde.rs`)
+# targets. Same posture as `pardiso`: cuDSS is a separate, proprietary NVIDIA
+# download (ships with the CUDA apt repo as `libcudss0-dev-cuda-*`, or from
+# <https://developer.nvidia.com/cudss> directly — see scripts/gpu-setup.sh),
+# so nothing is vendored, only a system install is linked and bound via
+# `bindgen` against that install's own `cudss.h`. Discovered via `CUDSS_ROOT`
+# (default `/usr`) and `CUDA_HOME`/`CUDA_PATH` (default `/usr/local/cuda`,
+# for the CUDA runtime headers `cudss.h` itself needs and the `libcudart`
+# this feature also links, for the `cudaMalloc`/`cudaMemcpy`/`cudaFree` calls
+# that manage the device-resident CSR buffers cuDSS operates on). Needs a
+# CUDA-capable GPU at runtime; not built or tested in CI.
+cudss = ["dep:bindgen"]
 
 [[test]]
 name = "klu_jacobian_test"
