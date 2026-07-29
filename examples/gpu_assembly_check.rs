@@ -186,7 +186,7 @@ fn main() {
     }
     let t_cpu = t0.elapsed();
 
-    let asm = default_assembler(&pattern, template.len());
+    let mut asm = default_assembler(&pattern, template.len());
     // Warm-up: first launch pays kernel compilation and buffer setup.
     let _ = asm.assemble_batch(&states, &p_all, &q_all);
 

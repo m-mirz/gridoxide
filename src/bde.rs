@@ -317,3 +317,244 @@ pub fn solve_batch_block_diagonal<S: LinearSolver>(
         })
         .collect()
 }
+
+/// Device-resident counterpart to [`solve_batch_block_diagonal`]: the
+/// Jacobian is assembled directly into cuDSS's own device buffer by
+/// [`crate::gpu::GpuAssembler`] and never round-trips through host memory —
+/// `plans/GPU_PLAN.md` §6 Phase 3's actual payoff, vs. the host-resident path
+/// both `solve_batch_block_diagonal` and `sparse_cudss::CudssRealSystem::
+/// factor_and_solve_values` still use (values assembled on the CPU, or
+/// assembled on the GPU then downloaded and re-uploaded — either way a full
+/// host↔device round trip of the batch's `nnz`-sized array every iteration).
+///
+/// Only the mismatch/right-hand-side and solution vectors still cross that
+/// boundary each iteration, and deliberately so: they are `O(n_unknowns)`,
+/// not `O(nnz)` — `plans/GPU_PLAN.md` §1 measured Jacobian assembly at
+/// 35-41% of iteration time and mismatch evaluation at only 4-6%, so this is
+/// exactly the split worth eliminating a round trip for and the split not
+/// worth the extra complexity of a GPU mismatch kernel.
+///
+/// Masking is real here, not simplified away: `active` feeds the same GPU
+/// kernel that assembles the real Newton values (see `gpu::assemble_kernel`'s
+/// doc comment), writing an identity block for any converged/diverged
+/// scenario — required for correctness, not just efficiency, since one
+/// singular block would otherwise be free to fail the whole batch's shared
+/// factorization.
+///
+/// **A known, investigated characteristic**: this path's per-scenario
+/// converged voltages agree with an independent CPU solve to ~1e-12
+/// (`bde_test.rs`'s `bde_device_resident_matches_independent`), but it
+/// sometimes takes one or two more Newton iterations to get there than the
+/// host-resident path does on identical data. `gpu.rs`'s
+/// `device_resident_tests` module rules out every gridoxide-side
+/// explanation directly: the GPU-assembled, CSR-scattered, masked values are
+/// bit-identical (~1e-16) to what the CPU would compute in the same order,
+/// the stacked-CSR offset arithmetic is exact, and a raw `cudaMemcpy` off the
+/// live device pointer sees exactly what CubeCL's own readback sees — so
+/// cuDSS receives the identical numbers either way. Neither an explicit
+/// `cudssMatrixSetValues` notification nor `CUDSS_CONFIG_DETERMINISTIC_MODE`
+/// changed this. The leading unconfirmed explanation is that cuDSS's own
+/// factorization takes a measurably different (internally consistent, still
+/// correct) path depending on which allocator provided the values buffer.
+/// Not expected to affect a real batch's wall-clock materially, but flagged
+/// here rather than silently accepted.
+///
+/// CUDA-only (`GpuAssembler<gpu::DefaultRuntime>` and `CudssRealSystem`
+/// both are), hence the `gpu`+`cudss` feature gate.
+#[cfg(all(feature = "gpu", feature = "cudss"))]
+pub fn solve_batch_block_diagonal_device_resident(
+    buses_template: &[Bus],
+    ybus: &YBusSparse,
+    scenarios: &[Scenario],
+    tol: f64,
+    max_iter: usize,
+) -> Vec<BdeScenarioResult> {
+    use crate::gpu::default_assembler;
+    use crate::sparse_cudss::{csr_scatter_map, build_csr_structure, device_synchronize, CudssRealSystem};
+
+    let nb = scenarios.len();
+    if nb == 0 {
+        return Vec::new();
+    }
+
+    let non_slack_idx: Vec<usize> = buses_template
+        .iter()
+        .filter(|b| !matches!(b.bus_type, BusType::Slack))
+        .map(|b| b.idx)
+        .collect();
+    let pq_idx: Vec<usize> = buses_template
+        .iter()
+        .filter(|b| matches!(b.bus_type, BusType::PQ))
+        .map(|b| b.idx)
+        .collect();
+    let n_angle = non_slack_idx.len();
+    let blk = n_angle + pq_idx.len();
+
+    let mut states: Vec<Vec<Bus>> = scenarios
+        .iter()
+        .map(|sc| {
+            let mut buses = buses_template.to_vec();
+            for ov in &sc.bus_overrides {
+                let b = &mut buses[ov.bus];
+                if let Some(p) = ov.p_spec {
+                    b.p_spec = p;
+                }
+                if let Some(q) = ov.q_spec {
+                    b.q_spec = q;
+                }
+                if let Some(vm) = ov.voltage_mag {
+                    b.voltage_mag = vm;
+                }
+            }
+            linear_initial_guess(&mut buses, ybus);
+            buses
+        })
+        .collect();
+
+    let pattern = BlockDiagonal::analyze(buses_template, ybus, nb);
+
+    // The GPU kernel writes each entry to its CSR position directly (see
+    // `gpu::assemble_kernel`'s doc comment) — computed once, from a single
+    // block's (row, col) pairs, since every scenario's block shares the same
+    // relative structure (`csr_scatter_map`'s own doc comment explains why
+    // one single-block map serves every scenario).
+    let block_pairs: Vec<(usize, usize)> =
+        pattern.block.rows().iter().zip(pattern.block.cols()).map(|(&r, &c)| (r as usize, c as usize)).collect();
+    let scatter = csr_scatter_map(pattern.block.n_unknowns, &block_pairs);
+
+    let mut assembler = default_assembler(&pattern.block, buses_template.len());
+    assembler.set_scatter(&scatter);
+
+    // The *stacked* CSR structure cuDSS's matrix wraps — built once, from
+    // the full block-diagonal (row, col) pairs (already correctly offset by
+    // `BlockDiagonal::analyze`), exactly like the host-resident path builds
+    // it from `pattern.to_triplets(&values)` inside `CudssRealSystem::new`.
+    let full_pairs: Vec<(usize, usize)> = pattern.rows.iter().zip(&pattern.cols).map(|(&r, &c)| (r as usize, c as usize)).collect();
+    let (row_ptr, col_idx, _groups) = build_csr_structure(pattern.n_unknowns(), &full_pairs);
+
+    let mut active = vec![true; nb];
+    let mut history: Vec<Vec<f64>> = vec![Vec::new(); nb];
+    let mut status = vec![SolveStatus::MaxIterationsReached; nb];
+
+    let mut rhs: Vec<f64> = vec![0.0; pattern.n_unknowns()];
+    let mut p_all: Vec<Vec<f64>> = vec![Vec::new(); nb];
+    let mut q_all: Vec<Vec<f64>> = vec![Vec::new(); nb];
+    // Constructed on the first iteration, once the GPU assembler has written
+    // valid initial values into the buffer cuDSS's matrix will point at —
+    // see `CudssRealSystem::new_device_resident`'s precondition.
+    let mut cudss: Option<CudssRealSystem> = None;
+
+    for _ in 0..max_iter {
+        rhs.iter_mut().for_each(|v| *v = 0.0);
+
+        for s in 0..nb {
+            let (p_calc, q_calc) = power_injections(&states[s], ybus);
+            if !active[s] {
+                p_all[s] = p_calc;
+                q_all[s] = q_calc;
+                continue;
+            }
+
+            let base = s * blk;
+            let mut max_mis = 0.0f64;
+            for (r, &i) in non_slack_idx.iter().enumerate() {
+                let (p_eff, _) = effective_injection(&states[s][i]);
+                let v = p_eff - p_calc[i];
+                rhs[base + r] = v;
+                max_mis = max_mis.max(v.abs());
+            }
+            for (r, &i) in pq_idx.iter().enumerate() {
+                let (_, q_eff) = effective_injection(&states[s][i]);
+                let v = q_eff - q_calc[i];
+                rhs[base + n_angle + r] = v;
+                max_mis = max_mis.max(v.abs());
+            }
+
+            history[s].push(max_mis);
+            if max_mis < tol {
+                status[s] = SolveStatus::Converged;
+                active[s] = false;
+                rhs[base..base + blk].iter_mut().for_each(|v| *v = 0.0);
+            }
+
+            p_all[s] = p_calc;
+            q_all[s] = q_calc;
+        }
+
+        if active.iter().all(|&a| !a) {
+            break;
+        }
+
+        // Assemble directly into the persistent device buffer — no host
+        // round trip for the (large) Jacobian values, masking active[]
+        // scenarios via the kernel's identity fallback.
+        assembler.assemble_batch_device(&states, &p_all, &q_all, &active);
+        // Required barrier, not a performance nicety: cuDSS's refactorization
+        // must not start reading this buffer before the kernel above has
+        // finished writing it — see `device_synchronize`'s doc comment.
+        if device_synchronize().is_none() {
+            for s in 0..nb {
+                if active[s] {
+                    status[s] = SolveStatus::Singular;
+                }
+            }
+            break;
+        }
+
+        if cudss.is_none() {
+            let Some(ptr) = assembler.values_ptr() else {
+                for s in 0..nb {
+                    if active[s] {
+                        status[s] = SolveStatus::Singular;
+                    }
+                }
+                break;
+            };
+            cudss = CudssRealSystem::new_device_resident(pattern.n_unknowns(), &row_ptr, &col_idx, ptr);
+        }
+        let Some(system) = cudss.as_mut() else {
+            for s in 0..nb {
+                if active[s] {
+                    status[s] = SolveStatus::Singular;
+                }
+            }
+            break;
+        };
+        let Some(dx) = system.solve_device_resident(&rhs) else {
+            for s in 0..nb {
+                if active[s] {
+                    status[s] = SolveStatus::Singular;
+                }
+            }
+            break;
+        };
+
+        for s in 0..nb {
+            if !active[s] {
+                continue;
+            }
+            let base = s * blk;
+            for (r, &i) in non_slack_idx.iter().enumerate() {
+                states[s][i].voltage_ang += dx[base + r];
+            }
+            for (r, &i) in pq_idx.iter().enumerate() {
+                states[s][i].voltage_mag += dx[base + n_angle + r];
+            }
+        }
+    }
+
+    states
+        .into_iter()
+        .zip(history)
+        .zip(status)
+        .map(|((buses, mismatch_history), status)| BdeScenarioResult {
+            buses,
+            stats: SolveStats {
+                status,
+                mismatch_history,
+                q_limit_switches: Vec::new(),
+                q_limit_stabilized: true,
+            },
+        })
+        .collect()
+}

@@ -73,7 +73,7 @@ fn gpu_assembly_matches_cpu_reference() {
         pattern.fill_into(&states[s], &p_all[s], &q_all[s], &mut expected);
     }
 
-    let asm = default_assembler(&pattern, template.len());
+    let mut asm = default_assembler(&pattern, template.len());
     let got = asm.assemble_batch(&states, &p_all, &q_all);
 
     assert_eq!(got.len(), expected.len(), "one value per (scenario, entry)");
@@ -117,7 +117,7 @@ fn scenario_stride_is_respected() {
         q_all.push(q);
     }
 
-    let asm = default_assembler(&pattern, template.len());
+    let mut asm = default_assembler(&pattern, template.len());
     let got = asm.assemble_batch(&states, &p_all, &q_all);
     let nnz = pattern.len();
 

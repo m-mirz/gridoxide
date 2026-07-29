@@ -247,3 +247,64 @@ fn bde_matches_independent_cudss() {
         }
     }
 }
+
+/// The device-resident path (`plans/GPU_PLAN.md` §6 Phase 3): Jacobian
+/// values are assembled directly into cuDSS's device buffer by
+/// `gpu::GpuAssembler` and never round-trip through host memory, unlike
+/// `bde_matches_independent_cudss` above (host-resident `CudssRealSystem`).
+/// This is also the harder correctness claim: it additionally exercises the
+/// GPU-side identity masking (`gpu::assemble_kernel`'s `active`/
+/// `identity_value` inputs) and the CSR-position scatter
+/// (`sparse_cudss::csr_scatter_map`), neither of which the host-resident
+/// path touches. Same agreement tolerance as `bde_matches_independent_cudss`
+/// — same cuDSS solve underneath, just fed differently.
+///
+/// Deliberately does **not** assert iteration-count parity with
+/// `independent`, unlike the CPU-backend comparisons above: this path is
+/// verified (see `gpu.rs`'s `device_resident_tests`) to feed cuDSS
+/// bit-identical values to the host-resident path, yet can still take a
+/// Newton iteration or two more to cross `tol` — see
+/// `bde::solve_batch_block_diagonal_device_resident`'s doc comment for the
+/// full investigation. Voltage agreement is the property that matters and
+/// the one checked here.
+#[cfg(all(feature = "gpu", feature = "cudss"))]
+#[test]
+fn bde_device_resident_matches_independent() {
+    use gridoxide::bde::solve_batch_block_diagonal_device_resident;
+
+    let (template, ybus) = load_network();
+    // A deliberately mixed batch: some scenarios converge fast, one is heavy
+    // — so the identity-masking path is actually exercised, not just the
+    // uniform-active happy path.
+    let mut scs = scenarios(&template, 12);
+    scs[0] = Scenario::new(vec![BusOverride::new(2).p(template[2].p_spec * 0.01).q(0.0)]);
+
+    let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 1).expect("build pool");
+    let independent = batch.solve(&template, &ybus, &scs, 1e-8, 40).expect("independent solves");
+
+    let embedded = solve_batch_block_diagonal_device_resident(&template, &ybus, &scs, 1e-8, 40);
+
+    assert_eq!(embedded.len(), scs.len());
+    for (k, (emb, indep)) in embedded.iter().zip(&independent).enumerate() {
+        assert_eq!(emb.stats.status, SolveStatus::Converged, "device-resident: scenario {k} status");
+        assert_eq!(
+            indep.stats.status,
+            SolveStatus::Converged,
+            "device-resident: scenario {k} reference status"
+        );
+        for (i, (e, r)) in emb.buses.iter().zip(&indep.buses).enumerate() {
+            assert!(
+                (e.voltage_mag - r.voltage_mag).abs() < 1e-6,
+                "device-resident: scenario {k} bus {i} |V|: {} vs {}",
+                e.voltage_mag,
+                r.voltage_mag
+            );
+            assert!(
+                (e.voltage_ang - r.voltage_ang).abs() < 1e-6,
+                "device-resident: scenario {k} bus {i} angle: {} vs {}",
+                e.voltage_ang,
+                r.voltage_ang
+            );
+        }
+    }
+}
