@@ -48,7 +48,7 @@ use bindings::{
     cudaError_t, cudaMalloc, cudaFree, cudaDeviceSynchronize, cudaError_cudaSuccess as cudaSuccess,
     cudssConfig_t, cudssConfigCreate, cudssConfigDestroy, cudssConfigSet,
     cudssConfigParam_t_CUDSS_CONFIG_DETERMINISTIC_MODE as CUDSS_CONFIG_DETERMINISTIC_MODE,
-    cudssCreate, cudssData_t, cudssDataCreate, cudssDataDestroy, cudssDestroy,
+    cudssCreate, cudssData_t, cudssDataCreate, cudssDataDestroy, cudssDestroy, cudssSetStream,
     cudssExecute, cudssHandle_t, cudssMatrixCreateCsr, cudssMatrixCreateDn, cudssMatrixDestroy, cudssMatrixSetValues,
     cudssMatrix_t, cudssStatus_t, cudssStatus_t_CUDSS_STATUS_SUCCESS as CUDSS_SUCCESS,
     cudssDataType_t_CUDSS_R_32I as CUDSS_R_32I, cudssDataType_t_CUDSS_R_64F as CUDSS_R_64F,
