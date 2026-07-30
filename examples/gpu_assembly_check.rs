@@ -10,17 +10,20 @@
 //!     scripts/bench/.case-cache/case1354pegase.json 64
 //! ```
 //!
-//! **f64, CUDA.** `src/gpu.rs` assembles in f64 on CubeCL's CUDA backend —
-//! see that module's doc comment. This is the real Phase 2 exit criterion:
-//! agreement with the f64 CPU reference to near machine epsilon, not just f32
-//! tolerance. Timings here are not a speedup claim either — nothing is being
-//! compared against a CPU assembly baseline.
+//! **f64, CUDA.** `src/gpu.rs` assembles in f64 via the hand-written kernel in
+//! `cuda/gridoxide_kernels.cu` — see that module's doc comment for why the
+//! CubeCL version it replaced was dropped. This is the real Phase 2 exit
+//! criterion: agreement with the f64 CPU reference to near machine epsilon,
+//! not just f32 tolerance. Timings here are not a speedup claim either —
+//! nothing is being compared against a CPU assembly baseline. For an
+//! end-to-end comparison against the CPU batch solver, use
+//! `examples/bde_profile.rs`.
 
 use std::env;
 use std::fs;
 use std::time::Instant;
 
-use gridoxide::gpu::default_assembler;
+use gridoxide::gpu::GpuAssembler;
 use gridoxide::jacobian::{EntryKind, JacobianPattern};
 use gridoxide::network::{build_ybus, linear_initial_guess, power_injections, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
@@ -186,12 +189,12 @@ fn main() {
     }
     let t_cpu = t0.elapsed();
 
-    let mut asm = default_assembler(&pattern, template.len());
+    let mut asm = GpuAssembler::new(&pattern, template.len()).expect("CUDA device available");
     // Warm-up: first launch pays kernel compilation and buffer setup.
-    let _ = asm.assemble_batch(&states, &p_all, &q_all);
+    let _ = asm.assemble_batch(&states, &p_all, &q_all).expect("assembly launch");
 
     let t1 = Instant::now();
-    let got = asm.assemble_batch(&states, &p_all, &q_all);
+    let got = asm.assemble_batch(&states, &p_all, &q_all).expect("assembly launch");
     let t_gpu = t1.elapsed();
 
     assert_eq!(got.len(), expected.len());

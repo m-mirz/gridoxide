@@ -2,6 +2,38 @@
 
 Status: **proposal**, not implemented. Written 2026-07-25 against `d9b8799`.
 
+> ## Amendment, 2026-07-30 — after Phases 0–3 were built and measured
+>
+> Phases 0–3 were implemented and benchmarked. The result was a **91x
+> regression** against the Phase 0 CPU baseline (case1354pegase, batch 4,096:
+> 52.7 GPU solves/s vs. 4,825 on 30 EPYC threads). Instrumenting it located
+> ~95% of the time inside cuDSS, refactorizing and solving a single
+> 10-million-row stacked matrix. Three things in this document are wrong or
+> incomplete as a result, and the corrections drive the current work:
+>
+> 1. **§3 property 2 ("it needs no batched solver API") is the trap.** Block
+>    diagonal embedding is *mathematically* equivalent to B independent solves
+>    — the proof in `src/bde.rs` stands — but it is not *computationally*
+>    equivalent on a GPU. A general sparse direct solver handed one enormous
+>    matrix cannot know it is really B independent 2,450-row problems, and
+>    pays scheduling and bookkeeping over the whole assembly forest. On NVIDIA
+>    the fix is cuDSS's **uniform batch API**, which this document listed in
+>    §4.1's table and then never used. See
+>    `sparse_cudss::CudssBatchedSystem`.
+> 2. **§2's published-results calibration is against the wrong baseline.**
+>    SABLE's 253x and Fraunhofer's 100x are over *pandapower*. gridoxide's own
+>    30-thread KLU `BatchSolver` is a far higher bar, and no published number
+>    in §2 says anything about clearing it. The current exit criterion is
+>    therefore "beat the 30-thread CPU baseline at all", not ">=10x".
+> 3. **§5's portability recommendation (one CubeCL kernel codebase) was
+>    dropped.** CubeCL hid stream control, allocation lifetime and raw device
+>    pointers — all three needed for a batched, device-resident loop. The
+>    kernels are now hand-written CUDA (`cuda/gridoxide_kernels.cu`) and
+>    NVIDIA-only. The portable kernel is preserved at commit `ff92b66`; see §5.
+>
+> §1's per-phase CPU measurements and §3's other three properties are
+> unaffected and still hold.
+
 This document answers: *how much of the AC power flow can realistically move to the
 GPU, on which stack, and in what order?* It covers CUDA, cuda-oxide, JAX, AMD/ROCm,
 and the portable Rust options, and ends with a phased plan.
@@ -116,6 +148,17 @@ The properties that make this the right choice:
    the library one ordinary sparse matrix. This decouples the architecture from
    vendor-specific batched entry points and is what makes the AMD path viable
    (§5) even though rocSOLVER's refactorization routines are not batched.
+
+   > **Measured correction (2026-07-30).** True, and the reason the GPU path
+   > lost by 91x. "Works on any solver" is a statement about *correctness*; it
+   > says nothing about throughput. Handing cuDSS one 10M-row matrix instead of
+   > B uniform 2,450-row systems cost ~95% of the runtime — the solver has no
+   > way to recover the block structure the embedding threw away. Keep BDE as
+   > the *data layout* (the scenario-major values buffer, the shared CSR
+   > structure, the identity masking are all still exactly right); stop using
+   > it as the *solver interface* wherever a batched entry point exists. On
+   > AMD, where rocSOLVER has none, expect this same cost and budget for it
+   > rather than assuming BDE makes the batched API optional.
 3. **It saturates the GPU.** A single 9,242-bus Jacobian (~18k unknowns) cannot fill
    a modern GPU. 256 of them stacked can.
 4. **Assembly becomes one flat kernel.** All *B* scenarios' Jacobian nonzeros are
@@ -260,6 +303,39 @@ which JITs the same `#[cube]` Rust function to CUDA, ROCm/HIP, *and* WGSL. Keep 
 sparse solve behind a trait with two FFI implementations (cuDSS, rocSOLVER). That
 gives one kernel codebase and two thin solver shims, rather than two full stacks.
 CubeCL is alpha and used in production by Burn; budget for API churn.
+
+> **Reversed, 2026-07-30. AMD is deferred; the kernels are NVIDIA-only CUDA.**
+>
+> The CubeCL assembler was built, validated to f64 exactness, and then removed.
+> It is preserved in git history at commit **`ff92b66`** — `src/gpu.rs` there is
+> the portable `#[cube]` kernel, generic over `R: Runtime`, and reverting to it
+> means reverting the dtype to f32 for the wgpu path as its own doc comment
+> explains.
+>
+> It was dropped for three things its runtime did not expose, each of which the
+> batched device-resident loop needs:
+>
+> - **Streams.** gridoxide's kernels ran on CubeCL's stream and cuDSS on the
+>   default one, forcing a `cudaDeviceSynchronize` — a whole-device stall —
+>   once per Newton iteration. One shared stream makes the ordering free.
+> - **Allocation lifetime.** CubeCL allocated a fresh device buffer per input
+>   per launch: ~178 MB of host-gathered upload and five `cudaMalloc`s *per
+>   iteration* at case1354pegase/4,096.
+> - **Raw device pointers**, stable across launches, for cuDSS's batched matrix
+>   to bind against once.
+>
+> This is a real loss and it should be stated as one: there is now no AMD path,
+> and reinstating one means either restoring the CubeCL kernel or writing HIP
+> alongside the CUDA. What it bought is the ability to test the central
+> hypothesis (§3 property 2's correction) at all. The AMD case in this section —
+> MI300X's 81.7 TFLOPS FP64, rocSOLVER's `csrrf_*` — is unchanged and still
+> good; it is the *hardware* that was never available, and the local gfx1103
+> iGPU could never have produced a performance number either way.
+>
+> Note also that the correction to §3 property 2 makes AMD *harder*, not
+> easier: rocSOLVER has no batched entry point, so the ~95%-in-the-solver cost
+> measured here is exactly what an AMD port would inherit. That should be
+> designed for up front rather than discovered.
 
 ---
 

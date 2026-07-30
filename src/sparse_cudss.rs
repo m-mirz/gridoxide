@@ -23,18 +23,31 @@
 //! there is no separate crate dependency for this (see `build.rs`'s `cudss`
 //! module for why: it links `libcudart` directly alongside `libcudss`).
 //!
-//! **This first implementation re-uploads values and the right-hand side
-//! every call** (`factor_and_solve_values` below) — correct, and sufficient
-//! to validate the block-diagonal-embedding path end to end
-//! (`scripts/GPU_RUNBOOK.md` Phase 3), but not yet the fully device-resident
-//! loop `plans/GPU_PLAN.md` §6 Phase 3 describes as the actual payoff. A
-//! per-iteration host round trip is exactly the thing that must go away
-//! before any GPU speedup claim means anything — see that phase's exit
-//! criterion.
+//! # Two solvers, and which one to use
+//!
+//! [`CudssBatchedSystem`] is the one that matters. It uses cuDSS's **uniform
+//! batch** entry point: `B` independent same-pattern systems, one analysis on
+//! a single block, one shared CSR structure, values striding into a buffer the
+//! assembly kernel writes directly. Nothing crosses the host boundary after
+//! construction.
+//!
+//! [`CudssRealSystem`] is the earlier design and is kept as the **A/B
+//! control**, not for production. It embeds the batch block-diagonally and
+//! hands cuDSS one enormous general sparse matrix — the approach
+//! `plans/GPU_PLAN.md` §3 property 2 chose because it works on any sparse
+//! direct solver, batched or not, which is what kept the AMD path open. That
+//! generality turned out to cost ~95% of the runtime (see
+//! [`CudssBatchedSystem`]'s own comment for why), and the two paths existing
+//! side by side is what makes that claim measurable rather than asserted —
+//! `examples/bde_profile.rs` runs both.
+//!
+//! It also still re-uploads values and the right-hand side on every
+//! `factor_and_solve_values` call, which is correct but is a per-iteration
+//! host round trip of the batch's whole `nnz`-sized array.
 //!
 //! `CUDSS_MTYPE_GENERAL`/`CUDSS_MVIEW_FULL` select "general, non-symmetric"
-//! storage — the same shape KLU and PARDISO are given (gridoxide's Newton
-//! Jacobian is never symmetric).
+//! storage for both — the same shape KLU and PARDISO are given (gridoxide's
+//! Newton Jacobian is never symmetric).
 
 use std::ffi::c_void;
 use std::ptr;
@@ -46,10 +59,12 @@ mod bindings {
 use bindings::{
     cudaMemcpy, cudaMemcpyKind_cudaMemcpyDeviceToHost as D2H, cudaMemcpyKind_cudaMemcpyHostToDevice as H2D,
     cudaError_t, cudaMalloc, cudaFree, cudaDeviceSynchronize, cudaError_cudaSuccess as cudaSuccess,
+    cudaStream_t,
     cudssConfig_t, cudssConfigCreate, cudssConfigDestroy, cudssConfigSet,
     cudssConfigParam_t_CUDSS_CONFIG_DETERMINISTIC_MODE as CUDSS_CONFIG_DETERMINISTIC_MODE,
     cudssCreate, cudssData_t, cudssDataCreate, cudssDataDestroy, cudssDestroy,
-    cudssExecute, cudssHandle_t, cudssMatrixCreateCsr, cudssMatrixCreateDn, cudssMatrixDestroy, cudssMatrixSetValues,
+    cudssExecute, cudssHandle_t, cudssMatrixCreateBatchCsr, cudssMatrixCreateBatchDn, cudssMatrixCreateCsr,
+    cudssMatrixCreateDn, cudssMatrixDestroy, cudssMatrixSetBatchValues, cudssMatrixSetValues, cudssSetStream,
     cudssMatrix_t, cudssStatus_t, cudssStatus_t_CUDSS_STATUS_SUCCESS as CUDSS_SUCCESS,
     cudssDataType_t_CUDSS_R_32I as CUDSS_R_32I, cudssDataType_t_CUDSS_R_64F as CUDSS_R_64F,
     cudssIndexBase_t_CUDSS_BASE_ZERO as CUDSS_BASE_ZERO, cudssLayout_t_CUDSS_LAYOUT_COL_MAJOR as CUDSS_LAYOUT_COL_MAJOR,
@@ -61,89 +76,17 @@ use bindings::{
     cudssPhase_t_CUDSS_PHASE_SOLVE as PHASE_SOLVE,
 };
 
-/// Builds a cuDSS-ready CSR structure (row pointers + sorted column indices)
-/// from a set of `(row, col)` index pairs, merging duplicates — identical
-/// accumulation semantics to `sparse_pardiso::build_csr_structure` (row-major,
-/// same duplicate-summing convention `sparse_klu`'s CSC builder uses).
-/// Returns `(row_ptr, col_idx, groups)`, where `groups[k]` lists the original
-/// entry indices contributing to the `k`-th CSR position. `pub(crate)`:
-/// `bde::solve_batch_block_diagonal_device_resident` needs this too, to
-/// build the stacked block-diagonal CSR structure cuDSS is given directly.
-pub(crate) fn build_csr_structure(n: usize, pairs: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>, Vec<Vec<usize>>) {
-    let mut order: Vec<usize> = (0..pairs.len()).collect();
-    order.sort_by_key(|&i| (pairs[i].0, pairs[i].1));
-
-    let mut row_ptr = vec![0i32; n + 1];
-    let mut col_idx: Vec<i32> = Vec::new();
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-
-    let mut idx = 0;
-    while idx < order.len() {
-        let (row, col) = pairs[order[idx]];
-        let mut group = vec![order[idx]];
-        let mut k = idx + 1;
-        while k < order.len() && pairs[order[k]] == (row, col) {
-            group.push(order[k]);
-            k += 1;
-        }
-        col_idx.push(col as i32);
-        groups.push(group);
-        row_ptr[row + 1] += 1;
-        idx = k;
-    }
-    for r in 0..n {
-        row_ptr[r + 1] += row_ptr[r];
-    }
-    (row_ptr, col_idx, groups)
-}
-
-/// For a **single block's** `(row, col)` pairs in `JacobianPattern` entries
-/// order, computes the CSR position each entry maps to — the inverse of
-/// `build_csr_structure`'s grouping. This is what lets
-/// `gpu::GpuAssembler`'s kernel write its per-entry outputs directly at the
-/// CSR position cuDSS expects, in one pass, with no host-side reorder.
-///
-/// Only defined when every CSR position merges exactly one original entry —
-/// true for every gridoxide Jacobian pattern, verified by
-/// `csr_permutation_tests::groups_are_all_singletons` and true by
-/// construction: `network::YBusSparse` never has a duplicate `(row, col)`
-/// neighbor (parallel lines are already summed at Y-bus assembly), so
-/// `JacobianPattern`, which walks each unknown row's Y-bus neighbors exactly
-/// once, can't produce a duplicate `(row, col)` triplet either. Panics
-/// otherwise — a real merge would need atomic adds in the GPU kernel this
-/// scatter map feeds, not a plain permutation, and silently dropping a
-/// contribution would be a much worse failure than a panic.
-///
-/// Because block-diagonal embedding gives every scenario's block the exact
-/// same relative (row, col) structure, just offset by `s * block_size`
-/// (`bde::BlockDiagonal::analyze`), sorting the *whole* stacked matrix's
-/// pairs by `(row, col)` reproduces this same single-block permutation
-/// inside each scenario's own contiguous `nnz`-sized segment — so one
-/// single-block scatter map is all any batch size needs; the caller adds
-/// `scenario * nnz` itself.
-pub(crate) fn csr_scatter_map(n: usize, pairs: &[(usize, usize)]) -> Vec<u32> {
-    let (_, _, groups) = build_csr_structure(n, pairs);
-    let mut scatter = vec![0u32; pairs.len()];
-    for (csr_pos, group) in groups.iter().enumerate() {
-        assert_eq!(
-            group.len(),
-            1,
-            "CSR position {csr_pos} merges {} entries; device-resident scatter assumes a pure permutation",
-            group.len()
-        );
-        scatter[group[0]] = csr_pos as u32;
-    }
-    scatter
-}
+/// The CSR layout helpers this module used to define now live in
+/// [`crate::device_layout`], which is not feature-gated: they are pure
+/// host-side index arithmetic, they are shared with the CUDA assembly
+/// kernel's scatter map, and getting them wrong breaks a whole batch — so
+/// they belong somewhere every `cargo test` exercises them, not only a box
+/// with cuDSS installed. Re-exported here because that is where callers of
+/// this module expect to find them.
+pub use crate::device_layout::{build_csr_structure, csr_scatter_map, pack_values_slice};
 
 fn pack_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> Vec<f64> {
     groups.iter().map(|g| g.iter().map(|&i| entries[i].2).sum()).collect()
-}
-
-/// `pack_values` for callers that already hold just the values — see
-/// `solver::LinearSolver::factor_and_solve_values`.
-pub(crate) fn pack_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups.iter().map(|g| g.iter().map(|&i| values[i]).sum()).collect()
 }
 
 fn cuda_check(err: cudaError_t, what: &str) -> Option<()> {
@@ -154,35 +97,23 @@ fn cuda_check(err: cudaError_t, what: &str) -> Option<()> {
     Some(())
 }
 
-/// Blocks until every previously enqueued CUDA operation (on **every**
-/// stream in this process's context) has completed.
+/// Blocks until every previously enqueued CUDA operation (on **every** stream
+/// in this process's context) has completed.
 ///
-/// Needed by the device-resident path
-/// (`bde::solve_batch_block_diagonal_device_resident`) specifically: a plain
-/// `cudaMemcpy` (as used elsewhere in this file for `rhs`/`x`) only
-/// guarantees ordering for buffers *it itself* touches, and CubeCL's CUDA
-/// runtime may run its kernels on a stream this module never otherwise
-/// synchronizes with. Without an explicit barrier here, cuDSS's
-/// refactorization could start reading the Jacobian values buffer before
-/// `gpu::GpuAssembler`'s kernel has finished writing it — not a crash, since
-/// both sides are well-formed CUDA operations on valid memory, but a subtle
-/// numeric race: the Newton step would occasionally read a partially-updated
-/// Jacobian, perturbing that iteration's `Δx` enough to change the
-/// iteration count without necessarily changing the converged answer. This
-/// was caught exactly that way — correct final voltages, but iteration
-/// counts that silently disagreed with an independent CPU solve.
+/// This used to be a per-iteration requirement of the device-resident path:
+/// gridoxide's kernels ran on CubeCL's own stream while cuDSS ran on the
+/// default one, so without a device-wide barrier cuDSS's refactorization
+/// could start reading the Jacobian values buffer before the assembly kernel
+/// had finished writing it — not a crash, since both sides are well-formed
+/// CUDA operations on valid memory, but a numeric race that perturbed a
+/// Newton step's `Δx` enough to change the iteration count without changing
+/// the converged answer, which is exactly how it was caught.
+///
+/// [`CudssBatchedSystem::set_stream`] removes the need for it: gridoxide's
+/// kernels and cuDSS now share one stream, so the ordering is implied. Kept
+/// for the legacy [`CudssRealSystem`] paths and for tests.
 pub fn device_synchronize() -> Option<()> {
     cuda_check(unsafe { cudaDeviceSynchronize() }, "cudaDeviceSynchronize")
-}
-
-/// Debug-only: reads `len` `f64`s directly from a raw device pointer via
-/// `cudaMemcpy`, bypassing cuDSS entirely. Used to check whether a raw CUDA
-/// read sees the same buffer content CubeCL's own readback does.
-#[cfg(test)]
-pub(crate) fn debug_read_f64(ptr: u64, len: usize) -> Option<Vec<f64>> {
-    let mut out = vec![0.0f64; len];
-    unsafe { download(&mut out, ptr as usize as *mut c_void)? };
-    Some(out)
 }
 
 fn cudss_check(status: cudssStatus_t, what: &str) -> Option<()> {
@@ -479,6 +410,334 @@ impl CudssRealSystem {
     }
 }
 
+/// cuDSS's **uniform batch** API: `B` independent same-size, same-pattern
+/// systems solved as a batch, rather than stacked into one giant matrix.
+///
+/// This is the change `plans/GPU_PLAN.md` Phase 3 was missing. [`CudssRealSystem`]
+/// (still here, as the A/B control) embeds the batch block-diagonally and hands
+/// cuDSS *one* general sparse matrix — 10M rows at case1354pegase/4096, ~18M at
+/// case9241pegase/1024. §3 property 2 chose that deliberately, because it works
+/// on any sparse direct solver, batched API or not, and that is what kept the
+/// AMD/rocSOLVER path open. It is also, measured, ~95% of that path's runtime:
+/// a multifrontal GPU solver on a 10M-row matrix pays scheduling and bookkeeping
+/// proportional to the whole assembly forest (thousands of tiny supernodes per
+/// block, times B blocks) and level-schedules a triangular solve over 10M rows,
+/// none of which knows the matrix is really B independent 2,450-row problems.
+///
+/// The uniform batch entry point is told exactly that, and the consequences are
+/// structural, not incremental:
+///
+/// - **Analysis runs on one block.** Ordering and symbolic factorization see a
+///   `blk`-row matrix, not a `B * blk`-row one.
+/// - **The CSR structure is uploaded once, and shared.** Every block's
+///   `rowStart`/`colIndices` pointer is *the same device pointer*
+///   ([`device_layout::repeat_device_ptr`](crate::device_layout::repeat_device_ptr)),
+///   because block-diagonal embedding makes every block's relative structure
+///   identical — the property
+///   `device_layout::stacked_scatter_matches_per_block_assumption` pins down.
+///   The stacked path's `O(n_total)` row-pointer and `O(nnz_total)` column-index
+///   arrays simply cease to exist.
+/// - **Only the values stride.** `values[s] = base + s * nnz * 8`, pointing
+///   straight into [`crate::gpu::GpuAssembler`]'s persistent output buffer,
+///   which already has exactly that layout. Same for the right-hand side and
+///   solution, with `ld = blk`.
+///
+/// Nothing in this struct ever touches host memory after construction:
+/// [`refactor_and_solve`](Self::refactor_and_solve) takes no arguments and
+/// returns none. The Jacobian, right-hand side and solution are all device
+/// buffers owned by [`crate::gpu::GpuBatch`] and written by its kernels.
+///
+/// # Ownership
+///
+/// The `Vec`s of pointers and dimensions are **members, not temporaries**:
+/// cuDSS's batch API takes host arrays by pointer and reads them again at
+/// execute time, so they must outlive the matrix objects. Dropping them early
+/// would be a use-after-free that only shows up as wrong numbers.
+///
+/// # Verify before trusting
+///
+/// `cudssMatrixCreateBatchCsr`'s parameter order below is written against
+/// cuDSS's documented 0.4+ signature. Several parameters are `void*`/`void**`,
+/// so a wrong order can compile cleanly and produce silent garbage — which is
+/// why [`batched_ffi_smoke_test`](self::batched_ffi_smoke_test) solves a known
+/// two-system batch off the raw bindings before any gridoxide logic is
+/// involved. Run it first on a new box; if it fails, check the generated
+/// `OUT_DIR/cudss_bindings.rs` against the cuDSS install's own batched sample.
+pub struct CudssBatchedSystem {
+    batch_count: usize,
+    blk: usize,
+    nnz: usize,
+
+    handle: cudssHandle_t,
+    config: cudssConfig_t,
+    data: cudssData_t,
+    matrix_a: cudssMatrix_t,
+    matrix_b: cudssMatrix_t,
+    matrix_x: cudssMatrix_t,
+
+    /// The one block's CSR structure, owned here and shared by every block.
+    d_row_ptr: *mut c_void,
+    d_col_idx: *mut c_void,
+
+    // Host-side descriptor arrays cuDSS keeps reading — see "Ownership".
+    nrows: Vec<i32>,
+    ncols: Vec<i32>,
+    nnz_per_block: Vec<i32>,
+    ld: Vec<i32>,
+    /// Column count for the dense right-hand-side/solution batch: one column
+    /// per system. A separate member rather than an inline `vec![1; n]`
+    /// because cuDSS re-reads these host arrays at execute time — a temporary
+    /// would dangle, and the symptom would be wrong numbers, not a crash.
+    rhs_ncols: Vec<i32>,
+    row_start: Vec<*mut c_void>,
+    col_indices: Vec<*mut c_void>,
+    a_values: Vec<*mut c_void>,
+    b_values: Vec<*mut c_void>,
+    x_values: Vec<*mut c_void>,
+}
+
+impl CudssBatchedSystem {
+    /// Binds cuDSS to already-live device buffers and runs analysis plus one
+    /// numeric factorization.
+    ///
+    /// - `row_ptr`/`col_idx` describe **one block** (length `blk + 1` and
+    ///   `nnz`), from [`build_csr_structure`] on a single
+    ///   [`JacobianPattern`](crate::jacobian::JacobianPattern)'s pairs.
+    /// - `values_ptr` is [`crate::gpu::GpuAssembler::values_ptr`]: `B * nnz`
+    ///   f64s, scenario-major, in CSR order (the assembly kernel scatters
+    ///   there directly via [`csr_scatter_map`]).
+    /// - `rhs_ptr`/`x_ptr` are `B * blk` f64s, scenario-major, written and
+    ///   read by [`crate::gpu::GpuBatch`]'s mismatch and update kernels.
+    /// - `stream` is [`crate::gpu::Stream::as_u64`]. It is bound *before* the
+    ///   analysis phase deliberately: that makes even this constructor's own
+    ///   factorization stream-ordered after the caller's first assembly
+    ///   kernel, so the precondition below needs no `cudaDeviceSynchronize`.
+    ///
+    /// **Precondition**: `values_ptr` must already hold valid numbers.
+    /// cuDSS's factorization phase reads actual values to choose pivots, not
+    /// just structure, so the caller must have launched one assembly pass
+    /// first.
+    pub fn new(
+        batch_count: usize,
+        blk: usize,
+        row_ptr: &[i32],
+        col_idx: &[i32],
+        values_ptr: u64,
+        rhs_ptr: u64,
+        x_ptr: u64,
+        stream: u64,
+    ) -> Option<Self> {
+        assert_eq!(row_ptr.len(), blk + 1, "row_ptr must describe exactly one block");
+        let nnz = col_idx.len();
+
+        let d_row_ptr = unsafe { device_alloc((blk + 1) * size_of::<i32>()) }?;
+        let d_col_idx = unsafe { device_alloc(nnz * size_of::<i32>()) }?;
+        unsafe {
+            upload(d_row_ptr, row_ptr)?;
+            upload(d_col_idx, col_idx)?;
+        }
+
+        let as_ptrs = |v: Vec<u64>| -> Vec<*mut c_void> { v.into_iter().map(|p| p as usize as *mut c_void).collect() };
+        let mut sys = Self {
+            batch_count,
+            blk,
+            nnz,
+            handle: ptr::null_mut(),
+            config: ptr::null_mut(),
+            data: ptr::null_mut(),
+            matrix_a: ptr::null_mut(),
+            matrix_b: ptr::null_mut(),
+            matrix_x: ptr::null_mut(),
+            d_row_ptr,
+            d_col_idx,
+            nrows: vec![blk as i32; batch_count],
+            ncols: vec![blk as i32; batch_count],
+            nnz_per_block: vec![nnz as i32; batch_count],
+            ld: vec![blk as i32; batch_count],
+            rhs_ncols: vec![1i32; batch_count],
+            // Uniform batch: one shared structure, `batch_count` aliases of it.
+            row_start: as_ptrs(crate::device_layout::repeat_device_ptr(d_row_ptr as usize as u64, batch_count)),
+            col_indices: as_ptrs(crate::device_layout::repeat_device_ptr(d_col_idx as usize as u64, batch_count)),
+            a_values: as_ptrs(crate::device_layout::strided_device_ptrs(
+                values_ptr,
+                nnz * size_of::<f64>(),
+                batch_count,
+            )),
+            b_values: as_ptrs(crate::device_layout::strided_device_ptrs(
+                rhs_ptr,
+                blk * size_of::<f64>(),
+                batch_count,
+            )),
+            x_values: as_ptrs(crate::device_layout::strided_device_ptrs(
+                x_ptr,
+                blk * size_of::<f64>(),
+                batch_count,
+            )),
+        };
+
+        cudss_check(unsafe { cudssCreate(&mut sys.handle) }, "cudssCreate")?;
+        sys.set_stream(stream)?;
+        cudss_check(unsafe { cudssConfigCreate(&mut sys.config) }, "cudssConfigCreate")?;
+        cudss_check(unsafe { cudssDataCreate(sys.handle, &mut sys.data) }, "cudssDataCreate")?;
+
+        // Deliberately *not* setting CUDSS_CONFIG_DETERMINISTIC_MODE here, in
+        // contrast to `CudssRealSystem::alloc`. It was enabled there
+        // defensively while chasing the stacked path's iteration-count drift
+        // and measurably did not help; on this path it is one of the config
+        // knobs `scripts/GPU_RUNBOOK.md`'s sweep step measures rather than
+        // assumes. Turn it on via `set_deterministic` if the sweep says it is
+        // free.
+        cudss_check(
+            unsafe {
+                cudssMatrixCreateBatchCsr(
+                    &mut sys.matrix_a,
+                    batch_count as i64,
+                    sys.nrows.as_mut_ptr() as *mut c_void,
+                    sys.ncols.as_mut_ptr() as *mut c_void,
+                    sys.nnz_per_block.as_mut_ptr() as *mut c_void,
+                    sys.row_start.as_mut_ptr(),
+                    // `rowEnd = NULL` selects the ordinary 3-array CSR form,
+                    // where row `r` ends where row `r + 1` starts.
+                    ptr::null_mut(),
+                    sys.col_indices.as_mut_ptr(),
+                    sys.a_values.as_mut_ptr(),
+                    CUDSS_R_32I,
+                    CUDSS_R_64F,
+                    CUDSS_MTYPE_GENERAL,
+                    CUDSS_MVIEW_FULL,
+                    CUDSS_BASE_ZERO,
+                )
+            },
+            "cudssMatrixCreateBatchCsr",
+        )?;
+
+        cudss_check(
+            unsafe {
+                cudssMatrixCreateBatchDn(
+                    &mut sys.matrix_b,
+                    batch_count as i64,
+                    sys.nrows.as_mut_ptr() as *mut c_void,
+                    // One right-hand side per system.
+                    sys.rhs_ncols.as_mut_ptr() as *mut c_void,
+                    sys.ld.as_mut_ptr() as *mut c_void,
+                    sys.b_values.as_mut_ptr(),
+                    CUDSS_R_32I,
+                    CUDSS_R_64F,
+                    CUDSS_LAYOUT_COL_MAJOR,
+                )
+            },
+            "cudssMatrixCreateBatchDn for b",
+        )?;
+        cudss_check(
+            unsafe {
+                cudssMatrixCreateBatchDn(
+                    &mut sys.matrix_x,
+                    batch_count as i64,
+                    sys.nrows.as_mut_ptr() as *mut c_void,
+                    sys.rhs_ncols.as_mut_ptr() as *mut c_void,
+                    sys.ld.as_mut_ptr() as *mut c_void,
+                    sys.x_values.as_mut_ptr(),
+                    CUDSS_R_32I,
+                    CUDSS_R_64F,
+                    CUDSS_LAYOUT_COL_MAJOR,
+                )
+            },
+            "cudssMatrixCreateBatchDn for x",
+        )?;
+
+        cudss_check(sys.execute(PHASE_ANALYSIS), "batched analysis")?;
+        cudss_check(sys.execute(PHASE_FACTORIZATION), "batched initial factorization")?;
+
+        Some(sys)
+    }
+
+    /// Runs cuDSS's work on `stream` instead of the default stream.
+    ///
+    /// This is what lets [`crate::gpu::GpuBatch`]'s kernels and the solve
+    /// share one stream, so "assemble, then factorize" is ordered by the
+    /// stream rather than by a `cudaDeviceSynchronize` that stalls the whole
+    /// device once per Newton iteration. Pass
+    /// [`crate::gpu::Stream::as_u64`].
+    pub fn set_stream(&mut self, stream: u64) -> Option<()> {
+        cudss_check(
+            unsafe { cudssSetStream(self.handle, stream as usize as cudaStream_t) },
+            "cudssSetStream",
+        )
+    }
+
+    /// Enables cuDSS's deterministic mode. Off by default here — see
+    /// [`new`](Self::new).
+    pub fn set_deterministic(&mut self, on: bool) -> Option<()> {
+        let flag: i32 = on as i32;
+        cudss_check(
+            unsafe {
+                cudssConfigSet(
+                    self.config,
+                    CUDSS_CONFIG_DETERMINISTIC_MODE,
+                    &flag as *const i32 as *const c_void,
+                    size_of::<i32>(),
+                )
+            },
+            "cudssConfigSet(DETERMINISTIC_MODE)",
+        )
+    }
+
+    /// Numeric refactorization against the cached analysis, then solve — for
+    /// every system in the batch, entirely on-device.
+    ///
+    /// Enqueued on this system's stream and **not** synchronized: the caller's
+    /// next kernel (`go_apply_update`) is on the same stream and therefore
+    /// ordered after it, and the loop's one synchronization point is the
+    /// convergence-norm copy. Nothing crosses the host boundary here at all,
+    /// which is why there is nothing to return but success.
+    pub fn refactor_and_solve(&mut self) -> Option<()> {
+        // The values buffer is rewritten in place by the assembly kernel;
+        // this is the documented way to tell cuDSS its contents changed. The
+        // pointers themselves never move, so it is cheap.
+        cudss_check(
+            unsafe { cudssMatrixSetBatchValues(self.matrix_a, self.a_values.as_mut_ptr()) },
+            "cudssMatrixSetBatchValues",
+        )?;
+        cudss_check(self.execute(PHASE_REFACTORIZATION), "batched refactorization")?;
+        cudss_check(self.execute(PHASE_SOLVE), "batched solve")
+    }
+
+    pub fn batch_count(&self) -> usize {
+        self.batch_count
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.blk
+    }
+
+    pub fn nnz_per_block(&self) -> usize {
+        self.nnz
+    }
+
+    fn execute(&mut self, phase: u32) -> cudssStatus_t {
+        unsafe {
+            cudssExecute(self.handle, phase as i32, self.config, self.data, self.matrix_a, self.matrix_x, self.matrix_b)
+        }
+    }
+}
+
+impl Drop for CudssBatchedSystem {
+    fn drop(&mut self) {
+        unsafe {
+            cudssMatrixDestroy(self.matrix_a);
+            cudssMatrixDestroy(self.matrix_b);
+            cudssMatrixDestroy(self.matrix_x);
+            cudssDataDestroy(self.handle, self.data);
+            cudssConfigDestroy(self.config);
+            cudssDestroy(self.handle);
+            cudaFree(self.d_row_ptr);
+            cudaFree(self.d_col_idx);
+        }
+        // The values/rhs/x device buffers are owned by `gpu::GpuBatch`, which
+        // outlives this system — nothing to free for them here.
+    }
+}
+
 impl crate::solver::LinearSolver for CudssRealSystem {
     fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
         CudssRealSystem::new(n, entries)
@@ -625,6 +884,175 @@ mod ffi_smoke_test {
     }
 }
 
+/// Solves a **two-system batch** off the raw FFI bindings, with no gridoxide
+/// wrapper involved.
+///
+/// Run this first on any new box. `cudssMatrixCreateBatchCsr` and
+/// `cudssMatrixCreateBatchDn` take most of their arguments as `void*`/`void**`,
+/// so a mistake in parameter order compiles cleanly and produces silent
+/// garbage rather than a type error — this is the check that turns that class
+/// of bug into an immediate, obvious failure. It also confirms the installed
+/// cuDSS actually has the batch API (added in 0.4.0): a missing symbol fails
+/// at link time here rather than three hours into a session.
+///
+/// Fixture: two independent 2x2 systems with different values, so a wrapper
+/// that silently solved system 0 twice would fail.
+///   [[2,1],[1,3]] x = [5,10]  => x = [1, 3]
+///   [[4,1],[1,2]] x = [6, 5]  => x = [1, 2]
+/// Both share one CSR structure — row_ptr = [0,2,4], col_idx = [0,1,0,1] —
+/// which is the uniform-batch property gridoxide's block-diagonal embedding
+/// guarantees, and here every block points at the *same* structure buffers.
+#[cfg(test)]
+mod batched_ffi_smoke_test {
+    use super::bindings::*;
+    use std::ffi::c_void;
+    use std::ptr;
+
+    #[test]
+    fn solves_a_two_system_batch_via_raw_ffi() {
+        const B: usize = 2;
+        let row_ptr: [i32; 3] = [0, 2, 4];
+        let col_idx: [i32; 4] = [0, 1, 0, 1];
+        let values: [f64; 8] = [2.0, 1.0, 1.0, 3.0, 4.0, 1.0, 1.0, 2.0];
+        let rhs: [f64; 4] = [5.0, 10.0, 6.0, 5.0];
+
+        unsafe {
+            let mut d_row_ptr: *mut c_void = ptr::null_mut();
+            let mut d_col_idx: *mut c_void = ptr::null_mut();
+            let mut d_values: *mut c_void = ptr::null_mut();
+            let mut d_rhs: *mut c_void = ptr::null_mut();
+            let mut d_x: *mut c_void = ptr::null_mut();
+            assert_eq!(cudaMalloc(&mut d_row_ptr, 3 * size_of::<i32>()), cudaError_cudaSuccess);
+            assert_eq!(cudaMalloc(&mut d_col_idx, 4 * size_of::<i32>()), cudaError_cudaSuccess);
+            assert_eq!(cudaMalloc(&mut d_values, 8 * size_of::<f64>()), cudaError_cudaSuccess);
+            assert_eq!(cudaMalloc(&mut d_rhs, 4 * size_of::<f64>()), cudaError_cudaSuccess);
+            assert_eq!(cudaMalloc(&mut d_x, 4 * size_of::<f64>()), cudaError_cudaSuccess);
+
+            let h2d = cudaMemcpyKind_cudaMemcpyHostToDevice;
+            assert_eq!(cudaMemcpy(d_row_ptr, row_ptr.as_ptr() as *const c_void, 3 * size_of::<i32>(), h2d), cudaError_cudaSuccess);
+            assert_eq!(cudaMemcpy(d_col_idx, col_idx.as_ptr() as *const c_void, 4 * size_of::<i32>(), h2d), cudaError_cudaSuccess);
+            assert_eq!(cudaMemcpy(d_values, values.as_ptr() as *const c_void, 8 * size_of::<f64>(), h2d), cudaError_cudaSuccess);
+            assert_eq!(cudaMemcpy(d_rhs, rhs.as_ptr() as *const c_void, 4 * size_of::<f64>(), h2d), cudaError_cudaSuccess);
+
+            // Uniform batch descriptors. Every block shares one structure;
+            // only the values and vectors stride.
+            let mut nrows: [i32; B] = [2, 2];
+            let mut ncols: [i32; B] = [2, 2];
+            let mut nnz: [i32; B] = [4, 4];
+            let mut ld: [i32; B] = [2, 2];
+            let mut rhs_ncols: [i32; B] = [1, 1];
+            let mut row_start: [*mut c_void; B] = [d_row_ptr, d_row_ptr];
+            let mut col_indices: [*mut c_void; B] = [d_col_idx, d_col_idx];
+            let mut a_values: [*mut c_void; B] =
+                [d_values, (d_values as *mut u8).add(4 * size_of::<f64>()) as *mut c_void];
+            let mut b_values: [*mut c_void; B] =
+                [d_rhs, (d_rhs as *mut u8).add(2 * size_of::<f64>()) as *mut c_void];
+            let mut x_values: [*mut c_void; B] =
+                [d_x, (d_x as *mut u8).add(2 * size_of::<f64>()) as *mut c_void];
+
+            let mut handle: cudssHandle_t = ptr::null_mut();
+            assert_eq!(cudssCreate(&mut handle), cudssStatus_t_CUDSS_STATUS_SUCCESS);
+            let mut config: cudssConfig_t = ptr::null_mut();
+            assert_eq!(cudssConfigCreate(&mut config), cudssStatus_t_CUDSS_STATUS_SUCCESS);
+            let mut data: cudssData_t = ptr::null_mut();
+            assert_eq!(cudssDataCreate(handle, &mut data), cudssStatus_t_CUDSS_STATUS_SUCCESS);
+
+            let mut a: cudssMatrix_t = ptr::null_mut();
+            assert_eq!(
+                cudssMatrixCreateBatchCsr(
+                    &mut a,
+                    B as i64,
+                    nrows.as_mut_ptr() as *mut c_void,
+                    ncols.as_mut_ptr() as *mut c_void,
+                    nnz.as_mut_ptr() as *mut c_void,
+                    row_start.as_mut_ptr(),
+                    ptr::null_mut(),
+                    col_indices.as_mut_ptr(),
+                    a_values.as_mut_ptr(),
+                    cudssDataType_t_CUDSS_R_32I,
+                    cudssDataType_t_CUDSS_R_64F,
+                    cudssMatrixType_t_CUDSS_MTYPE_GENERAL,
+                    cudssMatrixViewType_t_CUDSS_MVIEW_FULL,
+                    cudssIndexBase_t_CUDSS_BASE_ZERO,
+                ),
+                cudssStatus_t_CUDSS_STATUS_SUCCESS
+            );
+            let mut b: cudssMatrix_t = ptr::null_mut();
+            assert_eq!(
+                cudssMatrixCreateBatchDn(
+                    &mut b,
+                    B as i64,
+                    nrows.as_mut_ptr() as *mut c_void,
+                    rhs_ncols.as_mut_ptr() as *mut c_void,
+                    ld.as_mut_ptr() as *mut c_void,
+                    b_values.as_mut_ptr(),
+                    cudssDataType_t_CUDSS_R_32I,
+                    cudssDataType_t_CUDSS_R_64F,
+                    cudssLayout_t_CUDSS_LAYOUT_COL_MAJOR,
+                ),
+                cudssStatus_t_CUDSS_STATUS_SUCCESS
+            );
+            let mut x: cudssMatrix_t = ptr::null_mut();
+            assert_eq!(
+                cudssMatrixCreateBatchDn(
+                    &mut x,
+                    B as i64,
+                    nrows.as_mut_ptr() as *mut c_void,
+                    rhs_ncols.as_mut_ptr() as *mut c_void,
+                    ld.as_mut_ptr() as *mut c_void,
+                    x_values.as_mut_ptr(),
+                    cudssDataType_t_CUDSS_R_32I,
+                    cudssDataType_t_CUDSS_R_64F,
+                    cudssLayout_t_CUDSS_LAYOUT_COL_MAJOR,
+                ),
+                cudssStatus_t_CUDSS_STATUS_SUCCESS
+            );
+
+            for phase in [
+                cudssPhase_t_CUDSS_PHASE_ANALYSIS,
+                cudssPhase_t_CUDSS_PHASE_FACTORIZATION,
+                cudssPhase_t_CUDSS_PHASE_SOLVE,
+            ] {
+                assert_eq!(
+                    cudssExecute(handle, phase as i32, config, data, a, x, b),
+                    cudssStatus_t_CUDSS_STATUS_SUCCESS,
+                    "batched phase {phase} failed"
+                );
+            }
+
+            let mut x_host = [0.0f64; 4];
+            assert_eq!(
+                cudaMemcpy(
+                    x_host.as_mut_ptr() as *mut c_void,
+                    d_x,
+                    4 * size_of::<f64>(),
+                    cudaMemcpyKind_cudaMemcpyDeviceToHost
+                ),
+                cudaError_cudaSuccess
+            );
+
+            cudssMatrixDestroy(a);
+            cudssMatrixDestroy(b);
+            cudssMatrixDestroy(x);
+            cudssDataDestroy(handle, data);
+            cudssConfigDestroy(config);
+            cudssDestroy(handle);
+            cudaFree(d_row_ptr);
+            cudaFree(d_col_idx);
+            cudaFree(d_values);
+            cudaFree(d_rhs);
+            cudaFree(d_x);
+
+            // Distinct answers per system: a wrapper that aliased the batch
+            // would give [1, 3, 1, 3] or [1, 2, 1, 2] here.
+            let want = [1.0, 3.0, 1.0, 2.0];
+            for (i, (&got, &w)) in x_host.iter().zip(&want).enumerate() {
+                assert!((got - w).abs() < 1e-9, "batched solution[{i}] = {got}, want {w}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,95 +1097,5 @@ mod tests {
         let x2 = sys.factor_and_solve(&entries_b, &[6.0, 5.0]).unwrap();
         assert!((x2[0] - 1.0).abs() < 1e-9);
         assert!((x2[1] - 2.0).abs() < 1e-9);
-    }
-}
-
-#[cfg(test)]
-mod csr_permutation_tests {
-    use super::*;
-    use crate::jacobian::JacobianPattern;
-    use crate::json::NetworkData;
-    use crate::network::build_ybus;
-    use std::fs;
-    use std::path::PathBuf;
-
-    /// `csr_scatter_map` (used by the device-resident GPU path,
-    /// `bde::solve_batch_block_diagonal_device_resident`) assumes every CSR
-    /// position merges exactly one original `JacobianPattern` entry — no
-    /// summing, a pure permutation. This holds by construction (Y-bus itself
-    /// never has a duplicate `(row, col)` neighbor, so `JacobianPattern`
-    /// can't produce one either — see `csr_scatter_map`'s doc comment), and
-    /// this pins that invariant down on the committed fixture so a future
-    /// change to `JacobianPattern`'s emission order/logic can't silently
-    /// break the GPU scatter kernel.
-    #[test]
-    fn groups_are_all_singletons() {
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("tests/data/network.json");
-        let raw = fs::read_to_string(path).expect("read network.json");
-        let network: NetworkData = serde_json::from_str(&raw).expect("parse network.json");
-        let ybus = build_ybus(network.buses.len(), &network.lines, &[]).finish();
-        let pattern = JacobianPattern::analyze(&network.buses, &ybus);
-
-        let pairs: Vec<(usize, usize)> =
-            pattern.rows().iter().zip(pattern.cols()).map(|(&r, &c)| (r as usize, c as usize)).collect();
-        let (_, _, groups) = build_csr_structure(pattern.n_unknowns, &pairs);
-        assert_eq!(pairs.len(), groups.len(), "some CSR position merges >1 original entry");
-    }
-}
-
-/// Pins down `csr_scatter_map`'s doc-comment claim numerically: one
-/// single-block scatter map, offset by `scenario * nnz`, correctly locates
-/// every scenario's entries in the *stacked* block-diagonal CSR structure —
-/// not just structurally plausible, but checked position-by-position against
-/// `build_csr_structure` run directly on the full stacked `(row, col)` pairs.
-#[cfg(test)]
-mod stacked_scatter_tests {
-    use super::*;
-    use crate::bde::BlockDiagonal;
-    use crate::jacobian::JacobianPattern;
-    use crate::json::NetworkData;
-    use crate::network::build_ybus;
-    use std::fs;
-    use std::path::PathBuf;
-
-    #[test]
-    fn stacked_scatter_matches_per_block_assumption() {
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("tests/data/network.json");
-        let raw = fs::read_to_string(path).expect("read network.json");
-        let network: NetworkData = serde_json::from_str(&raw).expect("parse network.json");
-        let ybus = build_ybus(network.buses.len(), &network.lines, &[]).finish();
-
-        let nb = 3usize;
-        let bd = BlockDiagonal::analyze(&network.buses, &ybus, nb);
-        let base = JacobianPattern::analyze(&network.buses, &ybus);
-        let blk = base.n_unknowns;
-        let nnz = base.len();
-
-        let block_pairs: Vec<(usize, usize)> =
-            base.rows().iter().zip(base.cols()).map(|(&r, &c)| (r as usize, c as usize)).collect();
-        let scatter = csr_scatter_map(blk, &block_pairs);
-        let (block_row_ptr, block_col_idx, _) = build_csr_structure(blk, &block_pairs);
-
-        let dummy = vec![0.0f64; bd.len()];
-        let full_pairs: Vec<(usize, usize)> = bd.to_triplets(&dummy).iter().map(|&(r, c, _)| (r, c)).collect();
-        let (full_row_ptr, full_col_idx, full_groups) = build_csr_structure(bd.n_unknowns(), &full_pairs);
-
-        assert_eq!(full_col_idx.len(), nnz * nb);
-        assert!(full_groups.iter().all(|g| g.len() == 1));
-
-        for s in 0..nb {
-            for e in 0..nnz {
-                let expected_col = block_col_idx[scatter[e] as usize] as usize + s * blk;
-                let actual_col = full_col_idx[s * nnz + scatter[e] as usize] as usize;
-                assert_eq!(expected_col, actual_col, "column mismatch at scenario {s}, entry {e}");
-            }
-            for r in 0..=blk {
-                let expected = block_row_ptr[r] + (s * nnz) as i32;
-                let actual = full_row_ptr[s * blk + r];
-                assert_eq!(expected, actual, "row_ptr mismatch at scenario {s}, row {r}");
-            }
-        }
     }
 }

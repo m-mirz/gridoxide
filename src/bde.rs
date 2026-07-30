@@ -18,6 +18,19 @@
 //! it is why the same code can later target cuDSS, rocSOLVER, or anything else
 //! that factors a sparse matrix.
 //!
+//! **That property is real, and it is also the trap.** Stacking is
+//! *mathematically* equivalent to B independent solves (proof below) but it is
+//! not *computationally* equivalent on a GPU: a general sparse direct solver
+//! handed one 10-million-row matrix has no way to know it is really B
+//! independent 2,450-row problems, and pays scheduling and bookkeeping over the
+//! whole thing. Measured, that cost was ~95% of the device-resident path's
+//! runtime and left it ~91x slower than the 30-thread CPU
+//! [`BatchSolver`](crate::batch::BatchSolver). On NVIDIA the fix is to stop
+//! stacking and use cuDSS's uniform batch entry point instead — see
+//! [`solve_batch_block_diagonal_batched_device`], which is the path to use, and
+//! [`crate::sparse_cudss::CudssBatchedSystem`] for the mechanism. The stacking
+//! functions here are kept as the A/B control that makes that claim measurable.
+//!
 //! The equivalence is exact, not approximate:
 //!
 //! - **No fill crosses a block.** Fill at `(i, j)` needs a path `i → k → j`
@@ -42,11 +55,46 @@
 //! wide independent work, which is a GPU property. Treat this as an
 //! architecture validator and the host-side half of Phase 3.
 
+use rayon::prelude::*;
+
 use crate::batch::Scenario;
 use crate::jacobian::JacobianPattern;
 use crate::network::{effective_injection, linear_initial_guess, power_injections, YBusSparse};
 use crate::solver::{LinearSolver, SolveStats, SolveStatus};
 use crate::types::{Bus, BusType};
+
+/// Applies each scenario's overrides to the shared template and computes its
+/// starting point, exactly the way [`crate::batch::BatchSolver`] does, so the
+/// two are comparable scenario for scenario.
+///
+/// **Parallel across scenarios**, because `linear_initial_guess` is a full
+/// linearized sparse solve per scenario — at batch 4,096 that is thousands of
+/// sparse solves, and running them on one thread put a large serial region in
+/// front of every GPU path's Newton loop while the CPU baseline it is measured
+/// against spread the identical work over every core. Ordering is preserved:
+/// `par_iter().map().collect()` is deterministic.
+fn build_states(buses_template: &[Bus], ybus: &YBusSparse, scenarios: &[Scenario]) -> Vec<Vec<Bus>> {
+    scenarios
+        .par_iter()
+        .map(|sc| {
+            let mut buses = buses_template.to_vec();
+            for ov in &sc.bus_overrides {
+                let b = &mut buses[ov.bus];
+                if let Some(p) = ov.p_spec {
+                    b.p_spec = p;
+                }
+                if let Some(q) = ov.q_spec {
+                    b.q_spec = q;
+                }
+                if let Some(vm) = ov.voltage_mag {
+                    b.voltage_mag = vm;
+                }
+            }
+            linear_initial_guess(&mut buses, ybus);
+            buses
+        })
+        .collect()
+}
 
 /// The stacked sparsity pattern for `n_scenarios` copies of one topology's
 /// Jacobian, plus the per-block recipe needed to refill it.
@@ -144,6 +192,37 @@ pub struct BdeScenarioResult {
     pub stats: SolveStats,
 }
 
+/// Packs per-scenario states, mismatch traces and statuses into results.
+fn collect_results(
+    states: Vec<Vec<Bus>>,
+    history: Vec<Vec<f64>>,
+    status: Vec<SolveStatus>,
+) -> Vec<BdeScenarioResult> {
+    states
+        .into_iter()
+        .zip(history)
+        .zip(status)
+        .map(|((buses, mismatch_history), status)| BdeScenarioResult {
+            buses,
+            stats: SolveStats {
+                status,
+                mismatch_history,
+                q_limit_switches: Vec::new(),
+                q_limit_stabilized: true,
+            },
+        })
+        .collect()
+}
+
+/// Every scenario `Singular`, with its starting state — the outcome when
+/// device setup fails before a single Newton iteration can run. A GPU that
+/// isn't there is reported the same way a singular matrix is, rather than
+/// panicking, so a batch never takes the process down.
+#[cfg(all(feature = "gpu", feature = "cudss"))]
+fn singular_results(states: Vec<Vec<Bus>>, nb: usize) -> Vec<BdeScenarioResult> {
+    collect_results(states, vec![Vec::new(); nb], vec![SolveStatus::Singular; nb])
+}
+
 /// Runs Newton-Raphson on **all** scenarios at once through a single stacked
 /// sparse factorization per iteration, with per-scenario convergence masking.
 ///
@@ -185,28 +264,7 @@ pub fn solve_batch_block_diagonal<S: LinearSolver>(
     let n_angle = non_slack_idx.len();
     let blk = n_angle + pq_idx.len();
 
-    // Per-scenario starting state, built exactly the way `BatchSolver` builds
-    // it, so the two are comparable scenario for scenario.
-    let mut states: Vec<Vec<Bus>> = scenarios
-        .iter()
-        .map(|sc| {
-            let mut buses = buses_template.to_vec();
-            for ov in &sc.bus_overrides {
-                let b = &mut buses[ov.bus];
-                if let Some(p) = ov.p_spec {
-                    b.p_spec = p;
-                }
-                if let Some(q) = ov.q_spec {
-                    b.q_spec = q;
-                }
-                if let Some(vm) = ov.voltage_mag {
-                    b.voltage_mag = vm;
-                }
-            }
-            linear_initial_guess(&mut buses, ybus);
-            buses
-        })
-        .collect();
+    let mut states = build_states(buses_template, ybus, scenarios);
 
     let pattern = BlockDiagonal::analyze(buses_template, ybus, nb);
     let mut cache: Option<S> = None;
@@ -302,20 +360,7 @@ pub fn solve_batch_block_diagonal<S: LinearSolver>(
         }
     }
 
-    states
-        .into_iter()
-        .zip(history)
-        .zip(status)
-        .map(|((buses, mismatch_history), status)| BdeScenarioResult {
-            buses,
-            stats: SolveStats {
-                status,
-                mismatch_history,
-                q_limit_switches: Vec::new(),
-                q_limit_stabilized: true,
-            },
-        })
-        .collect()
+    collect_results(states, history, status)
 }
 
 /// Device-resident counterpart to [`solve_batch_block_diagonal`]: the
@@ -345,22 +390,23 @@ pub fn solve_batch_block_diagonal<S: LinearSolver>(
 /// converged voltages agree with an independent CPU solve to ~1e-12
 /// (`bde_test.rs`'s `bde_device_resident_matches_independent`), but it
 /// sometimes takes one or two more Newton iterations to get there than the
-/// host-resident path does on identical data. `gpu.rs`'s
-/// `device_resident_tests` module rules out every gridoxide-side
-/// explanation directly: the GPU-assembled, CSR-scattered, masked values are
-/// bit-identical (~1e-16) to what the CPU would compute in the same order,
-/// the stacked-CSR offset arithmetic is exact, and a raw `cudaMemcpy` off the
-/// live device pointer sees exactly what CubeCL's own readback sees — so
-/// cuDSS receives the identical numbers either way. Neither an explicit
-/// `cudssMatrixSetValues` notification nor `CUDSS_CONFIG_DETERMINISTIC_MODE`
-/// changed this. The leading unconfirmed explanation is that cuDSS's own
-/// factorization takes a measurably different (internally consistent, still
-/// correct) path depending on which allocator provided the values buffer.
-/// Not expected to affect a real batch's wall-clock materially, but flagged
-/// here rather than silently accepted.
+/// host-resident path does on identical data. Every gridoxide-side
+/// explanation was ruled out directly (see `tests/gpu_assembly_test.rs`'s
+/// device-resident checks): the GPU-assembled, CSR-scattered, masked values
+/// are bit-identical to what the CPU would compute in the same order, and the
+/// stacked-CSR offset arithmetic is exact, so cuDSS receives the identical
+/// numbers either way. Neither an explicit `cudssMatrixSetValues`
+/// notification nor `CUDSS_CONFIG_DETERMINISTIC_MODE` changed it. The leading
+/// unconfirmed explanation is that cuDSS's own factorization takes a
+/// measurably different (internally consistent, still correct) path depending
+/// on which allocator provided the values buffer.
 ///
-/// CUDA-only (`GpuAssembler<gpu::DefaultRuntime>` and `CudssRealSystem`
-/// both are), hence the `gpu`+`cudss` feature gate.
+/// **Status: superseded.** This is now the A/B *control* for
+/// [`solve_batch_block_diagonal_batched_device`], not the recommended path —
+/// see that function for why handing cuDSS one stacked matrix instead of a
+/// uniform batch costs ~95% of the runtime. It is kept because a performance
+/// claim needs something to be measured against; `examples/bde_profile.rs`
+/// runs both.
 #[cfg(all(feature = "gpu", feature = "cudss"))]
 pub fn solve_batch_block_diagonal_device_resident(
     buses_template: &[Bus],
@@ -369,8 +415,8 @@ pub fn solve_batch_block_diagonal_device_resident(
     tol: f64,
     max_iter: usize,
 ) -> Vec<BdeScenarioResult> {
-    use crate::gpu::default_assembler;
-    use crate::sparse_cudss::{csr_scatter_map, build_csr_structure, device_synchronize, CudssRealSystem};
+    use crate::gpu::GpuAssembler;
+    use crate::sparse_cudss::{build_csr_structure, csr_scatter_map, CudssRealSystem};
 
     let nb = scenarios.len();
     if nb == 0 {
@@ -390,40 +436,24 @@ pub fn solve_batch_block_diagonal_device_resident(
     let n_angle = non_slack_idx.len();
     let blk = n_angle + pq_idx.len();
 
-    let mut states: Vec<Vec<Bus>> = scenarios
-        .iter()
-        .map(|sc| {
-            let mut buses = buses_template.to_vec();
-            for ov in &sc.bus_overrides {
-                let b = &mut buses[ov.bus];
-                if let Some(p) = ov.p_spec {
-                    b.p_spec = p;
-                }
-                if let Some(q) = ov.q_spec {
-                    b.q_spec = q;
-                }
-                if let Some(vm) = ov.voltage_mag {
-                    b.voltage_mag = vm;
-                }
-            }
-            linear_initial_guess(&mut buses, ybus);
-            buses
-        })
-        .collect();
+    let mut states = build_states(buses_template, ybus, scenarios);
 
     let pattern = BlockDiagonal::analyze(buses_template, ybus, nb);
 
-    // The GPU kernel writes each entry to its CSR position directly (see
-    // `gpu::assemble_kernel`'s doc comment) — computed once, from a single
-    // block's (row, col) pairs, since every scenario's block shares the same
-    // relative structure (`csr_scatter_map`'s own doc comment explains why
-    // one single-block map serves every scenario).
+    // The GPU kernel writes each entry to its CSR position directly — computed
+    // once, from a single block's (row, col) pairs, since every scenario's
+    // block shares the same relative structure (`csr_scatter_map`'s own doc
+    // comment explains why one single-block map serves every scenario).
     let block_pairs: Vec<(usize, usize)> =
         pattern.block.rows().iter().zip(pattern.block.cols()).map(|(&r, &c)| (r as usize, c as usize)).collect();
     let scatter = csr_scatter_map(pattern.block.n_unknowns, &block_pairs);
 
-    let mut assembler = default_assembler(&pattern.block, buses_template.len());
-    assembler.set_scatter(&scatter);
+    let Some(mut assembler) = GpuAssembler::new(&pattern.block, buses_template.len()) else {
+        return singular_results(states, nb);
+    };
+    if assembler.set_scatter(&scatter).is_none() {
+        return singular_results(states, nb);
+    }
 
     // The *stacked* CSR structure cuDSS's matrix wraps — built once, from
     // the full block-diagonal (row, col) pairs (already correctly offset by
@@ -488,11 +518,21 @@ pub fn solve_batch_block_diagonal_device_resident(
         // Assemble directly into the persistent device buffer — no host
         // round trip for the (large) Jacobian values, masking active[]
         // scenarios via the kernel's identity fallback.
-        assembler.assemble_batch_device(&states, &p_all, &q_all, &active);
-        // Required barrier, not a performance nicety: cuDSS's refactorization
-        // must not start reading this buffer before the kernel above has
-        // finished writing it — see `device_synchronize`'s doc comment.
-        if device_synchronize().is_none() {
+        if assembler.assemble_batch_masked(&states, &p_all, &q_all, &active).is_none() {
+            for s in 0..nb {
+                if active[s] {
+                    status[s] = SolveStatus::Singular;
+                }
+            }
+            break;
+        }
+        // Required barrier, not a performance nicety: `CudssRealSystem` runs
+        // on the default stream while the assembler runs on its own, so
+        // cuDSS's refactorization must not be enqueued before the kernel
+        // above has finished writing the buffer it reads. (The batched path
+        // shares one stream with cuDSS and needs nothing here — see
+        // `solve_batch_block_diagonal_batched_device`.)
+        if assembler.stream().synchronize().is_none() {
             for s in 0..nb {
                 if active[s] {
                     status[s] = SolveStatus::Singular;
@@ -543,18 +583,159 @@ pub fn solve_batch_block_diagonal_device_resident(
         }
     }
 
-    states
-        .into_iter()
-        .zip(history)
-        .zip(status)
-        .map(|((buses, mismatch_history), status)| BdeScenarioResult {
-            buses,
-            stats: SolveStats {
-                status,
-                mismatch_history,
-                q_limit_switches: Vec::new(),
-                q_limit_stabilized: true,
-            },
-        })
-        .collect()
+    collect_results(states, history, status)
+}
+
+/// **The batched GPU path**: every scenario's Jacobian, mismatch, linear solve
+/// and Newton update stays on the device, and the linear solve goes through
+/// cuDSS's *uniform batch* API rather than one stacked block-diagonal matrix.
+///
+/// # Why this exists
+///
+/// [`solve_batch_block_diagonal_device_resident`] already removed the
+/// Jacobian's host round trip and was still ~91x slower than the 30-thread CPU
+/// [`BatchSolver`](crate::batch::BatchSolver) on case1354pegase at batch 4,096.
+/// The round trip was never the problem: at that batch size the serial host
+/// mismatch loop is ~1.5% of an iteration, the Jacobian upload another ~1.5%,
+/// and ~95% is inside cuDSS refactorizing and solving a single 10-million-row
+/// stacked matrix. `plans/GPU_PLAN.md` §3 property 2 chose that stacking
+/// deliberately — it needs no batched solver API, which is what kept the
+/// AMD/rocSOLVER path open — but a general sparse direct solver handed one
+/// enormous matrix cannot exploit the fact that it is really B independent
+/// 2,450-row problems. See [`crate::sparse_cudss::CudssBatchedSystem`] for the
+/// mechanism.
+///
+/// # What changed against the control path
+///
+/// | | device-resident (control) | batched (this) |
+/// |---|---|---|
+/// | Linear solve | one `B*blk`-row general matrix | `B` uniform batched systems |
+/// | Symbolic analysis | on `B*blk` rows | on `blk` rows, once |
+/// | CSR structure uploaded | `O(n_total)` + `O(nnz_total)` | one block, shared by all `B` |
+/// | Mismatch evaluation | serial host loop, `B` calls/iteration | one kernel |
+/// | Host↔device per iteration | `rhs` down + `Δx` up, `O(B*blk)` each | `B` f64 down, `B` u32 up |
+/// | Synchronization | stream sync per iteration, after a whole-batch stall | one, on the convergence copy |
+///
+/// The last two rows are why the loop below looks so different from its
+/// siblings: there is no `rhs` vector, no `p_all`/`q_all`, and no `Δx` on the
+/// host at all. The only host-visible per-iteration quantity is
+/// `max_mismatch[s]`, because whether a scenario has converged is a decision
+/// only the host can make — and the convergence, masking, `mismatch_history`
+/// and `SolveStatus` bookkeeping around it is deliberately kept identical to
+/// [`solve_batch_block_diagonal`]'s, so the two stay comparable line for line.
+///
+/// Masking works exactly as in the other paths: a converged or diverged
+/// scenario gets an identity block from the assembly kernel and a zeroed
+/// right-hand side, so its Δx is exactly zero. That is a correctness
+/// requirement, not an optimization — one singular block is otherwise free to
+/// fail the whole batch's factorization.
+///
+/// Returns every scenario as `Singular` if the device cannot be set up at all.
+#[cfg(all(feature = "gpu", feature = "cudss"))]
+pub fn solve_batch_block_diagonal_batched_device(
+    buses_template: &[Bus],
+    ybus: &YBusSparse,
+    scenarios: &[Scenario],
+    tol: f64,
+    max_iter: usize,
+) -> Vec<BdeScenarioResult> {
+    use crate::device_layout::{build_csr_structure, csr_scatter_map};
+    use crate::gpu::GpuBatch;
+    use crate::sparse_cudss::CudssBatchedSystem;
+
+    let nb = scenarios.len();
+    if nb == 0 {
+        return Vec::new();
+    }
+
+    let mut states = build_states(buses_template, ybus, scenarios);
+
+    // One block, not a stacked matrix — that is the whole point. Every
+    // scenario shares this pattern, this scatter map and this CSR structure,
+    // so all three are `O(one block)` regardless of batch size.
+    let block = JacobianPattern::analyze(buses_template, ybus);
+    let blk = block.n_unknowns;
+    let block_pairs: Vec<(usize, usize)> =
+        block.rows().iter().zip(block.cols()).map(|(&r, &c)| (r as usize, c as usize)).collect();
+    let scatter = csr_scatter_map(blk, &block_pairs);
+    let (row_ptr, col_idx, _groups) = build_csr_structure(blk, &block_pairs);
+
+    let Some(mut gpu) = GpuBatch::new(&block, ybus, buses_template, &states, &scatter) else {
+        return singular_results(states, nb);
+    };
+
+    let mut active = vec![true; nb];
+    let mut history: Vec<Vec<f64>> = vec![Vec::new(); nb];
+    let mut status = vec![SolveStatus::MaxIterationsReached; nb];
+    let mut max_mismatch = vec![0.0f64; nb];
+    // Constructed on the first iteration, once the assembly kernel has been
+    // enqueued into the buffer cuDSS's batched matrix points at — see
+    // `CudssBatchedSystem::new`'s precondition. Because it is handed this
+    // object's stream, its own analysis and factorization are ordered after
+    // that kernel with no host synchronization.
+    let mut cudss: Option<CudssBatchedSystem> = None;
+
+    // Runs the whole Newton loop; `None` anywhere means a CUDA or cuDSS call
+    // failed, and every still-active scenario is reported `Singular` — the
+    // same contract the CPU paths give a singular factorization.
+    let outcome = (|| -> Option<()> {
+        for _ in 0..max_iter {
+            gpu.power_injections()?;
+            gpu.mismatch()?;
+            // The loop's one synchronization point, and its only
+            // device-to-host transfer: one f64 per scenario.
+            gpu.download_max_mismatch(&mut max_mismatch)?;
+
+            for s in 0..nb {
+                if !active[s] {
+                    continue;
+                }
+                history[s].push(max_mismatch[s]);
+                if max_mismatch[s] < tol {
+                    status[s] = SolveStatus::Converged;
+                    active[s] = false;
+                }
+            }
+            if active.iter().all(|&a| !a) {
+                return Some(());
+            }
+
+            gpu.upload_active(&active)?;
+            // After the mask update, so a scenario that converged on *this*
+            // iteration gets Δx = 0 rather than one more step.
+            gpu.zero_masked_rhs()?;
+            gpu.assemble()?;
+
+            if cudss.is_none() {
+                cudss = CudssBatchedSystem::new(
+                    nb,
+                    blk,
+                    &row_ptr,
+                    &col_idx,
+                    gpu.values_ptr(),
+                    gpu.rhs_ptr(),
+                    gpu.dx_ptr(),
+                    gpu.stream().as_u64(),
+                );
+            }
+            cudss.as_mut()?.refactor_and_solve()?;
+            gpu.apply_update()?;
+        }
+        Some(())
+    })();
+
+    if outcome.is_none() {
+        for s in 0..nb {
+            if active[s] {
+                status[s] = SolveStatus::Singular;
+            }
+        }
+    }
+
+    // The one readback of the whole solve. Best-effort: if it fails, the
+    // states still hold each scenario's starting point and the statuses above
+    // already say the solve did not complete.
+    let _ = gpu.download_voltages_into(&mut states);
+
+    collect_results(states, history, status)
 }

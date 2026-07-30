@@ -140,6 +140,29 @@ if [[ "$VENDOR" == "nvidia" ]]; then
     CUDSS_SO="$(find "$CUDSS_ROOT" /usr/lib /usr/local -maxdepth 4 -name 'libcudss.so*' 2>/dev/null | head -1)"
     [[ -n "$CUDSS_H"  ]] && ok "cudss.h at $CUDSS_H"      || bad "cudss.h"
     [[ -n "$CUDSS_SO" ]] && ok "libcudss.so at $CUDSS_SO" || bad "libcudss.so"
+
+    # The batch API (cudssMatrixCreateBatchCsr and friends) landed in 0.4.0,
+    # and src/sparse_cudss.rs's CudssBatchedSystem -- the whole point of the
+    # current GPU path -- is built on it. An older cuDSS fails at *link* time
+    # with an undefined symbol, which is a confusing way to learn this on a
+    # metered box. Check it here instead.
+    if [[ -n "$CUDSS_H" ]]; then
+        CUDSS_MAJOR="$(grep -oP '#define\s+CUDSS_VERSION_MAJOR\s+\K[0-9]+' "$CUDSS_H" 2>/dev/null | head -1)"
+        CUDSS_MINOR="$(grep -oP '#define\s+CUDSS_VERSION_MINOR\s+\K[0-9]+' "$CUDSS_H" 2>/dev/null | head -1)"
+        if [[ -n "$CUDSS_MAJOR" && -n "$CUDSS_MINOR" ]]; then
+            if (( CUDSS_MAJOR > 0 || CUDSS_MINOR >= 4 )); then
+                ok "cuDSS $CUDSS_MAJOR.$CUDSS_MINOR (batch API available)"
+            else
+                bad "cuDSS $CUDSS_MAJOR.$CUDSS_MINOR is too old -- the batch API needs >= 0.4.0"
+                NOTES+=("upgrade cuDSS to >= 0.4.0: https://developer.nvidia.com/cudss")
+            fi
+        elif grep -q 'cudssMatrixCreateBatchCsr' "$CUDSS_H" 2>/dev/null; then
+            ok "cuDSS version macros absent, but cudssMatrixCreateBatchCsr is declared"
+        else
+            bad "cuDSS has no cudssMatrixCreateBatchCsr -- too old for the batched path (need >= 0.4.0)"
+        fi
+    fi
+
     if [[ -z "$CUDSS_H" || -z "$CUDSS_SO" ]]; then
         NOTES+=("cuDSS is a separate NVIDIA download: https://developer.nvidia.com/cudss")
         NOTES+=("  then: export CUDSS_ROOT=/path/to/cudss  (build.rs will discover it there)")

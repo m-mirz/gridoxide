@@ -98,6 +98,13 @@ fn main() {
         (r, t2.elapsed())
     };
 
+    #[cfg(all(feature = "gpu", feature = "cudss"))]
+    let (batched, t_batched) = {
+        let t3 = Instant::now();
+        let r = gridoxide::bde::solve_batch_block_diagonal_batched_device(&template, &ybus, &scenarios, 1e-8, 40);
+        (r, t3.elapsed())
+    };
+
     let mut worst_vm = 0.0f64;
     let mut worst_va = 0.0f64;
     let mut iter_mismatch = 0usize;
@@ -138,11 +145,31 @@ fn main() {
         (worst_vm, worst_va, iter_mismatch, not_converged)
     };
 
+    #[cfg(all(feature = "gpu", feature = "cudss"))]
+    let (worst_vm_b, worst_va_b, not_converged_b) = {
+        let mut worst_vm = 0.0f64;
+        let mut worst_va = 0.0f64;
+        let mut not_converged = 0usize;
+        for (b, indep) in batched.iter().zip(&independent) {
+            if b.stats.status != SolveStatus::Converged || indep.stats.status != SolveStatus::Converged {
+                not_converged += 1;
+                continue;
+            }
+            for (e, r) in b.buses.iter().zip(&indep.buses) {
+                worst_vm = worst_vm.max((e.voltage_mag - r.voltage_mag).abs());
+                worst_va = worst_va.max((e.voltage_ang - r.voltage_ang).abs());
+            }
+        }
+        (worst_vm, worst_va, not_converged)
+    };
+
     println!();
     println!("independent (1 thread):       {:.1} ms", t_indep.as_secs_f64() * 1e3);
     println!("block-diagonal (host round trip every iter): {:.1} ms", t_bde.as_secs_f64() * 1e3);
     #[cfg(all(feature = "gpu", feature = "cudss"))]
     println!("block-diagonal (device-resident Jacobian):   {:.1} ms", t_device.as_secs_f64() * 1e3);
+    #[cfg(all(feature = "gpu", feature = "cudss"))]
+    println!("batched (cuDSS uniform batch API):           {:.1} ms", t_batched.as_secs_f64() * 1e3);
     println!();
     println!("host-resident vs independent:");
     println!("  max |dVm| = {worst_vm:.3e}");
@@ -162,12 +189,18 @@ fn main() {
         // actually matters and the one gating pass/fail.
         println!("  iteration-count mismatches: {iter_mismatch_dr}/{nb}  (informational — see solve_batch_block_diagonal_device_resident's doc comment)");
         println!("  non-converged scenarios:    {not_converged_dr}/{nb}");
+        println!("batched vs independent:");
+        println!("  max |dVm| = {worst_vm_b:.3e}");
+        println!("  max |dVa| = {worst_va_b:.3e} rad");
+        println!("  non-converged scenarios:    {not_converged_b}/{nb}");
     }
 
+    #[allow(unused_mut)]
     let mut ok = worst_vm < AGREEMENT_TOL && worst_va < AGREEMENT_TOL && iter_mismatch == 0 && not_converged == 0;
     #[cfg(all(feature = "gpu", feature = "cudss"))]
     {
         ok &= worst_vm_dr < AGREEMENT_TOL && worst_va_dr < AGREEMENT_TOL && not_converged_dr == 0;
+        ok &= worst_vm_b < AGREEMENT_TOL && worst_va_b < AGREEMENT_TOL && not_converged_b == 0;
     }
     println!();
     println!("RESULT: {}", if ok { "PASS" } else { "FAIL" });

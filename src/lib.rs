@@ -4,6 +4,7 @@ pub mod solver;
 pub mod jacobian;
 pub mod batch;
 pub mod bde;
+pub mod device_layout;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod dc;

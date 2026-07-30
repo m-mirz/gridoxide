@@ -7,6 +7,12 @@ mechanical: two `bindgen` shims, an f64 dtype switch, and one honest benchmark.
 Budget roughly **2–4 hours** for the NVIDIA path if nothing surprises you.
 `plans/GPU_PLAN.md` is the design document; this is the operational one.
 
+> **Sessions 1–2 are done.** Phases 0–3 below were executed; the result was a
+> 91x *regression* against the CPU baseline. **If you are starting a session
+> now, go straight to [Session 3](#session-3--the-batched-rewrite) at the
+> bottom** — Phases 1–4 here are kept as the record of what was measured and
+> how, not as the next thing to do.
+
 ---
 
 ## Before you start the clock
@@ -48,8 +54,8 @@ it reports `Environment is ready.`
 about GPUs:
 
 ```bash
-cargo test                 # expect 161 passed, 0 failed
-cargo test --features klu  # expect 189 passed, 0 failed
+cargo test                 # expect 170 passed, 0 failed
+cargo test --features klu  # expect 198 passed, 0 failed
 ```
 
 If those fail, the machine or toolchain is broken and nothing downstream is
@@ -200,3 +206,205 @@ Do Phase 0, Phase 1, and Phase 2. That completes `plans/GPU_PLAN.md` Phase 2
 against its real f64 criterion and gives you a trustworthy CPU baseline — both
 permanent results. Phase 3 is the part that genuinely needs unhurried time, and
 it is much cheaper to start it with a verified environment already behind you.
+
+---
+
+## Session 3 — the batched rewrite
+
+**What happened in sessions 1–2.** Phases 0–4 above were executed. The
+device-resident path works and is correct (voltages agree with independent CPU
+solves to ~1e-12), and it is **91x slower** than the CPU:
+
+| case | batch | GPU device-resident | CPU 30 threads | CPU 1 thread |
+|---|---|---|---|---|
+| case1354pegase | 4,096 | 52.7 solves/s | 4,825 solves/s | 165.2 solves/s |
+| case9241pegase | 256 | 37.0 s | 285.9 solves/s | 19.1 s |
+
+**Why**, per the arithmetic in `plans/GPU_PLAN.md`'s amendment: the serial host
+mismatch loop is ~1.5% of an iteration, the Jacobian upload another ~1.5%, and
+~95% is inside cuDSS refactorizing a single 10-million-row *stacked* matrix.
+Block-diagonal embedding threw away the structure the solver needed.
+
+**What changed in the code, before this session.** All written blind, on a
+machine with no NVIDIA GPU, and as much of it as possible verified by ordinary
+`cargo test`:
+
+- `cuda/gridoxide_kernels.cu` — five hand-written CUDA kernels replacing the
+  CubeCL assembler: assembly, power injections, mismatch + convergence-norm
+  reduction, masked-rhs zeroing, Newton update.
+- `src/device_layout.rs` — **not feature-gated**, 9 unit tests that run
+  anywhere. Every layout decision the kernels depend on (Y-bus CSR, ZIP
+  coefficient flattening, unknown index maps, scenario-major strides, the CSR
+  scatter map) is checked here against the CPU implementation.
+- `src/sparse_cudss.rs::CudssBatchedSystem` — cuDSS's uniform batch API.
+- `src/bde.rs::solve_batch_block_diagonal_batched_device` — the fully
+  device-resident loop. `solve_batch_block_diagonal_device_resident` is kept as
+  the A/B control.
+- `examples/bde_profile.rs` — per-phase CUDA-event timers.
+
+### Before you start the clock
+
+- **cuDSS must be >= 0.4.0** — that is when the batch API landed. Check first;
+  everything else depends on it.
+- `nvcc` is now a **build-time** requirement (it was not before — CubeCL
+  JIT-compiled at runtime). A `-devel` image, not a runtime one, as always.
+- Set `CUDA_ARCH` to match the card: `sm_80` A100 (the default), `sm_90` H100,
+  `sm_70` V100, `sm_89` L40S. A mismatch is a *runtime* "no kernel image is
+  available" error, not a build failure.
+
+### Where the risk actually is
+
+All of the code above was written on a machine with **no NVIDIA GPU and no
+`nvcc`**, so it has never been compiled, let alone run. That shapes where the
+failures will be, and they are not evenly distributed:
+
+| Risk | Where it lands | What it looks like |
+|---|---|---|
+| `nvcc` flags, toolkit discovery, `bindgen` allowlist gaps | Step 1 | build errors in `build.rs`'s `mod cuda` |
+| Kernel launch signature vs. the `extern "C"` declarations in `src/gpu.rs` | Step 1 | link error, or `error code 98/209` at runtime |
+| `cudssMatrixCreateBatchCsr` parameter order / host-vs-device pointer arrays | Step 2 | **wrong numbers, not an error** — most args are `void*` |
+| Kernel indexing or stride typos | Step 3 | a specific test fails by orders of magnitude, not slightly |
+| The hypothesis itself being wrong | Step 4 | everything passes, cuDSS phase doesn't move |
+
+The kernels were syntax-checked with `g++` against a shim header, so expect
+*semantic* problems there rather than parse errors. Two deliberate safety nets:
+`src/device_layout.rs` has 9 tests covering every layout decision the kernels
+depend on and they already pass on CPU, so a Step 3 failure is in the kernel,
+not in the flattening; and `batched_ffi_smoke_test` (Step 2) exists purely to
+turn the silent-garbage row above into a loud failure.
+
+### Ordered steps, with a checkpoint after each
+
+**Step 0 — environment and the bar (~30 min).**
+
+The work described above is on branch **`gpu-nvidia`**. The benchmark cases are
+in a git submodule and the PGM JSON is *generated*, not committed
+(`scripts/bench/.case-cache/` is gitignored) — so a fresh clone has neither
+until you do this:
+
+```bash
+git clone --recurse-submodules https://github.com/m-mirz/gridoxide.git
+cd gridoxide && git checkout gpu-nvidia
+# If you cloned without --recurse-submodules:
+git submodule update --init --recursive
+
+./scripts/gpu-setup.sh --install
+cargo test                 # expect 170 passed, 0 failed
+cargo test --features klu  # expect 198 passed, 0 failed
+
+# The Python extension, which bench_batch.py drives. Install numpy/scipy with
+# plain pip rather than `pip install -e '.[matpower]'`: that would re-run the
+# maturin build without --features python,klu and replace what you just built.
+maturin develop --release --features python,klu
+pip install numpy scipy
+
+# Generate the case. Takes the MATPOWER .m from the submodule, writes PGM JSON.
+mkdir -p scripts/bench/.case-cache
+python3 scripts/bench/matpower_to_pgm.py \
+    tests/data/benchmark-grids/matpower/case9241pegase.m \
+    scripts/bench/.case-cache/case9241pegase.json
+
+python3 scripts/bench/bench_batch.py scripts/bench/.case-cache/case9241pegase.json klu 256
+```
+
+Record **this host's** CPU number. Everything later is measured against it.
+Do not reuse a number from a previous box — the one in
+`scripts/bench/README.md` came from a thermally throttled laptop APU and is a
+lower bound, not a baseline.
+
+Every `<case9241pegase.json>` below means
+`scripts/bench/.case-cache/case9241pegase.json`.
+
+**Step 1 — does anything compile and run? (~45 min).**
+
+```bash
+cargo test --features gpu,cudss --test gpu_assembly_test
+```
+
+This is where `nvcc`, the `bindgen` allowlists and the kernel launch
+signatures all get exercised for the first time. The kernels were syntax-checked
+with `g++` against a shim header (no `nvcc` on the dev machine), so expect
+argument-order and toolkit-discovery problems here rather than logic errors.
+
+*Checkpoint:* all three assembly/injection tests pass.
+
+**Step 2 — is the batch API wired up right? (~20 min).**
+
+```bash
+cargo test --features gpu,cudss --lib sparse_cudss::batched_ffi_smoke_test
+```
+
+Run this **before** anything gridoxide-specific. `cudssMatrixCreateBatchCsr`
+takes most of its arguments as `void*`/`void**`, so a wrong parameter order
+compiles cleanly and returns silent garbage; this solves a known two-system
+batch off the raw bindings and will fail loudly instead. If it fails, diff the
+call against `OUT_DIR/cudss_bindings.rs` and the cuDSS install's own batched
+sample before touching anything else.
+
+*Checkpoint:* the smoke test passes.
+
+**Step 3 — correctness (~30 min).**
+
+```bash
+cargo test --features gpu,cudss --test bde_test
+cargo run --release --features gpu,cudss --example bde_check -- \
+    <case9241pegase.json> 256
+```
+
+`bde_batched_and_stacked_device_paths_agree` is the informative one: the two
+device paths share the assembly kernel but differ in everything else, so a
+disagreement isolates the batched wrapper from anything they have in common.
+`bde_check` must print `PASS`.
+
+*Checkpoint:* voltages agree with independent CPU solves to ~1e-9.
+
+**Step 4 — the moment of truth (~30 min).**
+
+```bash
+cargo run --release --features gpu,cudss --example bde_profile -- \
+    <case9241pegase.json> 256
+```
+
+This prints the CPU baseline, both GPU paths, the speedup ratios, and the
+per-phase breakdown. **The number that decides everything is whether the cuDSS
+phase dropped** relative to the stacked control. If it did not, the hypothesis
+was wrong and nothing after this step matters — stop, copy the numbers out, and
+write up the negative result.
+
+*Checkpoint:* `batched` beats `stacked` by a large factor, or the session ends
+here with a real answer.
+
+**Step 5 — sweeps (~40 min), only if step 4 was positive.**
+
+- Batch size: 64 / 256 / 1024 / 4096. The GPU only wins by having enough
+  independent blocks, and the curve is the finding.
+- Chunking: `bde_profile` prints free device memory. Above the ceiling, split
+  the batch into passes and compare against the CPU at the same *total*
+  scenario count, never per chunk.
+- cuDSS config, measured one at a time as deltas, not assumed:
+  `CUDSS_CONFIG_PIVOT_TYPE = NONE` (power-flow Jacobians rarely need pivoting,
+  and skipping the pivot search matters disproportionately on a GPU),
+  reordering algorithm, and whether
+  `CudssBatchedSystem::set_deterministic(true)` costs anything (it is off by
+  default here, unlike the stacked path).
+- Re-check the iteration-count drift documented on
+  `solve_batch_block_diagonal_device_resident`: does it persist under the
+  batched path? Record the answer either way — it has been open since `ff92b66`.
+
+**Step 6 — before you shut the box down.**
+
+- [ ] Copy every raw number out; you cannot re-run it later for free.
+- [ ] `git push`.
+- [ ] Record GPU model, driver, CUDA version, cuDSS version, `CUDA_ARCH`.
+- [ ] Update `plans/GPU_PLAN.md`'s amendment with what was actually measured,
+      including if the answer is "still slower than 30 EPYC cores" — that is a
+      publishable result and closes the track honestly.
+
+### Honest expectation
+
+To merely *match* the CPU at case1354pegase/4,096, the A100 must do ~4,096
+refactor+solves in ~77 ms — roughly 10x a single EPYC core on tiny-front sparse
+LU. Plausible; not guaranteed. Parity to a few x is the realistic range, and the
+declared success bar is "beats the 30-thread `BatchSolver` at all, at some batch
+size". SABLE's 253x and Fraunhofer's 100x are over *pandapower* and say nothing
+about clearing a 30-thread KLU batch solver.

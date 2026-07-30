@@ -3,8 +3,129 @@ fn main() {
     klu::build();
     #[cfg(feature = "pardiso")]
     pardiso::build();
+    #[cfg(feature = "gpu")]
+    cuda::build();
     #[cfg(feature = "cudss")]
     cudss::build();
+}
+
+/// Compiles `cuda/gridoxide_kernels.cu` with `nvcc` and generates FFI
+/// bindings for the slice of the CUDA runtime `src/gpu.rs` drives directly
+/// (device allocation, stream creation, async copies, timing events).
+///
+/// This replaces the CubeCL dependency that backed `src/gpu.rs` through
+/// commit `ff92b66`. CubeCL JIT-compiled its kernels at *runtime* and needed
+/// no build-time CUDA toolkit; hand-written CUDA needs `nvcc` on the box, and
+/// in exchange gives explicit control over streams, persistent allocations,
+/// and raw device pointers — see the `.cu` file's own header comment and
+/// `plans/GPU_PLAN.md` §5 for what portability that trade gave up.
+///
+/// Discovery follows the `pardiso`/`cudss` precedent: nothing is vendored,
+/// only a system CUDA toolkit is used, located via `CUDA_HOME`/`CUDA_PATH`
+/// (default `/usr/local/cuda`). `CUDA_ARCH` selects the target architecture
+/// and defaults to `sm_80` (A100) — the part `scripts/GPU_RUNBOOK.md` targets.
+/// Set it to match whatever card is actually present (`sm_70` V100,
+/// `sm_89` L40S/4090, `sm_90` H100); a mismatch produces a runtime "no kernel
+/// image is available for execution on the device" error, not a build failure.
+#[cfg(feature = "gpu")]
+mod cuda {
+    use std::env;
+    use std::path::{Path, PathBuf};
+
+    pub fn build() {
+        let cuda_home = PathBuf::from(
+            env::var("CUDA_HOME").or_else(|_| env::var("CUDA_PATH")).unwrap_or_else(|_| "/usr/local/cuda".to_string()),
+        );
+        let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_80".to_string());
+
+        compile_kernels(&cuda_home, &arch);
+        link_cuda_runtime(&cuda_home);
+        generate_bindings(&cuda_home);
+
+        println!("cargo:rerun-if-changed=cuda/gridoxide_kernels.cu");
+        println!("cargo:rerun-if-env-changed=CUDA_ARCH");
+        println!("cargo:rerun-if-env-changed=CUDA_HOME");
+        println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    }
+
+    fn compile_kernels(cuda_home: &Path, arch: &str) {
+        let mut build = cc::Build::new();
+        build.cuda(true).file("cuda/gridoxide_kernels.cu").include(cuda_home.join("include")).flag(&format!("-arch={arch}"));
+
+        // `cc` finds `nvcc` on PATH by default; fall back to the toolkit's own
+        // copy when the toolkit is installed somewhere not on PATH (common on
+        // rented GPU images, where /usr/local/cuda/bin isn't exported for
+        // non-login shells).
+        let nvcc = cuda_home.join("bin/nvcc");
+        if nvcc.is_file() {
+            build.compiler(&nvcc);
+        }
+
+        build.compile("gridoxide_cuda_kernels");
+    }
+
+    /// Links `libcudart`. Duplicated with `mod cudss`'s own link directive
+    /// when both features are on, which is harmless — the linker resolves one
+    /// `-lcudart` either way — and keeps `--features gpu` usable on a box
+    /// that has the CUDA toolkit but not cuDSS (cuDSS is a separate,
+    /// separately-licensed download; see that module).
+    fn link_cuda_runtime(cuda_home: &Path) {
+        let lib_dir = [cuda_home.join("lib64"), cuda_home.join("lib")]
+            .into_iter()
+            .find(|p| p.join("libcudart.so").is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "couldn't find libcudart.so under {}/lib64 or {}/lib — the `gpu` feature needs a \
+                     CUDA toolkit (not just a driver); set CUDA_HOME. See scripts/GPU_RUNBOOK.md Phase 0.",
+                    cuda_home.display(),
+                    cuda_home.display()
+                )
+            });
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=cudart");
+    }
+
+    fn generate_bindings(cuda_home: &Path) {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let include_dir = cuda_home.join("include");
+        // `cuda_runtime_api.h`, not `cuda_runtime.h`: the latter is C++ (it
+        // adds templated overloads like `cudaMalloc<T>`) and would need
+        // `-x c++` plus a lot of noise suppression. The `_api` header is the
+        // plain C surface, which is all `src/gpu.rs` calls.
+        let mut builder = bindgen::Builder::default()
+            .header(include_dir.join("cuda_runtime_api.h").to_str().unwrap())
+            .clang_arg(format!("-I{}", include_dir.display()))
+            .allowlist_function(
+                "cudaMalloc|cudaFree|cudaMemcpy|cudaMemcpyAsync|cudaMemset|cudaMemsetAsync|\
+                 cudaStreamCreateWithFlags|cudaStreamDestroy|cudaStreamSynchronize|\
+                 cudaDeviceSynchronize|cudaGetLastError|cudaGetErrorString|cudaMemGetInfo|\
+                 cudaEventCreate|cudaEventRecord|cudaEventSynchronize|cudaEventElapsedTime|cudaEventDestroy",
+            )
+            .allowlist_type("cudaError.*|cudaMemcpyKind|cudaStream_t|cudaEvent_t")
+            .allowlist_var("cudaSuccess.*|cudaStream.*|cudaEvent.*");
+
+        // Same libclang-without-a-full-clang-toolchain fallback `klu`/
+        // `pardiso`/`cudss` need — see `klu::find_gcc_builtin_include`.
+        if let Some(gcc_builtin_include) = find_gcc_builtin_include() {
+            builder = builder.clang_arg(format!("-I{}", gcc_builtin_include.display()));
+        }
+
+        let bindings = builder.generate().expect("failed to generate CUDA runtime FFI bindings");
+
+        bindings
+            .write_to_file(out_dir.join("cuda_bindings.rs"))
+            .expect("failed to write CUDA runtime FFI bindings");
+    }
+
+    fn find_gcc_builtin_include() -> Option<PathBuf> {
+        let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        path.is_dir().then_some(path)
+    }
 }
 
 /// Compiles the vendored SuiteSparse KLU solver (`vendor/suitesparse/`) and
@@ -308,7 +429,10 @@ mod cudss {
             .allowlist_function("cudss.*")
             .allowlist_type("cudss.*")
             .allowlist_var("CUDSS_.*")
-            .allowlist_function("cudaMalloc|cudaFree|cudaMemcpy|cudaDeviceSynchronize|cudaGetErrorString")
+            .allowlist_function(
+                "cudaMalloc|cudaFree|cudaMemcpy|cudaMemcpyAsync|cudaDeviceSynchronize|\
+                 cudaStreamSynchronize|cudaGetErrorString|cudaMemGetInfo",
+            )
             .allowlist_type("cudaError.*|cudaMemcpyKind|cudaStream_t")
             .allowlist_var("cudaSuccess.*");
 

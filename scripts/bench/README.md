@@ -767,6 +767,18 @@ for real work on a CPU. Quoting these timings as a batching result would be exac
 
 ## 4e. GPU Jacobian assembly (CubeCL) — and what f32 actually costs
 
+> **Historical, as of 2026-07-30.** This section describes the CubeCL assembler
+> and its wgpu/f32 measurements on the local Radeon 780M. That assembler was
+> removed: `src/gpu.rs` is now hand-written CUDA (`cuda/gridoxide_kernels.cu`),
+> NVIDIA-only, f64-only, so **the local-iGPU workflow below no longer runs**.
+> The kernel is preserved at commit `ff92b66`; `plans/GPU_PLAN.md` §5 explains
+> why it was dropped. The f32-vs-f64 analysis further down is still the reason
+> `plans/GPU_PLAN.md` §4.4 rejects f32 assembly, and is worth keeping for that.
+>
+> The current end-to-end comparison — CPU `BatchSolver` vs. the stacked and
+> batched GPU paths, with a per-phase CUDA-event breakdown — is
+> `examples/bde_profile.rs`.
+
 `src/gpu.rs` (feature `gpu`) is the CubeCL transliteration of
 `JacobianPattern::fill`: one thread per (scenario, entry), coalesced writes, no branching beyond
 the eight-way dispatch on entry kind. `plans/GPU_PLAN.md` §3 property 4, "assembly becomes one flat

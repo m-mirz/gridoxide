@@ -31,14 +31,6 @@ num-complex = { version = "0.4.6", features = ["serde"] }
 # parallelism inside faer from oversubscribing the machine, and it means a
 # batch never pays thread-creation cost per call.
 rayon = "1.12"
-# Kernel DSL for `src/gpu.rs`, behind the `gpu` feature. JITs one `#[cube]`
-# function to CUDA, ROCm/HIP and WGSL, which is what lets a single kernel
-# codebase serve both vendor paths (see plans/GPU_PLAN.md §5). Alpha, with
-# documented API churn between minor versions — pinned exactly for that reason.
-# `cuda` is the backend in active use (GPU_RUNBOOK.md Phase 2, NVIDIA session);
-# `wgpu` stays enabled too so the portable/AMD-iGPU dev path in `plans/
-# GPU_PLAN.md` §5 still builds without a Cargo.toml edit.
-cubecl = { version = "=0.10.0", features = ["wgpu", "cuda"], optional = true }
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -97,16 +89,23 @@ pardiso = ["dep:bindgen"]
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]
-# Builds `src/gpu.rs`: the CubeCL Jacobian-assembly kernel (plans/GPU_PLAN.md
-# Phase 2). Opt-in because CubeCL pulls in a large graphics/compute dependency
-# tree and needs a working GPU driver at *runtime*.
+# Builds `src/gpu.rs` and `cuda/gridoxide_kernels.cu`: gridoxide's batched
+# power-flow CUDA kernels (Jacobian assembly, power injections, mismatch,
+# Newton update). **NVIDIA-only, and deliberately so** — this replaced the
+# CubeCL kernel DSL, which JIT-compiled one `#[cube]` function to CUDA,
+# ROCm/HIP *and* WGSL, at commit ff92b66. The portable kernel is still in git
+# history at that commit and `plans/GPU_PLAN.md` §5 points at it; what buying
+# back portability would cost is documented there. The trade was made for
+# three things CubeCL's runtime did not expose: explicit stream control,
+# persistent device allocations (it allocated fresh buffers per launch), and
+# stable raw device pointers to bind cuDSS's batched matrix against.
 #
-# `DefaultRuntime` (src/gpu.rs) targets CubeCL's CUDA backend, in f64 — see
-# scripts/GPU_RUNBOOK.md Phase 2. `GpuAssembler` stays generic over `R:
-# Runtime`, so the portable wgpu backend (WGSL, no f64 — f32-only, ~1e-5
-# tolerance) is still reachable by instantiating it with `cubecl::wgpu::
-# WgpuRuntime` directly, for AMD-iGPU development per §5.
-gpu = ["dep:cubecl"]
+# Needs a CUDA **toolkit** at build time (`nvcc` plus `cuda_runtime.h`, not
+# just a driver), discovered via `CUDA_HOME`/`CUDA_PATH`, and `libclang` for
+# `bindgen`. `CUDA_ARCH` selects the target architecture, default `sm_80`
+# (A100) — see `build.rs`'s `mod cuda`. Needs a CUDA-capable GPU at runtime;
+# not built or tested in CI.
+gpu = ["dep:cc", "dep:bindgen"]
 # Builds `src/sparse_cudss.rs`: a sixth, opt-in `LinearSolver` backed by
 # NVIDIA cuDSS — the device-resident sparse direct solver
 # `plans/GPU_PLAN.md` Phase 3's block-diagonal-embedding path (`src/bde.rs`)
@@ -211,3 +210,9 @@ required-features = ["cgmes"]
 name = "gpu_assembly_check"
 path = "examples/gpu_assembly_check.rs"
 required-features = ["gpu"]
+
+# No `required-features`: the CPU baseline half runs anywhere, and printing
+# "built without --features gpu,cudss" is more useful than refusing to build.
+[[example]]
+name = "bde_profile"
+path = "examples/bde_profile.rs"

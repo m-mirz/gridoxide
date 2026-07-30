@@ -308,3 +308,97 @@ fn bde_device_resident_matches_independent() {
         }
     }
 }
+
+/// **The batched path's correctness gate.** Same claim as
+/// `bde_device_resident_matches_independent`, against
+/// `solve_batch_block_diagonal_batched_device` — the path that replaces the
+/// stacked block-diagonal matrix with cuDSS's uniform batch API and moves the
+/// mismatch, convergence norm and Newton update on-device.
+///
+/// This is a much larger surface than the control path: the right-hand side
+/// is now built by `go_mismatch` (including the ZIP model, evaluated from
+/// `device_layout::ZipCoeffs`' flattened coefficients rather than a per-bus
+/// term list), `p_calc`/`q_calc` by `go_power_injections`, and the voltage
+/// update by `go_apply_update` — none of which the CPU comparison paths
+/// touch. An error in any of them shows up here as a wrong voltage or a
+/// non-converged scenario.
+///
+/// The batch mixes an easy scenario with hard ones so that identity masking
+/// is genuinely exercised, and asserts voltage agreement rather than
+/// iteration-count parity, for the same reason the control path does.
+#[cfg(all(feature = "gpu", feature = "cudss"))]
+#[test]
+fn bde_batched_device_matches_independent() {
+    use gridoxide::bde::solve_batch_block_diagonal_batched_device;
+
+    let (template, ybus) = load_network();
+    let mut scs = scenarios(&template, 12);
+    scs[0] = Scenario::new(vec![BusOverride::new(2).p(template[2].p_spec * 0.01).q(0.0)]);
+
+    let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 1).expect("build pool");
+    let independent = batch.solve(&template, &ybus, &scs, 1e-8, 40).expect("independent solves");
+
+    let embedded = solve_batch_block_diagonal_batched_device(&template, &ybus, &scs, 1e-8, 40);
+
+    assert_eq!(embedded.len(), scs.len());
+    for (k, (emb, indep)) in embedded.iter().zip(&independent).enumerate() {
+        assert_eq!(emb.stats.status, SolveStatus::Converged, "batched: scenario {k} status");
+        assert_eq!(indep.stats.status, SolveStatus::Converged, "batched: scenario {k} reference status");
+        for (i, (e, r)) in emb.buses.iter().zip(&indep.buses).enumerate() {
+            assert!(
+                (e.voltage_mag - r.voltage_mag).abs() < 1e-6,
+                "batched: scenario {k} bus {i} |V|: {} vs {}",
+                e.voltage_mag,
+                r.voltage_mag
+            );
+            assert!(
+                (e.voltage_ang - r.voltage_ang).abs() < 1e-6,
+                "batched: scenario {k} bus {i} angle: {} vs {}",
+                e.voltage_ang,
+                r.voltage_ang
+            );
+        }
+    }
+}
+
+/// The batched and stacked device paths must agree with *each other*, not
+/// just each with the CPU.
+///
+/// The two share the assembly kernel and the scatter map but differ in
+/// everything else — one analyzes a `B*blk`-row matrix, the other a
+/// `blk`-row one; one builds its right-hand side on the host, the other in a
+/// kernel. Comparing them directly is what isolates a bug in the batched
+/// wrapper (a wrong `cudssMatrixCreateBatchCsr` argument order, a bad stride
+/// in the pointer arrays) from a bug in something they share, which a
+/// CPU-only comparison cannot distinguish.
+#[cfg(all(feature = "gpu", feature = "cudss"))]
+#[test]
+fn bde_batched_and_stacked_device_paths_agree() {
+    use gridoxide::bde::{solve_batch_block_diagonal_batched_device, solve_batch_block_diagonal_device_resident};
+
+    let (template, ybus) = load_network();
+    let scs = scenarios(&template, 8);
+
+    let stacked = solve_batch_block_diagonal_device_resident(&template, &ybus, &scs, 1e-8, 40);
+    let batched = solve_batch_block_diagonal_batched_device(&template, &ybus, &scs, 1e-8, 40);
+
+    assert_eq!(stacked.len(), batched.len());
+    for (k, (a, b)) in stacked.iter().zip(&batched).enumerate() {
+        assert_eq!(a.stats.status, SolveStatus::Converged, "stacked: scenario {k}");
+        assert_eq!(b.stats.status, SolveStatus::Converged, "batched: scenario {k}");
+        for (i, (x, y)) in a.buses.iter().zip(&b.buses).enumerate() {
+            assert!(
+                (x.voltage_mag - y.voltage_mag).abs() < 1e-8,
+                "scenario {k} bus {i} |V|: stacked {} vs batched {}",
+                x.voltage_mag,
+                y.voltage_mag
+            );
+            assert!(
+                (x.voltage_ang - y.voltage_ang).abs() < 1e-8,
+                "scenario {k} bus {i} angle: stacked {} vs batched {}",
+                x.voltage_ang,
+                y.voltage_ang
+            );
+        }
+    }
+}
