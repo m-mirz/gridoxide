@@ -211,6 +211,24 @@ it is much cheaper to start it with a verified environment already behind you.
 
 ## Session 3 — the batched rewrite
 
+### Read these first — they are where the answers are
+
+This file is the *procedure*. The **reasoning** lives in four places, and when a
+step below fails, the fix is almost always in one of them rather than in this
+checklist. Read them before starting the clock, not after something breaks:
+
+| Read | For |
+|---|---|
+| [`plans/GPU_PLAN.md`](../plans/GPU_PLAN.md) — the amendment at the top | Why the last attempt lost by 91x, and which three claims in the original plan were wrong. Everything else here follows from it. |
+| [`src/sparse_cudss.rs`](../src/sparse_cudss.rs) — `CudssBatchedSystem`'s doc comment | What the uniform batch API does differently, why the pointer arrays are members and not temporaries, and the "verify before trusting" note on `cudssMatrixCreateBatchCsr`'s signature. **Step 2 fails here.** |
+| [`src/bde.rs`](../src/bde.rs) — `solve_batch_block_diagonal_batched_device`'s doc comment | The batched-vs-stacked comparison table, and why the loop keeps its convergence bookkeeping on the host. |
+| [`src/device_layout.rs`](../src/device_layout.rs) — module doc | Every layout decision the kernels depend on, with tests that already pass on CPU. **If a Step 3 test fails, the bug is in the kernel, not here.** |
+
+Also worth knowing before Step 1: [`cuda/gridoxide_kernels.cu`](../cuda/gridoxide_kernels.cu)'s
+header comment explains the layout conventions every kernel shares
+(`scenario * n_buses + bus`, `scenario * blk + r`, `scenario * nnz + scatter[e]`),
+and each kernel names the Rust function it was transliterated from.
+
 **What happened in sessions 1–2.** Phases 0–4 above were executed. The
 device-resident path works and is correct (voltages agree with independent CPU
 solves to ~1e-12), and it is **91x slower** than the CPU:
