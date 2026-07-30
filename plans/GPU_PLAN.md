@@ -182,6 +182,129 @@ Status: **proposal**, not implemented. Written 2026-07-25 against `d9b8799`.
 > that conclusion; everything else diagnosed this session (assembly,
 > injections, Newton update, host sync) is already <5% of wall time and not
 > worth further optimization until analysis-sharing is solved.
+>
+> ## Amendment 3, 2026-07-30 — what the published numbers actually mean, and a fork
+>
+> Still Session 3, after the A100 work above. Read closely rather than assumed:
+> §2's "100–250× over CPU baselines" and the short version's same claim needed
+> checking against what those baselines actually were, now that this repo has
+> its own hard numbers to compare against. Three papers, read in full or in
+> detail (not abstracts):
+>
+> **SABLE** ([arXiv:2606.07099](https://arxiv.org/html/2606.07099)) reports
+> 253× over pandapower at batch 256 on `case1354pegase` — but its own
+> methodology is cuDSS + block-diagonal embedding, i.e. the exact approach
+> this document's Amendment 1 called "the trap" and the exact approach this
+> session struggled to get working. Ran the same benchmark point ourselves:
+> `case1354pegase`, batch 256, `klu` 30-thread CPU gets **2,767 solves/s**;
+> our GPU stacked control (the SABLE-style path) gets **116.7 solves/s** —
+> `pandapower` on the same case measured **14.3 solves/s** (installed and
+> timed on this box: `pp.runpp`, warm, 70.2ms/solve). So our own admittedly
+> broken GPU path is already ~8× over pandapower; the 253× gap to SABLE's
+> number is almost entirely "pandapower is a slow, single-threaded, unbatched
+> baseline," not "SABLE solved the analysis-sharing problem we didn't."
+>
+> **Fraunhofer** ([arXiv:2101.02270](https://arxiv.org/pdf/2101.02270)) is
+> more useful and does **not** use cuDSS at all — hand-written batched
+> Gilbert-Peierls LU *refactorization*: AMD pre-ordering done once via KLU on
+> CPU, then only the numeric refactorization step runs batched on GPU,
+> reusing one shared permutation for the whole batch. Never touches a
+> vendor batch API, so never hits the `NOT_SUPPORTED` wall this session did.
+> Their own Table 1 (`case9241pegase`, 10,000 PFs, read directly, not the
+> abstract's headline) gives the real comparison:
+>
+> | baseline | solves/s | vs. pandapower |
+> |---|---|---|
+> | pandapower | 5.6 | 1× |
+> | their 12-thread CPU (SMT+SIMD) | 257 | 46× |
+> | their 1-GPU (GTX 1080) | 938 | 168× |
+> | their 2-GPU | 1,533 | 275× |
+>
+> Their **real GPU-over-their-own-strong-CPU speedup is ~3.7–6×**, not the
+> ">100×" headline, which is explicitly against pandapower. This is the
+> realistic ceiling for hand-rolled batched AC refactorization done well —
+> and it sidesteps the whole `UBATCH_SIZE` correctness bug by not depending
+> on cuDSS's batch machinery at all. If AC-on-GPU is pursued further, this
+> architecture — not cuDSS's uniform batch API — is the one with a working
+> reference implementation and honest published numbers.
+>
+> **ToOp** ([github.com/eliagroup/ToOp](https://github.com/eliagroup/ToOp),
+> Elia Group's open-source topology optimizer) does not attempt batched AC
+> on GPU at all — its GPU acceleration is scoped entirely to a **DC**
+> load-flow layer (PTDF/LODF/BSDF/MODF), with AC used only as a serial,
+> unbatched validation pass on the shortlist that survives DC screening.
+> The companion paper, [Westerbeck et al.,
+> "Accelerated DC loadflow solver for topology optimization"
+> (arXiv:2501.17529)](https://arxiv.org/pdf/2501.17529), has real
+> apples-to-apples numbers (Table II) on `pegase9421` — essentially this
+> repo's own `case9241pegase`:
+>
+> | solver | loadflows/s |
+> |---|---|
+> | pandapower (96 CPU) | 107 |
+> | their DC/PTDF solver, 96 CPU | 1,360,000 |
+> | their DC/PTDF solver, 1×H100 | 13,800,000 |
+> | their DC/PTDF solver, 8×H100 | 99,400,000 |
+>
+> Two separable multipliers:
+> 1. **DC vs. AC, same hardware: ~4,900×** (their 96-core DC number over
+>    pandapower's 96-core AC number; ~1,360,000/278 ≈ 4,900× over *this
+>    repo's own* 30-thread AC `BatchSolver` on the same case). This is
+>    **pure algorithm, not hardware.** DC power flow is linear (`P = Bθ`):
+>    factorize `B` once per topology, and every subsequent injection change
+>    is a matrix-vector multiply, every branch outage is a closed-form
+>    rank-1 update (LODF, a Woodbury-identity consequence), every busbar
+>    split is another closed-form low-rank update (BSDF). **Nothing is ever
+>    refactorized.** AC Newton-Raphson cannot do this — the Jacobian is
+>    value-dependent (differs per scenario, evolves per iteration) and needs
+>    fresh refactorization several times per scenario to converge, which is
+>    the entire source of this session's difficulty.
+> 2. **GPU vs. CPU, same DC algorithm: only ~10×** on this specific grid
+>    (1.36M → 13.8M/s), far below the 100–500× the same paper sees on
+>    smaller grids — their own explanation is that `pegase9421`'s PTDF
+>    matrix (16,049 monitored branches × 9,241 nodes) is large enough to be
+>    memory-bandwidth-bound on GPU rather than compute-bound. 8×H100 scales
+>    the 1×H100 number near-linearly (6.2–7.7×), since there is no
+>    cross-device communication during solving.
+> 3. The trade for all of this: DC gives **errors up to 10% against full AC**
+>    and **no voltage magnitudes at all** — a different, approximate tool,
+>    not a faster version of what this repo does today.
+>
+> **The reframe this amendment is recording:** §2's "100–250× over CPU
+> baselines" was calibrated against exactly the kind of baseline this
+> section shows to be weak (pandapower, unbatched). None of the three
+> projects surveyed here demonstrates "batched, accurate, GPU-beats-a-strong-
+> CPU-solver AC power flow" by a wide margin — the two that attempt it
+> (SABLE, Fraunhofer) get honest, modest wins (Fraunhofer: ~3.7–6×; this
+> repo, with the threading fix: 2.4–2.7× over its own stacked control, still
+> short of CPU) once a strong CPU baseline is the comparison point, and the
+> one built by an actual TSO for production use (ToOp) sidesteps AC-on-GPU
+> entirely rather than solve it. This is evidence the problem is genuinely
+> hard industry-wide, not a sign this session did anything wrong.
+>
+> **Fork for the next session**, not decided here:
+> - **(a) Keep pushing AC-on-GPU.** Either resolve the `UBATCH_SIZE`
+>   correctness bug (needs NVIDIA's complete sample source, see Amendment 2's
+>   update) or port Fraunhofer's hand-rolled batched-refactorization
+>   architecture (no cuDSS batch API dependency; this repo already has the
+>   two pieces it needs — `klu_native`'s own AMD/symbolic factorization, and
+>   the CUDA kernel + `device_layout.rs` scatter-map infrastructure).
+>   Realistic ceiling: ~3–6× over the 30-thread CPU `BatchSolver`, matching
+>   Fraunhofer's own honest numbers.
+> - **(b) Add DC/PTDF as a new, additive capability** — fast approximate
+>   screening (contingency analysis, topology search) backed by this
+>   repo's existing accurate AC solver as the validation step on survivors,
+>   mirroring ToOp's own architecture. This is where the evidence says GPUs
+>   pay off by orders of magnitude, but it is a genuinely different tool
+>   (different math, different accuracy semantics, no voltage magnitudes) —
+>   additive to gridoxide's scope, not an extension of the existing AC
+>   Newton-Raphson code, and only worth building if fast approximate
+>   screening is a use case worth having alongside gridoxide's core
+>   accuracy commitment.
+> - **(c) Stop here.** The CPU `BatchSolver` is already fast (233–2,767
+>   solves/s depending on case size, this session's own measurements) and
+>   gridoxide's stated value proposition is accuracy, not batch throughput.
+>   Nothing above obligates further GPU investment.
 
 This document answers: *how much of the AC power flow can realistically move to the
 GPU, on which stack, and in what order?* It covers CUDA, cuda-oxide, JAX, AMD/ROCm,
@@ -623,6 +746,13 @@ option I (PyTorch + cuDSS, SABLE's stack) from "maybe" to "primary."
   [arXiv:2606.07099](https://arxiv.org/html/2606.07099)
 - *JAX-Based Batched AC Power Flow for GPU Acceleration and AI Ecosystem Integration* —
   [arXiv:2605.14103](https://arxiv.org/html/2605.14103)
+- Westerbeck et al., *Accelerated DC loadflow solver for topology optimization*
+  (Elia Group) — [arXiv:2501.17529](https://arxiv.org/pdf/2501.17529) — read in
+  full for Amendment 3; the real numbers behind "DC on GPU is dramatically
+  faster, and why."
+- [eliagroup/ToOp](https://github.com/eliagroup/ToOp) — Elia Group's open-source
+  topology optimizer; GPU-accelerated DC layer, serial AC validation pass, no
+  batched-AC-on-GPU attempt
 - [NVIDIA cuDSS](https://docs.nvidia.com/cuda/cudss) — direct sparse solver; replaces
   cuSOLVERSp/cuSOLVERRf; uniform and non-uniform batching since 0.4.0
 - [rocSOLVER refactorization and direct solvers](https://rocm.docs.amd.com/projects/rocSOLVER/en/develop/api/refact.html)
