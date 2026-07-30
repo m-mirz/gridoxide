@@ -133,6 +133,47 @@ Status: **proposal**, not implemented. Written 2026-07-25 against `d9b8799`.
 > (`sparse_cudss::batched_ffi_smoke_test::ubatch_probe*`) were not committed;
 > reproduce from this description if picking the thread back up.
 >
+> **Update, same session: found the right shape, hit a correctness bug in
+> it.** NVIDIA's own sample repo (`NVIDIA/CUDALibrarySamples`,
+> `cuDSS/simple_uniform_batch/simple_uniform_batch.cpp`) resolves *why* every
+> combination above failed: `CUDSS_CONFIG_UBATCH_SIZE` is **not** meant to be
+> combined with `cudssMatrixCreateBatchCsr`/`CreateBatchDn` at all — those
+> are the *general/non-uniform* batch API (a different sample,
+> `simple_batch`), and pairing them with `UBATCH_SIZE` is exactly what
+> `NOT_SUPPORTED` was rejecting. The real shape, confirmed against quoted
+> excerpts of the sample (full verbatim reproduction declined on licensing
+> grounds, so this is reconstructed from targeted quotes, not the complete
+> file):
+> 1. Create **one plain, non-batch** matrix via `cudssMatrixCreateCsr`/
+>    `cudssMatrixCreateDn` — single device pointers, not
+>    `*const *const c_void` arrays — with `A`'s values pointer set to the
+>    *start* of a `B*nnz`-sized contiguous buffer (`csr_values_d`) and `b`/`x`
+>    similarly sized `B*n`.
+> 2. `cudssConfigSet(CUDSS_CONFIG_UBATCH_SIZE, B)`, once.
+> 3. `cudssExecute(PHASE_ANALYSIS)` — once, before `UBATCH_INDEX` is ever
+>    touched (it stays at its default `-1` for this call).
+> 4. Loop `i in 0..B`: `cudssConfigSet(CUDSS_CONFIG_UBATCH_INDEX, i)` →
+>    `cudssMatrixSetValues(A, csr_values_d + i*nnz)` (and similarly for `b`)
+>    → `cudssExecute(PHASE_FACTORIZATION)` → `cudssExecute(PHASE_SOLVE)`,
+>    reading `x`'s result at `x_values_d + i*n` afterward.
+>
+> Implemented faithfully against every one of the above (verified structural
+> match: allocation sizes `B*nnz`/`B*n`, no calls missing between matrix
+> creation and `UBATCH_SIZE`, `UBATCH_INDEX` untouched before `ANALYSIS`,
+> single `cudssDataCreate`, `x` sized and read back as one full `B*n` buffer)
+> on the toy 2-system problem. **Index 0 comes back exactly correct; index 1
+> comes back numerically wrong** (`[2.714285714285714, 0.5714285714285715]`
+> vs. the correct `[1, 2]`) — consistently, across every variant tried:
+> `FACTORIZATION` vs. `REFACTORIZATION` for the second index, with and
+> without re-running `ANALYSIS` per index, with and without an explicit
+> `SetValues` call on `x`. All `cudssConfigSet`/`cudssMatrixCreateCsr`/
+> `cudssExecute` calls return `CUDSS_STATUS_SUCCESS` throughout — this is a
+> silent-wrong-numbers bug, not a loud error, and it did not yield to the
+> hypotheses above. The next session should get NVIDIA's actual sample file
+> (not excerpts) onto the box before touching this again — likely something
+> ordering- or state-related in how `cudssData_t` persists numeric state
+> across `UBATCH_INDEX` switches that isn't visible from partial quotes.
+>
 > **Bottom line:** the batched device-resident path is now correct, ~2.4–2.7x
 > faster than the stacked control at every batch size tried, and the
 > threading fix is a genuine, permanent, committed win — but it still does
