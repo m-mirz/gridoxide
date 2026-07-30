@@ -293,6 +293,20 @@ turn the silent-garbage row above into a loud failure.
 
 ### Ordered steps, with a checkpoint after each
 
+> **Session 3 has now been run once**, on a rented A100. Read
+> `plans/GPU_PLAN.md`'s "Amendment 2" before starting a follow-up session —
+> it has the two FFI bugs that were fixed (both loud compile errors, not
+> silent), the real fix that mattered (cuDSS defaults to single-threaded host
+> execution; `sparse_cudss::enable_host_threading` is a ~3.2x win, already
+> committed), the batch-size sweep result (the CPU gap *widens* with batch
+> size, not closes), and the one open lead (`CUDSS_CONFIG_UBATCH_SIZE`
+> — accepted by `cudssConfigSet` but every combination tried returns
+> `NOT_SUPPORTED` at `PHASE_ANALYSIS`; needs NVIDIA's own sample code, not
+> more guessing). `scripts/gpu-setup.sh` also does not register cuDSS's lib
+> directory with `ldconfig` — `build.rs` now works around this via an
+> embedded rpath, but if you hit `libcudss.so.0: cannot open shared object
+> file` anyway, that gap is why.
+
 **Step 0 — environment and the bar (~30 min).**
 
 The work described above is on branch **`gpu-nvidia`**. The benchmark cases are

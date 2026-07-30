@@ -52,13 +52,23 @@ mod cuda {
         let mut build = cc::Build::new();
         build.cuda(true).file("cuda/gridoxide_kernels.cu").include(cuda_home.join("include")).flag(&format!("-arch={arch}"));
 
-        // `cc` finds `nvcc` on PATH by default; fall back to the toolkit's own
-        // copy when the toolkit is installed somewhere not on PATH (common on
-        // rented GPU images, where /usr/local/cuda/bin isn't exported for
-        // non-login shells).
+        // `cc`'s CUDA mode resolves the nvcc binary itself via the `NVCC` env
+        // var (falling back to bare `nvcc` on PATH) and treats
+        // `Build::compiler()` as the *host* compiler that nvcc wraps via
+        // `-ccbin` — passing our nvcc path to `.compiler()` bypassed that
+        // resolution entirely, which also silently disabled the `-Xcompiler`
+        // wrapping cc-rs applies to GNU-family flags. nvcc then saw raw
+        // `-ffunction-sections` etc. and rejected them outright. Route the
+        // "toolkit not on PATH" fallback (common on rented GPU images, where
+        // /usr/local/cuda/bin isn't exported for non-login shells) through
+        // the env var instead, so cc-rs's cuda-aware branch stays in play.
         let nvcc = cuda_home.join("bin/nvcc");
         if nvcc.is_file() {
-            build.compiler(&nvcc);
+            // SAFETY: build scripts run single-threaded, before any of the
+            // crate's own code executes.
+            unsafe {
+                env::set_var("NVCC", &nvcc);
+            }
         }
 
         build.compile("gridoxide_cuda_kernels");
@@ -374,6 +384,13 @@ mod cudss {
 
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
         println!("cargo:rustc-link-lib=dylib=cudss");
+        // Embedded so the binary finds libcudss.so (and the optional
+        // threading-layer .so beside it — see `sparse_cudss.rs`'s
+        // `cudssSetThreadingLayer` call) without relying on the box having
+        // registered cuDSS's versioned lib directory with `ldconfig`, which
+        // the apt package (`libcudss0-cuda-13`) does not do itself.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+        println!("cargo:rustc-env=CUDSS_LIB_DIR={}", lib_dir.display());
 
         let cuda_lib_dir = [cuda_home.join("lib64"), cuda_home.join("lib")]
             .into_iter()

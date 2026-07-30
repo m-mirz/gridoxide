@@ -65,6 +65,7 @@ use bindings::{
     cudssCreate, cudssData_t, cudssDataCreate, cudssDataDestroy, cudssDestroy,
     cudssExecute, cudssHandle_t, cudssMatrixCreateBatchCsr, cudssMatrixCreateBatchDn, cudssMatrixCreateCsr,
     cudssMatrixCreateDn, cudssMatrixDestroy, cudssMatrixSetBatchValues, cudssMatrixSetValues, cudssSetStream,
+    cudssSetThreadingLayer,
     cudssMatrix_t, cudssStatus_t, cudssStatus_t_CUDSS_STATUS_SUCCESS as CUDSS_SUCCESS,
     cudssDataType_t_CUDSS_R_32I as CUDSS_R_32I, cudssDataType_t_CUDSS_R_64F as CUDSS_R_64F,
     cudssIndexBase_t_CUDSS_BASE_ZERO as CUDSS_BASE_ZERO, cudssLayout_t_CUDSS_LAYOUT_COL_MAJOR as CUDSS_LAYOUT_COL_MAJOR,
@@ -138,6 +139,38 @@ unsafe fn upload<T>(dst: *mut c_void, src: &[T]) -> Option<()> {
 unsafe fn download<T>(dst: &mut [T], src: *mut c_void) -> Option<()> {
     let bytes = std::mem::size_of_val(dst);
     cuda_check(unsafe { cudaMemcpy(dst.as_mut_ptr() as *mut c_void, src, bytes, D2H) }, "cudaMemcpy D2H")
+}
+
+/// Opts into cuDSS's multithreaded host execution, used for symbolic
+/// analysis (reordering + symbolic factorization) on the CPU before any
+/// device work starts. Without this, `GPU_RUNBOOK.md` Session 3 measured
+/// `PHASE_ANALYSIS` on `case9241pegase` (17,038-unknown blocks) running at
+/// ~137% CPU regardless of batch size — effectively single-threaded — which
+/// made analysis the dominant cost at every batch size tried (~95% of wall
+/// time at batch 256, scaling near-linearly with batch count rather than
+/// being shared). Loading `libcudss_mtlayer_gomp.so` (shipped alongside
+/// `libcudss.so` by the apt package, an OpenMP-backed threading layer cuDSS
+/// does not load unless asked) cut analysis time by ~3.2x on a 30-core host,
+/// with no change to the converged answer.
+///
+/// Deliberately non-fatal: this is a performance opt-in, not a correctness
+/// requirement, and older cuDSS installs or non-apt layouts may not ship
+/// this library beside `libcudss.so`. A failure here just leaves cuDSS at
+/// its single-threaded default.
+fn enable_host_threading(handle: cudssHandle_t) {
+    let lib_dir = std::path::Path::new(env!("CUDSS_LIB_DIR"));
+    let mtlayer = lib_dir.join("libcudss_mtlayer_gomp.so");
+    if !mtlayer.is_file() {
+        eprintln!("cudss: no {} beside libcudss.so, leaving host execution single-threaded", mtlayer.display());
+        return;
+    }
+    let Ok(path) = std::ffi::CString::new(mtlayer.to_string_lossy().into_owned()) else {
+        return;
+    };
+    let status = unsafe { cudssSetThreadingLayer(handle, path.as_ptr()) };
+    if status != CUDSS_SUCCESS {
+        eprintln!("cudss: cudssSetThreadingLayer({}) failed: status {status}", mtlayer.display());
+    }
 }
 
 /// A real, general (non-symmetric) sparse system solved on-device via cuDSS,
@@ -262,6 +295,7 @@ impl CudssRealSystem {
 
         let mut handle: cudssHandle_t = ptr::null_mut();
         cudss_check(unsafe { cudssCreate(&mut handle) }, "cudssCreate")?;
+        enable_host_threading(handle);
         let mut config: cudssConfig_t = ptr::null_mut();
         cudss_check(unsafe { cudssConfigCreate(&mut config) }, "cudssConfigCreate")?;
         // Enabled defensively: this crate's whole value proposition is
@@ -576,6 +610,7 @@ impl CudssBatchedSystem {
         };
 
         cudss_check(unsafe { cudssCreate(&mut sys.handle) }, "cudssCreate")?;
+        enable_host_threading(sys.handle);
         sys.set_stream(stream)?;
         cudss_check(unsafe { cudssConfigCreate(&mut sys.config) }, "cudssConfigCreate")?;
         cudss_check(unsafe { cudssDataCreate(sys.handle, &mut sys.data) }, "cudssDataCreate")?;
@@ -595,12 +630,16 @@ impl CudssBatchedSystem {
                     sys.nrows.as_mut_ptr() as *mut c_void,
                     sys.ncols.as_mut_ptr() as *mut c_void,
                     sys.nnz_per_block.as_mut_ptr() as *mut c_void,
-                    sys.row_start.as_mut_ptr(),
+                    sys.row_start.as_ptr() as *const *const c_void,
                     // `rowEnd = NULL` selects the ordinary 3-array CSR form,
                     // where row `r` ends where row `r + 1` starts.
-                    ptr::null_mut(),
-                    sys.col_indices.as_mut_ptr(),
-                    sys.a_values.as_mut_ptr(),
+                    ptr::null(),
+                    sys.col_indices.as_ptr() as *const *const c_void,
+                    sys.a_values.as_ptr() as *const *const c_void,
+                    // offsetType (rowStart/rowEnd) and indexType (colIndices)
+                    // are separate parameters in the real 0.8.0 signature —
+                    // both 32-bit, matching `d_row_ptr`/`d_col_idx`.
+                    CUDSS_R_32I,
                     CUDSS_R_32I,
                     CUDSS_R_64F,
                     CUDSS_MTYPE_GENERAL,
@@ -620,7 +659,7 @@ impl CudssBatchedSystem {
                     // One right-hand side per system.
                     sys.rhs_ncols.as_mut_ptr() as *mut c_void,
                     sys.ld.as_mut_ptr() as *mut c_void,
-                    sys.b_values.as_mut_ptr(),
+                    sys.b_values.as_ptr() as *const *const c_void,
                     CUDSS_R_32I,
                     CUDSS_R_64F,
                     CUDSS_LAYOUT_COL_MAJOR,
@@ -636,7 +675,7 @@ impl CudssBatchedSystem {
                     sys.nrows.as_mut_ptr() as *mut c_void,
                     sys.rhs_ncols.as_mut_ptr() as *mut c_void,
                     sys.ld.as_mut_ptr() as *mut c_void,
-                    sys.x_values.as_mut_ptr(),
+                    sys.x_values.as_ptr() as *const *const c_void,
                     CUDSS_R_32I,
                     CUDSS_R_64F,
                     CUDSS_LAYOUT_COL_MAJOR,
@@ -695,7 +734,7 @@ impl CudssBatchedSystem {
         // this is the documented way to tell cuDSS its contents changed. The
         // pointers themselves never move, so it is cheap.
         cudss_check(
-            unsafe { cudssMatrixSetBatchValues(self.matrix_a, self.a_values.as_mut_ptr()) },
+            unsafe { cudssMatrixSetBatchValues(self.matrix_a, self.a_values.as_ptr() as *const *const c_void) },
             "cudssMatrixSetBatchValues",
         )?;
         cudss_check(self.execute(PHASE_REFACTORIZATION), "batched refactorization")?;
@@ -941,13 +980,13 @@ mod batched_ffi_smoke_test {
             let mut nnz: [i32; B] = [4, 4];
             let mut ld: [i32; B] = [2, 2];
             let mut rhs_ncols: [i32; B] = [1, 1];
-            let mut row_start: [*mut c_void; B] = [d_row_ptr, d_row_ptr];
-            let mut col_indices: [*mut c_void; B] = [d_col_idx, d_col_idx];
-            let mut a_values: [*mut c_void; B] =
+            let row_start: [*mut c_void; B] = [d_row_ptr, d_row_ptr];
+            let col_indices: [*mut c_void; B] = [d_col_idx, d_col_idx];
+            let a_values: [*mut c_void; B] =
                 [d_values, (d_values as *mut u8).add(4 * size_of::<f64>()) as *mut c_void];
-            let mut b_values: [*mut c_void; B] =
+            let b_values: [*mut c_void; B] =
                 [d_rhs, (d_rhs as *mut u8).add(2 * size_of::<f64>()) as *mut c_void];
-            let mut x_values: [*mut c_void; B] =
+            let x_values: [*mut c_void; B] =
                 [d_x, (d_x as *mut u8).add(2 * size_of::<f64>()) as *mut c_void];
 
             let mut handle: cudssHandle_t = ptr::null_mut();
@@ -965,10 +1004,11 @@ mod batched_ffi_smoke_test {
                     nrows.as_mut_ptr() as *mut c_void,
                     ncols.as_mut_ptr() as *mut c_void,
                     nnz.as_mut_ptr() as *mut c_void,
-                    row_start.as_mut_ptr(),
-                    ptr::null_mut(),
-                    col_indices.as_mut_ptr(),
-                    a_values.as_mut_ptr(),
+                    row_start.as_ptr() as *const *const c_void,
+                    ptr::null(),
+                    col_indices.as_ptr() as *const *const c_void,
+                    a_values.as_ptr() as *const *const c_void,
+                    cudssDataType_t_CUDSS_R_32I,
                     cudssDataType_t_CUDSS_R_32I,
                     cudssDataType_t_CUDSS_R_64F,
                     cudssMatrixType_t_CUDSS_MTYPE_GENERAL,
@@ -985,7 +1025,7 @@ mod batched_ffi_smoke_test {
                     nrows.as_mut_ptr() as *mut c_void,
                     rhs_ncols.as_mut_ptr() as *mut c_void,
                     ld.as_mut_ptr() as *mut c_void,
-                    b_values.as_mut_ptr(),
+                    b_values.as_ptr() as *const *const c_void,
                     cudssDataType_t_CUDSS_R_32I,
                     cudssDataType_t_CUDSS_R_64F,
                     cudssLayout_t_CUDSS_LAYOUT_COL_MAJOR,
@@ -1000,7 +1040,7 @@ mod batched_ffi_smoke_test {
                     nrows.as_mut_ptr() as *mut c_void,
                     rhs_ncols.as_mut_ptr() as *mut c_void,
                     ld.as_mut_ptr() as *mut c_void,
-                    x_values.as_mut_ptr(),
+                    x_values.as_ptr() as *const *const c_void,
                     cudssDataType_t_CUDSS_R_32I,
                     cudssDataType_t_CUDSS_R_64F,
                     cudssLayout_t_CUDSS_LAYOUT_COL_MAJOR,

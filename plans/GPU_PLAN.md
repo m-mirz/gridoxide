@@ -33,6 +33,114 @@ Status: **proposal**, not implemented. Written 2026-07-25 against `d9b8799`.
 >
 > §1's per-phase CPU measurements and §3's other three properties are
 > unaffected and still hold.
+>
+> ## Amendment 2, 2026-07-30 — Session 3, the batched rewrite, on an A100
+>
+> `CudssBatchedSystem` (`src/sparse_cudss.rs`) was compiled, run, and
+> correctness-verified for the first time this session, on a rented
+> **A100-SXM4-40GB** (driver 580.126.20, CUDA 13.0/`nvcc` 13.0.88, cuDSS
+> 0.8.0.10 via the `libcudss0-cuda-13` apt package, `CUDA_ARCH=sm_80`, host
+> 30-core AMD EPYC 7J13). It had never been compiled before — everything below
+> was written blind, on a machine with no NVIDIA GPU.
+>
+> **Three FFI bugs, all now fixed:**
+>
+> 1. `build.rs`'s nvcc-not-on-`PATH` fallback called `cc::Build::compiler()`
+>    with the nvcc path. `cc-rs`, in CUDA mode, treats an explicit
+>    `.compiler()` as the *host* compiler nvcc wraps via `-ccbin`, not nvcc
+>    itself — silently disabling the `-Xcompiler` wrapping it normally applies
+>    to GNU-family flags, so nvcc saw a raw `-ffunction-sections` and rejected
+>    it outright. Fixed by setting the `NVCC` env var instead, which routes
+>    through `cc-rs`'s CUDA-aware path.
+> 2. `cudssMatrixCreateBatchCsr`'s hand-written signature was missing the
+>    `offsetType` parameter (real cuDSS 0.8 splits offset/index/value types
+>    three ways, not two) and passed `*mut *mut c_void` where the real
+>    signature wants `*const *const c_void` — a single-level `*mut → *const`
+>    coerces implicitly in Rust, a double-level one does not, so this was a
+>    compile error, not a runtime one. Same fix applied to
+>    `cudssMatrixCreateBatchDn` and `cudssMatrixSetBatchValues`.
+> 3. Neither bug was silent-wrong-numbers, matching the risk table's
+>    prediction for Step 1/2 — both were loud compile errors once `nvcc` and
+>    real cuDSS headers existed to check against.
+>
+> **Correctness: full PASS.** `bde_test` (10/10), `gpu_assembly_test` (4/4),
+> `batched_ffi_smoke_test`, and `bde_check` on `case9241pegase`/256 all agree
+> with independent CPU solves to ~7e-13 — better than the ~1e-9 the runbook
+> expected, well inside the ~1e-6 bar.
+>
+> **Performance, before the threading fix below:** batched beat the stacked
+> control by 1.45–1.58x across batch 64/256/1024, but both were ~20–30x
+> *slower* than the 30-thread CPU baseline. Per-phase CUDA-event timers
+> (`bde_profile`) isolated why: `PHASE_ANALYSIS` alone — not
+> `PHASE_FACTORIZATION`, not the GPU kernels — was 95%+ of wall time and
+> scaled near-linearly with batch count (20.7s at batch 256, 100.2s at batch
+> 1024), meaning cuDSS's uniform batch API was **not** sharing one analysis
+> across the batch as its name implies; it was running full per-matrix
+> symbolic analysis, unshared.
+>
+> **The real fix — cuDSS defaults to single-threaded host execution.**
+> `nvidia-smi` showed 0% GPU utilization and `ps` showed ~137% CPU during
+> `PHASE_ANALYSIS`, regardless of batch size — one core's worth of work, not
+> thirty. cuDSS ships an opt-in OpenMP threading layer
+> (`libcudss_mtlayer_gomp.so`, installed alongside `libcudss.so` by the apt
+> package but never loaded unless `cudssSetThreadingLayer` is called
+> explicitly). Calling it (`sparse_cudss::enable_host_threading`, applied to
+> both `CudssBatchedSystem` and the `CudssRealSystem` control) cut analysis
+> time by **~3.2x** on this 30-core host, correctness unaffected. This is a
+> real, permanent, committed fix, not a workaround — `build.rs` now embeds an
+> rpath to cuDSS's lib directory via `CUDSS_LIB_DIR` so the `.so` is found
+> without relying on the box having registered it with `ldconfig` (the apt
+> package does not do this itself — a second, separate gap this session hit
+> and worked around manually before finding the rpath fix).
+>
+> **Batch-size sweep, after the threading fix (`case9241pegase`, `klu` CPU
+> baseline ~230–280 solves/s across all batch sizes):**
+>
+> | batch | CPU (30 threads) | GPU batched | vs CPU | vs stacked control |
+> |---|---|---|---|---|
+> | 64 | 143.0 solves/s | 38.4 solves/s | 0.27x | 2.65x |
+> | 256 | 233.1 solves/s | 35.7 solves/s | 0.15x | 2.51x |
+> | 1024 | 277.5 solves/s | 31.1 solves/s | 0.11x | 2.38x |
+>
+> The threading fix is real and consistent (~2.4–2.7x over stacked at every
+> size), but **the CPU-speedup ratio gets worse, not better, as batch size
+> grows** — the opposite of what a shared-analysis batch API should do. Setup
+> (dominated by `PHASE_ANALYSIS`) still scales slightly *faster* than linear
+> with batch count even after threading, because analysis is still run once
+> per matrix rather than once per batch. Batch 4096 was attempted and killed
+> after 32+ minutes without finishing (`nvidia-smi`: 26GB device memory
+> resident, 0% GPU utilization, 319% CPU) — the stacked control at that size
+> is a ~70-million-unknown monolithic matrix and its reordering cost is
+> almost certainly the dominant factor, consistent with §3 property 2's
+> documented failure mode, not new information worth more GPU time to confirm.
+>
+> **Unresolved lead, worth a future session with real cuDSS documentation.**
+> `cudssConfigParam_t` includes `CUDSS_CONFIG_UBATCH_SIZE`/`_UBATCH_INDEX`
+> ("U" for Uniform) — an `int` config, default 1, documented (per NVIDIA's
+> own docs site) to be set before `PHASE_ANALYSIS` to activate genuinely
+> shared analysis across a batch. Setting it (confirmed accepted,
+> `cudssConfigSet` returns success) collapsed a toy 2-system batch's
+> analysis+factorization+solve from seconds to milliseconds — a **~294x**
+> reduction on the toy case — but every one of 12 combinations tried
+> (reordering algorithm ∈ {default, AMD, nested dissection, none}; pivot type
+> ∈ {default, none}; matrix type ∈ {general, symmetric, SPD}; aliased vs.
+> distinct CSR structure pointers; `batchCount=1` with a `UBATCH_SIZE`-sized
+> value buffer vs. `batchCount=B`) failed identically at `PHASE_ANALYSIS`
+> with `CUDSS_STATUS_NOT_SUPPORTED`. This is a real, sanctioned, documented
+> feature that is currently unreachable from this codebase without NVIDIA's
+> own sample code or support — if unlocked, the toy-problem result suggests
+> it would flip this session's whole conclusion. The probe tests
+> (`sparse_cudss::batched_ffi_smoke_test::ubatch_probe*`) were not committed;
+> reproduce from this description if picking the thread back up.
+>
+> **Bottom line:** the batched device-resident path is now correct, ~2.4–2.7x
+> faster than the stacked control at every batch size tried, and the
+> threading fix is a genuine, permanent, committed win — but it still does
+> not clear the 30-thread CPU `BatchSolver`, and the gap widens with batch
+> size rather than closing. `UBATCH_SIZE` is the one lead that could change
+> that conclusion; everything else diagnosed this session (assembly,
+> injections, Newton update, host sync) is already <5% of wall time and not
+> worth further optimization until analysis-sharing is solved.
 
 This document answers: *how much of the AC power flow can realistically move to the
 GPU, on which stack, and in what order?* It covers CUDA, cuda-oxide, JAX, AMD/ROCm,
