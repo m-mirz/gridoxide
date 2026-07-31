@@ -47,7 +47,7 @@ use crate::types::{Bus, Line, Transformer};
 
 /// Which end of a branch a flow is measured at. Matches the first two variants
 /// of PGM's `MeasuredTerminalType` (`branch_from` = 0, `branch_to` = 1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Terminal {
     From,
     To,

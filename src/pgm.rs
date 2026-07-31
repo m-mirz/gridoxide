@@ -39,6 +39,10 @@ pub struct PgmData {
     pub three_winding_transformer: Vec<PgmThreeWindingTransformer>,
     #[serde(default)]
     pub voltage_regulator: Vec<PgmVoltageRegulator>,
+    #[serde(default)]
+    pub sym_voltage_sensor: Vec<PgmSymVoltageSensor>,
+    #[serde(default)]
+    pub sym_power_sensor: Vec<PgmSymPowerSensor>,
 }
 
 #[derive(Deserialize)]
@@ -65,13 +69,13 @@ pub struct PgmLine {
     pub tan1: f64,
     /// Zero-sequence parameters, needed only for asymmetric calculations —
     /// power-grid-model marks them optional and many of its own symmetric
-    /// documents omit them entirely.
+    /// fixtures omit them entirely.
     ///
     /// Defaulted to NaN rather than to zero or to the positive-sequence value:
     /// `r0 = x0 = 0` would make the zero-sequence admittance infinite, and
     /// `r0 = r1` is a modelling assumption that is wrong for real lines. NaN
     /// keeps the symmetric path (which never reads these) working while making
-    /// any asymmetric use of an incomplete document loudly wrong instead of
+    /// any asymmetric use of an incomplete fixture loudly wrong instead of
     /// quietly plausible.
     #[serde(default = "nan")]
     pub r0: f64,
@@ -94,20 +98,56 @@ fn default_sk() -> f64 { 1e10 }
 fn default_rx_ratio() -> f64 { 0.1 }
 fn nan3() -> [f64; 3] { [f64::NAN; 3] }
 
+/// Deserializes a number that power-grid-model may also write as the string
+/// `"inf"`.
+///
+/// Its state-estimation fixtures use this for a measurement that is present but
+/// carries no information (`inf-measurement-with-injection` and friends): an
+/// infinite standard deviation is a zero weight, so the row exists structurally
+/// and contributes nothing. JSON has no infinity literal, hence the string.
+fn de_f64_or_inf<'de, D>(d: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, Unexpected};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Num(f64),
+        Str(String),
+    }
+
+    match Option::<Raw>::deserialize(d)? {
+        None => Ok(f64::NAN),
+        Some(Raw::Num(v)) => Ok(v),
+        Some(Raw::Str(s)) => match s.trim() {
+            "inf" | "+inf" | "Infinity" => Ok(f64::INFINITY),
+            "-inf" | "-Infinity" => Ok(f64::NEG_INFINITY),
+            "nan" | "NaN" => Ok(f64::NAN),
+            other => Err(D::Error::invalid_value(
+                Unexpected::Str(other),
+                &"a number or the string \"inf\"",
+            )),
+        },
+    }
+}
+
 #[derive(Deserialize)]
 pub struct PgmSource {
     pub id: u64,
     pub node: u64,
     pub status: u8,
-    /// Reference voltage, per-unit. power-grid-model marks this required *only
-    /// for power flow*; documents written for other calculation types leave it
-    /// unset, so it falls back to 1.0 p.u. here.
+    /// Reference voltage, per-unit. Power-grid-model marks this required *only
+    /// for power flow* — a state-estimation input has no reason to assert the
+    /// source voltage, since that is precisely what is being estimated — so it
+    /// falls back to 1.0 p.u. here.
     #[serde(default = "one")]
     pub u_ref: f64,
-    /// Short-circuit power, VA. power-grid-model's documented default is 1e10.
+    /// Short-circuit power, VA. PGM's documented default is 1e10.
     #[serde(default = "default_sk")]
     pub sk: f64,
-    /// R-to-X ratio. power-grid-model's documented default is 0.1.
+    /// R-to-X ratio. PGM's documented default is 0.1.
     #[serde(default = "default_rx_ratio")]
     pub rx_ratio: f64,
     #[serde(default = "one")]
@@ -126,10 +166,10 @@ pub struct PgmSymLoad {
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
     /// Specified power. power-grid-model marks this required *only for power
-    /// flow*, and documents written for other calculation types leave it unset
-    /// because the appliance's power is an unknown there rather than an input.
-    /// NaN when absent; `pgm_to_buses_and_branches` then contributes nothing to
-    /// the bus injection for it.
+    /// flow*: a state-estimation input deliberately leaves it unset, because
+    /// the appliance's power is what the estimator solves for. NaN when
+    /// absent, and `pgm_to_network` contributes nothing to the bus injection
+    /// for a non-finite value.
     #[serde(default = "nan")]
     pub p_specified: f64,
     #[serde(default = "nan")]
@@ -143,8 +183,8 @@ pub struct PgmAsymLoad {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
-    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this is
-    /// optional.
+    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this
+    /// is optional.
     #[serde(default = "nan3")]
     pub p_specified: [f64; 3],
     #[serde(default = "nan3")]
@@ -159,10 +199,10 @@ pub struct PgmSymGen {
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
     /// Specified power. power-grid-model marks this required *only for power
-    /// flow*, and documents written for other calculation types leave it unset
-    /// because the appliance's power is an unknown there rather than an input.
-    /// NaN when absent; `pgm_to_buses_and_branches` then contributes nothing to
-    /// the bus injection for it.
+    /// flow*: a state-estimation input deliberately leaves it unset, because
+    /// the appliance's power is what the estimator solves for. NaN when
+    /// absent, and `pgm_to_network` contributes nothing to the bus injection
+    /// for a non-finite value.
     #[serde(default = "nan")]
     pub p_specified: f64,
     #[serde(default = "nan")]
@@ -203,8 +243,8 @@ pub struct PgmAsymGen {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
-    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this is
-    /// optional.
+    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this
+    /// is optional.
     #[serde(default = "nan3")]
     pub p_specified: [f64; 3],
     #[serde(default = "nan3")]
@@ -219,8 +259,8 @@ pub struct PgmShunt {
     pub g1: f64,
     pub b1: f64,
     /// Zero-sequence admittance, needed only for asymmetric calculations and
-    /// optional in power-grid-model, for the same reason `PgmLine`'s
-    /// zero-sequence fields are.
+    /// optional in power-grid-model. NaN when absent, for the same reason
+    /// `PgmLine`'s zero-sequence fields are.
     #[serde(default = "nan")]
     pub g0: f64,
     #[serde(default = "nan")]
@@ -285,6 +325,60 @@ pub struct PgmTransformer {
     pub tap_max: i32,
     pub tap_nom: i32,
     pub tap_size: f64,
+}
+
+/// PGM's `sym_voltage_sensor`: a voltage measurement at a node.
+///
+/// Both `u_measured` and `u_angle_measured` are optional in practice — PGM's
+/// own fixtures omit one or the other, and PGM reads an absent value as NaN
+/// rather than as zero. They are defaulted to NaN here for the same reason, and
+/// `measurement` skips any reading that isn't finite.
+///
+/// An angle-carrying voltage sensor is a phasor (PMU) measurement; one without
+/// is an ordinary magnitude-only SCADA measurement.
+#[derive(Deserialize)]
+pub struct PgmSymVoltageSensor {
+    pub id: u64,
+    /// The measured `node`'s id.
+    pub measured_object: u64,
+    #[serde(default = "nan")]
+    pub u_measured: f64,
+    #[serde(default = "nan")]
+    pub u_angle_measured: f64,
+    /// Standard deviation of the magnitude error, in volts.
+    #[serde(default = "nan")]
+    pub u_sigma: f64,
+    #[serde(default = "nan")]
+    pub u_angle_sigma: f64,
+}
+
+/// PGM's `sym_power_sensor`: an active/reactive power measurement at one
+/// terminal, of either a branch or an appliance.
+///
+/// `measured_terminal_type` is PGM's `MeasuredTerminalType`: 0 `branch_from`,
+/// 1 `branch_to`, 2 `source`, 3 `shunt`, 4 `load`, 5 `generator`, 6/7/8
+/// `branch3_1`/`_2`/`_3`, 9 `node`. It decides both what `measured_object`
+/// refers to and the sign convention of the reading — see
+/// [`measurement`](crate::measurement) for how each is mapped.
+///
+/// `power_sigma` applies to both components; `p_sigma`/`q_sigma` override it
+/// per component when present (only two of power-grid-model's own fixtures use
+/// them, but they are the more specific form).
+#[derive(Deserialize)]
+pub struct PgmSymPowerSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub p_measured: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub q_measured: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub power_sigma: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub p_sigma: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub q_sigma: f64,
 }
 
 // ── Output structs (used by integration tests) ────────────────────────────────
@@ -564,9 +658,11 @@ pub fn pgm_to_network(
     let mut q_inj: HashMap<u64, f64> = HashMap::new();
     let mut zip_map: HashMap<u64, Vec<ZipTerm>> = HashMap::new();
     let mut accumulate = |node: u64, load_type: u8, p: f64, q: f64, sign: f64| {
-        // An appliance with no specified power contributes nothing. Letting an
-        // unset (NaN) value through here would poison the bus injection and,
-        // through the initial guess, the whole solve.
+        // An appliance with no specified power contributes nothing. PGM marks
+        // `p_specified`/`q_specified` required only for power flow, and a
+        // state-estimation input leaves them unset precisely because the
+        // appliance's power is an unknown — letting NaN through here would
+        // poison the bus injection and, from there, the whole Y-bus solve.
         if !p.is_finite() && !q.is_finite() {
             return;
         }
