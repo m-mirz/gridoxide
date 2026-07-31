@@ -63,8 +63,21 @@ pub struct PgmLine {
     /// specifies it, and PGM treats an absent loss factor as zero.
     #[serde(default)]
     pub tan1: f64,
+    /// Zero-sequence parameters, needed only for asymmetric calculations —
+    /// power-grid-model marks them optional and many of its own symmetric
+    /// documents omit them entirely.
+    ///
+    /// Defaulted to NaN rather than to zero or to the positive-sequence value:
+    /// `r0 = x0 = 0` would make the zero-sequence admittance infinite, and
+    /// `r0 = r1` is a modelling assumption that is wrong for real lines. NaN
+    /// keeps the symmetric path (which never reads these) working while making
+    /// any asymmetric use of an incomplete document loudly wrong instead of
+    /// quietly plausible.
+    #[serde(default = "nan")]
     pub r0: f64,
+    #[serde(default = "nan")]
     pub x0: f64,
+    #[serde(default = "nan")]
     pub c0: f64,
     /// Zero-sequence shunt loss factor. Parsed for completeness; the
     /// three-phase conversion (`pgm_to_3ph_network`) still models zero-sequence
@@ -75,14 +88,27 @@ pub struct PgmLine {
 
 fn one() -> f64 { 1.0 }
 fn nan() -> f64 { f64::NAN }
+/// power-grid-model's documented `source.sk` default (`components.md`).
+fn default_sk() -> f64 { 1e10 }
+/// power-grid-model's documented `source.rx_ratio` default (`components.md`).
+fn default_rx_ratio() -> f64 { 0.1 }
+fn nan3() -> [f64; 3] { [f64::NAN; 3] }
 
 #[derive(Deserialize)]
 pub struct PgmSource {
     pub id: u64,
     pub node: u64,
     pub status: u8,
+    /// Reference voltage, per-unit. power-grid-model marks this required *only
+    /// for power flow*; documents written for other calculation types leave it
+    /// unset, so it falls back to 1.0 p.u. here.
+    #[serde(default = "one")]
     pub u_ref: f64,
+    /// Short-circuit power, VA. power-grid-model's documented default is 1e10.
+    #[serde(default = "default_sk")]
     pub sk: f64,
+    /// R-to-X ratio. power-grid-model's documented default is 0.1.
+    #[serde(default = "default_rx_ratio")]
     pub rx_ratio: f64,
     #[serde(default = "one")]
     pub z01_ratio: f64,
@@ -99,7 +125,14 @@ pub struct PgmSymLoad {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Specified power. power-grid-model marks this required *only for power
+    /// flow*, and documents written for other calculation types leave it unset
+    /// because the appliance's power is an unknown there rather than an input.
+    /// NaN when absent; `pgm_to_buses_and_branches` then contributes nothing to
+    /// the bus injection for it.
+    #[serde(default = "nan")]
     pub p_specified: f64,
+    #[serde(default = "nan")]
     pub q_specified: f64,
 }
 
@@ -110,7 +143,11 @@ pub struct PgmAsymLoad {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this is
+    /// optional.
+    #[serde(default = "nan3")]
     pub p_specified: [f64; 3],
+    #[serde(default = "nan3")]
     pub q_specified: [f64; 3],
 }
 
@@ -121,7 +158,14 @@ pub struct PgmSymGen {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Specified power. power-grid-model marks this required *only for power
+    /// flow*, and documents written for other calculation types leave it unset
+    /// because the appliance's power is an unknown there rather than an input.
+    /// NaN when absent; `pgm_to_buses_and_branches` then contributes nothing to
+    /// the bus injection for it.
+    #[serde(default = "nan")]
     pub p_specified: f64,
+    #[serde(default = "nan")]
     pub q_specified: f64,
 }
 
@@ -159,7 +203,11 @@ pub struct PgmAsymGen {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this is
+    /// optional.
+    #[serde(default = "nan3")]
     pub p_specified: [f64; 3],
+    #[serde(default = "nan3")]
     pub q_specified: [f64; 3],
 }
 
@@ -170,7 +218,12 @@ pub struct PgmShunt {
     pub status: u8,
     pub g1: f64,
     pub b1: f64,
+    /// Zero-sequence admittance, needed only for asymmetric calculations and
+    /// optional in power-grid-model, for the same reason `PgmLine`'s
+    /// zero-sequence fields are.
+    #[serde(default = "nan")]
     pub g0: f64,
+    #[serde(default = "nan")]
     pub b0: f64,
 }
 
@@ -511,6 +564,14 @@ pub fn pgm_to_network(
     let mut q_inj: HashMap<u64, f64> = HashMap::new();
     let mut zip_map: HashMap<u64, Vec<ZipTerm>> = HashMap::new();
     let mut accumulate = |node: u64, load_type: u8, p: f64, q: f64, sign: f64| {
+        // An appliance with no specified power contributes nothing. Letting an
+        // unset (NaN) value through here would poison the bus injection and,
+        // through the initial guess, the whole solve.
+        if !p.is_finite() && !q.is_finite() {
+            return;
+        }
+        let p = if p.is_finite() { p } else { 0.0 };
+        let q = if q.is_finite() { q } else { 0.0 };
         let s = Complex::new(p, q) * sign / s_base_va;
         match load_type {
             1 => zip_map.entry(node).or_default().push(ZipTerm { s_const: s, kind: ZipKind::ConstImpedance }),
