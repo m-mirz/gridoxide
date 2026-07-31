@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use serde::Deserialize;
+use super::branch_flow::Terminal;
 use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use super::network::{
     half_open_branch_shunt,
@@ -260,7 +261,26 @@ pub struct PgmNodeOutput {
     pub u: f64,
 }
 
-#[derive(Deserialize)]
+/// PGM's per-branch output record, as found in `sym_output.json`'s `line`,
+/// `transformer` and `link` arrays.
+///
+/// Powers are in W/var and currents in A — physical units, not per-unit, so
+/// comparing against gridoxide's [`branch_flow`](crate::branch_flow) results
+/// means scaling those by `s_base_va`. Only the flow fields are modelled;
+/// `loading`/`i_from`/`s_from` are derived quantities gridoxide does not
+/// compute.
+#[derive(Debug, Deserialize)]
+pub struct PgmLineOutput {
+    pub id: u64,
+    #[serde(default)]
+    pub energized: u8,
+    pub p_from: f64,
+    pub q_from: f64,
+    pub p_to: f64,
+    pub q_to: f64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PgmNodeAsymOutput {
     pub id: u64,
     pub u_pu: [f64; 3],
@@ -274,8 +294,7 @@ pub struct PgmNodeAsymOutput {
 /// Matches power-grid-model's `line.hpp`:
 /// `y1_shunt = 2π·f·c1/base_y·(tan1 + 1i)`. The conductive part comes entirely
 /// from the loss factor, so it is zero for the many fixtures that leave `tan1`
-/// unset — but not, for instance, for power-grid-model's state-estimation
-/// fixtures, which do specify it.
+/// unset — but not for the state-estimation fixtures, which specify it.
 fn line_y_shunt(ln: &PgmLine, omega: f64, z_base: f64) -> Complex<f64> {
     Complex::new(ln.tan1, 1.0) * (omega * ln.c1 * z_base)
 }
@@ -286,18 +305,17 @@ fn line_y_shunt(ln: &PgmLine, omega: f64, z_base: f64) -> Complex<f64> {
 /// still presents the near-end shunt half *in parallel with* the series
 /// impedance feeding the far-end shunt half, i.e.
 /// `y_sh/2 + 1/(1/y_s + 2/y_sh)` — [`half_open_branch_shunt`], the same
-/// function [`branch_calc_param`](crate::network::branch_calc_param) already
-/// applies to half-open transformers.
+/// function [`branch_calc_param`] already applies to half-open transformers.
 ///
-/// Modelling this as the bare shunt instead omits the small conductive path
-/// through the series resistance. In the `line` power-flow fixture that error
-/// is directly visible: its two half-open lines each carry 0.68 W in PGM's own
-/// expected output, and dropping both showed up as a 1.36 W deficit on the
-/// healthy line feeding them.
+/// Modelling this as the bare shunt instead (which gridoxide did until the
+/// branch-flow work) omits the small conductive path through the series
+/// resistance: `tests/branch_flow_test.rs`'s `line` fixture has two half-open
+/// lines, each carrying 0.68 W in PGM's own expected output, and their absence
+/// showed up as a 1.36 W deficit on the healthy line feeding them.
 ///
 /// The result is a self-loop `Line`, which `build_ybus` stamps as a pure
-/// diagonal admittance — a representation that cannot record which of the two
-/// terminals was the connected one.
+/// diagonal admittance. That representation loses which terminal was the
+/// connected one — see [`branch_flow::line_params`](crate::branch_flow::line_params).
 fn half_open_line(ln: &PgmLine, omega: f64, z_base: f64, idx: usize) -> Line {
     let y_shunt = line_y_shunt(ln, omega, z_base);
     let y_series = Complex::new(1.0, 0.0) / Complex::new(ln.r1 / z_base, ln.x1 / z_base);
@@ -392,11 +410,94 @@ pub fn pgm_transformers_3ph(
 /// Slack bus appended after the physical nodes, connected via a source-impedance
 /// `Line`. Transformers are returned as `Transformer` values in per-unit on the
 /// system base; stamp them into a Y-bus with `network::stamp_transformers`.
-pub fn pgm_to_buses_and_branches(
+/// A converted PGM network together with the object-ID maps needed to address
+/// its pieces by their original PGM ids.
+///
+/// [`pgm_to_buses_and_branches`] returns only the three vectors, which is all
+/// power flow ever needed: it addresses buses positionally and never has to name
+/// a branch. Measurements do — a `sym_power_sensor` carries
+/// `measured_object: 4`, a PGM object id — and the mapping from that id to a
+/// branch index is *not* recoverable by arithmetic on input positions:
+///
+/// - a line with both terminals open is dropped entirely (no branch at all),
+/// - each active `source` appends a virtual slack bus and an extra branch,
+/// - each `three_winding_transformer` expands into three branches plus a star
+///   bus,
+///
+/// so input position and branch index diverge as soon as any of those appear.
+/// Hence these maps are recorded during conversion rather than reconstructed.
+///
+/// All branch indices are *flat*: lines first, then transformers, matching the
+/// order [`branch_flow::branch_params`](crate::branch_flow::branch_params)
+/// assembles them in.
+#[derive(Clone, Debug)]
+pub struct PgmNetwork {
+    pub buses: Vec<Bus>,
+    pub lines: Vec<Line>,
+    pub transformers: Vec<Transformer>,
+    /// Node id → bus index. Covers physical nodes only; star buses and virtual
+    /// slack buses have no PGM id of their own.
+    pub node_idx: HashMap<u64, usize>,
+    /// `line`/`transformer` id → flat branch index. A line with both terminals
+    /// open is absent, since it produces no branch.
+    pub branch_idx: HashMap<u64, usize>,
+    /// `three_winding_transformer` id → its three flat branch indices, in
+    /// side-1/2/3 order.
+    pub three_winding_branch_idx: HashMap<u64, [usize; 3]>,
+    /// `source` id → the flat branch index of the virtual source-impedance
+    /// branch gridoxide synthesizes for it. Inactive sources are absent.
+    pub source_branch_idx: HashMap<u64, usize>,
+    /// Appliance id (`sym_load`, `asym_load`, `sym_gen`, `asym_gen`, `shunt`,
+    /// `source`) → the bus it is attached to. Includes inactive appliances: a
+    /// sensor may reference one, and reporting a zero flow for a disconnected
+    /// appliance is better than failing to resolve the id at all.
+    pub appliance_bus: HashMap<u64, usize>,
+    /// Branch ids that collapsed to a self-loop because exactly one terminal
+    /// was connected, mapped to *which* PGM terminal is the live one.
+    ///
+    /// gridoxide represents such a branch as a single diagonal admittance
+    /// (`from == to`), which by construction cannot distinguish its two ends,
+    /// so the distinction is kept here instead. Use [`resolve_terminal`] rather
+    /// than reading this directly.
+    ///
+    /// [`resolve_terminal`]: PgmNetwork::resolve_terminal
+    pub half_open_terminal: HashMap<u64, Terminal>,
+}
+
+impl PgmNetwork {
+    /// Maps a PGM branch id and the terminal a sensor measures to the branch
+    /// index and terminal to evaluate with
+    /// [`branch_flow::terminal_flow`](crate::branch_flow::terminal_flow).
+    ///
+    /// Returns `None` in the two cases where there is no flow to compute:
+    ///
+    /// - the branch has both terminals open, so no branch exists at all;
+    /// - the requested terminal is the *open* end of a half-open branch, whose
+    ///   flow is identically zero (which is what PGM reports for it too).
+    ///
+    /// For the live end of a half-open branch the returned terminal is always
+    /// [`Terminal::From`], since the whole equivalent admittance sits there
+    /// regardless of which PGM end was connected.
+    pub fn resolve_terminal(&self, id: u64, terminal: Terminal) -> Option<(usize, Terminal)> {
+        let &branch = self.branch_idx.get(&id)?;
+        match self.half_open_terminal.get(&id) {
+            Some(&live) if live == terminal => Some((branch, Terminal::From)),
+            Some(_) => None,
+            None => Some((branch, terminal)),
+        }
+    }
+}
+
+/// Converts a PGM input document into gridoxide's own network types, keeping
+/// the object-ID maps — see [`PgmNetwork`] for why those cannot be derived
+/// afterwards.
+///
+/// [`pgm_to_buses_and_branches`] is the same conversion with the maps dropped.
+pub fn pgm_to_network(
     input: PgmInput,
     s_base_va: f64,
     freq_hz: f64,
-) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>) {
+) -> PgmNetwork {
     let id_to_idx = node_id_to_idx(&input);
     let id_to_u_rated: HashMap<u64, f64> = input.data.node.iter()
         .map(|n| (n.id, n.u_rated))
@@ -490,11 +591,17 @@ pub fn pgm_to_buses_and_branches(
     // per end, matching PGM's y_shunt/2. Half-open cases become self-loop shunts.
     let omega = 2.0 * std::f64::consts::PI * freq_hz;
     let mut lines: Vec<Line> = Vec::new();
+    // Recorded as we go; see `PgmNetwork` for why these can't be rebuilt later.
+    let mut branch_idx: HashMap<u64, usize> = HashMap::new();
+    let mut three_winding_branch_idx: HashMap<u64, [usize; 3]> = HashMap::new();
+    let mut source_branch_idx: HashMap<u64, usize> = HashMap::new();
+    let mut half_open_terminal: HashMap<u64, Terminal> = HashMap::new();
     for ln in &input.data.line {
         match (ln.from_status, ln.to_status) {
             (1, 1) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 let y_shunt = line_y_shunt(ln, omega, z_base);
+                branch_idx.insert(ln.id, lines.len());
                 lines.push(Line {
                     from: id_to_idx[&ln.from_node],
                     to: id_to_idx[&ln.to_node],
@@ -507,22 +614,34 @@ pub fn pgm_to_buses_and_branches(
             (1, 0) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.from_node];
+                branch_idx.insert(ln.id, lines.len());
+                half_open_terminal.insert(ln.id, Terminal::From);
                 lines.push(half_open_line(ln, omega, z_base, idx));
             }
             (0, 1) => {
                 let z_base = id_to_u_rated[&ln.to_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.to_node];
+                branch_idx.insert(ln.id, lines.len());
+                half_open_terminal.insert(ln.id, Terminal::To);
                 lines.push(half_open_line(ln, omega, z_base, idx));
             }
+            // Both terminals open: no branch is created, so this line
+            // deliberately gets no `branch_idx` entry.
             _ => {}
         }
     }
 
     // Transformers — convert physical-unit PGM parameters to system pu.
     let mut transformers: Vec<Transformer> = Vec::new();
+    // Positions *within* `transformers`. They can't be turned into flat branch
+    // indices yet: the source loop below still appends to `lines`, so the
+    // offset (`lines.len()`) isn't final until the very end of this function.
+    let mut transformer_pos: HashMap<u64, usize> = HashMap::new();
+    let mut three_winding_pos: HashMap<u64, [usize; 3]> = HashMap::new();
     for t in &input.data.transformer {
         let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock);
         let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
+        transformer_pos.insert(t.id, transformers.len());
         transformers.push(Transformer {
             from: id_to_idx[&t.from_node],
             to: id_to_idx[&t.to_node],
@@ -578,6 +697,11 @@ pub fn pgm_to_buses_and_branches(
         // per-unit base is pinned to u1_rated (physical, fixed) — this is
         // why `transformer_admittances_ex` always takes (u1_local, u1_rated)
         // regardless of which leg is being built.
+        three_winding_pos.insert(
+            t.id,
+            [transformers.len(), transformers.len() + 1, transformers.len() + 2],
+        );
+
         let t1_tap = tap_ratio_from_voltages(u1_local * u1_rated, u1_local * u1_rated, 0);
         let (t1_series, t1_shunt) =
             transformer_admittances_ex(u1_local, u1_rated, t.sn_1, uk_t1, pk_t1, t.i0, t.p0, s_base_va);
@@ -623,10 +747,58 @@ pub fn pgm_to_buses_and_branches(
             u_rated: id_to_u_rated[&src.node],
             zip_terms: Vec::new(),
         });
+        source_branch_idx.insert(src.id, lines.len());
         lines.push(Line { from: virtual_idx, to: id_to_idx[&src.node], r: r_s, x: x_s, b_shunt: 0.0, g_shunt: 0.0 });
     }
 
-    (buses, lines, transformers)
+    // `lines` is final now, so transformer positions can become flat indices.
+    let n_lines = lines.len();
+    branch_idx.extend(transformer_pos.into_iter().map(|(id, pos)| (id, n_lines + pos)));
+    three_winding_branch_idx.extend(
+        three_winding_pos
+            .into_iter()
+            .map(|(id, legs)| (id, legs.map(|pos| n_lines + pos))),
+    );
+
+    // Appliance → bus. Built in one pass at the end rather than inside the
+    // accumulation closure above, which only sees active constant-power
+    // appliances; a sensor may reference an inactive or ZIP-modelled one.
+    let mut appliance_bus: HashMap<u64, usize> = HashMap::new();
+    for (id, node) in input.data.sym_load.iter().map(|a| (a.id, a.node))
+        .chain(input.data.asym_load.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.sym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.asym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.shunt.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.source.iter().map(|a| (a.id, a.node)))
+    {
+        if let Some(&idx) = id_to_idx.get(&node) {
+            appliance_bus.insert(id, idx);
+        }
+    }
+
+    PgmNetwork {
+        buses,
+        lines,
+        transformers,
+        node_idx: id_to_idx,
+        branch_idx,
+        three_winding_branch_idx,
+        source_branch_idx,
+        appliance_bus,
+        half_open_terminal,
+    }
+}
+
+/// The [`pgm_to_network`] conversion with the object-ID maps dropped — the
+/// shape power flow has always used, kept so its many call sites stay
+/// unchanged.
+pub fn pgm_to_buses_and_branches(
+    input: PgmInput,
+    s_base_va: f64,
+    freq_hz: f64,
+) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>) {
+    let net = pgm_to_network(input, s_base_va, freq_hz);
+    (net.buses, net.lines, net.transformers)
 }
 
 /// Converts a PGM input document (with `asym_load`) into a 3N-bus expanded
