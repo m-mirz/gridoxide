@@ -2,6 +2,7 @@ pub mod types;
 pub mod network;
 pub mod branch_flow;
 pub mod measurement;
+pub mod se;
 pub mod solver;
 pub mod jacobian;
 pub mod batch;

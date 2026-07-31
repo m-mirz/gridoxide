@@ -30,10 +30,10 @@ use std::path::{Path, PathBuf};
 
 use num_complex::Complex;
 
-use gridoxide::branch_flow::{branch_params, terminal_flow};
-use gridoxide::measurement::{measurements_from_pgm, Measurement, MeasurementKind, Target};
-use gridoxide::network::{build_ybus, power_injections, source_impedance_pu, stamp_shunts};
+use gridoxide::measurement::measurements_from_pgm;
+use gridoxide::network::{build_ybus, source_impedance_pu, stamp_shunts};
 use gridoxide::pgm::{pgm_shunts_1ph, pgm_to_network, PgmInput, PgmNetwork};
+use gridoxide::se::{measurement_functions, SeNetwork};
 use gridoxide::types::Bus;
 
 const S_BASE_VA: f64 = 1e6;
@@ -89,27 +89,6 @@ fn apply_expected_state(buses: &mut [Bus], net: &PgmNetwork, input: &PgmInput, e
     }
 }
 
-/// `h(x)`: what the model says this measurement should read in the given state.
-fn model_value(
-    m: &Measurement,
-    buses: &[Bus],
-    net: &PgmNetwork,
-    ybus: &gridoxide::network::YBusSparse,
-    v: &[Complex<f64>],
-) -> f64 {
-    match (m.kind, m.target) {
-        (MeasurementKind::VoltageMagnitude, Target::Bus(b)) => buses[b].voltage_mag,
-        (MeasurementKind::VoltageAngle, Target::Bus(b)) => buses[b].voltage_ang,
-        (MeasurementKind::ActivePower, Target::Bus(b)) => power_injections(buses, ybus).0[b],
-        (MeasurementKind::ReactivePower, Target::Bus(b)) => power_injections(buses, ybus).1[b],
-        (kind, Target::BranchTerminal { branch, terminal }) => {
-            let params = branch_params(&net.lines, &net.transformers);
-            let (p, q) = terminal_flow(&params[branch], terminal, v);
-            if kind == MeasurementKind::ActivePower { p } else { q }
-        }
-    }
-}
-
 /// Loads `name`, evaluates every measurement at PGM's own answer, and requires
 /// each residual to sit within `max_sigma` of the value measured.
 ///
@@ -123,31 +102,12 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
     let id_to_idx = gridoxide::pgm::node_id_to_idx(&input);
     let shunts = pgm_shunts_1ph(&input, &id_to_idx, S_BASE_VA);
     let measurements = {
-        // Only the sensor types whose mapping onto gridoxide's network model is
-        // settled: branch terminals (0, 1) and load/generator appliances (4, 5).
-        //
-        // Sources (2), shunts (3) and node injections (9) are excluded because
-        // the two tools disagree about *shape*, not sign. power-grid-model
-        // treats a source and a shunt as appliances at a node, so their power
-        // counts toward that node's injection. gridoxide models a source as a
-        // virtual slack bus feeding through a branch, and a shunt as a Y-bus
-        // diagonal entry — both structural, so by KCL neither appears in
-        // `power_injections` at all, and the node's net injection is just its
-        // loads and generators. Mapping those three types therefore needs their
-        // own measurement functions (source-branch flow, shunt admittance
-        // power, and a node injection composed from all three), which is
-        // phase 2 work rather than a sign flip. See this file's module comment.
-        let mut filtered = common::load_pgm_input(&dir.join("input.json"));
-        filtered
-            .data
-            .sym_power_sensor
-            .retain(|s| matches!(s.measured_terminal_type, 0 | 1 | 4 | 5));
         let net = pgm_to_network(
             common::load_pgm_input(&dir.join("input.json")),
             S_BASE_VA,
             50.0,
         );
-        measurements_from_pgm(&filtered, &net, S_BASE_VA).expect("measurements")
+        measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements")
     };
 
     let net = pgm_to_network(
@@ -160,20 +120,16 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
 
     let mut ybus = build_ybus(buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let ybus = ybus.finish();
-    let v: Vec<Complex<f64>> = buses
-        .iter()
-        .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
-        .collect();
+    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+    let modelled_all = measurement_functions(&measurements, &buses, &se_net);
 
     let mut checked = 0;
-    for m in &measurements {
+    for (m, &modelled) in measurements.iter().zip(&modelled_all) {
         // An infinite sigma is power-grid-model's "this measurement carries no
         // information"; there is nothing to agree with.
         if !m.sigma.is_finite() {
             continue;
         }
-        let modelled = model_value(m, &buses, &net, &ybus, &v);
         let residual = modelled - m.value;
         assert!(
             residual.abs() <= max_sigma * m.sigma,
@@ -210,6 +166,7 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
 ///   appliance at the bus is measured. Handling the partial case needs
 ///   power-grid-model's own rule for it, and this fixture is what will verify
 ///   that rule once implemented;
+/// - the fixtures in [`INCONSISTENT_BY_DESIGN`];
 /// - fixtures whose `sym_output.json` does not give a complete node state.
 ///   power-grid-model's validation framework only asserts the fields each case
 ///   is about, so many of these omit `u_pu`/`u_angle` (or the `node` array
@@ -220,9 +177,22 @@ const MODELLED_FIXTURES: &[&str] = &[
     "1os2msr",
     "1os2msr-no-angle",
     "inf-measurement-with-injection",
-    "node-injection-sensor-and-zero-injection",
     "transmission-case",
 ];
+
+/// Fixtures whose measurements deliberately disagree with the state
+/// power-grid-model publishes, so "residual within noise" is not a property
+/// they have.
+///
+/// `node-injection-sensor-and-zero-injection` puts a 0.1 p.u. injection sensor
+/// on a node with no appliance attached. power-grid-model requires at least one
+/// appliance for an injection sensor to mean anything, so it treats the node as
+/// a hard zero-injection bus and overrides the reading — its published answer
+/// has both buses at exactly 1.0 angle 0, i.e. no flow at all. gridoxide's
+/// `h(x)` agrees with that answer exactly; it is the sensor that is 100 sigma
+/// out, by construction. Testing this case properly needs the zero-injection
+/// constraints of phase 4.
+const INCONSISTENT_BY_DESIGN: &[&str] = &["node-injection-sensor-and-zero-injection"];
 
 /// Whether a fixture's expected output pins down every bus voltage, which is
 /// what `h(x)` has to be evaluated at.
@@ -287,10 +257,12 @@ fn every_symmetric_fixture_is_either_modelled_or_excluded() {
         let is_asym_only = name.starts_with("single-node-source-asym-voltage-sensor");
         let incomplete = !has_complete_state(&entry.path());
         let partial_appliances = name.ends_with("measured-unmeasured-appliances");
+        let inconsistent = INCONSISTENT_BY_DESIGN.contains(&name.as_str());
         if !has_link
             && !is_asym_only
             && !incomplete
             && !partial_appliances
+            && !inconsistent
             && name != "three_winding_transformer"
         {
             unexplained.push(name);

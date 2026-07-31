@@ -72,11 +72,39 @@ pub enum MeasurementKind {
 /// What a [`Measurement`] is attached to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
-    /// A bus: a voltage measurement, or a net injection.
+    /// A bus: a voltage measurement, or the injection of the loads and
+    /// generators attached to it.
+    ///
+    /// This is *not* power-grid-model's "node injection" — see
+    /// [`Target::NodeInjection`]. gridoxide models sources and shunts as part
+    /// of the network rather than as appliances, so they do not appear in this
+    /// quantity at all.
     Bus(usize),
     /// One terminal of one branch, indexed as in
     /// [`branch_flow::branch_params`](crate::branch_flow::branch_params).
     BranchTerminal { branch: usize, terminal: Terminal },
+    /// The power a `source` delivers into its node.
+    ///
+    /// power-grid-model treats a source as an appliance at the node, but
+    /// gridoxide synthesizes a virtual slack bus behind a source-impedance
+    /// branch, so the source's power is that branch's flow rather than any bus
+    /// injection. `branch` is the synthesized branch, from
+    /// [`PgmNetwork::source_branch_idx`](crate::pgm::PgmNetwork).
+    SourceInjection { branch: usize },
+    /// The injection of the shunts attached to a bus.
+    ///
+    /// Shunts are stamped into the Y-bus diagonal, so like sources they are
+    /// structural here and absent from [`Target::Bus`]. Shunts on one bus share
+    /// a single Y-bus entry and cannot be told apart afterwards, so this is
+    /// their total.
+    ShuntInjection { bus: usize },
+    /// power-grid-model's node injection: the sum of *every* appliance at the
+    /// bus — loads, generators, sources and shunts alike.
+    ///
+    /// Equals [`Target::Bus`] plus the source and shunt injections at the same
+    /// bus, which is what makes it a distinct measurement function rather than
+    /// a relabelling.
+    NodeInjection(usize),
 }
 
 /// One scalar observation with its uncertainty, in per-unit.
@@ -181,6 +209,9 @@ impl Summed {
 struct ApplianceAccumulator {
     bus: usize,
     sign: f64,
+    /// Shunts get their own measurement function, so they are summed into a
+    /// separate per-bus total rather than into the load/generator injection.
+    is_shunt: bool,
     p: Merged,
     q: Merged,
 }
@@ -190,9 +221,12 @@ struct ApplianceAccumulator {
 struct BusAccumulator {
     u_mag: Merged,
     u_angle: Merged,
-    /// Injection built up from individual appliance sensors.
+    /// Injection built up from load/generator sensors.
     appliance_p: Summed,
     appliance_q: Summed,
+    /// Total shunt injection, summed over the bus's measured shunts.
+    shunt_p: Summed,
+    shunt_q: Summed,
     /// Injection measured directly by node-injection sensors.
     node_p: Merged,
     node_q: Merged,
@@ -234,6 +268,8 @@ pub fn measurements_from_pgm(
     // two sensors on one load are one better-known load, not two loads. Doing
     // this in one step would double-count the appliance.
     let mut appliances: HashMap<u64, ApplianceAccumulator> = HashMap::new();
+    // Source readings, keyed by the synthesized source branch they describe.
+    let mut sources: HashMap<usize, (Merged, Merged)> = HashMap::new();
 
     // ── Voltage sensors ──────────────────────────────────────────────────
     for s in &input.data.sym_voltage_sensor {
@@ -295,13 +331,31 @@ pub fn measurements_from_pgm(
                     branch_q.entry((branch, terminal)).or_default().add(q, q_sigma);
                 }
             }
-            // Appliances. `sign` converts the appliance's own reference
-            // direction into a bus injection.
-            2 | 3 | 4 | 5 => {
+            // A source's power is a branch flow here, not a bus injection:
+            // gridoxide puts a virtual slack bus and an impedance branch behind
+            // every source, so by KCL its power never reaches the node's
+            // injection. Generator reference direction, so no sign change.
+            2 => {
+                let Some(&branch) = net.source_branch_idx.get(&s.measured_object) else {
+                    // An inactive source has no synthesized branch, so there is
+                    // nothing for the reading to describe.
+                    continue;
+                };
+                let acc = sources.entry(branch).or_default();
+                if s.p_measured.is_finite() {
+                    acc.0.add(p, p_sigma);
+                }
+                if s.q_measured.is_finite() {
+                    acc.1.add(q, q_sigma);
+                }
+            }
+            // Load/generator appliances, and shunts. `sign` converts the
+            // appliance's own reference direction into an injection.
+            3 | 4 | 5 => {
                 let sign = match s.measured_terminal_type {
                     // load, shunt: load reference direction — consumption.
                     3 | 4 => -1.0,
-                    // source, generator: generator reference direction.
+                    // generator: generator reference direction.
                     _ => 1.0,
                 };
                 let Some(&bus) = net.appliance_bus.get(&s.measured_object) else {
@@ -313,6 +367,7 @@ pub fn measurements_from_pgm(
                 let acc = appliances.entry(s.measured_object).or_insert(ApplianceAccumulator {
                     bus,
                     sign,
+                    is_shunt: s.measured_terminal_type == 3,
                     p: Merged::default(),
                     q: Merged::default(),
                 });
@@ -360,11 +415,16 @@ pub fn measurements_from_pgm(
     for id in appliance_ids {
         let acc = appliances[&id];
         let bus = buses.entry(acc.bus).or_default();
+        let (p_acc, q_acc) = if acc.is_shunt {
+            (&mut bus.shunt_p, &mut bus.shunt_q)
+        } else {
+            (&mut bus.appliance_p, &mut bus.appliance_q)
+        };
         if let Some((value, sigma)) = acc.p.finish() {
-            bus.appliance_p.add(acc.sign * value, sigma);
+            p_acc.add(acc.sign * value, sigma);
         }
         if let Some((value, sigma)) = acc.q.finish() {
-            bus.appliance_q.add(acc.sign * value, sigma);
+            q_acc.add(acc.sign * value, sigma);
         }
     }
 
@@ -382,20 +442,58 @@ pub fn measurements_from_pgm(
         if let Some((value, sigma)) = acc.u_angle.finish() {
             out.push(Measurement { kind: MeasurementKind::VoltageAngle, target, value, sigma });
         }
-        // Appliance-derived and node-derived injections describe the same
-        // quantity by different routes, so when a bus has both they merge by
-        // inverse variance, same as any other duplicate observation.
-        for (kind, appliance, node) in [
-            (MeasurementKind::ActivePower, acc.appliance_p.finish(), acc.node_p.finish()),
-            (MeasurementKind::ReactivePower, acc.appliance_q.finish(), acc.node_q.finish()),
+        // Load/generator injection, shunt injection and node injection are
+        // three *different* measurement functions of the same state, not three
+        // observations of one quantity, so they stay separate rows. Merging
+        // them (as an earlier version did) would assert that a node-injection
+        // sensor and a load sensor see the same thing, which is only true when
+        // the bus has no source and no shunt.
+        for (kind, appliance, shunt, node) in [
+            (
+                MeasurementKind::ActivePower,
+                acc.appliance_p.finish(),
+                acc.shunt_p.finish(),
+                acc.node_p.finish(),
+            ),
+            (
+                MeasurementKind::ReactivePower,
+                acc.appliance_q.finish(),
+                acc.shunt_q.finish(),
+                acc.node_q.finish(),
+            ),
         ] {
-            let mut merged = Merged::default();
-            for (value, sigma) in [appliance, node].into_iter().flatten() {
-                merged.add(value, sigma);
-            }
-            if let Some((value, sigma)) = merged.finish() {
+            if let Some((value, sigma)) = appliance {
                 out.push(Measurement { kind, target, value, sigma });
             }
+            if let Some((value, sigma)) = shunt {
+                out.push(Measurement {
+                    kind,
+                    target: Target::ShuntInjection { bus },
+                    value,
+                    sigma,
+                });
+            }
+            if let Some((value, sigma)) = node {
+                out.push(Measurement {
+                    kind,
+                    target: Target::NodeInjection(bus),
+                    value,
+                    sigma,
+                });
+            }
+        }
+    }
+
+    let mut source_branches: Vec<usize> = sources.keys().copied().collect();
+    source_branches.sort_unstable();
+    for branch in source_branches {
+        let (p, q) = sources[&branch];
+        let target = Target::SourceInjection { branch };
+        if let Some((value, sigma)) = p.finish() {
+            out.push(Measurement { kind: MeasurementKind::ActivePower, target, value, sigma });
+        }
+        if let Some((value, sigma)) = q.finish() {
+            out.push(Measurement { kind: MeasurementKind::ReactivePower, target, value, sigma });
         }
     }
 
@@ -545,16 +643,33 @@ mod tests {
     }
 
     /// A source uses the *generator* reference direction, so the same positive
-    /// reading is a positive injection — the opposite of the load case above.
+    /// reading stays positive — the opposite of the load case above.
+    ///
+    /// It lands on [`Target::SourceInjection`] rather than on the source node's
+    /// [`Target::Bus`], and that distinction is the point. gridoxide puts a
+    /// virtual slack bus behind an impedance branch for every source, so by KCL
+    /// the node's own injection excludes it entirely; treating a source sensor
+    /// as a bus injection made the modelled value zero while the sensor read
+    /// the full infeed (`tests/measurement_residual_test.rs` caught this at 63
+    /// sigma).
     #[test]
-    fn source_sensor_stays_positive_injection() {
+    fn source_sensor_targets_the_source_branch_not_the_bus() {
         let (input, net) = network_with_sensors(
             r#""sym_power_sensor":[{"id":12,"measured_object":4,"measured_terminal_type":2,
                  "p_measured":2000.0,"q_measured":0.0,"power_sigma":10.0}]"#,
         );
         let ms = measurements_from_pgm(&input, &net, 1e6).unwrap();
-        let p = find(&ms, MeasurementKind::ActivePower, Target::Bus(0));
+        let branch = net.source_branch_idx[&4];
+        let p = find(
+            &ms,
+            MeasurementKind::ActivePower,
+            Target::SourceInjection { branch },
+        );
         assert!((p.value - 0.002).abs() < 1e-12, "p={}", p.value);
+        assert!(
+            !ms.iter().any(|m| m.target == Target::Bus(0)),
+            "a source sensor must not produce a bus-injection row: {ms:#?}"
+        );
     }
 
     /// Branch sensors already use "into the branch" as positive, so they map
