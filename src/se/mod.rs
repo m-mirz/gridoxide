@@ -30,6 +30,9 @@
 //! network. `tests/measurement_residual_test.rs` is what established this — it
 //! reported a 63-sigma disagreement on exactly that quantity.
 
+pub mod jacobian;
+pub mod nr;
+
 use num_complex::Complex;
 
 use crate::branch_flow::{branch_params, terminal_flow, BranchParams, Terminal};
@@ -168,7 +171,7 @@ pub fn measurement_functions(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::network::YBus;
     use crate::types::BusType;
@@ -191,7 +194,7 @@ mod tests {
     /// Two buses joined by one branch, with a shunt on bus 1 and the branch
     /// treated as a source feeding bus 1 — enough to exercise all three of the
     /// structural measurement functions against one state.
-    fn two_bus_net() -> (SeNetwork, Vec<Bus>) {
+    pub(crate) fn two_bus_net() -> (SeNetwork, Vec<Bus>) {
         let y_series = Complex::new(1.0, 0.0) / Complex::new(0.05, 0.2);
         let y_shunt = Complex::new(0.02, 0.3);
 

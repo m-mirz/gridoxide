@@ -1,0 +1,171 @@
+//! The phase-2 gate: gridoxide's WLS estimate against power-grid-model's.
+//!
+//! `tests/measurement_residual_test.rs` checks the measurement *model* at a
+//! state someone else computed. This checks the estimator itself: start from a
+//! flat state, run Gauss-Newton on the fixture's sensors alone, and compare the
+//! answer against the one power-grid-model published.
+//!
+//! Per-unit magnitudes are compared at 1e-6, far tighter than measurement
+//! noise and deliberately so: both tools solve the same weighted-least-squares
+//! problem from the same data, so their optima should agree to solver
+//! tolerance, not merely to within the noise.
+//!
+//! # Angles and the global phase
+//!
+//! Angles are handled in two regimes, because only one of them has an absolute
+//! answer:
+//!
+//! - **With a voltage angle measured**, the phase is pinned by the data, so
+//!   absolute angles must match.
+//! - **Without one**, the whole estimate is invariant under a global rotation:
+//!   every measurement function depends on angle *differences* only. Any
+//!   reference is then equally valid, and power-grid-model's own fixtures do
+//!   not agree with each other on which to use — `transmission-case` reports
+//!   its source node at exactly 0, while `1os2msr-no-angle` reports its source
+//!   node at -0.0130. So this asserts what is actually determined: that
+//!   gridoxide's angles match PGM's *up to one constant shared by every bus*.
+//!
+//! That second check is stronger than it first appears. A genuinely wrong
+//! estimate does not produce a uniform offset — it produces per-bus errors. The
+//! test therefore requires the offset to be identical across all nodes to 1e-6,
+//! which is what distinguishes "a different convention" from "a different
+//! answer".
+
+mod common;
+
+use std::path::PathBuf;
+
+use gridoxide::measurement::measurements_from_pgm;
+use gridoxide::network::{build_ybus, stamp_shunts};
+use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
+use gridoxide::se::nr::{estimate, flat_start, SeOptions, SeStatus};
+use gridoxide::se::SeNetwork;
+use gridoxide::solver::JacobianBackend;
+
+const S_BASE_VA: f64 = 1e6;
+
+fn fixture_dir(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/pgm/state_estimation")
+        .join(name)
+}
+
+/// Estimates `name` from its sensors and compares every node against the
+/// fixture's expected output.
+fn assert_estimate_matches(name: &str, backend: JacobianBackend, tol: f64) {
+    let dir = fixture_dir(name);
+    let input = common::load_pgm_input(&dir.join("input.json"));
+    let expected = common::load_json(&dir.join("sym_output.json"));
+
+    let id_to_idx = node_id_to_idx(&input);
+    let shunts = pgm_shunts_1ph(&input, &id_to_idx, S_BASE_VA);
+    let net = pgm_to_network(
+        common::load_pgm_input(&dir.join("input.json")),
+        S_BASE_VA,
+        50.0,
+    );
+    let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
+
+    let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+    stamp_shunts(&mut ybus, &shunts);
+    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+
+    let mut buses = net.buses.clone();
+    flat_start(&mut buses, &measurements);
+    let options = SeOptions { backend, ..SeOptions::default() };
+    let report = estimate(&measurements, &mut buses, &se_net, &options);
+
+    assert_eq!(
+        report.status,
+        SeStatus::Converged,
+        "{name} [{backend:?}]: {report:?}"
+    );
+
+    // Absolute angles are only determined when something measures one.
+    let phase_is_measured = measurements
+        .iter()
+        .any(|m| m.kind == gridoxide::measurement::MeasurementKind::VoltageAngle);
+
+    let mut offsets = Vec::new();
+    for node in expected["data"]["node"].as_array().expect("node output") {
+        let id = node["id"].as_u64().expect("node id");
+        let idx = net.node_idx[&id];
+        let (Some(u_pu), Some(u_angle)) = (
+            node["u_pu"].as_f64(),
+            node["u_angle"].as_f64(),
+        ) else {
+            continue;
+        };
+        assert!(
+            (buses[idx].voltage_mag - u_pu).abs() < tol,
+            "{name} [{backend:?}] node {id}: |V| = {}, PGM says {u_pu}",
+            buses[idx].voltage_mag
+        );
+        if phase_is_measured {
+            assert!(
+                (buses[idx].voltage_ang - u_angle).abs() < tol,
+                "{name} [{backend:?}] node {id}: angle = {}, PGM says {u_angle}",
+                buses[idx].voltage_ang
+            );
+        } else {
+            offsets.push((id, buses[idx].voltage_ang - u_angle));
+        }
+    }
+
+    if let Some(&(ref_id, reference)) = offsets.first() {
+        for &(id, offset) in &offsets {
+            assert!(
+                (offset - reference).abs() < tol,
+                "{name} [{backend:?}] node {id}: angle offset {offset} differs from node \
+                 {ref_id}'s {reference} — a uniform offset is a reference convention, a \
+                 varying one is a wrong estimate"
+            );
+        }
+    }
+}
+
+/// A three-bus radial case with voltage phasor sensors on every node and power
+/// sensors on both line ends — the canonical worked example in
+/// power-grid-model's own test set.
+#[test]
+fn estimates_1os2msr() {
+    assert_estimate_matches("1os2msr", JacobianBackend::Scalar, 1e-6);
+}
+
+/// The same network with the voltage angles removed, so the phase has to come
+/// from a pinned reference instead of from the measurements. Exercises the
+/// other branch of `StateLayout`'s reference logic.
+#[test]
+fn estimates_1os2msr_without_angle_measurements() {
+    assert_estimate_matches("1os2msr-no-angle", JacobianBackend::Scalar, 1e-6);
+}
+
+/// Contains a measurement with an infinite sigma, which must contribute
+/// nothing at all rather than poisoning the gain matrix with a zero-weight row.
+#[test]
+fn estimates_with_an_infinite_sigma_measurement() {
+    assert_estimate_matches("inf-measurement-with-injection", JacobianBackend::Scalar, 1e-6);
+}
+
+/// The largest fixture, with transformers as well as lines.
+#[test]
+fn estimates_transmission_case() {
+    assert_estimate_matches("transmission-case", JacobianBackend::Scalar, 1e-6);
+}
+
+/// The gain matrix is an ordinary square sparse system, so every backend that
+/// carries power flow's Jacobian carries it too. `Block` is expected to fall
+/// back to the scalar path (its 2x2-per-bus structure does not fit a 2N-1 state
+/// vector), and this asserts that the fallback produces the same answer rather
+/// than silently mis-assembling.
+#[test]
+fn every_backend_agrees() {
+    for backend in [
+        JacobianBackend::Scalar,
+        JacobianBackend::Block,
+        JacobianBackend::KluNative,
+    ] {
+        assert_estimate_matches("1os2msr", backend, 1e-6);
+        assert_estimate_matches("transmission-case", backend, 1e-6);
+    }
+}
