@@ -317,7 +317,7 @@ pub fn tap_ratio_from_voltages(u_num: f64, u_denom: f64, clock: i32) -> Complex<
 /// CGMES transformer data far more often than gridoxide's own PGM test
 /// fixtures happen to combine with a half-open status), so this needs an
 /// explicit guard, not just trusting the formula.
-fn half_open_branch_shunt(y_series: Complex<f64>, y_shunt: Complex<f64>) -> Complex<f64> {
+pub fn half_open_branch_shunt(y_series: Complex<f64>, y_shunt: Complex<f64>) -> Complex<f64> {
     if y_shunt == Complex::new(0.0, 0.0) {
         return Complex::new(0.0, 0.0);
     }

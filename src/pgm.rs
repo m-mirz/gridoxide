@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use super::network::{
+    half_open_branch_shunt,
     source_impedance_pu, source_impedance_pu_seq, transformer_tap, transformer_admittances,
     transformer_admittances_ex, transformer_seq_params, tap_ratio_from_voltages, three_winding_star_params,
     ShuntAdm, ShuntAdm3Ph,
@@ -55,9 +56,20 @@ pub struct PgmLine {
     pub r1: f64,
     pub x1: f64,
     pub c1: f64,
+    /// Positive-sequence shunt loss factor (tan δ). PGM forms the shunt
+    /// admittance as `2πf·c1·(tan1 + j)` (`line.hpp`), so this is what gives a
+    /// line's shunt a conductive part. Defaulted because not every fixture
+    /// specifies it, and PGM treats an absent loss factor as zero.
+    #[serde(default)]
+    pub tan1: f64,
     pub r0: f64,
     pub x0: f64,
     pub c0: f64,
+    /// Zero-sequence shunt loss factor. Parsed for completeness; the
+    /// three-phase conversion (`pgm_to_3ph_network`) still models zero-sequence
+    /// shunts as purely susceptive, since `Line3Ph` carries no conductance.
+    #[serde(default)]
+    pub tan0: f64,
 }
 
 fn one() -> f64 { 1.0 }
@@ -257,6 +269,42 @@ pub struct PgmNodeAsymOutput {
 
 // ── Public helpers ────────────────────────────────────────────────────────────
 
+/// A line's total per-unit shunt admittance, `2πf·c1·(tan1 + j)·z_base`.
+///
+/// Matches power-grid-model's `line.hpp`:
+/// `y1_shunt = 2π·f·c1/base_y·(tan1 + 1i)`. The conductive part comes entirely
+/// from the loss factor, so it is zero for the many fixtures that leave `tan1`
+/// unset — but not, for instance, for power-grid-model's state-estimation
+/// fixtures, which do specify it.
+fn line_y_shunt(ln: &PgmLine, omega: f64, z_base: f64) -> Complex<f64> {
+    Complex::new(ln.tan1, 1.0) * (omega * ln.c1 * z_base)
+}
+
+/// Builds the `Line` representing a branch with exactly one terminal connected.
+///
+/// PGM does not simply drop the series impedance here: an open-ended branch
+/// still presents the near-end shunt half *in parallel with* the series
+/// impedance feeding the far-end shunt half, i.e.
+/// `y_sh/2 + 1/(1/y_s + 2/y_sh)` — [`half_open_branch_shunt`], the same
+/// function [`branch_calc_param`](crate::network::branch_calc_param) already
+/// applies to half-open transformers.
+///
+/// Modelling this as the bare shunt instead omits the small conductive path
+/// through the series resistance. In the `line` power-flow fixture that error
+/// is directly visible: its two half-open lines each carry 0.68 W in PGM's own
+/// expected output, and dropping both showed up as a 1.36 W deficit on the
+/// healthy line feeding them.
+///
+/// The result is a self-loop `Line`, which `build_ybus` stamps as a pure
+/// diagonal admittance — a representation that cannot record which of the two
+/// terminals was the connected one.
+fn half_open_line(ln: &PgmLine, omega: f64, z_base: f64, idx: usize) -> Line {
+    let y_shunt = line_y_shunt(ln, omega, z_base);
+    let y_series = Complex::new(1.0, 0.0) / Complex::new(ln.r1 / z_base, ln.x1 / z_base);
+    let y_eq = half_open_branch_shunt(y_series, y_shunt);
+    Line { from: idx, to: idx, r: 0.0, x: 0.0, b_shunt: y_eq.im, g_shunt: y_eq.re }
+}
+
 /// Returns a stable node-ID → 0-based-index map (sorted by node ID).
 pub fn node_id_to_idx(input: &PgmInput) -> HashMap<u64, usize> {
     let mut ids: Vec<u64> = input.data.node.iter().map(|n| n.id).collect();
@@ -446,26 +494,25 @@ pub fn pgm_to_buses_and_branches(
         match (ln.from_status, ln.to_status) {
             (1, 1) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
+                let y_shunt = line_y_shunt(ln, omega, z_base);
                 lines.push(Line {
                     from: id_to_idx[&ln.from_node],
                     to: id_to_idx[&ln.to_node],
                     r: ln.r1 / z_base,
                     x: ln.x1 / z_base,
-                    b_shunt: omega * ln.c1 * z_base,
-                    g_shunt: 0.0, // PgmLine has no tan1 (loss-tangent) field to derive this from
+                    b_shunt: y_shunt.im,
+                    g_shunt: y_shunt.re,
                 });
             }
             (1, 0) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.from_node];
-                lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
-                    b_shunt: omega * ln.c1 * z_base, g_shunt: 0.0 });
+                lines.push(half_open_line(ln, omega, z_base, idx));
             }
             (0, 1) => {
                 let z_base = id_to_u_rated[&ln.to_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.to_node];
-                lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
-                    b_shunt: omega * ln.c1 * z_base, g_shunt: 0.0 });
+                lines.push(half_open_line(ln, omega, z_base, idx));
             }
             _ => {}
         }
