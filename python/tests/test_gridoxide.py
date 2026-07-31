@@ -72,11 +72,15 @@ def test_invalid_json_raises():
         gridoxide.PowerFlowModel.from_pgm_json(str(Path(__file__)))  # this .py file isn't valid PGM JSON
 
 
-def test_block_backend_rejects_pv_buses(tmp_path):
-    """JacobianBackend::Block panics on a PV bus (src/solver.rs) — PyO3
-    catches Rust panics at the FFI boundary and turns them into a Python
-    exception rather than crashing the process; confirm that here. A real
-    PV bus needs a sym_gen with a voltage_regulator pointing at it (PGM's
+def test_block_backend_matches_scalar_on_pv_bus(tmp_path):
+    """JacobianBackend::Block handles PV buses by replacing their (absent)
+    Q-mismatch row with a dummy `ΔVmag = 0` equation rather than reducing
+    the system's dimension like Scalar does (src/solver.rs's
+    `build_jacobian_blocks`); the two formulations must converge to the
+    same solution. The Rust-side equivalent is
+    tests/block_jacobian_test.rs::block_backend_matches_scalar_backend_with_pv_bus
+    — this checks the same property through the Python bindings. A real PV
+    bus needs a sym_gen with a voltage_regulator pointing at it (PGM's
     actual PV mechanism — see src/pgm.rs's PgmVoltageRegulator)."""
     data = json.loads(INPUT_JSON.read_text())
     data["data"]["sym_gen"] = [
@@ -88,6 +92,18 @@ def test_block_backend_rejects_pv_buses(tmp_path):
     pv_input = tmp_path / "pv_input.json"
     pv_input.write_text(json.dumps(data))
 
-    model = gridoxide.PowerFlowModel.from_pgm_json(str(pv_input), backend="block")
-    with pytest.raises(BaseException):
+    solved = {}
+    for backend in ("scalar", "block"):
+        model = gridoxide.PowerFlowModel.from_pgm_json(str(pv_input), backend=backend)
         model.solve()
+        solved[backend] = (model.voltage_mag(), model.voltage_ang())
+
+    # Node id 2 is the regulated (PV) bus, index 1 in sorted-id order — its
+    # magnitude being pinned to the regulator's u_ref is what makes this a
+    # PV bus at all, so assert it before comparing the two backends.
+    assert solved["scalar"][0][1] == pytest.approx(1.0, abs=1e-12)
+
+    mag_s, ang_s = solved["scalar"]
+    mag_b, ang_b = solved["block"]
+    assert mag_b == pytest.approx(mag_s, abs=1e-9)
+    assert ang_b == pytest.approx(ang_s, abs=1e-9)

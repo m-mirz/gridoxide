@@ -120,7 +120,7 @@ in the main repo for a standalone (not part of this package) converter.
 | Backend | Notes |
 |---|---|
 | `"scalar"` (default) | Sparse LU via `faer`, no special build requirements. |
-| `"block"` | Block-structured variant of the same solver; faster on some topologies, but panics on PV buses. |
+| `"block"` | Block-structured variant of the same solver (one 2×2 block per bus); faster on some topologies. |
 | `"klu_native"` | From-scratch Rust translation of SuiteSparse KLU, always available in this wheel. |
 
 Two additional backends exist in the source tree but are **not** included in the published wheel, since
