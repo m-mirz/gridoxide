@@ -1,6 +1,6 @@
 [package]
 name = "gridoxide"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 build = "build.rs"
 # gridoxide's own code is Apache-2.0. `src/klu_native/` (always built, no
