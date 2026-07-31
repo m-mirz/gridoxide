@@ -190,8 +190,12 @@ const MODELLED_FIXTURES: &[&str] = &[
 /// a hard zero-injection bus and overrides the reading — its published answer
 /// has both buses at exactly 1.0 angle 0, i.e. no flow at all. gridoxide's
 /// `h(x)` agrees with that answer exactly; it is the sensor that is 100 sigma
-/// out, by construction. Testing this case properly needs the zero-injection
-/// constraints of phase 4.
+/// out, by construction. The estimator handles it correctly — see
+/// `tests/state_estimation_test.rs::zero_injection_constraint_overrides_a_conflicting_sensor`,
+/// which reproduces power-grid-model's answer exactly by treating the zero
+/// injection as a hard constraint. It is only *this* test's premise, that
+/// residuals sit within noise at the published state, that the fixture does not
+/// satisfy.
 const INCONSISTENT_BY_DESIGN: &[&str] = &["node-injection-sensor-and-zero-injection"];
 
 /// Whether a fixture's expected output pins down every bus voltage, which is

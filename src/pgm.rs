@@ -599,6 +599,26 @@ pub struct PgmNetwork {
     /// sensor may reference one, and reporting a zero flow for a disconnected
     /// appliance is better than failing to resolve the id at all.
     pub appliance_bus: HashMap<u64, usize>,
+    /// Buses whose net injection is identically zero, as a per-bus flag.
+    ///
+    /// A bus with no load and no generator injects nothing into the network,
+    /// and that is *structural knowledge*, not a measurement — it holds exactly,
+    /// with no uncertainty. State estimation can use it as a hard constraint
+    /// rather than as a very-high-weight pseudo-measurement, which is what
+    /// `se::constraints` does.
+    ///
+    /// Sources and shunts do not disqualify a bus here, because gridoxide
+    /// models both structurally: a source's power arrives through its
+    /// synthesized branch and a shunt sits on the Y-bus diagonal, so neither
+    /// appears in `network::power_injections` at that bus. The virtual slack
+    /// buses themselves *are* excluded — that is precisely where the source's
+    /// unknown power enters the network.
+    ///
+    /// Note this is read off the *input document*, not off `Bus::p_spec`. A
+    /// state-estimation document leaves `p_specified` unset, so an unmeasured
+    /// load looks like zero injection in the converted network while being
+    /// nothing of the sort.
+    pub zero_injection: Vec<bool>,
     /// Branch ids that collapsed to a self-loop because exactly one terminal
     /// was connected, mapped to *which* PGM terminal is the live one.
     ///
@@ -933,10 +953,31 @@ pub fn pgm_to_network(
         }
     }
 
+    // Zero-injection buses: everything except the ones carrying an active load
+    // or generator, and except the virtual slack buses where source power
+    // enters. Star buses of three-winding transformers qualify, which is the
+    // textbook example of the constraint being worth having.
+    let mut zero_injection = vec![true; buses.len()];
+    for (node, status) in input.data.sym_load.iter().map(|a| (a.node, a.status))
+        .chain(input.data.asym_load.iter().map(|a| (a.node, a.status)))
+        .chain(input.data.sym_gen.iter().map(|a| (a.node, a.status)))
+        .chain(input.data.asym_gen.iter().map(|a| (a.node, a.status)))
+    {
+        if status != 0 {
+            if let Some(&idx) = id_to_idx.get(&node) {
+                zero_injection[idx] = false;
+            }
+        }
+    }
+    for &branch in source_branch_idx.values() {
+        zero_injection[lines[branch].from] = false;
+    }
+
     PgmNetwork {
         buses,
         lines,
         transformers,
+        zero_injection,
         node_idx: id_to_idx,
         branch_idx,
         three_winding_branch_idx,

@@ -30,6 +30,7 @@
 //! network. `tests/measurement_residual_test.rs` is what established this — it
 //! reported a 63-sigma disagreement on exactly that quantity.
 
+pub mod constraints;
 pub mod jacobian;
 pub mod nr;
 
@@ -53,6 +54,9 @@ pub struct SeNetwork {
     pub shunt_y: Vec<Complex<f64>>,
     /// For each bus, the synthesized source branches delivering into it.
     pub source_branches: Vec<Vec<usize>>,
+    /// Per-bus zero-injection flags, carried through from the conversion — see
+    /// [`PgmNetwork::zero_injection`](crate::pgm::PgmNetwork::zero_injection).
+    pub zero_injection: Vec<bool>,
 }
 
 impl SeNetwork {
@@ -85,7 +89,8 @@ impl SeNetwork {
             list.sort_unstable();
         }
 
-        Self { ybus, branches, shunt_y, source_branches }
+        let zero_injection = net.zero_injection.clone();
+        Self { ybus, branches, shunt_y, source_branches, zero_injection }
     }
 
     /// The power a source delivers *into* its node, per-unit.
@@ -216,6 +221,7 @@ pub(crate) mod tests {
             branches,
             shunt_y: vec![Complex::new(0.0, 0.0), y_shunt],
             source_branches: vec![Vec::new(), vec![0]],
+            zero_injection: vec![false, false],
         };
         (net, vec![bus(0, 1.02, 0.03), bus(1, 0.99, -0.02)])
     }

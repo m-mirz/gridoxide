@@ -26,6 +26,7 @@ use crate::solver::{JacobianBackend, LinearSolver};
 use crate::sparse::RealSparseSystem;
 use crate::types::Bus;
 
+use super::constraints::Constraints;
 use super::jacobian::{gain_and_rhs, measurement_jacobian, StateLayout};
 use super::{measurement_functions, SeNetwork};
 
@@ -115,6 +116,7 @@ fn estimate_with<S: LinearSolver>(
     buses: &mut [Bus],
     net: &SeNetwork,
     layout: &StateLayout,
+    constraints: &Constraints,
     options: &SeOptions,
 ) -> SeReport {
     let mut cache: Option<S> = None;
@@ -137,6 +139,11 @@ fn estimate_with<S: LinearSolver>(
         let mut rhs = rhs;
         rhs.resize(n, 0.0);
 
+        // Zero-injection buses enter as hard constraints rather than as
+        // heavily-weighted pseudo-measurements; see `se::constraints` for why
+        // that matters for conditioning.
+        let (c_values, c_rows) = constraints.evaluate(buses, net, layout);
+
         // A state variable no measurement touches leaves an all-zero row and
         // column in G, which makes the whole system singular even though the
         // rest of it is perfectly well determined. Writing an identity into
@@ -151,7 +158,7 @@ fn estimate_with<S: LinearSolver>(
         // symbolic factorization requires. A column that is present but
         // numerically degenerate is a different problem, and phase 5's job.
         let mut touched = vec![false; n];
-        for row in &rows {
+        for row in rows.iter().chain(&c_rows) {
             for &(c, _) in row {
                 touched[c] = true;
             }
@@ -165,12 +172,16 @@ fn estimate_with<S: LinearSolver>(
         let unconstrained: Vec<usize> =
             touched.iter().enumerate().filter(|&(_, &t)| !t).map(|(c, _)| c).collect();
 
+        let (triplets, rhs) =
+            super::constraints::augment(triplets, rhs, n, &c_values, &c_rows);
+        let n_aug = n + constraints.len();
+
         // The gain matrix's sparsity pattern is fixed for a topology and a
         // measurement set, so the symbolic factorization is built once and
         // reused across iterations — the same property `PersistentSolver`
         // relies on for power flow.
         if cache.is_none() {
-            cache = S::new(n, &triplets);
+            cache = S::new(n_aug, &triplets);
         }
         let Some(system) = cache.as_mut() else {
             return SeReport {
@@ -201,7 +212,10 @@ fn estimate_with<S: LinearSolver>(
         }
 
         last_unconstrained = unconstrained.clone();
-        last_step = dx.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+        // Only the leading `n` entries are the state step; the tail holds the
+        // Lagrange multipliers, which say how hard each constraint is pulling
+        // and must not be mistaken for a lack of convergence.
+        last_step = dx[..n].iter().fold(0.0f64, |a, &b| a.max(b.abs()));
         if last_step < options.tol {
             // Recompute residuals at the state actually returned, so the
             // reported objective describes the answer rather than the
@@ -257,17 +271,18 @@ pub fn estimate(
     options: &SeOptions,
 ) -> SeReport {
     let layout = StateLayout::new(buses, measurements, net);
+    let constraints = Constraints::new(&net.zero_injection);
     match options.backend {
         JacobianBackend::KluNative => {
-            estimate_with::<crate::klu_native::KluNativeSystem>(measurements, buses, net, &layout, options)
+            estimate_with::<crate::klu_native::KluNativeSystem>(measurements, buses, net, &layout, &constraints, options)
         }
         #[cfg(feature = "klu")]
         JacobianBackend::Klu => {
-            estimate_with::<crate::sparse_klu::KluRealSystem>(measurements, buses, net, &layout, options)
+            estimate_with::<crate::sparse_klu::KluRealSystem>(measurements, buses, net, &layout, &constraints, options)
         }
         #[cfg(feature = "pardiso")]
         JacobianBackend::Pardiso => {
-            estimate_with::<crate::sparse_pardiso::PardisoRealSystem>(measurements, buses, net, &layout, options)
+            estimate_with::<crate::sparse_pardiso::PardisoRealSystem>(measurements, buses, net, &layout, &constraints, options)
         }
         // `Block` assumes power flow's two-unknowns-per-bus structure, which the
         // 2N−1 state vector here does not have (the reference bus contributes
@@ -275,7 +290,7 @@ pub fn estimate(
         // than silently mis-assembling. Every other backend is a general sparse
         // LU and carries the gain matrix unchanged.
         JacobianBackend::Block | JacobianBackend::Scalar => {
-            estimate_with::<RealSparseSystem>(measurements, buses, net, &layout, options)
+            estimate_with::<RealSparseSystem>(measurements, buses, net, &layout, &constraints, options)
         }
     }
 }

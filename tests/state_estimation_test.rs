@@ -153,6 +153,24 @@ fn estimates_transmission_case() {
     assert_estimate_matches("transmission-case", JacobianBackend::Scalar, 1e-6);
 }
 
+/// A node with no appliance attached injects exactly nothing, and
+/// power-grid-model overrides the 0.1 p.u. injection sensor placed on it with
+/// that fact — its published answer has both buses at exactly 1.0 angle 0.
+///
+/// Reproducing it requires treating zero injection as a hard constraint rather
+/// than as data to be fitted: a weighted least-squares fit that merely trusts
+/// the sensor a little less would still be pulled toward it. This fixture
+/// therefore fails outright without `se::constraints`, which is what makes it
+/// the phase-4 gate.
+#[test]
+fn zero_injection_constraint_overrides_a_conflicting_sensor() {
+    assert_estimate_matches(
+        "node-injection-sensor-and-zero-injection",
+        JacobianBackend::Scalar,
+        1e-6,
+    );
+}
+
 /// The gain matrix is an ordinary square sparse system, so every backend that
 /// carries power flow's Jacobian carries it too. `Block` is expected to fall
 /// back to the scalar path (its 2x2-per-bus structure does not fit a 2N-1 state

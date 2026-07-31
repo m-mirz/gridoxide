@@ -238,6 +238,24 @@ fn add_shunt_row(row: &mut Row, layout: &StateLayout, net: &SeNetwork, buses: &[
     push(row, Some(layout.vmag(bus)), d);
 }
 
+/// One bus-injection row on its own, for callers that need the same partials
+/// outside the measurement set — `se::constraints` builds its constraint rows
+/// from exactly this, since a zero-injection constraint and an injection
+/// measurement differ only in how the system consumes the row.
+pub fn injection_row(
+    layout: &StateLayout,
+    net: &SeNetwork,
+    buses: &[Bus],
+    p_inj: &[f64],
+    q_inj: &[f64],
+    bus: usize,
+    active: bool,
+) -> Row {
+    let mut row = Row::new();
+    add_injection_row(&mut row, layout, net, buses, p_inj, q_inj, bus, active, 1.0);
+    row
+}
+
 /// Builds `H`, one row per measurement, in the same order.
 pub fn measurement_jacobian(
     measurements: &[Measurement],
