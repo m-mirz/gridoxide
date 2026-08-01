@@ -70,6 +70,26 @@ def test_backends_agree():
         assert other == pytest.approx(answers[0], abs=1e-9)
 
 
+def test_iterative_linear_method_agrees():
+    """power-grid-model's default method, reached through the bindings.
+
+    It converges linearly rather than quadratically, hence the larger iteration
+    budget — trading more iterations for much cheaper ones is the point of it.
+    """
+    newton = model("transmission-case")
+    newton.solve()
+
+    linear = model("transmission-case", method="iterative_linear", max_iter=100)
+    linear.solve()
+
+    assert linear.voltage_mag() == pytest.approx(newton.voltage_mag(), abs=1e-6)
+
+
+def test_unknown_method_is_rejected():
+    with pytest.raises(ValueError, match="unknown method"):
+        model("1os2msr", method="bogus")
+
+
 def test_bad_data_rejects_the_conflicting_sensor():
     """A 0.1 p.u. injection sensor on a node with nothing attached to it.
 

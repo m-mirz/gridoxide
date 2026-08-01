@@ -505,15 +505,25 @@ impl StateEstimationModel {
     /// on its loads or `u_ref` on its sources, since those are quantities state
     /// estimation solves for rather than inputs it consumes.
     #[staticmethod]
-    #[pyo3(signature = (path, backend="scalar", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0))]
+    #[pyo3(signature = (path, backend="scalar", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0))]
     fn from_pgm_json(
         path: &str,
         backend: &str,
+        method: &str,
         tol: f64,
         max_iter: usize,
         s_base_va: f64,
         freq_hz: f64,
     ) -> PyResult<Self> {
+        let method = match method {
+            "newton_raphson" => crate::se::nr::SeMethod::NewtonRaphson,
+            "iterative_linear" => crate::se::nr::SeMethod::IterativeLinear,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown method {other:?}, expected 'newton_raphson' or 'iterative_linear'"
+                )))
+            }
+        };
         let raw = std::fs::read_to_string(path)
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
         let input: PgmInput = serde_json::from_str(&raw)
@@ -547,7 +557,12 @@ impl StateEstimationModel {
             net,
             se_net,
             measurements,
-            options: crate::se::nr::SeOptions { tol, max_iter, backend: parse_backend(backend)? },
+            options: crate::se::nr::SeOptions {
+                tol,
+                max_iter,
+                backend: parse_backend(backend)?,
+                method,
+            },
             report: None,
         })
     }

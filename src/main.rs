@@ -18,7 +18,7 @@ use gridoxide::run_power_flow_analysis;
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
-use gridoxide::se::nr::{estimate, flat_start, SeOptions, SeStatus};
+use gridoxide::se::nr::{estimate, flat_start, SeMethod, SeOptions, SeStatus};
 use gridoxide::se::observability;
 use gridoxide::se::SeNetwork;
 use gridoxide::solver::SolveStatus;
@@ -26,8 +26,11 @@ use gridoxide::solver::SolveStatus;
 const USAGE: &str = "\
 usage:
   gridoxide                     run the bundled power-flow demo
-  gridoxide estimate <path>     run state estimation over a PGM JSON document
-                                containing sym_voltage_sensor/sym_power_sensor
+  gridoxide estimate <path> [--iterative-linear]
+                                run state estimation over a PGM JSON document
+                                containing sym_voltage_sensor/sym_power_sensor.
+                                The default method is Newton-Raphson; the flag
+                                selects the faster, less exact linearized one.
 ";
 
 fn main() {
@@ -36,7 +39,12 @@ fn main() {
         None => power_flow_demo(),
         Some("estimate") => match args.get(1) {
             Some(path) => {
-                if let Err(message) = run_estimate(path) {
+                let method = if args.iter().any(|a| a == "--iterative-linear") {
+                    SeMethod::IterativeLinear
+                } else {
+                    SeMethod::NewtonRaphson
+                };
+                if let Err(message) = run_estimate(path, method) {
                     eprintln!("error: {message}");
                     std::process::exit(1);
                 }
@@ -95,7 +103,7 @@ fn power_flow_demo() {
 
 /// Estimates the state of the grid in `path` and prints it, along with the two
 /// analyses that say whether the answer should be trusted.
-fn run_estimate(path: &str) -> Result<(), String> {
+fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput =
@@ -119,7 +127,19 @@ fn run_estimate(path: &str) -> Result<(), String> {
 
     let mut buses = net.buses.clone();
     flat_start(&mut buses, &measurements);
-    let report = estimate(&measurements, &mut buses, &se_net, &SeOptions::default());
+    // The linearized method converges linearly rather than quadratically, so it
+    // wants a larger budget for the same tolerance — that trade, a cheaper
+    // iteration for more of them, is the point of it.
+    let max_iter = match method {
+        SeMethod::IterativeLinear => 100,
+        SeMethod::NewtonRaphson => 20,
+    };
+    let report = estimate(
+        &measurements,
+        &mut buses,
+        &se_net,
+        &SeOptions { method, max_iter, ..SeOptions::default() },
+    );
 
     println!(
         "{} bus(es), {} measurement(s) after aggregation",

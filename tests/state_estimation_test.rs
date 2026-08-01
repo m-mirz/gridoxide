@@ -41,7 +41,7 @@ use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
 use gridoxide::se::bad_data;
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
-use gridoxide::se::nr::{estimate, flat_start, SeOptions, SeStatus};
+use gridoxide::se::nr::{estimate, flat_start, SeMethod, SeOptions, SeStatus};
 use gridoxide::se::observability::analyze;
 use gridoxide::se::SeNetwork;
 use gridoxide::solver::JacobianBackend;
@@ -57,6 +57,17 @@ fn fixture_dir(name: &str) -> PathBuf {
 /// Estimates `name` from its sensors and compares every node against the
 /// fixture's expected output.
 fn assert_estimate_matches(name: &str, backend: JacobianBackend, tol: f64) {
+    assert_estimate_matches_with(name, backend, SeMethod::NewtonRaphson, tol, 20);
+}
+
+/// As above, but with the method and iteration budget chosen explicitly.
+fn assert_estimate_matches_with(
+    name: &str,
+    backend: JacobianBackend,
+    method: SeMethod,
+    tol: f64,
+    max_iter: usize,
+) {
     let dir = fixture_dir(name);
     let input = common::load_pgm_input(&dir.join("input.json"));
     let expected = common::load_json(&dir.join("sym_output.json"));
@@ -76,13 +87,13 @@ fn assert_estimate_matches(name: &str, backend: JacobianBackend, tol: f64) {
 
     let mut buses = net.buses.clone();
     flat_start(&mut buses, &measurements);
-    let options = SeOptions { backend, ..SeOptions::default() };
+    let options = SeOptions { backend, method, max_iter, ..SeOptions::default() };
     let report = estimate(&measurements, &mut buses, &se_net, &options);
 
     assert_eq!(
         report.status,
         SeStatus::Converged,
-        "{name} [{backend:?}]: {report:?}"
+        "{name} [{backend:?}/{method:?}]: {report:?}"
     );
 
     // Absolute angles are only determined when something measures one.
@@ -102,13 +113,13 @@ fn assert_estimate_matches(name: &str, backend: JacobianBackend, tol: f64) {
         };
         assert!(
             (buses[idx].voltage_mag - u_pu).abs() < tol,
-            "{name} [{backend:?}] node {id}: |V| = {}, PGM says {u_pu}",
+            "{name} [{backend:?}/{method:?}] node {id}: |V| = {}, PGM says {u_pu}",
             buses[idx].voltage_mag
         );
         if phase_is_measured {
             assert!(
                 (buses[idx].voltage_ang - u_angle).abs() < tol,
-                "{name} [{backend:?}] node {id}: angle = {}, PGM says {u_angle}",
+                "{name} [{backend:?}/{method:?}] node {id}: angle = {}, PGM says {u_angle}",
                 buses[idx].voltage_ang
             );
         } else {
@@ -120,7 +131,7 @@ fn assert_estimate_matches(name: &str, backend: JacobianBackend, tol: f64) {
         for &(id, offset) in &offsets {
             assert!(
                 (offset - reference).abs() < tol,
-                "{name} [{backend:?}] node {id}: angle offset {offset} differs from node \
+                "{name} [{backend:?}/{method:?}] node {id}: angle offset {offset} differs from node \
                  {ref_id}'s {reference} — a uniform offset is a reference convention, a \
                  varying one is a wrong estimate"
             );
@@ -300,6 +311,74 @@ fn bad_data_analysis_flags_only_the_inconsistent_fixture() {
                 worst.normalized_residual > 3.0,
                 "{name}: normalized residual {} should exceed the conventional threshold",
                 worst.normalized_residual
+            );
+        }
+    }
+}
+
+/// power-grid-model's own default method, reaching the same answers.
+///
+/// Its fixtures accept either algorithm against a single expected output, so
+/// agreement here is agreement with power-grid-model twice over. The iteration
+/// budget is larger than the Newton path's because this method converges
+/// linearly rather than quadratically — trading iteration count for a much
+/// cheaper iteration is the whole point of it.
+#[test]
+fn iterative_linear_matches_pgm() {
+    for name in [
+        "1os2msr",
+        "1os2msr-no-angle",
+        "inf-measurement-with-injection",
+        "transmission-case",
+        "node-injection-sensor-and-zero-injection",
+    ] {
+        assert_estimate_matches_with(
+            name,
+            JacobianBackend::Scalar,
+            SeMethod::IterativeLinear,
+            1e-6,
+            100,
+        );
+    }
+}
+
+/// The two methods must agree with each other, not merely each with the
+/// fixtures — a stricter statement, since it holds bus by bus rather than only
+/// where power-grid-model published a value.
+#[test]
+fn the_two_methods_agree() {
+    for name in ["1os2msr", "transmission-case"] {
+        let dir = fixture_dir(name);
+        let input = common::load_pgm_input(&dir.join("input.json"));
+        let id_to_idx = node_id_to_idx(&input);
+        let shunts = pgm_shunts_1ph(&input, &id_to_idx, S_BASE_VA);
+        let net = pgm_to_network(
+            common::load_pgm_input(&dir.join("input.json")),
+            S_BASE_VA,
+            50.0,
+        );
+        let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+
+        let solve = |method| {
+            let mut buses = net.buses.clone();
+            flat_start(&mut buses, &measurements);
+            let options = SeOptions { method, max_iter: 100, ..SeOptions::default() };
+            let report = estimate(&measurements, &mut buses, &se_net, &options);
+            assert_eq!(report.status, SeStatus::Converged, "{name} [{method:?}]: {report:?}");
+            buses
+        };
+        let newton = solve(SeMethod::NewtonRaphson);
+        let linear = solve(SeMethod::IterativeLinear);
+
+        for (i, (a, b)) in newton.iter().zip(&linear).enumerate() {
+            assert!(
+                (a.voltage_mag - b.voltage_mag).abs() < 1e-6,
+                "{name} bus {i}: Newton {} vs iterative-linear {}",
+                a.voltage_mag,
+                b.voltage_mag
             );
         }
     }

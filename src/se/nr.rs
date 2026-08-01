@@ -49,6 +49,24 @@ pub enum SeStatus {
     Singular,
 }
 
+/// Which algorithm to estimate with.
+///
+/// Both minimize the same weighted-least-squares objective and, on a
+/// well-conditioned problem, reach the same state — power-grid-model's fixtures
+/// accept either method against one expected answer, and gridoxide's tests
+/// check that they agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SeMethod {
+    /// Gauss-Newton on the nonlinear problem. Slower per iteration — a fresh
+    /// Jacobian and factorization each time — and the more accurate of the two.
+    #[default]
+    NewtonRaphson,
+    /// Linearize the measurements into currents, factorize once, iterate on the
+    /// right-hand side alone. Faster, at the cost of the approximations
+    /// [`super::iterative`] documents.
+    IterativeLinear,
+}
+
 /// Options for a single estimate.
 #[derive(Clone, Copy, Debug)]
 pub struct SeOptions {
@@ -56,11 +74,20 @@ pub struct SeOptions {
     pub tol: f64,
     pub max_iter: usize,
     pub backend: JacobianBackend,
+    /// Which algorithm to use. The backend applies only to
+    /// [`SeMethod::NewtonRaphson`]; the iterative-linear method solves a
+    /// complex system and has a single path.
+    pub method: SeMethod,
 }
 
 impl Default for SeOptions {
     fn default() -> Self {
-        Self { tol: 1e-8, max_iter: 20, backend: JacobianBackend::Scalar }
+        Self {
+            tol: 1e-8,
+            max_iter: 20,
+            backend: JacobianBackend::Scalar,
+            method: SeMethod::default(),
+        }
     }
 }
 
@@ -249,6 +276,9 @@ pub fn estimate(
     net: &SeNetwork,
     options: &SeOptions,
 ) -> SeReport {
+    if options.method == SeMethod::IterativeLinear {
+        return super::iterative::estimate(measurements, buses, net, options);
+    }
     let layout = StateLayout::new(buses, measurements, net);
     let constraints = Constraints::new(&net.zero_injection);
     match options.backend {

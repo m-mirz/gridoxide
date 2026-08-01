@@ -101,6 +101,22 @@ at −0.0130). The test then requires gridoxide's angles to match *up to one con
 bus* — a stronger check than it sounds, since a wrong estimate produces per-bus errors rather than a
 uniform offset.
 
+## Two methods
+
+gridoxide implements both of power-grid-model's calculation methods, and they agree with each other
+bus by bus on its fixtures.
+
+| | `SeMethod::NewtonRaphson` (default) | `SeMethod::IterativeLinear` |
+|---|---|---|
+| Solves | the nonlinear problem | a linearized one, re-linearized each pass |
+| Per iteration | fresh Jacobian and factorization | right-hand side only |
+| Convergence | quadratic | linear |
+| Accuracy | the true WLS optimum | approximate — see [the method's own page](./iterative.md) |
+
+The linearized method is faster per iteration and needs more of them. It is power-grid-model's
+default; gridoxide's default is Newton-Raphson, on the grounds that a library should be exact unless
+asked otherwise.
+
 ## Running it
 
 From the shell:

@@ -196,9 +196,10 @@ normalized residual. Zero injections are enforced as hard equality constraints r
 high-weight pseudo-measurements — the approach that avoids the ill-conditioning power-grid-model has
 two fixtures named after.
 
-Not yet covered, and worth stating plainly: only the Newton-Raphson method, not power-grid-model's
-faster prefactorized `iterative_linear`; symmetric calculations only; and `link` components are still
-unparsed, which excludes 4 of the 20 symmetric fixtures. Pseudo-measurement augmentation — filling an
+Both of power-grid-model's calculation methods are implemented and agree with each other:
+Newton-Raphson (`se::nr`) and the prefactorized `iterative_linear` (`se::iterative`), selectable per
+call. Not yet covered, and worth stating plainly: symmetric calculations only, and `link` components
+are still unparsed, which excludes 4 of the 20 symmetric fixtures. Pseudo-measurement augmentation — filling an
 unobservable region with forecast values, which VeraGrid does — is not implemented; gridoxide reports
 the unobservable set instead, which is the prerequisite for it.
 

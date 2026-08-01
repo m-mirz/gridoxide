@@ -32,6 +32,7 @@
 
 pub mod bad_data;
 pub mod constraints;
+pub mod iterative;
 pub mod jacobian;
 pub mod observability;
 pub mod nr;
