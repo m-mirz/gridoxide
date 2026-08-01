@@ -44,7 +44,7 @@ absence of a survey is not evidence of absence of the feature.
 | Time-series / batch injections | ✅ `TimeSerie`, ~13x speedup claimed | ✅ batch datasets, parallel via `threading` param | — | ✅ time-series variants of power flow, OPF, linear analysis, *and* contingency analysis | ✅ `timeseries` module (`run_time_series`, pluggable `DataSource`/`OutputWriter`) | ⚠️ `batch::BatchSolver` (`src/batch.rs`): many scenarios over one shared topology, parallel across cores via rayon, each worker amortizing one symbolic factorization over its share — 3.5x on 8 physical cores at 256 scenarios (`scripts/bench/README.md` §4b), results identical to a sequential loop and returned in scenario order. Injection overrides only (`BusOverride` deliberately cannot change `bus_type`, since that changes `n_unknowns` and invalidates the shared pattern), and no time-series driver layered on top — no `DataSource`/`OutputWriter` equivalent, no result writer |
 | Input validation | ❌ | ✅ `validate_input_data`/`validate_batch_data` | — | ❌ no generic equivalent found (only format-specific CIM/FMU import validation) | ✅ `diagnostic()` (disconnected elements, implausible values, wrong reference system, ...) | ❌ |
 | Short-circuit calculation | ❌ | ✅ (IEC 60909) | ❌ | ✅ (3-phase, LG, LL, LLG fault types — `Simulations/ShortCircuitStudies/`) | ✅ (IEC 60909-style, `shortcircuit` module) | ❌ |
-| State estimation | ❌ | ✅ (WLS) | ❌ | ✅ (WLS + observability analysis + pseudo-measurement augmentation) | ✅ (WLS, `estimation` module) | ❌ |
+| State estimation | ❌ | ✅ (WLS) | ❌ | ✅ (WLS + observability analysis + pseudo-measurement augmentation) | ✅ (WLS, `estimation` module) | ✅ (WLS + observability + bad-data detection + zero-injection constraints) |
 | Sensitivity analysis / OPF | ❌ / ❌ | ❌ / ❌ | ✅ / ❌ | ✅ (PTDF/LODF, `Simulations/LinearFactors/`) / ✅ (linear *and* nonlinear AC OPF, `Simulations/OPF/`) | ✅ (PTDF, `pypower/makePTDF.py`) / ✅ native PDIPM AC+DC OPF (`runopp`/`rundcopp`) *plus* an optional external Julia PandaModels.jl bridge (`runpm.py`) for more advanced formulations | ❌ / ❌ |
 | Pluggable "outer loop" architecture | ❌ | ⚠️ ad hoc (tap optimizer only) | ✅ extensively (14+ outer loops) | ⚠️ ad hoc (boolean control flags in `PowerFlowOptions`, not a modular/registry-based architecture like powsybl's) | ✅ genuine `Controller`/`BasicCtrl` base classes (`control/basic_controller.py`) registered on `net.controller` and driven by `run_control` — third-party code can subclass `Controller` directly, closer in spirit to powsybl's extensibility than to VeraGrid's/PGM's fixed flag sets, though not the same formal outer-loop-convergence architecture | ❌ |
 | Dynamic / time-domain simulation (EMT, RMS, small-signal stability) | ❌ | ❌ | ❌ | ✅ (`Simulations/EMT/`, `Simulations/Rms/`, `Simulations/SmallSignalStabilityEmt/`+`SmallSignalStabilityRms/` — the only one of the six with this at all) | ❌ | ❌ |
@@ -177,7 +177,30 @@ absence of a survey is not evidence of absence of the feature.
 3. **Distributed slack** — 4 of 5 tools have it (only lightsim2grid, powsybl, VeraGrid, and pandapower); real transmission grids often split slack across several generators.
 4. **DC power flow as a first-class mode** — cheap, since `linear_initial_guess` is most of the way there already; every reference tool treats this as a basic offering.
 5. **Switches, HVDC and SVC as first-class model elements** — no longer absent, but reachable *only* through CGMES import: switching state, converter setpoints and SVC regulation are all fixed at import time, with no element in gridoxide's own network model to change between solves. That is exactly the shape lightsim2grid's disclaimer calls out for its own fixed taps, and it is what stands between the current support and the contingency/time-series work in item 2.
-6. Everything else in the table (TCSC/SSC and the wider FACTS set, short-circuit, state estimation, sensitivity/OPF, outer-loop/controller architecture as a general extensibility mechanism, VeraGrid's unique EMT/RMS dynamic simulation, pandapower's protection-device modeling) — real capabilities elsewhere, but either a materially larger undertaking or outside gridoxide's current scope as a focused AC power-flow library.
+6. Everything else in the table (TCSC/SSC and the wider FACTS set, short-circuit, sensitivity/OPF, outer-loop/controller architecture as a general extensibility mechanism, VeraGrid's unique EMT/RMS dynamic simulation, pandapower's protection-device modeling) — real capabilities elsewhere, but either a materially larger undertaking or outside gridoxide's current scope as a focused AC power-flow library.
+
+## Note on state estimation
+
+**Done**, and the one entry in this table where gridoxide now matches the most capable reference tool
+rather than trailing it. `se::nr::estimate` is Gauss-Newton on the normal equations, validated against
+power-grid-model's own state-estimation fixtures (committed under `tests/data/pgm/state_estimation/`
+with their MPL-2.0 license files): per-unit magnitudes agree to 1.5e-9 on `transmission-case`, and
+every sparse backend produces the same answer, since the gain matrix is an ordinary square system.
+See the [State Estimation](../state_estimation/index.md) chapter.
+
+Both analyses VeraGrid is credited with above are present. Observability
+(`se::observability::analyze`) separates structural from numerical unobservability and names the
+buses and quantities involved, rather than only reporting that a factorization failed. Bad-data
+detection (`se::bad_data::analyze`) runs the chi-squared test and identifies culprits by largest
+normalized residual. Zero injections are enforced as hard equality constraints rather than as
+high-weight pseudo-measurements — the approach that avoids the ill-conditioning power-grid-model has
+two fixtures named after.
+
+Not yet covered, and worth stating plainly: only the Newton-Raphson method, not power-grid-model's
+faster prefactorized `iterative_linear`; symmetric calculations only; and `link` components are still
+unparsed, which excludes 4 of the 20 symmetric fixtures. Pseudo-measurement augmentation — filling an
+unobservable region with forecast values, which VeraGrid does — is not implemented; gridoxide reports
+the unobservable set instead, which is the prerequisite for it.
 
 ## Note on realistic benchmark coverage
 

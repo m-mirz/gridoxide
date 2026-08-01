@@ -1,6 +1,6 @@
 # gridoxide
 
-`gridoxide` is an AC power flow analysis tool written in Rust. It solves the power flow equations for
+`gridoxide` is an AC power flow and state estimation tool written in Rust. It solves the power flow equations for
 an electrical grid with the Newton-Raphson method, using a sparse Jacobian throughout — assembly,
 factorization, and solve.
 
@@ -38,6 +38,11 @@ See [Building and Running](docs/src/getting_started/building.md) and
 - **Newton-Raphson AC power flow**, symmetric and asymmetric, with a sparse Jacobian and symbolic
   factorization reused across both NR iterations and repeated solves
   (`solver::PersistentSolver`) — see [Backends and Factorization Reuse](docs/src/solvers/backends.md).
+- **Weighted-least-squares state estimation** — recovers the most likely grid state from noisy,
+  redundant, partial measurements, with [observability analysis and bad-data
+  detection](docs/src/state_estimation/diagnostics.md) and zero injections enforced as hard
+  constraints rather than high-weight guesses. Validated against power-grid-model's own fixtures; see
+  [The State Estimation Problem](docs/src/state_estimation/index.md).
 - **Five interchangeable linear-solver backends** — `faer` (`Scalar`), a hand-written block LU
   (`Block`), vendored SuiteSparse KLU over FFI (`Klu`), a from-scratch Rust translation of KLU
   (`KluNative`, always built), and Intel oneMKL PARDISO (`Pardiso`). All five produce identical
