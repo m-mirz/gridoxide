@@ -1,4 +1,4 @@
-# CGMES: StaticVarCompensator
+# StaticVarCompensator
 
 ## Motivation
 
@@ -6,7 +6,7 @@ A Static Var Compensator (SVC) is a shunt-connected, power-electronically-contro
 source: instead of a fixed shunt capacitor/reactor bank, it continuously adjusts its own reactive
 injection to hold the voltage at its connection point near a setpoint, within a capacitive/inductive
 rating. Electrically it behaves like a voltage-controlled bus for load-flow purposes — the same
-\\(\vert V_k \vert\\)-known, \\(Q_k\\)-unknown PV formulation the [Powerflow](./powerflow.md) page already
+\\(\vert V_k \vert\\)-known, \\(Q_k\\)-unknown PV formulation the [Powerflow](../powerflow/index.md) page already
 describes for a generator, just without any active-power term.
 
 CGMES represents one as its own `StaticVarCompensator` class (a `RegulatingCondEq`, the same base every
@@ -54,7 +54,7 @@ directly into the voltage equation as an extra term rather than being a post-hoc
 dead-band, only entering active regulation when voltage leaves it. Because that decision depends on the
 solved voltage, it can't be made before the solve — it needs an outer loop that toggles the bus between a
 fixed-susceptance PQ shunt and an active PV pin between passes, the same architectural pattern the
-[Reactive Power Limits](./q_limits.md) page describes for Q-limit switching, applied here to decide
+[Reactive Power Limits](../powerflow/q_limits.md) page describes for Q-limit switching, applied here to decide
 *whether* to regulate at all rather than *how far* a limit was exceeded.
 
 A tool that implements only the hard pin still solves the common case correctly; droop and standby refine
@@ -76,7 +76,7 @@ an ordinary PQ contribution.
 ## Where this fits in gridoxide today
 
 `src/cgmes.rs`'s `StaticVarCompensator` conversion (added alongside the `ACLineSegment.gch` fix — see
-the [Shunt Conductance](./cgmes_shunt_conductance.md) page — after this fixture's own SVC was found to
+the [Shunt Conductance](./shunt_conductance.md) page — after this fixture's own SVC was found to
 be silently dropped entirely) mirrors `SynchronousMachine`'s existing `RegulatingControl`-driven PV
 upgrade:
 

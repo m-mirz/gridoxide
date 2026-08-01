@@ -50,14 +50,14 @@ fn main() {
         #[cfg(feature = "klu")]
         "klu" => JacobianBackend::Klu,
         #[cfg(not(feature = "klu"))]
-        "klu" => panic!("the 'klu' backend needs `cargo run --features klu ...` (see the README's \"Sparse solver\" section)"),
+        "klu" => panic!("the 'klu' backend needs `cargo run --features klu ...` (see docs/src/solvers/backends.md)"),
         "klu_native" => JacobianBackend::KluNative,
         #[cfg(feature = "pardiso")]
         "pardiso" => JacobianBackend::Pardiso,
         #[cfg(not(feature = "pardiso"))]
         "pardiso" => panic!(
             "the 'pardiso' backend needs `cargo run --features pardiso ...` with MKLROOT set \
-             (see the README's \"Experimental backends\" section)"
+             (see docs/src/solvers/backends.md)"
         ),
         other => panic!("unknown backend '{other}', expected 'scalar', 'block', 'klu', 'klu_native', or 'pardiso'"),
     };

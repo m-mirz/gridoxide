@@ -154,8 +154,8 @@ absence of a survey is not evidence of absence of the feature.
   other five tools here have any equivalent of — outside the scope of this table's rows, but worth noting as
   another area where pandapower's breadth exceeds a pure power-flow-engine comparison.
 - This is the same pandapower already used elsewhere in this benchmark suite (`bench_pandapower.py`,
-  `bench_lightsim2grid.py`'s and lightsim2grid's own `init_from_pandapower`) — see the top-level README's
-  "Experimental backends" section and `scripts/bench/README.md` for its own timing numbers, where it's the
+  `bench_lightsim2grid.py`'s and lightsim2grid's own `init_from_pandapower`) — see [Backends and Factorization Reuse](../solvers/backends.md)
+  and `scripts/bench/README.md` for its own timing numbers, where it's the
   only tool besides gridoxide to converge on all 12 real MATPOWER cases.
 
 ## Where gridoxide already exceeds or matches

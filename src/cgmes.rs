@@ -1,7 +1,7 @@
 //! CGMES (Common Grid Model Exchange Standard) dataset loading and
 //! conversion, built on cimoxide's `cimdecoder`/`cimstructs` crates — see
-//! `CIMOXIDE_PROVENANCE.md` for why this is a pinned git dependency rather
-//! than a crates.io one.
+//! `docs/src/reference/provenance.md` for why this is a pinned git
+//! dependency rather than a crates.io one.
 //!
 //! Requires the TP profile: `TopologicalNode` is used directly as gridoxide's
 //! `Bus`, so ConnectivityNode/switch-state topology processing is assumed
@@ -290,8 +290,9 @@ impl UnionFind {
 /// `Switch`, `Disconnector`, `LoadBreakSwitch`, `DisconnectingCircuitBreaker`,
 /// `GroundDisconnector`, `Jumper`, `Cut`, `Fuse`) into one bus each, before
 /// any equipment loop below ever calls `terms.bus(...)` — approach #1 from
-/// `docs/src/zero_impedance_branches.md` ("topological reduction... the most
-/// direct fix"), not approach #2 (an extreme-admittance branch): this file's
+/// `docs/src/powerflow/zero_impedance_branches.md` ("topological
+/// reduction... the most direct fix"), not approach #2 (an
+/// extreme-admittance branch): this file's
 /// own top doc comment already commits to `TopologicalNode` *being* the
 /// fully-resolved bus everywhere downstream, so stamping switches as
 /// near-zero-impedance `Line`s instead would fight that assumption — and,
@@ -1526,8 +1527,8 @@ impl MridStr for PowerTransformerEnd {
 /// relative to FullGrid's real `DCLineSegment` resistance (2.5 Ω) so it's
 /// numerically negligible without ill-conditioning the small (<20-bus) dense
 /// Newton solve in `dc::solve_dc_network`. Mirrors the same "ideal switch as
-/// a tiny resistance" approach `docs/src/zero_impedance_branches.md`
-/// documents for AC.
+/// a tiny resistance" approach
+/// `docs/src/powerflow/zero_impedance_branches.md` documents for AC.
 const DC_SWITCH_R: f64 = 1e-4;
 
 /// Absolute mismatch tolerance for `dc::solve_dc_network` calls below (MW/kA

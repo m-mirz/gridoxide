@@ -1,8 +1,8 @@
 //! Thin internal wrapper around the vendored SuiteSparse KLU solver
 //! (`vendor/suitesparse/`, compiled by `build.rs`), mirroring `sparse.rs`'s
-//! shape exactly so it's a drop-in third backend. See the README's "Sparse
-//! solver" section for why this exists and `vendor/suitesparse/
-//! PROVENANCE.md` for what was vendored and its licensing.
+//! shape exactly so it's a drop-in third backend. See
+//! `docs/src/solvers/backends.md` for why this exists and
+//! `vendor/suitesparse/PROVENANCE.md` for what was vendored and its licensing.
 //!
 //! All raw-pointer FFI handling is confined to this one file — nothing raw
 //! leaks into `solver.rs`/`network.rs`, the same isolation principle

@@ -7,7 +7,7 @@ fn main() {
 
 /// Compiles the vendored SuiteSparse KLU solver (`vendor/suitesparse/`) and
 /// generates its FFI bindings, only when the `klu` feature is enabled — see
-/// `src/sparse_klu.rs` and the README's "Sparse solver" section for why this
+/// `src/sparse_klu.rs` and `docs/src/solvers/backends.md` for why this
 /// exists. `vendor/suitesparse/PROVENANCE.md` documents exactly what was
 /// vendored, from where, and its licensing (KLU and BTF are
 /// LGPL-2.1-or-later, which is why this whole integration is opt-in).
@@ -127,8 +127,8 @@ mod klu {
 
 /// Links a locally-installed Intel oneMKL's PARDISO sparse direct solver as
 /// a fifth, opt-in `JacobianBackend` (`solver::JacobianBackend::Pardiso`,
-/// `src/sparse_pardiso.rs`) — see the README's "Experimental backends"
-/// section for why this exists. Unlike `klu`, nothing is vendored: MKL is
+/// `src/sparse_pardiso.rs`) — see `docs/src/solvers/backends.md` for why
+/// this exists. Unlike `klu`, nothing is vendored: MKL is
 /// proprietary, so this only locates and dynamically links a system install
 /// (via the `MKLROOT` env var, the same variable Intel's own
 /// `setvars.sh` sets) and generates FFI bindings from *that install's own*

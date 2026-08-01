@@ -1,4 +1,4 @@
-# CGMES: PhaseTapChangerLinear
+# PhaseTapChangerLinear
 
 ## Motivation
 
@@ -58,7 +58,7 @@ sensitivities with respect to it. Two designs then exist for choosing that param
   before the solve, and only an explicit external call changes it between solves.
 - **Moved by an outer loop.** Solve, check whether the controlled branch's active-power or current flow
   matches its target, adjust the tap position, re-solve — the same architectural pattern the
-  [Reactive Power Limits](./q_limits.md) page describes for Q-limit switching. Since tap positions are
+  [Reactive Power Limits](../powerflow/q_limits.md) page describes for Q-limit switching. Since tap positions are
   discrete, an "incremental" refinement computes a continuous \\(dP/d\alpha_1\\) sensitivity from the
   Jacobian to estimate how many positions to move at once, bounded to prevent oscillation.
 

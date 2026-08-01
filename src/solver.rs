@@ -79,8 +79,9 @@ pub enum JacobianBackend {
     /// the same scalar Jacobian as `Scalar` (reuses `build_jacobian_triplets`
     /// unchanged), solved via the **vendored SuiteSparse KLU C library**,
     /// linked over FFI (`sparse_klu::KluRealSystem`) instead of `faer`. Needs
-    /// a C compiler and `libclang` at build time. See the README's "Sparse
-    /// solver" section and `vendor/suitesparse/PROVENANCE.md`. For the
+    /// a C compiler and `libclang` at build time. See
+    /// `docs/src/solvers/backends.md` and
+    /// `vendor/suitesparse/PROVENANCE.md`. For the
     /// pure-Rust reimplementation of the same algorithm, see `KluNative`.
     #[cfg(feature = "klu")]
     Klu,
@@ -96,8 +97,9 @@ pub enum JacobianBackend {
     /// the same scalar Jacobian as `Scalar`, solved via **Intel oneMKL's
     /// PARDISO** sparse direct solver, linked dynamically against a
     /// locally-installed oneMKL (`sparse_pardiso::PardisoRealSystem`) —
-    /// needs `MKLROOT` set at build time (see the README's "Experimental
-    /// backends" section). Unlike `Klu`, nothing is vendored: MKL is
+    /// needs `MKLROOT` set at build time (see
+    /// `docs/src/solvers/backends.md`). Unlike `Klu`, nothing is vendored:
+    /// MKL is
     /// proprietary, so this only links a system install rather than
     /// compiling any bundled source. Not built or tested in CI (no MKL on
     /// CI runners) — local/manual-verification-only.
@@ -315,9 +317,10 @@ pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: 
 
 /// Partitions `buses` into connected components first (`network::
 /// connected_components`/`classify`/`mark_unreferenced_islands` — see
-/// `docs/src/multi_island.md`), so a disconnected, sourceless region can
-/// never make the *whole* Jacobian singular, then solves every component in
-/// one shared Newton-Raphson call and returns each one's own outcome. This
+/// `docs/src/powerflow/multi_island.md`), so a disconnected, sourceless
+/// region can never make the *whole* Jacobian singular, then solves every
+/// component in one shared Newton-Raphson call and returns each one's own
+/// outcome. This
 /// is gridoxide's one canonical way to run a solve — [`PersistentSolver::solve`]
 /// and [`newton_raphson_enforcing_q_limits`] below share this exact same
 /// partitioning step, so behavior is identical regardless of which entry
@@ -494,7 +497,7 @@ impl PersistentSolver {
 /// but additionally enforces each `PV` bus's `q_min`/`q_max` — the one gap
 /// every reference power-flow tool this project benchmarks against either
 /// has, half-has, or explicitly disclaims not having (see
-/// `references/FEATURE_COMPARISON.md`). Plain `newton_raphson`/
+/// `docs/src/reference/feature_comparison.md`). Plain `newton_raphson`/
 /// `PersistentSolver::solve` ignore `q_min`/`q_max` entirely, matching every
 /// existing test/benchmark's behavior unchanged; this is a separate, opt-in
 /// entry point.

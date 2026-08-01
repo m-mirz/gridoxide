@@ -1,8 +1,8 @@
 # Vendored SuiteSparse source
 
 This directory contains a partial vendoring of [SuiteSparse](https://github.com/DrTimothyAldenDavis/SuiteSparse),
-used to build the optional `klu` backend (`solver::JacobianBackend::Klu`) — see the "Sparse solver" section of
-the top-level README for what that backend is and why it exists.
+used to build the optional `klu` backend (`solver::JacobianBackend::Klu`) — see
+`docs/src/solvers/backends.md` for what that backend is and why it exists.
 
 - **Upstream**: https://github.com/DrTimothyAldenDavis/SuiteSparse
 - **Tag**: `v7.12.2`
@@ -28,7 +28,7 @@ stripped) and from `SPDX-License-Identifier` headers in the source files themsel
 | `SuiteSparse_config` | BSD-3-Clause |
 
 `KLU` and `BTF` (one of KLU's own dependencies) being LGPL is why the `klu` Cargo feature that compiles this
-vendored source is opt-in (off by default) rather than always built — see the README for the full explanation
+vendored source is opt-in (off by default) rather than always built — see `docs/src/reference/provenance.md` for the full explanation
 and the `klu-dynamic` feature offered as an alternative for anyone who needs strict LGPL relinking compliance
 (link against a system-installed `libklu.so` instead of statically linking this vendored copy).
 

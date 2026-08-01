@@ -181,8 +181,8 @@ def main() -> None:
         n_nodes = None
         backend_times = {}
         # "pardiso" needs the gridoxide Python extension built with
-        # `--features python,pardiso` and MKLROOT set at build time (see the
-        # top-level README's "Experimental backends" section) — not run in
+        # `--features python,pardiso` and MKLROOT set at build time (see
+        # docs/src/solvers/backends.md) — not run in
         # CI or by default, only when locally available.
         for backend in ("scalar", "block", "klu", "klu_native", "pardiso"):
             t, n, err = run_gridoxide(args.python, json_path, backend)

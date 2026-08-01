@@ -1,8 +1,8 @@
-# CGMES: Line Shunt Conductance (`ACLineSegment.gch`)
+# Line Shunt Conductance (`ACLineSegment.gch`)
 
 ## Motivation
 
-The [Powerflow](./powerflow.md) page's Y-bus construction models each line as a π-equivalent: a series
+The [Powerflow](../powerflow/index.md) page's Y-bus construction models each line as a π-equivalent: a series
 impedance plus a shunt admittance split evenly across both ends. Almost every power-flow tool's
 documentation talks about that shunt term purely in terms of *susceptance* — line charging capacitance,
 the reactive effect of a long line's own capacitance to ground — because for the overwhelming majority
@@ -93,7 +93,7 @@ to derive a conductance from — the same "no data, so no effect" stance the res
 The missing MW didn't just make voltages a *little* off everywhere — it concentrated almost entirely
 into one bus's *angle*, and nowhere else. `BE-Line_6`/`BE-Line_2` feed directly into the substation
 hosting MicroGrid-BE-MAS's `StaticVarCompensator` (see the
-[StaticVarCompensator](./cgmes_static_var_compensator.md) page), a voltage-magnitude-pinned bus.
+[StaticVarCompensator](./static_var_compensator.md) page), a voltage-magnitude-pinned bus.
 A pinned bus can absorb a *reactive*-power mismatch by adjusting its own Q injection, but it has no
 equivalent slack for an *active*-power one — so the several MW this fix restores had, before the fix,
 nowhere to go but that one bus's angle. Cross-validated against pypowsybl's own independent CGMES import

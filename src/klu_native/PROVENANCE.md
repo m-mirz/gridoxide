@@ -54,6 +54,6 @@ Before this module existed, LGPL-2.1-or-later code only entered a gridoxide buil
 Cargo feature (`sparse_klu.rs`, FFI to the vendored C) — a plain `cargo build` produced an
 Apache-2.0-only artifact. Since `klu_native` is always built, **every default `cargo build` now bundles
 BSD-3-Clause (`amd/`) and LGPL-2.1-or-later (everything else in this module) code alongside gridoxide's
-own Apache-2.0 code** — see `Cargo.toml`'s `license` field and the README's licensing section for how
+own Apache-2.0 code** — see `Cargo.toml`'s `license` field and `docs/src/reference/provenance.md` for how
 that's reflected. This was a deliberate, confirmed choice (not a default the port drifted into) — see
 the git history for the `klu_native` port's planning discussion.

@@ -30,7 +30,7 @@ jobs:
     # the `Pardiso` backend (`src/sparse_pardiso.rs`) needs a locally
     # installed, separately-licensed Intel oneMKL (`MKLROOT` set) — not
     # available on GitHub-hosted runners at all, so this backend is
-    # local/manual-verification-only (see the top-level README's
-    # "Experimental backends" section).
+    # local/manual-verification-only (see
+    # docs/src/solvers/backends.md).
     - name: Run tests
       run: cargo test --verbose

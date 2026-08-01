@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The plain Newton-Raphson formulation on the [Powerflow](./powerflow.md) page treats every PV bus as if
+The plain Newton-Raphson formulation on the [Powerflow](./index.md) page treats every PV bus as if
 its generator could supply or absorb *any* amount of reactive power needed to hold \\(\vert V_k \vert\\)
 at its setpoint. Real generators can't: each has a nameplate reactive capability
 \\(Q_k^{min} \le Q_k \le Q_k^{max}\\), usually tightest for round-rotor machines operating near their
@@ -17,7 +17,7 @@ Repeat until no bus violates its limits.
 
 ## What changes in the equation system
 
-Recall from the [Powerflow](./powerflow.md) page that a PV bus contributes only a \\(P\\)-mismatch row to
+Recall from the [Powerflow](./index.md) page that a PV bus contributes only a \\(P\\)-mismatch row to
 \\(f(x)\\) — its voltage magnitude \\(\vert V_k \vert\\) is *known* (the setpoint), so it isn't part of the
 unknown vector \\(x\\) and there's no \\(Q\\)-mismatch row for it. A PQ bus contributes both a \\(P\\)- and
 a \\(Q\\)-mismatch row, and its \\(\vert V_k \vert\\) *is* part of \\(x\\).

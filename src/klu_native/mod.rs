@@ -26,7 +26,7 @@
 //! there's no C-toolchain burden left to gate against — so a default
 //! `cargo build` now always bundles this BSD/LGPL content alongside
 //! gridoxide's own Apache-2.0 code. See `Cargo.toml`'s `license` field and
-//! the README's licensing section for that crate-wide consequence.
+//! `docs/src/reference/provenance.md` for that crate-wide consequence.
 //!
 //! **Scope**: real (`f64`) matrices only, single right-hand side, `int32`-
 //! range indices — gridoxide's own Newton-Raphson Jacobian solve never needs

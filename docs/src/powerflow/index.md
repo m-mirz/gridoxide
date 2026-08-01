@@ -1,4 +1,4 @@
-# Powerflow
+# The Power Flow Problem
 
 The powerflow problem is about the calculation of voltage magnitudes and angles for all network nodes.
 The solution is obtained from a subset of voltages and power injections.

@@ -1,4 +1,4 @@
-# CGMES: RatioTapChanger.RatioTapChangerTable
+# RatioTapChanger.RatioTapChangerTable
 
 ## Motivation
 
@@ -47,7 +47,7 @@ directly.
 
 `ratio_tap_table` (`src/cgmes.rs`) implements concept 1's precedence rule, with concept 3's single-step
 lookup (gridoxide only ever needs *this* step's effect, since it neither exports step tables nor moves
-taps — see the [PhaseTapChangerLinear](./cgmes_phase_tap_changer_linear.md) page for the latter):
+taps — see the [PhaseTapChangerLinear](./phase_tap_changer_linear.md) page for the latter):
 
 ```rust
 fn ratio_tap_table(ds: &CimDataset, table_mrid: &str, step: i64, xtx: f64) -> Option<TapEffect> {

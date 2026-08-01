@@ -162,7 +162,7 @@ a following stage that doesn't feed back).
 
 The one power-flow case where it does something: a network with **several islands that each have a
 reference bus**. `PersistentSolver::solve` classifies islands but still hands the whole bus list to a
-single Newton solve (see [Multi-Island Power Flow](./multi_island.md)), so the Jacobian is block
+single Newton solve (see [Multi-Island Power Flow](../powerflow/multi_island.md)), so the Jacobian is block
 *diagonal* — no unknown in one island appears in any equation of another. The column digraph of
 step 1b then has no edges crossing island boundaries, so no strongly connected component can span
 two islands, and BTF necessarily recovers one block (or more) per island and factors them

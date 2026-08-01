@@ -3,7 +3,7 @@
 ## Motivation
 
 Real networks contain connections that are, by design, not really "branches" in the sense the
-[Powerflow](./powerflow.md) page assumes: breakers, disconnectors, bus-bar couplers, jumpers — elements meant
+[Powerflow](./index.md) page assumes: breakers, disconnectors, bus-bar couplers, jumpers — elements meant
 to either tie two points electrically together with (idealized) zero impedance, or fully separate them, with
 no impedance value in between and no partial state.
 

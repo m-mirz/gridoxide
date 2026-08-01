@@ -7,7 +7,7 @@ build = "build.rs"
 # feature gate) is a close Rust translation of vendored SuiteSparse C —
 # BSD-3-Clause for the AMD-derived pieces, LGPL-2.1-or-later for the
 # BTF/KLU-derived pieces — so every default build now bundles all three.
-# See src/klu_native/PROVENANCE.md and the README's licensing section.
+# See src/klu_native/PROVENANCE.md and docs/src/reference/provenance.md.
 # (Building with `--features klu` additionally links the vendored C itself,
 # already LGPL-2.1-or-later/BSD-3-Clause per vendor/suitesparse/PROVENANCE.md
 # — no new license beyond what's already listed here.)
@@ -37,7 +37,8 @@ serde_json = "1.0"
 # Neither crate is published to crates.io, so this pins the `vendor/gridoxide`
 # branch/tag of cimoxide (https://github.com/m-mirz/cimoxide) — a fork of
 # `main` with its normally-gitignored generated sources committed, created
-# specifically to make this dependency possible. See CIMOXIDE_PROVENANCE.md.
+# specifically to make this dependency possible. See
+# docs/src/reference/provenance.md.
 cimdecoder = { git = "https://github.com/m-mirz/cimoxide", tag = "v0.1.1-gridoxide.1", optional = true }
 cimstructs = { git = "https://github.com/m-mirz/cimoxide", tag = "v0.1.1-gridoxide.1", optional = true }
 
@@ -48,7 +49,7 @@ bindgen = { version = "0.72", optional = true }
 [features]
 default = []
 # Builds the vendored SuiteSparse KLU solver (vendor/suitesparse/) as a third,
-# opt-in JacobianBackend — see the README's "Sparse solver" section. Needs a
+# opt-in JacobianBackend — see docs/src/solvers/backends.md. Needs a
 # C compiler and libclang (for bindgen) at build time. KLU and BTF (one of
 # KLU's own dependencies) are LGPL-2.1-or-later — see
 # vendor/suitesparse/PROVENANCE.md before enabling this in a distributed
@@ -70,8 +71,9 @@ klu-dynamic = ["klu"]
 python = ["dep:pyo3"]
 # Builds a fifth, opt-in `JacobianBackend` (`Pardiso`) backed by Intel oneMKL's
 # PARDISO sparse direct solver, linked dynamically against a locally-installed
-# oneMKL (discovered via the `MKLROOT` env var — see the README's "Experimental
-# backends" section). Unlike `klu`, nothing is vendored or compiled from
+# oneMKL (discovered via the `MKLROOT` env var — see
+# docs/src/solvers/backends.md). Unlike `klu`, nothing is vendored or
+# compiled from
 # source: MKL is proprietary (Intel Simplified Software License, not OSS), so
 # this only ever links a system install's `libmkl_rt.so` and generates FFI
 # bindings via `bindgen` against that install's own `mkl_pardiso.h` — nothing
@@ -84,8 +86,8 @@ pardiso = ["dep:bindgen"]
 # Builds CGMES (Common Grid Model Exchange Standard) RDF/XML dataset support
 # (src/cgmes.rs), converting a CGMES EQ+SSH+TP+SV profile set into gridoxide's
 # own Bus/Line/Transformer model. Depends on cimoxide's cimdecoder/cimstructs
-# crates via a pinned git tag (see CIMOXIDE_PROVENANCE.md for why — they
-# aren't published to crates.io). Opt-in since most gridoxide users only need
+# crates via a pinned git tag — they aren't published to crates.io, see
+# docs/src/reference/provenance.md. Opt-in since most gridoxide users only need
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]

@@ -1,7 +1,7 @@
 # Benchmark scripts
 
 Reproduces the runtime comparison against [power-grid-model](https://github.com/PowerGridModel/power-grid-model)
-(PGM) referenced in the top-level README's "Sparse solver" section: generate a synthetic radial
+(PGM) referenced in `docs/src/solvers/backends.md`: generate a synthetic radial
 distribution/LV grid at a target scale, then time both gridoxide (`examples/bench_network.rs`) and PGM's
 Python bindings solving the exact same network.
 
@@ -15,9 +15,9 @@ subprocess call into a compiled Rust binary, no parsing its stdout.
 pip install maturin
 maturin develop --release --features python         # scalar + block backends
 maturin develop --release --features python,klu     # + the klu backend (needs a C compiler, libclang — see
-                                                      # the top-level README's "Experimental backends" section)
+                                                      # docs/src/solvers/backends.md)
 maturin develop --release --features python,pardiso # + the pardiso backend (needs MKLROOT set — see
-                                                      # the top-level README's "Experimental backends" section)
+                                                      # docs/src/solvers/backends.md)
 ```
 
 (`maturin develop` needs an active virtualenv — either run it from inside one, or set `VIRTUAL_ENV=/path/to/venv`
@@ -36,8 +36,7 @@ model.solve()
 print(model.voltage_mag(), model.voltage_ang())
 ```
 
-`PowerFlowModel` wraps `solver::PersistentSolver` directly (see the top-level README's "Reusing factorization
-across repeated solves") — repeated `.solve()` calls on the same model reuse cached symbolic factorization,
+`PowerFlowModel` wraps `solver::PersistentSolver` directly (see `docs/src/solvers/backends.md`) — repeated `.solve()` calls on the same model reuse cached symbolic factorization,
 matching exactly how every other tool benchmarked here (PGM's `PowerGridModel`, lightsim2grid's `GridModel`,
 pandapower's `net`) is itself used: construct once, call the solve method repeatedly, time each call yourself
 with `time.perf_counter()`. `scripts/bench/bench_gridoxide_native.py` does exactly this.
@@ -75,11 +74,10 @@ cargo build --release --example bench_network
 for stable timing averages and for `perf record`-based profiling, since a single solve is often too fast
 (tens of milliseconds) to sample meaningfully. `backend` selects `scalar` (default), `block`, `klu` (if
 built with `--features klu`), `klu_native` (no extra build requirements), or `pardiso` (if built with
-`--features pardiso` and `MKLROOT` set) — see the top-level README's "Sparse solver" and "Experimental
-backends" sections. `mode` selects `cold`
+`--features pardiso` and `MKLROOT` set) — see `docs/src/solvers/backends.md`. `mode` selects `cold`
 (default — every repeat calls `newton_raphson_with_backend` fresh, redoing symbolic factorization every time)
 or `warm` (one `solver::PersistentSolver` is reused across all repeats, so only the first pays for symbolic
-factorization) — see the top-level README's "Reusing factorization across repeated solves" section. `warm` is
+factorization) — see `docs/src/solvers/backends.md`. `warm` is
 the fair comparison against PGM's `min`/`mean` below and against every other tool in step 4, all of which
 reuse their own persistent model/solver object across their repeated timed calls.
 
@@ -119,7 +117,7 @@ there means something is wrong with the comparison, not just the timing.
 | 2,605 | 20.97 | 6.81 | 6.04 | 6.56 | 11.73 | 2.49 |
 
 PGM is clearly faster than any gridoxide backend on this synthetic radial distribution/LV topology, even
-warm-vs-warm — a real, standing gap (see the top-level README's "Experimental backends" section). `KluNative`
+warm-vs-warm — a real, standing gap (see `docs/src/solvers/backends.md`). `KluNative`
 (the pure-Rust port of `Klu`'s algorithm, `src/klu_native/`) lands close to `Klu` itself (1.02-1.09x) across
 this range of scales. `Pardiso` (Intel oneMKL, `src/sparse_pardiso.rs`) is 2-4.7x slower than `Klu` at every
 scale, and slower than even `Scalar` at 192 nodes — its default nonsymmetric matching/scaling preprocessing
@@ -247,8 +245,7 @@ the fixes add shunt admittances to Y-bus diagonal entries that already exist, so
 structure nor iteration counts materially. The *voltages* those runs converged to did change, though — see
 below.
 
-`klu_native` (`src/klu_native/`, the from-scratch Rust port — see the top-level README's "Experimental
-backends") converges to the same voltages as every other gridoxide backend on all 12 cases, and lands close
+`klu_native` (`src/klu_native/`, the from-scratch Rust port — see `docs/src/solvers/backends.md`) converges to the same voltages as every other gridoxide backend on all 12 cases, and lands close
 to `klu` throughout (mostly 1.0-1.2x, `case1354pegase` closer to 1.3x) — a large improvement from
 an earlier, unoptimized version of this port that ran a consistent ~1.9-2x slower across every scale.
 `perf`-profiling `case9241pegase` traced that gap to allocator churn, not algorithmic overhead:
@@ -265,7 +262,7 @@ absent from the profile.
 backend on all 12 cases (`case14`'s `voltage_mag` matches the others exactly: 1.010000/1.090000). Its gap to
 `klu` ranges from ~1.2x (`case14`, `case1888rte`, `case6495rte`) up to ~3.2x (`case118`, `case300`) depending
 on case, without as clean a shrinks-monotonically-with-size trend as the three synthetic radial-distribution
-grids in the top-level README's "Experimental backends" section show — these 12 cases vary more in topology
+grids in `docs/src/solvers/backends.md` show — these 12 cases vary more in topology
 and conditioning than those synthetic grids do. The largest cases still settle in a similar 1.2-1.4x range
 (`case6515rte`: 25.25ms vs 18.58ms, ~1.36x; `case9241pegase`: 35.64ms vs 29.26ms, ~1.22x), consistent with
 the same underlying cause: PARDISO's default nonsymmetric matching/scaling preprocessing carries a largely
@@ -350,8 +347,7 @@ solver, the two are roughly competitive: `klu` is faster on most cases (e.g. `ca
 7.70ms), lightsim2grid faster on a couple (`case9241pegase`: 29.26ms vs 27.46ms; `case14`: 0.059ms vs
 0.028ms, though at `case14`'s sub-millisecond scale that gap is close to run-to-run timing noise). This is
 the *warm* comparison (both gridoxide's `PowerFlowModel` and lightsim2grid's `GridModel` reuse one persistent
-solver object across their 5 timed calls — see the top-level README's "Reusing factorization across repeated
-solves" for the `PersistentSolver` feature itself); the earlier `cold` numbers (fresh symbolic factorization
+solver object across their 5 timed calls — see `docs/src/solvers/backends.md` for the `PersistentSolver` feature itself); the earlier `cold` numbers (fresh symbolic factorization
 every repeat) made gridoxide look 1.3–1.7x *slower* across the board, which `perf`-profiling `case9241pegase`
 traced to that redone-every-time ordering step, something lightsim2grid's own benchmark never does — not a
 genuine solver-speed gap. Measured directly on that same 9,241-bus case: reusing factorization across

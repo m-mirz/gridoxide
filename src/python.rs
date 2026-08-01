@@ -179,8 +179,8 @@ impl PowerFlowModel {
     /// code path, so results match the Rust-side tests bus-for-bus.
     ///
     /// Only built when the crate's `cgmes` feature is enabled too
-    /// (`maturin develop --features python,cgmes`) — see `CIMOXIDE_PROVENANCE.md`
-    /// for why that dependency is opt-in.
+    /// (`maturin develop --features python,cgmes`) — see
+    /// `docs/src/reference/provenance.md` for why that dependency is opt-in.
     #[cfg(feature = "cgmes")]
     #[staticmethod]
     #[pyo3(signature = (paths, backend="scalar", tol=1e-6, max_iter=20, s_base_va=100e6))]

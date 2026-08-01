@@ -1,322 +1,79 @@
 # gridoxide
 
-`gridoxide` is a power flow analysis tool written in Rust. It uses the Newton-Raphson method to solve the power flow equations for an electrical grid defined in a JSON file.
+`gridoxide` is an AC power flow analysis tool written in Rust. It solves the power flow equations for
+an electrical grid with the Newton-Raphson method, using a sparse Jacobian throughout — assembly,
+factorization, and solve.
 
-## Building
+📖 **[Documentation](https://m-mirz.github.io/gridoxide/)** — the full book covers the method, the
+solver backends, the CGMES importer, and the benchmark results. Its source lives in [`docs/`](docs/).
 
-To build the project, you need to have the Rust toolchain installed. You can find instructions on how to install it at [rustup.rs](https://rustup.rs/).
+## Quick start
 
-Once you have Rust installed, you can build the project by running:
-
-```bash
-cargo build
-```
-
-For an optimized release build, use:
+Rust — you need the [Rust toolchain](https://rustup.rs/), nothing else for a default build:
 
 ```bash
 cargo build --release
-```
-
-## Running
-
-You can run the program using `cargo run`:
-
-```bash
-cargo run
-```
-
-If you have built the project, you can also run the executable directly. From the project root:
-
-For a debug build:
-```bash
-./target/debug/gridoxide
-```
-
-For a release build:
-```bash
-./target/release/gridoxide
-```
-
-## Testing
-
-To run the tests for the project, use:
-
-```bash
 cargo test
 ```
 
-## Sparse solver
+Python:
 
-The Y-bus admittance matrix and Newton-Raphson Jacobian are stored and factored as **sparse** matrices (via
-the [`faer`](https://crates.io/crates/faer) crate), not dense ones.
-
-At 2,605 nodes the dense solver was over 100,000x slower than PGM; the sparse rewrite closed that to roughly
-an order of magnitude on a cold, single-shot solve — the underlying grid is sparse (each bus only connects to
-a handful of neighbors), so a dense representation was doing asymptotically unnecessary work regardless of
-how fast the constant-factor arithmetic was.
-
-Two things make this work, not just "swap in a sparse matrix type":
-
-- **Sparse-aware assembly.** Both the Jacobian build (`solver::build_jacobian_triplets`) and the
-  linear initial-guess warm start (`network::linear_initial_guess`) walk each bus's actual admittance
-  neighbors (via `network::YBusSparse::row`) instead of looping over every possible bus pair — the O(n²)/O(m²)
-  assembly cost has to go too, or a sparse *solve* alone doesn't fix the bottleneck.
-- **Symbolic factorization reuse.** A Newton-Raphson Jacobian has the same sparsity *pattern* every
-  iteration (same bus topology, only numeric values change), so `solver::newton_raphson` computes the
-  symbolic factorization (fill-reducing ordering) once and reuses it for a cheap numeric-only refactorization
-  on every iteration (`sparse::RealSparseSystem`), mirroring what PGM's own solver does internally. This
-  reuse now also extends *across* repeated solves, not just the iterations within one — see
-  `solver::PersistentSolver` below, PGM's own equivalent tuning this implementation used to not replicate.
-
-## Reusing factorization across repeated solves
-
-A single `newton_raphson`/`newton_raphson_with_backend` call already reuses its symbolic factorization across
-its own NR iterations, but starts cold (re-derives the fill-reducing ordering from scratch) on every call —
-fine for a genuinely one-off solve, wasteful for anything that solves the *same* topology repeatedly (a time
-series, a batch of scenarios, contingency analysis), where only bus values (`p_spec`, `q_spec`, voltage
-guess) change between calls, not the topology itself.
-
-`solver::PersistentSolver` fixes this: construct one per topology, call `.solve(&mut buses, &ybus, tol,
-max_iter)` as many times as needed, and only the *first* call pays for symbolic factorization — every later
-call does a numeric-only refactorization, the same reuse `newton_raphson` already does within one call,
-extended across calls. Call `.reset()` (or construct a new one) if the topology itself changes between
-solves.
-
-```rust
-use gridoxide::solver::{JacobianBackend, PersistentSolver};
-
-let mut solver = PersistentSolver::new(JacobianBackend::Klu);
-for scenario in scenarios {
-    apply_scenario(&mut buses, scenario); // changes p_spec/q_spec only
-    solver.solve(&mut buses, &ybus, 1e-6, 20);
-}
+```bash
+pip install gridoxide
 ```
-
-Reusing factorization across repeated solves is a meaningful win on real-world grids, since a cold solve's
-fill-reducing ordering step (COLAMD/AMD/BTF) is redone from scratch every call otherwise.
-`examples/bench_network.rs` exposes this as an optional `warm` mode (its default `cold` mode still measures
-"N independent flat-start solves with no shared state," a different, also-legitimate number) — see
-`scripts/bench/README.md`'s "Benchmark against real power-system test-case grids" section for the measured
-warm-vs-cold numbers.
-
-## Python bindings
-
-`src/python.rs` exposes `PersistentSolver` (and PGM-JSON loading) as `gridoxide._gridoxide`, a private
-compiled extension module built with [maturin](https://www.maturin.rs/) (`maturin develop --release
---features python,klu`) — gated entirely behind the opt-in `python` Cargo feature, compiled by nothing else,
-so a plain `cargo build`/`cargo test` never touches it. This is a mixed Rust/Python maturin project
-(`pyproject.toml`'s `python-source = "python"` + `module-name = "gridoxide._gridoxide"`): pure-Python code
-lives in `python/gridoxide/` and ships in the same wheel as the compiled extension, re-exported through
-`python/gridoxide/__init__.py` so callers only ever write `import gridoxide`.
 
 ```python
 import gridoxide
 
-model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", backend="klu")
+model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", backend="klu_native")
 model.solve()
 print(model.voltage_mag(), model.voltage_ang())
 ```
 
-Repeated `.solve()` calls on the same `PowerFlowModel` reuse cached symbolic factorization exactly like the
-Rust `PersistentSolver` API above, since it *is* that API — this is what lets `scripts/bench/` run its whole
-comparison in pure Python (`scripts/bench/bench_gridoxide_native.py`), timing gridoxide with the same
-`time.perf_counter()`-around-a-persistent-solve-object methodology every other tool there already uses (PGM's
-`PowerGridModel`, lightsim2grid's `GridModel`, pandapower's `net`), rather than shelling out to a compiled
-Rust binary and parsing its stdout. See `scripts/bench/README.md`'s "Python bindings" section for build
-details and the constraint on never combining the `python` feature with a plain `cargo` invocation.
+See [Building and Running](docs/src/getting_started/building.md) and
+[Python Bindings](docs/src/getting_started/python.md).
 
-Alongside `PowerFlowModel`, `python/gridoxide/` ships two input-building helpers that used to live only in
-`scripts/bench/` — general-purpose enough that they're now part of the pip package itself, not tied to the
-benchmark suite:
+## What it does
 
-- `gridoxide.generate_grid` — synthetic radial MV/LV distribution grid generator (pure stdlib, no extra).
-- `gridoxide.matpower` (needs `pip install gridoxide[matpower]`) — converts a raw MATPOWER `.m`/`.mat` case
-  into PGM JSON.
+- **Newton-Raphson AC power flow**, symmetric and asymmetric, with a sparse Jacobian and symbolic
+  factorization reused across both NR iterations and repeated solves
+  (`solver::PersistentSolver`) — see [Backends and Factorization Reuse](docs/src/solvers/backends.md).
+- **Five interchangeable linear-solver backends** — `faer` (`Scalar`), a hand-written block LU
+  (`Block`), vendored SuiteSparse KLU over FFI (`Klu`), a from-scratch Rust translation of KLU
+  (`KluNative`, always built), and Intel oneMKL PARDISO (`Pardiso`). All five produce identical
+  converged voltages; the choice is purely performance.
+- **Three input formats** — its own JSON, [power-grid-model](https://github.com/PowerGridModel/power-grid-model)
+  JSON, and [CGMES RDF/XML](docs/src/cgmes/index.md) (`--features cgmes`) with node-breaker
+  reduction, all four phase-tap-changer flavors, 3-winding star resolution, HVDC, and SVC.
+- **Modeling features beyond the plain formulation** —
+  [reactive power limits](docs/src/powerflow/q_limits.md) (PV→PQ switching),
+  [zero-impedance branches](docs/src/powerflow/zero_impedance_branches.md), and
+  [multi-island solves](docs/src/powerflow/multi_island.md) with a per-island status report.
+- **Batched solving** over one shared topology, parallel across cores via rayon (`batch::BatchSolver`).
 
-Each is also installed as a console script (`gridoxide-generate-grid`, `gridoxide-matpower`).
-`scripts/bench/generate_grid.py` and `matpower_to_pgm.py` are now thin CLI wrappers delegating to these same
-package modules, so the conversion logic itself only lives in one place. See `python/README.md` for usage
-examples. 
+[Feature Comparison](docs/src/reference/feature_comparison.md) is a detailed survey against five
+other power flow tools, including the gaps gridoxide hasn't closed.
 
-`python/tests/` has a pytest suite (`scalar`/`block` only — no `klu`, matching what's published, see below)
-checked against this project's own committed PGM reference fixtures, run by `.github/workflows/python.yml`
-on every push/PR (that workflow installs the `matpower` extra's dependencies too). `.github/workflows/pypi.yml`
-builds wheels (Linux/Windows/macOS) plus an sdist and publishes to PyPI via
-[trusted publishing](https://docs.pypi.org/trusted-publishers/) on `v*` tags — **the published wheel
-deliberately doesn't include the `klu` backend** (LGPL-2.1-or-later vendored SuiteSparse source, and a C
-compiler + libclang needed on every target platform — see Cargo.toml's `python`/`klu` feature doc comments);
-build from source with `--features python,klu` for that backend.
+## Benchmarks
 
-See `src/sparse.rs` for the thin backend wrapper around `faer` — it's intentionally the only file that
-imports `faer` types directly, so a different sparse-solver backend can be swapped in behind the same
-interface without touching the rest of the codebase. Two such backends exist today, both strictly opt-in
-experiments selectable via `solver::JacobianBackend` (`newton_raphson_with_backend`) — see the next section.
-
-## Experimental backends
-
-`solver::newton_raphson` always uses the default `Scalar` (`faer`-backed) path described above.
-`newton_raphson_with_backend` additionally accepts:
-
-- **`JacobianBackend::Block`** (`src/block_sparse.rs`, no extra build requirements) — groups each bus's own
-  (angle, voltage-magnitude) unknowns into one dense 2×2 block, mirroring power-grid-model's block-per-bus
-  matrix structure, with a hand-written Gilbert-Peierls sparse block LU (`block_sparse::BlockLu`). Symmetric
-  power flow only. Consistently faster than `Scalar` (see `scripts/bench/README.md` for exact numbers).
-- **`JacobianBackend::Klu`** (`src/sparse_klu.rs`, needs `cargo build --features klu`) — the same scalar
-  Jacobian as `Scalar`, solved by [SuiteSparse's KLU](https://github.com/DrTimothyAldenDavis/SuiteSparse)
-  instead of `faer`, vendored and compiled from source (`vendor/suitesparse/`, see
-  `vendor/suitesparse/PROVENANCE.md`) rather than depending on a third-party Rust wrapper crate. Needs a C
-  compiler and `libclang` (for `bindgen`) at build time. **KLU and BTF (one of KLU's own dependencies) are
-  LGPL-2.1-or-later** — this is why the `klu` feature is opt-in rather than always built; a `klu-dynamic`
-  sub-feature links a system-installed `libklu.so` instead of compiling the vendored copy statically, for
-  anyone who needs strict LGPL relinking compliance. At least as fast as `Block` at every benchmarked scale
-  (see `scripts/bench/README.md`).
-- **`JacobianBackend::KluNative`** (`src/klu_native/`, no extra build requirements) — a from-scratch Rust
-  *translation* of the same KLU algorithm `Klu` links over FFI: BTF block-triangular preprocessing,
-  per-block AMD ordering, a partial-pivoting Gilbert-Peierls LU kernel with Eisenstat-Liu pruning, and
-  cheap numeric-only refactorization, all faithfully ported (not a simplified reimplementation — see
-  `src/klu_native/PROVENANCE.md` for the file-by-file mapping back to the upstream C). No C compiler or
-  `libclang` needed, so — unlike `Klu` — it's always built. Validated end-to-end against real KLU on all
-  13 real MATPOWER benchmark cases (`scripts/bench/.case-cache/`, 14 to 9,241 buses): identical iteration
-  counts and identical converged voltages on every case. One known, documented gap: row scaling
-  (`klu_native::scale`) is ported and independently tested but not yet wired into the factor/refactor
-  path (see `src/klu_native/mod.rs`'s module doc comment) — a numerical-stability preconditioning step,
-  not a correctness one, so this doesn't affect the results above.
-- **`JacobianBackend::Pardiso`** (`src/sparse_pardiso.rs`, needs `cargo build --features pardiso` and
-  `MKLROOT` set at build time) — the same scalar Jacobian as `Scalar`, solved by
-  [Intel oneMKL's PARDISO](https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/) sparse
-  direct solver instead of `faer`. Unlike `Klu`, nothing is vendored — MKL is proprietary (Intel Simplified
-  Software License, not OSS), so this only dynamically links a locally-installed oneMKL (`libmkl_rt.so`,
-  discovered via `MKLROOT`, e.g. `source /opt/intel/oneapi/setvars.sh`) and generates FFI bindings via
-  `bindgen` against *that install's own* `mkl_pardiso.h` — no MKL header or source is copied into this repo.
-  PARDISO's C API is one function called repeatedly with different `phase` values against a persistent
-  opaque handle, rather than KLU's separate analyze/factor/refactor/solve functions; `mtype = 11` (real,
-  nonsymmetric) and `iparm[34] = 1` (0-based indexing) are the two settings that matter for matching
-  gridoxide's existing CSR/CSC conventions. **Not built or tested in CI** — no CI runner has MKL installed —
-  so this is a local/manual-verification-only backend.
-
-All four are strictly parallel to `Scalar`, not replacements — a bug in any of them can't affect
-`newton_raphson`'s default behavior, and every existing test keeps using `Scalar` unless it explicitly
-opts into a different backend (see `tests/block_jacobian_test.rs`, `tests/klu_jacobian_test.rs`,
-`tests/klu_native_jacobian_test.rs`, `tests/pardiso_jacobian_test.rs`).
-
-All five gridoxide backends produce identical converged voltages at every scale — these are purely
-performance comparisons, not correctness trade-offs. In rough terms: `Block`/`Klu`/`KluNative` are all
-meaningfully faster than `Scalar`, with `Klu`/`KluNative` landing close to each other and slightly ahead of
-`Block`; `Pardiso` carries a largely size-independent fixed setup cost from its default matching/scaling
-preprocessing that makes it the slowest backend at small problem sizes (even behind `Scalar`), though it
-scales better than `Scalar` as node count grows. PGM is clearly faster than any gridoxide backend on this
-particular synthetic radial-distribution/LV topology — a real, standing gap this project hasn't closed
-(interestingly, that gap doesn't hold universally: on the real-world *transmission*-topology grids in the
-next benchmark, gridoxide's `Klu` backend is frequently faster than lightsim2grid's own KLU-backed C++
-solver — the comparison depends on topology, not just implementation language). **See
-`scripts/bench/README.md`'s "Experimental backends"/"Interpreting results" sections for the full measured
-numbers, exact ratios, and how to reproduce them** — including the `klu_native` allocator-churn story and
-its fix (`src/klu_native/kernel.rs`'s `refactor_block_in_place` doc comment has the code-level detail).
-
-A second, separate benchmark compares gridoxide against five other independent solvers — PGM,
-[lightsim2grid](https://github.com/m-mirz/lightsim2grid), RTE's
-[powsybl-open-loadflow](https://github.com/powsybl/powsybl-open-loadflow) (via `pypowsybl`), pandapower's own
-default solver, and [VeraGrid](https://github.com/SanPen/VeraGrid) — on 12 real IEEE/MATPOWER power-system
-test-case grids (14 to 9,241 buses). gridoxide and pandapower's own native path are the only two of the six
-that converge on all 12; the other four each fail on a subset of the same handful of genuinely hard cases
-(RTE's own real production grids), confirmed by cross-checking against `powsybl-open-loadflow` directly, not
-a gridoxide gap. Once compared warm-vs-warm (`PersistentSolver`, see above), `Klu` is frequently *faster*
-than lightsim2grid's own KLU-backed C++ solver on this real transmission-topology data — even though PGM
-still clearly beats every gridoxide backend on the synthetic radial-distribution topology above, so the
-comparison genuinely depends on grid topology, not just implementation language. This benchmark is also what
-led to `src/pgm.rs` parsing PGM's `voltage_regulator` component: real generator PV (voltage-controlled)
-buses, not just the slack/PQ split described above — see `types::BusType::PV` and
-`solver::newton_raphson_scalar`/`newton_raphson_klu`'s existing PV handling, now actually reachable from PGM
-JSON input — and to fixing a real gap in `network::transformer_tap`'s off-nominal tap-ratio clamping
-(`src/network.rs`). **See `scripts/bench/README.md`'s "Benchmark against real power-system test-case grids"
-section for the full 12-case results table, per-case `Pardiso`/`VeraGrid` numbers, and methodology** — that
-file is the single source of truth for every benchmark number in this project; this README only summarizes
-the qualitative findings.
-
-## CGMES input (optional)
-
-`cargo build --features cgmes` builds `src/cgmes.rs`, a third network-input path (alongside the native JSON
-format and PGM-JSON) reading CGMES (Common Grid Model Exchange Standard) RDF/XML — the IEC 61970/61968
-interchange format ENTSO-E and TSOs use. It's built on [cimoxide](https://github.com/m-mirz/cimoxide) (a
-separate Rust project by the same author) for RDF/XML decoding, via a pinned git dependency rather than
-crates.io — see `CIMOXIDE_PROVENANCE.md` for why. Opt-in since most gridoxide users only need PGM-JSON input
-and shouldn't pay for `cimdecoder`'s own dependency tree or build time.
-
-```rust
-use gridoxide::cgmes::{load_profiles, cgmes_to_buses_and_branches};
-use gridoxide::network::{build_ybus, stamp_shunts};
-use gridoxide::run_power_flow_analysis_from_ybus;
-
-let ds = load_profiles(&[&eq_path, &ssh_path, &tp_path, &sv_path])?;
-let (buses, lines, transformers, shunts) = cgmes_to_buses_and_branches(&ds, 100e6)?;
-let mut ybus = build_ybus(buses.len(), &lines, &transformers);
-stamp_shunts(&mut ybus, &shunts);
-let result = run_power_flow_analysis_from_ybus(buses, ybus);
-```
-
-Requires the TP profile (`TopologicalNode` is used directly as gridoxide's `Bus`, so switch-state topology
-processing is assumed already resolved upstream — the standard EQ+SSH+TP+SV "solved case" profile bundle) and
-an SV profile with a populated `TopologicalIsland.AngleRefTopologicalNode` (used as the slack bus). Handles
-`EnergyConsumer`/`ConformLoad`/`NonConformLoad`/`EquivalentInjection`/`ExternalNetworkInjection`/
-`AsynchronousMachine` loads (the last converted like a plain load — both P and Q negated — per
-`references/powsybl-core`'s own `AsynchronousMachineConversion`, not `SynchronousMachine`'s Q exception),
-`ACLineSegment`/`SeriesCompensator` lines (including `ACLineSegment.gch`, real shunt conductance — not just
-`bch`'s reactive charging), 2- and 3-winding `PowerTransformer`s (`RatioTapChanger` — including its optional
-`RatioTapChangerTable` per-step override, falling back to the linear `stepVoltageIncrement` formula when absent
-— and all four `PhaseTapChanger` variants: `Linear`, `Symmetrical`, `Asymmetrical`, `Tabular`; the non-`Linear`
-formulas cross-checked against `references/powsybl-core`'s own CGMES importer source),
-`LinearShuntCompensator`/`NonlinearShuntCompensator` shunts, `SynchronousMachine`+`RegulatingControl`-driven PV
-buses, and `StaticVarCompensator`/`ExternalNetworkInjection` (same `RegulatingControl`-driven PV-bus mechanism,
-minus the active-power term for the former). Validated end-to-end against four ENTSO-E conformance cases:
-MicroGrid-BE-MAS (`tests/cgmes_microgrid_be_test.rs`), MiniGrid (`tests/cgmes_minigrid_test.rs`, the first
-fixture with more than one 3-winding transformer — which exposed and fixed a real star-bus-indexing bug —
-and with real `AsynchronousMachine` loads, ~9 MW/~5 MVAr worth), the
-`PhaseTapChangerLinear` PST cases (`tests/cgmes_pst_phase_tap_changer_linear_test.rs`, matching published SV
-values to ~1e-3), and RealGrid, a large real transmission+distribution model
-(`tests/cgmes_realgrid_test.rs`, 6252 buses) — fixtures referenced via a git submodule, see
-`tests/data/cgmes/README.md`. MicroGrid-BE-MAS and MiniGrid converge cleanly but match their own published SV
-voltages only within a few percent, a gap cross-checked (for MicroGrid-BE-MAS) against `pypowsybl`'s own
-independent CGMES import + AC load flow on the same case (which shows a comparable deviation from the same
-published values, see `scripts/bench/cross_validate_cgmes_microgrid_be.py`), confirming it's inherent to
-solving a boundary-truncated area file with fixed-injection equivalents rather than a correctness bug — aside
-from one known, documented limitation: `types::Line` has no tap ratio, so it can't absorb the small
-nominal-voltage mismatch CGMES explicitly allows at boundary tie points. **Not built or tested in CI** — same
-local/manual-verification posture as `klu`/`pardiso`.
-
-## Profiling
-
-For profiling with perf, set
-
-    sysctl kernel.perf_event_paranoid=1
+`scripts/bench/README.md` is the single source of truth for every benchmark number in this project;
+[Benchmarking and Profiling](docs/src/reference/benchmarking.md) is a map into it. In short:
+gridoxide is one of two solvers out of six that converge on all 12 real IEEE/MATPOWER test cases, and
+its `Klu` backend is frequently faster than lightsim2grid's own KLU-backed C++ solver on real
+transmission topology — while power-grid-model remains clearly faster on synthetic radial
+distribution grids, a real standing gap.
 
 ## License
 
-gridoxide's own code is licensed under Apache-2.0 (`LICENSE`). Two pieces of vendored/translated
-third-party code are also always part of a default build:
+gridoxide's own code is Apache-2.0 ([`LICENSE`](LICENSE)). A **default** build always includes
+`src/klu_native/`, a from-scratch Rust translation of vendored SuiteSparse AMD/BTF/KLU source, so
+`Cargo.toml`'s license field is `Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later` — accurate for
+every default build, not just an opt-in one.
 
-- **`src/klu_native/`** (always built, no feature gate) is a from-scratch Rust translation of vendored
-  SuiteSparse `AMD`, `BTF`, and `KLU` C source (see the "Experimental backends" section above). A close
-  translation of licensed source carries forward its upstream license, and that's not one license here:
-  `AMD` is BSD-3-Clause upstream, while `BTF`/`KLU` are LGPL-2.1-or-later — see
-  `src/klu_native/PROVENANCE.md` for the exact file-by-file breakdown.
+Building with `--features klu` compiles the vendored SuiteSparse C itself, adding LGPL relinking
+obligations for anyone distributing the resulting binary (a `klu-dynamic` sub-feature exists for
+that case). Building with `--features pardiso` dynamically links a locally-installed Intel oneMKL
+under Intel's own proprietary license; nothing MKL-derived is vendored or shipped by this repo.
 
-As a result, `Cargo.toml`'s `license` field is
-`"Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"` — accurate for every default `cargo build`, not
-just an opt-in one.
-
-Building with `cargo build --features klu` additionally compiles the vendored SuiteSparse C itself
-(`vendor/suitesparse/`, see `vendor/suitesparse/PROVENANCE.md`) into the binary via FFI — already
-BSD-3-Clause/LGPL-2.1-or-later per the same table above, so this doesn't add any license beyond what's
-already listed, but it does add LGPL's relinking obligations for anyone distributing a binary built with
-that feature (a `klu-dynamic` sub-feature exists for that case — see `Cargo.toml`'s feature doc
-comments).
-
-Building with `cargo build --features pardiso` is a separate case from all of the above: it dynamically
-links a locally-installed Intel oneMKL (`libmkl_rt.so`) at build/run time, under Intel's own Simplified
-Software License — not LGPL, not OSS, and not vendored or redistributed by this repo in any form (no MKL
-header or source is copied in; `bindgen` only reads the local install's own `mkl_pardiso.h` at build time to
-generate FFI bindings). Because nothing MKL-derived is ever copied into or shipped by this crate,
-`Cargo.toml`'s `license` field does **not** need to change for this feature. Anyone who builds with
-`--features pardiso` and distributes the resulting binary is responsible for their own compliance with
-Intel's oneMKL redistribution terms — this project doesn't audit that on their behalf.
+See [Provenance and Licensing](docs/src/reference/provenance.md) for the full breakdown, and the
+`PROVENANCE.md` files under `src/klu_native/` and `vendor/suitesparse/` for per-file detail.

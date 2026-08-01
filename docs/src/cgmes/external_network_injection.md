@@ -1,4 +1,4 @@
-# CGMES: ExternalNetworkInjection
+# ExternalNetworkInjection
 
 ## Motivation
 
@@ -70,12 +70,12 @@ for mrid in by_type(ds, "ExternalNetworkInjection") {
 ```
 
 Both P *and* Q are negated here — `EquivalentInjection`'s convention, not `SynchronousMachine`'s Q
-exception (see the [StaticVarCompensator](./cgmes_static_var_compensator.md) page for why that exception
+exception (see the [StaticVarCompensator](./static_var_compensator.md) page for why that exception
 exists and why it doesn't extend here).
 
 Concepts 3 and 4 don't arise: gridoxide has no boundary-line object for an injection to fold into, and its
 slack bus comes from CGMES's own `TopologicalIsland.AngleRefTopologicalNode` (see
-[Multi-Island Power Flow](./multi_island.md)) rather than from any generator-size heuristic, so an
+[Multi-Island Power Flow](../powerflow/multi_island.md)) rather than from any generator-size heuristic, so an
 unbounded `maxP` has nothing to distort.
 
 ## Tool reference

@@ -2,9 +2,9 @@
 //! mirroring `sparse_klu.rs`'s shape and role — a fifth, opt-in
 //! `JacobianBackend` — but linked dynamically against a locally-installed
 //! oneMKL instead of a vendored, statically-compiled library, since MKL is
-//! proprietary and can't be vendored the way SuiteSparse's KLU can. See the
-//! README's "Experimental backends" section and this crate's `pardiso`
-//! Cargo feature doc comment for why this exists and how it's linked.
+//! proprietary and can't be vendored the way SuiteSparse's KLU can. See
+//! `docs/src/solvers/backends.md` and this crate's `pardiso` Cargo feature
+//! doc comment for why this exists and how it's linked.
 //!
 //! All raw-pointer FFI handling is confined to this one file, matching
 //! `sparse_klu.rs`'s own isolation principle.
