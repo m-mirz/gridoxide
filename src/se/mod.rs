@@ -32,6 +32,7 @@
 
 pub mod constraints;
 pub mod jacobian;
+pub mod observability;
 pub mod nr;
 
 use num_complex::Complex;

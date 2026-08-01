@@ -39,8 +39,13 @@ pub enum SeStatus {
     MaxIterations,
     /// The gain matrix could not be factorized. With WLS this usually means the
     /// system is unobservable — too few independent measurements to pin down
-    /// every state variable — rather than a numerical accident. Phase 5's
-    /// observability analysis exists to say which part.
+    /// every state variable — rather than a numerical accident.
+    ///
+    /// [`observability::analyze`](super::observability::analyze) turns this into
+    /// a diagnosis, naming the buses and quantities the measurements leave
+    /// undetermined. It is not run automatically because it densifies the gain
+    /// matrix, which is affordable for a deliberate analysis pass and not for
+    /// every solve.
     Singular,
 }
 

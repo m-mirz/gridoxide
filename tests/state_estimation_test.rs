@@ -38,7 +38,9 @@ use std::path::PathBuf;
 use gridoxide::measurement::measurements_from_pgm;
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
+use gridoxide::se::jacobian::StateLayout;
 use gridoxide::se::nr::{estimate, flat_start, SeOptions, SeStatus};
+use gridoxide::se::observability::analyze;
 use gridoxide::se::SeNetwork;
 use gridoxide::solver::JacobianBackend;
 
@@ -169,6 +171,58 @@ fn zero_injection_constraint_overrides_a_conflicting_sensor() {
         JacobianBackend::Scalar,
         1e-6,
     );
+}
+
+/// Every fixture the estimator handles should be observable in its *physical*
+/// unknowns.
+///
+/// Anything reported undetermined must be one of gridoxide's own synthesized
+/// buses — a virtual slack bus behind a source, or a three-winding
+/// transformer's star point. Those carry no PGM node id and are genuinely
+/// unobservable whenever the source's own power is unmeasured, which is a
+/// property of gridoxide's network model rather than of the measurement set.
+/// A *physical* node turning up here would mean the fixture cannot determine
+/// something power-grid-model evidently does.
+#[test]
+fn fixtures_are_observable_in_their_physical_unknowns() {
+    for name in [
+        "1os2msr",
+        "1os2msr-no-angle",
+        "inf-measurement-with-injection",
+        "transmission-case",
+        "node-injection-sensor-and-zero-injection",
+    ] {
+        let dir = fixture_dir(name);
+        let input = common::load_pgm_input(&dir.join("input.json"));
+        let id_to_idx = node_id_to_idx(&input);
+        let shunts = pgm_shunts_1ph(&input, &id_to_idx, S_BASE_VA);
+        let net = pgm_to_network(
+            common::load_pgm_input(&dir.join("input.json")),
+            S_BASE_VA,
+            50.0,
+        );
+        let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+
+        let mut buses = net.buses.clone();
+        flat_start(&mut buses, &measurements);
+        let layout = StateLayout::new(&buses, &measurements, &se_net);
+        let report = analyze(&measurements, &buses, &se_net, &layout);
+        assert!(!report.skipped_numerical, "{name}: fixture should be small enough to analyze");
+
+        // Physical nodes occupy the first `id_to_idx.len()` bus indices.
+        let n_physical = id_to_idx.len();
+        for unknown in report.unobservable.iter().chain(&report.structurally_unmeasured) {
+            assert!(
+                unknown.bus >= n_physical,
+                "{name}: physical bus {} ({:?}) is unobservable — report {report:?}",
+                unknown.bus,
+                unknown.quantity
+            );
+        }
+    }
 }
 
 /// The gain matrix is an ordinary square sparse system, so every backend that
