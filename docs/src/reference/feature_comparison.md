@@ -198,8 +198,11 @@ two fixtures named after.
 
 Both of power-grid-model's calculation methods are implemented and agree with each other:
 Newton-Raphson (`se::nr`) and the prefactorized `iterative_linear` (`se::iterative`), selectable per
-call. Not yet covered, and worth stating plainly: symmetric calculations only, and `link` components
-are still unparsed, which excludes 4 of the 20 symmetric fixtures. Pseudo-measurement augmentation — filling an
+call. Not yet covered, and worth stating plainly: symmetric calculations only. `link` is
+modelled now (stamped as a branch, see the
+[zero-impedance](../powerflow/zero_impedance_branches.md) chapter), so the fixtures using one are
+reachable; two remain excluded for unrelated reasons — mixed asymmetric sensors, and a published
+state that omits voltages. Pseudo-measurement augmentation — filling an
 unobservable region with forecast values, which VeraGrid does — is not implemented; gridoxide reports
 the unobservable set instead, which is the prerequisite for it.
 

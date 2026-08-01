@@ -69,35 +69,75 @@ reason about flow through each side of the connection separately.
 
 ## Where this fits in gridoxide today
 
-gridoxide's solver core has no node-breaker layer at all: every `Bus` reaching `network::build_ybus` is
-already assumed to be a single, fully-resolved electrical node. Topology resolution is a precondition of the
-`Bus`/`Line`/`Transformer` model, not something the solver participates in — so where gridoxide needs one of
-the three mechanisms above, it uses approach 1, in the importer.
+gridoxide's solver core has no node-breaker layer: every `Bus` reaching `network::build_ybus` is
+already a fully-resolved electrical node. Topology resolution is a precondition of the
+`Bus`/`Line`/`Transformer` model, so the choice above is made once, at import.
 
-- **CGMES (`src/cgmes.rs`)** — `merge_closed_switches` is a direct implementation of approach 1: a
-  path-compressing union-find over every closed, in-service `Breaker`/`Disconnector`/`LoadBreakSwitch`/
-  `Fuse`/`Jumper`/`Cut`/`GroundDisconnector`/`DisconnectingCircuitBreaker`/`Switch` (plus `Junction`, which
-  CIM defines as a permanent zero-impedance tie with no `open` state at all), collapsing each group into one
-  bus and remapping every terminal index onto it.
+### The rule: identity, not impedance
 
-  This exists because the converter's original assumption — that CGMES's TP profile always pre-merges a
-  closed switch's two ends into a single `TopologicalNode`, making switches topologically invisible — turned
-  out to be false in practice. It holds for MiniGrid/MicroGrid-BE/RealGrid, but FullGrid has a plain `Switch`
-  that is `open=false` in SSH and still resolves to two distinct `TopologicalNode`s in TP. Real exporters
-  don't universally do the reduction, so gridoxide does it itself.
-- **PGM-JSON (`src/pgm.rs`)** — maps each PGM `node` directly to a `Bus` and doesn't implement PGM's own
-  `link` component at all yet. That's the one remaining place gridoxide would need a mechanism from this
-  page (most naturally approach 1 again, at import) to correctly ingest a PGM dataset that uses it.
+> **Merge only when the element has no identity in the output model. Otherwise it stays a branch.**
 
-Since the merge happens once at import, gridoxide inherits approach 1's limitations directly: switching state
-can't be changed between solves without re-importing, and no per-side flow reporting is possible across a
-merged switch. Neither matters for gridoxide's current scope — nothing downstream reports per-terminal flows.
+| Element | Identity? | Treatment |
+|---|---|---|
+| CGMES closed switch | No — the bus/branch view *is* the merged view | Merge (`cgmes::merge_closed_switches`) |
+| PGM `link` | Yes — power-grid-model's output schema carries a `link` record with its own flows | Branch, at `pgm::LINK_Y` |
+| Any branch with `\|Z\|` below a threshold | Yes — it is a line | Branch, with `\|Z\|` clamped to `topology::MIN_BRANCH_Z` |
+
+The deciding evidence is what the fixtures assert. All four upstream power-flow cases containing a
+`link` publish that link's own current, and `vision-validation-network` publishes its full `p`/`q`/`s`
+at both ends. Two state-estimation fixtures publish per-node injections either side of a link. Merging
+deletes the branch those numbers describe, so it is unavailable wherever they are asserted — branch
+satisfies all eight, merge satisfies two.
+
+Note this is decided by *what the element is*, not by what is attached to it. An earlier version of
+this rule asked whether the endpoints carried appliances, and `vision-validation-network`'s link 74
+refutes it: the link joins two nodes with no appliances at all — apparently the safest possible merge
+— and power-grid-model still reports 1.964 MW flowing through it.
+
+The threshold row exists because a connection can be electrically zero-impedance without being
+declared as one. `ill-conditioned-by-line-meshed` carries a line at 7.07e-9 p.u.; only a value-based
+test catches that, which is powsybl's framing rather than power-grid-model's.
+
+### The numbers, and why they were measured
+
+Both constants were chosen by sweeping, not derived, because the two calculation types pull in
+opposite directions:
+
+- **Power flow** wants a link stiff. The drop across it is \\(\Delta V = I/y\\), and the fixtures
+  check node voltages and the link current at 1e-5 relative.
+- **State estimation** wants it soft. \\(G = H^{T}WH\\) squares the admittance, so
+  power-grid-model's `1e8` becomes `1e16` in the gain matrix.
+
+| `y` | power flow | state estimation |
+|---|---|---|
+| `1e8` (power-grid-model's) | pass | **singular** |
+| `1e6` | pass | **singular** |
+| **`2e5`** (`pgm::LINK_Y`) | **pass** | **converge** |
+| `1e5` | **fail**, exactly at tolerance | converge |
+
+The window is about one order of magnitude wide. That narrowness is the argument for treating these
+as regularization parameters with measured values rather than physical constants: a network far
+outside these fixtures' power scale may need them re-measured, and if no value serves both, approach
+3 is the exit — it imposes \\(V_i = V_j\\) exactly, with no large number anywhere.
+
+`topology::MIN_BRANCH_Z` is `1e-7` p.u. on the same basis: measured across all 86 branches in the
+committed PGM fixtures, it sits above the one pathological line at 7.07e-9 and below the smallest
+legitimate branch at 1.0e-6, so it disturbs nothing currently modelled. powsybl's own `1e-8` was too
+permissive to copy, since it admits \\(|Y|\\) up to `1e8`.
+
+### Consequences of the merge, where it is used
+
+CGMES inherits approach 1's limitations directly: switching state cannot change between solves
+without re-importing, and no per-side flow is reportable across a merged switch. There is also an
+empirical reason that side merges rather than stamping branches — it was tried, and the AC
+Newton-Raphson solve *diverged* on FullGrid with 20-odd such branches active at once, which is
+exactly the conditioning cost approach 2 carries.
 
 ## Tool reference
 
 | Tool | Approach | Where |
 |---|---|---|
-| **gridoxide** | 1 — topological reduction, at CGMES import | `cgmes::merge_closed_switches` (union-find over closed switches; PGM `link` not implemented) |
+| **gridoxide** | 1 and 2, by element identity | `cgmes::merge_closed_switches` merges closed CGMES switches (union-find, shared via `topology`); PGM `link` is stamped as a branch at `pgm::LINK_Y`; any branch below `topology::MIN_BRANCH_Z` is clamped |
 | powsybl-core | 1 — topological reduction, in the bus/branch view | graph traversal of a `VoltageLevel`'s node-breaker topology terminates at open switches and fuses everything reachable through closed ones into one `CalculatedBusImpl` |
 | power-grid-model | 2 — large-admittance regularization | the `Link` component: an ordinary two-terminal branch with a large fixed series admittance ("1e6 Siemens in a 10kV network", scaled to the network's base) and zero shunt; no special status in `Topology::build_topology` |
 | powsybl-open-loadflow | 3 — equality-constrained augmented system | `LfZeroImpedanceNetwork` groups zero-impedance branches per component and runs Kruskal's algorithm; `AcEquationSystemCreator.createNonImpedantBranch` emits `ZERO_V`/`ZERO_PHI` equations with a `DUMMY_P`/`DUMMY_Q` variable pair per spanning-tree edge, non-tree edges inactive |
