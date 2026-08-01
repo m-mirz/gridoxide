@@ -150,15 +150,16 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
 ///
 /// Excluded, with reasons rather than silently:
 ///
-/// - anything containing a `link` (a zero-impedance branch power-grid-model
-///   models as a fixed high admittance): gridoxide does not parse the component
-///   at all, so those networks are missing branches and no residual claim about
-///   them would be meaningful;
 /// - `three_winding_transformer`: its sensor uses `measured_terminal_type` 6,
 ///   which `measurements_from_pgm` rejects rather than guesses at;
 /// - the `single-node-source-asym-voltage-sensor*` pair: their only sensors are
 ///   asymmetric, and this is the symmetric path, so they yield no measurements
 ///   to check;
+/// - `dummy-test-sym`, for the same reason in mixed form: it carries
+///   `asym_voltage_sensor` and `asym_power_sensor` alongside symmetric ones, so
+///   the symmetric path sees only part of its measurement set and solves a
+///   different problem than power-grid-model does. Its `link` is modelled
+///   correctly; the asymmetric sensors are the gap;
 /// - `inf-measurement-with-injection-measured-unmeasured-appliances`: its bus
 ///   carries both measured and unmeasured appliances, so the measured subset is
 ///   not the bus injection. `measurements_from_pgm` currently sums appliance
@@ -254,11 +255,12 @@ fn every_symmetric_fixture_is_either_modelled_or_excluded() {
             continue;
         }
         let text = std::fs::read_to_string(entry.path().join("input.json")).expect("input");
-        let has_link = serde_json::from_str::<serde_json::Value>(&text)
-            .expect("input parses")["data"]
-            .get("link")
-            .is_some();
-        let is_asym_only = name.starts_with("single-node-source-asym-voltage-sensor");
+        // `link` is modelled now (stamped as a branch, see `pgm::LINK_Y`), so
+        // its presence no longer excludes a fixture.
+        let has_link = false;
+        let _ = &text;
+        let is_asym_only = name.starts_with("single-node-source-asym-voltage-sensor")
+            || name == "dummy-test-sym";
         let incomplete = !has_complete_state(&entry.path());
         let partial_appliances = name.ends_with("measured-unmeasured-appliances");
         let inconsistent = INCONSISTENT_BY_DESIGN.contains(&name.as_str());
@@ -278,11 +280,15 @@ fn every_symmetric_fixture_is_either_modelled_or_excluded() {
     );
 }
 
-/// Guards the exclusion list itself: `link` support is a known gap, and this
-/// records how much it is worth. When links are modelled, this count drops and
-/// the fixtures move into `MODELLED_FIXTURES`.
+/// `link` is no longer a gap: the four fixtures using one are all reachable,
+/// and none is excluded *for containing a link*.
+///
+/// Two are checked here; the other two are excluded for unrelated reasons
+/// documented above (asymmetric sensors, and an incomplete published state).
+/// This asserts the count so that adding a link fixture later cannot silently
+/// reintroduce the gap.
 #[test]
-fn link_gap_is_four_fixtures() {
+fn link_fixtures_are_no_longer_excluded_for_their_link() {
     let dir: &Path = &fixture_dir("");
     let with_link = std::fs::read_dir(dir)
         .expect("fixture dir")
@@ -296,4 +302,9 @@ fn link_gap_is_four_fixtures() {
         })
         .count();
     assert_eq!(with_link, 4, "link-using fixtures");
+    for name in ["dummy-test-sym", "ill-conditioned-by-link-meshed"] {
+        let text = std::fs::read_to_string(fixture_dir(name).join("input.json")).expect("input");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("parses");
+        assert!(v["data"].get("link").is_some(), "{name} should still carry a link");
+    }
 }

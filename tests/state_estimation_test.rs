@@ -38,7 +38,9 @@ use std::path::PathBuf;
 use gridoxide::measurement::measurements_from_pgm;
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
+use gridoxide::measurement::{Measurement, MeasurementKind, Target};
 use gridoxide::se::bad_data;
+use gridoxide::se::measurement_functions;
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
 use gridoxide::se::nr::{estimate, flat_start, SeMethod, SeOptions, SeStatus};
@@ -381,6 +383,93 @@ fn the_two_methods_agree() {
                 b.voltage_mag
             );
         }
+    }
+}
+
+/// Per-node injections across a link — the assertion that decides the whole
+/// zero-impedance policy.
+///
+/// These two fixtures publish `p`/`q` at *each* node of a linked pair: node 1
+/// injecting and node 2 absorbing the same power. Both survive only because a
+/// link is stamped as a branch. Merging its endpoints — the treatment gridoxide
+/// uses for CGMES switches, and the one an earlier draft of this policy applied
+/// here too — collapses them into a single bus whose net injection is zero, and
+/// these numbers cease to exist.
+///
+/// A test comparing node *voltages* would pass under either treatment and so
+/// would not be testing the decision at all.
+#[test]
+fn per_node_injections_survive_across_a_link() {
+    for name in [
+        "node-injection-with-injection-sensor-sym-sensors",
+        "node-injection-wo-injection-sensor-sym-sensors",
+    ] {
+        let dir = fixture_dir(name);
+        let input = common::load_pgm_input(&dir.join("input.json"));
+        let expected = common::load_json(&dir.join("sym_output.json"));
+        let id_to_idx = node_id_to_idx(&input);
+        let shunts = pgm_shunts_1ph(&input, &id_to_idx, S_BASE_VA);
+        let net = pgm_to_network(
+            common::load_pgm_input(&dir.join("input.json")),
+            S_BASE_VA,
+            50.0,
+        );
+        let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+
+        let mut buses = net.buses.clone();
+        flat_start(&mut buses, &measurements);
+        let report = estimate(&measurements, &mut buses, &se_net, &SeOptions::default());
+        assert_eq!(report.status, SeStatus::Converged, "{name}: {report:?}");
+
+        let nodes = expected["data"]["node"].as_array().expect("node output");
+        let mut checked = 0;
+        for node in nodes {
+            let id = node["id"].as_u64().expect("node id");
+            let idx = net.node_idx[&id];
+            let (Some(p), Some(q)) = (node["p"].as_f64(), node["q"].as_f64()) else { continue };
+
+            // power-grid-model's node injection: every appliance at the bus,
+            // which for gridoxide means the bus injection plus the structural
+            // source and shunt contributions. Same composition as
+            // `Target::NodeInjection`'s measurement function.
+            let probe = |kind| Measurement {
+                kind,
+                target: Target::NodeInjection(idx),
+                value: 0.0,
+                sigma: 1.0,
+            };
+            let rows = vec![
+                probe(MeasurementKind::ActivePower),
+                probe(MeasurementKind::ReactivePower),
+            ];
+            let h = measurement_functions(&rows, &buses, &se_net);
+
+            assert!(
+                (h[0] * S_BASE_VA - p).abs() < 1e-3,
+                "{name} node {id}: p = {} W, PGM says {p}",
+                h[0] * S_BASE_VA
+            );
+            assert!(
+                (h[1] * S_BASE_VA - q).abs() < 1e-3,
+                "{name} node {id}: q = {} W, PGM says {q}",
+                h[1] * S_BASE_VA
+            );
+            checked += 1;
+        }
+        assert!(checked >= 2, "{name}: expected both nodes of the link to be checked");
+
+        // And the endpoints really are distinct buses, asserted directly rather
+        // than inferred from the numbers above.
+        let raw = common::load_json(&dir.join("input.json"));
+        let link = &raw["data"]["link"].as_array().expect("link")[0];
+        assert_ne!(
+            net.node_idx[&link["from_node"].as_u64().unwrap()],
+            net.node_idx[&link["to_node"].as_u64().unwrap()],
+            "{name}: a merge here would erase the injections just checked"
+        );
     }
 }
 

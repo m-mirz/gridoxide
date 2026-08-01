@@ -40,6 +40,8 @@ pub struct PgmData {
     #[serde(default)]
     pub voltage_regulator: Vec<PgmVoltageRegulator>,
     #[serde(default)]
+    pub link: Vec<PgmLink>,
+    #[serde(default)]
     pub sym_voltage_sensor: Vec<PgmSymVoltageSensor>,
     #[serde(default)]
     pub sym_power_sensor: Vec<PgmSymPowerSensor>,
@@ -89,6 +91,53 @@ pub struct PgmLine {
     #[serde(default)]
     pub tan0: f64,
 }
+
+/// power-grid-model's own `link` admittance, `1e8 + j1e8` per-unit — recorded
+/// for reference, but **not** what gridoxide uses. See [`LINK_Y`].
+///
+/// Derived in its `common.hpp:83` as `1e6 / (base_power_3p / 10e3 / 10e3)` —
+/// "1e6 siemens in a 10 kV network", evaluated once against a 1 MVA base and
+/// frozen. It is a *per-unit* constant: the `10e3` is not a live voltage, so it
+/// does not track the network's voltage level, and re-scaling it by voltage
+/// would double-count what per-unit already removed. powsybl-open-loadflow
+/// reaches the same order independently, clamping `|Z|` at `1e-8` p.u.
+/// (`LfNetworkParameters.java:39`).
+pub const PGM_LINK_Y: Complex<f64> = Complex::new(1e8, 1e8);
+
+/// The admittance gridoxide stamps for a `link`: `2e5 + j2e5` per-unit.
+///
+/// Three orders of magnitude below power-grid-model's, and chosen by
+/// measurement rather than by derivation, because the two calculation types
+/// pull in opposite directions and their windows barely overlap:
+///
+/// - **Power flow** wants it *large*. The drop across the link is `ΔV = I/y`,
+///   and the `dummy-test` fixture checks node voltages and the link's own
+///   current at 1e-5 relative. At `1e5` both land exactly on that boundary and
+///   fail; from `2e5` up they pass.
+/// - **State estimation** wants it *small*. `G = HᵀWH` squares the admittance,
+///   so power-grid-model's `1e8` becomes `1e16` in the gain matrix and the
+///   `node-injection-*` fixtures come back singular. They stay singular at
+///   `1e6` and converge from `5e5` down.
+///
+/// Measured window, both suites:
+///
+/// | `y` | power flow | state estimation |
+/// |---|---|---|
+/// | `1e8` (PGM's) | pass | **singular** |
+/// | `1e6` | pass | **singular** |
+/// | `5e5` | pass | 2 of 3 converge |
+/// | **`2e5`** | **pass** | **converge** |
+/// | `1e5` | **fail** (at tolerance) | converge |
+///
+/// At `2e5` the residual error is 1.3e-5 W on a 1000 W injection — 1.3e-8
+/// relative, far inside anything the fixtures ask for. The narrowness of that
+/// window is the honest argument for treating this as a regularization
+/// parameter with a measured value, not a physical constant to be derived: a
+/// network far outside these fixtures' power scale may need it re-measured, and
+/// if no value serves both, the equality-constrained formulation
+/// (`docs/src/powerflow/zero_impedance_branches.md`, approach 3) is the exit —
+/// it imposes `V_i = V_j` exactly, with no large number anywhere.
+pub const LINK_Y: Complex<f64> = Complex::new(2e5, 2e5);
 
 fn one() -> f64 { 1.0 }
 fn nan() -> f64 { f64::NAN }
@@ -435,6 +484,24 @@ pub struct PgmNodeAsymOutput {
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────────
+
+/// power-grid-model's `link`: an ideal connection between two nodes, carrying
+/// no attributes beyond its endpoints and their statuses.
+///
+/// Modelled as a branch rather than by merging its endpoints, because a `link`
+/// has an identity in power-grid-model's output model — the schema carries a
+/// `link` record with its own `p`/`q`/`i` flows, and its fixtures assert them.
+/// Merging would delete the branch those numbers describe. See
+/// [`crate::topology`] for the policy and
+/// `docs/src/powerflow/zero_impedance_branches.md` for the alternatives.
+#[derive(Deserialize)]
+pub struct PgmLink {
+    pub id: u64,
+    pub from_node: u64,
+    pub to_node: u64,
+    pub from_status: u8,
+    pub to_status: u8,
+}
 
 /// A line's total per-unit shunt admittance, `2πf·c1·(tan1 + j)·z_base`.
 ///
@@ -827,6 +894,24 @@ pub fn pgm_to_network(
             y_series,
             y_shunt,
             tap,
+        });
+    }
+
+    // Links: ideal connections, stamped as branches rather than merged. See
+    // `PgmLink` for why, and `link_admittance` for the value.
+    for ln in &input.data.link {
+        if ln.from_status == 0 && ln.to_status == 0 {
+            continue;
+        }
+        transformer_pos.insert(ln.id, transformers.len());
+        transformers.push(Transformer {
+            from: id_to_idx[&ln.from_node],
+            to: id_to_idx[&ln.to_node],
+            from_status: ln.from_status,
+            to_status: ln.to_status,
+            y_series: LINK_Y,
+            y_shunt: Complex::new(0.0, 0.0),
+            tap: Complex::new(1.0, 0.0),
         });
     }
 
