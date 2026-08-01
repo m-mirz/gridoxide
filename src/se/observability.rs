@@ -29,6 +29,20 @@
 //! tolerance. The number of steps taken is the rank, and the unknowns left in
 //! the trailing block are the ones the measurements do not pin down.
 //!
+//! The factorization itself is `faer`'s
+//! (`linalg::cholesky::llt_pivoting`) — blocked and vectorized, rather than the
+//! naive triple loop this module originally carried.
+//!
+//! The rank *decision*, however, is made here rather than taken from faer's
+//! `PivLltInfo::rank`. faer stops at `eps · n · max_diag`, i.e. around 1e-16
+//! relative: the threshold for "numerically not positive definite".
+//! Observability wants a much looser one. A grid whose measurements determine a
+//! direction only barely — a weak coupling that survives at 1e-12 of the
+//! leading pivot — is unobservable for every practical purpose, and reporting
+//! it as observable would be a worse answer than reporting it as not. So the
+//! factor's diagonal is thresholded here at [`RANK_TOLERANCE`], relative to the
+//! largest pivot, and faer's own rank is an upper bound on the result.
+//!
 //! The alternative — reading zero pivots out of the LU that
 //! [`crate::solver::LinearSolver`] already computes — was the plan's first
 //! choice, but none of the five backends expose their pivots (`faer`'s
@@ -42,6 +56,12 @@
 //! than quietly allocating gigabytes. A sparse rank-revealing method is the
 //! follow-up.
 
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::cholesky::llt_pivoting::factor::{
+    cholesky_in_place, cholesky_in_place_scratch,
+};
+use faer::{Mat, Par};
+
 use crate::measurement::Measurement;
 use crate::types::Bus;
 
@@ -51,6 +71,18 @@ use super::SeNetwork;
 /// Largest state dimension [`analyze`] will densify, chosen so the gain matrix
 /// stays under ~32 MB (`2000² × 8` bytes).
 pub const DENSE_LIMIT: usize = 2000;
+
+/// Relative threshold below which a pivot counts as zero.
+///
+/// Applied to the ratio of a pivot to the largest one, so it is scale-free —
+/// which matters because `G`'s entries carry measurement weights that routinely
+/// span several orders of magnitude, and an absolute threshold would call a
+/// grid watched entirely by high-sigma sensors unobservable purely for having
+/// small weights.
+///
+/// Deliberately far looser than the `eps · n` faer uses internally: a direction
+/// determined only at the 1e-12 level is not usefully determined at all.
+pub const RANK_TOLERANCE: f64 = 1e-10;
 
 /// Which of a bus's two unknowns an [`Unknown`] refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,55 +140,58 @@ fn describe(layout: &StateLayout, col: usize) -> Unknown {
     }
 }
 
-/// Pivoted Cholesky of a symmetric positive semidefinite matrix.
+/// Rank of a symmetric positive semidefinite matrix, and the pivot order.
 ///
 /// Returns `(rank, permutation)`: the first `rank` entries of the permutation
-/// are the columns that were successfully eliminated, and the tail is the
-/// deficient block.
+/// are the columns that were eliminated with a pivot above threshold, and the
+/// tail is the deficient block — the unknowns the measurements do not
+/// determine.
 ///
-/// `tol` is relative to the largest diagonal entry, so it is scale-free — which
-/// matters here because `G`'s entries carry measurement weights that routinely
-/// span several orders of magnitude.
-fn pivoted_cholesky_rank(mut a: Vec<Vec<f64>>, tol: f64) -> (usize, Vec<usize>) {
-    let n = a.len();
-    let mut perm: Vec<usize> = (0..n).collect();
-    let max_diag = (0..n).map(|i| a[i][i]).fold(0.0f64, f64::max);
-    if max_diag <= 0.0 {
-        return (0, perm);
+/// The factorization is faer's blocked pivoted `LLᵀ`; the rank decision is this
+/// module's, for the reason given in the module comment. `None` means the
+/// factorization itself failed (a NaN pivot), which for a gain matrix means the
+/// inputs were already corrupt rather than merely rank-deficient.
+fn pivoted_cholesky_rank(mut a: Mat<f64>, tol: f64) -> Option<(usize, Vec<usize>)> {
+    let n = a.nrows();
+    if n == 0 {
+        return Some((0, Vec::new()));
     }
-    let threshold = tol * max_diag;
 
-    for k in 0..n {
-        // Largest remaining diagonal, the standard pivot choice for PSD input.
-        let (pivot, value) = (k..n)
-            .map(|i| (i, a[i][i]))
-            .fold((k, f64::NEG_INFINITY), |best, cur| if cur.1 > best.1 { cur } else { best });
-        if value <= threshold {
-            return (k, perm);
-        }
+    let mut perm = vec![0usize; n];
+    let mut perm_inv = vec![0usize; n];
+    // `MemBuffer` rather than a hand-rolled byte vector: faer's scratch is
+    // allocated as `f64`, and a plain `Vec<u8>` is not guaranteed to be aligned
+    // for that, so the stack silently loses bytes to alignment and then runs
+    // out.
+    let mut buffer = MemBuffer::new(cholesky_in_place_scratch::<usize, f64>(
+        n,
+        Par::Seq,
+        Default::default(),
+    ));
+    let stack = MemStack::new(&mut buffer);
 
-        if pivot != k {
-            a.swap(k, pivot);
-            for row in a.iter_mut() {
-                row.swap(k, pivot);
-            }
-            perm.swap(k, pivot);
-        }
+    let (info, _) = cholesky_in_place(
+        a.as_mut(),
+        &mut perm,
+        &mut perm_inv,
+        Par::Seq,
+        stack,
+        Default::default(),
+    )
+    .ok()?;
 
-        let d = a[k][k].sqrt();
-        a[k][k] = d;
-        for i in k + 1..n {
-            a[i][k] /= d;
-        }
-        for j in k + 1..n {
-            for i in j..n {
-                let update = a[i][k] * a[j][k];
-                a[i][j] -= update;
-                a[j][i] = a[i][j];
-            }
-        }
-    }
-    (n, perm)
+    // faer stopped either at full rank or at its own eps-level threshold; apply
+    // the looser observability threshold to the pivots it did compute. The
+    // diagonal holds L's entries, so a pivot is the square of its diagonal.
+    let pivots: Vec<f64> = (0..info.rank).map(|k| a[(k, k)] * a[(k, k)]).collect();
+    let largest = pivots.iter().copied().fold(0.0f64, f64::max);
+    let rank = if largest <= 0.0 {
+        0
+    } else {
+        pivots.iter().take_while(|&&p| p > tol * largest).count()
+    };
+
+    Some((rank, perm))
 }
 
 /// Analyzes what `measurements` determine about the state at `buses`.
@@ -202,7 +237,7 @@ pub fn analyze(
         };
     }
 
-    let mut g = vec![vec![0.0; n]; n];
+    let mut g = Mat::<f64>::zeros(n, n);
     for (row, m) in rows.iter().zip(measurements) {
         let w = m.weight();
         if !w.is_finite() || w == 0.0 {
@@ -210,12 +245,22 @@ pub fn analyze(
         }
         for &(i, hi) in row {
             for &(j, hj) in row {
-                g[i][j] += w * hi * hj;
+                g[(i, j)] += w * hi * hj;
             }
         }
     }
 
-    let (rank, perm) = pivoted_cholesky_rank(g, 1e-10);
+    let Some((rank, perm)) = pivoted_cholesky_rank(g, RANK_TOLERANCE) else {
+        // A gain matrix that cannot be factorized at all is not a statement
+        // about observability; report nothing determined rather than guess.
+        return ObservabilityReport {
+            n_unknowns: n,
+            rank: 0,
+            structurally_unmeasured,
+            unobservable: (0..n).map(|c| describe(layout, c)).collect(),
+            skipped_numerical: false,
+        };
+    };
     let unobservable = perm[rank..].iter().map(|&c| describe(layout, c)).collect();
 
     ObservabilityReport {
@@ -237,10 +282,22 @@ mod tests {
         Measurement { kind, target, value: 0.0, sigma: 0.01 }
     }
 
+    /// Builds a dense matrix from rows, for the kernel tests.
+    fn mat(rows: &[&[f64]]) -> Mat<f64> {
+        let n = rows.len();
+        let mut m = Mat::<f64>::zeros(n, n);
+        for (i, row) in rows.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                m[(i, j)] = v;
+            }
+        }
+        m
+    }
+
     #[test]
     fn identity_is_full_rank() {
-        let a = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
-        let (rank, _) = pivoted_cholesky_rank(a, 1e-10);
+        let (rank, _) = pivoted_cholesky_rank(mat(&[&[1.0, 0.0], &[0.0, 1.0]]), RANK_TOLERANCE)
+            .expect("factorizable");
         assert_eq!(rank, 2);
     }
 
@@ -249,10 +306,11 @@ mod tests {
     #[test]
     fn rank_one_outer_product_is_rank_one() {
         let v = [1.0, 2.0, -1.0];
-        let a: Vec<Vec<f64>> = (0..3)
+        let rows: Vec<Vec<f64>> = (0..3)
             .map(|i| (0..3).map(|j| v[i] * v[j]).collect())
             .collect();
-        let (rank, _) = pivoted_cholesky_rank(a, 1e-10);
+        let refs: Vec<&[f64]> = rows.iter().map(|r| r.as_slice()).collect();
+        let (rank, _) = pivoted_cholesky_rank(mat(&refs), RANK_TOLERANCE).expect("factorizable");
         assert_eq!(rank, 1, "v v^T has rank 1");
     }
 
@@ -261,8 +319,8 @@ mod tests {
     /// reported unobservable purely because its weights are small.
     #[test]
     fn rank_detection_is_scale_free() {
-        let a = vec![vec![1e-12, 0.0], vec![0.0, 1e-12]];
-        let (rank, _) = pivoted_cholesky_rank(a, 1e-10);
+        let (rank, _) = pivoted_cholesky_rank(mat(&[&[1e-12, 0.0], &[0.0, 1e-12]]), RANK_TOLERANCE)
+            .expect("factorizable");
         assert_eq!(rank, 2);
     }
 
@@ -310,6 +368,70 @@ mod tests {
                 .contains(&Unknown { bus: 0, quantity: Quantity::Magnitude }),
             "the measured quantity must not be reported unobservable: {report:?}"
         );
+    }
+
+    /// The case structural detection cannot see: every column is touched, and
+    /// the state is still not determined.
+    ///
+    /// Two measurements at one branch terminal reach all three unknowns of this
+    /// network — the near bus's angle and both magnitudes — so nothing is
+    /// structurally missing and the estimator's own mask would report a clean
+    /// bill. But two numbers cannot fix three unknowns, and only the rank
+    /// computation says so. This is the capability the module exists for, on a
+    /// network rather than on a hand-built matrix.
+    #[test]
+    fn structurally_complete_but_rank_deficient_is_caught() {
+        let (net, buses) = crate::se::tests::two_bus_net();
+        let measurements = vec![
+            m(
+                MeasurementKind::ActivePower,
+                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+            ),
+            m(
+                MeasurementKind::ReactivePower,
+                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+            ),
+        ];
+        let layout = StateLayout::new(&buses, &measurements, &net);
+        let report = analyze(&measurements, &buses, &net, &layout);
+
+        assert_eq!(report.n_unknowns, 3);
+        assert!(
+            report.structurally_unmeasured.is_empty(),
+            "every unknown is reached by a measurement, so structure alone sees no problem: {report:?}"
+        );
+        assert_eq!(report.rank, 2, "two measurements cannot determine three unknowns");
+        assert!(!report.is_observable());
+        assert_eq!(report.unobservable.len(), 1);
+    }
+
+    /// Redundant sensors add confidence, not rank.
+    ///
+    /// A third measurement duplicating the first leaves the rank where it was —
+    /// the naive check of "enough measurements for the unknowns" would pass here
+    /// and be wrong.
+    #[test]
+    fn a_duplicate_measurement_adds_no_rank() {
+        let (net, buses) = crate::se::tests::two_bus_net();
+        let flow = m(
+            MeasurementKind::ActivePower,
+            Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+        );
+        let measurements = vec![
+            flow,
+            m(
+                MeasurementKind::ReactivePower,
+                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+            ),
+            // Same quantity, same terminal, independently reported.
+            flow,
+        ];
+        let layout = StateLayout::new(&buses, &measurements, &net);
+        let report = analyze(&measurements, &buses, &net, &layout);
+
+        assert_eq!(measurements.len(), report.n_unknowns, "as many rows as unknowns");
+        assert_eq!(report.rank, 2, "but only two of them are independent");
+        assert!(!report.is_observable(), "{report:?}");
     }
 
     /// Measuring only powers leaves the global phase free, which is exactly the
