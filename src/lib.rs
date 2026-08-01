@@ -1,5 +1,6 @@
 pub mod types;
 pub mod network;
+pub mod topology;
 pub mod branch_flow;
 pub mod measurement;
 pub mod se;
