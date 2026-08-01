@@ -38,6 +38,8 @@ use std::path::PathBuf;
 use gridoxide::measurement::measurements_from_pgm;
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
+use gridoxide::se::bad_data;
+use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
 use gridoxide::se::nr::{estimate, flat_start, SeOptions, SeStatus};
 use gridoxide::se::observability::analyze;
@@ -220,6 +222,84 @@ fn fixtures_are_observable_in_their_physical_unknowns() {
                 "{name}: physical bus {} ({:?}) is unobservable — report {report:?}",
                 unknown.bus,
                 unknown.quantity
+            );
+        }
+    }
+}
+
+/// Bad-data analysis on the fixtures: silent where the data agrees, and
+/// pointing at the right sensor where it does not.
+///
+/// Note the consistent fixtures produce a chi-squared of ~0 rather than ~dof.
+/// power-grid-model generated their readings from the true state without adding
+/// noise, so there is nothing for the estimate to disagree with. Real telemetry
+/// would sit near its degrees of freedom; a near-zero statistic here is a
+/// property of the fixtures, not a bug.
+#[test]
+fn bad_data_analysis_flags_only_the_inconsistent_fixture() {
+    for (name, should_reject) in [
+        ("1os2msr", false),
+        ("1os2msr-no-angle", false),
+        ("inf-measurement-with-injection", false),
+        ("transmission-case", false),
+        ("node-injection-sensor-and-zero-injection", true),
+    ] {
+        let dir = fixture_dir(name);
+        let input = common::load_pgm_input(&dir.join("input.json"));
+        let id_to_idx = node_id_to_idx(&input);
+        let shunts = pgm_shunts_1ph(&input, &id_to_idx, S_BASE_VA);
+        let net = pgm_to_network(
+            common::load_pgm_input(&dir.join("input.json")),
+            S_BASE_VA,
+            50.0,
+        );
+        let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+
+        let mut buses = net.buses.clone();
+        flat_start(&mut buses, &measurements);
+        let report = estimate(&measurements, &mut buses, &se_net, &SeOptions::default());
+
+        let layout = StateLayout::new(&buses, &measurements, &se_net);
+        let constraints = Constraints::new(&se_net.zero_injection);
+        let bad = bad_data::analyze(
+            &measurements,
+            &report.residuals,
+            &buses,
+            &se_net,
+            &layout,
+            &constraints,
+            bad_data::Candidates::default(),
+        );
+
+        assert_eq!(
+            bad.rejects_at(0.05),
+            should_reject,
+            "{name}: chi-squared {:.3e} on {} dof, p = {:.3e}",
+            bad.chi_squared,
+            bad.degrees_of_freedom,
+            bad.p_value
+        );
+
+        if should_reject {
+            // The offending sensor is the node-injection one placed on a bus
+            // with no appliance; the zero-injection constraint holds the state
+            // at the truth, so the whole disagreement lands in that residual.
+            let worst = bad.worst().expect("a suspect should be identified");
+            assert!(
+                matches!(
+                    measurements[worst.measurement].target,
+                    gridoxide::measurement::Target::NodeInjection(_)
+                ),
+                "{name}: expected the injection sensor to be worst, got {:?}",
+                measurements[worst.measurement]
+            );
+            assert!(
+                worst.normalized_residual > 3.0,
+                "{name}: normalized residual {} should exceed the conventional threshold",
+                worst.normalized_residual
             );
         }
     }

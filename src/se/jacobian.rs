@@ -306,6 +306,46 @@ pub fn measurement_jacobian(
         .collect()
 }
 
+/// Pins state variables that nothing reaches, and reports which.
+///
+/// A column no row touches leaves an all-zero row and column in `G`, making the
+/// whole system singular even when the rest of it is perfectly determined.
+/// Writing an identity there with a zero right-hand side holds that variable at
+/// its current value and lets the observable part solve — the same masking
+/// `bde::mask_scenario` uses for a converged block, and for the same reason:
+/// dropping the row instead would change the sparsity pattern and invalidate a
+/// cached symbolic factorization.
+///
+/// "Touched" is structural — any appearance in a row, regardless of value — so
+/// that the mask, and hence the sparsity pattern, is identical across
+/// iterations. Whether a present-but-degenerate column is *usefully* determined
+/// is a different question, and
+/// [`observability`](super::observability)'s.
+pub fn mask_untouched(
+    triplets: &mut Vec<(usize, usize, f64)>,
+    rhs: &mut [f64],
+    row_sets: &[&[Row]],
+    n: usize,
+) -> Vec<usize> {
+    let mut touched = vec![false; n];
+    for rows in row_sets {
+        for row in rows.iter() {
+            for &(c, _) in row {
+                touched[c] = true;
+            }
+        }
+    }
+    let mut untouched = Vec::new();
+    for (c, &seen) in touched.iter().enumerate() {
+        if !seen {
+            triplets.push((c, c, 1.0));
+            rhs[c] = 0.0;
+            untouched.push(c);
+        }
+    }
+    untouched
+}
+
 /// Assembles `G = HᵀWH` as triplets, and `HᵀW r` as a dense vector.
 ///
 /// `G = Σ_m w_m·hₘhₘᵀ`, so it is built as a sum of per-row outer products —

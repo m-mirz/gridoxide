@@ -27,7 +27,7 @@ use crate::sparse::RealSparseSystem;
 use crate::types::Bus;
 
 use super::constraints::Constraints;
-use super::jacobian::{gain_and_rhs, measurement_jacobian, StateLayout};
+use super::jacobian::{gain_and_rhs, mask_untouched, measurement_jacobian, StateLayout};
 use super::{measurement_functions, SeNetwork};
 
 /// How the estimate finished.
@@ -149,33 +149,7 @@ fn estimate_with<S: LinearSolver>(
         // that matters for conditioning.
         let (c_values, c_rows) = constraints.evaluate(buses, net, layout);
 
-        // A state variable no measurement touches leaves an all-zero row and
-        // column in G, which makes the whole system singular even though the
-        // rest of it is perfectly well determined. Writing an identity into
-        // that position with a zero right-hand side pins the variable at its
-        // current value and lets the observable part solve — the same masking
-        // `bde::mask_scenario` uses for a converged block, and for the same
-        // reason: dropping the row instead would change the sparsity pattern
-        // and invalidate the cached symbolic factorization.
-        // Structural, not numerical: a column counts as constrained if any
-        // measurement's row reaches it at all. That keeps the mask — and so the
-        // gain matrix's pattern — identical across iterations, which the cached
-        // symbolic factorization requires. A column that is present but
-        // numerically degenerate is a different problem, and phase 5's job.
-        let mut touched = vec![false; n];
-        for row in rows.iter().chain(&c_rows) {
-            for &(c, _) in row {
-                touched[c] = true;
-            }
-        }
-        for (c, &seen) in touched.iter().enumerate() {
-            if !seen {
-                triplets.push((c, c, 1.0));
-                rhs[c] = 0.0;
-            }
-        }
-        let unconstrained: Vec<usize> =
-            touched.iter().enumerate().filter(|&(_, &t)| !t).map(|(c, _)| c).collect();
+        let unconstrained = mask_untouched(&mut triplets, &mut rhs, &[&rows, &c_rows], n);
 
         let (triplets, rhs) =
             super::constraints::augment(triplets, rhs, n, &c_values, &c_rows);

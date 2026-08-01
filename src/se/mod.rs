@@ -30,6 +30,7 @@
 //! network. `tests/measurement_residual_test.rs` is what established this — it
 //! reported a 63-sigma disagreement on exactly that quantity.
 
+pub mod bad_data;
 pub mod constraints;
 pub mod jacobian;
 pub mod observability;
