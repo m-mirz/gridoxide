@@ -532,7 +532,8 @@ fn line_y_shunt(ln: &PgmLine, omega: f64, z_base: f64) -> Complex<f64> {
 /// connected one — see [`branch_flow::line_params`](crate::branch_flow::line_params).
 fn half_open_line(ln: &PgmLine, omega: f64, z_base: f64, idx: usize) -> Line {
     let y_shunt = line_y_shunt(ln, omega, z_base);
-    let y_series = Complex::new(1.0, 0.0) / Complex::new(ln.r1 / z_base, ln.x1 / z_base);
+    let (r, x) = crate::topology::clamp_branch_impedance(ln.r1 / z_base, ln.x1 / z_base);
+    let y_series = Complex::new(1.0, 0.0) / Complex::new(r, x);
     let y_eq = half_open_branch_shunt(y_series, y_shunt);
     Line { from: idx, to: idx, r: 0.0, x: 0.0, b_shunt: y_eq.im, g_shunt: y_eq.re }
 }
@@ -845,12 +846,19 @@ pub fn pgm_to_network(
             (1, 1) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 let y_shunt = line_y_shunt(ln, omega, z_base);
+                // A line short enough to be a jumper would otherwise put an
+                // unbounded admittance into the Y-bus; see
+                // `topology::MIN_BRANCH_Z`.
+                let (r, x) = crate::topology::clamp_branch_impedance(
+                    ln.r1 / z_base,
+                    ln.x1 / z_base,
+                );
                 branch_idx.insert(ln.id, lines.len());
                 lines.push(Line {
                     from: id_to_idx[&ln.from_node],
                     to: id_to_idx[&ln.to_node],
-                    r: ln.r1 / z_base,
-                    x: ln.x1 / z_base,
+                    r,
+                    x,
                     b_shunt: y_shunt.im,
                     g_shunt: y_shunt.re,
                 });

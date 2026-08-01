@@ -30,6 +30,52 @@
 //! Newton-Raphson solve failed on FullGrid with 20-odd such branches active at
 //! once. That is the conditioning cost approach 2 carries, met in practice.
 
+/// Smallest branch impedance, per-unit, that reaches the admittance matrix.
+///
+/// A branch with `|Z|` below this is clamped up to it. The point is robustness,
+/// not accuracy: `Y = 1/Z` is unbounded as `Z -> 0`, and a network can reach
+/// that by accident — a jumper modelled as a very short line rather than as a
+/// declared switch or link. power-grid-model's own
+/// `ill-conditioned-by-line-meshed` fixture contains exactly that, a line at
+/// `7.07e-9` p.u., and is named for the consequence.
+///
+/// The value sits between the two things it has to separate: above that
+/// fixture's `7.07e-9`, and below the `1.0e-6` of the smallest *legitimate*
+/// branch in the committed fixtures, so nothing currently modelled is touched.
+/// powsybl-open-loadflow's equivalent (`lowImpedanceThreshold`) is `1e-8`, which
+/// is more permissive than gridoxide can afford: it admits `|Y|` up to `1e8`,
+/// and the state estimator's gain matrix squares that.
+///
+/// Note this is deliberately *not* the same ceiling as a declared link's
+/// [`pgm::LINK_Y`](crate::pgm::LINK_Y) (`|y| = 2.83e5`). A link's value was
+/// measured to satisfy fixtures that assert its flow at 1e-5; this is a floor
+/// for pathological input that no fixture asserts anything about, so it is set
+/// where it disturbs least rather than where it is most accurate.
+pub const MIN_BRANCH_Z: f64 = 1e-7;
+
+/// Raises a branch impedance to [`MIN_BRANCH_Z`] if it falls below it,
+/// preserving the R/X ratio so the branch keeps its character.
+///
+/// A branch at exactly zero has no ratio to preserve and becomes purely
+/// reactive, matching how a zero-impedance connection behaves in practice.
+///
+/// This is powsybl's `REPLACE_BY_MIN_IMPEDANCE_LINE` treatment
+/// (`SimplePiModel::setMinZ`). Its *default* is the equality-constrained
+/// alternative instead; gridoxide clamps because it has no augmented-system
+/// machinery on the power-flow side — see
+/// `docs/src/powerflow/zero_impedance_branches.md`.
+pub fn clamp_branch_impedance(r: f64, x: f64) -> (f64, f64) {
+    let z = (r * r + x * x).sqrt();
+    if z >= MIN_BRANCH_Z || !z.is_finite() {
+        return (r, x);
+    }
+    if z == 0.0 {
+        return (0.0, MIN_BRANCH_Z);
+    }
+    let scale = MIN_BRANCH_Z / z;
+    (r * scale, x * scale)
+}
+
 /// Minimal path-compressing union-find.
 ///
 /// Deliberately without union-by-rank: the inputs here are at most a few
@@ -137,6 +183,48 @@ mod tests {
         let (remap, n) = merge_groups(3, &mut uf);
         assert_eq!(n, 1);
         assert!(remap.iter().all(|&r| r == remap[0]));
+    }
+
+    #[test]
+    fn an_ordinary_impedance_is_left_alone() {
+        let (r, x) = clamp_branch_impedance(0.05, 0.2);
+        assert_eq!((r, x), (0.05, 0.2));
+    }
+
+    /// Clamping preserves the R/X ratio, so a clamped branch keeps its
+    /// character rather than becoming arbitrarily resistive or reactive.
+    #[test]
+    fn clamping_preserves_the_r_over_x_ratio() {
+        let (r, x) = clamp_branch_impedance(1e-10, 2e-10);
+        let z = (r * r + x * x).sqrt();
+        assert!((z - MIN_BRANCH_Z).abs() < 1e-18, "z = {z}");
+        assert!((x / r - 2.0).abs() < 1e-9, "ratio not preserved: {}", x / r);
+    }
+
+    /// The fixture case: power-grid-model's `ill-conditioned-by-line-meshed`
+    /// carries a line at 7.07e-9 p.u., which would otherwise put an admittance
+    /// of 1.4e8 into the Y-bus.
+    #[test]
+    fn the_ill_conditioned_fixture_value_is_caught() {
+        let (r, x) = clamp_branch_impedance(5e-9, 5e-9);
+        let y = 1.0 / (r * r + x * x).sqrt();
+        assert!(y <= 1.0 / MIN_BRANCH_Z + 1.0, "admittance still unbounded: {y:.3e}");
+        assert!(y >= 1.0 / MIN_BRANCH_Z - 1.0);
+    }
+
+    /// A branch at exactly zero has no ratio to preserve.
+    #[test]
+    fn exactly_zero_becomes_purely_reactive() {
+        assert_eq!(clamp_branch_impedance(0.0, 0.0), (0.0, MIN_BRANCH_Z));
+    }
+
+    /// The smallest legitimate branch in the committed fixtures is 1.0e-6 p.u.
+    /// and must pass through untouched, or the threshold is disturbing real
+    /// data rather than protecting against pathological data.
+    #[test]
+    fn the_smallest_real_fixture_branch_is_untouched() {
+        let (r, x) = clamp_branch_impedance(0.0, 1.0e-6);
+        assert_eq!((r, x), (0.0, 1.0e-6));
     }
 
     /// The remap is dense and ascending, so it can index straight into a
