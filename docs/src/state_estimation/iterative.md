@@ -80,6 +80,32 @@ same state an undamped one would reach if it got there at all.
 
 Relaxation engages only when progress stalls; a well-behaved problem runs undamped and is unaffected.
 
+## Measured cost
+
+`examples/bench_se.rs` runs both methods over the MATPOWER benchmark grids, with measurements
+synthesized from a converged power flow — a voltage magnitude at every bus and flows at both ends of
+every branch, giving a redundancy around 4x.
+
+| case | buses | measurements | Newton-Raphson | iters | iterative-linear | iters | speedup |
+|---|---|---|---|---|---|---|---|
+| case14 | 15 | 125 | 0.7 ms | 6 | 0.1 ms | 16 | 7x |
+| case118 | 119 | 1,083 | 5.5 ms | 6 | 1.0 ms | 37 | 5.5x |
+| case300 | 301 | 2,419 | 13.8 ms | 6 | 2.3 ms | 41 | 6x |
+| case1354pegase | 1,355 | 11,189 | 137 ms | 6 | 12.8 ms | 45 | 10.7x |
+| case2869pegase | 2,870 | 25,204 | 349 ms | 6 | 30.6 ms | 33 | 11.4x |
+
+Both the benefit and the cost show up plainly. Newton-Raphson takes **exactly six iterations at every
+scale** — quadratic convergence — while the linearized method takes 16 to 45. It still wins on wall
+clock because each of its iterations is so much cheaper, and the margin *widens* with size, from 5.5x
+at 119 buses to 11.4x at 2,870: prefactorization amortizes better the larger the matrix.
+
+The accuracy trade is equally visible. Against the state the measurements were read from,
+Newton-Raphson lands at ~1e-14 throughout — the data is perfectly consistent here, so it is limited
+only by arithmetic. The linearized method runs 8.7e-10, 1.6e-8, 8.9e-8, 5.6e-7, 1.1e-6 down that same
+column: still far below any real measurement noise, but degrading with size rather than holding
+constant. That is the linearization and the constant-|U| weighting showing through, and it is why
+Newton-Raphson remains the default.
+
 ## Agreement with Newton-Raphson
 
 On every fixture gridoxide checks, the two methods agree to \\(10^{-6}\\) per-unit, bus by bus — a
