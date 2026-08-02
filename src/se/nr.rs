@@ -150,8 +150,8 @@ fn estimate_with<S: LinearSolver>(
     layout: &StateLayout,
     constraints: &Constraints,
     options: &SeOptions,
+    cache: &mut Option<S>,
 ) -> SeReport {
-    let mut cache: Option<S> = None;
     let mut residuals = Vec::new();
     let mut last_step = f64::INFINITY;
     let mut last_unconstrained = Vec::new();
@@ -187,7 +187,7 @@ fn estimate_with<S: LinearSolver>(
         // reused across iterations — the same property `PersistentSolver`
         // relies on for power flow.
         if cache.is_none() {
-            cache = S::new(n_aug, &triplets);
+            *cache = S::new(n_aug, &triplets);
         }
         let Some(system) = cache.as_mut() else {
             return SeReport {
@@ -264,6 +264,124 @@ fn objective(measurements: &[Measurement], residuals: &[f64]) -> f64 {
         / 2.0
 }
 
+/// A reusable estimator that keeps its factorization between solves.
+///
+/// [`estimate`] is the one-shot entry point: it builds the state layout, the
+/// constraint set and the solver's symbolic factorization, uses them once, and
+/// throws all three away. For a single estimate that is the whole cost of doing
+/// business; for a sequence of them — a time series, a scenario sweep, a live
+/// feed refreshing the same telemetry — it is repeated work, and measurably so.
+/// Power flow solved the identical problem with
+/// [`PersistentSolver`](crate::solver::PersistentSolver); this is its
+/// counterpart.
+///
+/// # When a cached factorization stays valid
+///
+/// The gain matrix's sparsity pattern depends on the topology *and* on the
+/// measurement set's structure — which quantities are measured where — but not
+/// on their values. So this stays valid while:
+///
+/// - the network is unchanged, and
+/// - the same measurements exist, on the same targets, in the same order.
+///
+/// New readings on the existing sensors are the case this is built for and need
+/// no reset. Sigmas may change too: a weight scales `G`'s values, never its
+/// pattern. Adding, removing or reordering a measurement does invalidate it, as
+/// does anything that changes whether an angle is measured at all — that flips
+/// whether a reference is pinned, and with it the number of unknowns. Call
+/// [`reset`](Self::reset) then.
+///
+/// Nothing here detects a stale cache. The same is true of `PersistentSolver`,
+/// and for the same reason: the check would cost as much as the work it saves.
+pub struct PersistentEstimator {
+    options: SeOptions,
+    layout: Option<StateLayout>,
+    constraints: Option<Constraints>,
+    scalar: Option<RealSparseSystem>,
+    klu_native: Option<crate::klu_native::KluNativeSystem>,
+    #[cfg(feature = "klu")]
+    klu: Option<crate::sparse_klu::KluRealSystem>,
+    #[cfg(feature = "pardiso")]
+    pardiso: Option<crate::sparse_pardiso::PardisoRealSystem>,
+}
+
+impl PersistentEstimator {
+    pub fn new(options: SeOptions) -> Self {
+        Self {
+            options,
+            layout: None,
+            constraints: None,
+            scalar: None,
+            klu_native: None,
+            #[cfg(feature = "klu")]
+            klu: None,
+            #[cfg(feature = "pardiso")]
+            pardiso: None,
+        }
+    }
+
+    /// Discards every cached artifact. Call after changing the network or the
+    /// structure of the measurement set.
+    pub fn reset(&mut self) {
+        self.layout = None;
+        self.constraints = None;
+        self.scalar = None;
+        self.klu_native = None;
+        #[cfg(feature = "klu")]
+        {
+            self.klu = None;
+        }
+        #[cfg(feature = "pardiso")]
+        {
+            self.pardiso = None;
+        }
+    }
+
+    /// Estimates, reusing whatever this estimator already holds.
+    ///
+    /// The iterative-linear method has nothing to reuse *between* calls — it
+    /// factorizes once per call already, and its matrix depends on the starting
+    /// magnitudes, which move — so it delegates to the one-shot path. The
+    /// saving here is Newton-Raphson's, which is also the slower method and so
+    /// the one that wanted it.
+    pub fn estimate(
+        &mut self,
+        measurements: &[Measurement],
+        buses: &mut [Bus],
+        net: &SeNetwork,
+    ) -> SeReport {
+        if self.options.method == SeMethod::IterativeLinear {
+            return super::iterative::estimate(measurements, buses, net, &self.options);
+        }
+
+        if self.layout.is_none() {
+            self.layout = Some(StateLayout::new(buses, measurements, net));
+        }
+        if self.constraints.is_none() {
+            self.constraints = Some(Constraints::new(&net.zero_injection));
+        }
+        let layout = self.layout.as_ref().expect("just populated");
+        let constraints = self.constraints.as_ref().expect("just populated");
+
+        match self.options.backend {
+            JacobianBackend::KluNative => estimate_with(
+                measurements, buses, net, layout, constraints, &self.options, &mut self.klu_native,
+            ),
+            #[cfg(feature = "klu")]
+            JacobianBackend::Klu => estimate_with(
+                measurements, buses, net, layout, constraints, &self.options, &mut self.klu,
+            ),
+            #[cfg(feature = "pardiso")]
+            JacobianBackend::Pardiso => estimate_with(
+                measurements, buses, net, layout, constraints, &self.options, &mut self.pardiso,
+            ),
+            JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
+                measurements, buses, net, layout, constraints, &self.options, &mut self.scalar,
+            ),
+        }
+    }
+}
+
 /// Runs weighted-least-squares state estimation, updating `buses` in place.
 ///
 /// `buses` supplies the starting state; use [`flat_start`] for the standard
@@ -282,25 +400,29 @@ pub fn estimate(
     let layout = StateLayout::new(buses, measurements, net);
     let constraints = Constraints::new(&net.zero_injection);
     match options.backend {
-        JacobianBackend::KluNative => {
-            estimate_with::<crate::klu_native::KluNativeSystem>(measurements, buses, net, &layout, &constraints, options)
-        }
+        JacobianBackend::KluNative => estimate_with(
+            measurements, buses, net, &layout, &constraints, options,
+            &mut None::<crate::klu_native::KluNativeSystem>,
+        ),
         #[cfg(feature = "klu")]
-        JacobianBackend::Klu => {
-            estimate_with::<crate::sparse_klu::KluRealSystem>(measurements, buses, net, &layout, &constraints, options)
-        }
+        JacobianBackend::Klu => estimate_with(
+            measurements, buses, net, &layout, &constraints, options,
+            &mut None::<crate::sparse_klu::KluRealSystem>,
+        ),
         #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => {
-            estimate_with::<crate::sparse_pardiso::PardisoRealSystem>(measurements, buses, net, &layout, &constraints, options)
-        }
+        JacobianBackend::Pardiso => estimate_with(
+            measurements, buses, net, &layout, &constraints, options,
+            &mut None::<crate::sparse_pardiso::PardisoRealSystem>,
+        ),
         // `Block` assumes power flow's two-unknowns-per-bus structure, which the
         // 2N−1 state vector here does not have (the reference bus contributes
         // one unknown, not two), so it falls back to the scalar path rather
         // than silently mis-assembling. Every other backend is a general sparse
         // LU and carries the gain matrix unchanged.
-        JacobianBackend::Block | JacobianBackend::Scalar => {
-            estimate_with::<RealSparseSystem>(measurements, buses, net, &layout, &constraints, options)
-        }
+        JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
+            measurements, buses, net, &layout, &constraints, options,
+            &mut None::<RealSparseSystem>,
+        ),
     }
 }
 
@@ -403,6 +525,105 @@ mod tests {
         // And the unconstrained ones kept their starting value rather than
         // drifting somewhere arbitrary.
         assert!((buses[1].voltage_mag - 1.0).abs() < 1e-12, "got {}", buses[1].voltage_mag);
+    }
+
+    /// A reused estimator must produce exactly what a fresh one does.
+    ///
+    /// The whole premise of caching is that the second solve is the same
+    /// computation with less setup, so anything else is a bug rather than a
+    /// tradeoff. Checked bit-for-bit, not approximately.
+    #[test]
+    fn reuse_reproduces_a_fresh_estimate_exactly() {
+        let (net, truth) = crate::se::tests::two_bus_net();
+        let probe = vec![
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(0), 0.0, 0.01),
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(1), 0.0, 0.01),
+            m(MeasurementKind::ActivePower, Target::Bus(1), 0.0, 0.01),
+            m(MeasurementKind::ReactivePower, Target::Bus(1), 0.0, 0.01),
+        ];
+        let exact = measurement_functions(&probe, &truth, &net);
+        let measurements: Vec<Measurement> = probe
+            .iter()
+            .zip(&exact)
+            .map(|(p, &v)| Measurement { value: v, ..*p })
+            .collect();
+
+        let mut fresh = truth.clone();
+        flat_start(&mut fresh, &measurements);
+        let one_shot = estimate(&measurements, &mut fresh, &net, &SeOptions::default());
+
+        let mut persistent = PersistentEstimator::new(SeOptions::default());
+        let mut reused = Vec::new();
+        for _ in 0..3 {
+            let mut buses = truth.clone();
+            flat_start(&mut buses, &measurements);
+            let report = persistent.estimate(&measurements, &mut buses, &net);
+            reused.push((report, buses));
+        }
+
+        for (i, (report, buses)) in reused.iter().enumerate() {
+            assert_eq!(report.status, one_shot.status, "solve {i} status");
+            assert_eq!(report.iterations, one_shot.iterations, "solve {i} iterations");
+            for (bus, (got, want)) in buses.iter().zip(&fresh).enumerate() {
+                assert_eq!(
+                    got.voltage_mag, want.voltage_mag,
+                    "solve {i} bus {bus}: reuse changed the answer"
+                );
+                assert_eq!(got.voltage_ang, want.voltage_ang, "solve {i} bus {bus} angle");
+            }
+        }
+    }
+
+    /// New readings on the same sensors are the case the cache is built for:
+    /// values may move freely, only the *structure* has to hold still.
+    #[test]
+    fn reuse_tracks_changed_measurement_values() {
+        let (net, truth) = crate::se::tests::two_bus_net();
+        let probe = vec![
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(0), 0.0, 0.01),
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(1), 0.0, 0.01),
+            m(MeasurementKind::ActivePower, Target::Bus(1), 0.0, 0.01),
+            m(MeasurementKind::ReactivePower, Target::Bus(1), 0.0, 0.01),
+        ];
+        let exact = measurement_functions(&probe, &truth, &net);
+        let first: Vec<Measurement> = probe
+            .iter()
+            .zip(&exact)
+            .map(|(p, &v)| Measurement { value: v, ..*p })
+            .collect();
+        // A different operating point, same sensors.
+        let second: Vec<Measurement> = first
+            .iter()
+            .map(|m| Measurement { value: m.value * 0.98, ..*m })
+            .collect();
+
+        let mut persistent = PersistentEstimator::new(SeOptions::default());
+        let mut a = truth.clone();
+        flat_start(&mut a, &first);
+        persistent.estimate(&first, &mut a, &net);
+
+        let mut b = truth.clone();
+        flat_start(&mut b, &second);
+        persistent.estimate(&second, &mut b, &net);
+
+        // Against a fresh estimator on the second set.
+        let mut reference = truth.clone();
+        flat_start(&mut reference, &second);
+        estimate(&second, &mut reference, &net, &SeOptions::default());
+
+        for (bus, (got, want)) in b.iter().zip(&reference).enumerate() {
+            assert!(
+                (got.voltage_mag - want.voltage_mag).abs() < 1e-12,
+                "bus {bus}: cached run gave {} against {}",
+                got.voltage_mag,
+                want.voltage_mag
+            );
+        }
+        assert!(
+            (a[1].voltage_mag - b[1].voltage_mag).abs() > 1e-6,
+            "the two measurement sets should give visibly different answers, \
+             or this test proves nothing"
+        );
     }
 
     /// A noisy measurement set still converges; the leftover objective is the

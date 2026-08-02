@@ -494,6 +494,11 @@ struct StateEstimationModel {
     measurements: Vec<crate::measurement::Measurement>,
     options: crate::se::nr::SeOptions,
     report: Option<crate::se::nr::SeReport>,
+    /// Keeps the symbolic factorization between `solve()` calls, the way
+    /// `PowerFlowModel` keeps `PersistentSolver`'s. The measurement set on a
+    /// model never changes structure — it is fixed at load — so the cache is
+    /// valid for the model's whole life.
+    estimator: crate::se::nr::PersistentEstimator,
 }
 
 #[pymethods]
@@ -564,6 +569,12 @@ impl StateEstimationModel {
                 method,
             },
             report: None,
+            estimator: crate::se::nr::PersistentEstimator::new(crate::se::nr::SeOptions {
+                tol,
+                max_iter,
+                backend: parse_backend(backend)?,
+                method,
+            }),
         })
     }
 
@@ -585,12 +596,9 @@ impl StateEstimationModel {
     fn solve(&mut self) -> PyResult<()> {
         self.buses = self.net.buses.clone();
         crate::se::nr::flat_start(&mut self.buses, &self.measurements);
-        let report = crate::se::nr::estimate(
-            &self.measurements,
-            &mut self.buses,
-            &self.se_net,
-            &self.options,
-        );
+        let report = self
+            .estimator
+            .estimate(&self.measurements, &mut self.buses, &self.se_net);
         let status = report.status;
         self.report = Some(report);
         match status {
