@@ -106,6 +106,36 @@ column: still far below any real measurement noise, but degrading with size rath
 constant. That is the linearization and the constant-|U| weighting showing through, and it is why
 Newton-Raphson remains the default.
 
+### Where the remaining time goes
+
+Profiling was worth doing before optimizing, because it redirected the obvious plan. On
+case1354pegase the two methods spend their time quite differently:
+
+| | Newton-Raphson | iterative-linear |
+|---|---|---|
+| assembly (`h(x)`, `H`, gain) | 22% | — |
+| factorization | **78%** | ~30% *including* all setup |
+| per-iteration solves | — | **~70%**, over roughly 80 iterations |
+
+The tempting optimization is a symmetric factorization: `G` is symmetric and a general sparse LU is
+being used on it, so in principle half of Newton-Raphson's 78% is recoverable. Two measurements argue
+against it.
+
+First, zero-injection buses are 9-31% of buses on these grids, so the constrained KKT system is the
+normal case, not the exception, and it is symmetric *indefinite* — needing Bunch-Kaufman or a
+quasi-definite regularization rather than a Cholesky, which is two code paths and a perturbation of
+the constraints.
+
+Second and more decisively, it would speed up the wrong method. Newton-Raphson is where gridoxide is
+already ahead — power-grid-model's own Newton-Raphson state estimator fails with a sparse-matrix
+error on case300 and case1354pegase where gridoxide's converges. The remaining gap is on *this*
+method — 1.3 ms against 0.8 ms on case300, 6.7 ms against 3.3 ms on case1354pegase — and there the
+factorization is not the bottleneck at all.
+
+So the open lead for this method is its **convergence rate**, not its linear algebra: it needs about
+eighty iterations to reach 1e-8 here. Under-relaxation is not the cause — traced on this case, it
+stays at 1.0 through iteration 77 and engages once at 78, right at convergence.
+
 ## Agreement with Newton-Raphson
 
 On every fixture gridoxide checks, the two methods agree to \\(10^{-6}\\) per-unit, bus by bus — a
