@@ -519,14 +519,30 @@ pub fn source_impedance_pu_seq(
 pub fn transformer_tap(
     u1: f64, u2: f64, tap_side: u8,
     tap_pos: i32, tap_min: i32, tap_max: i32, tap_nom: i32, tap_size: f64, clock: i32,
+    u1_rated: f64, u2_rated: f64,
 ) -> Complex<f64> {
     let tap_pos = tap_pos.clamp(tap_min.min(tap_max), tap_min.max(tap_max));
     let delta = (tap_pos - tap_nom) as f64 * tap_size;
-    if tap_side == 0 {
-        tap_ratio_from_voltages(u1 + delta, u1, clock)
+    let (u1_tapped, u2_tapped) = if tap_side == 0 {
+        (u1 + delta, u2)
     } else {
-        tap_ratio_from_voltages(u2, u2 + delta, clock)
-    }
+        (u1, u2 + delta)
+    };
+    // `k = (u1/u2) / (u1_rated/u2_rated)`, matching power-grid-model's
+    // `transformer.hpp:194` exactly. Both halves matter:
+    //
+    // - the *nameplate* ratio `u1/u2` is what the windings actually do, tap
+    //   included;
+    // - the *node* ratings are the per-unit bases the Y-bus is expressed in.
+    //
+    // Their quotient is the off-nominal ratio. Taking only `(u1 + delta)/u1` —
+    // as this did until the `vision-validation-network` fixture exposed it —
+    // cancels the nameplate against itself and drops the node bases entirely,
+    // so a transformer whose nameplate ratio differs from its nodes' rating
+    // ratio is modelled as though it did not. That is ordinary data, not an
+    // edge case: 20 of that fixture's 22 transformers are 10750/420 units on a
+    // 10500 V node, a 2.4% ratio silently lost.
+    tap_ratio_from_voltages(u1_tapped * u2_rated, u2_tapped * u1_rated, clock)
 }
 
 /// Computes per-unit series and shunt admittances from transformer nameplate data.
@@ -703,6 +719,55 @@ pub fn power_injections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transformer whose nameplate ratio differs from its nodes' rating
+    /// ratio has a real off-nominal ratio, even at nominal tap.
+    ///
+    /// This is the case that went wrong: the old formula computed
+    /// `(u1 + delta)/u1`, which cancels the nameplate against itself and never
+    /// looks at the node ratings, so a 10750/420 unit on a 10500 V node came out
+    /// as 1:1. Twenty of `vision-validation-network`'s twenty-two transformers
+    /// are exactly that, and the resulting node voltages were 10.7 V out against
+    /// a 0.5 V tolerance.
+    #[test]
+    fn tap_ratio_accounts_for_nameplate_versus_node_rating() {
+        // Nominal tap: pos == nom, so the tap contributes nothing and the whole
+        // ratio comes from nameplate against rating.
+        let k = transformer_tap(10750.0, 420.0, 0, 3, 5, 1, 3, 250.0, 0, 10500.0, 420.0);
+        assert!(
+            (k.norm() - 10750.0 / 10500.0).abs() < 1e-12,
+            "expected the 2.4% off-nominal ratio, got {}",
+            k.norm()
+        );
+    }
+
+    /// The reassuring half: when nameplate and rating agree, nominal tap really
+    /// is 1:1, so the fix does not disturb the ordinary case.
+    #[test]
+    fn a_matched_transformer_at_nominal_tap_is_unity() {
+        let k = transformer_tap(110000.0, 10500.0, 0, 0, -12, 12, 0, 1320.0, 0, 110000.0, 10500.0);
+        assert!((k.norm() - 1.0).abs() < 1e-12, "got {}", k.norm());
+    }
+
+    /// The tap itself still moves the ratio, on whichever side it sits.
+    #[test]
+    fn the_tap_position_shifts_the_tapped_side() {
+        // tap_side 0: -3 steps of 1320 V off a 110 kV winding.
+        let k = transformer_tap(110000.0, 10500.0, 0, -3, -12, 12, 0, 1320.0, 0, 110000.0, 10500.0);
+        assert!((k.norm() - (110000.0 - 3960.0) / 110000.0).abs() < 1e-12, "got {}", k.norm());
+
+        // tap_side 1 moves u2 instead, which inverts the direction.
+        let k = transformer_tap(110000.0, 10500.0, 1, -3, -12, 12, 0, 100.0, 0, 110000.0, 10500.0);
+        assert!((k.norm() - 10500.0 / (10500.0 - 300.0)).abs() < 1e-12, "got {}", k.norm());
+    }
+
+    /// `clock` is a vector-group phase shift of 30 degrees per unit, and must
+    /// survive the ratio change untouched.
+    #[test]
+    fn the_clock_still_sets_the_phase() {
+        let k = transformer_tap(10750.0, 420.0, 0, 3, 5, 1, 3, 250.0, 5, 10500.0, 420.0);
+        assert!((k.arg() - 5.0 * std::f64::consts::PI / 6.0).abs() < 1e-12, "got {}", k.arg());
+    }
 
     #[test]
     fn connected_components_single_cluster() {

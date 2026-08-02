@@ -573,9 +573,14 @@ pub fn pgm_transformers_3ph(
     id_to_idx: &HashMap<u64, usize>,
     s_base_va: f64,
 ) -> Vec<Transformer3PhSeq> {
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
     input.data.transformer.iter()
         .map(|t| {
-            let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock);
+            let tap = transformer_tap(
+                t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size,
+                t.clock, id_to_u_rated[&t.from_node], id_to_u_rated[&t.to_node],
+            );
             let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
             let (y0, y1, y2) = transformer_seq_params(
                 y_series, y_shunt, tap, t.from_status, t.to_status,
@@ -865,7 +870,10 @@ pub fn pgm_to_network(
     let mut transformer_pos: HashMap<u64, usize> = HashMap::new();
     let mut three_winding_pos: HashMap<u64, [usize; 3]> = HashMap::new();
     for t in &input.data.transformer {
-        let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock);
+        let tap = transformer_tap(
+            t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock,
+            id_to_u_rated[&t.from_node], id_to_u_rated[&t.to_node],
+        );
         let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
         transformer_pos.insert(t.id, transformers.len());
         transformers.push(Transformer {
