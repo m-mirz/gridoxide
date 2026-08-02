@@ -44,9 +44,96 @@ const S_BASE_VA: f64 = 1e6;
 const SIGMA_V: f64 = 1e-3;
 const SIGMA_S: f64 = 1e-2;
 
+/// `--emit <dir>`, if given.
+fn emit_dir() -> Option<PathBuf> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == "--emit")?;
+    args.get(i + 1).map(PathBuf::from)
+}
+
+/// Writes the case plus its synthesized sensors as a power-grid-model input
+/// document, in SI units.
+///
+/// Only voltage and branch-terminal sensors are emitted. gridoxide's
+/// bus-injection measurements have no direct power-grid-model counterpart here —
+/// its node-injection sensor sums *every* appliance at the bus, which is a
+/// different quantity — so including them would give the two tools different
+/// information, which is exactly what this document exists to prevent.
+fn emit_pgm_document(
+    dir: &std::path::Path,
+    case: &str,
+    original: &str,
+    truth: &[Bus],
+    measurements: &[Measurement],
+    net: &gridoxide::pgm::PgmNetwork,
+) {
+    let mut doc: serde_json::Value = serde_json::from_str(original).expect("case parses");
+    let bus_to_node: std::collections::HashMap<usize, u64> =
+        net.node_idx.iter().map(|(&id, &idx)| (idx, id)).collect();
+    let branch_to_id: std::collections::HashMap<usize, u64> =
+        net.branch_idx.iter().map(|(&id, &idx)| (idx, id)).collect();
+
+    let mut next_id = 1_000_000u64;
+    let (mut voltage, mut power) = (Vec::new(), Vec::new());
+    // A power sensor is two scalar rows; pair them back up by target.
+    let mut pending: std::collections::HashMap<(usize, bool), (Option<f64>, Option<f64>)> =
+        std::collections::HashMap::new();
+
+    for m in measurements {
+        match (m.kind, m.target) {
+            (MeasurementKind::VoltageMagnitude, Target::Bus(bus)) => {
+                let Some(&node) = bus_to_node.get(&bus) else { continue };
+                let u_rated = truth[bus].u_rated;
+                voltage.push(serde_json::json!({
+                    "id": next_id,
+                    "measured_object": node,
+                    "u_measured": m.value * u_rated,
+                    "u_sigma": (m.sigma * u_rated).max(1.0),
+                }));
+                next_id += 1;
+            }
+            (kind, Target::BranchTerminal { branch, terminal }) => {
+                if branch_to_id.get(&branch).is_none() {
+                    continue;
+                }
+                let slot = pending.entry((branch, terminal == Terminal::To)).or_default();
+                if kind == MeasurementKind::ActivePower {
+                    slot.0 = Some(m.value);
+                } else {
+                    slot.1 = Some(m.value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut keys: Vec<_> = pending.keys().copied().collect();
+    keys.sort();
+    for key in keys {
+        let (Some(p), Some(q)) = pending[&key] else { continue };
+        power.push(serde_json::json!({
+            "id": next_id,
+            "measured_object": branch_to_id[&key.0],
+            "measured_terminal_type": if key.1 { 1 } else { 0 },
+            "p_measured": p * S_BASE_VA,
+            "q_measured": q * S_BASE_VA,
+            "power_sigma": SIGMA_S * S_BASE_VA,
+        }));
+        next_id += 1;
+    }
+
+    doc["data"]["sym_voltage_sensor"] = serde_json::Value::Array(voltage);
+    doc["data"]["sym_power_sensor"] = serde_json::Value::Array(power);
+    std::fs::create_dir_all(dir).ok();
+    std::fs::write(dir.join(format!("{case}_se.json")), doc.to_string()).ok();
+}
+
 fn main() {
     let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/bench/.case-cache");
-    let mut cases: Vec<String> = std::env::args().skip(1).collect();
+    let mut cases: Vec<String> = std::env::args()
+        .skip(1)
+        .take_while(|a| a != "--emit")
+        .collect();
     if cases.is_empty() {
         cases = ["case14", "case118", "case300", "case1354pegase", "case2869pegase"]
             .iter()
@@ -105,6 +192,12 @@ fn main() {
             let report = estimate(&measurements, &mut buses, &se_net, &options);
             (start.elapsed().as_secs_f64() * 1e3, report, buses)
         };
+
+        // `--emit <dir>` writes the augmented PGM document so another tool can
+        // estimate from byte-identical sensors; see scripts/bench/bench_se_pgm.py.
+        if let Some(dir) = emit_dir() {
+            emit_pgm_document(&dir, case, &text, &truth, &measurements, &net);
+        }
 
         let (nr_ms, nr, nr_buses) = run(SeMethod::NewtonRaphson);
         let (il_ms, il, il_buses) = run(SeMethod::IterativeLinear);
