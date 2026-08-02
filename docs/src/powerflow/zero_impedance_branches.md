@@ -81,7 +81,7 @@ already a fully-resolved electrical node. Topology resolution is a precondition 
 |---|---|---|
 | CGMES closed switch | No — the bus/branch view *is* the merged view | Merge (`cgmes::merge_closed_switches`) |
 | PGM `link` | Yes — power-grid-model's output schema carries a `link` record with its own flows | Branch, at `pgm::LINK_Y` |
-| Any branch with `\|Z\|` below a threshold | Yes — it is a line | Branch, with `\|Z\|` clamped to `topology::MIN_BRANCH_Z` |
+| Any branch with `\|Z\|` below a threshold | Yes — it is a line | Branch, clamped to a link's stiffness |
 
 The deciding evidence is what the fixtures assert. All four upstream power-flow cases containing a
 `link` publish that link's own current, and `vision-validation-network` publishes its full `p`/`q`/`s`
@@ -120,10 +120,20 @@ as regularization parameters with measured values rather than physical constants
 outside these fixtures' power scale may need them re-measured, and if no value serves both, approach
 3 is the exit — it imposes \\(V_i = V_j\\) exactly, with no large number anywhere.
 
-`topology::MIN_BRANCH_Z` is `1e-7` p.u. on the same basis: measured across all 86 branches in the
-committed PGM fixtures, it sits above the one pathological line at 7.07e-9 and below the smallest
-legitimate branch at 1.0e-6, so it disturbs nothing currently modelled. powsybl's own `1e-8` was too
-permissive to copy, since it admits \\(|Y|\\) up to `1e8`.
+`topology::ZERO_IMPEDANCE_THRESHOLD` is `1e-7` p.u. on the same basis: measured across all 86
+branches in the committed PGM fixtures and every CGMES one, it sits above the single pathological
+line at 7.07e-9 and below the smallest legitimate branch (1.0e-6 in PGM, 2.92e-6 in CGMES), so it
+disturbs nothing currently modelled.
+
+**Detection and treatment are separate numbers.** The threshold only decides *whether* a branch is an
+ideal connection; a branch it catches is clamped to `IDEAL_CONNECTION_Y`, the same admittance a
+declared link gets. One number cannot do both jobs: it has to sit below every legitimate branch, yet
+clamping merely to that level leaves \\(|Y|\\) as high as `1e7` — inside the range measured as
+singular for state estimation, and 35x stiffer than a link. Separating them satisfies both, and says
+the right thing besides: a line that short *is* an undeclared link, so it should be treated as one.
+
+powsybl's own threshold is `1e-8`, but its default treatment is the equality-constrained formulation
+rather than a clamp, so it never has to reconcile the two roles in a single value.
 
 ### Consequences of the merge, where it is used
 
@@ -137,7 +147,7 @@ exactly the conditioning cost approach 2 carries.
 
 | Tool | Approach | Where |
 |---|---|---|
-| **gridoxide** | 1 and 2, by element identity | `cgmes::merge_closed_switches` merges closed CGMES switches (union-find, shared via `topology`); PGM `link` is stamped as a branch at `pgm::LINK_Y`; any branch below `topology::MIN_BRANCH_Z` is clamped |
+| **gridoxide** | 1 and 2, by element identity | `cgmes::merge_closed_switches` merges closed CGMES switches (union-find, shared via `topology`); PGM `link` is stamped as a branch at `pgm::LINK_Y`; any branch below `topology::ZERO_IMPEDANCE_THRESHOLD` is clamped to the same admittance |
 | powsybl-core | 1 — topological reduction, in the bus/branch view | graph traversal of a `VoltageLevel`'s node-breaker topology terminates at open switches and fuses everything reachable through closed ones into one `CalculatedBusImpl` |
 | power-grid-model | 2 — large-admittance regularization | the `Link` component: an ordinary two-terminal branch with a large fixed series admittance ("1e6 Siemens in a 10kV network", scaled to the network's base) and zero shunt; no special status in `Topology::build_topology` |
 | powsybl-open-loadflow | 3 — equality-constrained augmented system | `LfZeroImpedanceNetwork` groups zero-impedance branches per component and runs Kruskal's algorithm; `AcEquationSystemCreator.createNonImpedantBranch` emits `ZERO_V`/`ZERO_PHI` equations with a `DUMMY_P`/`DUMMY_Q` variable pair per spanning-tree edge, non-tree edges inactive |

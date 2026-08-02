@@ -906,7 +906,16 @@ pub fn cgmes_to_buses_and_branches(
     // entries (a real de-energized/switched-out snapshot, not a decode gap).
     fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) {
         match (from_conn, to_conn) {
-            (true, true) => lines.push(Line { from, to, r, x, b_shunt, g_shunt }),
+            (true, true) => {
+                // A jumper exported as a very short `ACLineSegment` would put an
+                // unbounded admittance into the Y-bus; see
+                // `topology::ZERO_IMPEDANCE_THRESHOLD`. Measured across every committed
+                // CGMES fixture the smallest branch is 2.92e-6 p.u., some 30x
+                // above the threshold, so this changes nothing modelled today
+                // and exists for exports that are less well behaved.
+                let (r, x) = crate::topology::clamp_branch_impedance(r, x);
+                lines.push(Line { from, to, r, x, b_shunt, g_shunt })
+            }
             (true, false) => lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt }),
             (false, true) => lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt }),
             (false, false) => {}

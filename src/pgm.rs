@@ -104,40 +104,14 @@ pub struct PgmLine {
 /// (`LfNetworkParameters.java:39`).
 pub const PGM_LINK_Y: Complex<f64> = Complex::new(1e8, 1e8);
 
-/// The admittance gridoxide stamps for a `link`: `2e5 + j2e5` per-unit.
+/// The admittance gridoxide stamps for a `link`.
 ///
-/// Three orders of magnitude below power-grid-model's, and chosen by
-/// measurement rather than by derivation, because the two calculation types
-/// pull in opposite directions and their windows barely overlap:
-///
-/// - **Power flow** wants it *large*. The drop across the link is `ΔV = I/y`,
-///   and the `dummy-test` fixture checks node voltages and the link's own
-///   current at 1e-5 relative. At `1e5` both land exactly on that boundary and
-///   fail; from `2e5` up they pass.
-/// - **State estimation** wants it *small*. `G = HᵀWH` squares the admittance,
-///   so power-grid-model's `1e8` becomes `1e16` in the gain matrix and the
-///   `node-injection-*` fixtures come back singular. They stay singular at
-///   `1e6` and converge from `5e5` down.
-///
-/// Measured window, both suites:
-///
-/// | `y` | power flow | state estimation |
-/// |---|---|---|
-/// | `1e8` (PGM's) | pass | **singular** |
-/// | `1e6` | pass | **singular** |
-/// | `5e5` | pass | 2 of 3 converge |
-/// | **`2e5`** | **pass** | **converge** |
-/// | `1e5` | **fail** (at tolerance) | converge |
-///
-/// At `2e5` the residual error is 1.3e-5 W on a 1000 W injection — 1.3e-8
-/// relative, far inside anything the fixtures ask for. The narrowness of that
-/// window is the honest argument for treating this as a regularization
-/// parameter with a measured value, not a physical constant to be derived: a
-/// network far outside these fixtures' power scale may need it re-measured, and
-/// if no value serves both, the equality-constrained formulation
-/// (`docs/src/powerflow/zero_impedance_branches.md`, approach 3) is the exit —
-/// it imposes `V_i = V_j` exactly, with no large number anywhere.
-pub const LINK_Y: Complex<f64> = Complex::new(2e5, 2e5);
+/// An alias for [`topology::IDEAL_CONNECTION_Y`](crate::topology::IDEAL_CONNECTION_Y),
+/// which documents the measurement behind the value and is shared with the
+/// branches detected as ideal by impedance rather than declared as such — a
+/// link and an undeclared jumper get the same treatment because they are the
+/// same thing.
+pub use crate::topology::IDEAL_CONNECTION_Y as LINK_Y;
 
 fn one() -> f64 { 1.0 }
 fn nan() -> f64 { f64::NAN }
@@ -848,7 +822,7 @@ pub fn pgm_to_network(
                 let y_shunt = line_y_shunt(ln, omega, z_base);
                 // A line short enough to be a jumper would otherwise put an
                 // unbounded admittance into the Y-bus; see
-                // `topology::MIN_BRANCH_Z`.
+                // `topology::ZERO_IMPEDANCE_THRESHOLD`.
                 let (r, x) = crate::topology::clamp_branch_impedance(
                     ln.r1 / z_base,
                     ln.x1 / z_base,

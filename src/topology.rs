@@ -30,31 +30,76 @@
 //! Newton-Raphson solve failed on FullGrid with 20-odd such branches active at
 //! once. That is the conditioning cost approach 2 carries, met in practice.
 
-/// Smallest branch impedance, per-unit, that reaches the admittance matrix.
+/// The admittance gridoxide gives any element it treats as an ideal
+/// connection, declared or detected: `2e5 + j2e5` per-unit.
 ///
-/// A branch with `|Z|` below this is clamped up to it. The point is robustness,
-/// not accuracy: `Y = 1/Z` is unbounded as `Z -> 0`, and a network can reach
-/// that by accident — a jumper modelled as a very short line rather than as a
-/// declared switch or link. power-grid-model's own
-/// `ill-conditioned-by-line-meshed` fixture contains exactly that, a line at
-/// `7.07e-9` p.u., and is named for the consequence.
+/// Three orders below power-grid-model's own `1e8 + j1e8` for a `link`, and
+/// chosen by measurement rather than derivation, because the two calculation
+/// types pull in opposite directions and their windows barely overlap:
 ///
-/// The value sits between the two things it has to separate: above that
-/// fixture's `7.07e-9`, and below the `1.0e-6` of the smallest *legitimate*
-/// branch in the committed fixtures, so nothing currently modelled is touched.
-/// powsybl-open-loadflow's equivalent (`lowImpedanceThreshold`) is `1e-8`, which
-/// is more permissive than gridoxide can afford: it admits `|Y|` up to `1e8`,
-/// and the state estimator's gain matrix squares that.
+/// - **Power flow** wants it large. The drop across the connection is
+///   `ΔV = I/y`, and the `dummy-test` fixture checks node voltages and the
+///   link's own current at 1e-5 relative. At `1e5` both land exactly on that
+///   boundary and fail; from `2e5` up they pass.
+/// - **State estimation** wants it small. `G = HᵀWH` *squares* the admittance,
+///   so power-grid-model's `1e8` becomes `1e16` in the gain matrix and the
+///   `node-injection-*` fixtures come back singular. They stay singular at
+///   `1e6`.
 ///
-/// Note this is deliberately *not* the same ceiling as a declared link's
-/// [`pgm::LINK_Y`](crate::pgm::LINK_Y) (`|y| = 2.83e5`). A link's value was
-/// measured to satisfy fixtures that assert its flow at 1e-5; this is a floor
-/// for pathological input that no fixture asserts anything about, so it is set
-/// where it disturbs least rather than where it is most accurate.
-pub const MIN_BRANCH_Z: f64 = 1e-7;
+/// | `y` | power flow | state estimation |
+/// |---|---|---|
+/// | `1e8` (power-grid-model's) | pass | **singular** |
+/// | `1e6` | pass | **singular** |
+/// | **`2e5`** | **pass** | **converge** |
+/// | `1e5` | **fail**, at tolerance | converge |
+///
+/// The narrowness of that window is the argument for treating this as a
+/// regularization parameter with a measured value rather than a physical
+/// constant: a network far outside these fixtures' power scale may need it
+/// re-measured, and if no value serves both, the equality-constrained
+/// formulation (`docs/src/powerflow/zero_impedance_branches.md`, approach 3) is
+/// the exit — it imposes `V_i = V_j` exactly, with no large number anywhere.
+pub const IDEAL_CONNECTION_Y: num_complex::Complex<f64> = num_complex::Complex::new(2e5, 2e5);
 
-/// Raises a branch impedance to [`MIN_BRANCH_Z`] if it falls below it,
-/// preserving the R/X ratio so the branch keeps its character.
+/// The impedance corresponding to [`IDEAL_CONNECTION_Y`]: `3.54e-6` p.u.
+///
+/// What a branch caught by [`ZERO_IMPEDANCE_THRESHOLD`] is raised *to*.
+fn ideal_connection_z() -> f64 {
+    1.0 / (IDEAL_CONNECTION_Y.re.powi(2) + IDEAL_CONNECTION_Y.im.powi(2)).sqrt()
+}
+
+/// Below this impedance, per-unit, a branch is treated as an ideal connection
+/// rather than as an ordinary one.
+///
+/// `Y = 1/Z` is unbounded as `Z -> 0`, and a network can reach that by accident
+/// — a jumper modelled as a very short line rather than as a declared switch or
+/// link. power-grid-model's own `ill-conditioned-by-line-meshed` fixture
+/// contains exactly that, a line at `7.07e-9` p.u., and is named for the
+/// consequence.
+///
+/// **Detection and treatment are separate numbers, deliberately.** This
+/// threshold only decides *whether* a branch is an ideal connection; what it is
+/// clamped to is [`IDEAL_CONNECTION_Y`], the same admittance a declared link
+/// gets. Tying the two together would force a single value to satisfy two
+/// incompatible constraints:
+///
+/// - it must sit below every *legitimate* branch, or real data gets mangled —
+///   the smallest in the committed fixtures are `1.0e-6` (PGM) and `2.92e-6`
+///   (CGMES);
+/// - yet clamping only to that value leaves `|Y|` as high as `1e7`, which is
+///   inside the range measured as singular for state estimation.
+///
+/// Separating them satisfies both: detection at `1e-7` touches nothing real,
+/// and anything it does catch is raised to a link's stiffness — which is what
+/// such a branch *is*, an undeclared link.
+///
+/// powsybl-open-loadflow's equivalent (`lowImpedanceThreshold`) is `1e-8`. Its
+/// default treatment is the equality-constrained formulation rather than a
+/// clamp, so it never has to reconcile these two roles in one number.
+pub const ZERO_IMPEDANCE_THRESHOLD: f64 = 1e-7;
+
+/// Raises a branch below [`ZERO_IMPEDANCE_THRESHOLD`] to the impedance of
+/// [`IDEAL_CONNECTION_Y`], preserving the R/X ratio so it keeps its character.
 ///
 /// A branch at exactly zero has no ratio to preserve and becomes purely
 /// reactive, matching how a zero-impedance connection behaves in practice.
@@ -66,13 +111,14 @@ pub const MIN_BRANCH_Z: f64 = 1e-7;
 /// `docs/src/powerflow/zero_impedance_branches.md`.
 pub fn clamp_branch_impedance(r: f64, x: f64) -> (f64, f64) {
     let z = (r * r + x * x).sqrt();
-    if z >= MIN_BRANCH_Z || !z.is_finite() {
+    if z >= ZERO_IMPEDANCE_THRESHOLD || !z.is_finite() {
         return (r, x);
     }
+    let target = ideal_connection_z();
     if z == 0.0 {
-        return (0.0, MIN_BRANCH_Z);
+        return (0.0, target);
     }
-    let scale = MIN_BRANCH_Z / z;
+    let scale = target / z;
     (r * scale, x * scale)
 }
 
@@ -197,7 +243,7 @@ mod tests {
     fn clamping_preserves_the_r_over_x_ratio() {
         let (r, x) = clamp_branch_impedance(1e-10, 2e-10);
         let z = (r * r + x * x).sqrt();
-        assert!((z - MIN_BRANCH_Z).abs() < 1e-18, "z = {z}");
+        assert!((z - ideal_connection_z()).abs() < 1e-18, "z = {z}");
         assert!((x / r - 2.0).abs() < 1e-9, "ratio not preserved: {}", x / r);
     }
 
@@ -208,14 +254,18 @@ mod tests {
     fn the_ill_conditioned_fixture_value_is_caught() {
         let (r, x) = clamp_branch_impedance(5e-9, 5e-9);
         let y = 1.0 / (r * r + x * x).sqrt();
-        assert!(y <= 1.0 / MIN_BRANCH_Z + 1.0, "admittance still unbounded: {y:.3e}");
-        assert!(y >= 1.0 / MIN_BRANCH_Z - 1.0);
+        let ideal = (IDEAL_CONNECTION_Y.re.powi(2) + IDEAL_CONNECTION_Y.im.powi(2)).sqrt();
+        assert!(
+            (y - ideal).abs() < 1.0,
+            "a caught branch should land at a link's stiffness, not merely under the \
+             detection threshold: {y:.3e} vs {ideal:.3e}"
+        );
     }
 
     /// A branch at exactly zero has no ratio to preserve.
     #[test]
     fn exactly_zero_becomes_purely_reactive() {
-        assert_eq!(clamp_branch_impedance(0.0, 0.0), (0.0, MIN_BRANCH_Z));
+        assert_eq!(clamp_branch_impedance(0.0, 0.0), (0.0, ideal_connection_z()));
     }
 
     /// The smallest legitimate branch in the committed fixtures is 1.0e-6 p.u.
