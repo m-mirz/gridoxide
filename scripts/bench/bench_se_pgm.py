@@ -164,11 +164,12 @@ def main():
     print("\nTimes are milliseconds, best of", REPEATS, "runs. Measurements are scalar rows")
     print("(a power sensor contributes two), so both tools see the same count.")
     print()
-    print("Caveat on the gridoxide column: `estimate()` builds its symbolic")
-    print("factorization fresh on every call — `cache` starts as None in")
-    print("`se::nr::estimate_with` — so these numbers include setup that power flow")
-    print("amortizes away via `PersistentSolver`. State estimation has no equivalent")
-    print("yet, and that is likely a fair part of the gap at scale.")
+    print("Warm-vs-warm on both sides: power-grid-model amortizes its setup across")
+    print("repeated calls on one `PowerGridModel`, and `StateEstimationModel` holds a")
+    print("`se::nr::PersistentEstimator` whose symbolic factorization survives across")
+    print("`solve()` calls the same way. This note used to warn that gridoxide's column")
+    print("alone carried per-call setup; that stopped being true when the persistent")
+    print("estimator landed.")
 
 
 if __name__ == "__main__":

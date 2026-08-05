@@ -68,6 +68,12 @@ its `Klu` backend is frequently faster than lightsim2grid's own KLU-backed C++ s
 transmission topology — while power-grid-model remains clearly faster on synthetic radial
 distribution grids, a real standing gap.
 
+On **state estimation** the same pattern holds in both directions: gridoxide's Newton-Raphson
+estimator is the only one of the two that answers at all above 300 buses, where power-grid-model's
+raises `SparseMatrixError` on documents its own iterative-linear method estimates from without
+complaint; on iterative-linear itself power-grid-model is 1.6-2.0x faster across an order of
+magnitude of problem size, the clearest standing gap on that side.
+
 ## License
 
 gridoxide's own code is Apache-2.0 ([`LICENSE`](LICENSE)). A **default** build always includes

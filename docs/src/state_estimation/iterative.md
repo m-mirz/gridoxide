@@ -78,7 +78,10 @@ at a state satisfying the measurements, one iteration leaves the residuals at ze
 state only by the global rotation the estimator normalizes away. So a damped run converges to the
 same state an undamped one would reach if it got there at all.
 
-Relaxation engages only when progress stalls; a well-behaved problem runs undamped and is unaffected.
+Relaxation engages whenever an iteration fails to improve on the last by 10%, which is not the same
+thing as "only on a pathological problem" — a flat start alone can trip it, and on case1354pegase it
+does, at iteration 3. See [What actually ends the iteration](#what-actually-ends-the-iteration) below,
+where that turns out to matter more than this section originally assumed.
 
 ## Measured cost
 
@@ -115,7 +118,7 @@ case1354pegase the two methods spend their time quite differently:
 |---|---|---|
 | assembly (`h(x)`, `H`, gain) | 22% | — |
 | factorization | **78%** | ~30% *including* all setup |
-| per-iteration solves | — | **~70%**, over roughly 80 iterations |
+| per-iteration solves | — | **~70%**, over 45 iterations |
 
 The tempting optimization is a symmetric factorization: `G` is symmetric and a general sparse LU is
 being used on it, so in principle half of Newton-Raphson's 78% is recoverable. Two measurements argue
@@ -127,14 +130,73 @@ quasi-definite regularization rather than a Cholesky, which is two code paths an
 the constraints.
 
 Second and more decisively, it would speed up the wrong method. Newton-Raphson is where gridoxide is
-already ahead — power-grid-model's own Newton-Raphson state estimator fails with a sparse-matrix
-error on case300 and case1354pegase where gridoxide's converges. The remaining gap is on *this*
-method — 1.3 ms against 0.8 ms on case300, 6.7 ms against 3.3 ms on case1354pegase — and there the
-factorization is not the bottleneck at all.
+already ahead — power-grid-model's own Newton-Raphson state estimator raises `SparseMatrixError` on
+every case from 300 buses up, where gridoxide's converges. The remaining gap is on *this* method —
+1.3 ms against 0.8 ms on case300, 6.3 ms against 3.5 ms on case1354pegase, 16.5 ms against 8.1 ms on
+case2869pegase — and there the factorization is not the bottleneck at all. §7 of
+`scripts/bench/README.md` has the full table.
 
-So the open lead for this method is its **convergence rate**, not its linear algebra: it needs about
-eighty iterations to reach 1e-8 here. Under-relaxation is not the cause — traced on this case, it
-stays at 1.0 through iteration 77 and engages once at 78, right at convergence.
+So the open lead for this method is its **convergence rate**, not its linear algebra: it needs 45
+iterations here where Newton-Raphson needs 6.
+
+### What actually ends the iteration
+
+Tracing that convergence rate is worth doing before trying to improve it, because it is not one
+phenomenon but two, and the second one is not a rate at all.
+
+`examples/se_converge.rs` re-runs the estimate at increasing `max_iter` and prints the step, its ratio
+to the previous step, and the error against the state the measurements were read from:
+
+```bash
+cargo run --release --example se_converge case1354pegase
+```
+
+Forced undamped, case1354pegase decays geometrically at a strikingly stable ratio — 0.757, holding to
+three digits from iteration 30 through iteration 53. A single dominant mode, textbook material for
+Aitken or Anderson acceleration. Then it stops:
+
+```text
+iter        50       51       52       53      ...      197      198      199      200
+step    6.3e-6   4.7e-6   3.6e-6   2.7e-6      ...   2.5e-7   3.4e-7   2.9e-7   7.3e-8
+```
+
+Out to 200 iterations the raw step never reaches the 1e-8 tolerance; it settles on a floor around
+1e-7 and bounces. Forcing any constant relaxation between 0.4 and 1.0 gives the same picture.
+
+What ends the default run is the relaxation ratchet:
+
+```text
+iter      1        2        3     ...      39       40       41       42       43       44       45
+raw    1.19e0   1.66e0   1.72e0   ...   3.2e-7   3.7e-7   2.1e-7   2.5e-7   2.6e-7   4.7e-7   1.9e-7
+relax    1.0      1.0      0.5    ...      0.5     0.25     0.25    0.125   0.0625  0.03125  0.03125
+```
+
+Relaxation engages at **iteration 3**, in the flat-start transient, and holds at 0.5 through
+iteration 39. Then the raw step stops falling, the 10%-improvement test fails four times over the
+next five iterations, and the factor halves to 1/32. Convergence is declared at iteration 45 on a
+reported step of
+\\(1.86 \times 10^{-7} \times 0.03125 = 5.8 \times 10^{-9}\\).
+
+That reported step is honest about what it measures — the state genuinely moved that little, because
+that is how far damping let it move. But it is not the iteration reaching 1e-8. The tolerance is met
+by the damping factor.
+
+The answer is unaffected, and this is the part worth being clear about. The error against the true
+state bottoms out at 5.5e-7 by iteration 36 — the same 5.6e-7 this method scores on case1354pegase in
+the table above, i.e. its own linearization bias, the floor no amount of iterating can go below.
+Iterations 37 to 45 buy no accuracy in any case.
+
+Two consequences for whoever picks this up next:
+
+* Accelerating the 0.757 mode wins iterations 3 through 39 and nothing after. The floor is a separate
+  phenomenon and would still be there.
+* A step floor near 1e-7 on a gain matrix whose weights span 1e4 to 1e6, with exact KKT constraints
+  augmented in, is the shape of linear-solve accuracy rather than of the fixed-point map — worth
+  testing with iterative refinement or a scaling pass before assuming the iteration is at fault.
+
+An earlier version of this section reported roughly eighty iterations, with relaxation holding at 1.0
+until iteration 78. Neither figure reproduces at HEAD; the traces above are what the current code
+does.
 
 ## Agreement with Newton-Raphson
 
