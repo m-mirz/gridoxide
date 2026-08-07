@@ -181,10 +181,11 @@ absence of a survey is not evidence of absence of the feature.
 
 ## Note on state estimation
 
-**Done for symmetric estimation, snapshot and batched, with voltage, power and current sensors**, and
-within that scope gridoxide matches the most capable reference tool and leads it in two places.
-Outside it, one gap remains of the three this note used to list, plus one found since — both at the
-end. An earlier version claimed parity outright, which overstated it.
+**Done for symmetric estimation — snapshot and batched, with voltage, power and current sensors — and
+for asymmetric networks driven by symmetric sensors.** Within that scope gridoxide matches the most
+capable reference tool and leads it in two places. What is left of the three gaps this note used to
+list is one part of one of them, at the end. An earlier version claimed parity outright, which
+overstated it.
 
 `se::nr::estimate` is Gauss-Newton on the normal equations, validated against
 power-grid-model's own state-estimation fixtures (committed under `tests/data/pgm/state_estimation/`
@@ -223,38 +224,35 @@ the unobservable set instead, which is the prerequisite for it.
 Measured against power-grid-model 1.13 (`references/power-grid-model/`), in order of how much they
 matter:
 
-1. **Asymmetric state estimation.** power-grid-model has `asym_voltage_sensor`, `asym_power_sensor`
-   and `asym_current_sensor`, and estimates three-phase. gridoxide is symmetric-only — no asymmetric
-   path anywhere in `src/se/`. This is the largest remaining one, because unbalanced LV distribution
-   is exactly the setting that needs it, and gridoxide already solves asymmetric *power flow* — so
-   the gap is in the estimator, not in the network model underneath it.
+1. **Asymmetric state estimation.** Substantially done, and what remains is narrower than the
+   heading suggests.
 
-   Narrower than it was, in two steps. `measurement.rs` reads `asym_voltage_sensor`,
-   `asym_power_sensor` and `asym_current_sensor` and reduces them to the symmetric problem the way
-   power-grid-model's own `sym_calc_param` does — positive sequence for a phasor, the mean of the
-   phases otherwise — so an asymmetric *document* estimates correctly today.
+   A phase-domain document now estimates end to end. `SeNetwork::from_3ph` builds the measurement
+   model for a 3N-bus network, `pgm::pgm_3ph_maps` supplies the object-ID maps a sensor needs to
+   resolve against it, and `measurement::measurements_from_pgm_3ph` maps sensors onto phase-expanded
+   targets. `tests/se_three_phase_test.rs` estimates power-grid-model's `transmission-case` in the
+   phase domain and matches the answer it published for that network solved asymmetrically — all 33
+   phase-buses to 1e-6, with angles agreeing up to the single rotation nothing measures.
 
-   And the estimator is now phase-capable: `SeNetwork::from_3ph` builds the measurement model for a
-   3N-bus phase-domain network, with a branch terminal indexed `3·branch + phase` to match the
-   `3·node + phase` bus convention power flow already uses. Nothing above it changed — `Target`,
-   `StateLayout`, the Jacobian, the constraints and both methods carry over untouched, because a
-   three-phase terminal is a six-coefficient `CurrentFunctional` where a scalar one has two.
-   `tests/se_three_phase_test.rs` checks those functionals against the Y-bus they sit beside by
-   Kirchhoff's law, on an unbalanced state.
+   Nothing in the estimator changed for it. `Target`, `StateLayout`, the Jacobian, the constraints,
+   both methods and the batch solver carry over untouched, because a three-phase branch terminal is a
+   six-coefficient `CurrentFunctional` where a scalar one has two. A branch is indexed
+   `3·branch + phase` to match the `3·node + phase` bus convention, which is what keeps `Target`
+   identical between the two domains.
 
-   It also settles the design question that made this stage risky. Had the three phases been
-   independent circuits, the measurement set would have had *three* rotational symmetries where
-   `StateLayout` removes one, leaving two undetermined directions no structural check could catch.
-   Asked directly — rotate one phase and see whether any measurement moves — the answer is that only
-   the global rotation is a symmetry, and the reason is gridoxide's own model rather than any
-   fixture's data: a source expands into a virtual bus behind a *sequence-parameterised* impedance,
-   which couples the phases at the one place every energised component is reachable from.
+   The symmetric sensors that fixture carries need no conversion beyond a rotation, and it is worth
+   recording why: a voltage reading is line-to-line over `u_rated` in the scalar case and
+   line-to-neutral over `u_rated/√3` here, which is the same number for a balanced set, and a power
+   reading is a three-phase total over `s_base` against a per-phase value over `s_base/3`, likewise.
+   So the value replicates and only the angle rotates by 0/−120/+120 — which is exactly
+   power-grid-model's own `ComplexValue<asymmetric_t>` broadcast.
 
-   What remains is the conversion layer, not the estimator: `pgm_to_3ph_network` returns a bare tuple
-   carrying none of the object-ID maps `measurements_from_pgm` needs, so a phase-domain document
-   cannot yet be driven end to end from JSON. It also silently drops `link`, `three_winding_transformer`
-   and `voltage_regulator`, and `transformer_seq_params` still panics on any winding pair outside
-   Dyn and YNyn.
+   **What is left:** asymmetric *sensors* in the phase domain, where they currently reduce to the
+   symmetric problem instead of describing their three phases separately; and the components
+   `pgm_to_3ph_network` does not model — `link`, `three_winding_transformer` and `voltage_regulator`,
+   which `pgm_3ph_maps` now refuses with a typed error rather than dropping silently, plus
+   `transformer_seq_params`' panic on any winding pair outside Dyn and YNyn.
+
 2. ~~**Current sensors.**~~ **Done.** `sym_current_sensor` and `asym_current_sensor` are read in both
    angle frames, on both calculation methods, checked against power-grid-model's own
    `global-current-sensor` and `local-current-sensor` fixtures — which are identical but for the

@@ -364,6 +364,74 @@ struct Accumulators {
     currents: HashMap<(usize, Terminal), (AngleFrame, Merged, Merged)>,
 }
 
+/// What routing a sensor needs to know about the network it measures.
+///
+/// Implemented twice: once by [`PgmNetwork`] for the scalar case, and once by a
+/// per-phase view of a three-phase network, which answers the same questions
+/// with phase-expanded indices. That is what lets one routing function carry
+/// both — the sign conventions and terminal semantics are identical, and only
+/// the indices differ.
+trait Resolver {
+    fn resolve_terminal(&self, id: u64, terminal: Terminal) -> Option<(usize, Terminal)>;
+    fn source_branch(&self, id: u64) -> Option<usize>;
+    fn appliance_bus(&self, id: u64) -> Option<usize>;
+    fn node_bus(&self, id: u64) -> Option<usize>;
+    fn three_winding_legs(&self, id: u64) -> Option<[usize; 3]>;
+}
+
+impl Resolver for PgmNetwork {
+    fn resolve_terminal(&self, id: u64, terminal: Terminal) -> Option<(usize, Terminal)> {
+        PgmNetwork::resolve_terminal(self, id, terminal)
+    }
+    fn source_branch(&self, id: u64) -> Option<usize> {
+        self.source_branch_idx.get(&id).copied()
+    }
+    fn appliance_bus(&self, id: u64) -> Option<usize> {
+        self.appliance_bus.get(&id).copied()
+    }
+    fn node_bus(&self, id: u64) -> Option<usize> {
+        self.node_idx.get(&id).copied()
+    }
+    fn three_winding_legs(&self, id: u64) -> Option<[usize; 3]> {
+        self.three_winding_branch_idx.get(&id).copied()
+    }
+}
+
+/// One phase of a three-phase network, seen as if it were a scalar one.
+///
+/// Bus `k` phase `p` is `3k + p` and branch `b` phase `p` is `3b + p`, the
+/// convention `se::SeNetwork::from_3ph` builds its functionals on.
+struct PhaseView<'a> {
+    net: &'a crate::pgm::PgmNetwork3Ph,
+    phase: usize,
+}
+
+impl Resolver for PhaseView<'_> {
+    fn resolve_terminal(&self, id: u64, terminal: Terminal) -> Option<(usize, Terminal)> {
+        let &branch = self.net.branch_idx.get(&id)?;
+        match self.net.half_open_terminal.get(&id) {
+            Some(&live) if live == terminal => Some((3 * branch + self.phase, Terminal::From)),
+            Some(_) => None,
+            None => Some((3 * branch + self.phase, terminal)),
+        }
+    }
+    fn source_branch(&self, id: u64) -> Option<usize> {
+        self.net.source_branch_idx.get(&id).map(|&b| 3 * b + self.phase)
+    }
+    fn appliance_bus(&self, id: u64) -> Option<usize> {
+        self.net.appliance_bus.get(&id).map(|&k| 3 * k + self.phase)
+    }
+    fn node_bus(&self, id: u64) -> Option<usize> {
+        self.net.node_idx.get(&id).map(|&k| 3 * k + self.phase)
+    }
+    fn three_winding_legs(&self, _id: u64) -> Option<[usize; 3]> {
+        // `pgm_to_3ph_network` does not model three-winding transformers at all,
+        // so a sensor on one has nothing to resolve against rather than
+        // something to guess at.
+        None
+    }
+}
+
 /// One power reading, already converted to per-unit, as `(value, sigma)` per
 /// component. `None` where the document left that component unset.
 type PowerReading = (Option<(f64, f64)>, Option<(f64, f64)>);
@@ -375,7 +443,7 @@ type PowerReading = (Option<(f64, f64)>, Option<(f64, f64)>);
 /// how they arrive at the per-unit `(value, sigma)` pair, never in where it goes.
 fn route_power_reading(
     acc: &mut Accumulators,
-    net: &PgmNetwork,
+    net: &dyn Resolver,
     sensor: u64,
     measured_object: u64,
     terminal_type: u8,
@@ -403,7 +471,7 @@ fn route_power_reading(
         // every source, so by KCL its power never reaches the node's injection.
         // Generator reference direction, so no sign change.
         2 => {
-            let Some(&branch) = net.source_branch_idx.get(&measured_object) else {
+            let Some(branch) = net.source_branch(measured_object) else {
                 // An inactive source has no synthesized branch, so there is
                 // nothing for the reading to describe.
                 return Ok(());
@@ -425,7 +493,7 @@ fn route_power_reading(
                 // generator: generator reference direction.
                 _ => 1.0,
             };
-            let Some(&bus) = net.appliance_bus.get(&measured_object) else {
+            let Some(bus) = net.appliance_bus(measured_object) else {
                 return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
             };
             let entry = acc.appliances.entry(measured_object).or_insert(ApplianceAccumulator {
@@ -459,7 +527,7 @@ fn route_power_reading(
         // Jacobian row) while still showing up as a residual if the sensor
         // disagrees.
         6 | 7 | 8 => {
-            let Some(&legs) = net.three_winding_branch_idx.get(&measured_object) else {
+            let Some(legs) = net.three_winding_legs(measured_object) else {
                 return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
             };
             let key = (legs[(terminal_type - 6) as usize], Terminal::From);
@@ -472,7 +540,7 @@ fn route_power_reading(
         }
         // Node injection: already a bus injection, generator direction.
         9 => {
-            let Some(&bus) = net.node_idx.get(&measured_object) else {
+            let Some(bus) = net.node_bus(measured_object) else {
                 return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
             };
             let entry = acc.buses.entry(bus).or_default();
@@ -918,6 +986,15 @@ pub fn measurements_from_pgm(
         entry.2.add(im, im_sigma);
     }
 
+    Ok(flatten(acc))
+}
+
+
+/// Turns the accumulators into measurement rows, in a deterministic order.
+///
+/// Shared by the scalar and three-phase builders: the two differ in how a
+/// sensor reaches an accumulator, never in what an accumulator becomes.
+fn flatten(mut acc: Accumulators) -> Vec<Measurement> {
     // Each appliance contributes its merged reading, sign-corrected, to its
     // bus's injection sum. Iterated in id order so the summed variance is
     // built deterministically.
@@ -1051,7 +1128,108 @@ pub fn measurements_from_pgm(
         }
     }
 
-    Ok(out)
+    out
+}
+
+/// The phase angles a balanced positive-sequence quantity takes, per phase.
+///
+/// power-grid-model broadcasts a scalar to three phases as `x, x·a², x·a` with
+/// `a = e^{j2π/3}` (`three_phase_tensor.hpp`), which is this. It is also the
+/// flat start `pgm_to_3ph_network` uses, so the two agree by construction.
+const PHASE_ANGLE: [f64; 3] = [
+    0.0,
+    -std::f64::consts::TAU / 3.0,
+    std::f64::consts::TAU / 3.0,
+];
+
+/// Builds the measurement set for a *three-phase* network.
+///
+/// Targets carry phase-expanded indices — bus `3k + p`, branch `3b + p` — so
+/// everything downstream is the same code the scalar path uses. See
+/// [`se::SeNetwork::from_3ph`](crate::se::SeNetwork::from_3ph).
+///
+/// A **symmetric** sensor describes all three phases at once, and both of its
+/// per-unit bases happen to carry over unchanged. A voltage reading is
+/// line-to-line over `u_rated` in the scalar case and line-to-neutral over
+/// `u_rated/√3` here, which is the same number for a balanced set; a power
+/// reading is a three-phase total over `s_base` against a per-phase value over
+/// `s_base/3`, likewise. So the value replicates and only the *angle* rotates,
+/// by `PHASE_ANGLE`. power-grid-model reaches the same conclusion through its
+/// `ComplexValue<asymmetric_t>` broadcast.
+///
+/// Sigmas replicate rather than divide, which triples a symmetric sensor's total
+/// variance relative to the scalar run. That is power-grid-model's choice too,
+/// and it is an approximation rather than a derivation — three phase readings
+/// from one instrument are not three independent measurements.
+pub fn measurements_from_pgm_3ph(
+    input: &PgmInput,
+    net: &crate::pgm::PgmNetwork3Ph,
+    s_base_va: f64,
+    u_rated: &dyn Fn(usize) -> f64,
+) -> Result<Vec<Measurement>, MeasurementError> {
+    let mut acc = Accumulators::default();
+
+    for phase in 0..3 {
+        let view = PhaseView { net, phase };
+
+        for s in &input.data.sym_voltage_sensor {
+            let Some(bus) = view.node_bus(s.measured_object) else {
+                return Err(MeasurementError::UnknownObject {
+                    sensor: s.id,
+                    object: s.measured_object,
+                });
+            };
+            if !s.u_measured.is_finite() {
+                continue;
+            }
+            // `u_rated` is the *phase bus*'s own rating, which
+            // `pgm_to_3ph_network` sets to the node's line-to-line value on all
+            // three phases — so the ratio is per-unit on the same base the
+            // scalar path uses, and the equivalence above holds.
+            let base = u_rated(bus);
+            let sigma = checked_sigma(s.id, s.u_sigma)? / base;
+            let magnitude = s.u_measured / base;
+            let bus_acc = acc.buses.entry(bus).or_default();
+            if s.u_angle_measured.is_finite() {
+                let sigma = if s.u_angle_sigma.is_finite() {
+                    checked_sigma(s.id, s.u_angle_sigma)?
+                } else {
+                    sigma
+                };
+                bus_acc.u_phasor.add(
+                    num_complex::Complex::from_polar(
+                        magnitude,
+                        s.u_angle_measured + PHASE_ANGLE[phase],
+                    ),
+                    sigma,
+                );
+            } else {
+                bus_acc.u_mag.add(magnitude, sigma);
+            }
+        }
+
+        for s in &input.data.sym_power_sensor {
+            if !s.p_measured.is_finite() && !s.q_measured.is_finite() {
+                continue;
+            }
+            let (p_sigma, q_sigma) =
+                component_sigmas(s.id, s.p_sigma, s.q_sigma, s.power_sigma, s_base_va)?;
+            let reading = (
+                s.p_measured.is_finite().then(|| (s.p_measured / s_base_va, p_sigma)),
+                s.q_measured.is_finite().then(|| (s.q_measured / s_base_va, q_sigma)),
+            );
+            route_power_reading(
+                &mut acc,
+                &view,
+                s.id,
+                s.measured_object,
+                s.measured_terminal_type,
+                reading,
+            )?;
+        }
+    }
+
+    Ok(flatten(acc))
 }
 
 #[cfg(test)]

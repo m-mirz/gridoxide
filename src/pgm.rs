@@ -1191,6 +1191,169 @@ pub fn pgm_to_buses_and_branches(
 ///
 /// Returns `(buses, lines_3ph, id_to_physical_idx)`.  Pass `buses.len() / 3`
 /// as `n` to `build_ybus_3ph`.
+/// The object-ID maps a three-phase network needs beyond its buses and branches.
+///
+/// [`pgm_to_3ph_network`] returns only what a power flow needs — buses, lines
+/// and a node map — because a power flow never has to answer "which branch
+/// terminal does this sensor name". State estimation does, so this carries the
+/// same maps [`PgmNetwork`] does for the scalar case.
+///
+/// **Every index here is a *physical* one.** Node `k` is buses `3k..3k+3` and
+/// branch `b` is terminals `3b..3b+3`, matching
+/// [`SeNetwork::from_3ph`](crate::se::SeNetwork::from_3ph). Storing the physical
+/// index and expanding at the point of use keeps one map serving all three
+/// phases.
+pub struct PgmNetwork3Ph {
+    /// Node id → physical node index. Physical nodes only; the virtual slack
+    /// buses behind sources have no PGM id.
+    pub node_idx: HashMap<u64, usize>,
+    /// `line` id → physical flat branch index.
+    ///
+    /// The flat order is the one [`pgm_to_3ph_network`] produces and
+    /// `SeNetwork::from_3ph` consumes: the document's own lines that yield a
+    /// branch, then one synthesized branch per active source, then the
+    /// transformers. A line with both terminals open yields no branch and is
+    /// absent, which is why this cannot be derived from document position.
+    pub branch_idx: HashMap<u64, usize>,
+    /// `source` id → the physical index of its synthesized impedance branch.
+    pub source_branch_idx: HashMap<u64, usize>,
+    /// Appliance id → the physical node index it sits on.
+    pub appliance_bus: HashMap<u64, usize>,
+    /// Per *physical node*, whether its net injection is identically zero.
+    pub zero_injection: Vec<bool>,
+    /// Branch ids that collapsed to a self-loop because exactly one terminal was
+    /// connected, mapped to which PGM terminal is the live one — see
+    /// [`PgmNetwork::half_open_terminal`].
+    pub half_open_terminal: HashMap<u64, Terminal>,
+    /// Physical nodes including the virtual slack bus per active source.
+    pub n_nodes: usize,
+}
+
+/// Builds [`PgmNetwork3Ph`] for a document, without consuming it.
+///
+/// Deliberately separate from [`pgm_to_3ph_network`] rather than folded into it:
+/// that function consumes its input and is on the power-flow path, which has no
+/// use for any of this.
+///
+/// Returns an error for the components the three-phase conversion does not
+/// model, rather than letting them vanish. `pgm_to_3ph_network` drops all three
+/// silently, which is survivable for a power flow whose caller chose the
+/// document, and not for an estimate whose answer would quietly describe a
+/// different network.
+pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
+    if !input.data.three_winding_transformer.is_empty() {
+        return Err(Unsupported3Ph::ThreeWindingTransformer);
+    }
+    if !input.data.voltage_regulator.is_empty() {
+        return Err(Unsupported3Ph::VoltageRegulator);
+    }
+    if !input.data.link.is_empty() {
+        return Err(Unsupported3Ph::Link);
+    }
+
+    let node_idx = node_id_to_idx(input);
+    let n_physical = input.data.node.len();
+
+    // Lines, in the order `pgm_to_3ph_network` emits them: a branch per line
+    // with at least one live terminal, skipping the fully-open ones.
+    let mut branch_idx = HashMap::new();
+    let mut half_open_terminal = HashMap::new();
+    let mut next = 0usize;
+    for ln in &input.data.line {
+        match (ln.from_status, ln.to_status) {
+            (1, 1) => {}
+            (1, 0) => {
+                half_open_terminal.insert(ln.id, Terminal::From);
+            }
+            (0, 1) => {
+                half_open_terminal.insert(ln.id, Terminal::To);
+            }
+            _ => continue,
+        }
+        branch_idx.insert(ln.id, next);
+        next += 1;
+    }
+
+    // Then one synthesized branch per active source, then the transformers.
+    let mut source_branch_idx = HashMap::new();
+    for src in input.data.source.iter().filter(|s| s.status != 0) {
+        source_branch_idx.insert(src.id, next);
+        next += 1;
+    }
+    for t in &input.data.transformer {
+        branch_idx.insert(t.id, next);
+        next += 1;
+    }
+
+    let mut appliance_bus = HashMap::new();
+    for (id, node) in input.data.sym_load.iter().map(|a| (a.id, a.node))
+        .chain(input.data.asym_load.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.sym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.asym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.shunt.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.source.iter().map(|a| (a.id, a.node)))
+    {
+        if let Some(&k) = node_idx.get(&node) {
+            appliance_bus.insert(id, k);
+        }
+    }
+
+    // A node with any load or generator injects something; sources and shunts
+    // are structural here exactly as in the scalar case. Virtual slack buses are
+    // excluded, being where a source's own unknown power enters.
+    let n_sources = input.data.source.iter().filter(|s| s.status != 0).count();
+    let mut zero_injection = vec![true; n_physical + n_sources];
+    for k in n_physical..zero_injection.len() {
+        zero_injection[k] = false;
+    }
+    for node in input.data.sym_load.iter().map(|a| a.node)
+        .chain(input.data.asym_load.iter().map(|a| a.node))
+        .chain(input.data.sym_gen.iter().map(|a| a.node))
+        .chain(input.data.asym_gen.iter().map(|a| a.node))
+    {
+        if let Some(&k) = node_idx.get(&node) {
+            zero_injection[k] = false;
+        }
+    }
+
+    Ok(PgmNetwork3Ph {
+        node_idx,
+        branch_idx,
+        source_branch_idx,
+        appliance_bus,
+        zero_injection,
+        half_open_terminal,
+        n_nodes: n_physical + n_sources,
+    })
+}
+
+/// A component the three-phase conversion does not model.
+///
+/// Each is a deliberate cut rather than an oversight. A three-winding
+/// transformer needs asymmetric star parameters; `voltage_regulator` has no
+/// meaning in an estimate, where a generator's voltage is an unknown; and a
+/// `link` needs its own three-phase stamping that `pgm_to_3ph_network` never
+/// grew. Failing is the point — all three were being dropped silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unsupported3Ph {
+    ThreeWindingTransformer,
+    VoltageRegulator,
+    Link,
+}
+
+impl std::fmt::Display for Unsupported3Ph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self {
+            Self::ThreeWindingTransformer => "three_winding_transformer",
+            Self::VoltageRegulator => "voltage_regulator",
+            Self::Link => "link",
+        };
+        write!(f, "the three-phase conversion does not model `{what}`")
+    }
+}
+
+impl std::error::Error for Unsupported3Ph {}
+
 pub fn pgm_to_3ph_network(
     input: PgmInput,
     s_base_va: f64,

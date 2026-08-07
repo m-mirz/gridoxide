@@ -291,3 +291,99 @@ fn only_the_global_rotation_is_a_symmetry_of_the_phase_domain() {
         worst(&phase_a)
     );
 }
+
+/// The gate for asymmetric state estimation: a phase-domain estimate of
+/// power-grid-model's own `transmission-case`, against the answer it published
+/// for that network solved asymmetrically.
+///
+/// The fixture's sensors are symmetric, which is the case worth doing first —
+/// it separates "does the phase-domain model solve" from "are asymmetric sensors
+/// read correctly", and only the first is in question here. Its 11 voltage and
+/// 24 power sensors describe all three phases at once, and both of their
+/// per-unit bases carry over unchanged: line-to-line over `u_rated` and
+/// line-to-neutral over `u_rated/√3` are the same number for a balanced set, as
+/// are a three-phase total over `s_base` and a per-phase value over `s_base/3`.
+#[test]
+fn estimates_transmission_case_in_the_phase_domain() {
+    use gridoxide::measurement::measurements_from_pgm_3ph;
+    use gridoxide::pgm::pgm_3ph_maps;
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+
+    let dir = fixture("tests/data/pgm/state_estimation/transmission-case");
+    let input = common::load_pgm_input(&dir.join("input.json"));
+    let expected = common::load_json(&dir.join("asym_output.json"));
+
+    let maps = pgm_3ph_maps(&input).expect("this fixture uses no unsupported component");
+    let id_to_idx = node_id_to_idx(&input);
+    let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
+    let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
+    let (buses, lines, _) = pgm_to_3ph_network(
+        common::load_pgm_input(&dir.join("input.json")),
+        S_BASE_VA,
+        50.0,
+    );
+
+    let mut ybus = build_ybus_3ph(buses.len() / 3, &lines);
+    stamp_transformers_3ph(&mut ybus, &transformers);
+    stamp_shunts_3ph(&mut ybus, &shunts);
+    let se_net = SeNetwork::from_3ph(
+        ybus.finish(),
+        &lines,
+        &transformers,
+        &shunts,
+        &maps.source_branch_idx,
+        &maps.zero_injection,
+    );
+
+    let u_rated = |bus: usize| buses[bus].u_rated;
+    let measurements = measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated)
+        .expect("measurements");
+    assert!(
+        measurements.len() > 100,
+        "11 voltage and 24 power sensors over three phases should give a large set, got {}",
+        measurements.len()
+    );
+
+    let mut state = buses.clone();
+    linear_start(&mut state, &se_net, &measurements);
+    let report = estimate(
+        &measurements,
+        &mut state,
+        &se_net,
+        &SeOptions { max_iter: 40, ..SeOptions::default() },
+    );
+    assert_eq!(report.status, SeStatus::Converged, "{report:?}");
+
+    // Magnitudes are absolute; angles only up to one rotation shared by every
+    // phase-bus, since nothing here measures an angle.
+    let mut offsets = Vec::new();
+    let mut checked = 0;
+    for node in expected["data"]["node"].as_array().expect("node output") {
+        let id = node["id"].as_u64().expect("node id");
+        let k = maps.node_idx[&id];
+        let u_pu = node["u_pu"].as_array().expect("per-phase u_pu");
+        let u_angle = node["u_angle"].as_array().expect("per-phase u_angle");
+        for p in 0..3 {
+            let want = u_pu[p].as_f64().expect("u_pu");
+            let got = state[3 * k + p].voltage_mag;
+            assert!(
+                (got - want).abs() < 1e-6,
+                "node {id} phase {p}: |V| = {got}, PGM says {want}"
+            );
+            offsets.push((id, p, state[3 * k + p].voltage_ang - u_angle[p].as_f64().expect("angle")));
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 33, "11 nodes times three phases");
+
+    let (ref_id, ref_p, reference) = offsets[0];
+    for &(id, p, offset) in &offsets {
+        assert!(
+            (offset - reference).abs() < 1e-6,
+            "node {id} phase {p}: angle offset {offset} differs from node {ref_id} phase \
+             {ref_p}'s {reference} — a uniform offset is a reference convention, a varying \
+             one is a wrong estimate"
+        );
+    }
+}
+
