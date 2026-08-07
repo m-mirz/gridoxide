@@ -366,11 +366,23 @@ pub fn gain_and_rhs(
     let mut rhs = vec![0.0; n];
 
     for ((row, m), &r) in rows.iter().zip(measurements).zip(residuals) {
+        // An infinite sigma contributes nothing, by design — but it has to
+        // contribute nothing *numerically*, not structurally. Skipping the row
+        // outright would make the triplet list's length and order depend on a
+        // measurement's sigma, i.e. on a value rather than on the topology and
+        // the measurement set's shape. That breaks two things that assume
+        // otherwise: `RealSparseSystem`'s cached argsort, which relies on
+        // positional correspondence between calls, and `PersistentEstimator`'s
+        // stated validity condition, which promises a weight scales `G`'s values
+        // and never its pattern. Stamping an exact zero keeps both true and is
+        // numerically identical.
+        //
+        // A non-finite weight means a zero sigma, i.e. a perfectly known
+        // measurement, which would properly be a hard constraint rather than a
+        // very heavy row. `checked_sigma` rejects it at the door, so this clamp
+        // is a guard on an unreachable case rather than a modelling decision.
         let w = m.weight();
-        if !w.is_finite() || w == 0.0 {
-            // An infinite sigma contributes nothing, by design.
-            continue;
-        }
+        let w = if w.is_finite() { w } else { 0.0 };
         for &(i, hi) in row {
             rhs[i] += w * hi * r;
             for &(j, hj) in row {
@@ -484,6 +496,56 @@ mod tests {
             if i != reference {
                 assert!(layout.theta(i).is_some(), "bus {i} should carry an angle unknown");
             }
+        }
+    }
+
+    /// A sigma going to infinity must change `G`'s *values* and not its
+    /// pattern.
+    ///
+    /// This is what `PersistentEstimator` promises ("a weight scales `G`'s
+    /// values, never its pattern") and what `RealSparseSystem`'s cached argsort
+    /// requires, since it assumes the value slice it is handed corresponds
+    /// positionally to the one the pattern was built from. `gain_and_rhs` used
+    /// to `continue` past a zero-weight row, which broke both: the triplet list
+    /// got shorter when a sensor was disabled. Batch estimation makes that live
+    /// — a scenario that disables a sensor would hand faer a mismatched slice.
+    #[test]
+    fn an_infinite_sigma_changes_values_but_not_the_gain_pattern() {
+        let (net, buses) = super::super::tests::two_bus_net();
+        let finite = vec![
+            measurement(MeasurementKind::VoltageMagnitude, Target::Bus(1)),
+            measurement(MeasurementKind::ActivePower, Target::Bus(1)),
+        ];
+        let mut disabled = finite.clone();
+        disabled[1].sigma = f64::INFINITY;
+
+        let layout = StateLayout::new(&buses, &finite, &net);
+        let residuals = [0.1, 0.2];
+        let pattern = |ms: &[crate::measurement::Measurement]| {
+            let rows = measurement_jacobian(ms, &buses, &net, &layout);
+            let (triplets, _, _) = gain_and_rhs(&rows, ms, &residuals);
+            triplets
+        };
+
+        let a = pattern(&finite);
+        let b = pattern(&disabled);
+        assert_eq!(
+            a.iter().map(|&(i, j, _)| (i, j)).collect::<Vec<_>>(),
+            b.iter().map(|&(i, j, _)| (i, j)).collect::<Vec<_>>(),
+            "disabling a sensor must not move, add or drop a triplet position"
+        );
+        assert!(
+            a.iter().zip(&b).any(|(x, y)| x.2 != y.2),
+            "the values should differ — otherwise the sigma did nothing at all"
+        );
+        // And the disabled row really is inert, not merely present.
+        let rows = measurement_jacobian(&disabled, &buses, &net, &layout);
+        let (_, rhs, _) = gain_and_rhs(&rows, &disabled, &residuals);
+        let only_voltage = vec![finite[0]];
+        let vrows = measurement_jacobian(&only_voltage, &buses, &net, &layout);
+        let (_, vrhs, _) = gain_and_rhs(&vrows, &only_voltage, &residuals[..1]);
+        for (x, y) in rhs.iter().zip(&vrhs) {
+            assert!((x - y).abs() < 1e-15, "an infinite sigma still moved the rhs: {x} vs {y}");
         }
     }
 
