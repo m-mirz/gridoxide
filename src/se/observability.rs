@@ -72,16 +72,23 @@ use super::SeNetwork;
 /// stays under ~32 MB (`2000² × 8` bytes).
 pub const DENSE_LIMIT: usize = 2000;
 
-/// Relative threshold below which a pivot counts as zero.
+/// Relative pivot threshold below which a column counts as dependent.
 ///
-/// Applied to the ratio of a pivot to the largest one, so it is scale-free —
-/// which matters because `G`'s entries carry measurement weights that routinely
-/// span several orders of magnitude, and an absolute threshold would call a
-/// grid watched entirely by high-sigma sensors unobservable purely for having
-/// small weights.
+/// Applied against the largest pivot, which makes the check a statement about
+/// the gain matrix's *conditioning* as much as its rank — and on a network with
+/// a very stiff source those are not the same question. gridoxide expands a
+/// source into an impedance branch whose admittance follows `sk`, so a fixture
+/// with `sk = 1e10` carries branch admittances of order 1e7; squared into the
+/// gain matrix and weighted, the pivots span some fourteen decades, and a
+/// voltage row's own contribution of order 1e4 falls below this threshold
+/// relative to them. The report then names most of the network unobservable
+/// when nothing of the sort is true.
 ///
-/// Deliberately far looser than the `eps · n` faer uses internally: a direction
-/// determined only at the 1e-12 level is not usefully determined at all.
+/// Not a reason to loosen the threshold, which would blind it to genuine
+/// dependence. It is a reason to read a report on such a network with the
+/// conditioning in mind, and to answer a question about *symmetries* — which is
+/// usually what "is this observable" means — by asking the measurement functions
+/// directly, as `tests/se_three_phase_test.rs` does.
 pub const RANK_TOLERANCE: f64 = 1e-10;
 
 /// Which of a bus's two unknowns an [`Unknown`] refers to.

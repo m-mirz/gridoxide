@@ -54,7 +54,20 @@ use crate::types::Bus;
 /// from a line's charging susceptance.
 pub struct SeNetwork {
     pub ybus: YBusSparse,
-    pub branches: Vec<BranchParams>,
+    /// Per branch, the current functional at each terminal: `[0]` is the from
+    /// side, `[1]` the to side.
+    ///
+    /// Stored resolved rather than as branch parameters, because a three-phase
+    /// terminal is not a two-bus quantity: phase `p` of one end depends on all
+    /// six phasors of the branch, through the 3×3 blocks. A coefficient list
+    /// expresses both cases, and the estimator above it cannot tell them apart —
+    /// which is what makes the phase domain a matter of longer lists rather than
+    /// of a second Jacobian.
+    ///
+    /// In the phase domain the index is `3·branch + phase`, exactly as a bus
+    /// index is `3·node + phase`. That is what keeps
+    /// [`Target`](crate::measurement::Target) unchanged between the two.
+    pub terminals: Vec<[functional::CurrentFunctional; 2]>,
     /// Total shunt admittance stamped at each bus, or zero.
     pub shunt_y: Vec<Complex<f64>>,
     /// For each bus, the synthesized source branches delivering into it.
@@ -82,6 +95,24 @@ pub struct SeNetwork {
     pub energized: Vec<bool>,
 }
 
+/// One `[from, to]` functional pair per scalar branch.
+fn terminals_from_params(params: &[BranchParams]) -> Vec<[functional::CurrentFunctional; 2]> {
+    use crate::branch_flow::Terminal;
+    params
+        .iter()
+        .map(|b| {
+            [Terminal::From, Terminal::To].map(|t| {
+                let (near, far) = b.buses(t);
+                let (y_self, y_mut) = b.seen_from(t);
+                functional::CurrentFunctional {
+                    at: near,
+                    coefficients: vec![(near, y_self), (far, y_mut)],
+                }
+            })
+        })
+        .collect()
+}
+
 impl SeNetwork {
     /// Builds the model from a converted network plus the shunt list that was
     /// stamped into its Y-bus.
@@ -101,12 +132,12 @@ impl SeNetwork {
             shunt_y[s.at] += s.y;
         }
 
-        let branches = branch_params(&net.lines, &net.transformers);
+        let terminals = terminals_from_params(&branch_params(&net.lines, &net.transformers));
         let mut source_branches = vec![Vec::new(); n];
         for (&_id, &branch) in &net.source_branch_idx {
             // The synthesized branch runs virtual -> node, so the node it feeds
             // is its `to` end.
-            source_branches[branches[branch].to].push(branch);
+            source_branches[terminals[branch][1].at].push(branch);
         }
         for list in &mut source_branches {
             list.sort_unstable();
@@ -125,7 +156,113 @@ impl SeNetwork {
         }
 
         let zero_injection = net.zero_injection.clone();
-        Self { ybus, branches, shunt_y, source_branches, zero_injection, energized }
+        Self { ybus, terminals, shunt_y, source_branches, zero_injection, energized }
+    }
+
+    /// Builds the model for a three-phase network.
+    ///
+    /// Everything above this is unchanged by the phase domain. Bus `k` phase `p`
+    /// is index `3k + p`, as `lib.rs` documents for power flow, and a branch
+    /// terminal is indexed `3b + p` to match — so `Target`, `StateLayout`, the
+    /// Jacobian, the constraints and both estimator methods carry over without
+    /// knowing there are phases at all. What changes is the length of a
+    /// coefficient list: six terms where the scalar case has two, because phase
+    /// `p` of one end of a branch depends on all six phasors through the 3×3
+    /// blocks.
+    ///
+    /// `lines`, `transformers` and `shunts` must be the same slices stamped into
+    /// `ybus` — this reads their blocks a second time to build the measurement
+    /// model, and a disagreement between the two would produce an estimate that
+    /// converges confidently to the wrong answer.
+    pub fn from_3ph(
+        ybus: YBusSparse,
+        lines: &[crate::types::Line3Ph],
+        transformers: &[crate::types::Transformer3PhSeq],
+        shunts: &[crate::network::ShuntAdm3Ph],
+        source_branch_idx: &std::collections::HashMap<u64, usize>,
+        zero_injection_per_node: &[bool],
+    ) -> Self {
+        let n = ybus.n();
+        let n_nodes = n / 3;
+
+        // One functional per (branch, phase), laid out `3·branch + phase` so the
+        // index arithmetic matches the bus one.
+        let mut terminals = Vec::with_capacity(3 * (lines.len() + transformers.len()));
+        let blocks = lines
+            .iter()
+            .map(|ln| (ln.from, ln.to, crate::network::line3ph_blocks(ln)))
+            .chain(
+                transformers
+                    .iter()
+                    .map(|t| (t.from, t.to, crate::network::transformer3ph_blocks(t))),
+            );
+        for (from, to, [yff, yft, ytf, ytt]) in blocks {
+            for p in 0..3 {
+                // From side: `I_p = Σ_q Yff[p][q]·V_from,q + Σ_q Yft[p][q]·V_to,q`.
+                let coeffs = |near_block: &[[Complex<f64>; 3]; 3],
+                              far_block: &[[Complex<f64>; 3]; 3],
+                              near: usize,
+                              far: usize| {
+                    (0..3)
+                        .map(|q| (3 * near + q, near_block[p][q]))
+                        .chain((0..3).map(|q| (3 * far + q, far_block[p][q])))
+                        .collect::<Vec<_>>()
+                };
+                terminals.push([
+                    functional::CurrentFunctional {
+                        at: 3 * from + p,
+                        coefficients: coeffs(&yff, &yft, from, to),
+                    },
+                    functional::CurrentFunctional {
+                        at: 3 * to + p,
+                        coefficients: coeffs(&ytt, &ytf, to, from),
+                    },
+                ]);
+            }
+        }
+
+        let mut shunt_y = vec![Complex::new(0.0, 0.0); n];
+        for s in shunts {
+            // A three-phase shunt is a 3×3 block, but `shunt_y` is the *diagonal*
+            // a shunt-injection measurement reads. The off-diagonal coupling is
+            // in the Y-bus, where the bus-injection functional already picks it
+            // up; only the standalone shunt target uses this.
+            let m = crate::network::seq_to_phase_shunt(s.y1, s.y0);
+            for p in 0..3 {
+                shunt_y[3 * s.at + p] += m[p][p];
+            }
+        }
+
+        let mut source_branches = vec![Vec::new(); n];
+        for &branch in source_branch_idx.values() {
+            for p in 0..3 {
+                let phase_branch = 3 * branch + p;
+                source_branches[terminals[phase_branch][1].at].push(phase_branch);
+            }
+        }
+        for list in &mut source_branches {
+            list.sort_unstable();
+        }
+
+        // A node's zero-injection flag applies to all three of its phases: an
+        // appliance-free node injects nothing on any of them.
+        let mut zero_injection = vec![false; n];
+        for (k, &zero) in zero_injection_per_node.iter().enumerate().take(n_nodes) {
+            for p in 0..3 {
+                zero_injection[3 * k + p] = zero;
+            }
+        }
+
+        let mut energized = vec![false; n];
+        for component in crate::network::connected_components(&ybus) {
+            if component.iter().any(|&i| !source_branches[i].is_empty()) {
+                for &i in &component {
+                    energized[i] = true;
+                }
+            }
+        }
+
+        Self { ybus, terminals, shunt_y, source_branches, zero_injection, energized }
     }
 
     /// Buses a zero-injection constraint should apply to.
@@ -297,6 +434,16 @@ pub(crate) mod tests {
     /// Two buses joined by one branch, with a shunt on bus 1 and the branch
     /// treated as a source feeding bus 1 — enough to exercise all three of the
     /// structural measurement functions against one state.
+    /// The scalar branch `two_bus_net` is built from.
+    ///
+    /// Exposed so the functional tests can check themselves against
+    /// `branch_flow`'s own closed forms, which is a genuinely independent
+    /// derivation rather than a restatement of the one under test.
+    pub(crate) fn two_bus_params() -> BranchParams {
+        let y_series = Complex::new(1.0, 0.0) / Complex::new(0.05, 0.2);
+        BranchParams { from: 0, to: 1, y: [y_series, -y_series, -y_series, y_series] }
+    }
+
     pub(crate) fn two_bus_net() -> (SeNetwork, Vec<Bus>) {
         let y_series = Complex::new(1.0, 0.0) / Complex::new(0.05, 0.2);
         let y_shunt = Complex::new(0.02, 0.3);
@@ -308,15 +455,9 @@ pub(crate) mod tests {
         yb.add(1, 0, -y_series);
         yb.add(1, 1, y_shunt);
 
-        let branches = vec![BranchParams {
-            from: 0,
-            to: 1,
-            y: [y_series, -y_series, -y_series, y_series],
-        }];
-
         let net = SeNetwork {
             ybus: yb.finish(),
-            branches,
+            terminals: terminals_from_params(&[two_bus_params()]),
             shunt_y: vec![Complex::new(0.0, 0.0), y_shunt],
             source_branches: vec![Vec::new(), vec![0]],
             zero_injection: vec![false, false],
@@ -341,7 +482,7 @@ pub(crate) mod tests {
 
         let net = SeNetwork {
             ybus: yb.finish(),
-            branches: vec![BranchParams { from: 0, to: 1, y: [y, -y, -y, y] }],
+            terminals: terminals_from_params(&[BranchParams { from: 0, to: 1, y: [y, -y, -y, y] }]),
             shunt_y: vec![Complex::new(0.0, 0.0); 3],
             source_branches: vec![Vec::new(), vec![0], Vec::new()],
             zero_injection: vec![true, false, true],
@@ -396,7 +537,7 @@ pub(crate) mod tests {
             .iter()
             .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
             .collect();
-        let (p_to, q_to) = terminal_flow(&net.branches[0], Terminal::To, &v);
+        let (p_to, q_to) = terminal_flow(&two_bus_params(), Terminal::To, &v);
         let s_src = net
             .functional(Target::SourceInjection { branch: 0 })
             .expect("source functional")

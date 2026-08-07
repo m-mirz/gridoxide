@@ -249,19 +249,17 @@ impl SeNetwork {
             // `power` — not the coefficients.
             Target::BranchTerminal { branch, terminal }
             | Target::BranchTerminalCurrent { branch, terminal, .. } => {
-                let b = self.branches.get(branch)?;
-                let (near, far) = b.buses(terminal);
-                let (y_self, y_mut) = b.seen_from(terminal);
-                CurrentFunctional { at: near, coefficients: vec![(near, y_self), (far, y_mut)] }
+                self.terminals.get(branch)?[terminal as usize].clone()
             }
             // A source's injection into its node is the negation of the current
             // flowing from that node into the synthesized branch, and negating
             // the coefficients negates the power with it.
             Target::SourceInjection { branch } => {
-                let b = self.branches.get(branch)?;
-                let (near, far) = b.buses(Terminal::To);
-                let (y_self, y_mut) = b.seen_from(Terminal::To);
-                CurrentFunctional { at: near, coefficients: vec![(near, -y_self), (far, -y_mut)] }
+                let f = &self.terminals.get(branch)?[Terminal::To as usize];
+                CurrentFunctional {
+                    at: f.at,
+                    coefficients: f.coefficients.iter().map(|&(k, c)| (k, -c)).collect(),
+                }
             }
             // A shunt consumes `S = |V|²·conj(y_sh)`; as an injection that is
             // negated, which is the `-y_sh` here.
@@ -277,12 +275,9 @@ impl SeNetwork {
             Target::NodeInjection(bus) => {
                 let mut coefficients = self.ybus.row(bus).to_vec();
                 for &branch in &self.source_branches[bus] {
-                    let b = &self.branches[branch];
-                    let (near, far) = b.buses(Terminal::To);
-                    let (y_self, y_mut) = b.seen_from(Terminal::To);
-                    debug_assert_eq!(near, bus, "a source branch must feed the bus it is listed on");
-                    coefficients.push((near, -y_self));
-                    coefficients.push((far, -y_mut));
+                    let f = &self.terminals[branch][Terminal::To as usize];
+                    debug_assert_eq!(f.at, bus, "a source branch must feed the bus it is listed on");
+                    coefficients.extend(f.coefficients.iter().map(|&(k, c)| (k, -c)));
                 }
                 coefficients.push((bus, -self.shunt_y[bus]));
                 CurrentFunctional { at: bus, coefficients }
@@ -319,7 +314,7 @@ mod tests {
                 .functional(Target::BranchTerminal { branch: 0, terminal })
                 .expect("branch 0 exists");
             let s = f.power(&v);
-            let (p, q) = terminal_flow(&net.branches[0], terminal, &v);
+            let (p, q) = terminal_flow(&super::super::tests::two_bus_params(), terminal, &v);
             assert!((s.re - p).abs() < 1e-12, "{terminal:?}: P {} vs {p}", s.re);
             assert!((s.im - q).abs() < 1e-12, "{terminal:?}: Q {} vs {q}", s.im);
         }
@@ -347,8 +342,9 @@ mod tests {
             let mut partials = Vec::new();
             f.power_partials(&v, &mut partials);
 
-            let d = terminal_flow_derivs(&net.branches[0], terminal, &v);
-            let (near, _far) = net.branches[0].buses(terminal);
+            let params = super::super::tests::two_bus_params();
+            let d = terminal_flow_derivs(&params, terminal, &v);
+            let (near, _far) = params.buses(terminal);
             let want = |bus: usize| -> (f64, f64, f64, f64) {
                 if bus == near {
                     (d.dp_dtheta_near, d.dq_dtheta_near, d.dp_dv_near, d.dq_dv_near)

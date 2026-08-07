@@ -229,10 +229,32 @@ matter:
    is exactly the setting that needs it, and gridoxide already solves asymmetric *power flow* — so
    the gap is in the estimator, not in the network model underneath it.
 
-   Narrower than it was: `measurement.rs` now reads `asym_voltage_sensor` and `asym_power_sensor`
-   and reduces them to the symmetric problem the way power-grid-model's own `sym_calc_param` does —
-   positive sequence for a phasor, the mean of the phases otherwise. So an asymmetric *document*
-   estimates correctly today; what is missing is estimating the three phases as distinct unknowns.
+   Narrower than it was, in two steps. `measurement.rs` reads `asym_voltage_sensor`,
+   `asym_power_sensor` and `asym_current_sensor` and reduces them to the symmetric problem the way
+   power-grid-model's own `sym_calc_param` does — positive sequence for a phasor, the mean of the
+   phases otherwise — so an asymmetric *document* estimates correctly today.
+
+   And the estimator is now phase-capable: `SeNetwork::from_3ph` builds the measurement model for a
+   3N-bus phase-domain network, with a branch terminal indexed `3·branch + phase` to match the
+   `3·node + phase` bus convention power flow already uses. Nothing above it changed — `Target`,
+   `StateLayout`, the Jacobian, the constraints and both methods carry over untouched, because a
+   three-phase terminal is a six-coefficient `CurrentFunctional` where a scalar one has two.
+   `tests/se_three_phase_test.rs` checks those functionals against the Y-bus they sit beside by
+   Kirchhoff's law, on an unbalanced state.
+
+   It also settles the design question that made this stage risky. Had the three phases been
+   independent circuits, the measurement set would have had *three* rotational symmetries where
+   `StateLayout` removes one, leaving two undetermined directions no structural check could catch.
+   Asked directly — rotate one phase and see whether any measurement moves — the answer is that only
+   the global rotation is a symmetry, and the reason is gridoxide's own model rather than any
+   fixture's data: a source expands into a virtual bus behind a *sequence-parameterised* impedance,
+   which couples the phases at the one place every energised component is reachable from.
+
+   What remains is the conversion layer, not the estimator: `pgm_to_3ph_network` returns a bare tuple
+   carrying none of the object-ID maps `measurements_from_pgm` needs, so a phase-domain document
+   cannot yet be driven end to end from JSON. It also silently drops `link`, `three_winding_transformer`
+   and `voltage_regulator`, and `transformer_seq_params` still panics on any winding pair outside
+   Dyn and YNyn.
 2. ~~**Current sensors.**~~ **Done.** `sym_current_sensor` and `asym_current_sensor` are read in both
    angle frames, on both calculation methods, checked against power-grid-model's own
    `global-current-sensor` and `local-current-sensor` fixtures — which are identical but for the

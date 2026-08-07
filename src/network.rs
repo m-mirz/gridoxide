@@ -17,7 +17,7 @@ pub struct ShuntAdm3Ph {
 
 /// Converts sequence-domain admittance (y1, y0) to the 3×3 phase-domain shunt
 /// tensor: diagonal `(2·y1+y0)/3`, off-diagonal `(y0−y1)/3`.
-fn seq_to_phase_shunt(y1: Complex<f64>, y0: Complex<f64>) -> [[Complex<f64>; 3]; 3] {
+pub(crate) fn seq_to_phase_shunt(y1: Complex<f64>, y0: Complex<f64>) -> [[Complex<f64>; 3]; 3] {
     let d = (y0 + 2.0 * y1) / 3.0;
     let o = (y0 - y1) / 3.0;
     let mut m = [[o; 3]; 3];
@@ -246,6 +246,57 @@ pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> YBu
     y
 }
 
+/// The four 3×3 phase-domain π-model blocks of a three-phase line,
+/// `[Yff, Yft, Ytf, Ytt]` — the same order and meaning as
+/// [`branch_calc_param`]'s four scalars.
+///
+/// Extracted so that [`build_ybus_3ph`] and the state estimator's own branch
+/// functionals read one description rather than two. A Y-bus and a measurement
+/// model that disagree about a branch produce an estimate that converges
+/// confidently to the wrong answer, which is the failure mode
+/// `tests/measurement_residual_test.rs` exists to catch on the symmetric side.
+pub fn line3ph_blocks(ln: &Line3Ph) -> [[[Complex<f64>; 3]; 3]; 4] {
+    let y_c1 = Complex::new(0.0, ln.b1);
+    let y_c0 = Complex::new(0.0, ln.b0);
+    let zero = [[Complex::new(0.0, 0.0); 3]; 3];
+
+    // A `from == to` line is gridoxide's half-open branch: the whole equivalent
+    // admittance sits on one diagonal block and there is no mutual term.
+    if ln.from == ln.to {
+        let m = seq_to_phase_shunt(y_c1, y_c0);
+        return [m, zero, zero, zero];
+    }
+
+    let y1 = Complex::new(1.0, 0.0) / Complex::new(ln.r1, ln.x1);
+    let y0 = Complex::new(1.0, 0.0) / Complex::new(ln.r0, ln.x0);
+    let d_s = (y0 + 2.0 * y1) / 3.0;
+    let o_s = (y0 - y1) / 3.0;
+    let d_sh = (y_c0 + 2.0 * y_c1) / 6.0;
+    let o_sh = (y_c0 - y_c1) / 6.0;
+
+    let mut diag = zero;
+    let mut mutual = zero;
+    for p in 0..3 {
+        for q in 0..3 {
+            let ys = if p == q { d_s } else { o_s };
+            let ysh = if p == q { d_sh } else { o_sh };
+            diag[p][q] = ys + ysh;
+            mutual[p][q] = -ys;
+        }
+    }
+    [diag, mutual, mutual, diag]
+}
+
+/// The four 3×3 phase-domain blocks of a three-phase transformer, in the same
+/// order as [`line3ph_blocks`].
+///
+/// Unlike a line, a transformer's positive and negative sequences differ once
+/// its clock phase shift is in, so this needs the full Fortescue product rather
+/// than the closed form a passive branch admits.
+pub fn transformer3ph_blocks(t: &Transformer3PhSeq) -> [[[Complex<f64>; 3]; 3]; 4] {
+    [0, 1, 2, 3].map(|i| fortescue_to_phase(t.y0[i], t.y1[i], t.y2[i]))
+}
+
 /// Builds a 3N×3N phase-domain Y-bus from a list of three-phase lines.
 ///
 /// Physical node `k` maps to rows/columns `3k`, `3k+1`, `3k+2` (phases a, b, c).
@@ -254,43 +305,18 @@ pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> YBu
 /// r0≠r1 or x0≠x1.
 pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> YBus {
     let mut y = YBus::new(3 * n);
-
     for ln in lines {
-        let y_c1 = Complex::new(0.0, ln.b1);
-        let y_c0 = Complex::new(0.0, ln.b0);
-
-        if ln.from == ln.to {
-            // Pure shunt: add full 3×3 shunt matrix to the diagonal block.
-            let m = seq_to_phase_shunt(y_c1, y_c0);
-            let fi = ln.from;
+        let [yff, yft, ytf, ytt] = line3ph_blocks(ln);
+        // A half-open branch collapses to `from == to`, where all four blocks
+        // land on one diagonal and the three zero ones add nothing.
+        for (block, (bi, bj)) in [yff, yft, ytf, ytt]
+            .iter()
+            .zip([(ln.from, ln.from), (ln.from, ln.to), (ln.to, ln.from), (ln.to, ln.to)])
+        {
             for p in 0..3 {
                 for q in 0..3 {
-                    y.add(3 * fi + p, 3 * fi + q, m[p][q]);
+                    y.add(3 * bi + p, 3 * bj + q, block[p][q]);
                 }
-            }
-            continue;
-        }
-
-        let y1 = Complex::new(1.0, 0.0) / Complex::new(ln.r1, ln.x1);
-        let y0 = Complex::new(1.0, 0.0) / Complex::new(ln.r0, ln.x0);
-
-        // 3×3 series admittance: diagonal (y0+2y1)/3, off-diagonal (y0-y1)/3.
-        let d_s = (y0 + 2.0 * y1) / 3.0;
-        let o_s = (y0 - y1) / 3.0;
-        // Half-shunt per terminal.
-        let d_sh = (y_c0 + 2.0 * y_c1) / 6.0;
-        let o_sh = (y_c0 - y_c1) / 6.0;
-
-        let fi = ln.from;
-        let ti = ln.to;
-        for p in 0..3 {
-            for q in 0..3 {
-                let ys = if p == q { d_s } else { o_s };
-                let ysh = if p == q { d_sh } else { o_sh };
-                y.add(3 * fi + p, 3 * fi + q, ys + ysh);
-                y.add(3 * ti + p, 3 * ti + q, ys + ysh);
-                y.add(3 * fi + p, 3 * ti + q, -ys);
-                y.add(3 * ti + p, 3 * fi + q, -ys);
             }
         }
     }
@@ -457,12 +483,12 @@ pub fn transformer_seq_params(
 /// Stamps asymmetric transformer contributions into a 3N×3N phase-domain Y-bus.
 pub fn stamp_transformers_3ph(ybus: &mut YBus, transformers: &[Transformer3PhSeq]) {
     for t in transformers {
-        let blocks = [(t.from, t.from), (t.from, t.to), (t.to, t.from), (t.to, t.to)];
-        for (i, &(bi, bj)) in blocks.iter().enumerate() {
-            let m = fortescue_to_phase(t.y0[i], t.y1[i], t.y2[i]);
+        let blocks = transformer3ph_blocks(t);
+        let ends = [(t.from, t.from), (t.from, t.to), (t.to, t.from), (t.to, t.to)];
+        for (block, (bi, bj)) in blocks.iter().zip(ends) {
             for p in 0..3 {
                 for q in 0..3 {
-                    ybus.add(3 * bi + p, 3 * bj + q, m[p][q]);
+                    ybus.add(3 * bi + p, 3 * bj + q, block[p][q]);
                 }
             }
         }
