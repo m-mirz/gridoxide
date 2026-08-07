@@ -640,10 +640,16 @@ those calls — PGM through `PowerGridModel`, gridoxide through the `PersistentE
 | case | buses | measurements | PGM nr | PGM il | gridoxide nr | gridoxide il |
 |---|---|---|---|---|---|---|
 | case14 | 14 | 94 | 0.2 | 0.2 | **0.1** | 0.1 |
-| case118 | 118 | 862 | **0.7** | 0.5 | 1.4 | 0.6 |
-| case300 | 300 | 1,944 | `SparseMatrixError`¹ | **0.8** | 4.3 | 1.3 |
-| case1354pegase | 1,354 | 9,318 | `SparseMatrixError`¹ | **3.5** | 24.5 | 6.3 |
-| case2869pegase | 2,869 | 21,197 | `SparseMatrixError`¹ | **8.1** | 16.5 | 16.5 |
+| case118 | 118 | 862 | **0.7** | 0.5 | 1.2 | 0.6 |
+| case300 | 300 | 1,944 | `SparseMatrixError`¹ | **0.7** | 6.3 | 1.5 |
+| case1354pegase | 1,354 | 9,318 | `SparseMatrixError`¹ | **3.4** | 23.6 | 7.2 |
+| case2869pegase | 2,869 | 21,197 | `SparseMatrixError`¹ | **8.4** | 72.2 | 18.3 |
+
+Re-measured. The previous revision of this table gave gridoxide's Newton-Raphson as 4.3 / 24.5 / 16.5
+on the last three cases; 16.5 was its *iterative-linear* figure duplicated into the wrong column, and
+the harness reports 72.2 there. Newton-Raphson does not get faster from 1,354 buses to 2,869 — it
+refactorizes every iteration, and that cost grows. The current figures include the measurement-model
+caching in `se::functional`, worth 8-16% on the larger cases.
 
 ¹ PGM's Newton-Raphson estimator raises `SparseMatrixError` ("possibly singular matrix! ... might mean the
 system is not fully observable") on every case from 300 buses up, on documents its *own* iterative-linear
@@ -659,7 +665,7 @@ That extra bus is also why gridoxide's bus counts run one higher than the `buses
 
 **Newton-Raphson.** gridoxide is the only one of the two that answers at all above 300 buses, which outweighs
 any timing statement about the cases where both run. Where both run they are within 2x either way: gridoxide
-faster on case14 (0.1 vs 0.2 ms), PGM faster on case118 (0.7 vs 1.4 ms).
+faster on case14 (0.1 vs 0.2 ms), PGM faster on case118 (0.7 vs 1.2 ms).
 
 **Iterative-linear.** PGM is faster, by a ratio remarkably stable with size — 1.6x at case300, 1.8x at
 case1354pegase, 2.0x at case2869pegase. This used to read that flatness as "a constant-factor gap in

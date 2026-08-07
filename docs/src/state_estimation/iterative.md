@@ -132,7 +132,7 @@ the constraints.
 Second and more decisively, it would speed up the wrong method. Newton-Raphson is where gridoxide is
 already ahead — power-grid-model's own Newton-Raphson state estimator raises `SparseMatrixError` on
 every case from 300 buses up, where gridoxide's converges. The remaining gap is on *this* method —
-1.3 ms against 0.8 ms on case300, 6.3 ms against 3.5 ms on case1354pegase, 16.5 ms against 8.1 ms on
+1.5 ms against 0.7 ms on case300, 7.2 ms against 3.4 ms on case1354pegase, 18.3 ms against 8.4 ms on
 case2869pegase — and there the factorization is not the bottleneck at all. §7 of
 `scripts/bench/README.md` has the full table.
 
