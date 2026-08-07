@@ -165,9 +165,24 @@ pub fn flat_start(buses: &mut [Bus], measurements: &[Measurement]) {
 /// power-grid-model reaches the same place differently, carrying a per-bus
 /// `phase_shift` in its math topology and initializing its voltages with it.
 pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurement]) {
+    // Reset the *unknowns* only. `linear_initial_guess` solves for the PQ buses
+    // while reading every other bus's voltage as a fixed boundary condition, so
+    // flattening those first would be discarding the very thing it solves
+    // against.
+    //
+    // It matters twice over. A source's `u_ref` is not generally 1 p.u., and
+    // flattening it degrades the guess by exactly that offset. And in the phase
+    // domain it is fatal rather than merely lossy: a virtual slack bus carries
+    // its phase's own 0/−120/+120 angle, which is the *only* thing distinguishing
+    // the three phases before any load flows. Flatten it and the guess comes back
+    // with all three phases at one angle — a balanced-collapsed state that
+    // Gauss-Newton does not recover from, and which looks like a modelling bug
+    // rather than a starting one.
     for b in buses.iter_mut() {
-        b.voltage_mag = 1.0;
-        b.voltage_ang = 0.0;
+        if !matches!(b.bus_type, crate::types::BusType::Slack) {
+            b.voltage_mag = 1.0;
+            b.voltage_ang = 0.0;
+        }
     }
     crate::network::linear_initial_guess(buses, &net.ybus);
     apply_measured_magnitudes(buses, measurements);
