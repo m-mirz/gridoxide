@@ -127,11 +127,55 @@ pub struct SeReport {
 /// measurements costs nothing and starts the buses that *are* measured much
 /// closer to their answer. power-grid-model does the same
 /// (`se-algorithms.md`'s initialization step).
+///
+/// Note this leaves every angle at zero, which is wrong by 30° per `clock` step
+/// across a phase-shifting transformer — see [`linear_start`], which is the
+/// better default wherever a [`SeNetwork`] is available.
 pub fn flat_start(buses: &mut [Bus], measurements: &[Measurement]) {
     for b in buses.iter_mut() {
         b.voltage_mag = 1.0;
         b.voltage_ang = 0.0;
     }
+    apply_measured_magnitudes(buses, measurements);
+}
+
+/// A starting state that carries the network's own structural phase shifts,
+/// then applies the voltage-magnitude measurements on top.
+///
+/// Prefer this to [`flat_start`] wherever a [`SeNetwork`] is at hand. A flat
+/// start puts every angle at zero, which is a poor description of any network
+/// containing a phase-shifting transformer: a `clock` of 11 offsets one side by
+/// 30° (0.52 rad) before any load flows at all. Gauss-Newton started half a
+/// radian away from the answer does not merely take longer — on
+/// `three_winding_transformer` it converges to a *different* stationary point,
+/// reporting an objective of 2.4e2 where the true optimum is 4e-11, with the
+/// source node at 0.21 p.u. against its own sensor reading of 1.00.
+///
+/// [`linear_initial_guess`](crate::network::linear_initial_guess) is the fix
+/// gridoxide already had: it solves the linear network with loads as constant
+/// admittances, so each transformer's complex tap ratio propagates its phase
+/// shift exactly. On a state-estimation document, where `p_specified` is
+/// normally unset, it degenerates to a no-load solve — which still carries every
+/// phase shift, which is the part that matters here. It is also safe by
+/// construction: a singular linear system leaves the flat state untouched rather
+/// than failing.
+///
+/// power-grid-model reaches the same place differently, carrying a per-bus
+/// `phase_shift` in its math topology and initializing its voltages with it.
+pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurement]) {
+    for b in buses.iter_mut() {
+        b.voltage_mag = 1.0;
+        b.voltage_ang = 0.0;
+    }
+    crate::network::linear_initial_guess(buses, &net.ybus);
+    apply_measured_magnitudes(buses, measurements);
+}
+
+/// Overwrites each bus's magnitude with a directly measured one where it exists.
+///
+/// Shared by [`flat_start`] and [`linear_start`]: a measured magnitude is a
+/// better starting value than either produces on its own, and costs nothing.
+fn apply_measured_magnitudes(buses: &mut [Bus], measurements: &[Measurement]) {
     for m in measurements {
         if let (crate::measurement::MeasurementKind::VoltageMagnitude,
                 crate::measurement::Target::Bus(bus)) = (m.kind, m.target)

@@ -43,7 +43,7 @@ use gridoxide::se::bad_data;
 use gridoxide::se::measurement_functions;
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
-use gridoxide::se::nr::{estimate, flat_start, SeMethod, SeOptions, SeStatus};
+use gridoxide::se::nr::{estimate, linear_start, SeMethod, SeOptions, SeStatus};
 use gridoxide::se::observability::analyze;
 use gridoxide::se::SeNetwork;
 use gridoxide::solver::JacobianBackend;
@@ -88,7 +88,7 @@ fn assert_estimate_matches_with(
     let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
 
     let mut buses = net.buses.clone();
-    flat_start(&mut buses, &measurements);
+    linear_start(&mut buses, &se_net, &measurements);
     let options = SeOptions { backend, method, max_iter, ..SeOptions::default() };
     let report = estimate(&measurements, &mut buses, &se_net, &options);
 
@@ -104,30 +104,43 @@ fn assert_estimate_matches_with(
         .any(|m| m.kind == gridoxide::measurement::MeasurementKind::VoltageAngle);
 
     let mut offsets = Vec::new();
+    let mut checked = 0usize;
     for node in expected["data"]["node"].as_array().expect("node output") {
         let id = node["id"].as_u64().expect("node id");
         let idx = net.node_idx[&id];
-        let (Some(u_pu), Some(u_angle)) = (
-            node["u_pu"].as_f64(),
-            node["u_angle"].as_f64(),
-        ) else {
+        // Magnitude and angle are checked independently of each other, because
+        // power-grid-model's validation framework publishes only the fields a
+        // fixture is about: `three_winding_transformer` gives `u_pu` with no
+        // `u_angle` at all. Requiring both would silently skip every node there
+        // and leave the test asserting nothing but convergence.
+        if let Some(u_pu) = node["u_pu"].as_f64() {
+            assert!(
+                (buses[idx].voltage_mag - u_pu).abs() < tol,
+                "{name} [{backend:?}/{method:?}] node {id}: |V| = {}, PGM says {u_pu}",
+                buses[idx].voltage_mag
+            );
+            checked += 1;
+        }
+        let Some(u_angle) = node["u_angle"].as_f64() else {
             continue;
         };
-        assert!(
-            (buses[idx].voltage_mag - u_pu).abs() < tol,
-            "{name} [{backend:?}/{method:?}] node {id}: |V| = {}, PGM says {u_pu}",
-            buses[idx].voltage_mag
-        );
         if phase_is_measured {
             assert!(
                 (buses[idx].voltage_ang - u_angle).abs() < tol,
                 "{name} [{backend:?}/{method:?}] node {id}: angle = {}, PGM says {u_angle}",
                 buses[idx].voltage_ang
             );
+            checked += 1;
         } else {
             offsets.push((id, buses[idx].voltage_ang - u_angle));
         }
     }
+
+    assert!(
+        checked + offsets.len() > 0,
+        "{name} [{backend:?}/{method:?}]: the fixture published no node state to compare against, \
+         so this test asserted nothing but convergence"
+    );
 
     if let Some(&(ref_id, reference)) = offsets.first() {
         for &(id, offset) in &offsets {
@@ -168,6 +181,85 @@ fn estimates_with_an_infinite_sigma_measurement() {
 #[test]
 fn estimates_transmission_case() {
     assert_estimate_matches("transmission-case", JacobianBackend::Scalar, 1e-6);
+}
+
+/// Sensors on all three sides of a three-winding transformer, i.e.
+/// `measured_terminal_type` 6/7/8 — the types `measurements_from_pgm` used to
+/// reject outright.
+///
+/// gridoxide models a three-winding transformer as three two-winding legs to a
+/// synthesized star bus, so side k's sensor is leg k's `From` terminal. The
+/// star bus itself carries no sensor and is zero-injection, which is what makes
+/// the three legs determinable from side measurements alone.
+#[test]
+fn estimates_three_winding_transformer_side_sensors() {
+    assert_estimate_matches("three_winding_transformer", JacobianBackend::Scalar, 1e-6);
+}
+
+/// Why [`linear_start`] exists, pinned so the reason cannot be lost.
+///
+/// `three_winding_transformer` has `clock_12 = clock_13 = 11`, i.e. a 30° shift
+/// on two of its three legs, putting the true angles at ~0.53 rad before any
+/// load flows. Gauss-Newton started at zero does not merely take longer from
+/// there — it converges, reports success, and returns a *different* stationary
+/// point: the source node at 0.21 p.u. against its own sensor reading 1.00, at
+/// an objective nine orders of magnitude worse than the true optimum.
+///
+/// This asserts the failure rather than just the fix, because a silent
+/// convergence to the wrong basin is the dangerous shape here. If some future
+/// change makes the flat start succeed too, this test should be revisited
+/// deliberately, not deleted for being noisy.
+#[test]
+fn a_flat_start_finds_the_wrong_basin_through_a_phase_shifting_transformer() {
+    let dir = fixture_dir("three_winding_transformer");
+    let input = common::load_pgm_input(&dir.join("input.json"));
+    let id_to_idx = node_id_to_idx(&input);
+    let shunts = pgm_shunts_1ph(&input, &id_to_idx, S_BASE_VA);
+    let net = pgm_to_network(
+        common::load_pgm_input(&dir.join("input.json")),
+        S_BASE_VA,
+        50.0,
+    );
+    let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
+    let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+    stamp_shunts(&mut ybus, &shunts);
+    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+
+    let run = |seed: fn(&mut [gridoxide::types::Bus], &SeNetwork, &[Measurement])| {
+        let mut buses = net.buses.clone();
+        seed(&mut buses, &se_net, &measurements);
+        let report = estimate(&measurements, &mut buses, &se_net, &SeOptions::default());
+        (report, buses)
+    };
+
+    let (flat, flat_buses) = run(|b, _, m| gridoxide::se::nr::flat_start(b, m));
+    let (linear, linear_buses) = run(gridoxide::se::nr::linear_start);
+
+    assert_eq!(flat.status, SeStatus::Converged, "the flat start does converge — that is the problem");
+    assert_eq!(linear.status, SeStatus::Converged);
+
+    // The linear start finds the true optimum; the flat one finds a stationary
+    // point that fits the data incomparably worse.
+    assert!(
+        linear.objective < 1e-6,
+        "linear start should reach the true optimum, got J = {:.3e}",
+        linear.objective
+    );
+    assert!(
+        flat.objective > 1.0,
+        "the flat start's spurious minimum should be far worse, got J = {:.3e}",
+        flat.objective
+    );
+
+    // And the difference is visible in the answer, not just the objective: the
+    // source node carries a direct voltage measurement of ~1.0 p.u.
+    let source_node = net.node_idx[&1];
+    assert!((linear_buses[source_node].voltage_mag - 0.9999926174270017).abs() < 1e-6);
+    assert!(
+        flat_buses[source_node].voltage_mag < 0.5,
+        "expected the spurious basin to sit far from 1.0 p.u., got {}",
+        flat_buses[source_node].voltage_mag
+    );
 }
 
 /// A node with no appliance attached injects exactly nothing, and
@@ -222,7 +314,7 @@ fn fixtures_are_observable_in_their_physical_unknowns() {
         let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
 
         let mut buses = net.buses.clone();
-        flat_start(&mut buses, &measurements);
+        linear_start(&mut buses, &se_net, &measurements);
         let layout = StateLayout::new(&buses, &measurements, &se_net);
         let report = analyze(&measurements, &buses, &se_net, &layout);
         assert!(!report.skipped_numerical, "{name}: fixture should be small enough to analyze");
@@ -272,7 +364,7 @@ fn bad_data_analysis_flags_only_the_inconsistent_fixture() {
         let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
 
         let mut buses = net.buses.clone();
-        flat_start(&mut buses, &measurements);
+        linear_start(&mut buses, &se_net, &measurements);
         let report = estimate(&measurements, &mut buses, &se_net, &SeOptions::default());
 
         let layout = StateLayout::new(&buses, &measurements, &se_net);
@@ -366,7 +458,7 @@ fn the_two_methods_agree() {
 
         let solve = |method| {
             let mut buses = net.buses.clone();
-            flat_start(&mut buses, &measurements);
+            linear_start(&mut buses, &se_net, &measurements);
             let options = SeOptions { method, max_iter: 100, ..SeOptions::default() };
             let report = estimate(&measurements, &mut buses, &se_net, &options);
             assert_eq!(report.status, SeStatus::Converged, "{name} [{method:?}]: {report:?}");
@@ -420,7 +512,7 @@ fn per_node_injections_survive_across_a_link() {
         let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
 
         let mut buses = net.buses.clone();
-        flat_start(&mut buses, &measurements);
+        linear_start(&mut buses, &se_net, &measurements);
         let report = estimate(&measurements, &mut buses, &se_net, &SeOptions::default());
         assert_eq!(report.status, SeStatus::Converged, "{name}: {report:?}");
 

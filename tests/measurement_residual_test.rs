@@ -150,8 +150,6 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
 ///
 /// Excluded, with reasons rather than silently:
 ///
-/// - `three_winding_transformer`: its sensor uses `measured_terminal_type` 6,
-///   which `measurements_from_pgm` rejects rather than guesses at;
 /// - the `single-node-source-asym-voltage-sensor*` pair: their only sensors are
 ///   asymmetric, and this is the symmetric path, so they yield no measurements
 ///   to check;
@@ -173,7 +171,12 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
 ///   is about, so many of these omit `u_pu`/`u_angle` (or the `node` array
 ///   entirely). Without the full state there is nothing to evaluate `h(x)` at,
 ///   and inventing the missing entries would be testing a state nobody
-///   published.
+///   published. `three_winding_transformer` is one of these — it publishes
+///   `u_pu` but no `u_angle`. Its sensors themselves are modelled now
+///   (`measured_terminal_type` 6/7/8 map to the three legs' `From` terminals),
+///   and the estimator is checked against it in
+///   `tests/state_estimation_test.rs::estimates_three_winding_transformer_side_sensors`,
+///   which needs only the magnitudes this fixture does publish.
 const MODELLED_FIXTURES: &[&str] = &[
     "1os2msr",
     "1os2msr-no-angle",
@@ -254,23 +257,15 @@ fn every_symmetric_fixture_is_either_modelled_or_excluded() {
         if !entry.path().join("sym_output.json").exists() || MODELLED_FIXTURES.contains(&name.as_str()) {
             continue;
         }
-        let text = std::fs::read_to_string(entry.path().join("input.json")).expect("input");
-        // `link` is modelled now (stamped as a branch, see `pgm::LINK_Y`), so
-        // its presence no longer excludes a fixture.
-        let has_link = false;
-        let _ = &text;
+        // `link` is modelled now (stamped as a branch, see `pgm::LINK_Y`), and
+        // `measured_terminal_type` 6/7/8 are too, so neither excludes a fixture
+        // any more. What remains are the four documented reasons above.
         let is_asym_only = name.starts_with("single-node-source-asym-voltage-sensor")
             || name == "dummy-test-sym";
         let incomplete = !has_complete_state(&entry.path());
         let partial_appliances = name.ends_with("measured-unmeasured-appliances");
         let inconsistent = INCONSISTENT_BY_DESIGN.contains(&name.as_str());
-        if !has_link
-            && !is_asym_only
-            && !incomplete
-            && !partial_appliances
-            && !inconsistent
-            && name != "three_winding_transformer"
-        {
+        if !is_asym_only && !incomplete && !partial_appliances && !inconsistent {
             unexplained.push(name);
         }
     }

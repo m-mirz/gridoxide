@@ -592,10 +592,10 @@ impl StateEstimationModel {
         self.measurements.len()
     }
 
-    /// Runs the estimate from a flat start. Raises if it does not converge.
+    /// Runs the estimate from a linear start. Raises if it does not converge.
     fn solve(&mut self) -> PyResult<()> {
         self.buses = self.net.buses.clone();
-        crate::se::nr::flat_start(&mut self.buses, &self.measurements);
+        crate::se::nr::linear_start(&mut self.buses, &self.se_net, &self.measurements);
         let report = self
             .estimator
             .estimate(&self.measurements, &mut self.buses, &self.se_net);

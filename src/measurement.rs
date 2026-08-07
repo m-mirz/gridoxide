@@ -394,10 +394,38 @@ pub fn measurements_from_pgm(
                     acc.node_q.add(q, q_sigma);
                 }
             }
-            // 6/7/8 are the three-winding transformer sides. gridoxide models
-            // one of those as three separate two-winding branches to a star
-            // bus, so the mapping exists — but it is not exercised by any
-            // symmetric fixture yet, and guessing at it is worse than saying so.
+            // 6/7/8 are the three-winding transformer's three sides. gridoxide
+            // models one as three two-winding legs running *physical node → star
+            // bus* (`pgm_to_network`), so side k's terminal is leg k's `From`
+            // end, and its flow already has PGM's sign convention: positive into
+            // the transformer.
+            //
+            // A leg whose own `status_k` is 0 needs no special handling, unlike
+            // a half-open *line*. A line with one end open collapses to a
+            // self-loop, losing the distinction between its ends — which is what
+            // `half_open_terminal` exists to restore. A leg keeps its two
+            // distinct endpoints, and `branch_calc_param`'s `(0, 1)` case zeroes
+            // both `yff` and `yft`, so the `From` flow evaluates to exactly zero.
+            // That is what PGM reports for a disconnected side too, so the row
+            // is kept rather than dropped: it contributes nothing to the gain
+            // matrix (an all-zero Jacobian row) while still showing up as a
+            // residual if the sensor disagrees.
+            6 | 7 | 8 => {
+                let Some(&legs) = net.three_winding_branch_idx.get(&s.measured_object) else {
+                    return Err(MeasurementError::UnknownObject {
+                        sensor: s.id,
+                        object: s.measured_object,
+                    });
+                };
+                let branch = legs[(s.measured_terminal_type - 6) as usize];
+                let key = (branch, Terminal::From);
+                if s.p_measured.is_finite() {
+                    branch_p.entry(key).or_default().add(p, p_sigma);
+                }
+                if s.q_measured.is_finite() {
+                    branch_q.entry(key).or_default().add(q, q_sigma);
+                }
+            }
             other => {
                 return Err(MeasurementError::UnsupportedTerminalType {
                     sensor: s.id,
@@ -602,6 +630,73 @@ mod tests {
             50.0,
         );
         (input, net)
+    }
+
+    /// `measured_terminal_type` 6/7/8 land on the three legs' `From` terminals,
+    /// in side order.
+    ///
+    /// The integration test checks the resulting *estimate* against
+    /// power-grid-model's published answer; this pins the mapping itself, which
+    /// is the part that would fail silently — a sensor routed to the wrong leg
+    /// still produces a plausible-looking measurement set.
+    #[test]
+    fn three_winding_sides_map_to_their_legs_from_terminal() {
+        let json = r#"{"version":"1.0","type":"input","is_batch":false,"attributes":{},"data":{
+            "node":[{"id":1,"u_rated":138000.0},{"id":2,"u_rated":69000.0},{"id":3,"u_rated":13800.0}],
+            "three_winding_transformer":[{"id":4,"node_1":1,"node_2":2,"node_3":3,
+                "status_1":1,"status_2":1,"status_3":1,
+                "u1":138000.0,"u2":69000.0,"u3":13800.0,
+                "sn_1":60000000.0,"sn_2":50000000.0,"sn_3":10000000.0,
+                "uk_12":0.09,"uk_13":0.03,"uk_23":0.06,
+                "pk_12":50000.0,"pk_13":5000.0,"pk_23":10000.0,
+                "i0":0.1,"p0":50000.0,"winding_1":1,"winding_2":2,"winding_3":2,
+                "clock_12":11,"clock_13":11,"tap_side":2,"tap_pos":0,
+                "tap_min":-8,"tap_max":10,"tap_nom":0,"tap_size":1380.0}],
+            "source":[{"id":7,"node":1,"status":1,"u_ref":1.0,"sk":1e12,"rx_ratio":0.1}],
+            "sym_power_sensor":[
+                {"id":61,"measured_object":4,"measured_terminal_type":6,
+                 "p_measured":1000000.0,"q_measured":0.0,"power_sigma":100000.0},
+                {"id":62,"measured_object":4,"measured_terminal_type":7,
+                 "p_measured":-600000.0,"q_measured":0.0,"power_sigma":100000.0},
+                {"id":63,"measured_object":4,"measured_terminal_type":8,
+                 "p_measured":-400000.0,"q_measured":0.0,"power_sigma":100000.0}]
+        }}"#;
+        let input: PgmInput = serde_json::from_str(json).expect("fixture parses");
+        let net = crate::pgm::pgm_to_network(
+            serde_json::from_str(json).expect("fixture parses"),
+            1e6,
+            50.0,
+        );
+        let legs = net.three_winding_branch_idx[&4];
+        let ms = measurements_from_pgm(&input, &net, 1e6).expect("measurements");
+
+        for (side, expected_p) in [(0usize, 1.0), (1, -0.6), (2, -0.4)] {
+            let m = find(
+                &ms,
+                MeasurementKind::ActivePower,
+                Target::BranchTerminal { branch: legs[side], terminal: Terminal::From },
+            );
+            assert!(
+                (m.value - expected_p).abs() < 1e-12,
+                "side {side} landed on leg {} with value {}",
+                legs[side],
+                m.value
+            );
+        }
+    }
+
+    /// A terminal type gridoxide genuinely does not model is still an error,
+    /// rather than being swallowed by the 6/7/8 arm's neighbours.
+    #[test]
+    fn an_unknown_terminal_type_is_still_rejected() {
+        let (input, net) = network_with_sensors(
+            r#""sym_power_sensor":[{"id":9,"measured_object":3,"measured_terminal_type":11,
+                "p_measured":1.0,"q_measured":0.0,"power_sigma":1.0}]"#,
+        );
+        assert_eq!(
+            measurements_from_pgm(&input, &net, 1e6),
+            Err(MeasurementError::UnsupportedTerminalType { sensor: 9, terminal_type: 11 })
+        );
     }
 
     fn find(ms: &[Measurement], kind: MeasurementKind, target: Target) -> Measurement {

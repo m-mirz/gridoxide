@@ -18,7 +18,7 @@ use gridoxide::run_power_flow_analysis;
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
-use gridoxide::se::nr::{estimate, flat_start, SeMethod, SeOptions, SeStatus};
+use gridoxide::se::nr::{estimate, linear_start, SeMethod, SeOptions, SeStatus};
 use gridoxide::se::observability;
 use gridoxide::se::SeNetwork;
 use gridoxide::solver::SolveStatus;
@@ -126,7 +126,7 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
     let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
 
     let mut buses = net.buses.clone();
-    flat_start(&mut buses, &measurements);
+    linear_start(&mut buses, &se_net, &measurements);
     // The linearized method converges linearly rather than quadratically, so it
     // wants a larger budget for the same tolerance — that trade, a cheaper
     // iteration for more of them, is the point of it.
