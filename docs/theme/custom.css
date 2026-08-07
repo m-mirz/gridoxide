@@ -1,0 +1,26 @@
+/* Let wide tables use the full content area while prose stays readable.
+ *
+ * mdbook centres `.content main` inside `--content-max-width` (750px), which
+ * squeezes tables like the feature comparison. Instead, let `main` fill the
+ * available width and re-apply the 750px cap to its direct children, exempting
+ * the `.table-wrapper` divs mdbook puts around every table. The wrapper keeps
+ * its `overflow-x: auto`, so a table still wider than the screen scrolls
+ * rather than being clipped. */
+
+.content main {
+    max-width: none;
+}
+
+.content main > * {
+    max-width: var(--content-max-width);
+    margin-inline: auto;
+}
+
+.content main > .table-wrapper {
+    max-width: 100%;
+}
+
+.content main > .table-wrapper > table {
+    width: max-content;
+    max-width: 100%;
+}
