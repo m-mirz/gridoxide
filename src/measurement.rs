@@ -179,6 +179,35 @@ impl Merged {
     }
 }
 
+/// [`Merged`] for a complex quantity: several phasor readings of one voltage.
+///
+/// Voltage sensors that carry an angle have to merge as *phasors*, not as a
+/// magnitude and an angle separately. The two agree only when the readings
+/// share an angle. power-grid-model's `sensor-update-initially-empty` is the
+/// case that separates them: 11.0∠−0.1 with σ=1 and 9.0∠+0.1 with σ=2 merge to
+/// 10.5702∠−0.0662 as phasors, against 10.6 if the magnitudes are merged on
+/// their own — the vector sum is shorter than the scalar one whenever the
+/// phasors disagree, which is the whole point of merging them as vectors.
+#[derive(Clone, Copy, Debug, Default)]
+struct MergedPhasor {
+    weighted_sum: num_complex::Complex<f64>,
+    weight: f64,
+}
+
+impl MergedPhasor {
+    fn add(&mut self, value: num_complex::Complex<f64>, sigma: f64) {
+        let w = 1.0 / (sigma * sigma);
+        self.weighted_sum += value * w;
+        self.weight += w;
+    }
+
+    /// `(phasor, sigma)`, or `None` if nothing was ever added.
+    fn finish(self) -> Option<(num_complex::Complex<f64>, f64)> {
+        (self.weight > 0.0)
+            .then(|| (self.weighted_sum / self.weight, (1.0 / self.weight).sqrt()))
+    }
+}
+
 /// An accumulator for contributions that *add* rather than merge: several
 /// appliances making up one bus injection. Variances add.
 #[derive(Clone, Copy, Debug, Default)]
@@ -219,8 +248,12 @@ struct ApplianceAccumulator {
 /// Everything a bus can accumulate before becoming [`Measurement`]s.
 #[derive(Clone, Copy, Debug, Default)]
 struct BusAccumulator {
+    /// Magnitude-only readings. A phasor group's own merged magnitude joins
+    /// this at flatten time, so a bus carrying both kinds combines them by
+    /// inverse variance like any other repeated measurement.
     u_mag: Merged,
-    u_angle: Merged,
+    /// Readings that carry an angle, merged as phasors — see [`MergedPhasor`].
+    u_phasor: MergedPhasor,
     /// Injection built up from load/generator sensors.
     appliance_p: Summed,
     appliance_q: Summed,
@@ -475,20 +508,27 @@ pub fn measurements_from_pgm(
         let u_rated = net.buses[bus].u_rated;
         let bus_acc = acc.buses.entry(bus).or_default();
 
-        if s.u_measured.is_finite() {
-            let sigma = checked_sigma(s.id, s.u_sigma)?;
-            bus_acc.u_mag.add(s.u_measured / u_rated, sigma / u_rated);
+        if !s.u_measured.is_finite() {
+            continue;
         }
+        let sigma = checked_sigma(s.id, s.u_sigma)? / u_rated;
+        let magnitude = s.u_measured / u_rated;
         if s.u_angle_measured.is_finite() {
-            // An angle sigma is optional even when an angle is given; PGM
-            // reuses u_sigma's relative size in that case, which at |U| ≈ 1 p.u.
-            // is the same number in radians.
+            // A phasor reading merges as a phasor. An angle sigma is optional
+            // even when an angle is given; PGM has no `u_angle_sigma` field at
+            // all and weights the whole complex value by `u_sigma`, which is
+            // what the phasor merge does here. gridoxide's extra
+            // `u_angle_sigma` still overrides it when present.
             let sigma = if s.u_angle_sigma.is_finite() {
                 checked_sigma(s.id, s.u_angle_sigma)?
             } else {
-                checked_sigma(s.id, s.u_sigma)? / u_rated
+                sigma
             };
-            bus_acc.u_angle.add(s.u_angle_measured, sigma);
+            bus_acc
+                .u_phasor
+                .add(num_complex::Complex::from_polar(magnitude, s.u_angle_measured), sigma);
+        } else {
+            bus_acc.u_mag.add(magnitude, sigma);
         }
     }
 
@@ -519,9 +559,7 @@ pub fn measurements_from_pgm(
         // PGM requires *every* phase angle to be present before it treats the
         // sensor as a phasor (`has_angle()` is `!isNaN().any()`).
         if s.u_angle_measured.iter().all(|a| a.is_finite()) {
-            let seq = positive_sequence(&mag, &s.u_angle_measured);
-            bus_acc.u_mag.add(seq.norm(), sigma);
-            bus_acc.u_angle.add(seq.arg(), sigma);
+            bus_acc.u_phasor.add(positive_sequence(&mag, &s.u_angle_measured), sigma);
         } else {
             bus_acc.u_mag.add(mag.iter().sum::<f64>() / 3.0, sigma);
         }
@@ -625,11 +663,25 @@ pub fn measurements_from_pgm(
     for bus in bus_ids {
         let b = acc.buses[&bus];
         let target = Target::Bus(bus);
-        if let Some((value, sigma)) = b.u_mag.finish() {
+        // The phasor group contributes its magnitude to the magnitude merge and
+        // supplies the angle. A bus with only magnitude-only sensors gets no
+        // angle row at all, which is what leaves the global phase to
+        // `StateLayout`'s pinned reference.
+        let mut u_mag = b.u_mag;
+        let phasor = b.u_phasor.finish();
+        if let Some((value, sigma)) = phasor {
+            u_mag.add(value.norm(), sigma);
+        }
+        if let Some((value, sigma)) = u_mag.finish() {
             out.push(Measurement { kind: MeasurementKind::VoltageMagnitude, target, value, sigma });
         }
-        if let Some((value, sigma)) = b.u_angle.finish() {
-            out.push(Measurement { kind: MeasurementKind::VoltageAngle, target, value, sigma });
+        if let Some((value, sigma)) = phasor {
+            out.push(Measurement {
+                kind: MeasurementKind::VoltageAngle,
+                target,
+                value: value.arg(),
+                sigma,
+            });
         }
         // Load/generator injection, shunt injection and node injection are
         // three *different* measurement functions of the same state, not three
@@ -791,6 +843,63 @@ mod tests {
             50.0,
         );
         (input, net)
+    }
+
+    /// Two phasor sensors on one bus merge as *phasors*, not as a magnitude and
+    /// an angle separately.
+    ///
+    /// The two agree whenever the readings share an angle, which is why every
+    /// fixture in this repo agreed with either rule until
+    /// `sensor-update-initially-empty` arrived with 11.0∠−0.1 against 9.0∠+0.1.
+    /// The vector sum is shorter than the scalar one whenever the phasors
+    /// disagree: 1.05703 here, against 1.06 from merging the magnitudes alone.
+    #[test]
+    fn phasor_sensors_merge_as_vectors_not_as_magnitudes() {
+        let (input, net) = network_with_sensors(
+            r#""sym_voltage_sensor":[
+                {"id":9,"measured_object":1,"u_measured":11000.0,"u_sigma":1000.0,
+                 "u_angle_measured":-0.1},
+                {"id":10,"measured_object":1,"u_measured":9000.0,"u_sigma":2000.0,
+                 "u_angle_measured":0.1}]"#,
+        );
+        let ms = measurements_from_pgm(&input, &net, 1e6).unwrap();
+        let mag = find(&ms, MeasurementKind::VoltageMagnitude, Target::Bus(0));
+        let ang = find(&ms, MeasurementKind::VoltageAngle, Target::Bus(0));
+
+        // (1.1·e^{-0.1i}/0.01 + 0.9·e^{0.1i}/0.04) / (100 + 25). These are the
+        // same two phasors `sensor-update-initially-empty` carries at ten times
+        // the scale, and power-grid-model publishes exactly
+        // `u = 10.570170726436285`, `u_angle = -0.0661620368126038` for them —
+        // so this pins the aggregation against PGM's own arithmetic, not just
+        // against gridoxide's.
+        assert!((mag.value - 1.0570170726436283).abs() < 1e-12, "magnitude={}", mag.value);
+        assert!((ang.value + 0.0661620368126038).abs() < 1e-12, "angle={}", ang.value);
+        assert!(
+            (mag.value - 1.06).abs() > 1e-4,
+            "merging the magnitudes alone would give exactly 1.06 — the point is that it does not"
+        );
+        // Both rows carry the merged phasor's own sigma, 1/√125.
+        assert!((mag.sigma - 125.0f64.sqrt().recip()).abs() < 1e-12, "sigma={}", mag.sigma);
+        assert!((ang.sigma - 125.0f64.sqrt().recip()).abs() < 1e-12);
+    }
+
+    /// A magnitude-only sensor still merges as a scalar, and produces no angle
+    /// row at all — which is what leaves the global phase to `StateLayout`'s
+    /// pinned reference.
+    #[test]
+    fn magnitude_only_sensors_produce_no_angle_row() {
+        let (input, net) = network_with_sensors(
+            r#""sym_voltage_sensor":[
+                {"id":9,"measured_object":1,"u_measured":11000.0,"u_sigma":1000.0},
+                {"id":10,"measured_object":1,"u_measured":9000.0,"u_sigma":2000.0}]"#,
+        );
+        let ms = measurements_from_pgm(&input, &net, 1e6).unwrap();
+        let mag = find(&ms, MeasurementKind::VoltageMagnitude, Target::Bus(0));
+        assert!((mag.value - 1.06).abs() < 1e-12, "magnitude={}", mag.value);
+        assert!(
+            !ms.iter().any(|m| m.kind == MeasurementKind::VoltageAngle),
+            "no sensor supplied an angle, so no angle row should exist"
+        );
     }
 
     /// `measured_terminal_type` 6/7/8 land on the three legs' `From` terminals,
