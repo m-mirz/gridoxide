@@ -113,7 +113,13 @@ fn assert_estimate_matches_with(
         // fixture is about: `three_winding_transformer` gives `u_pu` with no
         // `u_angle` at all. Requiring both would silently skip every node there
         // and leave the test asserting nothing but convergence.
-        if let Some(u_pu) = node["u_pu"].as_f64() {
+        // Some fixtures publish only the volt-valued `u`. It is the same
+        // quantity in the node's own rating, so deriving the per-unit value
+        // keeps them from going unchecked.
+        let u_pu = node["u_pu"]
+            .as_f64()
+            .or_else(|| node["u"].as_f64().map(|u| u / net.buses[idx].u_rated));
+        if let Some(u_pu) = u_pu {
             assert!(
                 (buses[idx].voltage_mag - u_pu).abs() < tol,
                 "{name} [{backend:?}/{method:?}] node {id}: |V| = {}, PGM says {u_pu}",
@@ -194,6 +200,54 @@ fn estimates_transmission_case() {
 #[test]
 fn estimates_three_winding_transformer_side_sensors() {
     assert_estimate_matches("three_winding_transformer", JacobianBackend::Scalar, 1e-6);
+}
+
+/// An `asym_voltage_sensor` reduced to the symmetric problem by its positive
+/// sequence.
+///
+/// The three phases here sit at 0.1, 0.2 and 0.3 radians once rotated into
+/// sequence, so the positive sequence lands at exactly 0.2 with a magnitude
+/// 0.33% below the phase readings — a case where the mean of the angles would
+/// give the right answer for the wrong reason, but the mean of the *magnitudes*
+/// would not.
+#[test]
+fn estimates_from_an_asymmetric_voltage_phasor() {
+    assert_estimate_matches("single-node-source-asym-voltage-sensor", JacobianBackend::Scalar, 1e-6);
+}
+
+/// The same sensor without angles, which PGM reduces by the mean of the three
+/// magnitudes rather than by a positive sequence — `has_angle()` requires every
+/// phase to carry one.
+#[test]
+fn estimates_from_an_asymmetric_voltage_magnitude() {
+    assert_estimate_matches(
+        "single-node-source-asym-voltage-sensor-no-angle",
+        JacobianBackend::Scalar,
+        1e-6,
+    );
+}
+
+/// Asymmetric and symmetric sensors in one document, which is the case that
+/// actually matters: the symmetric path used to see only part of the
+/// measurement set and therefore solved a different problem than PGM did.
+///
+/// The tolerance is 1e-5 rather than the 1e-6 everything else here uses, and
+/// the reason is [`topology::IDEAL_CONNECTION_Y`] rather than the sensors. This
+/// fixture's two lower nodes are joined by a `link`, and gridoxide stamps a
+/// link at `2e5+j2e5` p.u. where power-grid-model uses `1e8+j1e8` — deliberately,
+/// because `G = HᵀWH` squares the admittance and PGM's value makes the
+/// `node-injection-*` fixtures come back singular. That is a 500x softer
+/// connection, so gridoxide separates the two nodes by 5.2e-6 p.u. where PGM
+/// separates them by 1.0e-8, and the whole solution shifts by ~3.3e-6.
+///
+/// Checked rather than assumed: rebuilding with PGM's `1e8` makes this fixture
+/// pass at 1e-6 unchanged. The gap is the regularization, not the asymmetric
+/// aggregation, which reproduces PGM's `sym_calc_param` exactly.
+///
+/// [`topology::IDEAL_CONNECTION_Y`]: gridoxide::topology::IDEAL_CONNECTION_Y
+#[test]
+fn estimates_with_mixed_symmetric_and_asymmetric_sensors() {
+    assert_estimate_matches("dummy-test-sym", JacobianBackend::Scalar, 1e-5);
 }
 
 /// Why [`linear_start`] exists, pinned so the reason cannot be lost.

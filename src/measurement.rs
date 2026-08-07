@@ -232,6 +232,206 @@ struct BusAccumulator {
     node_q: Merged,
 }
 
+/// The five accumulators a sensor can feed, gathered so that the symmetric and
+/// asymmetric loops can share one routing function.
+#[derive(Default)]
+struct Accumulators {
+    buses: HashMap<usize, BusAccumulator>,
+    /// Branch-terminal readings merge per `(branch, terminal)`.
+    branch_p: HashMap<(usize, Terminal), Merged>,
+    branch_q: HashMap<(usize, Terminal), Merged>,
+    /// Appliance readings merge *per appliance* before the per-bus sum: two
+    /// sensors on one load are one better-known load, not two loads. Doing this
+    /// in one step would double-count the appliance.
+    appliances: HashMap<u64, ApplianceAccumulator>,
+    /// Source readings, keyed by the synthesized source branch they describe.
+    sources: HashMap<usize, (Merged, Merged)>,
+}
+
+/// One power reading, already converted to per-unit, as `(value, sigma)` per
+/// component. `None` where the document left that component unset.
+type PowerReading = (Option<(f64, f64)>, Option<(f64, f64)>);
+
+/// Routes a per-unit power reading to whichever accumulator its
+/// `measured_terminal_type` names.
+///
+/// Shared by `sym_power_sensor` and `asym_power_sensor`; the two differ only in
+/// how they arrive at the per-unit `(value, sigma)` pair, never in where it goes.
+fn route_power_reading(
+    acc: &mut Accumulators,
+    net: &PgmNetwork,
+    sensor: u64,
+    measured_object: u64,
+    terminal_type: u8,
+    (p, q): PowerReading,
+) -> Result<(), MeasurementError> {
+    match terminal_type {
+        // Branch terminals: same direction convention as `terminal_flow`.
+        0 | 1 => {
+            let terminal = if terminal_type == 0 { Terminal::From } else { Terminal::To };
+            let Some(key) = net.resolve_terminal(measured_object, terminal) else {
+                // The branch is absent or this is its open end. PGM reports
+                // zero flow there, so the reading carries no information about
+                // the state and is dropped rather than fought with.
+                return Ok(());
+            };
+            if let Some((v, s)) = p {
+                acc.branch_p.entry(key).or_default().add(v, s);
+            }
+            if let Some((v, s)) = q {
+                acc.branch_q.entry(key).or_default().add(v, s);
+            }
+        }
+        // A source's power is a branch flow here, not a bus injection:
+        // gridoxide puts a virtual slack bus and an impedance branch behind
+        // every source, so by KCL its power never reaches the node's injection.
+        // Generator reference direction, so no sign change.
+        2 => {
+            let Some(&branch) = net.source_branch_idx.get(&measured_object) else {
+                // An inactive source has no synthesized branch, so there is
+                // nothing for the reading to describe.
+                return Ok(());
+            };
+            let entry = acc.sources.entry(branch).or_default();
+            if let Some((v, s)) = p {
+                entry.0.add(v, s);
+            }
+            if let Some((v, s)) = q {
+                entry.1.add(v, s);
+            }
+        }
+        // Load/generator appliances, and shunts. `sign` converts the appliance's
+        // own reference direction into an injection.
+        3 | 4 | 5 => {
+            let sign = match terminal_type {
+                // load, shunt: load reference direction — consumption.
+                3 | 4 => -1.0,
+                // generator: generator reference direction.
+                _ => 1.0,
+            };
+            let Some(&bus) = net.appliance_bus.get(&measured_object) else {
+                return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
+            };
+            let entry = acc.appliances.entry(measured_object).or_insert(ApplianceAccumulator {
+                bus,
+                sign,
+                is_shunt: terminal_type == 3,
+                p: Merged::default(),
+                q: Merged::default(),
+            });
+            if let Some((v, s)) = p {
+                entry.p.add(v, s);
+            }
+            if let Some((v, s)) = q {
+                entry.q.add(v, s);
+            }
+        }
+        // 6/7/8 are the three-winding transformer's three sides. gridoxide
+        // models one as three two-winding legs running *physical node → star
+        // bus* (`pgm_to_network`), so side k's terminal is leg k's `From` end,
+        // and its flow already has PGM's sign convention: positive into the
+        // transformer.
+        //
+        // A leg whose own `status_k` is 0 needs no special handling, unlike a
+        // half-open *line*. A line with one end open collapses to a self-loop,
+        // losing the distinction between its ends — which is what
+        // `half_open_terminal` exists to restore. A leg keeps its two distinct
+        // endpoints, and `branch_calc_param`'s `(0, 1)` case zeroes both `yff`
+        // and `yft`, so the `From` flow evaluates to exactly zero. That is what
+        // PGM reports for a disconnected side too, so the row is kept rather
+        // than dropped: it contributes nothing to the gain matrix (an all-zero
+        // Jacobian row) while still showing up as a residual if the sensor
+        // disagrees.
+        6 | 7 | 8 => {
+            let Some(&legs) = net.three_winding_branch_idx.get(&measured_object) else {
+                return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
+            };
+            let key = (legs[(terminal_type - 6) as usize], Terminal::From);
+            if let Some((v, s)) = p {
+                acc.branch_p.entry(key).or_default().add(v, s);
+            }
+            if let Some((v, s)) = q {
+                acc.branch_q.entry(key).or_default().add(v, s);
+            }
+        }
+        // Node injection: already a bus injection, generator direction.
+        9 => {
+            let Some(&bus) = net.node_idx.get(&measured_object) else {
+                return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
+            };
+            let entry = acc.buses.entry(bus).or_default();
+            if let Some((v, s)) = p {
+                entry.node_p.add(v, s);
+            }
+            if let Some((v, s)) = q {
+                entry.node_q.add(v, s);
+            }
+        }
+        other => {
+            return Err(MeasurementError::UnsupportedTerminalType {
+                sensor,
+                terminal_type: other,
+            })
+        }
+    }
+    Ok(())
+}
+
+/// `√3`, the line-to-line / line-to-neutral ratio.
+const SQRT_3: f64 = 1.732_050_807_568_877_2;
+
+/// The positive-sequence phasor of a three-phase reading,
+/// `(U_a + a·U_b + a²·U_c) / 3` with `a = e^{j2π/3}`.
+///
+/// This is power-grid-model's `pos_seq` (`three_phase_tensor.hpp`), and it is
+/// how an asymmetric phasor measurement becomes a symmetric one.
+fn positive_sequence(magnitudes: &[f64; 3], angles: &[f64; 3]) -> num_complex::Complex<f64> {
+    let a = num_complex::Complex::from_polar(1.0, std::f64::consts::TAU / 3.0);
+    let rotate = [num_complex::Complex::new(1.0, 0.0), a, a * a];
+    (0..3)
+        .map(|p| rotate[p] * num_complex::Complex::from_polar(magnitudes[p], angles[p]))
+        .sum::<num_complex::Complex<f64>>()
+        / 3.0
+}
+
+/// The per-component standard deviation implied by an *apparent* power sigma.
+///
+/// power-grid-model splits `power_sigma` across the two components as
+/// `Var(P) = Var(Q) = σ_S²/2` (`PowerSensor::sym_calc_param`), so each
+/// component's own standard deviation is `σ_S/√2` rather than `σ_S`.
+///
+/// gridoxide used `σ_S` for both, which is the same answer whenever *every*
+/// sensor in a document falls back to `power_sigma` — a uniform scaling of all
+/// weights leaves a weighted-least-squares optimum untouched. It stops being
+/// the same answer as soon as one sensor supplies `p_sigma`/`q_sigma` and
+/// another does not, which is exactly what power-grid-model's own
+/// `unbalanced-power-measurements-*` fixtures do.
+fn apparent_power_component_sigma(apparent: f64) -> f64 {
+    apparent / std::f64::consts::SQRT_2
+}
+
+/// The two component sigmas of a symmetric power sensor, per-unit.
+///
+/// Per-component values win when *both* are given, matching power-grid-model,
+/// which tests them jointly rather than falling back one at a time.
+fn component_sigmas(
+    sensor: u64,
+    p_sigma: f64,
+    q_sigma: f64,
+    power_sigma: f64,
+    s_base_va: f64,
+) -> Result<(f64, f64), MeasurementError> {
+    if p_sigma.is_finite() && q_sigma.is_finite() {
+        return Ok((
+            checked_sigma(sensor, p_sigma)? / s_base_va,
+            checked_sigma(sensor, q_sigma)? / s_base_va,
+        ));
+    }
+    let shared =
+        apparent_power_component_sigma(checked_sigma(sensor, power_sigma)? / s_base_va);
+    Ok((shared, shared))
+}
+
 /// Validates a standard deviation.
 ///
 /// An *infinite* sigma is allowed and meaningful: it is power-grid-model's way
@@ -260,16 +460,7 @@ pub fn measurements_from_pgm(
     net: &PgmNetwork,
     s_base_va: f64,
 ) -> Result<Vec<Measurement>, MeasurementError> {
-    let mut buses: HashMap<usize, BusAccumulator> = HashMap::new();
-    // Branch-terminal readings merge per (branch, terminal).
-    let mut branch_p: HashMap<(usize, Terminal), Merged> = HashMap::new();
-    let mut branch_q: HashMap<(usize, Terminal), Merged> = HashMap::new();
-    // Appliance readings are merged *per appliance* before the per-bus sum:
-    // two sensors on one load are one better-known load, not two loads. Doing
-    // this in one step would double-count the appliance.
-    let mut appliances: HashMap<u64, ApplianceAccumulator> = HashMap::new();
-    // Source readings, keyed by the synthesized source branch they describe.
-    let mut sources: HashMap<usize, (Merged, Merged)> = HashMap::new();
+    let mut acc = Accumulators::default();
 
     // ── Voltage sensors ──────────────────────────────────────────────────
     for s in &input.data.sym_voltage_sensor {
@@ -282,11 +473,11 @@ pub fn measurements_from_pgm(
         // u_measured is a line-to-line voltage in V, as is the node's rating,
         // so their ratio is directly the per-unit magnitude.
         let u_rated = net.buses[bus].u_rated;
-        let acc = buses.entry(bus).or_default();
+        let bus_acc = acc.buses.entry(bus).or_default();
 
         if s.u_measured.is_finite() {
             let sigma = checked_sigma(s.id, s.u_sigma)?;
-            acc.u_mag.add(s.u_measured / u_rated, sigma / u_rated);
+            bus_acc.u_mag.add(s.u_measured / u_rated, sigma / u_rated);
         }
         if s.u_angle_measured.is_finite() {
             // An angle sigma is optional even when an angle is given; PGM
@@ -297,7 +488,42 @@ pub fn measurements_from_pgm(
             } else {
                 checked_sigma(s.id, s.u_sigma)? / u_rated
             };
-            acc.u_angle.add(s.u_angle_measured, sigma);
+            bus_acc.u_angle.add(s.u_angle_measured, sigma);
+        }
+    }
+
+    // ── Asymmetric voltage sensors, reduced to the symmetric problem ─────
+    //
+    // power-grid-model does this itself when a document carrying asymmetric
+    // sensors is solved symmetrically (`VoltageSensor<asymmetric_t>::
+    // sym_calc_param`), so this is not an approximation gridoxide invents: with
+    // angles it takes the positive sequence of the three phasors, without them
+    // the mean of the three magnitudes.
+    for s in &input.data.asym_voltage_sensor {
+        let Some(&bus) = net.node_idx.get(&s.measured_object) else {
+            return Err(MeasurementError::UnknownObject {
+                sensor: s.id,
+                object: s.measured_object,
+            });
+        };
+        if !s.u_measured.iter().all(|v| v.is_finite()) {
+            continue;
+        }
+        // An asymmetric reading is line-to-neutral, so its base is `u_rated/√3`
+        // rather than `u_rated` — PGM's `u_scale` (`common.hpp`).
+        let u_base = net.buses[bus].u_rated / SQRT_3;
+        let sigma = checked_sigma(s.id, s.u_sigma)? / u_base;
+        let mag = s.u_measured.map(|v| v / u_base);
+        let bus_acc = acc.buses.entry(bus).or_default();
+
+        // PGM requires *every* phase angle to be present before it treats the
+        // sensor as a phasor (`has_angle()` is `!isNaN().any()`).
+        if s.u_angle_measured.iter().all(|a| a.is_finite()) {
+            let seq = positive_sequence(&mag, &s.u_angle_measured);
+            bus_acc.u_mag.add(seq.norm(), sigma);
+            bus_acc.u_angle.add(seq.arg(), sigma);
+        } else {
+            bus_acc.u_mag.add(mag.iter().sum::<f64>() / 3.0, sigma);
         }
     }
 
@@ -306,168 +532,103 @@ pub fn measurements_from_pgm(
         if !s.p_measured.is_finite() && !s.q_measured.is_finite() {
             continue;
         }
-        // Per-component sigmas win over the shared one when present.
-        let p_sigma = if s.p_sigma.is_finite() { s.p_sigma } else { s.power_sigma };
-        let q_sigma = if s.q_sigma.is_finite() { s.q_sigma } else { s.power_sigma };
-        let p_sigma = checked_sigma(s.id, p_sigma)? / s_base_va;
-        let q_sigma = checked_sigma(s.id, q_sigma)? / s_base_va;
-        let p = s.p_measured / s_base_va;
-        let q = s.q_measured / s_base_va;
+        let (p_sigma, q_sigma) =
+            component_sigmas(s.id, s.p_sigma, s.q_sigma, s.power_sigma, s_base_va)?;
+        let reading = (
+            s.p_measured.is_finite().then(|| (s.p_measured / s_base_va, p_sigma)),
+            s.q_measured.is_finite().then(|| (s.q_measured / s_base_va, q_sigma)),
+        );
+        route_power_reading(
+            &mut acc,
+            net,
+            s.id,
+            s.measured_object,
+            s.measured_terminal_type,
+            reading,
+        )?;
+    }
 
-        match s.measured_terminal_type {
-            // Branch terminals: same direction convention as `terminal_flow`.
-            0 | 1 => {
-                let terminal = if s.measured_terminal_type == 0 { Terminal::From } else { Terminal::To };
-                let Some((branch, terminal)) = net.resolve_terminal(s.measured_object, terminal) else {
-                    // The branch is absent or this is its open end. PGM reports
-                    // zero flow there, so the reading carries no information
-                    // about the state and is dropped rather than fought with.
-                    continue;
-                };
-                if s.p_measured.is_finite() {
-                    branch_p.entry((branch, terminal)).or_default().add(p, p_sigma);
-                }
-                if s.q_measured.is_finite() {
-                    branch_q.entry((branch, terminal)).or_default().add(q, q_sigma);
-                }
-            }
-            // A source's power is a branch flow here, not a bus injection:
-            // gridoxide puts a virtual slack bus and an impedance branch behind
-            // every source, so by KCL its power never reaches the node's
-            // injection. Generator reference direction, so no sign change.
-            2 => {
-                let Some(&branch) = net.source_branch_idx.get(&s.measured_object) else {
-                    // An inactive source has no synthesized branch, so there is
-                    // nothing for the reading to describe.
-                    continue;
-                };
-                let acc = sources.entry(branch).or_default();
-                if s.p_measured.is_finite() {
-                    acc.0.add(p, p_sigma);
-                }
-                if s.q_measured.is_finite() {
-                    acc.1.add(q, q_sigma);
-                }
-            }
-            // Load/generator appliances, and shunts. `sign` converts the
-            // appliance's own reference direction into an injection.
-            3 | 4 | 5 => {
-                let sign = match s.measured_terminal_type {
-                    // load, shunt: load reference direction — consumption.
-                    3 | 4 => -1.0,
-                    // generator: generator reference direction.
-                    _ => 1.0,
-                };
-                let Some(&bus) = net.appliance_bus.get(&s.measured_object) else {
-                    return Err(MeasurementError::UnknownObject {
-                        sensor: s.id,
-                        object: s.measured_object,
-                    });
-                };
-                let acc = appliances.entry(s.measured_object).or_insert(ApplianceAccumulator {
-                    bus,
-                    sign,
-                    is_shunt: s.measured_terminal_type == 3,
-                    p: Merged::default(),
-                    q: Merged::default(),
-                });
-                if s.p_measured.is_finite() {
-                    acc.p.add(p, p_sigma);
-                }
-                if s.q_measured.is_finite() {
-                    acc.q.add(q, q_sigma);
-                }
-            }
-            // Node injection: already a bus injection, generator direction.
-            9 => {
-                let Some(&bus) = net.node_idx.get(&s.measured_object) else {
-                    return Err(MeasurementError::UnknownObject {
-                        sensor: s.id,
-                        object: s.measured_object,
-                    });
-                };
-                let acc = buses.entry(bus).or_default();
-                if s.p_measured.is_finite() {
-                    acc.node_p.add(p, p_sigma);
-                }
-                if s.q_measured.is_finite() {
-                    acc.node_q.add(q, q_sigma);
-                }
-            }
-            // 6/7/8 are the three-winding transformer's three sides. gridoxide
-            // models one as three two-winding legs running *physical node → star
-            // bus* (`pgm_to_network`), so side k's terminal is leg k's `From`
-            // end, and its flow already has PGM's sign convention: positive into
-            // the transformer.
-            //
-            // A leg whose own `status_k` is 0 needs no special handling, unlike
-            // a half-open *line*. A line with one end open collapses to a
-            // self-loop, losing the distinction between its ends — which is what
-            // `half_open_terminal` exists to restore. A leg keeps its two
-            // distinct endpoints, and `branch_calc_param`'s `(0, 1)` case zeroes
-            // both `yff` and `yft`, so the `From` flow evaluates to exactly zero.
-            // That is what PGM reports for a disconnected side too, so the row
-            // is kept rather than dropped: it contributes nothing to the gain
-            // matrix (an all-zero Jacobian row) while still showing up as a
-            // residual if the sensor disagrees.
-            6 | 7 | 8 => {
-                let Some(&legs) = net.three_winding_branch_idx.get(&s.measured_object) else {
-                    return Err(MeasurementError::UnknownObject {
-                        sensor: s.id,
-                        object: s.measured_object,
-                    });
-                };
-                let branch = legs[(s.measured_terminal_type - 6) as usize];
-                let key = (branch, Terminal::From);
-                if s.p_measured.is_finite() {
-                    branch_p.entry(key).or_default().add(p, p_sigma);
-                }
-                if s.q_measured.is_finite() {
-                    branch_q.entry(key).or_default().add(q, q_sigma);
-                }
-            }
-            other => {
-                return Err(MeasurementError::UnsupportedTerminalType {
-                    sensor: s.id,
-                    terminal_type: other,
-                })
-            }
+    // ── Asymmetric power sensors, reduced to the symmetric problem ───────
+    //
+    // As with voltage, this is power-grid-model's own reduction
+    // (`PowerSensor<asymmetric_t>::sym_calc_param`): the value is the mean of
+    // the three per-phase powers and the variance is the mean of the three
+    // per-phase variances. Note the *mean* of the variances, not their sum —
+    // PGM's approximation, and one that looks like a bug unless you know it is
+    // deliberate.
+    //
+    // The per-unit base differs too: a per-phase power is per-unit against
+    // `s_base/3` (PGM's `base_power_1p`), not the three-phase `s_base`.
+    for s in &input.data.asym_power_sensor {
+        let p_any = s.p_measured.iter().any(|v| v.is_finite());
+        let q_any = s.q_measured.iter().any(|v| v.is_finite());
+        if !p_any && !q_any {
+            continue;
         }
+        let s_base_1ph = s_base_va / 3.0;
+        let mean = |vs: &[f64; 3]| vs.iter().sum::<f64>() / 3.0 / s_base_1ph;
+        // A sigma is per-phase here, unlike the voltage sensor's. Reduce the
+        // three variances to their mean and hand back one standard deviation.
+        let rms = |vs: &[f64; 3]| {
+            (vs.iter().map(|v| (v / s_base_1ph).powi(2)).sum::<f64>() / 3.0).sqrt()
+        };
+        let per_phase_finite = |vs: &[f64; 3]| vs.iter().all(|v| v.is_finite());
+
+        let (p_sigma, q_sigma) = if per_phase_finite(&s.p_sigma) && per_phase_finite(&s.q_sigma) {
+            (checked_sigma(s.id, rms(&s.p_sigma))?, checked_sigma(s.id, rms(&s.q_sigma))?)
+        } else {
+            let shared = apparent_power_component_sigma(
+                checked_sigma(s.id, s.power_sigma)? / s_base_1ph,
+            );
+            (shared, shared)
+        };
+        let reading = (
+            p_any.then(|| (mean(&s.p_measured), p_sigma)),
+            q_any.then(|| (mean(&s.q_measured), q_sigma)),
+        );
+        route_power_reading(
+            &mut acc,
+            net,
+            s.id,
+            s.measured_object,
+            s.measured_terminal_type,
+            reading,
+        )?;
     }
 
     // Each appliance contributes its merged reading, sign-corrected, to its
     // bus's injection sum. Iterated in id order so the summed variance is
     // built deterministically.
-    let mut appliance_ids: Vec<u64> = appliances.keys().copied().collect();
+    let mut appliance_ids: Vec<u64> = acc.appliances.keys().copied().collect();
     appliance_ids.sort_unstable();
     for id in appliance_ids {
-        let acc = appliances[&id];
-        let bus = buses.entry(acc.bus).or_default();
-        let (p_acc, q_acc) = if acc.is_shunt {
+        let app = acc.appliances[&id];
+        let bus = acc.buses.entry(app.bus).or_default();
+        let (p_acc, q_acc) = if app.is_shunt {
             (&mut bus.shunt_p, &mut bus.shunt_q)
         } else {
             (&mut bus.appliance_p, &mut bus.appliance_q)
         };
-        if let Some((value, sigma)) = acc.p.finish() {
-            p_acc.add(acc.sign * value, sigma);
+        if let Some((value, sigma)) = app.p.finish() {
+            p_acc.add(app.sign * value, sigma);
         }
-        if let Some((value, sigma)) = acc.q.finish() {
-            q_acc.add(acc.sign * value, sigma);
+        if let Some((value, sigma)) = app.q.finish() {
+            q_acc.add(app.sign * value, sigma);
         }
     }
 
     // ── Flatten the accumulators into measurement rows ───────────────────
     let mut out = Vec::new();
 
-    let mut bus_ids: Vec<usize> = buses.keys().copied().collect();
+    let mut bus_ids: Vec<usize> = acc.buses.keys().copied().collect();
     bus_ids.sort_unstable();
     for bus in bus_ids {
-        let acc = buses[&bus];
+        let b = acc.buses[&bus];
         let target = Target::Bus(bus);
-        if let Some((value, sigma)) = acc.u_mag.finish() {
+        if let Some((value, sigma)) = b.u_mag.finish() {
             out.push(Measurement { kind: MeasurementKind::VoltageMagnitude, target, value, sigma });
         }
-        if let Some((value, sigma)) = acc.u_angle.finish() {
+        if let Some((value, sigma)) = b.u_angle.finish() {
             out.push(Measurement { kind: MeasurementKind::VoltageAngle, target, value, sigma });
         }
         // Load/generator injection, shunt injection and node injection are
@@ -479,15 +640,15 @@ pub fn measurements_from_pgm(
         for (kind, appliance, shunt, node) in [
             (
                 MeasurementKind::ActivePower,
-                acc.appliance_p.finish(),
-                acc.shunt_p.finish(),
-                acc.node_p.finish(),
+                b.appliance_p.finish(),
+                b.shunt_p.finish(),
+                b.node_p.finish(),
             ),
             (
                 MeasurementKind::ReactivePower,
-                acc.appliance_q.finish(),
-                acc.shunt_q.finish(),
-                acc.node_q.finish(),
+                b.appliance_q.finish(),
+                b.shunt_q.finish(),
+                b.node_q.finish(),
             ),
         ] {
             if let Some((value, sigma)) = appliance {
@@ -512,10 +673,10 @@ pub fn measurements_from_pgm(
         }
     }
 
-    let mut source_branches: Vec<usize> = sources.keys().copied().collect();
+    let mut source_branches: Vec<usize> = acc.sources.keys().copied().collect();
     source_branches.sort_unstable();
     for branch in source_branches {
-        let (p, q) = sources[&branch];
+        let (p, q) = acc.sources[&branch];
         let target = Target::SourceInjection { branch };
         if let Some((value, sigma)) = p.finish() {
             out.push(Measurement { kind: MeasurementKind::ActivePower, target, value, sigma });
@@ -526,16 +687,16 @@ pub fn measurements_from_pgm(
     }
 
     let mut branch_keys: Vec<(usize, Terminal)> =
-        branch_p.keys().chain(branch_q.keys()).copied().collect();
+        acc.branch_p.keys().chain(acc.branch_q.keys()).copied().collect();
     branch_keys.sort_unstable_by_key(|&(b, t)| (b, t == Terminal::To));
     branch_keys.dedup();
     for key in branch_keys {
         let (branch, terminal) = key;
         let target = Target::BranchTerminal { branch, terminal };
-        if let Some((value, sigma)) = branch_p.get(&key).copied().unwrap_or_default().finish() {
+        if let Some((value, sigma)) = acc.branch_p.get(&key).copied().unwrap_or_default().finish() {
             out.push(Measurement { kind: MeasurementKind::ActivePower, target, value, sigma });
         }
-        if let Some((value, sigma)) = branch_q.get(&key).copied().unwrap_or_default().finish() {
+        if let Some((value, sigma)) = acc.branch_q.get(&key).copied().unwrap_or_default().finish() {
             out.push(Measurement { kind: MeasurementKind::ReactivePower, target, value, sigma });
         }
     }
@@ -734,7 +895,37 @@ mod tests {
         let q = find(&ms, MeasurementKind::ReactivePower, Target::Bus(1));
         assert!((p.value + 0.002).abs() < 1e-12, "p={}", p.value);
         assert!((q.value + 0.0005).abs() < 1e-12, "q={}", q.value);
-        assert!((p.sigma - 1e-5).abs() < 1e-15, "sigma={}", p.sigma);
+        // `power_sigma` is an *apparent* power sigma, which power-grid-model
+        // splits across the two components as `Var(P) = Var(Q) = σ_S²/2`. So the
+        // per-component deviation is `σ_S/√2`, not `σ_S`: 10/1e6/√2.
+        assert!(
+            (p.sigma - 1e-5 / std::f64::consts::SQRT_2).abs() < 1e-15,
+            "sigma={}",
+            p.sigma
+        );
+    }
+
+    /// `p_sigma`/`q_sigma` are per-component already, so they are *not* divided
+    /// by √2 the way `power_sigma` is.
+    ///
+    /// This is the distinction that makes the split matter. When every sensor in
+    /// a document falls back to `power_sigma`, scaling them all by the same
+    /// constant leaves the weighted-least-squares optimum untouched and the rule
+    /// is unobservable. Mixing the two forms in one document is what exposes it,
+    /// and power-grid-model's `unbalanced-power-measurements-*` fixtures do
+    /// exactly that.
+    #[test]
+    fn per_component_sigmas_are_not_rescaled() {
+        let (input, net) = network_with_sensors(
+            r#""sym_power_sensor":[{"id":11,"measured_object":5,"measured_terminal_type":4,
+                 "p_measured":2000.0,"q_measured":500.0,
+                 "p_sigma":10.0,"q_sigma":20.0}]"#,
+        );
+        let ms = measurements_from_pgm(&input, &net, 1e6).unwrap();
+        let p = find(&ms, MeasurementKind::ActivePower, Target::Bus(1));
+        let q = find(&ms, MeasurementKind::ReactivePower, Target::Bus(1));
+        assert!((p.sigma - 1e-5).abs() < 1e-15, "p sigma={}", p.sigma);
+        assert!((q.sigma - 2e-5).abs() < 1e-15, "q sigma={}", q.sigma);
     }
 
     /// A source uses the *generator* reference direction, so the same positive

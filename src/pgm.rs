@@ -45,6 +45,10 @@ pub struct PgmData {
     pub sym_voltage_sensor: Vec<PgmSymVoltageSensor>,
     #[serde(default)]
     pub sym_power_sensor: Vec<PgmSymPowerSensor>,
+    #[serde(default)]
+    pub asym_voltage_sensor: Vec<PgmAsymVoltageSensor>,
+    #[serde(default)]
+    pub asym_power_sensor: Vec<PgmAsymPowerSensor>,
 }
 
 #[derive(Deserialize)]
@@ -402,6 +406,56 @@ pub struct PgmSymPowerSensor {
     pub p_sigma: f64,
     #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
     pub q_sigma: f64,
+}
+
+/// PGM's `asym_voltage_sensor`: a per-phase voltage magnitude and angle.
+///
+/// The per-unit base differs from the symmetric sensor's. PGM divides by
+/// `u_rated * u_scale`, with `u_scale` 1 for a symmetric sensor and `1/√3` for
+/// an asymmetric one (`common.hpp`), because `u_measured` is line-to-line on the
+/// first and line-to-neutral on the second. So an asymmetric reading is
+/// `u_measured · √3 / u_rated` per unit.
+///
+/// `u_sigma` stays a single scalar covering all three phases; PGM has no
+/// per-phase voltage sigma, and no `u_angle_sigma` at all (gridoxide's symmetric
+/// struct carries one as an extension).
+#[derive(Deserialize)]
+pub struct PgmAsymVoltageSensor {
+    pub id: u64,
+    /// The measured `node`'s id.
+    pub measured_object: u64,
+    #[serde(default = "nan3")]
+    pub u_measured: [f64; 3],
+    #[serde(default = "nan3")]
+    pub u_angle_measured: [f64; 3],
+    /// Standard deviation of the magnitude error, in volts, line-to-neutral.
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub u_sigma: f64,
+}
+
+/// PGM's `asym_power_sensor`: per-phase active/reactive power at one terminal.
+///
+/// Per-phase powers are per-unit against `s_base / 3`, PGM's `base_power_1p`,
+/// where the symmetric sensor's are against the three-phase `s_base`.
+///
+/// Unlike the voltage sensor, the per-component sigmas here *are* per-phase
+/// (`RealValue<sym>` in PGM's `PowerSensorInput`), while the fallback
+/// `power_sigma` remains one scalar for the whole sensor.
+#[derive(Deserialize)]
+pub struct PgmAsymPowerSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default = "nan3")]
+    pub p_measured: [f64; 3],
+    #[serde(default = "nan3")]
+    pub q_measured: [f64; 3],
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub power_sigma: f64,
+    #[serde(default = "nan3")]
+    pub p_sigma: [f64; 3],
+    #[serde(default = "nan3")]
+    pub q_sigma: [f64; 3],
 }
 
 // ── Output structs (used by integration tests) ────────────────────────────────

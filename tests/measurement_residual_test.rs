@@ -150,14 +150,14 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
 ///
 /// Excluded, with reasons rather than silently:
 ///
-/// - the `single-node-source-asym-voltage-sensor*` pair: their only sensors are
-///   asymmetric, and this is the symmetric path, so they yield no measurements
-///   to check;
-/// - `dummy-test-sym`, for the same reason in mixed form: it carries
-///   `asym_voltage_sensor` and `asym_power_sensor` alongside symmetric ones, so
-///   the symmetric path sees only part of its measurement set and solves a
-///   different problem than power-grid-model does. Its `link` is modelled
-///   correctly; the asymmetric sensors are the gap;
+/// - `dummy-test-sym`: its `link` is modelled, and so are its asymmetric
+///   sensors now, but gridoxide stamps a link at `topology::IDEAL_CONNECTION_Y`
+///   (`2e5+j2e5` p.u.) where power-grid-model uses `1e8+j1e8`. That is a
+///   deliberate divergence — `G = HᵀWH` squares the admittance, and PGM's value
+///   makes the `node-injection-*` fixtures singular — but it moves the solved
+///   state by ~3e-6 p.u., which is above this test's own three-sigma premise on
+///   the tightest rows. The estimator is checked against it at 1e-5 in
+///   `tests/state_estimation_test.rs`;
 /// - `inf-measurement-with-injection-measured-unmeasured-appliances`: its bus
 ///   carries both measured and unmeasured appliances, so the measured subset is
 ///   not the bus injection. `measurements_from_pgm` currently sums appliance
@@ -257,15 +257,15 @@ fn every_symmetric_fixture_is_either_modelled_or_excluded() {
         if !entry.path().join("sym_output.json").exists() || MODELLED_FIXTURES.contains(&name.as_str()) {
             continue;
         }
-        // `link` is modelled now (stamped as a branch, see `pgm::LINK_Y`), and
-        // `measured_terminal_type` 6/7/8 are too, so neither excludes a fixture
-        // any more. What remains are the four documented reasons above.
-        let is_asym_only = name.starts_with("single-node-source-asym-voltage-sensor")
-            || name == "dummy-test-sym";
+        // `link` is modelled now (stamped as a branch, see `pgm::LINK_Y`),
+        // `measured_terminal_type` 6/7/8 are, and so are asymmetric sensors
+        // reduced to the symmetric problem — so none of those excludes a
+        // fixture any more. What remains are the four documented reasons above.
+        let link_regularization = name == "dummy-test-sym";
         let incomplete = !has_complete_state(&entry.path());
         let partial_appliances = name.ends_with("measured-unmeasured-appliances");
         let inconsistent = INCONSISTENT_BY_DESIGN.contains(&name.as_str());
-        if !is_asym_only && !incomplete && !partial_appliances && !inconsistent {
+        if !link_regularization && !incomplete && !partial_appliances && !inconsistent {
             unexplained.push(name);
         }
     }
