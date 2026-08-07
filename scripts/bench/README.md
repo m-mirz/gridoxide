@@ -662,10 +662,34 @@ any timing statement about the cases where both run. Where both run they are wit
 faster on case14 (0.1 vs 0.2 ms), PGM faster on case118 (0.7 vs 1.4 ms).
 
 **Iterative-linear.** PGM is faster, by a ratio remarkably stable with size — 1.6x at case300, 1.8x at
-case1354pegase, 2.0x at case2869pegase. A gap that flat across an order of magnitude is a constant-factor gap
-in per-iteration work, not an asymptotic one, and it is the clearest standing gap in gridoxide's state
-estimation. `docs/src/state_estimation/iterative.md` traces it: ~30% in setup and its single factorization,
-~70% over 45 cheap iterations on case1354pegase against Newton-Raphson's 6.
+case1354pegase, 2.0x at case2869pegase. This used to read that flatness as "a constant-factor gap in
+per-iteration work, not an asymptotic one". **That inference was wrong, and backwards.** A stable ratio is
+equally consistent with two ratios that happen to be stable, which is what this is.
+
+```bash
+.venv-ls2g/bin/python3 scripts/bench/se_iterations.py /tmp/se_bench
+```
+
+`se_iterations.py` measures the iteration count identically for both tools — the smallest `max_iterations`
+that does not fail — having first checked the two convergence criteria are the same quantity (both take
+`max over buses of |Δu|`, phase-normalized, against a 1e-8 default):
+
+| case | PGM its | gridoxide its | iterations | ms per iteration |
+|---|---|---|---|---|
+| case300 | 9 | 29 | 3.2x | **0.62x** |
+| case1354pegase | 10 | 28 | 2.8x | **0.71x** |
+| case2869pegase | 10 | 33 | 3.3x | **0.71x** |
+
+**gridoxide's iterations are 30-40% cheaper than PGM's; it just takes three times as many.** Both tools
+reach the same answer — max |Δu| between their solutions is 7.6e-9 to 5.2e-7, agreement at their shared
+tolerance — so this is one problem with one optimum and two paths to it. The standing gap is a
+convergence-rate gap, and the linear algebra the earlier reading pointed at is already ahead.
+
+Taking the damping out does not close it: undamped, gridoxide's map locks into a period-2 limit cycle at
+~1.7e-1 rather than converging, so the under-relaxation is load-bearing rather than overhead.
+`docs/src/state_estimation/iterative.md` has the trace and rules out the two obvious mechanisms — the `|U|²`
+weight scaling PGM deliberately omits, and the zero-injection KKT constraints it has no equivalent of.
+Neither removes the cycle.
 
 **Accuracy is not a differentiator on this data.** Where PGM answers, the two tools agree to 5.8e-15 V on
 case14 and 3.3e-15 V on case118. Against the state the measurements were read from, gridoxide's

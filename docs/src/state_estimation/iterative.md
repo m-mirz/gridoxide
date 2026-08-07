@@ -139,6 +139,84 @@ case2869pegase — and there the factorization is not the bottleneck at all. §7
 So the open lead for this method is its **convergence rate**, not its linear algebra: it needs 45
 iterations here where Newton-Raphson needs 6.
 
+### Measured against power-grid-model's own iteration count
+
+That last paragraph was a conclusion about gridoxide on its own. Comparing the *same* method in the
+two tools sharpens it into something more useful, and reverses the reading §7 of
+`scripts/bench/README.md` used to give.
+
+Neither tool reports an iteration count through its public API, so `scripts/bench/se_iterations.py`
+obtains it the same way for both: the smallest `max_iterations` budget that does not fail, found by
+bisection. Before comparing anything it is worth knowing the two criteria are the same quantity, and
+they are — power-grid-model's `iterate_unknown` returns `max over buses of |u_new − u_old|`
+phase-normalized and loops `while (max_dev > err_tol)`; gridoxide's `raw_step` is
+`.map(|(a, b)| (a - b).norm()).fold(0.0, f64::max)` over the same normalized voltages, and both
+default to `1e-8`. The one asymmetry is that gridoxide tests `raw_step × relaxation`, where
+power-grid-model has no relaxation at all and always takes the full step.
+
+On the documents `examples/bench_se.rs --emit` writes:
+
+| case | buses | PGM ms | its | ms/it | gridoxide ms | its | ms/it | time | iters | per-iteration |
+|---|---|---|---|---|---|---|---|---|---|---|
+| case14 | 14 | 0.25 | 15 | 0.017 | 0.10 | 31 | 0.003 | **0.42x** | 2.07x | **0.20x** |
+| case118 | 118 | 0.53 | 18 | 0.029 | 0.59 | 35 | 0.017 | 1.11x | 1.94x | **0.57x** |
+| case300 | 300 | 0.73 | 9 | 0.082 | 1.46 | 29 | 0.050 | 1.99x | 3.22x | **0.62x** |
+| case1354pegase | 1,354 | 3.58 | 10 | 0.358 | 7.16 | 28 | 0.256 | 2.00x | 2.80x | **0.71x** |
+| case2869pegase | 2,869 | 7.76 | 10 | 0.776 | 18.07 | 33 | 0.548 | 2.33x | 3.30x | **0.71x** |
+
+**gridoxide's iterations are individually cheaper than power-grid-model's — by 30-40% on every case
+above 100 buses — and it takes about three times as many of them.** The flat ~2x total is the product
+of those two effects pulling against each other, not evidence of a constant-factor gap in the
+per-iteration work. Reading a stable ratio as a per-iteration constant was the error; a stable ratio
+is equally consistent with two ratios that happen to be stable.
+
+The control that makes this comparison mean anything is that both tools reach the *same answer*: max
+|Δu| between their solutions is 7.6e-9 to 5.2e-7 across these cases, i.e. agreement at their shared
+tolerance. Same problem, same optimum, different paths to it.
+
+So the lever is convergence rate, confirmed rather than inferred — and specifically **not** the
+linear algebra, which is already ahead.
+
+### The relaxation is load-bearing, not overhead
+
+The obvious next move from that table is to take the damping out, since power-grid-model manages
+without it. That does not work, and finding out why moves the problem somewhere more interesting.
+
+Forced undamped on these same documents, the iteration does not converge slowly — it does not
+converge at all. The step falls for three iterations and then locks onto a constant:
+
+```text
+iter        1        2        3        4       ...      58       59       60
+step   6.09e-1  2.27e-1  1.77e-1  1.76e-1     ...  1.748610e-1  1.748610e-1  1.748610e-1
+```
+
+Constant to seven digits for fifty-odd iterations is a limit cycle, not a floor — the step is not
+shrinking at all, so the iterate is circulating rather than settling. That under-relaxation at 0.5
+restores convergence places the dominant eigenvalue near −1: damping maps `λ` to `0.5 + 0.5λ`, which
+sends `λ ≈ −1` to `≈ 0`. power-grid-model's map, on the identical document with the identical
+measurements and no damping at all, is stable there.
+
+Two candidate mechanisms were tested and both ruled out:
+
+* **The `|U|²` weight scaling.** gridoxide scales a power row's weight by the reference bus's
+  starting `|U|²`, where power-grid-model deliberately does not — its
+  `iterative_linear_se_solver.hpp` says so directly ("the variance is not scaled as an
+  approximation"). Removing the scaling moves the limit cycle's amplitude (1.75e-1 → 1.81e-1 on
+  case300) and does not remove it.
+* **The zero-injection KKT constraints.** These are 66 to 869 buses on the cases above, and
+  power-grid-model has no equivalent augmentation. Dropping them entirely shrinks the amplitude to
+  5.7e-2 and still leaves a limit cycle.
+
+Whatever destabilizes the map is therefore in its core — the power-to-current conversion, the phase
+normalization, or the interaction between them — rather than in either of the two places gridoxide
+visibly departs from power-grid-model. That is the open question, and it is worth answering before
+anyone reaches for an accelerator: a scheme layered on an unstable map inherits the instability.
+
+Note this is a different measurement set from the one the next section traces. These documents carry
+voltage magnitudes and branch flows only; `examples/se_converge.rs` synthesizes bus injections too,
+and its undamped run decays rather than cycling. Both are real, and the difference between them is
+itself a clue about which rows drive the instability.
+
 ### What actually ends the iteration
 
 Tracing that convergence rate is worth doing before trying to improve it, because it is not one

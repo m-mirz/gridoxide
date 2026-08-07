@@ -72,7 +72,9 @@ On **state estimation** the same pattern holds in both directions: gridoxide's N
 estimator is the only one of the two that answers at all above 300 buses, where power-grid-model's
 raises `SparseMatrixError` on documents its own iterative-linear method estimates from without
 complaint; on iterative-linear itself power-grid-model is 1.6-2.0x faster across an order of
-magnitude of problem size, the clearest standing gap on that side.
+magnitude of problem size, the clearest standing gap on that side. That gap is a convergence-rate
+one, not a linear-algebra one — gridoxide's iterations are 30-40% cheaper and it takes three times
+as many of them.
 
 ## License
 

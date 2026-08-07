@@ -244,7 +244,10 @@ matter:
    is the distance between estimating a snapshot and running an estimator.
 
 On speed, the iterative-linear method runs 1.6-2.0x behind power-grid-model's across an order of
-magnitude of problem size (`scripts/bench/README.md` §7).
+magnitude of problem size (`scripts/bench/README.md` §7). Measured rather than inferred, that is
+entirely an iteration-count gap: gridoxide's own iterations are 30-40% *cheaper* than
+power-grid-model's and it takes about three times as many, and undamped its map does not converge at
+all. See `docs/src/state_estimation/iterative.md`.
 
 Two smaller gaps have closed. A sensor on a three-winding transformer side (`measured_terminal_type`
 6/7/8) used to return `MeasurementError::UnsupportedTerminalType`; it now maps to the corresponding
