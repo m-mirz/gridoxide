@@ -388,8 +388,28 @@ pub fn estimate(
             .fold(0.0f64, f64::max);
         // Stalling, not converging: back off. The floor keeps a badly
         // conditioned case crawling rather than freezing.
-        if iteration > 2 && raw_step > previous_step * 0.9 {
-            relaxation = (relaxation * 0.5).max(1.0 / 64.0);
+        // Under-relaxation, adaptive in *both* directions.
+        //
+        // Backing off when the step stops shrinking is what breaks the
+        // two-cycle this method is prone to (see the chapter). Letting the
+        // factor grow again when progress resumes is what stops that backoff
+        // becoming permanent — and it was, because the flat-start transient
+        // alone trips the stall test at iteration 3, after which a ratchet that
+        // only descends spends the whole run at half a step.
+        //
+        // The growth rate is measured rather than derived. This map's optimal
+        // constant relaxation sits near 0.7 and the map goes unstable above
+        // ~0.75, so the useful range is narrow and network-dependent; hunting
+        // for it adaptively beats picking one. Across the five benchmark
+        // documents, growth factors of 1.2, 1.3 and 1.4 all converge, and 1.2
+        // has the best worst case — 1.3 costs case2869pegase 30 iterations and
+        // 1.4 costs case14 seventy, where 1.2 needs 20 and 19.
+        if iteration > 2 {
+            if raw_step > previous_step * 0.9 {
+                relaxation = (relaxation * 0.5).max(1.0 / 64.0);
+            } else if raw_step < previous_step * 0.75 {
+                relaxation = (relaxation * 1.2).min(1.0);
+            }
         }
         previous_step = raw_step;
 

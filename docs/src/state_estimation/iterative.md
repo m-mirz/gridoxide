@@ -64,7 +64,7 @@ step:       6.9e-2 5.2e-2 5.6e-2 5.6e-2 5.6e-2 5.5e-2 5.4e-2 5.3e-2
 ```
 
 gridoxide backs the step off — halving a relaxation factor whenever an iteration fails to improve on
-the last — which breaks the cycle:
+the last, and letting it grow again by 1.2 whenever progress resumes — which breaks the cycle:
 
 ```text
 iteration:  1     2     3     5     10    20
@@ -80,8 +80,9 @@ same state an undamped one would reach if it got there at all.
 
 Relaxation engages whenever an iteration fails to improve on the last by 10%, which is not the same
 thing as "only on a pathological problem" — a flat start alone can trip it, and on case1354pegase it
-does, at iteration 3. See [What actually ends the iteration](#what-actually-ends-the-iteration) below,
-where that turns out to matter more than this section originally assumed.
+does, at iteration 3. That is exactly why the factor has to be able to *recover*: see
+[Letting the relaxation recover](#letting-the-relaxation-recover) below, where a version that could
+only descend turned out to be spending whole runs at half a step because of one transient.
 
 ## Measured cost
 
@@ -156,13 +157,16 @@ power-grid-model has no relaxation at all and always takes the full step.
 
 On the documents `examples/bench_se.rs --emit` writes:
 
-| case | buses | PGM ms | its | ms/it | gridoxide ms | its | ms/it | time | iters | per-iteration |
-|---|---|---|---|---|---|---|---|---|---|---|
-| case14 | 14 | 0.25 | 15 | 0.017 | 0.10 | 31 | 0.003 | **0.42x** | 2.07x | **0.20x** |
-| case118 | 118 | 0.53 | 18 | 0.029 | 0.59 | 35 | 0.017 | 1.11x | 1.94x | **0.57x** |
-| case300 | 300 | 0.73 | 9 | 0.082 | 1.46 | 29 | 0.050 | 1.99x | 3.22x | **0.62x** |
-| case1354pegase | 1,354 | 3.58 | 10 | 0.358 | 7.16 | 28 | 0.256 | 2.00x | 2.80x | **0.71x** |
-| case2869pegase | 2,869 | 7.76 | 10 | 0.776 | 18.07 | 33 | 0.548 | 2.33x | 3.30x | **0.71x** |
+| case | buses | PGM its | gridoxide its | iterations | ms per iteration |
+|---|---|---|---|---|---|
+| case14 | 14 | 15 | 31 | 2.07x | **0.20x** |
+| case118 | 118 | 18 | 35 | 1.94x | **0.57x** |
+| case300 | 300 | 9 | 29 | 3.22x | **0.62x** |
+| case1354pegase | 1,354 | 10 | 28 | 2.80x | **0.71x** |
+| case2869pegase | 2,869 | 10 | 33 | 3.30x | **0.71x** |
+
+(gridoxide's counts here are the ones that stood before
+[Letting the relaxation recover](#letting-the-relaxation-recover), which cuts them by about 40%.)
 
 **gridoxide's iterations are individually cheaper than power-grid-model's — by 30-40% on every case
 above 100 buses — and it takes about three times as many of them.** The flat ~2x total is the product
@@ -176,6 +180,50 @@ tolerance. Same problem, same optimum, different paths to it.
 
 So the lever is convergence rate, confirmed rather than inferred — and specifically **not** the
 linear algebra, which is already ahead.
+
+### Letting the relaxation recover
+
+The section above establishes two things that pull in opposite directions: the damping cannot be
+removed, because the undamped map does not converge at all; and the damping is what makes gridoxide
+take three times power-grid-model's iterations. Both are true, and the way between them is that the
+factor could only ever go *down*.
+
+The rule was: halve whenever an iteration fails to improve on the last by 10%. Nothing ever restored
+it. And the flat-start transient alone trips that test — at iteration 3 on case1354pegase, before the
+iteration has settled into anything — so a run would spend its whole length at half a step because of
+one early stumble that had nothing to do with the instability the damping exists for.
+
+Adding one clause fixes it: when the step *is* shrinking, by more than 25%, grow the factor by 1.2
+again, capped at 1. The result on the benchmark documents:
+
+| case | before | after | PGM |
+|---|---|---|---|
+| case14 | 31 | **19** | 15 |
+| case118 | 35 | **21** | 18 |
+| case300 | 29 | **18** | 9 |
+| case1354pegase | 28 | **17** | 10 |
+| case2869pegase | 33 | **20** | 10 |
+
+About 40% fewer iterations, and 16-22% less wall clock — measured interleaved, old build and new,
+two rounds. The two do not match because a fixed setup-and-factorization cost does not shrink with
+the iteration count; that it is now a *larger* share of the total is the point of having cut the
+rest. The iteration-count gap to power-grid-model falls from 2.0-3.3x to 1.2-2.0x, and on case118
+gridoxide is now the faster of the two outright.
+
+The growth rate is measured rather than derived, and the measurement is the interesting part. Forcing
+a *constant* relaxation shows this map's optimum sits near 0.7 — 23 iterations on case300 against 35
+at 0.5 — with the map going unstable just above it: 0.8 costs 36 iterations and 0.9 costs 80. So
+there is a narrow good range whose location depends on the network, which is an argument for hunting
+for it adaptively rather than for hardcoding 0.7. Among growth factors that all converge, 1.2 has the
+best worst case: 1.3 costs case2869pegase 30 iterations and 1.4 costs case14 seventy, where 1.2 needs
+20 and 19.
+
+The answer is untouched, as it must be — `the_true_state_is_a_fixed_point` already pins that damping
+changes the path and never the destination, and the estimates agree to 2.5e-9 across the change,
+which is below the 1e-8 the iteration is asked for.
+
+**This does not explain why power-grid-model needs no damping at all.** That remains open, and the
+next section narrows it.
 
 ### The relaxation is load-bearing, not overhead
 
@@ -196,7 +244,13 @@ restores convergence places the dominant eigenvalue near −1: damping maps `λ`
 sends `λ ≈ −1` to `≈ 0`. power-grid-model's map, on the identical document with the identical
 measurements and no damping at all, is stable there.
 
-Two candidate mechanisms were tested and both ruled out:
+The rows responsible are the *branch-terminal power* ones. Dropping them from the undamped run drops
+the step from 1.7e-1 to 7.1e-4 — three orders of magnitude — while dropping the voltage rows instead
+changes nothing at all. That fits their shape: a branch row converts its reading with
+`I = conj(S/U_at)`, so its right-hand side depends on the inverse of a voltage the same row solves
+for, and on these documents the branch rows outweigh the voltage rows by four orders of magnitude.
+
+Two further candidate mechanisms were tested and both ruled out:
 
 * **The `|U|²` weight scaling.** gridoxide scales a power row's weight by the reference bus's
   starting `|U|²`, where power-grid-model deliberately does not — its

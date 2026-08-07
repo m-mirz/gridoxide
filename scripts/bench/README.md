@@ -640,10 +640,10 @@ those calls — PGM through `PowerGridModel`, gridoxide through the `PersistentE
 | case | buses | measurements | PGM nr | PGM il | gridoxide nr | gridoxide il |
 |---|---|---|---|---|---|---|
 | case14 | 14 | 94 | 0.2 | 0.2 | **0.1** | 0.1 |
-| case118 | 118 | 862 | **0.7** | 0.5 | 1.2 | 0.6 |
-| case300 | 300 | 1,944 | `SparseMatrixError`¹ | **0.7** | 6.3 | 1.5 |
-| case1354pegase | 1,354 | 9,318 | `SparseMatrixError`¹ | **3.4** | 23.6 | 7.2 |
-| case2869pegase | 2,869 | 21,197 | `SparseMatrixError`¹ | **8.4** | 72.2 | 18.3 |
+| case118 | 118 | 862 | 0.7 | 0.5 | 1.2 | **0.5** |
+| case300 | 300 | 1,944 | `SparseMatrixError`¹ | **0.7** | 6.3 | 1.3 |
+| case1354pegase | 1,354 | 9,318 | `SparseMatrixError`¹ | **3.4** | 23.6 | 6.1 |
+| case2869pegase | 2,869 | 21,197 | `SparseMatrixError`¹ | **8.4** | 72.2 | 16.5 |
 
 Re-measured. The previous revision of this table gave gridoxide's Newton-Raphson as 4.3 / 24.5 / 16.5
 on the last three cases; 16.5 was its *iterative-linear* figure duplicated into the wrong column, and
@@ -682,20 +682,26 @@ that does not fail — having first checked the two convergence criteria are the
 
 | case | PGM its | gridoxide its | iterations | ms per iteration |
 |---|---|---|---|---|
-| case300 | 9 | 29 | 3.2x | **0.62x** |
-| case1354pegase | 10 | 28 | 2.8x | **0.71x** |
-| case2869pegase | 10 | 33 | 3.3x | **0.71x** |
+| case300 | 9 | 18 | 2.0x | **0.75x** |
+| case1354pegase | 10 | 17 | 1.7x | **0.99x** |
+| case2869pegase | 10 | 20 | 2.0x | **0.87x** |
 
-**gridoxide's iterations are 30-40% cheaper than PGM's; it just takes three times as many.** Both tools
+**gridoxide's iterations are individually cheaper than PGM's; it takes about twice as many.** Both tools
 reach the same answer — max |Δu| between their solutions is 7.6e-9 to 5.2e-7, agreement at their shared
 tolerance — so this is one problem with one optimum and two paths to it. The standing gap is a
 convergence-rate gap, and the linear algebra the earlier reading pointed at is already ahead.
 
-Taking the damping out does not close it: undamped, gridoxide's map locks into a period-2 limit cycle at
-~1.7e-1 rather than converging, so the under-relaxation is load-bearing rather than overhead.
-`docs/src/state_estimation/iterative.md` has the trace and rules out the two obvious mechanisms — the `|U|²`
+Those counts were 29 / 28 / 33 until the under-relaxation was allowed to *recover* rather than only ever
+back off — the flat-start transient alone tripped the backoff at iteration 3, after which a whole run ran
+at half a step. About 40% fewer iterations and 16-22% less wall clock, which is why the table above now
+reads 1.5-1.8x where it read 2.0-2.3x, and why case118 has crossed over to gridoxide being faster.
+
+Taking the damping out entirely does not work: undamped, gridoxide's map locks into a limit cycle at
+~1.7e-1 rather than converging. `docs/src/state_estimation/iterative.md` has the trace, localizes the
+instability to the branch-terminal power rows (dropping them takes the undamped step from 1.7e-1 to
+7.1e-4; dropping the voltage rows changes nothing), and rules out the two obvious mechanisms — the `|U|²`
 weight scaling PGM deliberately omits, and the zero-injection KKT constraints it has no equivalent of.
-Neither removes the cycle.
+Why PGM needs no damping at all is still open.
 
 **Accuracy is not a differentiator on this data.** Where PGM answers, the two tools agree to 5.8e-15 V on
 case14 and 3.3e-15 V on case118. Against the state the measurements were read from, gridoxide's
