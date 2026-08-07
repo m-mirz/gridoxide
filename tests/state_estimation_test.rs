@@ -452,7 +452,7 @@ fn bad_data_analysis_flags_only_the_inconsistent_fixture() {
         let report = estimate(&measurements, &mut buses, &se_net, &SeOptions::default());
 
         let layout = StateLayout::new(&buses, &measurements, &se_net);
-        let constraints = Constraints::new(&se_net.zero_injection);
+        let constraints = Constraints::new(&se_net.constrained_buses());
         let bad = bad_data::analyze(
             &measurements,
             &report.residuals,

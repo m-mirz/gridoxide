@@ -779,7 +779,7 @@ impl StateEstimationModel {
             &self.measurements,
             &self.se_net,
         );
-        let constraints = crate::se::constraints::Constraints::new(&self.se_net.zero_injection);
+        let constraints = crate::se::constraints::Constraints::new(&self.se_net.constrained_buses());
         let bad = crate::se::bad_data::analyze(
             &self.measurements,
             &report.residuals,

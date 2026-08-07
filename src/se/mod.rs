@@ -62,6 +62,24 @@ pub struct SeNetwork {
     /// Per-bus zero-injection flags, carried through from the conversion — see
     /// [`PgmNetwork::zero_injection`](crate::pgm::PgmNetwork::zero_injection).
     pub zero_injection: Vec<bool>,
+    /// Whether each bus is reachable from any source.
+    ///
+    /// A connected component containing no source carries no voltage that any
+    /// measurement can determine: every quantity in it is identically zero, and
+    /// the sensors that sit there — a network can perfectly well have a voltage
+    /// sensor on a de-energized node — describe nothing. power-grid-model
+    /// reports such nodes as `energized: 0` with a state of exactly zero, and
+    /// decides it topologically, ignoring whatever sensors are attached.
+    ///
+    /// Without this the gain matrix comes back singular rather than merely
+    /// uninformative, because those buses' columns are *touched* — by their own
+    /// sensors, or by a zero-injection constraint — while being determined by
+    /// nothing. `jacobian::mask_untouched` only pins what nothing touches at
+    /// all, which catches a fully isolated bus and not this.
+    ///
+    /// `solver::PersistentSolver` has done the equivalent for power flow all
+    /// along, via `network::connected_components` and `mark_unreferenced_islands`.
+    pub energized: Vec<bool>,
 }
 
 impl SeNetwork {
@@ -94,8 +112,33 @@ impl SeNetwork {
             list.sort_unstable();
         }
 
+        // A component is energized if any bus in it is fed by a source. The
+        // virtual slack bus behind a source is in that same component, since
+        // the synthesized branch connects them.
+        let mut energized = vec![false; n];
+        for component in crate::network::connected_components(&ybus) {
+            if component.iter().any(|&i| !source_branches[i].is_empty()) {
+                for &i in &component {
+                    energized[i] = true;
+                }
+            }
+        }
+
         let zero_injection = net.zero_injection.clone();
-        Self { ybus, branches, shunt_y, source_branches, zero_injection }
+        Self { ybus, branches, shunt_y, source_branches, zero_injection, energized }
+    }
+
+    /// Buses a zero-injection constraint should apply to.
+    ///
+    /// A de-energized bus's injection is zero too, but asserting it adds a row
+    /// that reaches columns nothing determines — which is how a constraint turns
+    /// an uninformative island into a singular matrix.
+    pub fn constrained_buses(&self) -> Vec<bool> {
+        self.zero_injection
+            .iter()
+            .zip(&self.energized)
+            .map(|(&zero, &live)| zero && live)
+            .collect()
     }
 
 }
@@ -135,6 +178,7 @@ pub fn measurement_functions_with(
         .iter()
         .enumerate()
         .map(|(i, m)| match (m.kind, m.target) {
+            _ if !model.is_live(i) => 0.0,
             (MeasurementKind::VoltageMagnitude, Target::Bus(b)) => buses[b].voltage_mag,
             (MeasurementKind::VoltageAngle, Target::Bus(b)) => buses[b].voltage_ang,
             _ => match model.functional(i) {
@@ -166,6 +210,15 @@ pub fn measurement_functions_with(
 /// functional, and for a target that does not resolve in this network.
 pub struct MeasurementModel {
     functionals: Vec<Option<functional::CurrentFunctional>>,
+    /// Whether each measurement describes anything at all.
+    ///
+    /// False for a measurement whose bus is de-energized. Such a row is dropped
+    /// from the system entirely rather than given a zero weight: a zero-weight
+    /// row still *touches* its columns, and touching is what stops
+    /// [`jacobian::mask_untouched`] pinning them. power-grid-model does the same
+    /// by construction, since a de-energized node is not in its math model at
+    /// all.
+    live: Vec<bool>,
 }
 
 impl MeasurementModel {
@@ -177,15 +230,33 @@ impl MeasurementModel {
     /// cached factorization, since both depend on which quantities are measured
     /// where and neither on their values.
     pub fn new(measurements: &[Measurement], net: &SeNetwork) -> Self {
-        Self {
-            functionals: measurements
-                .iter()
-                .map(|m| match (m.kind, m.target) {
-                    (MeasurementKind::VoltageMagnitude | MeasurementKind::VoltageAngle, Target::Bus(_)) => None,
-                    _ => net.functional(m.target),
-                })
-                .collect(),
-        }
+        let functionals: Vec<Option<functional::CurrentFunctional>> = measurements
+            .iter()
+            .map(|m| match (m.kind, m.target) {
+                (MeasurementKind::VoltageMagnitude | MeasurementKind::VoltageAngle, Target::Bus(_)) => None,
+                _ => net.functional(m.target),
+            })
+            .collect();
+
+        // Which bus a measurement lives on: its own for a voltage row, the
+        // functional's `at` otherwise. Both ends of a branch are in one
+        // component, so either end answers the question.
+        let live = measurements
+            .iter()
+            .zip(&functionals)
+            .map(|(m, f)| match (m.target, f) {
+                (Target::Bus(b), None) => net.energized[b],
+                (_, Some(f)) => net.energized[f.at],
+                (_, None) => false,
+            })
+            .collect();
+
+        Self { functionals, live }
+    }
+
+    /// Whether measurement `i` describes anything — see [`live`](Self::live).
+    pub fn is_live(&self, measurement: usize) -> bool {
+        self.live[measurement]
     }
 
     pub fn functional(&self, measurement: usize) -> Option<&functional::CurrentFunctional> {
@@ -249,8 +320,49 @@ pub(crate) mod tests {
             shunt_y: vec![Complex::new(0.0, 0.0), y_shunt],
             source_branches: vec![Vec::new(), vec![0]],
             zero_injection: vec![false, false],
+            // One component, fed by the source on bus 1.
+            energized: vec![true, true],
         };
         (net, vec![bus(0, 1.02, 0.03), bus(1, 0.99, -0.02)])
+    }
+
+    /// Energization is topological: a component with a source is live, one
+    /// without is not, whatever sensors sit on it.
+    #[test]
+    fn energization_follows_components_not_sensors() {
+        // Three buses: 0–1 joined and fed by a source on 1, bus 2 isolated.
+        let y = Complex::new(1.0, 0.0) / Complex::new(0.05, 0.2);
+        let mut yb = YBus::new(3);
+        for (i, j, v) in [(0, 0, y), (1, 1, y), (0, 1, -y), (1, 0, -y)] {
+            yb.add(i, j, v);
+        }
+        // An isolated bus still needs a diagonal to appear in the Y-bus at all.
+        yb.add(2, 2, Complex::new(0.0, 0.0));
+
+        let net = SeNetwork {
+            ybus: yb.finish(),
+            branches: vec![BranchParams { from: 0, to: 1, y: [y, -y, -y, y] }],
+            shunt_y: vec![Complex::new(0.0, 0.0); 3],
+            source_branches: vec![Vec::new(), vec![0], Vec::new()],
+            zero_injection: vec![true, false, true],
+            energized: vec![true, true, false],
+        };
+
+        let rebuilt: Vec<bool> = crate::network::connected_components(&net.ybus)
+            .iter()
+            .fold(vec![false; 3], |mut acc, c| {
+                if c.iter().any(|&i| !net.source_branches[i].is_empty()) {
+                    for &i in c {
+                        acc[i] = true;
+                    }
+                }
+                acc
+            });
+        assert_eq!(rebuilt, vec![true, true, false], "bus 2 has no source in its component");
+
+        // And a zero-injection flag on the de-energized bus does not become a
+        // constraint, which is what used to make the gain matrix singular.
+        assert_eq!(net.constrained_buses(), vec![true, false, false]);
     }
 
     /// A shunt *consumes* `|V|²·conj(y)`, so as an injection its active part is

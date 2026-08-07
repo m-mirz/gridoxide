@@ -171,6 +171,18 @@ pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurem
     }
     crate::network::linear_initial_guess(buses, &net.ybus);
     apply_measured_magnitudes(buses, measurements);
+    // A de-energized bus is reported at exactly zero, which is both
+    // power-grid-model's convention for `energized: 0` and what
+    // `network::mark_unreferenced_islands` already does on the power-flow side.
+    // Nothing determines these buses, so `mask_untouched` pins them wherever the
+    // start leaves them — which makes the start the answer, and zero the only
+    // defensible one.
+    for (b, &live) in buses.iter_mut().zip(&net.energized) {
+        if !live {
+            b.voltage_mag = 0.0;
+            b.voltage_ang = 0.0;
+        }
+    }
 }
 
 /// Overwrites each bus's magnitude with a directly measured one where it exists.
@@ -415,7 +427,7 @@ impl PersistentEstimator {
             self.layout = Some(StateLayout::new(buses, measurements, net));
         }
         if self.constraints.is_none() {
-            self.constraints = Some(Constraints::new(&net.zero_injection));
+            self.constraints = Some(Constraints::new(&net.constrained_buses()));
         }
         if self.model.is_none() {
             self.model = Some(MeasurementModel::new(measurements, net));
@@ -459,7 +471,7 @@ pub fn estimate(
         return super::iterative::estimate(measurements, buses, net, options);
     }
     let layout = StateLayout::new(buses, measurements, net);
-    let constraints = Constraints::new(&net.zero_injection);
+    let constraints = Constraints::new(&net.constrained_buses());
     let model = MeasurementModel::new(measurements, net);
     match options.backend {
         JacobianBackend::KluNative => estimate_with(

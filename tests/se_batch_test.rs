@@ -126,16 +126,29 @@ const BATCH_FIXTURES: &[(&str, SeMethod)] = &[
     ("unbalanced-power-measurements-iterative-linear", SeMethod::IterativeLinear),
 ];
 
-/// Those whose state can be compared against power-grid-model's.
+/// Every fixture, with the tolerance its own comparison holds to.
 ///
-/// `sensor-update-nr` and `sensor-update-il` are excluded, and not for anything
-/// to do with batching — see
-/// [`de_energised_islands_are_the_reason_two_fixtures_are_excluded`]. The gap is
-/// in the estimator itself and shows identically in a single-shot run.
-const SOLVABLE_FIXTURES: &[(&str, SeMethod)] = &[
-    ("sensor-update-initially-empty", SeMethod::NewtonRaphson),
-    ("unbalanced-power-measurements-newton-raphson", SeMethod::NewtonRaphson),
-    ("unbalanced-power-measurements-iterative-linear", SeMethod::IterativeLinear),
+/// All are 1e-6 relative but `sensor-update-il`, and the reason there is the
+/// method rather than the model. Its network is `sensor-update-nr`'s, and
+/// gridoxide's *Newton-Raphson* reproduces power-grid-model's answer on it to
+/// 1e-6 — so the measurement set, the weights, the constraints and the network
+/// all agree. What differs is how the two tools linearize, and this fixture's
+/// data is inconsistent enough (objective ≈ 320, against ~1e-22 on the
+/// consistent ones) for that to show: gridoxide lands 7.8 V from
+/// power-grid-model on a 20 kV node, both of them about 1,100 V from the
+/// Newton-Raphson optimum they are each approximating.
+///
+/// Checked rather than assumed: removing the `|U|²` weight scaling that
+/// `docs/src/state_estimation/iterative.md` records as gridoxide's known
+/// departure from power-grid-model here moves the answer by less than a
+/// millivolt, so that is not the cause and the remaining difference is
+/// somewhere else in the linearization.
+const SOLVABLE_FIXTURES: &[(&str, SeMethod, f64)] = &[
+    ("sensor-update-nr", SeMethod::NewtonRaphson, 1e-6),
+    ("sensor-update-il", SeMethod::IterativeLinear, 1e-3),
+    ("sensor-update-initially-empty", SeMethod::NewtonRaphson, 1e-6),
+    ("unbalanced-power-measurements-newton-raphson", SeMethod::NewtonRaphson, 1e-6),
+    ("unbalanced-power-measurements-iterative-linear", SeMethod::IterativeLinear, 1e-6),
 ];
 
 /// A parallel batch equals a sequential loop, bit for bit, at every thread
@@ -180,7 +193,7 @@ fn a_batch_reproduces_a_sequential_loop_exactly() {
 #[test]
 fn batch_scenarios_match_pgm_per_scenario() {
     let mut checked = 0;
-    for &(name, method) in SOLVABLE_FIXTURES {
+    for &(name, method, tol) in SOLVABLE_FIXTURES {
         let l = load(name);
         let options = SeOptions { method, max_iter: 100, ..SeOptions::default() };
         let out = SeBatchSolver::new(options)
@@ -214,7 +227,7 @@ fn batch_scenarios_match_pgm_per_scenario() {
                 };
                 let got = result.buses[idx].voltage_mag * u_rated;
                 assert!(
-                    (got - u).abs() <= 1e-6 * u.abs().max(1.0),
+                    (got - u).abs() <= tol * u.abs().max(1.0),
                     "{name} scenario {i} node {id}: |V| = {got}, PGM says {u}"
                 );
                 checked += 1;
@@ -295,68 +308,60 @@ fn an_out_of_range_override_is_reported() {
 }
 
 
-/// Why `sensor-update-nr` and `sensor-update-il` are excluded from the
-/// comparison above, asserted rather than asserted-in-a-comment.
+/// A component with no source is reported at exactly zero, and the rest of the
+/// network solves around it.
 ///
-/// Their shared network has three connected components and only one source.
+/// `sensor-update-nr`'s network has three connected components and one source.
 /// Node 0 is isolated; node 3 carries a voltage sensor but no branch at all;
 /// nodes 4/5/6 are joined to each other by links and to nothing else. Only
 /// nodes 1 and 2 are reachable from the source, and power-grid-model reports
 /// every other node as `energized: 0` with a state of exactly zero — including
 /// node 3, whose sensor it simply ignores. Energization is topological.
 ///
-/// gridoxide's estimator has no equivalent notion. `mask_untouched` pins a
+/// This used to leave gridoxide's gain matrix singular: `mask_untouched` pins a
 /// column nothing *structurally* touches, which catches isolated node 0, but
 /// nodes 4/5/6 are reached by node 4's own zero-injection constraint and node 3
-/// by its voltage sensor. Those columns are touched and undetermined, so the
-/// gain matrix is singular.
-///
-/// This is a gap in the estimator, not in batching: the same document is
-/// singular through a single-shot `estimate` too, which is what this asserts.
-/// `solver::PersistentSolver` already partitions islands for power flow
-/// (`network::connected_components` + `mark_unreferenced_islands`); state
-/// estimation does not, and closing that is its own change.
+/// by its own voltage sensor. Touched, and determined by nothing.
 #[test]
-fn de_energised_islands_are_the_reason_two_fixtures_are_excluded() {
+fn a_de_energised_island_is_reported_at_zero() {
     for name in ["sensor-update-nr", "sensor-update-il"] {
         let l = load(name);
 
-        // Three components, one source: the shape the estimator cannot express.
+        // Three components, exactly one of them energized.
         let components = gridoxide::network::connected_components(&l.se_net.ybus);
-        let energised: Vec<bool> = components
+        let live = components
             .iter()
-            .map(|c| c.iter().any(|&i| !l.se_net.source_branches[i].is_empty()))
-            .collect();
+            .filter(|c| c.iter().any(|&i| !l.se_net.source_branches[i].is_empty()))
+            .count();
         assert!(
-            components.len() > 1 && energised.iter().filter(|&&e| e).count() == 1,
-            "{name}: expected several components with exactly one energised, got {} components",
-            components.len()
+            components.len() > 1 && live == 1,
+            "{name}: expected several components with exactly one energised"
         );
 
-        // Singular through the plain one-shot path, with no batch involved.
-        let mut measurements = l.template.clone();
-        for ov in &l.scenarios[0].overrides {
-            if let Some(v) = ov.value {
-                measurements[ov.measurement].value = v;
-            }
-            if let Some(s) = ov.sigma {
-                measurements[ov.measurement].sigma = s;
+        let options = SeOptions { method: SeMethod::NewtonRaphson, max_iter: 100, ..SeOptions::default() };
+        let out = SeBatchSolver::new(options)
+            .estimate(&l.buses, &l.se_net, &l.template, &l.scenarios)
+            .expect("batch estimates");
+
+        let expected = l.expected["data"].as_array().expect("batch output");
+        let mut zeroed = 0;
+        for (result, scenario) in out.iter().zip(expected) {
+            assert_eq!(result.report.status, SeStatus::Converged, "{name}: {:?}", result.report);
+            for node in scenario["node"].as_array().expect("node output") {
+                if node["energized"].as_u64() != Some(0) {
+                    continue;
+                }
+                let idx = l.node_idx[&node["id"].as_u64().expect("node id")];
+                assert_eq!(
+                    (result.buses[idx].voltage_mag, result.buses[idx].voltage_ang),
+                    (0.0, 0.0),
+                    "{name}: node {} is de-energised and must be reported at zero",
+                    node["id"]
+                );
+                zeroed += 1;
             }
         }
-        let mut buses = l.buses.clone();
-        linear_start(&mut buses, &l.se_net, &measurements);
-        let report = gridoxide::se::nr::estimate(
-            &measurements,
-            &mut buses,
-            &l.se_net,
-            &SeOptions::default(),
-        );
-        assert_eq!(
-            report.status,
-            SeStatus::Singular,
-            "{name}: expected the single-shot estimate to be singular too, so that the batch \
-             exclusion is clearly not about batching"
-        );
+        assert!(zeroed >= 8, "{name}: expected several de-energised nodes, got {zeroed}");
     }
 }
 

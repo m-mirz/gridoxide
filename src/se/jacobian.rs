@@ -265,6 +265,12 @@ pub fn measurement_jacobian_with(
         .enumerate()
         .map(|(i, m)| {
             let mut row = Row::new();
+            // A measurement on a de-energized bus contributes no row at all,
+            // not a zero-weighted one: an empty row leaves its columns
+            // untouched, which is what lets `mask_untouched` pin them.
+            if !model.is_live(i) {
+                return row;
+            }
             match (m.kind, m.target) {
                 (MeasurementKind::VoltageMagnitude, Target::Bus(b)) => {
                     push(&mut row, Some(layout.vmag(b)), 1.0)

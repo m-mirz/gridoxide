@@ -405,7 +405,7 @@ mod tests {
         let report = estimate(&measurements, &mut buses, &net, &SeOptions::default());
 
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let constraints = Constraints::new(&net.zero_injection);
+        let constraints = Constraints::new(&net.constrained_buses());
         let bad = analyze(
             &measurements,
             &report.residuals,
@@ -433,7 +433,7 @@ mod tests {
         let report = estimate(&measurements, &mut buses, &net, &SeOptions::default());
 
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let constraints = Constraints::new(&net.zero_injection);
+        let constraints = Constraints::new(&net.constrained_buses());
         let bad = analyze(
             &measurements,
             &report.residuals,

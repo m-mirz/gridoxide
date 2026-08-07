@@ -272,17 +272,16 @@ entirely an iteration-count gap: gridoxide's own iterations are 30-40% *cheaper*
 power-grid-model's and it takes about three times as many, and undamped its map does not converge at
 all. See `docs/src/state_estimation/iterative.md`.
 
-A fourth gap surfaced while closing the third, and is worth stating rather than leaving to be
-rediscovered: **the estimator has no notion of a de-energized island.** power-grid-model reports a
-node in a component containing no source as `energized: 0` with a state of exactly zero — topology
-decides it, and a voltage sensor on such a node is simply ignored. gridoxide has no equivalent:
+A fourth gap surfaced while closing the third and is now closed too: **de-energized islands**.
+power-grid-model reports a node in a component containing no source as `energized: 0` with a state of
+exactly zero — topology decides it, and a voltage sensor on such a node is simply ignored. gridoxide
+had no equivalent, and the consequence was not a wrong answer but no answer:
 `jacobian::mask_untouched` pins a column nothing *structurally* touches, which catches a fully
 isolated node, but a de-energized node reached by a zero-injection constraint or by its own sensor is
-touched and undetermined, and the gain matrix comes back singular. `solver::PersistentSolver` already
-partitions islands for power flow (`network::connected_components` +
-`mark_unreferenced_islands`); state estimation does not. It is what keeps power-grid-model's
-`sensor-update-nr`/`sensor-update-il` fixtures from being checked against its published answers —
-see `tests/se_batch_test.rs`, which asserts the diagnosis rather than assuming it.
+touched and undetermined, so the gain matrix came back singular. `SeNetwork::energized` now carries
+the same topological verdict `solver::PersistentSolver` has always applied on the power-flow side
+(`network::connected_components` + `mark_unreferenced_islands`): such a bus contributes no rows and
+no constraints, and is reported at zero.
 
 Two smaller gaps have closed. A sensor on a three-winding transformer side (`measured_terminal_type`
 6/7/8) used to return `MeasurementError::UnsupportedTerminalType`; it now maps to the corresponding

@@ -150,6 +150,13 @@ fn build_rows(measurements: &[Measurement], net: &SeNetwork) -> Vec<LinearRow> {
         let magnitude = find(MeasurementKind::VoltageMagnitude);
         let angle = find(MeasurementKind::VoltageAngle);
         if let (Some(mag), Target::Bus(bus)) = (magnitude, target) {
+            // A de-energized bus carries no voltage any measurement describes;
+            // power-grid-model drops such a node from its math model entirely,
+            // sensors included. Keeping the row would pin the bus to a reading
+            // of a component that is not energized.
+            if !net.energized[bus] {
+                continue;
+            }
             let m = &measurements[mag];
             rows.push(LinearRow {
                 coefficients: vec![(bus, Complex::new(1.0, 0.0))],
@@ -185,6 +192,9 @@ fn build_rows(measurements: &[Measurement], net: &SeNetwork) -> Vec<LinearRow> {
         let Some(functional) = net.functional(target) else {
             continue;
         };
+        if !net.energized[functional.at] {
+            continue;
+        }
         // The apparent-power measurement's variance is the sum of the two
         // components', per power-grid-model's aggregation rule.
         let variance = measurements[p].sigma.powi(2) + measurements[q].sigma.powi(2);
@@ -238,8 +248,11 @@ pub fn estimate(
     // Zero-injection buses: the injected current is exactly zero, a linear
     // constraint in U. Far simpler than the nonlinear case, because no
     // linearization is involved at all.
+    // Energized zero-injection buses only: asserting `(YU)_i = 0` on a
+    // de-energized island reaches columns nothing determines, which turns an
+    // uninformative component into a singular matrix.
     let constrained: Vec<usize> = net
-        .zero_injection
+        .constrained_buses()
         .iter()
         .enumerate()
         .filter(|&(_, &z)| z)
