@@ -38,6 +38,8 @@ const PARSED_COMPONENTS: &[&str] = &[
     "sym_power_sensor",
     "asym_voltage_sensor",
     "asym_power_sensor",
+    "sym_current_sensor",
+    "asym_current_sensor",
 ];
 
 /// Components a fixture may contain that gridoxide knowingly does not read,

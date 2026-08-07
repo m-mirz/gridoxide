@@ -182,6 +182,8 @@ const MODELLED_FIXTURES: &[&str] = &[
     "1os2msr-no-angle",
     "inf-measurement-with-injection",
     "transmission-case",
+    "global-current-sensor",
+    "local-current-sensor",
 ];
 
 /// Fixtures whose measurements deliberately disagree with the state

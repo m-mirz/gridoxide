@@ -250,6 +250,36 @@ fn estimates_with_mixed_symmetric_and_asymmetric_sensors() {
     assert_estimate_matches("dummy-test-sym", JacobianBackend::Scalar, 1e-5);
 }
 
+/// A current sensor whose angle is measured against the global reference.
+///
+/// `I = i·e^{j·i_angle}`, so the measurement is linear in the voltages and the
+/// estimator reads the functional's `current` directly.
+#[test]
+fn estimates_from_a_global_angle_current_sensor() {
+    assert_estimate_matches("global-current-sensor", JacobianBackend::Scalar, 1e-6);
+}
+
+/// The same sensor read as a *local* angle — the shift between the terminal's
+/// voltage and its current.
+///
+/// The fixture is identical to its sibling but for `angle_measurement_type`,
+/// and power-grid-model converges to a visibly different state (node 2 at
+/// 1.00654 against 1.00323), so this pins that gridoxide distinguishes the two
+/// frames rather than treating the field as decoration.
+#[test]
+fn estimates_from_a_local_angle_current_sensor() {
+    assert_estimate_matches("local-current-sensor", JacobianBackend::Scalar, 1e-6);
+}
+
+/// Both frames, through the iterative-linear method as well — both fixtures
+/// list it in their own `params.json`.
+#[test]
+fn both_methods_agree_on_current_sensors() {
+    for name in ["global-current-sensor", "local-current-sensor"] {
+        assert_estimate_matches_with(name, JacobianBackend::Scalar, SeMethod::IterativeLinear, 1e-6, 100);
+    }
+}
+
 /// Why [`linear_start`] exists, pinned so the reason cannot be lost.
 ///
 /// `three_winding_transformer` has `clock_12 = clock_13 = 11`, i.e. a 30° shift

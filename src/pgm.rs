@@ -49,6 +49,10 @@ pub struct PgmData {
     pub asym_voltage_sensor: Vec<PgmAsymVoltageSensor>,
     #[serde(default)]
     pub asym_power_sensor: Vec<PgmAsymPowerSensor>,
+    #[serde(default)]
+    pub sym_current_sensor: Vec<PgmSymCurrentSensor>,
+    #[serde(default)]
+    pub asym_current_sensor: Vec<PgmAsymCurrentSensor>,
 }
 
 #[derive(Deserialize)]
@@ -456,6 +460,54 @@ pub struct PgmAsymPowerSensor {
     pub p_sigma: [f64; 3],
     #[serde(default = "nan3")]
     pub q_sigma: [f64; 3],
+}
+
+/// PGM's `sym_current_sensor`: a current magnitude and angle at a branch
+/// terminal.
+///
+/// `angle_measurement_type` is 0 for a *local* angle — the shift between the
+/// terminal's voltage and its current, what a power-factor meter reads — and 1
+/// for a *global* one, measured against the same reference voltage phasors use.
+/// The two are different quantities, not two spellings of one; see
+/// [`AngleFrame`](crate::measurement::AngleFrame).
+///
+/// Only branch terminals carry one: `measured_terminal_type` 0/1 and 6/7/8, and
+/// never a `link`. Both sigmas are scalar, including on the asymmetric variant.
+#[derive(Deserialize)]
+pub struct PgmSymCurrentSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default)]
+    pub angle_measurement_type: u8,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_measured: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_angle_measured: f64,
+    /// Standard deviation of the magnitude error, in amperes.
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_sigma: f64,
+    /// Standard deviation of the angle error, in radians.
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_angle_sigma: f64,
+}
+
+/// PGM's `asym_current_sensor`: per-phase magnitudes and angles, scalar sigmas.
+#[derive(Deserialize)]
+pub struct PgmAsymCurrentSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default)]
+    pub angle_measurement_type: u8,
+    #[serde(default = "nan3")]
+    pub i_measured: [f64; 3],
+    #[serde(default = "nan3")]
+    pub i_angle_measured: [f64; 3],
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_sigma: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_angle_sigma: f64,
 }
 
 // ── Output structs (used by integration tests) ────────────────────────────────

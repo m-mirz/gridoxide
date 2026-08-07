@@ -67,6 +67,44 @@ pub enum MeasurementKind {
     ActivePower,
     /// Reactive power, per-unit.
     ReactivePower,
+    /// Real part of a measured current, per-unit.
+    ///
+    /// A current sensor is stored decomposed rather than as a magnitude and an
+    /// angle, following power-grid-model. Three reasons, the first decisive:
+    /// `arg(I)` has a branch cut, and a residual `z − h(x)` taken near ±π wraps
+    /// — gridoxide has no `phase_mod_2pi` anywhere, so a polar row would
+    /// silently chase a 2π error. `|I|` also has an unbounded derivative as
+    /// `I → 0`, which an unloaded branch reaches. And the iterative-linear
+    /// method needs a complex current regardless, so polar rows would be
+    /// recombined later and less legibly.
+    CurrentReal,
+    /// Imaginary part of a measured current, per-unit.
+    CurrentImag,
+}
+
+/// Which reference a current sensor's angle is measured against.
+///
+/// The two are not a presentation detail: they measure *different quantities*
+/// of the same terminal, and power-grid-model's own `global-current-sensor` and
+/// `local-current-sensor` fixtures are identical but for this field and converge
+/// to visibly different states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AngleFrame {
+    /// The angle is absolute, against the same reference voltage phasors use:
+    /// `I = i·e^{j·i_angle}`.
+    ///
+    /// Only meaningful when something else fixes that reference, so
+    /// power-grid-model requires at least one voltage angle measurement
+    /// alongside — `se::observability` checks the same.
+    Global,
+    /// The angle is the shift between the terminal's voltage and its current,
+    /// `i_angle = θ_U − θ_I`, which is what a meter reading power factor
+    /// produces.
+    ///
+    /// Carries no absolute phase, so it neither needs nor supplies a reference.
+    /// Note the sign convention is the opposite of [`Global`](Self::Global)'s:
+    /// `I = conj(i·e^{j·i_angle})·U/|U|`.
+    Local,
 }
 
 /// What a [`Measurement`] is attached to.
@@ -105,6 +143,14 @@ pub enum Target {
     /// bus, which is what makes it a distinct measurement function rather than
     /// a relabelling.
     NodeInjection(usize),
+    /// A current sensor on a branch terminal.
+    ///
+    /// Separate from [`Target::BranchTerminal`] rather than a flag on it,
+    /// because the frame changes the measurement *function* and because
+    /// `se::iterative` keys its row builder on `Target` — which makes
+    /// power-grid-model's "no mixing power and current on one terminal" rule
+    /// fall out of the type rather than needing to be enforced downstream.
+    BranchTerminalCurrent { branch: usize, terminal: Terminal, frame: AngleFrame },
 }
 
 /// One scalar observation with its uncertainty, in per-unit.
@@ -136,6 +182,24 @@ pub enum MeasurementError {
     UnsupportedTerminalType { sensor: u64, terminal_type: u8 },
     /// A sigma was absent, zero or negative. Zero would mean infinite weight.
     InvalidSigma { sensor: u64, sigma: f64 },
+    /// A current sensor was placed on a `link`.
+    ///
+    /// power-grid-model refuses this outright, and for a reason gridoxide shares
+    /// with more force: a link's admittance is a regularization constant, not a
+    /// measured property, so the current through one is an artifact of that
+    /// choice rather than a physical quantity. gridoxide's own value differs
+    /// from power-grid-model's by 500x (`topology::IDEAL_CONNECTION_Y`), which
+    /// is exactly how meaningless the reading would be.
+    CurrentSensorOnLink { sensor: u64, link: u64 },
+    /// Two current sensors on one terminal disagree about which angle frame
+    /// they use, so there is no one quantity for them to merge into.
+    ConflictingAngleFrame { sensor: u64, object: u64 },
+    /// A power sensor and a current sensor share one terminal.
+    ///
+    /// power-grid-model rejects this in its Python validation layer while its
+    /// C++ core would accept and double-count it. gridoxide rejects it here,
+    /// which is deliberately the stricter of the two.
+    MixedPowerAndCurrent { sensor: u64, object: u64 },
 }
 
 impl std::fmt::Display for MeasurementError {
@@ -150,6 +214,21 @@ impl std::fmt::Display for MeasurementError {
             Self::InvalidSigma { sensor, sigma } => {
                 write!(f, "sensor {sensor} has non-positive or missing sigma {sigma}")
             }
+            Self::CurrentSensorOnLink { sensor, link } => write!(
+                f,
+                "current sensor {sensor} measures link {link}, whose admittance is a \
+                 regularization constant rather than a physical property"
+            ),
+            Self::ConflictingAngleFrame { sensor, object } => write!(
+                f,
+                "current sensor {sensor} uses a different angle frame than another sensor on the \
+                 same terminal of object {object}"
+            ),
+            Self::MixedPowerAndCurrent { sensor, object } => write!(
+                f,
+                "sensor {sensor} puts a current measurement on a terminal of object {object} that \
+                 a power sensor already measures"
+            ),
         }
     }
 }
@@ -279,6 +358,10 @@ struct Accumulators {
     appliances: HashMap<u64, ApplianceAccumulator>,
     /// Source readings, keyed by the synthesized source branch they describe.
     sources: HashMap<usize, (Merged, Merged)>,
+    /// Current readings, keyed by the terminal they measure. The frame is part
+    /// of the value rather than of the key, so two sensors disagreeing about it
+    /// on one terminal are caught rather than silently kept apart.
+    currents: HashMap<(usize, Terminal), (AngleFrame, Merged, Merged)>,
 }
 
 /// One power reading, already converted to per-unit, as `(value, sigma)` per
@@ -465,6 +548,127 @@ fn component_sigmas(
     Ok((shared, shared))
 }
 
+/// Decomposes a polar reading `(magnitude, angle)` with independent magnitude
+/// and angle variances into independent real and imaginary components.
+///
+/// This is power-grid-model's `compute_decomposed_variance_from_polar`,
+/// second-order terms included:
+///
+/// ```text
+/// Var(Re) = σ_i²cos²θ + i²σ_θ²sin²θ + ½i²σ_θ⁴cos²θ + σ_i²σ_θ²sin²θ
+/// Var(Im) = σ_i²sin²θ + i²σ_θ²cos²θ + ½i²σ_θ⁴sin²θ + σ_i²σ_θ²cos²θ
+/// ```
+///
+/// The second-order terms are power-grid-model's modelling choice rather than
+/// anything forced by the statistics — a first-order propagation would stop
+/// after two terms. They are reproduced so its fixtures agree to their own
+/// tolerances, and named here so a later reader does not take them for a law.
+///
+/// Returns `((re, σ_re), (im, σ_im))`.
+fn decompose_polar(
+    magnitude: f64,
+    angle: f64,
+    mag_sigma: f64,
+    angle_sigma: f64,
+) -> ((f64, f64), (f64, f64)) {
+    let (sin, cos) = angle.sin_cos();
+    let (sin2, cos2) = (sin * sin, cos * cos);
+    let mag2 = magnitude * magnitude;
+    let mag_var = mag_sigma * mag_sigma;
+    let ang_var = angle_sigma * angle_sigma;
+
+    let re_var = mag_var * cos2
+        + mag2 * ang_var * sin2
+        + 0.5 * mag2 * ang_var * ang_var * cos2
+        + mag_var * ang_var * sin2;
+    let im_var = mag_var * sin2
+        + mag2 * ang_var * cos2
+        + 0.5 * mag2 * ang_var * ang_var * sin2
+        + mag_var * ang_var * cos2;
+
+    ((magnitude * cos, re_var.sqrt()), (magnitude * sin, im_var.sqrt()))
+}
+
+/// A current sensor's terminal, resolved against the network.
+struct CurrentTerminal {
+    branch: usize,
+    terminal: Terminal,
+    /// Rated voltage of the node at the measured terminal, which sets the
+    /// current base.
+    u_rated: f64,
+}
+
+/// Resolves a current sensor's `measured_object` and `measured_terminal_type`.
+///
+/// `Ok(None)` means the terminal carries no flow to measure — an absent branch,
+/// or the open end of a half-open one — which is what power-grid-model reports
+/// zero for and what the power path already drops.
+fn resolve_current_terminal(
+    input: &PgmInput,
+    net: &PgmNetwork,
+    sensor: u64,
+    object: u64,
+    terminal_type: u8,
+) -> Result<Option<CurrentTerminal>, MeasurementError> {
+    // A `link`'s admittance is a chosen constant, so the current through one is
+    // not a measurable quantity. power-grid-model refuses it too.
+    if input.data.link.iter().any(|l| l.id == object) {
+        return Err(MeasurementError::CurrentSensorOnLink { sensor, link: object });
+    }
+
+    let node_of = |id: u64| net.node_idx.get(&id).map(|&b| net.buses[b].u_rated);
+
+    match terminal_type {
+        0 | 1 => {
+            let terminal = if terminal_type == 0 { Terminal::From } else { Terminal::To };
+            let Some((branch, terminal)) = net.resolve_terminal(object, terminal) else {
+                return Ok(None);
+            };
+            // The current base follows the node at the measured terminal, so a
+            // transformer's two sides have different bases. The `current-sensor`
+            // fixtures are 10 kV on both sides and would not catch this.
+            let node = input
+                .data
+                .line
+                .iter()
+                .find(|l| l.id == object)
+                .map(|l| if terminal_type == 0 { l.from_node } else { l.to_node })
+                .or_else(|| {
+                    input
+                        .data
+                        .transformer
+                        .iter()
+                        .find(|t| t.id == object)
+                        .map(|t| if terminal_type == 0 { t.from_node } else { t.to_node })
+                });
+            let Some(u_rated) = node.and_then(node_of) else {
+                return Err(MeasurementError::UnknownObject { sensor, object });
+            };
+            Ok(Some(CurrentTerminal { branch, terminal, u_rated }))
+        }
+        6 | 7 | 8 => {
+            let Some(&legs) = net.three_winding_branch_idx.get(&object) else {
+                return Err(MeasurementError::UnknownObject { sensor, object });
+            };
+            let side = (terminal_type - 6) as usize;
+            let node = input
+                .data
+                .three_winding_transformer
+                .iter()
+                .find(|t| t.id == object)
+                .map(|t| [t.node_1, t.node_2, t.node_3][side]);
+            let Some(u_rated) = node.and_then(node_of) else {
+                return Err(MeasurementError::UnknownObject { sensor, object });
+            };
+            Ok(Some(CurrentTerminal { branch: legs[side], terminal: Terminal::From, u_rated }))
+        }
+        // power-grid-model's `CurrentSensor` constructor rejects every other
+        // terminal type outright: a current sensor belongs on a branch, and
+        // there is no current to speak of at a bus or an appliance.
+        other => Err(MeasurementError::UnsupportedTerminalType { sensor, terminal_type: other }),
+    }
+}
+
 /// Validates a standard deviation.
 ///
 /// An *infinite* sigma is allowed and meaningful: it is power-grid-model's way
@@ -634,6 +838,86 @@ pub fn measurements_from_pgm(
         )?;
     }
 
+    // ── Current sensors ──────────────────────────────────────────────────
+    //
+    // Stored decomposed into real and imaginary components rather than as a
+    // magnitude and an angle — see `MeasurementKind::CurrentReal` for why, and
+    // `decompose_polar` for the variance conversion, which is
+    // power-grid-model's including its second-order terms.
+    let sym_currents = input.data.sym_current_sensor.iter().map(|s| {
+        (
+            s.id,
+            s.measured_object,
+            s.measured_terminal_type,
+            s.angle_measurement_type,
+            s.i_measured,
+            s.i_angle_measured,
+            s.i_sigma,
+            s.i_angle_sigma,
+        )
+    });
+    // An asymmetric current sensor reduces to the symmetric problem the way its
+    // voltage and power counterparts do: the positive sequence when every phase
+    // carries an angle, the mean of the magnitudes otherwise.
+    let asym_currents = input.data.asym_current_sensor.iter().map(|s| {
+        let (magnitude, angle) = if s.i_angle_measured.iter().all(|a| a.is_finite()) {
+            let seq = positive_sequence(&s.i_measured, &s.i_angle_measured);
+            (seq.norm(), seq.arg())
+        } else {
+            (s.i_measured.iter().sum::<f64>() / 3.0, f64::NAN)
+        };
+        (
+            s.id,
+            s.measured_object,
+            s.measured_terminal_type,
+            s.angle_measurement_type,
+            magnitude,
+            angle,
+            s.i_sigma,
+            s.i_angle_sigma,
+        )
+    });
+
+    for (id, object, terminal_type, frame_code, i_measured, i_angle, i_sigma, i_angle_sigma) in
+        sym_currents.chain(asym_currents)
+    {
+        if !i_measured.is_finite() || !i_angle.is_finite() {
+            // A current without an angle determines nothing linear in the
+            // voltages, so unlike a voltage magnitude it cannot be kept as half
+            // a measurement.
+            continue;
+        }
+        let Some(t) = resolve_current_terminal(input, net, id, object, terminal_type)? else {
+            continue;
+        };
+        let frame = if frame_code == 0 { AngleFrame::Local } else { AngleFrame::Global };
+
+        // Per-unit against the base current of the node at this terminal:
+        // `I_base = S_base / (√3 · u_rated)`.
+        let i_base = s_base_va / (SQRT_3 * t.u_rated);
+        let magnitude = i_measured / i_base;
+        let mag_sigma = checked_sigma(id, i_sigma)? / i_base;
+        let angle_sigma = checked_sigma(id, i_angle_sigma)?;
+        let ((re, re_sigma), (im, im_sigma)) =
+            decompose_polar(magnitude, i_angle, mag_sigma, angle_sigma);
+
+        // Power sensors are read before this loop, so checking one direction
+        // catches the mixture whichever sensor the document lists first.
+        let key = (t.branch, t.terminal);
+        if acc.branch_p.contains_key(&key) || acc.branch_q.contains_key(&key) {
+            return Err(MeasurementError::MixedPowerAndCurrent { sensor: id, object });
+        }
+        let entry = acc
+            .currents
+            .entry(key)
+            .or_insert((frame, Merged::default(), Merged::default()));
+        if entry.0 != frame {
+            return Err(MeasurementError::ConflictingAngleFrame { sensor: id, object });
+        }
+        entry.1.add(re, re_sigma);
+        entry.2.add(im, im_sigma);
+    }
+
     // Each appliance contributes its merged reading, sign-corrected, to its
     // bus's injection sum. Iterated in id order so the summed variance is
     // built deterministically.
@@ -750,6 +1034,20 @@ pub fn measurements_from_pgm(
         }
         if let Some((value, sigma)) = acc.branch_q.get(&key).copied().unwrap_or_default().finish() {
             out.push(Measurement { kind: MeasurementKind::ReactivePower, target, value, sigma });
+        }
+    }
+
+    let mut current_keys: Vec<(usize, Terminal)> = acc.currents.keys().copied().collect();
+    current_keys.sort_unstable_by_key(|&(b, t)| (b, t == Terminal::To));
+    for key in current_keys {
+        let (branch, terminal) = key;
+        let (frame, re, im) = acc.currents[&key];
+        let target = Target::BranchTerminalCurrent { branch, terminal, frame };
+        if let Some((value, sigma)) = re.finish() {
+            out.push(Measurement { kind: MeasurementKind::CurrentReal, target, value, sigma });
+        }
+        if let Some((value, sigma)) = im.finish() {
+            out.push(Measurement { kind: MeasurementKind::CurrentImag, target, value, sigma });
         }
     }
 
@@ -899,6 +1197,95 @@ mod tests {
         assert!(
             !ms.iter().any(|m| m.kind == MeasurementKind::VoltageAngle),
             "no sensor supplied an angle, so no angle row should exist"
+        );
+    }
+
+    /// A current sensor's per-unit base follows the node at the *measured*
+    /// terminal, and its polar reading decomposes with power-grid-model's own
+    /// variance formula.
+    #[test]
+    fn a_current_sensor_converts_to_decomposed_per_unit() {
+        // 10 kV node, 1 MVA base: I_base = 1e6/(√3·1e4) = 57.735 A.
+        let (input, net) = network_with_sensors(
+            r#""sym_current_sensor":[{"id":9,"measured_object":3,"measured_terminal_type":1,
+                "angle_measurement_type":1,"i_measured":10.0,"i_angle_measured":0.5,
+                "i_sigma":5.0,"i_angle_sigma":0.1}]"#,
+        );
+        let ms = measurements_from_pgm(&input, &net, 1e6).expect("measurements");
+        let target = Target::BranchTerminalCurrent {
+            branch: 0,
+            terminal: Terminal::To,
+            frame: AngleFrame::Global,
+        };
+        let re = find(&ms, MeasurementKind::CurrentReal, target);
+        let im = find(&ms, MeasurementKind::CurrentImag, target);
+
+        // I_base = 1e6/(√3·1e4) = 57.735 A, so 10 A is 0.173205 p.u.
+        let i_pu = 10.0 * SQRT_3 * 10000.0 / 1e6;
+        assert!((re.value - i_pu * 0.5f64.cos()).abs() < 1e-12, "Re={}", re.value);
+        assert!((im.value - i_pu * 0.5f64.sin()).abs() < 1e-12, "Im={}", im.value);
+
+        // Var(Re) = σ²cos²θ + i²σ_θ²sin²θ + ½i²σ_θ⁴cos²θ + σ²σ_θ²sin²θ
+        let sigma = 5.0 * SQRT_3 * 10000.0 / 1e6;
+        let (sin, cos) = 0.5f64.sin_cos();
+        let (v, a) = (sigma * sigma, 0.01);
+        let want_re = (v * cos * cos
+            + i_pu * i_pu * a * sin * sin
+            + 0.5 * i_pu * i_pu * a * a * cos * cos
+            + v * a * sin * sin)
+            .sqrt();
+        assert!((re.sigma - want_re).abs() < 1e-14, "σ_Re={} want {want_re}", re.sigma);
+    }
+
+    /// A current sensor and a power sensor may not share a terminal.
+    ///
+    /// power-grid-model rejects this in its Python validation layer only — its
+    /// C++ core accepts the mixture and double-counts it — so gridoxide is
+    /// deliberately the stricter of the two here.
+    #[test]
+    fn a_power_and_a_current_sensor_may_not_share_a_terminal() {
+        let (input, net) = network_with_sensors(
+            r#""sym_power_sensor":[{"id":8,"measured_object":3,"measured_terminal_type":1,
+                "p_measured":1000.0,"q_measured":0.0,"power_sigma":10.0}],
+               "sym_current_sensor":[{"id":9,"measured_object":3,"measured_terminal_type":1,
+                "angle_measurement_type":1,"i_measured":10.0,"i_angle_measured":0.5,
+                "i_sigma":5.0,"i_angle_sigma":0.1}]"#,
+        );
+        assert_eq!(
+            measurements_from_pgm(&input, &net, 1e6),
+            Err(MeasurementError::MixedPowerAndCurrent { sensor: 9, object: 3 })
+        );
+    }
+
+    /// Two current sensors on one terminal must agree about the angle frame,
+    /// since local and global are different quantities.
+    #[test]
+    fn two_current_sensors_on_one_terminal_must_share_a_frame() {
+        let (input, net) = network_with_sensors(
+            r#""sym_current_sensor":[
+                {"id":9,"measured_object":3,"measured_terminal_type":1,"angle_measurement_type":1,
+                 "i_measured":10.0,"i_angle_measured":0.5,"i_sigma":5.0,"i_angle_sigma":0.1},
+                {"id":10,"measured_object":3,"measured_terminal_type":1,"angle_measurement_type":0,
+                 "i_measured":10.0,"i_angle_measured":0.5,"i_sigma":5.0,"i_angle_sigma":0.1}]"#,
+        );
+        assert_eq!(
+            measurements_from_pgm(&input, &net, 1e6),
+            Err(MeasurementError::ConflictingAngleFrame { sensor: 10, object: 3 })
+        );
+    }
+
+    /// A current sensor on a bus or an appliance is meaningless and rejected,
+    /// matching power-grid-model's own constructor.
+    #[test]
+    fn a_current_sensor_off_a_branch_is_rejected() {
+        let (input, net) = network_with_sensors(
+            r#""sym_current_sensor":[{"id":9,"measured_object":5,"measured_terminal_type":4,
+                "angle_measurement_type":1,"i_measured":10.0,"i_angle_measured":0.5,
+                "i_sigma":5.0,"i_angle_sigma":0.1}]"#,
+        );
+        assert_eq!(
+            measurements_from_pgm(&input, &net, 1e6),
+            Err(MeasurementError::UnsupportedTerminalType { sensor: 9, terminal_type: 4 })
         );
     }
 

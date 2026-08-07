@@ -118,10 +118,32 @@ pub struct ObservabilityReport {
     /// Set when the system was too large to analyze densely, in which case only
     /// the structural half of the report is filled in.
     pub skipped_numerical: bool,
+    /// A global-angle current sensor is present with nothing to measure its
+    /// angle against.
+    ///
+    /// Such a sensor reports `I = i·e^{jθ}` with `θ` absolute, which is only
+    /// meaningful if something else fixes what that reference *is*. With no
+    /// voltage angle in the set, [`StateLayout`] pins a reference bus instead —
+    /// and that pin is then a false constraint, rotating the estimate away from
+    /// the angle the sensor actually measured. The rank check will not catch it,
+    /// because the system is perfectly determined; it is determined to the wrong
+    /// thing.
+    ///
+    /// power-grid-model refuses to run at all here, raising `NotObservableError`
+    /// with "Global angle current sensors require at least one voltage angle
+    /// measurement as a reference point". gridoxide reports rather than refuses,
+    /// on the grounds that this analysis is the place that says what is wrong
+    /// and the estimator's job is to answer the question it was asked.
+    pub global_current_without_angle_reference: bool,
 }
 
 impl ObservabilityReport {
     /// Whether every state variable is determined.
+    ///
+    /// Deliberately does *not* fold in
+    /// [`global_current_without_angle_reference`](Self::global_current_without_angle_reference):
+    /// that state is fully determined, just to the wrong reference, and calling
+    /// it unobservable would misname it.
     pub fn is_observable(&self) -> bool {
         self.rank == self.n_unknowns && self.structurally_unmeasured.is_empty()
     }
@@ -209,6 +231,23 @@ pub fn analyze(
     let n = layout.n_unknowns();
     let rows = measurement_jacobian(measurements, buses, net, layout);
 
+    // A global-angle current sensor supplies an absolute phase; a voltage angle
+    // is what gives that phase a meaning. `StateLayout` pins a reference bus
+    // when no voltage angle exists, which would silently contradict the sensor.
+    let has_global_current = measurements.iter().any(|m| {
+        matches!(
+            m.target,
+            crate::measurement::Target::BranchTerminalCurrent {
+                frame: crate::measurement::AngleFrame::Global,
+                ..
+            }
+        ) && m.weight() > 0.0
+    });
+    let has_voltage_angle = measurements
+        .iter()
+        .any(|m| m.kind == crate::measurement::MeasurementKind::VoltageAngle && m.weight() > 0.0);
+    let global_current_without_angle_reference = has_global_current && !has_voltage_angle;
+
     // Structural half: a column no row mentions with a nonzero coefficient.
     // Note this asks for a nonzero *value*, unlike the estimator's mask, which
     // deliberately asks only for structural presence so its sparsity pattern
@@ -234,6 +273,7 @@ pub fn analyze(
             structurally_unmeasured,
             unobservable: Vec::new(),
             skipped_numerical: true,
+            global_current_without_angle_reference,
         };
     }
 
@@ -259,6 +299,7 @@ pub fn analyze(
             structurally_unmeasured,
             unobservable: (0..n).map(|c| describe(layout, c)).collect(),
             skipped_numerical: false,
+            global_current_without_angle_reference,
         };
     };
     let unobservable = perm[rank..].iter().map(|&c| describe(layout, c)).collect();
@@ -269,6 +310,7 @@ pub fn analyze(
         structurally_unmeasured,
         unobservable,
         skipped_numerical: false,
+        global_current_without_angle_reference,
     }
 }
 

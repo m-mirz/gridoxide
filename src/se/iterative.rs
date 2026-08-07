@@ -44,30 +44,77 @@
 
 use num_complex::Complex;
 
-use crate::measurement::{Measurement, MeasurementKind, Target};
+use crate::measurement::{AngleFrame, Measurement, MeasurementKind, Target};
 use crate::sparse::ComplexSparseSystem;
 use crate::types::Bus;
 
 use super::nr::{SeOptions, SeReport, SeStatus};
 use super::SeNetwork;
 
+/// What a linear row measures, and how its measured value becomes the complex
+/// current the row's equation is written in.
+///
+/// Every row states `Σ c_k·U_k = I`, so each variant's job is to produce that
+/// `I` from what the sensor actually read, using the previous iterate where the
+/// conversion needs a voltage.
+#[derive(Clone, Copy, Debug)]
+enum RowKind {
+    /// A bus voltage. Magnitude-only rows borrow the previous iterate's angle.
+    Voltage { bus: usize, magnitude: f64, angle: Option<f64> },
+    /// A power, converted as `I = conj(S/U_at)`.
+    ///
+    /// The only variant whose weight is scaled by `|U_at|²`: dividing by `U`
+    /// scales the current's variance by `1/|U|²`, so the weight scales the other
+    /// way. A current measurement involves no such division and is *not* scaled
+    /// — power-grid-model leaves the variance alone there too.
+    Power(Complex<f64>),
+    /// A current already in the global frame, used as-is.
+    GlobalCurrent(Complex<f64>),
+    /// A current in its terminal's own voltage frame, converted as
+    /// `I = conj(I_local)·U_at/|U_at|`.
+    LocalCurrent(Complex<f64>),
+}
+
 /// A measurement rewritten as a linear function of the complex voltages.
 struct LinearRow {
     /// Nonzero coefficients: `Σ coeff·U` is the quantity measured.
     coefficients: Vec<(usize, Complex<f64>)>,
-    /// Set for a voltage row, whose measured value has to be re-derived from
-    /// the previous iterate's angle each pass.
-    voltage_bus: Option<usize>,
-    /// Measured magnitude (voltage rows) or complex power (current rows).
-    magnitude: f64,
-    power: Complex<f64>,
-    /// Measured angle, if a phasor sensor supplied one.
-    angle: Option<f64>,
-    /// Bus whose voltage converts `S` to `I` for a current row.
+    kind: RowKind,
+    /// Bus whose voltage converts the reading into a global current.
     reference_bus: usize,
     /// `1/σ²` in the converted units.
     weight: f64,
-    is_voltage: bool,
+}
+
+impl RowKind {
+    /// The complex current this row's equation is set equal to, at `v`.
+    ///
+    /// `None` when the conversion needs a voltage that has collapsed to zero,
+    /// which leaves the row out of that pass rather than dividing by it.
+    fn measured(&self, v: &[Complex<f64>], reference_bus: usize) -> Option<Complex<f64>> {
+        match *self {
+            RowKind::Voltage { bus, magnitude, angle } => {
+                Some(Complex::from_polar(magnitude, angle.unwrap_or_else(|| v[bus].arg())))
+            }
+            RowKind::Power(s) => {
+                let u = v[reference_bus];
+                (u.norm() > 0.0).then(|| (s / u).conj())
+            }
+            RowKind::GlobalCurrent(i) => Some(i),
+            RowKind::LocalCurrent(i) => {
+                let u = v[reference_bus];
+                (u.norm() > 0.0).then(|| i.conj() * u / u.norm())
+            }
+        }
+    }
+
+    /// Factor applied to this row's weight when the matrix is built.
+    fn weight_scale(&self, buses: &[Bus], reference_bus: usize) -> f64 {
+        match self {
+            RowKind::Power(_) => buses[reference_bus].voltage_mag.powi(2),
+            _ => 1.0,
+        }
+    }
 }
 
 /// Pairs the scalar measurements into complex linear rows.
@@ -106,20 +153,30 @@ fn build_rows(measurements: &[Measurement], net: &SeNetwork) -> Vec<LinearRow> {
             let m = &measurements[mag];
             rows.push(LinearRow {
                 coefficients: vec![(bus, Complex::new(1.0, 0.0))],
-                voltage_bus: Some(bus),
-                magnitude: m.value,
-                power: Complex::new(0.0, 0.0),
-                angle: angle.map(|a| measurements[a].value),
+                kind: RowKind::Voltage {
+                    bus,
+                    magnitude: m.value,
+                    angle: angle.map(|a| measurements[a].value),
+                },
                 reference_bus: bus,
                 weight: m.weight(),
-                is_voltage: true,
             });
         }
 
-        let (Some(p), Some(q)) = (
-            find(MeasurementKind::ActivePower),
-            find(MeasurementKind::ReactivePower),
-        ) else {
+        // A power pairs P with Q; a current sensor pairs its two components.
+        // Either way only the pair determines a current, so a lone half is
+        // dropped — a real limitation of this method rather than of the code.
+        let (real, imag) = match target {
+            Target::BranchTerminalCurrent { .. } => (
+                find(MeasurementKind::CurrentReal),
+                find(MeasurementKind::CurrentImag),
+            ),
+            _ => (
+                find(MeasurementKind::ActivePower),
+                find(MeasurementKind::ReactivePower),
+            ),
+        };
+        let (Some(p), Some(q)) = (real, imag) else {
             continue;
         };
         // One description of what this target measures, shared with the Newton
@@ -134,15 +191,20 @@ fn build_rows(measurements: &[Measurement], net: &SeNetwork) -> Vec<LinearRow> {
         if variance <= 0.0 || !variance.is_finite() {
             continue;
         }
+        let value = Complex::new(measurements[p].value, measurements[q].value);
         rows.push(LinearRow {
             coefficients: functional.coefficients,
-            voltage_bus: None,
-            magnitude: 0.0,
-            power: Complex::new(measurements[p].value, measurements[q].value),
-            angle: None,
+            kind: match target {
+                Target::BranchTerminalCurrent { frame: AngleFrame::Global, .. } => {
+                    RowKind::GlobalCurrent(value)
+                }
+                Target::BranchTerminalCurrent { frame: AngleFrame::Local, .. } => {
+                    RowKind::LocalCurrent(value)
+                }
+                _ => RowKind::Power(value),
+            },
             reference_bus: functional.at,
             weight: 1.0 / variance,
-            is_voltage: false,
         });
     }
     rows
@@ -193,12 +255,7 @@ pub fn estimate(
     for row in &rows {
         // Converting S to I divides by U, so the current's variance scales by
         // 1/|U|^2 — i.e. the weight scales by |U|^2.
-        let scale = if row.is_voltage {
-            1.0
-        } else {
-            buses[row.reference_bus].voltage_mag.powi(2)
-        };
-        let w = row.weight * scale;
+        let w = row.weight * row.kind.weight_scale(buses, row.reference_bus);
         row_weights.push(w);
         for &(i, ci) in &row.coefficients {
             for &(j, cj) in &row.coefficients {
@@ -243,7 +300,9 @@ pub fn estimate(
         };
     };
 
-    let phase_is_measured = rows.iter().any(|r| r.is_voltage && r.angle.is_some());
+    let phase_is_measured = rows
+        .iter()
+        .any(|r| matches!(r.kind, RowKind::Voltage { angle: Some(_), .. }));
     let reference = net
         .source_branches
         .iter()
@@ -276,16 +335,8 @@ pub fn estimate(
         // currents at the previous voltage.
         let mut rhs = vec![Complex::new(0.0, 0.0); n_aug];
         for (row, &w) in rows.iter().zip(&row_weights) {
-            let measured = if row.is_voltage {
-                let bus = row.voltage_bus.expect("voltage row carries its bus");
-                let theta = row.angle.unwrap_or_else(|| v[bus].arg());
-                Complex::from_polar(row.magnitude, theta)
-            } else {
-                let u = v[row.reference_bus];
-                if u.norm() <= 0.0 {
-                    continue;
-                }
-                (row.power / u).conj()
+            let Some(measured) = row.kind.measured(&v, row.reference_bus) else {
+                continue;
             };
             for &(i, ci) in &row.coefficients {
                 rhs[i] += ci.conj() * w * measured;
@@ -399,7 +450,10 @@ mod tests {
         ];
         let rows = build_rows(&measurements, &net);
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].angle.is_some(), "the phasor row should carry the measured angle");
+        assert!(
+            matches!(rows[0].kind, RowKind::Voltage { angle: Some(_), .. }),
+            "the phasor row should carry the measured angle"
+        );
     }
 
     /// The property that makes under-relaxation safe: damping changes how the

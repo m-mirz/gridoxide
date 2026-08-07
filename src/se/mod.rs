@@ -139,8 +139,20 @@ pub fn measurement_functions_with(
             (MeasurementKind::VoltageAngle, Target::Bus(b)) => buses[b].voltage_ang,
             _ => match model.functional(i) {
                 Some(f) => {
-                    let s = f.power(&v);
-                    if m.kind == MeasurementKind::ActivePower { s.re } else { s.im }
+                    // Which quantity of the functional this row reads: the
+                    // power, the current itself, or the current in the
+                    // terminal's own voltage frame.
+                    let value = match m.target {
+                        Target::BranchTerminalCurrent { frame, .. } => match frame {
+                            crate::measurement::AngleFrame::Global => f.current(&v),
+                            crate::measurement::AngleFrame::Local => f.local_current(&v),
+                        },
+                        _ => f.power(&v),
+                    };
+                    match m.kind {
+                        MeasurementKind::ActivePower | MeasurementKind::CurrentReal => value.re,
+                        _ => value.im,
+                    }
                 }
                 None => 0.0,
             },

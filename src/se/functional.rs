@@ -92,6 +92,19 @@ impl CurrentFunctional {
     pub fn power_partials(&self, v: &[Complex<f64>], out: &mut Vec<Partial>) {
         power_partials_of(self.at, &self.coefficients, v, out)
     }
+
+    /// `I_local = S/|V_at|` — see [`local_current_partials_of`].
+    pub fn local_current(&self, v: &[Complex<f64>]) -> Complex<f64> {
+        local_current_of(self.at, &self.coefficients, v)
+    }
+
+    pub fn current_partials(&self, v: &[Complex<f64>], out: &mut Vec<Partial>) {
+        current_partials_of(&self.coefficients, v, out)
+    }
+
+    pub fn local_current_partials(&self, v: &[Complex<f64>], out: &mut Vec<Partial>) {
+        local_current_partials_of(self.at, &self.coefficients, v, out)
+    }
 }
 
 /// [`CurrentFunctional::power_partials`] against borrowed parts.
@@ -115,7 +128,7 @@ pub fn power_partials_of(
         let mut saw_at = false;
 
         for &(k, c) in coefficients {
-            let unit_k = if v[k].norm() > 0.0 { v[k] / v[k].norm() } else { Complex::new(1.0, 0.0) };
+            let unit_k = unit(v[k]);
             let mut d_dtheta = -J * v_at * (c * v[k]).conj();
             let mut d_dvmag = v_at * (c * unit_k).conj();
             if k == at {
@@ -136,6 +149,87 @@ pub fn power_partials_of(
     }
 }
 
+/// Partials of `I` itself, rather than of the power it forms.
+///
+/// A *global-angle* current sensor measures `I` directly, and `I` is linear in
+/// the voltages, so these are simply the coefficients rotated:
+///
+/// ```text
+/// ∂I/∂θ_k   = j·c_k·V_k
+/// ∂I/∂|V_k| = c_k·e^{jθ_k}
+/// ```
+pub fn current_partials_of(
+    coefficients: &[(usize, Complex<f64>)],
+    v: &[Complex<f64>],
+    out: &mut Vec<Partial>,
+) {
+    for &(k, c) in coefficients {
+        let unit_k = unit(v[k]);
+        out.push(Partial { bus: k, d_dtheta: J * c * v[k], d_dvmag: c * unit_k });
+    }
+}
+
+/// Partials of `S/|V_at|`, the *local-angle* current frame.
+///
+/// A local-angle sensor measures the phase shift between voltage and current
+/// rather than an absolute angle, so what it reads is
+/// `I_local = conj(I)·e^{jθ_at}`. Substituting `conj(I) = S/V_at` collapses that
+/// to `S/|V_at|` — the same power the estimator already differentiates, divided
+/// by a magnitude. power-grid-model reaches the identical place from the other
+/// direction, computing its local-angle Jacobian as the power form
+/// post-multiplied by `abs_u_chi_inv`.
+///
+/// Only the leading magnitude carries the extra term, since `|V_at|` depends on
+/// no angle at all:
+///
+/// ```text
+/// ∂/∂θ_k   = (∂S/∂θ_k)/|V_at|
+/// ∂/∂|V_k| = (∂S/∂|V_k|)/|V_at| − [k = at]·S/|V_at|²
+/// ```
+pub fn local_current_partials_of(
+    at: usize,
+    coefficients: &[(usize, Complex<f64>)],
+    v: &[Complex<f64>],
+    out: &mut Vec<Partial>,
+) {
+    let start = out.len();
+    power_partials_of(at, coefficients, v, out);
+    if out.len() == start {
+        return;
+    }
+    let mag = v[at].norm();
+    if mag <= 0.0 {
+        return;
+    }
+    let s = local_current_of(at, coefficients, v) * mag;
+    for p in out[start..].iter_mut() {
+        p.d_dtheta /= mag;
+        p.d_dvmag /= mag;
+        if p.bus == at {
+            p.d_dvmag -= s / (mag * mag);
+        }
+    }
+}
+
+/// `S/|V_at|`, the quantity a local-angle current sensor reads.
+pub fn local_current_of(
+    at: usize,
+    coefficients: &[(usize, Complex<f64>)],
+    v: &[Complex<f64>],
+) -> Complex<f64> {
+    let mag = v[at].norm();
+    if mag <= 0.0 {
+        return Complex::new(0.0, 0.0);
+    }
+    let i: Complex<f64> = coefficients.iter().map(|&(k, c)| c * v[k]).sum();
+    v[at] * i.conj() / mag
+}
+
+/// A unit phasor in `z`'s direction, or `1` where `z` has no direction.
+fn unit(z: Complex<f64>) -> Complex<f64> {
+    if z.norm() > 0.0 { z / z.norm() } else { Complex::new(1.0, 0.0) }
+}
+
 impl SeNetwork {
     /// The current functional a measurement target names, or `None` if the
     /// target does not resolve in this network.
@@ -149,7 +243,12 @@ impl SeNetwork {
             Target::Bus(bus) => {
                 CurrentFunctional { at: bus, coefficients: self.ybus.row(bus).to_vec() }
             }
-            Target::BranchTerminal { branch, terminal } => {
+            // A current sensor names the same terminal as a power sensor and so
+            // resolves to the same functional. What differs is which quantity of
+            // it the estimator reads — `current` or `local_current` rather than
+            // `power` — not the coefficients.
+            Target::BranchTerminal { branch, terminal }
+            | Target::BranchTerminalCurrent { branch, terminal, .. } => {
                 let b = self.branches.get(branch)?;
                 let (near, far) = b.buses(terminal);
                 let (y_self, y_mut) = b.seen_from(terminal);
@@ -340,6 +439,103 @@ mod tests {
                     p.bus,
                     p.d_dvmag
                 );
+            }
+        }
+    }
+
+    /// The three identities the local-angle frame rests on.
+    ///
+    /// A local-angle sensor reads `conj(I)·e^{jθ_at}`; that equals `S/|V_at|`
+    /// once `conj(I) = S/V_at` is substituted, which is what lets the estimator
+    /// reuse the power path for it instead of deriving a third quantity.
+    #[test]
+    fn local_current_is_the_power_over_the_magnitude() {
+        let (net, mut buses) = super::super::tests::two_bus_net();
+        buses[0].voltage_mag = 1.041;
+        buses[0].voltage_ang = 0.137;
+        buses[1].voltage_mag = 0.958;
+        buses[1].voltage_ang = -0.061;
+        let v = state(&buses);
+
+        let f = net
+            .functional(Target::BranchTerminal { branch: 0, terminal: Terminal::From })
+            .expect("branch 0");
+        let local = f.local_current(&v);
+        let s = f.power(&v);
+        let i = f.current(&v);
+        let v_at = v[f.at];
+
+        assert!((local - s / v_at.norm()).norm() < 1e-12, "S/|V| identity");
+        assert!(
+            (local - i.conj() * Complex::from_polar(1.0, v_at.arg())).norm() < 1e-12,
+            "conj(I)·e^{{jθ}} identity"
+        );
+        // And it is genuinely a different quantity from the global current, so
+        // a test confusing the two would not pass by coincidence.
+        assert!((local - i).norm() > 1e-3, "the two frames should differ here");
+    }
+
+    /// Both current forms' partials against central differences of their own
+    /// values.
+    #[test]
+    fn current_partials_match_finite_differences() {
+        let (net, mut buses) = super::super::tests::two_bus_net();
+        buses[0].voltage_mag = 1.031;
+        buses[0].voltage_ang = 0.121;
+        buses[1].voltage_mag = 0.967;
+        buses[1].voltage_ang = -0.074;
+
+        let f = net
+            .functional(Target::BranchTerminal { branch: 0, terminal: Terminal::To })
+            .expect("branch 0");
+
+        const H: f64 = 1e-6;
+        for (name, value, partials) in [
+            (
+                "global",
+                Box::new(|v: &[Complex<f64>]| f.current(v)) as Box<dyn Fn(&[Complex<f64>]) -> Complex<f64>>,
+                {
+                    let mut o = Vec::new();
+                    f.current_partials(&state(&buses), &mut o);
+                    o
+                },
+            ),
+            (
+                "local",
+                Box::new(|v: &[Complex<f64>]| f.local_current(v)),
+                {
+                    let mut o = Vec::new();
+                    f.local_current_partials(&state(&buses), &mut o);
+                    o
+                },
+            ),
+        ] {
+            // Sum duplicates before comparing, for the same reason the power
+            // check does.
+            let mut summed: Vec<Partial> = Vec::new();
+            for e in &partials {
+                match summed.iter_mut().find(|p| p.bus == e.bus) {
+                    Some(p) => {
+                        p.d_dtheta += e.d_dtheta;
+                        p.d_dvmag += e.d_dvmag;
+                    }
+                    None => summed.push(*e),
+                }
+            }
+            for p in &summed {
+                let mut shifted = buses.clone();
+                shifted[p.bus].voltage_ang += H;
+                let up = value(&state(&shifted));
+                shifted[p.bus].voltage_ang -= 2.0 * H;
+                let fd = (up - value(&state(&shifted))) / (2.0 * H);
+                assert!((fd - p.d_dtheta).norm() < 1e-5, "{name} d/dθ at {}", p.bus);
+
+                let mut shifted = buses.clone();
+                shifted[p.bus].voltage_mag += H;
+                let up = value(&state(&shifted));
+                shifted[p.bus].voltage_mag -= 2.0 * H;
+                let fd = (up - value(&state(&shifted))) / (2.0 * H);
+                assert!((fd - p.d_dvmag).norm() < 1e-5, "{name} d/d|V| at {}", p.bus);
             }
         }
     }

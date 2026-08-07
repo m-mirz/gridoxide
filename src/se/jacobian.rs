@@ -26,8 +26,10 @@
 //! plan keeps the option of an orthogonal method open and why phase 4 prefers
 //! equality constraints over huge weights.
 
-use crate::measurement::{Measurement, MeasurementKind, Target};
-use crate::se::functional::{power_partials_of, Partial};
+use crate::measurement::{AngleFrame, Measurement, MeasurementKind, Target};
+use crate::se::functional::{
+    current_partials_of, local_current_partials_of, power_partials_of, Partial,
+};
 use crate::types::Bus;
 
 use super::SeNetwork;
@@ -190,8 +192,18 @@ fn add_functional_row(
 ) {
     scratch.clear();
     power_partials_of(at, coefficients, v, scratch);
-    for p in scratch.iter() {
-        let (d_th, d_v) = if active {
+    push_partials(row, layout, scratch, active);
+}
+
+/// Writes partials into a row, taking the real or imaginary half of each.
+///
+/// A partial repeated on one bus is summed, not overwritten: `Row` is an
+/// association list and `gain_and_rhs` sums duplicates. That is what makes a
+/// node injection's overlapping Y-bus and source terms come out right, and a
+/// half-open branch's self-loop with it.
+fn push_partials(row: &mut Row, layout: &StateLayout, partials: &[Partial], real: bool) {
+    for p in partials {
+        let (d_th, d_v) = if real {
             (p.d_dtheta.re, p.d_dvmag.re)
         } else {
             (p.d_dtheta.im, p.d_dvmag.im)
@@ -199,11 +211,6 @@ fn add_functional_row(
         push(row, layout.theta(p.bus), d_th);
         push(row, Some(layout.vmag(p.bus)), d_v);
     }
-
-    // A partial repeated on one bus is summed, not overwritten: `Row` is an
-    // association list and `gain_and_rhs` sums duplicates. That is what makes a
-    // node injection's overlapping Y-bus and source terms come out right, and a
-    // half-open branch's self-loop with it.
 }
 
 /// One bus-injection row on its own, for callers that need the same partials
@@ -267,16 +274,26 @@ pub fn measurement_jacobian_with(
                 }
                 _ => {
                     if let Some(f) = model.functional(i) {
-                        let active = m.kind == MeasurementKind::ActivePower;
-                        add_functional_row(
-                            &mut row,
-                            layout,
-                            f.at,
-                            &f.coefficients,
-                            &v,
-                            active,
-                            &mut scratch,
+                        scratch.clear();
+                        match m.target {
+                            Target::BranchTerminalCurrent { frame, .. } => match frame {
+                                AngleFrame::Global => {
+                                    current_partials_of(&f.coefficients, &v, &mut scratch)
+                                }
+                                AngleFrame::Local => local_current_partials_of(
+                                    f.at,
+                                    &f.coefficients,
+                                    &v,
+                                    &mut scratch,
+                                ),
+                            },
+                            _ => power_partials_of(f.at, &f.coefficients, &v, &mut scratch),
+                        }
+                        let real = matches!(
+                            m.kind,
+                            MeasurementKind::ActivePower | MeasurementKind::CurrentReal
                         );
+                        push_partials(&mut row, layout, &scratch, real);
                     }
                 }
             }
