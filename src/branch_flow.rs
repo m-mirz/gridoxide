@@ -69,7 +69,7 @@ pub struct BranchParams {
 impl BranchParams {
     /// `(y_self, y_mutual)` as seen from `terminal`, i.e. the two entries whose
     /// row is that terminal's own bus.
-    fn seen_from(&self, terminal: Terminal) -> (Complex<f64>, Complex<f64>) {
+    pub(crate) fn seen_from(&self, terminal: Terminal) -> (Complex<f64>, Complex<f64>) {
         match terminal {
             Terminal::From => (self.y[0], self.y[1]),
             Terminal::To => (self.y[3], self.y[2]),
@@ -77,7 +77,7 @@ impl BranchParams {
     }
 
     /// `(near_bus, far_bus)` for `terminal`.
-    fn buses(&self, terminal: Terminal) -> (usize, usize) {
+    pub(crate) fn buses(&self, terminal: Terminal) -> (usize, usize) {
         match terminal {
             Terminal::From => (self.from, self.to),
             Terminal::To => (self.to, self.from),

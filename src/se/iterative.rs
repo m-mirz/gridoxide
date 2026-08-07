@@ -70,41 +70,6 @@ struct LinearRow {
     is_voltage: bool,
 }
 
-/// Collects the coefficients that express a target's quantity as `Σ coeff·U`.
-///
-/// Every measurement function state estimation supports is linear in the
-/// complex voltages once expressed as a current, which is the property this
-/// whole method rests on.
-fn coefficients_for(net: &SeNetwork, target: Target) -> Option<Vec<(usize, Complex<f64>)>> {
-    match target {
-        Target::Bus(bus) => Some(net.ybus.row(bus).to_vec()),
-        Target::BranchTerminal { branch, terminal } => {
-            let b = &net.branches[branch];
-            Some(match terminal {
-                crate::branch_flow::Terminal::From => vec![(b.from, b.y[0]), (b.to, b.y[1])],
-                crate::branch_flow::Terminal::To => vec![(b.to, b.y[3]), (b.from, b.y[2])],
-            })
-        }
-        // A source's injection into its node is the negation of the current
-        // flowing from the node into the synthesized branch.
-        Target::SourceInjection { branch } => {
-            let b = &net.branches[branch];
-            Some(vec![(b.to, -b.y[3]), (b.from, -b.y[2])])
-        }
-        Target::ShuntInjection { bus } => Some(vec![(bus, -net.shunt_y[bus])]),
-        Target::NodeInjection(bus) => {
-            let mut coefficients = net.ybus.row(bus).to_vec();
-            for &branch in &net.source_branches[bus] {
-                let b = &net.branches[branch];
-                coefficients.push((b.to, -b.y[3]));
-                coefficients.push((b.from, -b.y[2]));
-            }
-            coefficients.push((bus, -net.shunt_y[bus]));
-            Some(coefficients)
-        }
-    }
-}
-
 /// Pairs the scalar measurements into complex linear rows.
 ///
 /// `P` and `Q` on one target become a single complex power measurement, since
@@ -157,7 +122,10 @@ fn build_rows(measurements: &[Measurement], net: &SeNetwork) -> Vec<LinearRow> {
         ) else {
             continue;
         };
-        let Some(coefficients) = coefficients_for(net, target) else {
+        // One description of what this target measures, shared with the Newton
+        // path's Jacobian — including which bus's voltage converts the power
+        // into a current, which used to be restated as its own match here.
+        let Some(functional) = net.functional(target) else {
             continue;
         };
         // The apparent-power measurement's variance is the sum of the two
@@ -166,22 +134,13 @@ fn build_rows(measurements: &[Measurement], net: &SeNetwork) -> Vec<LinearRow> {
         if variance <= 0.0 || !variance.is_finite() {
             continue;
         }
-        // Which bus's voltage converts this power into a current.
-        let reference_bus = match target {
-            Target::Bus(b) | Target::NodeInjection(b) | Target::ShuntInjection { bus: b } => b,
-            Target::BranchTerminal { branch, terminal } => match terminal {
-                crate::branch_flow::Terminal::From => net.branches[branch].from,
-                crate::branch_flow::Terminal::To => net.branches[branch].to,
-            },
-            Target::SourceInjection { branch } => net.branches[branch].to,
-        };
         rows.push(LinearRow {
-            coefficients,
+            coefficients: functional.coefficients,
             voltage_bus: None,
             magnitude: 0.0,
             power: Complex::new(measurements[p].value, measurements[q].value),
             angle: None,
-            reference_bus,
+            reference_bus: functional.at,
             weight: 1.0 / variance,
             is_voltage: false,
         });

@@ -33,6 +33,7 @@
 pub mod bad_data;
 pub mod batch;
 pub mod constraints;
+pub mod functional;
 pub mod iterative;
 pub mod jacobian;
 pub mod observability;
