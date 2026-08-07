@@ -26,6 +26,7 @@ use cimstructs::{
 
 use crate::dc::{injected_currents, solve_dc_network, DcBus, DcBusRole, DcLine, DcSolveStatus};
 use crate::network::ShuntAdm;
+use crate::topology::UnionFind;
 use crate::types::{Bus, BusType, Line, Transformer};
 
 /// Loads and merges a set of CGMES profile files (e.g. EQ, SSH, TP, SV) into
@@ -262,30 +263,6 @@ impl TerminalIndex {
     }
 }
 
-/// Minimal path-compressing union-find, used only by `merge_closed_switches`
-/// below (small enough — at most a few hundred buses — that union-by-rank
-/// isn't worth the extra bookkeeping).
-struct UnionFind {
-    parent: Vec<usize>,
-}
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        UnionFind { parent: (0..n).collect() }
-    }
-    fn find(&mut self, x: usize) -> usize {
-        if self.parent[x] != x {
-            self.parent[x] = self.find(self.parent[x]);
-        }
-        self.parent[x]
-    }
-    fn union(&mut self, a: usize, b: usize) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra != rb {
-            self.parent[ra] = rb;
-        }
-    }
-}
-
 /// Merges buses tied together by a *closed*, in-service switch (`Breaker`,
 /// `Switch`, `Disconnector`, `LoadBreakSwitch`, `DisconnectingCircuitBreaker`,
 /// `GroundDisconnector`, `Jumper`, `Cut`, `Fuse`) into one bus each, before
@@ -376,17 +353,21 @@ fn merge_closed_switches(ds: &CimDataset, buses: Vec<Bus>, terms: &mut TerminalI
     // deterministic) — a closed switch always ties nodes at the same
     // nominal voltage, so taking that representative bus's own fields
     // (`u_rated` in particular) for the merged bus is safe.
-    let mut remap = vec![usize::MAX; buses.len()];
-    let mut merged: Vec<Bus> = Vec::new();
+    let (remap, n_merged) = crate::topology::merge_groups(buses.len(), &mut uf);
+    let mut merged: Vec<Bus> = Vec::with_capacity(n_merged);
     for i in 0..buses.len() {
-        let root = uf.find(i);
-        if remap[root] == usize::MAX {
-            remap[root] = merged.len();
+        if remap[i] == merged.len() {
+            // Clone the group's union-find *root*, not the first index landing
+            // on this slot. The two coincide in most groups and the fields that
+            // matter (`u_rated`, `bus_type`) agree across a group anyway, since
+            // a closed switch ties nodes at one nominal voltage — but keeping
+            // the original choice makes this extraction provably behaviour-
+            // preserving rather than merely equivalent-looking.
+            let root = uf.find(i);
             let mut b = buses[root].clone();
-            b.idx = merged.len();
+            b.idx = remap[i];
             merged.push(b);
         }
-        remap[i] = remap[root];
     }
     for v in terms.bus_of.values_mut() {
         *v = remap[*v];
@@ -925,7 +906,16 @@ pub fn cgmes_to_buses_and_branches(
     // entries (a real de-energized/switched-out snapshot, not a decode gap).
     fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) {
         match (from_conn, to_conn) {
-            (true, true) => lines.push(Line { from, to, r, x, b_shunt, g_shunt }),
+            (true, true) => {
+                // A jumper exported as a very short `ACLineSegment` would put an
+                // unbounded admittance into the Y-bus; see
+                // `topology::ZERO_IMPEDANCE_THRESHOLD`. Measured across every committed
+                // CGMES fixture the smallest branch is 2.92e-6 p.u., some 30x
+                // above the threshold, so this changes nothing modelled today
+                // and exists for exports that are less well behaved.
+                let (r, x) = crate::topology::clamp_branch_impedance(r, x);
+                lines.push(Line { from, to, r, x, b_shunt, g_shunt })
+            }
             (true, false) => lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt }),
             (false, true) => lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt }),
             (false, false) => {}

@@ -14,6 +14,13 @@
 - [Ideal Switches and Zero-Impedance Branches](./powerflow/zero_impedance_branches.md)
 - [Multi-Island Power Flow](./powerflow/multi_island.md)
 
+# State Estimation
+
+- [The State Estimation Problem](./state_estimation/index.md)
+- [Measurements and What They Mean](./state_estimation/measurements.md)
+- [The Iterative-Linear Method](./state_estimation/iterative.md)
+- [Observability and Bad Data](./state_estimation/diagnostics.md)
+
 # Sparse Linear Solvers
 
 - [Backends and Factorization Reuse](./solvers/backends.md)

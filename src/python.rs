@@ -77,6 +77,24 @@ struct BatchResult {
     max_mismatch: f64,
 }
 
+/// One scenario's outcome from [`StateEstimationModel::solve_batch`].
+#[pyclass]
+struct SeBatchOutcome {
+    /// Per-bus voltage magnitude in per-unit, in node order.
+    #[pyo3(get)]
+    voltage_mag: Vec<f64>,
+    /// Per-bus voltage angle in radians, in node order.
+    #[pyo3(get)]
+    voltage_ang: Vec<f64>,
+    #[pyo3(get)]
+    iterations: usize,
+    /// `J(x) = ½ rᵀWr` at the estimate.
+    #[pyo3(get)]
+    objective: f64,
+    #[pyo3(get)]
+    converged: bool,
+}
+
 /// A power flow model loaded from a PGM-format JSON file, solved via a
 /// persistent `solver::PersistentSolver` — repeated `solve()` calls on the
 /// same `PowerFlowModel` reuse cached symbolic factorization exactly the
@@ -478,9 +496,316 @@ impl PowerFlowModel {
 /// links this as `PyInit__gridoxide`, loaded by `python/gridoxide/__init__.py`
 /// via `from ._gridoxide import PowerFlowModel`, not imported directly by
 /// end users.
+/// State estimation over a PGM network and its sensors.
+///
+/// Deliberately a separate class from `PowerFlowModel` rather than a method on
+/// it. The two solve different problems from different inputs: power flow is
+/// given injections and computes voltages, while state estimation is given
+/// noisy measurements and computes the most likely voltages. They do not even
+/// share an unknown count — state estimation has no PV buses, so every bus
+/// carries a magnitude.
+#[pyclass]
+struct StateEstimationModel {
+    buses: Vec<Bus>,
+    net: crate::pgm::PgmNetwork,
+    se_net: crate::se::SeNetwork,
+    measurements: Vec<crate::measurement::Measurement>,
+    options: crate::se::nr::SeOptions,
+    report: Option<crate::se::nr::SeReport>,
+    /// Keeps the symbolic factorization between `solve()` calls, the way
+    /// `PowerFlowModel` keeps `PersistentSolver`'s. The measurement set on a
+    /// model never changes structure — it is fixed at load — so the cache is
+    /// valid for the model's whole life.
+    estimator: crate::se::nr::PersistentEstimator,
+}
+
+#[pymethods]
+impl StateEstimationModel {
+    /// Loads a PGM-format JSON document containing sensors.
+    ///
+    /// The document needs `sym_voltage_sensor` and/or `sym_power_sensor`
+    /// entries; unlike a power-flow document it does *not* need `p_specified`
+    /// on its loads or `u_ref` on its sources, since those are quantities state
+    /// estimation solves for rather than inputs it consumes.
+    #[staticmethod]
+    #[pyo3(signature = (path, backend="scalar", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0))]
+    fn from_pgm_json(
+        path: &str,
+        backend: &str,
+        method: &str,
+        tol: f64,
+        max_iter: usize,
+        s_base_va: f64,
+        freq_hz: f64,
+    ) -> PyResult<Self> {
+        let method = match method {
+            "newton_raphson" => crate::se::nr::SeMethod::NewtonRaphson,
+            "iterative_linear" => crate::se::nr::SeMethod::IterativeLinear,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown method {other:?}, expected 'newton_raphson' or 'iterative_linear'"
+                )))
+            }
+        };
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+        let input: PgmInput = serde_json::from_str(&raw)
+            .map_err(|e| PyValueError::new_err(format!("parsing {path} as PGM JSON: {e}")))?;
+        let id_to_idx = crate::pgm::node_id_to_idx(&input);
+        let shunts = crate::pgm::pgm_shunts_1ph(&input, &id_to_idx, s_base_va);
+
+        // The conversion consumes its input and the measurement builder needs
+        // it, so the document is parsed twice rather than cloned through.
+        let net = crate::pgm::pgm_to_network(
+            serde_json::from_str(&raw)
+                .map_err(|e| PyValueError::new_err(format!("parsing {path} as PGM JSON: {e}")))?,
+            s_base_va,
+            freq_hz,
+        );
+        let measurements = crate::measurement::measurements_from_pgm(&input, &net, s_base_va)
+            .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        if measurements.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "{path} contains no usable sensors, so there is nothing to estimate"
+            )));
+        }
+
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let se_net = crate::se::SeNetwork::new(&net, ybus.finish(), &shunts);
+        let buses = net.buses.clone();
+        // One value shared by the field and the estimator. These used to be two
+        // separately-constructed copies, harmless while nothing read the field
+        // — `solve_batch` now does.
+        let options = crate::se::nr::SeOptions {
+            tol,
+            max_iter,
+            backend: parse_backend(backend)?,
+            method,
+        };
+
+        Ok(Self {
+            buses,
+            net,
+            se_net,
+            measurements,
+            options,
+            report: None,
+            estimator: crate::se::nr::PersistentEstimator::new(options),
+        })
+    }
+
+    /// Number of buses, including the virtual slack bus gridoxide synthesizes
+    /// per active source.
+    #[getter]
+    fn n_nodes(&self) -> usize {
+        self.buses.len()
+    }
+
+    /// The loaded value of measurement `i`, per-unit.
+    ///
+    /// `solve_batch` overrides rows by index, so a caller building scenarios
+    /// needs to be able to read the template it is overriding — otherwise
+    /// varying one row means re-deriving the whole aggregated set in Python.
+    fn measurement_value(&self, i: usize) -> PyResult<f64> {
+        self.measurements
+            .get(i)
+            .map(|m| m.value)
+            .ok_or_else(|| PyValueError::new_err(format!("no measurement {i}")))
+    }
+
+    /// The loaded standard deviation of measurement `i`, per-unit.
+    fn measurement_sigma(&self, i: usize) -> PyResult<f64> {
+        self.measurements
+            .get(i)
+            .map(|m| m.sigma)
+            .ok_or_else(|| PyValueError::new_err(format!("no measurement {i}")))
+    }
+
+    /// Number of scalar measurements after aggregation — one per `z` entry, so
+    /// a power sensor contributes two.
+    #[getter]
+    fn n_measurements(&self) -> usize {
+        self.measurements.len()
+    }
+
+    /// Runs the estimate from a linear start. Raises if it does not converge.
+    fn solve(&mut self) -> PyResult<()> {
+        self.buses = self.net.buses.clone();
+        crate::se::nr::linear_start(&mut self.buses, &self.se_net, &self.measurements);
+        let report = self
+            .estimator
+            .estimate(&self.measurements, &mut self.buses, &self.se_net);
+        let status = report.status;
+        self.report = Some(report);
+        match status {
+            crate::se::nr::SeStatus::Converged => Ok(()),
+            crate::se::nr::SeStatus::MaxIterations => Err(PyRuntimeError::new_err(
+                "state estimation did not converge within max_iter",
+            )),
+            crate::se::nr::SeStatus::Singular => Err(PyRuntimeError::new_err(
+                "the gain matrix is singular; the measurements likely leave part of \
+                 the state unobservable — call observability() for the detail",
+            )),
+        }
+    }
+
+    /// Estimates many scenarios over this model's topology and measurement
+    /// structure, across `threads` workers.
+    ///
+    /// Each scenario is `[(measurement_index, value, sigma), ...]`, replacing
+    /// those rows of the loaded measurement set. Everything not named keeps the
+    /// loaded reading. Deliberately index-based rather than document-based:
+    /// what may vary between scenarios is exactly values and sigmas, since
+    /// anything else would move the gain matrix's sparsity pattern and throw
+    /// away the shared factorization batching exists for.
+    ///
+    /// Returns one `SeBatchOutcome` per scenario, in scenario order regardless
+    /// of thread count. A scenario that fails to converge is reported rather
+    /// than raised — a divergent scenario must not poison the batch.
+    #[pyo3(signature = (scenarios, threads=0))]
+    fn solve_batch(
+        &mut self,
+        scenarios: Vec<Vec<(usize, f64, f64)>>,
+        threads: usize,
+    ) -> PyResult<Vec<SeBatchOutcome>> {
+        use crate::se::batch::{MeasurementOverride, SeBatchSolver, SeScenario};
+
+        let scenarios: Vec<SeScenario> = scenarios
+            .into_iter()
+            .map(|rows| {
+                SeScenario::new(
+                    rows.into_iter()
+                        .map(|(i, value, sigma)| {
+                            MeasurementOverride::new(i).value(value).sigma(sigma)
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+
+        let solver = if threads == 0 {
+            SeBatchSolver::new(self.options)
+        } else {
+            SeBatchSolver::with_threads(self.options, threads)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        };
+        let results = solver
+            .estimate(&self.net.buses, &self.se_net, &self.measurements, &scenarios)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| SeBatchOutcome {
+                voltage_mag: r.buses.iter().map(|b| b.voltage_mag).collect(),
+                voltage_ang: r.buses.iter().map(|b| b.voltage_ang).collect(),
+                iterations: r.report.iterations,
+                objective: r.report.objective,
+                converged: matches!(r.report.status, crate::se::nr::SeStatus::Converged),
+            })
+            .collect())
+    }
+
+    /// Per-bus voltage magnitude in per-unit, in node order.
+    fn voltage_mag(&self) -> Vec<f64> {
+        self.buses.iter().map(|b| b.voltage_mag).collect()
+    }
+
+    /// Per-bus voltage angle in radians, in node order.
+    fn voltage_ang(&self) -> Vec<f64> {
+        self.buses.iter().map(|b| b.voltage_ang).collect()
+    }
+
+    /// `z - h(x)` at the final state, one per measurement.
+    fn residuals(&self) -> Vec<f64> {
+        self.report.as_ref().map(|r| r.residuals.clone()).unwrap_or_default()
+    }
+
+    /// `J(x) = 1/2 r^T W r` at the final state.
+    ///
+    /// A large value is not a convergence failure: it means the measurements
+    /// disagree with each other. `bad_data()` is what interprets it.
+    #[getter]
+    fn objective(&self) -> f64 {
+        self.report.as_ref().map(|r| r.objective).unwrap_or(f64::NAN)
+    }
+
+    /// Which buses and quantities the measurements leave undetermined, as a
+    /// list of `(bus, "angle" | "magnitude")`.
+    ///
+    /// Empty means fully observable. Entries beyond the physical node count
+    /// refer to gridoxide's synthesized buses, which are expected to appear
+    /// whenever a source's own power is unmeasured.
+    fn observability(&self) -> Vec<(usize, String)> {
+        let layout = crate::se::jacobian::StateLayout::new(
+            &self.buses,
+            &self.measurements,
+            &self.se_net,
+        );
+        let report = crate::se::observability::analyze(
+            &self.measurements,
+            &self.buses,
+            &self.se_net,
+            &layout,
+        );
+        report
+            .unobservable
+            .iter()
+            .chain(&report.structurally_unmeasured)
+            .map(|u| {
+                let quantity = match u.quantity {
+                    crate::se::observability::Quantity::Angle => "angle",
+                    crate::se::observability::Quantity::Magnitude => "magnitude",
+                };
+                (u.bus, quantity.to_string())
+            })
+            .collect()
+    }
+
+    /// Bad-data analysis at the solved state.
+    ///
+    /// Returns `(chi_squared, degrees_of_freedom, p_value, suspects)`, where
+    /// each suspect is `(measurement_index, normalized_residual)` worst first.
+    /// A p-value below 0.05 conventionally means the measurements are not
+    /// merely noisy; a normalized residual above 3 conventionally identifies
+    /// the culprit.
+    #[pyo3(signature = (candidates=20))]
+    fn bad_data(&self, candidates: usize) -> PyResult<(f64, usize, f64, Vec<(usize, f64)>)> {
+        let Some(report) = self.report.as_ref() else {
+            return Err(PyRuntimeError::new_err("call solve() before bad_data()"));
+        };
+        let layout = crate::se::jacobian::StateLayout::new(
+            &self.buses,
+            &self.measurements,
+            &self.se_net,
+        );
+        let constraints = crate::se::constraints::Constraints::new(&self.se_net);
+        let bad = crate::se::bad_data::analyze(
+            &self.measurements,
+            &report.residuals,
+            &self.buses,
+            &self.se_net,
+            &layout,
+            &constraints,
+            crate::se::bad_data::Candidates { limit: candidates },
+        );
+        Ok((
+            bad.chi_squared,
+            bad.degrees_of_freedom,
+            bad.p_value,
+            bad.suspects
+                .iter()
+                .map(|s| (s.measurement, s.normalized_residual))
+                .collect(),
+        ))
+    }
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     m.add_class::<BatchResult>()?;
+    m.add_class::<StateEstimationModel>()?;
+    m.add_class::<SeBatchOutcome>()?;
     Ok(())
 }

@@ -139,6 +139,47 @@ impl crate::solver::LinearSolver for RealSparseSystem {
     }
 }
 
+/// A complex sparse system whose sparsity *pattern* and *values* are both fixed
+/// across repeated solves, so the whole factorization — not merely the symbolic
+/// half — is computed once and reused.
+///
+/// This is the stronger guarantee [`RealSparseSystem`] cannot make: Newton's
+/// Jacobian changes numerically every iteration, so only the ordering can be
+/// cached. The iterative-linear state estimator
+/// ([`se::iterative`](crate::se::iterative)) is different — its system matrix
+/// depends on the measurement set and on the *assumption* that voltage
+/// magnitudes stay near their initial values, so it is genuinely constant and
+/// only the right-hand side moves. That is exactly what makes the method
+/// cheaper per iteration than Newton-Raphson, and it is why this type exists.
+pub struct ComplexSparseSystem {
+    n: usize,
+    lu: Lu<usize, Complex<f64>>,
+}
+
+impl ComplexSparseSystem {
+    /// Factorizes once. Returns `None` if the matrix is singular or malformed.
+    pub fn new(n: usize, entries: &[(usize, usize, Complex<f64>)]) -> Option<Self> {
+        let triplets: Vec<Triplet<usize, usize, Complex<f64>>> =
+            entries.iter().map(|&(r, c, v)| Triplet::new(r, c, v)).collect();
+        let mat = SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
+        Some(Self { n, lu: mat.sp_lu().ok()? })
+    }
+
+    /// Solves `A x = b` against the cached factorization.
+    ///
+    /// Singularity is checked on the result rather than reported by `faer`,
+    /// which returns NaN-poisoned values instead of an error — the same
+    /// contract [`solve_complex`] documents.
+    pub fn solve(&self, rhs: &[Complex<f64>]) -> Option<Vec<Complex<f64>>> {
+        let b = Col::<Complex<f64>>::from_fn(self.n, |i| rhs[i]);
+        let x = self.lu.solve(&b);
+        if (0..self.n).any(|i| !x[i].re.is_finite() || !x[i].im.is_finite()) {
+            return None;
+        }
+        Some((0..self.n).map(|i| x[i]).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
