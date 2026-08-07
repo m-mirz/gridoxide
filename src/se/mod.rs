@@ -31,6 +31,7 @@
 //! reported a 63-sigma disagreement on exactly that quantity.
 
 pub mod bad_data;
+pub mod batch;
 pub mod constraints;
 pub mod iterative;
 pub mod jacobian;

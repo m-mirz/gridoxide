@@ -77,6 +77,24 @@ struct BatchResult {
     max_mismatch: f64,
 }
 
+/// One scenario's outcome from [`StateEstimationModel::solve_batch`].
+#[pyclass]
+struct SeBatchOutcome {
+    /// Per-bus voltage magnitude in per-unit, in node order.
+    #[pyo3(get)]
+    voltage_mag: Vec<f64>,
+    /// Per-bus voltage angle in radians, in node order.
+    #[pyo3(get)]
+    voltage_ang: Vec<f64>,
+    #[pyo3(get)]
+    iterations: usize,
+    /// `J(x) = ½ rᵀWr` at the estimate.
+    #[pyo3(get)]
+    objective: f64,
+    #[pyo3(get)]
+    converged: bool,
+}
+
 /// A power flow model loaded from a PGM-format JSON file, solved via a
 /// persistent `solver::PersistentSolver` — repeated `solve()` calls on the
 /// same `PowerFlowModel` reuse cached symbolic factorization exactly the
@@ -556,25 +574,24 @@ impl StateEstimationModel {
         stamp_shunts(&mut ybus, &shunts);
         let se_net = crate::se::SeNetwork::new(&net, ybus.finish(), &shunts);
         let buses = net.buses.clone();
+        // One value shared by the field and the estimator. These used to be two
+        // separately-constructed copies, harmless while nothing read the field
+        // — `solve_batch` now does.
+        let options = crate::se::nr::SeOptions {
+            tol,
+            max_iter,
+            backend: parse_backend(backend)?,
+            method,
+        };
 
         Ok(Self {
             buses,
             net,
             se_net,
             measurements,
-            options: crate::se::nr::SeOptions {
-                tol,
-                max_iter,
-                backend: parse_backend(backend)?,
-                method,
-            },
+            options,
             report: None,
-            estimator: crate::se::nr::PersistentEstimator::new(crate::se::nr::SeOptions {
-                tol,
-                max_iter,
-                backend: parse_backend(backend)?,
-                method,
-            }),
+            estimator: crate::se::nr::PersistentEstimator::new(options),
         })
     }
 
@@ -583,6 +600,26 @@ impl StateEstimationModel {
     #[getter]
     fn n_nodes(&self) -> usize {
         self.buses.len()
+    }
+
+    /// The loaded value of measurement `i`, per-unit.
+    ///
+    /// `solve_batch` overrides rows by index, so a caller building scenarios
+    /// needs to be able to read the template it is overriding — otherwise
+    /// varying one row means re-deriving the whole aggregated set in Python.
+    fn measurement_value(&self, i: usize) -> PyResult<f64> {
+        self.measurements
+            .get(i)
+            .map(|m| m.value)
+            .ok_or_else(|| PyValueError::new_err(format!("no measurement {i}")))
+    }
+
+    /// The loaded standard deviation of measurement `i`, per-unit.
+    fn measurement_sigma(&self, i: usize) -> PyResult<f64> {
+        self.measurements
+            .get(i)
+            .map(|m| m.sigma)
+            .ok_or_else(|| PyValueError::new_err(format!("no measurement {i}")))
     }
 
     /// Number of scalar measurements after aggregation — one per `z` entry, so
@@ -611,6 +648,62 @@ impl StateEstimationModel {
                  the state unobservable — call observability() for the detail",
             )),
         }
+    }
+
+    /// Estimates many scenarios over this model's topology and measurement
+    /// structure, across `threads` workers.
+    ///
+    /// Each scenario is `[(measurement_index, value, sigma), ...]`, replacing
+    /// those rows of the loaded measurement set. Everything not named keeps the
+    /// loaded reading. Deliberately index-based rather than document-based:
+    /// what may vary between scenarios is exactly values and sigmas, since
+    /// anything else would move the gain matrix's sparsity pattern and throw
+    /// away the shared factorization batching exists for.
+    ///
+    /// Returns one `SeBatchOutcome` per scenario, in scenario order regardless
+    /// of thread count. A scenario that fails to converge is reported rather
+    /// than raised — a divergent scenario must not poison the batch.
+    #[pyo3(signature = (scenarios, threads=0))]
+    fn solve_batch(
+        &mut self,
+        scenarios: Vec<Vec<(usize, f64, f64)>>,
+        threads: usize,
+    ) -> PyResult<Vec<SeBatchOutcome>> {
+        use crate::se::batch::{MeasurementOverride, SeBatchSolver, SeScenario};
+
+        let scenarios: Vec<SeScenario> = scenarios
+            .into_iter()
+            .map(|rows| {
+                SeScenario::new(
+                    rows.into_iter()
+                        .map(|(i, value, sigma)| {
+                            MeasurementOverride::new(i).value(value).sigma(sigma)
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+
+        let solver = if threads == 0 {
+            SeBatchSolver::new(self.options)
+        } else {
+            SeBatchSolver::with_threads(self.options, threads)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        };
+        let results = solver
+            .estimate(&self.net.buses, &self.se_net, &self.measurements, &scenarios)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| SeBatchOutcome {
+                voltage_mag: r.buses.iter().map(|b| b.voltage_mag).collect(),
+                voltage_ang: r.buses.iter().map(|b| b.voltage_ang).collect(),
+                iterations: r.report.iterations,
+                objective: r.report.objective,
+                converged: matches!(r.report.status, crate::se::nr::SeStatus::Converged),
+            })
+            .collect())
     }
 
     /// Per-bus voltage magnitude in per-unit, in node order.
@@ -713,5 +806,6 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     m.add_class::<BatchResult>()?;
     m.add_class::<StateEstimationModel>()?;
+    m.add_class::<SeBatchOutcome>()?;
     Ok(())
 }

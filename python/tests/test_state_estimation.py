@@ -146,3 +146,44 @@ def test_document_without_sensors_is_rejected():
     )
     with pytest.raises(ValueError, match="no usable sensors"):
         gridoxide.StateEstimationModel.from_pgm_json(str(power_flow_input))
+
+
+def test_solve_batch_is_order_and_thread_invariant():
+    """A batch returns scenario order regardless of thread count, and an empty
+    scenario reproduces the single-shot solve exactly.
+
+    The bit-for-bit comparison is the point: a batch that merely agreed to
+    1e-12 would have order-dependence in it, and the shared factorization is
+    supposed to leave none to have.
+    """
+    m = model("transmission-case")
+    m.solve()
+    single = list(m.voltage_mag())
+
+    # Scenario 0 changes nothing, so it must reproduce the single-shot answer.
+    # The others reweight the first row rather than moving its value: what is
+    # under test is ordering and thread invariance, and a perturbation large
+    # enough to be interesting is also large enough to diverge, which would
+    # test something else.
+    scenarios = [[], [(0, m.measurement_value(0), 0.05)], [(0, m.measurement_value(0), 0.5)]]
+
+    reference = m.solve_batch(scenarios, 1)
+    assert [r.converged for r in reference] == [True, True, True]
+    assert reference[0].voltage_mag == pytest.approx(single, abs=0.0)
+
+    for threads in (2, 4):
+        out = m.solve_batch(scenarios, threads)
+        assert len(out) == len(scenarios)
+        for got, want in zip(out, reference):
+            assert got.voltage_mag == pytest.approx(want.voltage_mag, abs=0.0)
+            assert got.voltage_ang == pytest.approx(want.voltage_ang, abs=0.0)
+            assert got.iterations == want.iterations
+
+
+def test_solve_batch_rejects_an_out_of_range_measurement():
+    """An override past the end of the measurement set names the offending
+    index rather than panicking across the FFI boundary."""
+    m = model("transmission-case")
+    n = m.n_measurements
+    with pytest.raises(ValueError, match="only .* measurement"):
+        m.solve_batch([[(n, 1.0, 0.1)]])
