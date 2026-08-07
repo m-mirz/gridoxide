@@ -1227,6 +1227,161 @@ pub fn measurements_from_pgm_3ph(
                 reading,
             )?;
         }
+
+        // ── Asymmetric sensors, describing their phases separately ───────
+        //
+        // Where a symmetric sensor's one reading rotates onto three phases,
+        // these carry a value per phase already, so `phase` selects rather than
+        // rotates. Sigmas stay scalar and apply to each phase, which is
+        // power-grid-model's own treatment.
+        for s in &input.data.asym_voltage_sensor {
+            let Some(bus) = view.node_bus(s.measured_object) else {
+                return Err(MeasurementError::UnknownObject {
+                    sensor: s.id,
+                    object: s.measured_object,
+                });
+            };
+            if !s.u_measured[phase].is_finite() {
+                continue;
+            }
+            // An asymmetric reading is line-to-neutral, against a
+            // line-to-neutral base — where the symmetric sensor above is
+            // line-to-line against `u_rated`. The two coincide only for a
+            // balanced set, which is exactly what these sensors exist to
+            // describe the failure of.
+            let base = u_rated(bus) / SQRT_3;
+            let sigma = checked_sigma(s.id, s.u_sigma)? / base;
+            let magnitude = s.u_measured[phase] / base;
+            let bus_acc = acc.buses.entry(bus).or_default();
+            if s.u_angle_measured[phase].is_finite() {
+                // Already this phase's own absolute angle: no 120° rotation, and
+                // no requirement that the other phases carry one either.
+                bus_acc
+                    .u_phasor
+                    .add(num_complex::Complex::from_polar(magnitude, s.u_angle_measured[phase]), sigma);
+            } else {
+                bus_acc.u_mag.add(magnitude, sigma);
+            }
+        }
+
+        for s in &input.data.asym_power_sensor {
+            let p_finite = s.p_measured[phase].is_finite();
+            let q_finite = s.q_measured[phase].is_finite();
+            if !p_finite && !q_finite {
+                continue;
+            }
+            // A per-phase power is per-unit against `s_base/3`, PGM's
+            // `base_power_1p`. Per-component sigmas are per-phase here too,
+            // unlike the voltage sensor's.
+            let s_base_1ph = s_base_va / 3.0;
+            let (p_sigma, q_sigma) =
+                if s.p_sigma[phase].is_finite() && s.q_sigma[phase].is_finite() {
+                    (
+                        checked_sigma(s.id, s.p_sigma[phase])? / s_base_1ph,
+                        checked_sigma(s.id, s.q_sigma[phase])? / s_base_1ph,
+                    )
+                } else {
+                    let shared = apparent_power_component_sigma(
+                        checked_sigma(s.id, s.power_sigma)? / s_base_1ph,
+                    );
+                    (shared, shared)
+                };
+            let reading = (
+                p_finite.then(|| (s.p_measured[phase] / s_base_1ph, p_sigma)),
+                q_finite.then(|| (s.q_measured[phase] / s_base_1ph, q_sigma)),
+            );
+            route_power_reading(
+                &mut acc,
+                &view,
+                s.id,
+                s.measured_object,
+                s.measured_terminal_type,
+                reading,
+            )?;
+        }
+
+        for (id, object, terminal_type, frame_code, i_measured, i_angle, i_sigma, i_angle_sigma) in
+            input
+                .data
+                .sym_current_sensor
+                .iter()
+                .map(|s| {
+                    (
+                        s.id,
+                        s.measured_object,
+                        s.measured_terminal_type,
+                        s.angle_measurement_type,
+                        s.i_measured,
+                        // A symmetric current sensor's angle rotates onto the
+                        // three phases, exactly as a symmetric voltage phasor's
+                        // does.
+                        s.i_angle_measured + PHASE_ANGLE[phase],
+                        s.i_sigma,
+                        s.i_angle_sigma,
+                    )
+                })
+                .chain(input.data.asym_current_sensor.iter().map(|s| {
+                    (
+                        s.id,
+                        s.measured_object,
+                        s.measured_terminal_type,
+                        s.angle_measurement_type,
+                        s.i_measured[phase],
+                        s.i_angle_measured[phase],
+                        s.i_sigma,
+                        s.i_angle_sigma,
+                    )
+                }))
+        {
+            if !i_measured.is_finite() || !i_angle.is_finite() {
+                continue;
+            }
+            // `pgm_3ph_maps` refuses links and three-winding transformers
+            // outright, so a current sensor here is on an ordinary branch
+            // terminal or on nothing.
+            if !matches!(terminal_type, 0 | 1) {
+                return Err(MeasurementError::UnsupportedTerminalType {
+                    sensor: id,
+                    terminal_type,
+                });
+            }
+            let terminal = if terminal_type == 0 { Terminal::From } else { Terminal::To };
+            let Some(key) = view.resolve_terminal(object, terminal) else {
+                continue;
+            };
+            let near = if terminal_type == 0 {
+                input.data.line.iter().find(|l| l.id == object).map(|l| l.from_node).or_else(|| {
+                    input.data.transformer.iter().find(|t| t.id == object).map(|t| t.from_node)
+                })
+            } else {
+                input.data.line.iter().find(|l| l.id == object).map(|l| l.to_node).or_else(|| {
+                    input.data.transformer.iter().find(|t| t.id == object).map(|t| t.to_node)
+                })
+            };
+            let Some(near_bus) = near.and_then(|id| view.node_bus(id)) else {
+                return Err(MeasurementError::UnknownObject { sensor: id, object });
+            };
+            let i_base = s_base_va / (SQRT_3 * u_rated(near_bus));
+            let ((re, re_sigma), (im, im_sigma)) = decompose_polar(
+                i_measured / i_base,
+                i_angle,
+                checked_sigma(id, i_sigma)? / i_base,
+                checked_sigma(id, i_angle_sigma)?,
+            );
+            let frame = if frame_code == 0 { AngleFrame::Local } else { AngleFrame::Global };
+            if acc.branch_p.contains_key(&key) || acc.branch_q.contains_key(&key) {
+                return Err(MeasurementError::MixedPowerAndCurrent { sensor: id, object });
+            }
+            let entry = acc
+                .currents
+                .entry(key)
+                .or_insert((frame, Merged::default(), Merged::default()));
+            if entry.0 != frame {
+                return Err(MeasurementError::ConflictingAngleFrame { sensor: id, object });
+            }
+            entry.1.add(re, re_sigma);
+            entry.2.add(im, im_sigma);
+        }
     }
 
     Ok(flatten(acc))

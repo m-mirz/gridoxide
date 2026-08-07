@@ -247,11 +247,28 @@ matter:
    So the value replicates and only the angle rotates by 0/−120/+120 — which is exactly
    power-grid-model's own `ComplexValue<asymmetric_t>` broadcast.
 
-   **What is left:** asymmetric *sensors* in the phase domain, where they currently reduce to the
-   symmetric problem instead of describing their three phases separately; and the components
-   `pgm_to_3ph_network` does not model — `link`, `three_winding_transformer` and `voltage_regulator`,
-   which `pgm_3ph_maps` now refuses with a typed error rather than dropping silently, plus
-   `transformer_seq_params`' panic on any winding pair outside Dyn and YNyn.
+   Asymmetric sensors describe their three phases separately here rather than reducing to the
+   symmetric problem: `asym_voltage_sensor`, `asym_power_sensor` and `asym_current_sensor` each
+   select their own phase's reading, against a line-to-neutral voltage base and a `s_base/3` power
+   base. Checked against `single-node-source-asym-voltage-sensor`, where the sensor determines the
+   answer outright and power-grid-model reports back exactly what it read.
+
+   **What is left is one modelling difference, and it is worth stating precisely.** Voltage
+   magnitudes alone do not determine a phase relationship. With flows in the set the source
+   impedance couples the phases — a flow through it depends on all six of its phasors — but given
+   only magnitudes the three per-phase rotations are three separate symmetries where `StateLayout`
+   removes one, and the gain matrix is correctly singular. power-grid-model answers such a case
+   because its source is a *boundary condition*, a fixed balanced three-phase voltage; gridoxide's
+   is an unknown behind a synthesized impedance, the same difference that leaves
+   `SeReport::unconstrained` naming a virtual bus per source on the symmetric side. The fix is to
+   say what gridoxide already knows and does not use — that virtual bus is a balanced Thévenin by
+   construction, so its three angles differ by exactly ±120° — as two linear constraints per source,
+   which `se::constraints` cannot express today.
+
+   `pgm_3ph_maps` refuses the components the three-phase conversion does not model — `link`,
+   `three_winding_transformer`, `voltage_regulator`, and any transformer winding pair outside Dyn
+   and YNyn — with a typed error rather than dropping them silently or, in the last case, panicking
+   from inside `transformer_seq_params`.
 
 2. ~~**Current sensors.**~~ **Done.** `sym_current_sensor` and `asym_current_sensor` are read in both
    angle frames, on both calculation methods, checked against power-grid-model's own

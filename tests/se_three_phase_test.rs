@@ -210,6 +210,12 @@ fn a_three_phase_terminal_couples_its_phases() {
 /// and positive sequences differ by `z01_ratio`. That branch couples the phases
 /// at the one place every energised component is reachable from, so a per-phase
 /// rotation is not a symmetry even when every line in the network is balanced.
+///
+/// Note the measurement set does the coupling as much as the network does: it is
+/// a *flow* through that branch that depends on all six of its phasors. Given
+/// only voltage magnitudes the three rotations separate again — see
+/// [`magnitudes_alone_leave_the_phase_relationship_undetermined`], which is the
+/// same question answered the other way for a set carrying no flows at all.
 #[test]
 fn only_the_global_rotation_is_a_symmetry_of_the_phase_domain() {
     use gridoxide::measurement::{Measurement, MeasurementKind};
@@ -387,3 +393,164 @@ fn estimates_transmission_case_in_the_phase_domain() {
     }
 }
 
+
+/// Asymmetric sensors describing their three phases separately.
+///
+/// The `transmission-case` gate above drives the phase domain from *symmetric*
+/// sensors, which reach it by replication and a rotation. This one carries a
+/// value per phase already, which is the case the asymmetric path exists for.
+///
+/// A single node behind a source, so the measurement determines the answer
+/// outright and power-grid-model reports back exactly what the sensor read.
+/// That makes it a check on the *conversion* — per-unit base, phase selection,
+/// angle handling — rather than on the estimator.
+#[test]
+fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
+    use gridoxide::measurement::measurements_from_pgm_3ph;
+    use gridoxide::pgm::pgm_3ph_maps;
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+
+    let name = "single-node-source-asym-voltage-sensor";
+    let dir = fixture("tests/data/pgm/state_estimation").join(name);
+    let input = common::load_pgm_input(&dir.join("input.json"));
+    let expected = common::load_json(&dir.join("asym_output.json"));
+
+    let maps = pgm_3ph_maps(&input).expect("no unsupported component");
+    let id_to_idx = node_id_to_idx(&input);
+    let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
+    let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
+    let (buses, lines, _) = pgm_to_3ph_network(
+        common::load_pgm_input(&dir.join("input.json")),
+        S_BASE_VA,
+        50.0,
+    );
+    let mut ybus = build_ybus_3ph(buses.len() / 3, &lines);
+    stamp_transformers_3ph(&mut ybus, &transformers);
+    stamp_shunts_3ph(&mut ybus, &shunts);
+    let se_net = SeNetwork::from_3ph(
+        ybus.finish(),
+        &lines,
+        &transformers,
+        &shunts,
+        &maps.source_branch_idx,
+        &maps.zero_injection,
+    );
+
+    let u_rated = |bus: usize| buses[bus].u_rated;
+    let measurements =
+        measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated).expect("measurements");
+    assert_eq!(measurements.len(), 6, "three phases, each a magnitude and an angle");
+
+    let mut state = buses.clone();
+    linear_start(&mut state, &se_net, &measurements);
+    let report = estimate(
+        &measurements,
+        &mut state,
+        &se_net,
+        &SeOptions { max_iter: 40, ..SeOptions::default() },
+    );
+    assert_eq!(report.status, SeStatus::Converged, "{name}: {report:?}");
+
+    for node in expected["data"]["node"].as_array().expect("node output") {
+        let k = maps.node_idx[&node["id"].as_u64().expect("node id")];
+        let u = node["u"].as_array().expect("per-phase u");
+        let u_angle = node["u_angle"].as_array().expect("per-phase u_angle");
+        // Published `u` is line-to-neutral volts; the state is per-unit on the
+        // line-to-neutral base.
+        let base = buses[3 * k].u_rated / 3.0f64.sqrt();
+        for p in 0..3 {
+            let want = u[p].as_f64().expect("u") / base;
+            assert!(
+                (state[3 * k + p].voltage_mag - want).abs() < 1e-6,
+                "{name} phase {p}: |V| = {}, PGM says {want}",
+                state[3 * k + p].voltage_mag
+            );
+            let want_ang = u_angle[p].as_f64().expect("angle");
+            assert!(
+                (state[3 * k + p].voltage_ang - want_ang).abs() < 1e-6,
+                "{name} phase {p}: angle = {}, PGM says {want_ang}",
+                state[3 * k + p].voltage_ang
+            );
+        }
+    }
+}
+
+/// Magnitudes alone do not determine a phase relationship, and that is a real
+/// limit of gridoxide's source model rather than a defect in the conversion.
+///
+/// This refines the finding in
+/// [`only_the_global_rotation_is_a_symmetry_of_the_phase_domain`], which is true
+/// of a set containing *flows*: there the source impedance couples the phases,
+/// because a flow through it depends on all six of its phasors. Given only
+/// voltage magnitudes nothing does, and the three per-phase rotations are three
+/// separate symmetries where `StateLayout` removes one. Two undetermined
+/// directions, and the gain matrix is singular — correctly, since the question
+/// has no answer.
+///
+/// power-grid-model does answer it, because its source is a *boundary
+/// condition*: a fixed, balanced three-phase voltage. gridoxide's is an unknown
+/// like any other, behind a synthesized impedance — the same modelling
+/// difference that leaves `SeReport::unconstrained` naming a virtual bus per
+/// source on the symmetric side.
+///
+/// The fix, when it is wanted, is to say what gridoxide already knows and does
+/// not use: that virtual bus *is* a balanced Thévenin by construction, so its
+/// three angles differ by exactly ±120°. Two linear constraints per source,
+/// removing exactly the two directions in question — which `se::constraints`
+/// cannot express today, carrying only zero-injection rows.
+#[test]
+fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
+    use gridoxide::measurement::measurements_from_pgm_3ph;
+    use gridoxide::pgm::pgm_3ph_maps;
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+
+    let dir = fixture("tests/data/pgm/state_estimation")
+        .join("single-node-source-asym-voltage-sensor-no-angle");
+    let input = common::load_pgm_input(&dir.join("input.json"));
+    let maps = pgm_3ph_maps(&input).expect("no unsupported component");
+    let id_to_idx = node_id_to_idx(&input);
+    let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
+    let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
+    let (buses, lines, _) = pgm_to_3ph_network(
+        common::load_pgm_input(&dir.join("input.json")),
+        S_BASE_VA,
+        50.0,
+    );
+    let mut ybus = build_ybus_3ph(buses.len() / 3, &lines);
+    stamp_transformers_3ph(&mut ybus, &transformers);
+    stamp_shunts_3ph(&mut ybus, &shunts);
+    let se_net = SeNetwork::from_3ph(
+        ybus.finish(),
+        &lines,
+        &transformers,
+        &shunts,
+        &maps.source_branch_idx,
+        &maps.zero_injection,
+    );
+
+    let u_rated = |bus: usize| buses[bus].u_rated;
+    let measurements =
+        measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated).expect("measurements");
+    assert_eq!(measurements.len(), 3, "three magnitudes, no angle anywhere");
+
+    let mut state = buses.clone();
+    linear_start(&mut state, &se_net, &measurements);
+    let report = estimate(
+        &measurements,
+        &mut state,
+        &se_net,
+        &SeOptions { max_iter: 40, ..SeOptions::default() },
+    );
+    assert_eq!(
+        report.status,
+        SeStatus::Singular,
+        "expected the phase relationship to be undetermined here. If this now converges, \
+         something has supplied the two missing directions — check it is the balanced-source \
+         constraint described above and not an accident"
+    );
+    assert!(
+        report.unconstrained.is_empty(),
+        "the deficiency is rank, not an untouched column: every unknown is reached by some \
+         row, and two combinations of them are still undetermined"
+    );
+}

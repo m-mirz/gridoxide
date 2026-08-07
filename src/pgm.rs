@@ -1250,6 +1250,21 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
     if !input.data.link.is_empty() {
         return Err(Unsupported3Ph::Link);
     }
+    // `transformer_seq_params` panics outside these two, and a panic reached
+    // from a document is not a diagnosis. Checked here rather than there because
+    // that function is on the power-flow path, whose callers chose their own
+    // documents; an estimate's caller may not have.
+    if let Some(t) = input
+        .data
+        .transformer
+        .iter()
+        .find(|t| !matches!((t.winding_from, t.winding_to), (2, 1) | (1, 1)))
+    {
+        return Err(Unsupported3Ph::WindingPair {
+            from: t.winding_from,
+            to: t.winding_to,
+        });
+    }
 
     let node_idx = node_id_to_idx(input);
     let n_physical = input.data.node.len();
@@ -1339,6 +1354,9 @@ pub enum Unsupported3Ph {
     ThreeWindingTransformer,
     VoltageRegulator,
     Link,
+    /// A transformer winding pair outside Dyn `(2, 1)` and YNyn `(1, 1)`, the
+    /// two `transformer_seq_params` derives zero-sequence parameters for.
+    WindingPair { from: u8, to: u8 },
 }
 
 impl std::fmt::Display for Unsupported3Ph {
@@ -1347,6 +1365,13 @@ impl std::fmt::Display for Unsupported3Ph {
             Self::ThreeWindingTransformer => "three_winding_transformer",
             Self::VoltageRegulator => "voltage_regulator",
             Self::Link => "link",
+            Self::WindingPair { from, to } => {
+                return write!(
+                    f,
+                    "the three-phase conversion derives zero-sequence parameters only for Dyn \
+                     and YNyn windings, not for the pair ({from}, {to})"
+                )
+            }
         };
         write!(f, "the three-phase conversion does not model `{what}`")
     }
