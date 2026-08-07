@@ -27,8 +27,10 @@ use crate::sparse::RealSparseSystem;
 use crate::types::Bus;
 
 use super::constraints::Constraints;
-use super::jacobian::{gain_and_rhs, mask_untouched, measurement_jacobian, StateLayout};
-use super::{measurement_functions, SeNetwork};
+use super::jacobian::{
+    gain_and_rhs, mask_untouched, measurement_jacobian_with, StateLayout,
+};
+use super::{measurement_functions, measurement_functions_with, MeasurementModel, SeNetwork};
 
 /// How the estimate finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +195,7 @@ fn estimate_with<S: LinearSolver>(
     net: &SeNetwork,
     layout: &StateLayout,
     constraints: &Constraints,
+    model: &MeasurementModel,
     options: &SeOptions,
     cache: &mut Option<S>,
 ) -> SeReport {
@@ -201,14 +204,14 @@ fn estimate_with<S: LinearSolver>(
     let mut last_unconstrained = Vec::new();
 
     for iteration in 1..=options.max_iter {
-        let h = measurement_functions(measurements, buses, net);
+        let h = measurement_functions_with(measurements, buses, model);
         residuals = measurements
             .iter()
             .zip(&h)
             .map(|(m, &hi)| m.value - hi)
             .collect();
 
-        let rows = measurement_jacobian(measurements, buses, net, layout);
+        let rows = measurement_jacobian_with(measurements, buses, layout, model);
         let (mut triplets, rhs, _) = gain_and_rhs(&rows, measurements, &residuals);
 
         let n = layout.n_unknowns();
@@ -321,6 +324,11 @@ fn objective(measurements: &[Measurement], residuals: &[f64]) -> f64 {
 ///
 /// # When a cached factorization stays valid
 ///
+/// Four things are cached — the state layout, the constraint set, each
+/// measurement's resolved [`MeasurementModel`](super::MeasurementModel), and one
+/// symbolic factorization — and all four hold under the same condition, which is
+/// what makes it one condition to state rather than four.
+///
 /// The gain matrix's sparsity pattern depends on the topology *and* on the
 /// measurement set's structure — which quantities are measured where — but not
 /// on their values. So this stays valid while:
@@ -341,6 +349,9 @@ pub struct PersistentEstimator {
     options: SeOptions,
     layout: Option<StateLayout>,
     constraints: Option<Constraints>,
+    /// Each measurement's target resolved to a current functional, valid under
+    /// exactly this struct's own stated condition.
+    model: Option<MeasurementModel>,
     scalar: Option<RealSparseSystem>,
     klu_native: Option<crate::klu_native::KluNativeSystem>,
     #[cfg(feature = "klu")]
@@ -355,6 +366,7 @@ impl PersistentEstimator {
             options,
             layout: None,
             constraints: None,
+            model: None,
             scalar: None,
             klu_native: None,
             #[cfg(feature = "klu")]
@@ -369,6 +381,7 @@ impl PersistentEstimator {
     pub fn reset(&mut self) {
         self.layout = None;
         self.constraints = None;
+        self.model = None;
         self.scalar = None;
         self.klu_native = None;
         #[cfg(feature = "klu")]
@@ -404,23 +417,27 @@ impl PersistentEstimator {
         if self.constraints.is_none() {
             self.constraints = Some(Constraints::new(&net.zero_injection));
         }
+        if self.model.is_none() {
+            self.model = Some(MeasurementModel::new(measurements, net));
+        }
         let layout = self.layout.as_ref().expect("just populated");
         let constraints = self.constraints.as_ref().expect("just populated");
+        let model = self.model.as_ref().expect("just populated");
 
         match self.options.backend {
             JacobianBackend::KluNative => estimate_with(
-                measurements, buses, net, layout, constraints, &self.options, &mut self.klu_native,
+                measurements, buses, net, layout, constraints, model, &self.options, &mut self.klu_native,
             ),
             #[cfg(feature = "klu")]
             JacobianBackend::Klu => estimate_with(
-                measurements, buses, net, layout, constraints, &self.options, &mut self.klu,
+                measurements, buses, net, layout, constraints, model, &self.options, &mut self.klu,
             ),
             #[cfg(feature = "pardiso")]
             JacobianBackend::Pardiso => estimate_with(
-                measurements, buses, net, layout, constraints, &self.options, &mut self.pardiso,
+                measurements, buses, net, layout, constraints, model, &self.options, &mut self.pardiso,
             ),
             JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
-                measurements, buses, net, layout, constraints, &self.options, &mut self.scalar,
+                measurements, buses, net, layout, constraints, model, &self.options, &mut self.scalar,
             ),
         }
     }
@@ -443,19 +460,20 @@ pub fn estimate(
     }
     let layout = StateLayout::new(buses, measurements, net);
     let constraints = Constraints::new(&net.zero_injection);
+    let model = MeasurementModel::new(measurements, net);
     match options.backend {
         JacobianBackend::KluNative => estimate_with(
-            measurements, buses, net, &layout, &constraints, options,
+            measurements, buses, net, &layout, &constraints, &model, options,
             &mut None::<crate::klu_native::KluNativeSystem>,
         ),
         #[cfg(feature = "klu")]
         JacobianBackend::Klu => estimate_with(
-            measurements, buses, net, &layout, &constraints, options,
+            measurements, buses, net, &layout, &constraints, &model, options,
             &mut None::<crate::sparse_klu::KluRealSystem>,
         ),
         #[cfg(feature = "pardiso")]
         JacobianBackend::Pardiso => estimate_with(
-            measurements, buses, net, &layout, &constraints, options,
+            measurements, buses, net, &layout, &constraints, &model, options,
             &mut None::<crate::sparse_pardiso::PardisoRealSystem>,
         ),
         // `Block` assumes power flow's two-unknowns-per-bus structure, which the
@@ -464,7 +482,7 @@ pub fn estimate(
         // than silently mis-assembling. Every other backend is a general sparse
         // LU and carries the gain matrix unchanged.
         JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
-            measurements, buses, net, &layout, &constraints, options,
+            measurements, buses, net, &layout, &constraints, &model, options,
             &mut None::<RealSparseSystem>,
         ),
     }
