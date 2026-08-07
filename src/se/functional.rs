@@ -90,19 +90,35 @@ impl CurrentFunctional {
     /// [`mask_untouched`](super::jacobian::mask_untouched), which is what pins a
     /// genuinely disconnected bus.
     pub fn power_partials(&self, v: &[Complex<f64>], out: &mut Vec<Partial>) {
-        if self.coefficients.is_empty() {
+        power_partials_of(self.at, &self.coefficients, v, out)
+    }
+}
+
+/// [`CurrentFunctional::power_partials`] against borrowed parts.
+///
+/// Callers that already hold a coefficient slice — `se::constraints` hands over
+/// a Y-bus row directly — use this rather than building a functional to own a
+/// copy of it, which would be an allocation per constraint row per iteration.
+pub fn power_partials_of(
+    at: usize,
+    coefficients: &[(usize, Complex<f64>)],
+    v: &[Complex<f64>],
+    out: &mut Vec<Partial>,
+) {
+    {
+        if coefficients.is_empty() {
             return;
         }
-        let v_at = v[self.at];
-        let s = v_at * self.current(v).conj();
+        let v_at = v[at];
+        let s = v_at * coefficients.iter().map(|&(k, c)| c * v[k]).sum::<Complex<f64>>().conj();
         let inv_mag = if v_at.norm() > 0.0 { v_at.norm().recip() } else { 0.0 };
         let mut saw_at = false;
 
-        for &(k, c) in &self.coefficients {
+        for &(k, c) in coefficients {
             let unit_k = if v[k].norm() > 0.0 { v[k] / v[k].norm() } else { Complex::new(1.0, 0.0) };
             let mut d_dtheta = -J * v_at * (c * v[k]).conj();
             let mut d_dvmag = v_at * (c * unit_k).conj();
-            if k == self.at {
+            if k == at {
                 saw_at = true;
                 d_dtheta += J * s;
                 d_dvmag += s * inv_mag;
@@ -115,11 +131,7 @@ impl CurrentFunctional {
         // conj(I)` does not require it, and a functional that ever separates the
         // two would otherwise silently lose the leading factor's derivative.
         if !saw_at {
-            out.push(Partial {
-                bus: self.at,
-                d_dtheta: J * s,
-                d_dvmag: s * inv_mag,
-            });
+            out.push(Partial { bus: at, d_dtheta: J * s, d_dvmag: s * inv_mag });
         }
     }
 }
@@ -237,7 +249,7 @@ mod tests {
             f.power_partials(&v, &mut partials);
 
             let d = terminal_flow_derivs(&net.branches[0], terminal, &v);
-            let (near, far) = net.branches[0].buses(terminal);
+            let (near, _far) = net.branches[0].buses(terminal);
             let want = |bus: usize| -> (f64, f64, f64, f64) {
                 if bus == near {
                     (d.dp_dtheta_near, d.dq_dtheta_near, d.dp_dv_near, d.dq_dv_near)

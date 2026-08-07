@@ -41,9 +41,9 @@ pub mod nr;
 
 use num_complex::Complex;
 
-use crate::branch_flow::{branch_params, terminal_flow, BranchParams, Terminal};
+use crate::branch_flow::{branch_params, BranchParams};
 use crate::measurement::{Measurement, MeasurementKind, Target};
-use crate::network::{power_injections, YBusSparse};
+use crate::network::YBusSparse;
 use crate::types::Bus;
 
 /// Everything `h(x)` needs about the network, beyond the state itself.
@@ -98,91 +98,101 @@ impl SeNetwork {
         Self { ybus, branches, shunt_y, source_branches, zero_injection }
     }
 
-    /// The power a source delivers *into* its node, per-unit.
-    ///
-    /// The synthesized branch runs virtual bus -> node, so the flow gridoxide
-    /// computes at the branch's `to` terminal is power leaving the node into
-    /// the branch. What the source delivers is its negation.
-    pub fn source_injection(&self, branch: usize, v: &[Complex<f64>]) -> (f64, f64) {
-        let (p, q) = terminal_flow(&self.branches[branch], Terminal::To, v);
-        (-p, -q)
-    }
-
-    /// A bus's shunt injection, per-unit.
-    ///
-    /// A shunt consumes `S = V·conj(y_sh·V) = |V|²·conj(y_sh)`; as an injection
-    /// that is negated, giving `(-|V|²g, +|V|²b)`.
-    pub fn shunt_injection(&self, bus: usize, v: &[Complex<f64>]) -> (f64, f64) {
-        let y = self.shunt_y[bus];
-        let v2 = v[bus].norm_sqr();
-        (-v2 * y.re, v2 * y.im)
-    }
 }
 
 /// Evaluates `h(x)` for every measurement in `measurements`, in order.
 ///
-/// `buses` carries the state (magnitudes and angles); everything else is read
-/// from `net`. Bus injections are computed once for the whole set rather than
-/// per measurement, since [`power_injections`] is a full sparse matrix-vector
-/// product.
+/// `buses` carries the state; everything else comes from `net`. Two arms, not
+/// five: a voltage row reads the state directly, and every power row is its
+/// target's [`CurrentFunctional`](functional::CurrentFunctional) evaluated at
+/// the state.
 pub fn measurement_functions(
     measurements: &[Measurement],
     buses: &[Bus],
     net: &SeNetwork,
 ) -> Vec<f64> {
+    let model = MeasurementModel::new(measurements, net);
+    measurement_functions_with(measurements, buses, &model)
+}
+
+/// [`measurement_functions`] against an already-resolved model.
+///
+/// Resolving a target into a functional allocates a coefficient list, and the
+/// estimator evaluates `h(x)` once per iteration over an unchanging measurement
+/// set — so the resolution belongs outside the loop. `PersistentEstimator`
+/// caches one of these next to the state layout.
+pub fn measurement_functions_with(
+    measurements: &[Measurement],
+    buses: &[Bus],
+    model: &MeasurementModel,
+) -> Vec<f64> {
     let v: Vec<Complex<f64>> = buses
         .iter()
         .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
         .collect();
-    let (p_inj, q_inj) = power_injections(buses, &net.ybus);
 
     measurements
         .iter()
-        .map(|m| {
-            let active = m.kind == MeasurementKind::ActivePower;
-            match m.target {
-                Target::Bus(b) => match m.kind {
-                    MeasurementKind::VoltageMagnitude => buses[b].voltage_mag,
-                    MeasurementKind::VoltageAngle => buses[b].voltage_ang,
-                    MeasurementKind::ActivePower => p_inj[b],
-                    MeasurementKind::ReactivePower => q_inj[b],
-                },
-                Target::BranchTerminal { branch, terminal } => {
-                    let (p, q) = terminal_flow(&net.branches[branch], terminal, &v);
-                    if active { p } else { q }
+        .enumerate()
+        .map(|(i, m)| match (m.kind, m.target) {
+            (MeasurementKind::VoltageMagnitude, Target::Bus(b)) => buses[b].voltage_mag,
+            (MeasurementKind::VoltageAngle, Target::Bus(b)) => buses[b].voltage_ang,
+            _ => match model.functional(i) {
+                Some(f) => {
+                    let s = f.power(&v);
+                    if m.kind == MeasurementKind::ActivePower { s.re } else { s.im }
                 }
-                Target::SourceInjection { branch } => {
-                    let (p, q) = net.source_injection(branch, &v);
-                    if active { p } else { q }
-                }
-                Target::ShuntInjection { bus } => {
-                    let (p, q) = net.shunt_injection(bus, &v);
-                    if active { p } else { q }
-                }
-                // power-grid-model's node injection is the sum over every
-                // appliance at the bus. gridoxide's bus injection covers the
-                // loads and generators; the source and shunt contributions are
-                // structural and have to be added back.
-                Target::NodeInjection(bus) => {
-                    let (mut p, mut q) = (p_inj[bus], q_inj[bus]);
-                    for &branch in &net.source_branches[bus] {
-                        let (sp, sq) = net.source_injection(branch, &v);
-                        p += sp;
-                        q += sq;
-                    }
-                    let (shp, shq) = net.shunt_injection(bus, &v);
-                    p += shp;
-                    q += shq;
-                    if active { p } else { q }
-                }
-            }
+                None => 0.0,
+            },
         })
         .collect()
+}
+
+/// One resolved [`CurrentFunctional`] per measurement, in input order.
+///
+/// `None` for a voltage row, which reads the state directly and has no
+/// functional, and for a target that does not resolve in this network.
+pub struct MeasurementModel {
+    functionals: Vec<Option<functional::CurrentFunctional>>,
+}
+
+impl MeasurementModel {
+    /// Resolves every measurement's target once.
+    ///
+    /// Valid for as long as the network and the measurement set's *structure*
+    /// are unchanged — the same condition
+    /// [`PersistentEstimator`](nr::PersistentEstimator) already states for its
+    /// cached factorization, since both depend on which quantities are measured
+    /// where and neither on their values.
+    pub fn new(measurements: &[Measurement], net: &SeNetwork) -> Self {
+        Self {
+            functionals: measurements
+                .iter()
+                .map(|m| match (m.kind, m.target) {
+                    (MeasurementKind::VoltageMagnitude | MeasurementKind::VoltageAngle, Target::Bus(_)) => None,
+                    _ => net.functional(m.target),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn functional(&self, measurement: usize) -> Option<&functional::CurrentFunctional> {
+        self.functionals[measurement].as_ref()
+    }
+
+    pub fn len(&self) -> usize {
+        self.functionals.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.functionals.is_empty()
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::branch_flow::{terminal_flow, Terminal};
     use crate::network::YBus;
     use crate::types::BusType;
 
@@ -242,7 +252,11 @@ pub(crate) mod tests {
             .iter()
             .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
             .collect();
-        let (p, q) = net.shunt_injection(1, &v);
+        let s = net
+            .functional(Target::ShuntInjection { bus: 1 })
+            .expect("shunt functional")
+            .power(&v);
+        let (p, q) = (s.re, s.im);
         let v2 = 0.99_f64 * 0.99;
         assert!((p + v2 * 0.02).abs() < 1e-12, "p={p}");
         assert!((q - v2 * 0.3).abs() < 1e-12, "q={q}");
@@ -259,7 +273,11 @@ pub(crate) mod tests {
             .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
             .collect();
         let (p_to, q_to) = terminal_flow(&net.branches[0], Terminal::To, &v);
-        let (p_src, q_src) = net.source_injection(0, &v);
+        let s_src = net
+            .functional(Target::SourceInjection { branch: 0 })
+            .expect("source functional")
+            .power(&v);
+        let (p_src, q_src) = (s_src.re, s_src.im);
         assert!((p_src + p_to).abs() < 1e-12);
         assert!((q_src + q_to).abs() < 1e-12);
     }
@@ -283,7 +301,10 @@ pub(crate) mod tests {
             .iter()
             .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
             .collect();
-        let expected = h[0] + net.source_injection(0, &v).0 + net.shunt_injection(1, &v).0;
+        let power = |t| net.functional(t).expect("functional").power(&v).re;
+        let expected = h[0]
+            + power(Target::SourceInjection { branch: 0 })
+            + power(Target::ShuntInjection { bus: 1 });
         assert!((h[1] - expected).abs() < 1e-12, "node={} expected={expected}", h[1]);
         // And the two are genuinely different quantities, so a test that
         // confused them would not pass by coincidence.

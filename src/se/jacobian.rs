@@ -26,8 +26,8 @@
 //! plan keeps the option of an orthogonal method open and why phase 4 prefers
 //! equality constraints over huge weights.
 
-use crate::branch_flow::{terminal_flow_derivs, Terminal};
 use crate::measurement::{Measurement, MeasurementKind, Target};
+use crate::se::functional::{power_partials_of, Partial};
 use crate::types::Bus;
 
 use super::SeNetwork;
@@ -134,11 +134,13 @@ fn push(row: &mut Row, col: Option<usize>, value: f64) {
 }
 
 /// Partials of the bus injections `P_i`, `Q_i` with respect to a neighbour's
-/// angle and magnitude.
+/// angle and magnitude — the classic power-flow Jacobian expressions.
 ///
-/// These are the classic power-flow Jacobian expressions, but written for
-/// arbitrary `(i, k)` rather than for power flow's reduced unknown set, since a
-/// state estimator needs the full `2N − 1` columns.
+/// Superseded by [`CurrentFunctional::power_partials`], which derives the same
+/// numbers for every target rather than for injections alone. Kept as a
+/// test-only oracle: it is an independent derivation, so agreeing with it is
+/// evidence beyond a finite-difference check of the new code against itself.
+#[cfg(test)]
 fn injection_partials(
     net: &SeNetwork,
     buses: &[Bus],
@@ -171,88 +173,56 @@ fn injection_partials(
     }
 }
 
-/// Adds a bus injection's partials into `row`, for whichever of `P` or `Q` the
-/// measurement is about.
-fn add_injection_row(
+/// Adds a functional's partials to `row`, in the estimator's column layout.
+///
+/// Takes `(at, coefficients)` borrowed rather than a whole
+/// [`CurrentFunctional`], so a caller already holding a coefficient slice — a
+/// zero-injection constraint hands over a Y-bus row directly — does not
+/// allocate a copy of it per row per iteration.
+fn add_functional_row(
     row: &mut Row,
     layout: &StateLayout,
-    net: &SeNetwork,
-    buses: &[Bus],
-    p_inj: &[f64],
-    q_inj: &[f64],
-    bus: usize,
-    active: bool,
-    scale: f64,
-) {
-    // Only buses adjacent in the Y-bus (plus the bus itself) contribute, which
-    // is exactly `ybus.row`.
-    for &(k, _) in net.ybus.row(bus) {
-        let (dp_dth, dp_dv, dq_dth, dq_dv) =
-            injection_partials(net, buses, p_inj, q_inj, bus, k);
-        let (d_th, d_v) = if active { (dp_dth, dp_dv) } else { (dq_dth, dq_dv) };
-        push(row, layout.theta(k), scale * d_th);
-        push(row, Some(layout.vmag(k)), scale * d_v);
-    }
-}
-
-/// Adds a branch terminal flow's partials into `row`, scaled by `scale` (which
-/// is `-1` for a source, whose injection is the negated terminal flow).
-fn add_branch_row(
-    row: &mut Row,
-    layout: &StateLayout,
-    net: &SeNetwork,
+    at: usize,
+    coefficients: &[(usize, num_complex::Complex<f64>)],
     v: &[num_complex::Complex<f64>],
-    branch: usize,
-    terminal: Terminal,
     active: bool,
-    scale: f64,
+    scratch: &mut Vec<Partial>,
 ) {
-    let params = &net.branches[branch];
-    let d = terminal_flow_derivs(params, terminal, v);
-    let (near, far) = match terminal {
-        Terminal::From => (params.from, params.to),
-        Terminal::To => (params.to, params.from),
-    };
-    let (dth_near, dth_far, dv_near, dv_far) = if active {
-        (d.dp_dtheta_near, d.dp_dtheta_far, d.dp_dv_near, d.dp_dv_far)
-    } else {
-        (d.dq_dtheta_near, d.dq_dtheta_far, d.dq_dv_near, d.dq_dv_far)
-    };
-    push(row, layout.theta(near), scale * dth_near);
-    push(row, layout.theta(far), scale * dth_far);
-    push(row, Some(layout.vmag(near)), scale * dv_near);
-    push(row, Some(layout.vmag(far)), scale * dv_far);
+    scratch.clear();
+    power_partials_of(at, coefficients, v, scratch);
+    for p in scratch.iter() {
+        let (d_th, d_v) = if active {
+            (p.d_dtheta.re, p.d_dvmag.re)
+        } else {
+            (p.d_dtheta.im, p.d_dvmag.im)
+        };
+        push(row, layout.theta(p.bus), d_th);
+        push(row, Some(layout.vmag(p.bus)), d_v);
+    }
 
-    // A self-loop branch (gridoxide's half-open representation) has near == far,
-    // so the two contributions land in the same columns and must sum rather
-    // than overwrite. `Row` is an association list, so duplicates are summed
-    // when the gain matrix is assembled — see `gain_triplets`.
-}
-
-/// Adds a shunt injection's partials. A shunt depends only on its own bus's
-/// magnitude: `-|V|²g` and `+|V|²b` have no angle dependence at all.
-fn add_shunt_row(row: &mut Row, layout: &StateLayout, net: &SeNetwork, buses: &[Bus], bus: usize, active: bool) {
-    let y = net.shunt_y[bus];
-    let v = buses[bus].voltage_mag;
-    let d = if active { -2.0 * v * y.re } else { 2.0 * v * y.im };
-    push(row, Some(layout.vmag(bus)), d);
+    // A partial repeated on one bus is summed, not overwritten: `Row` is an
+    // association list and `gain_and_rhs` sums duplicates. That is what makes a
+    // node injection's overlapping Y-bus and source terms come out right, and a
+    // half-open branch's self-loop with it.
 }
 
 /// One bus-injection row on its own, for callers that need the same partials
 /// outside the measurement set — `se::constraints` builds its constraint rows
 /// from exactly this, since a zero-injection constraint and an injection
 /// measurement differ only in how the system consumes the row.
+///
+/// `v` is the state as complex phasors, passed in because a caller building
+/// many rows should form it once.
 pub fn injection_row(
     layout: &StateLayout,
     net: &SeNetwork,
-    buses: &[Bus],
-    p_inj: &[f64],
-    q_inj: &[f64],
+    v: &[num_complex::Complex<f64>],
     bus: usize,
     active: bool,
+    scratch: &mut Vec<Partial>,
 ) -> Row {
     let mut row = Row::new();
-    add_injection_row(&mut row, layout, net, buses, p_inj, q_inj, bus, active, 1.0);
+    add_functional_row(&mut row, layout, bus, net.ybus.row(bus), v, active, scratch);
     row
 }
 
@@ -263,42 +233,51 @@ pub fn measurement_jacobian(
     net: &SeNetwork,
     layout: &StateLayout,
 ) -> Vec<Row> {
+    let model = crate::se::MeasurementModel::new(measurements, net);
+    measurement_jacobian_with(measurements, buses, layout, &model)
+}
+
+/// [`measurement_jacobian`] against an already-resolved model.
+///
+/// Two arms, not five. A voltage row is a single unit entry; every power row is
+/// its functional's partials, whatever target produced it.
+pub fn measurement_jacobian_with(
+    measurements: &[Measurement],
+    buses: &[Bus],
+    layout: &StateLayout,
+    model: &crate::se::MeasurementModel,
+) -> Vec<Row> {
     let v: Vec<num_complex::Complex<f64>> = buses
         .iter()
         .map(|b| num_complex::Complex::from_polar(b.voltage_mag, b.voltage_ang))
         .collect();
-    let (p_inj, q_inj) = crate::network::power_injections(buses, &net.ybus);
+    let mut scratch = Vec::new();
 
     measurements
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(i, m)| {
             let mut row = Row::new();
-            let active = m.kind == MeasurementKind::ActivePower;
-            match m.target {
-                Target::Bus(b) => match m.kind {
-                    MeasurementKind::VoltageMagnitude => push(&mut row, Some(layout.vmag(b)), 1.0),
-                    MeasurementKind::VoltageAngle => push(&mut row, layout.theta(b), 1.0),
-                    _ => add_injection_row(
-                        &mut row, layout, net, buses, &p_inj, &q_inj, b, active, 1.0,
-                    ),
-                },
-                Target::BranchTerminal { branch, terminal } => {
-                    add_branch_row(&mut row, layout, net, &v, branch, terminal, active, 1.0)
+            match (m.kind, m.target) {
+                (MeasurementKind::VoltageMagnitude, Target::Bus(b)) => {
+                    push(&mut row, Some(layout.vmag(b)), 1.0)
                 }
-                Target::SourceInjection { branch } => {
-                    add_branch_row(&mut row, layout, net, &v, branch, Terminal::To, active, -1.0)
+                (MeasurementKind::VoltageAngle, Target::Bus(b)) => {
+                    push(&mut row, layout.theta(b), 1.0)
                 }
-                Target::ShuntInjection { bus } => {
-                    add_shunt_row(&mut row, layout, net, buses, bus, active)
-                }
-                Target::NodeInjection(bus) => {
-                    add_injection_row(
-                        &mut row, layout, net, buses, &p_inj, &q_inj, bus, active, 1.0,
-                    );
-                    for &branch in &net.source_branches[bus] {
-                        add_branch_row(&mut row, layout, net, &v, branch, Terminal::To, active, -1.0);
+                _ => {
+                    if let Some(f) = model.functional(i) {
+                        let active = m.kind == MeasurementKind::ActivePower;
+                        add_functional_row(
+                            &mut row,
+                            layout,
+                            f.at,
+                            &f.coefficients,
+                            &v,
+                            active,
+                            &mut scratch,
+                        );
                     }
-                    add_shunt_row(&mut row, layout, net, buses, bus, active);
                 }
             }
             row
@@ -396,6 +375,7 @@ pub fn gain_and_rhs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::branch_flow::Terminal;
     use crate::measurement::Target;
     use crate::se::measurement_functions;
 
@@ -456,6 +436,48 @@ mod tests {
 
     fn measurement(kind: MeasurementKind, target: Target) -> Measurement {
         Measurement { kind, target, value: 0.0, sigma: 1.0 }
+    }
+
+    /// The unified row reproduces the closed-form injection partials it
+    /// replaced.
+    ///
+    /// `injection_partials` is the classic power-flow Jacobian written out as
+    /// eight expressions in `p_inj`, `q_inj`, `g`, `b` and the angle difference.
+    /// `power_partials_of` derives the same numbers from `S = V_at · conj(I)`
+    /// without ever naming them. Two independent derivations agreeing to 1e-12
+    /// at an arbitrary state is stronger evidence than either one agreeing with
+    /// finite differences of itself, which is why the old form is retained
+    /// `#[cfg(test)]` rather than deleted.
+    #[test]
+    fn the_unified_row_matches_the_closed_form_it_replaced() {
+        let (net, mut buses) = super::super::tests::two_bus_net();
+        // Nothing zero by symmetry: distinct magnitudes and a real angle spread.
+        buses[0].voltage_mag = 1.037;
+        buses[0].voltage_ang = 0.147;
+        buses[1].voltage_mag = 0.962;
+        buses[1].voltage_ang = -0.083;
+
+        let (p_inj, q_inj) = crate::network::power_injections(&buses, &net.ybus);
+        let v: Vec<num_complex::Complex<f64>> = buses
+            .iter()
+            .map(|b| num_complex::Complex::from_polar(b.voltage_mag, b.voltage_ang))
+            .collect();
+
+        let mut compared = 0;
+        for bus in 0..buses.len() {
+            let mut partials = Vec::new();
+            power_partials_of(bus, net.ybus.row(bus), &v, &mut partials);
+            for p in &partials {
+                let (dp_dth, dp_dv, dq_dth, dq_dv) =
+                    injection_partials(&net, &buses, &p_inj, &q_inj, bus, p.bus);
+                assert!((p.d_dtheta.re - dp_dth).abs() < 1e-12, "dP/dθ at ({bus},{})", p.bus);
+                assert!((p.d_dvmag.re - dp_dv).abs() < 1e-12, "dP/dV at ({bus},{})", p.bus);
+                assert!((p.d_dtheta.im - dq_dth).abs() < 1e-12, "dQ/dθ at ({bus},{})", p.bus);
+                assert!((p.d_dvmag.im - dq_dv).abs() < 1e-12, "dQ/dV at ({bus},{})", p.bus);
+                compared += 1;
+            }
+        }
+        assert!(compared >= 4, "expected several neighbours to compare, got {compared}");
     }
 
     /// Covers every target kind at once, on a network where no partial is zero

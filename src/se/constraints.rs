@@ -85,14 +85,19 @@ impl Constraints {
         layout: &StateLayout,
     ) -> (Vec<f64>, Vec<Row>) {
         let (p_inj, q_inj) = crate::network::power_injections(buses, &net.ybus);
+        let v: Vec<num_complex::Complex<f64>> = buses
+            .iter()
+            .map(|b| num_complex::Complex::from_polar(b.voltage_mag, b.voltage_ang))
+            .collect();
         let mut values = Vec::with_capacity(self.len());
         let mut rows = Vec::with_capacity(self.len());
+        let mut scratch = Vec::new();
 
         for &bus in &self.buses {
             for active in [true, false] {
                 values.push(if active { p_inj[bus] } else { q_inj[bus] });
                 rows.push(super::jacobian::injection_row(
-                    layout, net, buses, &p_inj, &q_inj, bus, active,
+                    layout, net, &v, bus, active, &mut scratch,
                 ));
             }
         }
