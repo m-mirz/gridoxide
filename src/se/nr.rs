@@ -442,7 +442,7 @@ impl PersistentEstimator {
             self.layout = Some(StateLayout::new(buses, measurements, net));
         }
         if self.constraints.is_none() {
-            self.constraints = Some(Constraints::new(&net.constrained_buses()));
+            self.constraints = Some(Constraints::new(net));
         }
         if self.model.is_none() {
             self.model = Some(MeasurementModel::new(measurements, net));
@@ -486,7 +486,7 @@ pub fn estimate(
         return super::iterative::estimate(measurements, buses, net, options);
     }
     let layout = StateLayout::new(buses, measurements, net);
-    let constraints = Constraints::new(&net.constrained_buses());
+    let constraints = Constraints::new(net);
     let model = MeasurementModel::new(measurements, net);
     match options.backend {
         JacobianBackend::KluNative => estimate_with(

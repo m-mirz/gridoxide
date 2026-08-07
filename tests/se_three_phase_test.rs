@@ -493,11 +493,27 @@ fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
 /// difference that leaves `SeReport::unconstrained` naming a virtual bus per
 /// source on the symmetric side.
 ///
-/// The fix, when it is wanted, is to say what gridoxide already knows and does
-/// not use: that virtual bus *is* a balanced Thévenin by construction, so its
-/// three angles differ by exactly ±120°. Two linear constraints per source,
-/// removing exactly the two directions in question — which `se::constraints`
-/// cannot express today, carrying only zero-injection rows.
+/// The obvious fix is wrong, and it was tried. gridoxide *builds* that virtual
+/// bus balanced — one `u_ref` across three phases at 0/−120/+120 — so
+/// constraining its angles to differ by exactly ±120° looks like free
+/// information, and it removes exactly the two directions in question. It also
+/// contradicts the data.
+///
+/// The counterexample is this fixture's own sibling,
+/// [`estimates_from_an_asymmetric_voltage_phasor_per_phase`]. Its sensor reads
+/// three phases whose sequence angles are 0.1, 0.2 and 0.3 — deliberately
+/// unbalanced — and its node carries no appliance, so the injection there is
+/// zero, so the current through the source branch is zero, so
+/// `V_virtual = V_node` exactly. The virtual bus is therefore *as unbalanced as
+/// the measurement says the node is*, and forcing it balanced moves that
+/// fixture's answer from 0.1 to 0.2, the positive-sequence compromise.
+///
+/// So the balance is a property of the *initial state* gridoxide synthesizes,
+/// not of the equivalent it represents: a real network behind a source can be
+/// unbalanced, and one of power-grid-model's own fixtures is. The two
+/// directions here are genuinely undetermined, and reporting singular is the
+/// correct answer rather than a missing feature. power-grid-model answers
+/// instead because it has no source-internal bus to be undetermined about.
 #[test]
 fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
     use gridoxide::measurement::measurements_from_pgm_3ph;

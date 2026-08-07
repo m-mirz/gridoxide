@@ -260,10 +260,21 @@ matter:
    removes one, and the gain matrix is correctly singular. power-grid-model answers such a case
    because its source is a *boundary condition*, a fixed balanced three-phase voltage; gridoxide's
    is an unknown behind a synthesized impedance, the same difference that leaves
-   `SeReport::unconstrained` naming a virtual bus per source on the symmetric side. The fix is to
-   say what gridoxide already knows and does not use — that virtual bus is a balanced Thévenin by
-   construction, so its three angles differ by exactly ±120° — as two linear constraints per source,
-   which `se::constraints` cannot express today.
+   `SeReport::unconstrained` naming a virtual bus per source on the symmetric side.
+
+   The obvious fix is wrong, and it was tried rather than assumed. gridoxide *builds* that virtual
+   bus balanced, so constraining its three angles to differ by ±120° looks like free information and
+   removes exactly the two directions in question. It also contradicts the data: power-grid-model's
+   own `single-node-source-asym-voltage-sensor` reads three phases whose sequence angles are 0.1,
+   0.2 and 0.3, on a node with no appliance — zero injection, so zero current through the source
+   branch, so `V_virtual = V_node` exactly. The virtual bus is as unbalanced as the measurement says
+   the node is, and the constraint moves that fixture's answer from 0.1 to 0.2. The balance is a
+   property of the initial state gridoxide synthesizes, not of the equivalent it represents.
+
+   So this is not a missing feature but a real limit: those two directions are undetermined, and
+   reporting singular is the correct answer. power-grid-model answers instead because it has no
+   source-internal bus to be undetermined about. Both directions are asserted in
+   `tests/se_three_phase_test.rs`, so a change that supplies them will announce itself.
 
    `pgm_3ph_maps` refuses the components the three-phase conversion does not model — `link`,
    `three_winding_transformer`, `voltage_regulator`, and any transformer winding pair outside Dyn

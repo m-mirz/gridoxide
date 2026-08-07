@@ -48,12 +48,17 @@ pub struct Constraints {
 }
 
 impl Constraints {
-    /// Collects the zero-injection buses flagged during conversion.
+    /// The constraints a network implies: its zero injections.
     ///
-    /// Passing an empty `zero_injection` (or a network with none) yields no
-    /// constraints, and the estimator then solves the plain normal equations —
-    /// so this is safe to apply unconditionally.
-    pub fn new(zero_injection: &[bool]) -> Self {
+    /// Notably *not* the phase relationship of a synthesized source's three
+    /// virtual buses, which looks like free information and is not — see
+    /// `tests/se_three_phase_test.rs::magnitudes_alone_leave_the_phase_relationship_undetermined`.
+    pub fn new(net: &SeNetwork) -> Self {
+        Self::from_flags(&net.constrained_buses())
+    }
+
+    /// Zero-injection constraints from per-bus flags.
+    pub fn from_flags(zero_injection: &[bool]) -> Self {
         let buses = zero_injection
             .iter()
             .enumerate()
@@ -101,6 +106,7 @@ impl Constraints {
                 ));
             }
         }
+
         (values, rows)
     }
 }
@@ -140,14 +146,14 @@ mod tests {
 
     #[test]
     fn no_flags_means_no_constraints() {
-        let c = Constraints::new(&[false, false]);
+        let c = Constraints::from_flags(&[false, false]);
         assert!(c.is_empty());
         assert_eq!(c.len(), 0);
     }
 
     #[test]
     fn each_bus_contributes_two_rows() {
-        let c = Constraints::new(&[true, false, true]);
+        let c = Constraints::from_flags(&[true, false, true]);
         assert_eq!(c.buses, vec![0, 2]);
         assert_eq!(c.len(), 4);
     }

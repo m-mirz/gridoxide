@@ -156,7 +156,14 @@ impl SeNetwork {
         }
 
         let zero_injection = net.zero_injection.clone();
-        Self { ybus, terminals, shunt_y, source_branches, zero_injection, energized }
+        Self {
+            ybus,
+            terminals,
+            shunt_y,
+            source_branches,
+            zero_injection,
+            energized,
+        }
     }
 
     /// Builds the model for a three-phase network.
@@ -262,7 +269,14 @@ impl SeNetwork {
             }
         }
 
-        Self { ybus, terminals, shunt_y, source_branches, zero_injection, energized }
+        Self {
+            ybus,
+            terminals,
+            shunt_y,
+            source_branches,
+            zero_injection,
+            energized,
+        }
     }
 
     /// Buses a zero-injection constraint should apply to.

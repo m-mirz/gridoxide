@@ -202,7 +202,7 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
         println!("  fully observable");
     }
 
-    let constraints = Constraints::new(&se_net.constrained_buses());
+    let constraints = Constraints::new(&se_net);
     let bad = bad_data::analyze(
         &measurements,
         &report.residuals,

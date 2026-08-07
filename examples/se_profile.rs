@@ -54,7 +54,7 @@ fn main() {
     let mut buses = net.buses.clone();
     flat_start(&mut buses, &ms);
     let layout = StateLayout::new(&buses, &ms, &se_net);
-    let constraints = Constraints::new(&se_net.constrained_buses());
+    let constraints = Constraints::new(&se_net);
     let n = layout.n_unknowns();
 
     let reps = 6; // one estimate's worth of iterations
