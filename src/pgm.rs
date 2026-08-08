@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use serde::Deserialize;
+use super::branch_flow::Terminal;
 use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use super::network::{
+    half_open_branch_shunt,
     source_impedance_pu, source_impedance_pu_seq, transformer_tap, transformer_admittances,
     transformer_admittances_ex, transformer_seq_params, tap_ratio_from_voltages, three_winding_star_params,
     ShuntAdm, ShuntAdm3Ph,
@@ -37,6 +39,20 @@ pub struct PgmData {
     pub three_winding_transformer: Vec<PgmThreeWindingTransformer>,
     #[serde(default)]
     pub voltage_regulator: Vec<PgmVoltageRegulator>,
+    #[serde(default)]
+    pub link: Vec<PgmLink>,
+    #[serde(default)]
+    pub sym_voltage_sensor: Vec<PgmSymVoltageSensor>,
+    #[serde(default)]
+    pub sym_power_sensor: Vec<PgmSymPowerSensor>,
+    #[serde(default)]
+    pub asym_voltage_sensor: Vec<PgmAsymVoltageSensor>,
+    #[serde(default)]
+    pub asym_power_sensor: Vec<PgmAsymPowerSensor>,
+    #[serde(default)]
+    pub sym_current_sensor: Vec<PgmSymCurrentSensor>,
+    #[serde(default)]
+    pub asym_current_sensor: Vec<PgmAsymCurrentSensor>,
 }
 
 #[derive(Deserialize)]
@@ -55,21 +71,115 @@ pub struct PgmLine {
     pub r1: f64,
     pub x1: f64,
     pub c1: f64,
+    /// Positive-sequence shunt loss factor (tan δ). PGM forms the shunt
+    /// admittance as `2πf·c1·(tan1 + j)` (`line.hpp`), so this is what gives a
+    /// line's shunt a conductive part. Defaulted because not every fixture
+    /// specifies it, and PGM treats an absent loss factor as zero.
+    #[serde(default)]
+    pub tan1: f64,
+    /// Zero-sequence parameters, needed only for asymmetric calculations —
+    /// power-grid-model marks them optional and many of its own symmetric
+    /// fixtures omit them entirely.
+    ///
+    /// Defaulted to NaN rather than to zero or to the positive-sequence value:
+    /// `r0 = x0 = 0` would make the zero-sequence admittance infinite, and
+    /// `r0 = r1` is a modelling assumption that is wrong for real lines. NaN
+    /// keeps the symmetric path (which never reads these) working while making
+    /// any asymmetric use of an incomplete fixture loudly wrong instead of
+    /// quietly plausible.
+    #[serde(default = "nan")]
     pub r0: f64,
+    #[serde(default = "nan")]
     pub x0: f64,
+    #[serde(default = "nan")]
     pub c0: f64,
+    /// Zero-sequence shunt loss factor. Parsed for completeness; the
+    /// three-phase conversion (`pgm_to_3ph_network`) still models zero-sequence
+    /// shunts as purely susceptive, since `Line3Ph` carries no conductance.
+    #[serde(default)]
+    pub tan0: f64,
 }
+
+/// power-grid-model's own `link` admittance, `1e8 + j1e8` per-unit — recorded
+/// for reference, but **not** what gridoxide uses. See [`LINK_Y`].
+///
+/// Derived in its `common.hpp:83` as `1e6 / (base_power_3p / 10e3 / 10e3)` —
+/// "1e6 siemens in a 10 kV network", evaluated once against a 1 MVA base and
+/// frozen. It is a *per-unit* constant: the `10e3` is not a live voltage, so it
+/// does not track the network's voltage level, and re-scaling it by voltage
+/// would double-count what per-unit already removed. powsybl-open-loadflow
+/// reaches the same order independently, clamping `|Z|` at `1e-8` p.u.
+/// (`LfNetworkParameters.java:39`).
+pub const PGM_LINK_Y: Complex<f64> = Complex::new(1e8, 1e8);
+
+/// The admittance gridoxide stamps for a `link`.
+///
+/// An alias for [`topology::IDEAL_CONNECTION_Y`](crate::topology::IDEAL_CONNECTION_Y),
+/// which documents the measurement behind the value and is shared with the
+/// branches detected as ideal by impedance rather than declared as such — a
+/// link and an undeclared jumper get the same treatment because they are the
+/// same thing.
+pub use crate::topology::IDEAL_CONNECTION_Y as LINK_Y;
 
 fn one() -> f64 { 1.0 }
 fn nan() -> f64 { f64::NAN }
+/// power-grid-model's documented `source.sk` default (`components.md`).
+fn default_sk() -> f64 { 1e10 }
+/// power-grid-model's documented `source.rx_ratio` default (`components.md`).
+fn default_rx_ratio() -> f64 { 0.1 }
+fn nan3() -> [f64; 3] { [f64::NAN; 3] }
+
+/// Deserializes a number that power-grid-model may also write as the string
+/// `"inf"`.
+///
+/// Its state-estimation fixtures use this for a measurement that is present but
+/// carries no information (`inf-measurement-with-injection` and friends): an
+/// infinite standard deviation is a zero weight, so the row exists structurally
+/// and contributes nothing. JSON has no infinity literal, hence the string.
+fn de_f64_or_inf<'de, D>(d: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, Unexpected};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Num(f64),
+        Str(String),
+    }
+
+    match Option::<Raw>::deserialize(d)? {
+        None => Ok(f64::NAN),
+        Some(Raw::Num(v)) => Ok(v),
+        Some(Raw::Str(s)) => match s.trim() {
+            "inf" | "+inf" | "Infinity" => Ok(f64::INFINITY),
+            "-inf" | "-Infinity" => Ok(f64::NEG_INFINITY),
+            "nan" | "NaN" => Ok(f64::NAN),
+            other => Err(D::Error::invalid_value(
+                Unexpected::Str(other),
+                &"a number or the string \"inf\"",
+            )),
+        },
+    }
+}
 
 #[derive(Deserialize)]
 pub struct PgmSource {
     pub id: u64,
     pub node: u64,
     pub status: u8,
+    /// Reference voltage, per-unit. Power-grid-model marks this required *only
+    /// for power flow* — a state-estimation input has no reason to assert the
+    /// source voltage, since that is precisely what is being estimated — so it
+    /// falls back to 1.0 p.u. here.
+    #[serde(default = "one")]
     pub u_ref: f64,
+    /// Short-circuit power, VA. PGM's documented default is 1e10.
+    #[serde(default = "default_sk")]
     pub sk: f64,
+    /// R-to-X ratio. PGM's documented default is 0.1.
+    #[serde(default = "default_rx_ratio")]
     pub rx_ratio: f64,
     #[serde(default = "one")]
     pub z01_ratio: f64,
@@ -86,7 +196,14 @@ pub struct PgmSymLoad {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Specified power. power-grid-model marks this required *only for power
+    /// flow*: a state-estimation input deliberately leaves it unset, because
+    /// the appliance's power is what the estimator solves for. NaN when
+    /// absent, and `pgm_to_network` contributes nothing to the bus injection
+    /// for a non-finite value.
+    #[serde(default = "nan")]
     pub p_specified: f64,
+    #[serde(default = "nan")]
     pub q_specified: f64,
 }
 
@@ -97,7 +214,11 @@ pub struct PgmAsymLoad {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this
+    /// is optional.
+    #[serde(default = "nan3")]
     pub p_specified: [f64; 3],
+    #[serde(default = "nan3")]
     pub q_specified: [f64; 3],
 }
 
@@ -108,7 +229,14 @@ pub struct PgmSymGen {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Specified power. power-grid-model marks this required *only for power
+    /// flow*: a state-estimation input deliberately leaves it unset, because
+    /// the appliance's power is what the estimator solves for. NaN when
+    /// absent, and `pgm_to_network` contributes nothing to the bus injection
+    /// for a non-finite value.
+    #[serde(default = "nan")]
     pub p_specified: f64,
+    #[serde(default = "nan")]
     pub q_specified: f64,
 }
 
@@ -146,7 +274,11 @@ pub struct PgmAsymGen {
     pub status: u8,
     #[serde(rename = "type", default = "default_load_type")]
     pub load_type: u8,
+    /// Per-phase specified power; see `PgmSymLoad::p_specified` for why this
+    /// is optional.
+    #[serde(default = "nan3")]
     pub p_specified: [f64; 3],
+    #[serde(default = "nan3")]
     pub q_specified: [f64; 3],
 }
 
@@ -157,7 +289,12 @@ pub struct PgmShunt {
     pub status: u8,
     pub g1: f64,
     pub b1: f64,
+    /// Zero-sequence admittance, needed only for asymmetric calculations and
+    /// optional in power-grid-model. NaN when absent, for the same reason
+    /// `PgmLine`'s zero-sequence fields are.
+    #[serde(default = "nan")]
     pub g0: f64,
+    #[serde(default = "nan")]
     pub b0: f64,
 }
 
@@ -221,6 +358,158 @@ pub struct PgmTransformer {
     pub tap_size: f64,
 }
 
+/// PGM's `sym_voltage_sensor`: a voltage measurement at a node.
+///
+/// Both `u_measured` and `u_angle_measured` are optional in practice — PGM's
+/// own fixtures omit one or the other, and PGM reads an absent value as NaN
+/// rather than as zero. They are defaulted to NaN here for the same reason, and
+/// `measurement` skips any reading that isn't finite.
+///
+/// An angle-carrying voltage sensor is a phasor (PMU) measurement; one without
+/// is an ordinary magnitude-only SCADA measurement.
+#[derive(Deserialize)]
+pub struct PgmSymVoltageSensor {
+    pub id: u64,
+    /// The measured `node`'s id.
+    pub measured_object: u64,
+    #[serde(default = "nan")]
+    pub u_measured: f64,
+    #[serde(default = "nan")]
+    pub u_angle_measured: f64,
+    /// Standard deviation of the magnitude error, in volts.
+    #[serde(default = "nan")]
+    pub u_sigma: f64,
+    #[serde(default = "nan")]
+    pub u_angle_sigma: f64,
+}
+
+/// PGM's `sym_power_sensor`: an active/reactive power measurement at one
+/// terminal, of either a branch or an appliance.
+///
+/// `measured_terminal_type` is PGM's `MeasuredTerminalType`: 0 `branch_from`,
+/// 1 `branch_to`, 2 `source`, 3 `shunt`, 4 `load`, 5 `generator`, 6/7/8
+/// `branch3_1`/`_2`/`_3`, 9 `node`. It decides both what `measured_object`
+/// refers to and the sign convention of the reading — see
+/// [`measurement`](crate::measurement) for how each is mapped.
+///
+/// `power_sigma` applies to both components; `p_sigma`/`q_sigma` override it
+/// per component when present (only two of power-grid-model's own fixtures use
+/// them, but they are the more specific form).
+#[derive(Deserialize)]
+pub struct PgmSymPowerSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub p_measured: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub q_measured: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub power_sigma: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub p_sigma: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub q_sigma: f64,
+}
+
+/// PGM's `asym_voltage_sensor`: a per-phase voltage magnitude and angle.
+///
+/// The per-unit base differs from the symmetric sensor's. PGM divides by
+/// `u_rated * u_scale`, with `u_scale` 1 for a symmetric sensor and `1/√3` for
+/// an asymmetric one (`common.hpp`), because `u_measured` is line-to-line on the
+/// first and line-to-neutral on the second. So an asymmetric reading is
+/// `u_measured · √3 / u_rated` per unit.
+///
+/// `u_sigma` stays a single scalar covering all three phases; PGM has no
+/// per-phase voltage sigma, and no `u_angle_sigma` at all (gridoxide's symmetric
+/// struct carries one as an extension).
+#[derive(Deserialize)]
+pub struct PgmAsymVoltageSensor {
+    pub id: u64,
+    /// The measured `node`'s id.
+    pub measured_object: u64,
+    #[serde(default = "nan3")]
+    pub u_measured: [f64; 3],
+    #[serde(default = "nan3")]
+    pub u_angle_measured: [f64; 3],
+    /// Standard deviation of the magnitude error, in volts, line-to-neutral.
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub u_sigma: f64,
+}
+
+/// PGM's `asym_power_sensor`: per-phase active/reactive power at one terminal.
+///
+/// Per-phase powers are per-unit against `s_base / 3`, PGM's `base_power_1p`,
+/// where the symmetric sensor's are against the three-phase `s_base`.
+///
+/// Unlike the voltage sensor, the per-component sigmas here *are* per-phase
+/// (`RealValue<sym>` in PGM's `PowerSensorInput`), while the fallback
+/// `power_sigma` remains one scalar for the whole sensor.
+#[derive(Deserialize)]
+pub struct PgmAsymPowerSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default = "nan3")]
+    pub p_measured: [f64; 3],
+    #[serde(default = "nan3")]
+    pub q_measured: [f64; 3],
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub power_sigma: f64,
+    #[serde(default = "nan3")]
+    pub p_sigma: [f64; 3],
+    #[serde(default = "nan3")]
+    pub q_sigma: [f64; 3],
+}
+
+/// PGM's `sym_current_sensor`: a current magnitude and angle at a branch
+/// terminal.
+///
+/// `angle_measurement_type` is 0 for a *local* angle — the shift between the
+/// terminal's voltage and its current, what a power-factor meter reads — and 1
+/// for a *global* one, measured against the same reference voltage phasors use.
+/// The two are different quantities, not two spellings of one; see
+/// [`AngleFrame`](crate::measurement::AngleFrame).
+///
+/// Only branch terminals carry one: `measured_terminal_type` 0/1 and 6/7/8, and
+/// never a `link`. Both sigmas are scalar, including on the asymmetric variant.
+#[derive(Deserialize)]
+pub struct PgmSymCurrentSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default)]
+    pub angle_measurement_type: u8,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_measured: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_angle_measured: f64,
+    /// Standard deviation of the magnitude error, in amperes.
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_sigma: f64,
+    /// Standard deviation of the angle error, in radians.
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_angle_sigma: f64,
+}
+
+/// PGM's `asym_current_sensor`: per-phase magnitudes and angles, scalar sigmas.
+#[derive(Deserialize)]
+pub struct PgmAsymCurrentSensor {
+    pub id: u64,
+    pub measured_object: u64,
+    pub measured_terminal_type: u8,
+    #[serde(default)]
+    pub angle_measurement_type: u8,
+    #[serde(default = "nan3")]
+    pub i_measured: [f64; 3],
+    #[serde(default = "nan3")]
+    pub i_angle_measured: [f64; 3],
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_sigma: f64,
+    #[serde(default = "nan", deserialize_with = "de_f64_or_inf")]
+    pub i_angle_sigma: f64,
+}
+
 // ── Output structs (used by integration tests) ────────────────────────────────
 
 #[derive(Deserialize)]
@@ -248,7 +537,26 @@ pub struct PgmNodeOutput {
     pub u: f64,
 }
 
-#[derive(Deserialize)]
+/// PGM's per-branch output record, as found in `sym_output.json`'s `line`,
+/// `transformer` and `link` arrays.
+///
+/// Powers are in W/var and currents in A — physical units, not per-unit, so
+/// comparing against gridoxide's [`branch_flow`](crate::branch_flow) results
+/// means scaling those by `s_base_va`. Only the flow fields are modelled;
+/// `loading`/`i_from`/`s_from` are derived quantities gridoxide does not
+/// compute.
+#[derive(Debug, Deserialize)]
+pub struct PgmLineOutput {
+    pub id: u64,
+    #[serde(default)]
+    pub energized: u8,
+    pub p_from: f64,
+    pub q_from: f64,
+    pub p_to: f64,
+    pub q_to: f64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PgmNodeAsymOutput {
     pub id: u64,
     pub u_pu: [f64; 3],
@@ -256,6 +564,59 @@ pub struct PgmNodeAsymOutput {
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────────
+
+/// power-grid-model's `link`: an ideal connection between two nodes, carrying
+/// no attributes beyond its endpoints and their statuses.
+///
+/// Modelled as a branch rather than by merging its endpoints, because a `link`
+/// has an identity in power-grid-model's output model — the schema carries a
+/// `link` record with its own `p`/`q`/`i` flows, and its fixtures assert them.
+/// Merging would delete the branch those numbers describe. See
+/// [`crate::topology`] for the policy and
+/// `docs/src/powerflow/zero_impedance_branches.md` for the alternatives.
+#[derive(Deserialize)]
+pub struct PgmLink {
+    pub id: u64,
+    pub from_node: u64,
+    pub to_node: u64,
+    pub from_status: u8,
+    pub to_status: u8,
+}
+
+/// A line's total per-unit shunt admittance, `2πf·c1·(tan1 + j)·z_base`.
+///
+/// Matches power-grid-model's `line.hpp`:
+/// `y1_shunt = 2π·f·c1/base_y·(tan1 + 1i)`. The conductive part comes entirely
+/// from the loss factor, so it is zero for the many fixtures that leave `tan1`
+/// unset — but not for the state-estimation fixtures, which specify it.
+fn line_y_shunt(ln: &PgmLine, omega: f64, z_base: f64) -> Complex<f64> {
+    Complex::new(ln.tan1, 1.0) * (omega * ln.c1 * z_base)
+}
+
+/// Builds the `Line` representing a branch with exactly one terminal connected.
+///
+/// PGM does not simply drop the series impedance here: an open-ended branch
+/// still presents the near-end shunt half *in parallel with* the series
+/// impedance feeding the far-end shunt half, i.e.
+/// `y_sh/2 + 1/(1/y_s + 2/y_sh)` — [`half_open_branch_shunt`], the same
+/// function [`branch_calc_param`] already applies to half-open transformers.
+///
+/// Modelling this as the bare shunt instead (which gridoxide did until the
+/// branch-flow work) omits the small conductive path through the series
+/// resistance: `tests/branch_flow_test.rs`'s `line` fixture has two half-open
+/// lines, each carrying 0.68 W in PGM's own expected output, and their absence
+/// showed up as a 1.36 W deficit on the healthy line feeding them.
+///
+/// The result is a self-loop `Line`, which `build_ybus` stamps as a pure
+/// diagonal admittance. That representation loses which terminal was the
+/// connected one — see [`branch_flow::line_params`](crate::branch_flow::line_params).
+fn half_open_line(ln: &PgmLine, omega: f64, z_base: f64, idx: usize) -> Line {
+    let y_shunt = line_y_shunt(ln, omega, z_base);
+    let (r, x) = crate::topology::clamp_branch_impedance(ln.r1 / z_base, ln.x1 / z_base);
+    let y_series = Complex::new(1.0, 0.0) / Complex::new(r, x);
+    let y_eq = half_open_branch_shunt(y_series, y_shunt);
+    Line { from: idx, to: idx, r: 0.0, x: 0.0, b_shunt: y_eq.im, g_shunt: y_eq.re }
+}
 
 /// Returns a stable node-ID → 0-based-index map (sorted by node ID).
 pub fn node_id_to_idx(input: &PgmInput) -> HashMap<u64, usize> {
@@ -318,9 +679,14 @@ pub fn pgm_transformers_3ph(
     id_to_idx: &HashMap<u64, usize>,
     s_base_va: f64,
 ) -> Vec<Transformer3PhSeq> {
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
     input.data.transformer.iter()
         .map(|t| {
-            let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock);
+            let tap = transformer_tap(
+                t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size,
+                t.clock, id_to_u_rated[&t.from_node], id_to_u_rated[&t.to_node],
+            );
             let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
             let (y0, y1, y2) = transformer_seq_params(
                 y_series, y_shunt, tap, t.from_status, t.to_status,
@@ -344,11 +710,114 @@ pub fn pgm_transformers_3ph(
 /// Slack bus appended after the physical nodes, connected via a source-impedance
 /// `Line`. Transformers are returned as `Transformer` values in per-unit on the
 /// system base; stamp them into a Y-bus with `network::stamp_transformers`.
-pub fn pgm_to_buses_and_branches(
+/// A converted PGM network together with the object-ID maps needed to address
+/// its pieces by their original PGM ids.
+///
+/// [`pgm_to_buses_and_branches`] returns only the three vectors, which is all
+/// power flow ever needed: it addresses buses positionally and never has to name
+/// a branch. Measurements do — a `sym_power_sensor` carries
+/// `measured_object: 4`, a PGM object id — and the mapping from that id to a
+/// branch index is *not* recoverable by arithmetic on input positions:
+///
+/// - a line with both terminals open is dropped entirely (no branch at all),
+/// - each active `source` appends a virtual slack bus and an extra branch,
+/// - each `three_winding_transformer` expands into three branches plus a star
+///   bus,
+///
+/// so input position and branch index diverge as soon as any of those appear.
+/// Hence these maps are recorded during conversion rather than reconstructed.
+///
+/// All branch indices are *flat*: lines first, then transformers, matching the
+/// order [`branch_flow::branch_params`](crate::branch_flow::branch_params)
+/// assembles them in.
+#[derive(Clone, Debug)]
+pub struct PgmNetwork {
+    pub buses: Vec<Bus>,
+    pub lines: Vec<Line>,
+    pub transformers: Vec<Transformer>,
+    /// Node id → bus index. Covers physical nodes only; star buses and virtual
+    /// slack buses have no PGM id of their own.
+    pub node_idx: HashMap<u64, usize>,
+    /// `line`/`transformer` id → flat branch index. A line with both terminals
+    /// open is absent, since it produces no branch.
+    pub branch_idx: HashMap<u64, usize>,
+    /// `three_winding_transformer` id → its three flat branch indices, in
+    /// side-1/2/3 order.
+    pub three_winding_branch_idx: HashMap<u64, [usize; 3]>,
+    /// `source` id → the flat branch index of the virtual source-impedance
+    /// branch gridoxide synthesizes for it. Inactive sources are absent.
+    pub source_branch_idx: HashMap<u64, usize>,
+    /// Appliance id (`sym_load`, `asym_load`, `sym_gen`, `asym_gen`, `shunt`,
+    /// `source`) → the bus it is attached to. Includes inactive appliances: a
+    /// sensor may reference one, and reporting a zero flow for a disconnected
+    /// appliance is better than failing to resolve the id at all.
+    pub appliance_bus: HashMap<u64, usize>,
+    /// Buses whose net injection is identically zero, as a per-bus flag.
+    ///
+    /// A bus with no load and no generator injects nothing into the network,
+    /// and that is *structural knowledge*, not a measurement — it holds exactly,
+    /// with no uncertainty. State estimation can use it as a hard constraint
+    /// rather than as a very-high-weight pseudo-measurement, which is what
+    /// `se::constraints` does.
+    ///
+    /// Sources and shunts do not disqualify a bus here, because gridoxide
+    /// models both structurally: a source's power arrives through its
+    /// synthesized branch and a shunt sits on the Y-bus diagonal, so neither
+    /// appears in `network::power_injections` at that bus. The virtual slack
+    /// buses themselves *are* excluded — that is precisely where the source's
+    /// unknown power enters the network.
+    ///
+    /// Note this is read off the *input document*, not off `Bus::p_spec`. A
+    /// state-estimation document leaves `p_specified` unset, so an unmeasured
+    /// load looks like zero injection in the converted network while being
+    /// nothing of the sort.
+    pub zero_injection: Vec<bool>,
+    /// Branch ids that collapsed to a self-loop because exactly one terminal
+    /// was connected, mapped to *which* PGM terminal is the live one.
+    ///
+    /// gridoxide represents such a branch as a single diagonal admittance
+    /// (`from == to`), which by construction cannot distinguish its two ends,
+    /// so the distinction is kept here instead. Use [`resolve_terminal`] rather
+    /// than reading this directly.
+    ///
+    /// [`resolve_terminal`]: PgmNetwork::resolve_terminal
+    pub half_open_terminal: HashMap<u64, Terminal>,
+}
+
+impl PgmNetwork {
+    /// Maps a PGM branch id and the terminal a sensor measures to the branch
+    /// index and terminal to evaluate with
+    /// [`branch_flow::terminal_flow`](crate::branch_flow::terminal_flow).
+    ///
+    /// Returns `None` in the two cases where there is no flow to compute:
+    ///
+    /// - the branch has both terminals open, so no branch exists at all;
+    /// - the requested terminal is the *open* end of a half-open branch, whose
+    ///   flow is identically zero (which is what PGM reports for it too).
+    ///
+    /// For the live end of a half-open branch the returned terminal is always
+    /// [`Terminal::From`], since the whole equivalent admittance sits there
+    /// regardless of which PGM end was connected.
+    pub fn resolve_terminal(&self, id: u64, terminal: Terminal) -> Option<(usize, Terminal)> {
+        let &branch = self.branch_idx.get(&id)?;
+        match self.half_open_terminal.get(&id) {
+            Some(&live) if live == terminal => Some((branch, Terminal::From)),
+            Some(_) => None,
+            None => Some((branch, terminal)),
+        }
+    }
+}
+
+/// Converts a PGM input document into gridoxide's own network types, keeping
+/// the object-ID maps — see [`PgmNetwork`] for why those cannot be derived
+/// afterwards.
+///
+/// [`pgm_to_buses_and_branches`] is the same conversion with the maps dropped.
+pub fn pgm_to_network(
     input: PgmInput,
     s_base_va: f64,
     freq_hz: f64,
-) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>) {
+) -> PgmNetwork {
     let id_to_idx = node_id_to_idx(&input);
     let id_to_u_rated: HashMap<u64, f64> = input.data.node.iter()
         .map(|n| (n.id, n.u_rated))
@@ -362,6 +831,16 @@ pub fn pgm_to_buses_and_branches(
     let mut q_inj: HashMap<u64, f64> = HashMap::new();
     let mut zip_map: HashMap<u64, Vec<ZipTerm>> = HashMap::new();
     let mut accumulate = |node: u64, load_type: u8, p: f64, q: f64, sign: f64| {
+        // An appliance with no specified power contributes nothing. PGM marks
+        // `p_specified`/`q_specified` required only for power flow, and a
+        // state-estimation input leaves them unset precisely because the
+        // appliance's power is an unknown — letting NaN through here would
+        // poison the bus injection and, from there, the whole Y-bus solve.
+        if !p.is_finite() && !q.is_finite() {
+            return;
+        }
+        let p = if p.is_finite() { p } else { 0.0 };
+        let q = if q.is_finite() { q } else { 0.0 };
         let s = Complex::new(p, q) * sign / s_base_va;
         match load_type {
             1 => zip_map.entry(node).or_default().push(ZipTerm { s_const: s, kind: ZipKind::ConstImpedance }),
@@ -442,40 +921,67 @@ pub fn pgm_to_buses_and_branches(
     // per end, matching PGM's y_shunt/2. Half-open cases become self-loop shunts.
     let omega = 2.0 * std::f64::consts::PI * freq_hz;
     let mut lines: Vec<Line> = Vec::new();
+    // Recorded as we go; see `PgmNetwork` for why these can't be rebuilt later.
+    let mut branch_idx: HashMap<u64, usize> = HashMap::new();
+    let mut three_winding_branch_idx: HashMap<u64, [usize; 3]> = HashMap::new();
+    let mut source_branch_idx: HashMap<u64, usize> = HashMap::new();
+    let mut half_open_terminal: HashMap<u64, Terminal> = HashMap::new();
     for ln in &input.data.line {
         match (ln.from_status, ln.to_status) {
             (1, 1) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
+                let y_shunt = line_y_shunt(ln, omega, z_base);
+                // A line short enough to be a jumper would otherwise put an
+                // unbounded admittance into the Y-bus; see
+                // `topology::ZERO_IMPEDANCE_THRESHOLD`.
+                let (r, x) = crate::topology::clamp_branch_impedance(
+                    ln.r1 / z_base,
+                    ln.x1 / z_base,
+                );
+                branch_idx.insert(ln.id, lines.len());
                 lines.push(Line {
                     from: id_to_idx[&ln.from_node],
                     to: id_to_idx[&ln.to_node],
-                    r: ln.r1 / z_base,
-                    x: ln.x1 / z_base,
-                    b_shunt: omega * ln.c1 * z_base,
-                    g_shunt: 0.0, // PgmLine has no tan1 (loss-tangent) field to derive this from
+                    r,
+                    x,
+                    b_shunt: y_shunt.im,
+                    g_shunt: y_shunt.re,
                 });
             }
             (1, 0) => {
                 let z_base = id_to_u_rated[&ln.from_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.from_node];
-                lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
-                    b_shunt: omega * ln.c1 * z_base, g_shunt: 0.0 });
+                branch_idx.insert(ln.id, lines.len());
+                half_open_terminal.insert(ln.id, Terminal::From);
+                lines.push(half_open_line(ln, omega, z_base, idx));
             }
             (0, 1) => {
                 let z_base = id_to_u_rated[&ln.to_node].powi(2) / s_base_va;
                 let idx = id_to_idx[&ln.to_node];
-                lines.push(Line { from: idx, to: idx, r: 0.0, x: 0.0,
-                    b_shunt: omega * ln.c1 * z_base, g_shunt: 0.0 });
+                branch_idx.insert(ln.id, lines.len());
+                half_open_terminal.insert(ln.id, Terminal::To);
+                lines.push(half_open_line(ln, omega, z_base, idx));
             }
+            // Both terminals open: no branch is created, so this line
+            // deliberately gets no `branch_idx` entry.
             _ => {}
         }
     }
 
     // Transformers — convert physical-unit PGM parameters to system pu.
     let mut transformers: Vec<Transformer> = Vec::new();
+    // Positions *within* `transformers`. They can't be turned into flat branch
+    // indices yet: the source loop below still appends to `lines`, so the
+    // offset (`lines.len()`) isn't final until the very end of this function.
+    let mut transformer_pos: HashMap<u64, usize> = HashMap::new();
+    let mut three_winding_pos: HashMap<u64, [usize; 3]> = HashMap::new();
     for t in &input.data.transformer {
-        let tap = transformer_tap(t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock);
+        let tap = transformer_tap(
+            t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock,
+            id_to_u_rated[&t.from_node], id_to_u_rated[&t.to_node],
+        );
         let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
+        transformer_pos.insert(t.id, transformers.len());
         transformers.push(Transformer {
             from: id_to_idx[&t.from_node],
             to: id_to_idx[&t.to_node],
@@ -484,6 +990,24 @@ pub fn pgm_to_buses_and_branches(
             y_series,
             y_shunt,
             tap,
+        });
+    }
+
+    // Links: ideal connections, stamped as branches rather than merged. See
+    // `PgmLink` for why, and `link_admittance` for the value.
+    for ln in &input.data.link {
+        if ln.from_status == 0 && ln.to_status == 0 {
+            continue;
+        }
+        transformer_pos.insert(ln.id, transformers.len());
+        transformers.push(Transformer {
+            from: id_to_idx[&ln.from_node],
+            to: id_to_idx[&ln.to_node],
+            from_status: ln.from_status,
+            to_status: ln.to_status,
+            y_series: LINK_Y,
+            y_shunt: Complex::new(0.0, 0.0),
+            tap: Complex::new(1.0, 0.0),
         });
     }
 
@@ -531,6 +1055,11 @@ pub fn pgm_to_buses_and_branches(
         // per-unit base is pinned to u1_rated (physical, fixed) — this is
         // why `transformer_admittances_ex` always takes (u1_local, u1_rated)
         // regardless of which leg is being built.
+        three_winding_pos.insert(
+            t.id,
+            [transformers.len(), transformers.len() + 1, transformers.len() + 2],
+        );
+
         let t1_tap = tap_ratio_from_voltages(u1_local * u1_rated, u1_local * u1_rated, 0);
         let (t1_series, t1_shunt) =
             transformer_admittances_ex(u1_local, u1_rated, t.sn_1, uk_t1, pk_t1, t.i0, t.p0, s_base_va);
@@ -576,10 +1105,79 @@ pub fn pgm_to_buses_and_branches(
             u_rated: id_to_u_rated[&src.node],
             zip_terms: Vec::new(),
         });
+        source_branch_idx.insert(src.id, lines.len());
         lines.push(Line { from: virtual_idx, to: id_to_idx[&src.node], r: r_s, x: x_s, b_shunt: 0.0, g_shunt: 0.0 });
     }
 
-    (buses, lines, transformers)
+    // `lines` is final now, so transformer positions can become flat indices.
+    let n_lines = lines.len();
+    branch_idx.extend(transformer_pos.into_iter().map(|(id, pos)| (id, n_lines + pos)));
+    three_winding_branch_idx.extend(
+        three_winding_pos
+            .into_iter()
+            .map(|(id, legs)| (id, legs.map(|pos| n_lines + pos))),
+    );
+
+    // Appliance → bus. Built in one pass at the end rather than inside the
+    // accumulation closure above, which only sees active constant-power
+    // appliances; a sensor may reference an inactive or ZIP-modelled one.
+    let mut appliance_bus: HashMap<u64, usize> = HashMap::new();
+    for (id, node) in input.data.sym_load.iter().map(|a| (a.id, a.node))
+        .chain(input.data.asym_load.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.sym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.asym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.shunt.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.source.iter().map(|a| (a.id, a.node)))
+    {
+        if let Some(&idx) = id_to_idx.get(&node) {
+            appliance_bus.insert(id, idx);
+        }
+    }
+
+    // Zero-injection buses: everything except the ones carrying an active load
+    // or generator, and except the virtual slack buses where source power
+    // enters. Star buses of three-winding transformers qualify, which is the
+    // textbook example of the constraint being worth having.
+    let mut zero_injection = vec![true; buses.len()];
+    for (node, status) in input.data.sym_load.iter().map(|a| (a.node, a.status))
+        .chain(input.data.asym_load.iter().map(|a| (a.node, a.status)))
+        .chain(input.data.sym_gen.iter().map(|a| (a.node, a.status)))
+        .chain(input.data.asym_gen.iter().map(|a| (a.node, a.status)))
+    {
+        if status != 0 {
+            if let Some(&idx) = id_to_idx.get(&node) {
+                zero_injection[idx] = false;
+            }
+        }
+    }
+    for &branch in source_branch_idx.values() {
+        zero_injection[lines[branch].from] = false;
+    }
+
+    PgmNetwork {
+        buses,
+        lines,
+        transformers,
+        zero_injection,
+        node_idx: id_to_idx,
+        branch_idx,
+        three_winding_branch_idx,
+        source_branch_idx,
+        appliance_bus,
+        half_open_terminal,
+    }
+}
+
+/// The [`pgm_to_network`] conversion with the object-ID maps dropped — the
+/// shape power flow has always used, kept so its many call sites stay
+/// unchanged.
+pub fn pgm_to_buses_and_branches(
+    input: PgmInput,
+    s_base_va: f64,
+    freq_hz: f64,
+) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>) {
+    let net = pgm_to_network(input, s_base_va, freq_hz);
+    (net.buses, net.lines, net.transformers)
 }
 
 /// Converts a PGM input document (with `asym_load`) into a 3N-bus expanded
@@ -593,6 +1191,194 @@ pub fn pgm_to_buses_and_branches(
 ///
 /// Returns `(buses, lines_3ph, id_to_physical_idx)`.  Pass `buses.len() / 3`
 /// as `n` to `build_ybus_3ph`.
+/// The object-ID maps a three-phase network needs beyond its buses and branches.
+///
+/// [`pgm_to_3ph_network`] returns only what a power flow needs — buses, lines
+/// and a node map — because a power flow never has to answer "which branch
+/// terminal does this sensor name". State estimation does, so this carries the
+/// same maps [`PgmNetwork`] does for the scalar case.
+///
+/// **Every index here is a *physical* one.** Node `k` is buses `3k..3k+3` and
+/// branch `b` is terminals `3b..3b+3`, matching
+/// [`SeNetwork::from_3ph`](crate::se::SeNetwork::from_3ph). Storing the physical
+/// index and expanding at the point of use keeps one map serving all three
+/// phases.
+pub struct PgmNetwork3Ph {
+    /// Node id → physical node index. Physical nodes only; the virtual slack
+    /// buses behind sources have no PGM id.
+    pub node_idx: HashMap<u64, usize>,
+    /// `line` id → physical flat branch index.
+    ///
+    /// The flat order is the one [`pgm_to_3ph_network`] produces and
+    /// `SeNetwork::from_3ph` consumes: the document's own lines that yield a
+    /// branch, then one synthesized branch per active source, then the
+    /// transformers. A line with both terminals open yields no branch and is
+    /// absent, which is why this cannot be derived from document position.
+    pub branch_idx: HashMap<u64, usize>,
+    /// `source` id → the physical index of its synthesized impedance branch.
+    pub source_branch_idx: HashMap<u64, usize>,
+    /// Appliance id → the physical node index it sits on.
+    pub appliance_bus: HashMap<u64, usize>,
+    /// Per *physical node*, whether its net injection is identically zero.
+    pub zero_injection: Vec<bool>,
+    /// Branch ids that collapsed to a self-loop because exactly one terminal was
+    /// connected, mapped to which PGM terminal is the live one — see
+    /// [`PgmNetwork::half_open_terminal`].
+    pub half_open_terminal: HashMap<u64, Terminal>,
+    /// Physical nodes including the virtual slack bus per active source.
+    pub n_nodes: usize,
+}
+
+/// Builds [`PgmNetwork3Ph`] for a document, without consuming it.
+///
+/// Deliberately separate from [`pgm_to_3ph_network`] rather than folded into it:
+/// that function consumes its input and is on the power-flow path, which has no
+/// use for any of this.
+///
+/// Returns an error for the components the three-phase conversion does not
+/// model, rather than letting them vanish. `pgm_to_3ph_network` drops all three
+/// silently, which is survivable for a power flow whose caller chose the
+/// document, and not for an estimate whose answer would quietly describe a
+/// different network.
+pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
+    if !input.data.three_winding_transformer.is_empty() {
+        return Err(Unsupported3Ph::ThreeWindingTransformer);
+    }
+    if !input.data.voltage_regulator.is_empty() {
+        return Err(Unsupported3Ph::VoltageRegulator);
+    }
+    if !input.data.link.is_empty() {
+        return Err(Unsupported3Ph::Link);
+    }
+    // `transformer_seq_params` panics outside these two, and a panic reached
+    // from a document is not a diagnosis. Checked here rather than there because
+    // that function is on the power-flow path, whose callers chose their own
+    // documents; an estimate's caller may not have.
+    if let Some(t) = input
+        .data
+        .transformer
+        .iter()
+        .find(|t| !matches!((t.winding_from, t.winding_to), (2, 1) | (1, 1)))
+    {
+        return Err(Unsupported3Ph::WindingPair {
+            from: t.winding_from,
+            to: t.winding_to,
+        });
+    }
+
+    let node_idx = node_id_to_idx(input);
+    let n_physical = input.data.node.len();
+
+    // Lines, in the order `pgm_to_3ph_network` emits them: a branch per line
+    // with at least one live terminal, skipping the fully-open ones.
+    let mut branch_idx = HashMap::new();
+    let mut half_open_terminal = HashMap::new();
+    let mut next = 0usize;
+    for ln in &input.data.line {
+        match (ln.from_status, ln.to_status) {
+            (1, 1) => {}
+            (1, 0) => {
+                half_open_terminal.insert(ln.id, Terminal::From);
+            }
+            (0, 1) => {
+                half_open_terminal.insert(ln.id, Terminal::To);
+            }
+            _ => continue,
+        }
+        branch_idx.insert(ln.id, next);
+        next += 1;
+    }
+
+    // Then one synthesized branch per active source, then the transformers.
+    let mut source_branch_idx = HashMap::new();
+    for src in input.data.source.iter().filter(|s| s.status != 0) {
+        source_branch_idx.insert(src.id, next);
+        next += 1;
+    }
+    for t in &input.data.transformer {
+        branch_idx.insert(t.id, next);
+        next += 1;
+    }
+
+    let mut appliance_bus = HashMap::new();
+    for (id, node) in input.data.sym_load.iter().map(|a| (a.id, a.node))
+        .chain(input.data.asym_load.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.sym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.asym_gen.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.shunt.iter().map(|a| (a.id, a.node)))
+        .chain(input.data.source.iter().map(|a| (a.id, a.node)))
+    {
+        if let Some(&k) = node_idx.get(&node) {
+            appliance_bus.insert(id, k);
+        }
+    }
+
+    // A node with any load or generator injects something; sources and shunts
+    // are structural here exactly as in the scalar case. Virtual slack buses are
+    // excluded, being where a source's own unknown power enters.
+    let n_sources = input.data.source.iter().filter(|s| s.status != 0).count();
+    let mut zero_injection = vec![true; n_physical + n_sources];
+    for k in n_physical..zero_injection.len() {
+        zero_injection[k] = false;
+    }
+    for node in input.data.sym_load.iter().map(|a| a.node)
+        .chain(input.data.asym_load.iter().map(|a| a.node))
+        .chain(input.data.sym_gen.iter().map(|a| a.node))
+        .chain(input.data.asym_gen.iter().map(|a| a.node))
+    {
+        if let Some(&k) = node_idx.get(&node) {
+            zero_injection[k] = false;
+        }
+    }
+
+    Ok(PgmNetwork3Ph {
+        node_idx,
+        branch_idx,
+        source_branch_idx,
+        appliance_bus,
+        zero_injection,
+        half_open_terminal,
+        n_nodes: n_physical + n_sources,
+    })
+}
+
+/// A component the three-phase conversion does not model.
+///
+/// Each is a deliberate cut rather than an oversight. A three-winding
+/// transformer needs asymmetric star parameters; `voltage_regulator` has no
+/// meaning in an estimate, where a generator's voltage is an unknown; and a
+/// `link` needs its own three-phase stamping that `pgm_to_3ph_network` never
+/// grew. Failing is the point — all three were being dropped silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unsupported3Ph {
+    ThreeWindingTransformer,
+    VoltageRegulator,
+    Link,
+    /// A transformer winding pair outside Dyn `(2, 1)` and YNyn `(1, 1)`, the
+    /// two `transformer_seq_params` derives zero-sequence parameters for.
+    WindingPair { from: u8, to: u8 },
+}
+
+impl std::fmt::Display for Unsupported3Ph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self {
+            Self::ThreeWindingTransformer => "three_winding_transformer",
+            Self::VoltageRegulator => "voltage_regulator",
+            Self::Link => "link",
+            Self::WindingPair { from, to } => {
+                return write!(
+                    f,
+                    "the three-phase conversion derives zero-sequence parameters only for Dyn \
+                     and YNyn windings, not for the pair ({from}, {to})"
+                )
+            }
+        };
+        write!(f, "the three-phase conversion does not model `{what}`")
+    }
+}
+
+impl std::error::Error for Unsupported3Ph {}
+
 pub fn pgm_to_3ph_network(
     input: PgmInput,
     s_base_va: f64,

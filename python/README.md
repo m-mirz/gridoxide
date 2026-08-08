@@ -1,7 +1,8 @@
 # gridoxide
 
-Python bindings for [`gridoxide`](https://github.com/m-mirz/gridoxide), a Rust AC power flow solver
-using the Newton-Raphson method with a sparse Jacobian (via [`faer`](https://crates.io/crates/faer)).
+Python bindings for [`gridoxide`](https://github.com/m-mirz/gridoxide), a Rust AC power flow and
+state estimation solver, both Newton-based with a sparse Jacobian (via
+[`faer`](https://crates.io/crates/faer)).
 
 Grids are loaded from [power-grid-model (PGM)](https://github.com/PowerGridModel/power-grid-model) JSON
 input files. Repeated solves against the same topology reuse a cached symbolic factorization, so scenario
@@ -129,6 +130,44 @@ feature to use them:
 
 - `"klu"` — links vendored SuiteSparse C directly (`--features python,klu`).
 - `"pardiso"` — Intel oneMKL's PARDISO solver (`--features python,pardiso`, needs `MKLROOT` set).
+
+## State estimation
+
+`StateEstimationModel` recovers the most likely grid state from measurements, rather than computing
+voltages from known injections. Its input is a PGM document carrying `sym_voltage_sensor` and/or
+`sym_power_sensor` entries — and notably it does *not* need `p_specified` on its loads or `u_ref` on
+its sources, since those are quantities the estimator solves for rather than inputs it consumes.
+
+```python
+import gridoxide
+
+model = gridoxide.StateEstimationModel.from_pgm_json("grid_with_sensors.json")
+model.solve()
+
+print(model.voltage_mag())      # per-unit magnitude, one entry per bus
+print(model.voltage_ang())      # radians
+print(model.residuals())        # z - h(x), one per measurement
+print(model.objective)          # J(x) = 1/2 r^T W r
+```
+
+A converged estimate is not automatically a trustworthy one, so two analyses come with it:
+
+```python
+# What the measurements fail to determine, as (bus, "angle" | "magnitude").
+# Empty means fully observable. Entries beyond the physical node count are
+# gridoxide's own synthesized buses (one virtual slack bus per source), which
+# are expected whenever a source's own power is unmeasured.
+print(model.observability())
+
+# (chi_squared, degrees_of_freedom, p_value, [(measurement_index, normalized_residual), ...])
+# p below 0.05 conventionally means the measurements are not merely noisy;
+# a normalized residual above 3 conventionally identifies the culprit.
+print(model.bad_data())
+```
+
+`from_pgm_json` takes the same `backend`, `tol`, `max_iter`, `s_base_va` and `freq_hz` arguments as
+`PowerFlowModel`. Every backend produces the same estimate — the gain matrix is an ordinary square
+sparse system — so the choice is performance only.
 
 ## License
 

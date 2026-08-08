@@ -44,7 +44,7 @@ absence of a survey is not evidence of absence of the feature.
 | Time-series / batch injections | ✅ `TimeSerie`, ~13x speedup claimed | ✅ batch datasets, parallel via `threading` param | — | ✅ time-series variants of power flow, OPF, linear analysis, *and* contingency analysis | ✅ `timeseries` module (`run_time_series`, pluggable `DataSource`/`OutputWriter`) | ⚠️ `batch::BatchSolver` (`src/batch.rs`): many scenarios over one shared topology, parallel across cores via rayon, each worker amortizing one symbolic factorization over its share — 3.5x on 8 physical cores at 256 scenarios (`scripts/bench/README.md` §4b), results identical to a sequential loop and returned in scenario order. Injection overrides only (`BusOverride` deliberately cannot change `bus_type`, since that changes `n_unknowns` and invalidates the shared pattern), and no time-series driver layered on top — no `DataSource`/`OutputWriter` equivalent, no result writer |
 | Input validation | ❌ | ✅ `validate_input_data`/`validate_batch_data` | — | ❌ no generic equivalent found (only format-specific CIM/FMU import validation) | ✅ `diagnostic()` (disconnected elements, implausible values, wrong reference system, ...) | ❌ |
 | Short-circuit calculation | ❌ | ✅ (IEC 60909) | ❌ | ✅ (3-phase, LG, LL, LLG fault types — `Simulations/ShortCircuitStudies/`) | ✅ (IEC 60909-style, `shortcircuit` module) | ❌ |
-| State estimation | ❌ | ✅ (WLS) | ❌ | ✅ (WLS + observability analysis + pseudo-measurement augmentation) | ✅ (WLS, `estimation` module) | ❌ |
+| State estimation | ❌ | ✅ (WLS, **sym + asym**, iterative-linear + Newton-Raphson, voltage/power/**current** sensors, **batched** with topology caching and thread-parallelism; no bad-data detection) | ❌ | ✅ (WLS + observability analysis + pseudo-measurement augmentation) | ✅ (WLS, `estimation` module) | ⚠️ **symmetric only** (WLS + observability + bad-data detection + zero-injection constraints, both PGM calculation methods, **batched** with thread-parallelism and a shared factorization, voltage/power/**current** sensors in both angle frames; reads asymmetric sensors but reduces them to the symmetric problem) — see the note below |
 | Sensitivity analysis / OPF | ❌ / ❌ | ❌ / ❌ | ✅ / ❌ | ✅ (PTDF/LODF, `Simulations/LinearFactors/`) / ✅ (linear *and* nonlinear AC OPF, `Simulations/OPF/`) | ✅ (PTDF, `pypower/makePTDF.py`) / ✅ native PDIPM AC+DC OPF (`runopp`/`rundcopp`) *plus* an optional external Julia PandaModels.jl bridge (`runpm.py`) for more advanced formulations | ❌ / ❌ |
 | Pluggable "outer loop" architecture | ❌ | ⚠️ ad hoc (tap optimizer only) | ✅ extensively (14+ outer loops) | ⚠️ ad hoc (boolean control flags in `PowerFlowOptions`, not a modular/registry-based architecture like powsybl's) | ✅ genuine `Controller`/`BasicCtrl` base classes (`control/basic_controller.py`) registered on `net.controller` and driven by `run_control` — third-party code can subclass `Controller` directly, closer in spirit to powsybl's extensibility than to VeraGrid's/PGM's fixed flag sets, though not the same formal outer-loop-convergence architecture | ❌ |
 | Dynamic / time-domain simulation (EMT, RMS, small-signal stability) | ❌ | ❌ | ❌ | ✅ (`Simulations/EMT/`, `Simulations/Rms/`, `Simulations/SmallSignalStabilityEmt/`+`SmallSignalStabilityRms/` — the only one of the six with this at all) | ❌ | ❌ |
@@ -177,7 +177,173 @@ absence of a survey is not evidence of absence of the feature.
 3. **Distributed slack** — 4 of 5 tools have it (only lightsim2grid, powsybl, VeraGrid, and pandapower); real transmission grids often split slack across several generators.
 4. **DC power flow as a first-class mode** — cheap, since `linear_initial_guess` is most of the way there already; every reference tool treats this as a basic offering.
 5. **Switches, HVDC and SVC as first-class model elements** — no longer absent, but reachable *only* through CGMES import: switching state, converter setpoints and SVC regulation are all fixed at import time, with no element in gridoxide's own network model to change between solves. That is exactly the shape lightsim2grid's disclaimer calls out for its own fixed taps, and it is what stands between the current support and the contingency/time-series work in item 2.
-6. Everything else in the table (TCSC/SSC and the wider FACTS set, short-circuit, state estimation, sensitivity/OPF, outer-loop/controller architecture as a general extensibility mechanism, VeraGrid's unique EMT/RMS dynamic simulation, pandapower's protection-device modeling) — real capabilities elsewhere, but either a materially larger undertaking or outside gridoxide's current scope as a focused AC power-flow library.
+6. Everything else in the table (TCSC/SSC and the wider FACTS set, short-circuit, sensitivity/OPF, outer-loop/controller architecture as a general extensibility mechanism, VeraGrid's unique EMT/RMS dynamic simulation, pandapower's protection-device modeling) — real capabilities elsewhere, but either a materially larger undertaking or outside gridoxide's current scope as a focused AC power-flow library.
+
+## Note on state estimation
+
+**Done for symmetric estimation — snapshot and batched, with voltage, power and current sensors — and
+for asymmetric networks driven by symmetric sensors.** Within that scope gridoxide matches the most
+capable reference tool and leads it in two places. What is left of the three gaps this note used to
+list is one part of one of them, at the end. An earlier version claimed parity outright, which
+overstated it.
+
+`se::nr::estimate` is Gauss-Newton on the normal equations, validated against
+power-grid-model's own state-estimation fixtures (committed under `tests/data/pgm/state_estimation/`
+with their MPL-2.0 license files): per-unit magnitudes agree to 1.5e-9 on `transmission-case`, and
+every sparse backend produces the same answer, since the gain matrix is an ordinary square system.
+See the [State Estimation](../state_estimation/index.md) chapter.
+
+Both analyses VeraGrid is credited with above are present. Observability
+(`se::observability::analyze`) separates structural from numerical unobservability and names the
+buses and quantities involved, rather than only reporting that a factorization failed. Bad-data
+detection (`se::bad_data::analyze`) runs the chi-squared test and identifies culprits by largest
+normalized residual. Zero injections are enforced as hard equality constraints rather than as
+high-weight pseudo-measurements — the approach that avoids the ill-conditioning power-grid-model has
+two fixtures named after.
+
+Both of power-grid-model's calculation methods are implemented and agree with each other:
+Newton-Raphson (`se::nr`) and the prefactorized `iterative_linear` (`se::iterative`), selectable per
+call. `link` is modelled now (stamped as a branch, see the
+[zero-impedance](../powerflow/zero_impedance_branches.md) chapter), so the fixtures using one are
+reachable. Pseudo-measurement augmentation — filling an
+unobservable region with forecast values, which VeraGrid does — is not implemented; gridoxide reports
+the unobservable set instead, which is the prerequisite for it.
+
+### The two leads
+
+- **Bad-data detection, which power-grid-model does not have at all.** Checked against its own
+  documentation rather than assumed: it reports a per-sensor residual and stops there — no
+  chi-squared test, no identification of a culprit. `se::bad_data::analyze` does both.
+- **Newton-Raphson robustness.** power-grid-model's Newton-Raphson estimator raises
+  `SparseMatrixError` on every benchmark case from 300 buses up, on documents its own
+  iterative-linear method estimates from the same sensors without complaint, and that gridoxide's
+  Newton-Raphson converges on to 1e-14. See `scripts/bench/README.md` §7.
+
+### The gaps that remain
+
+Measured against power-grid-model 1.13 (`references/power-grid-model/`), in order of how much they
+matter:
+
+1. **Asymmetric state estimation.** Substantially done, and what remains is narrower than the
+   heading suggests.
+
+   A phase-domain document now estimates end to end. `SeNetwork::from_3ph` builds the measurement
+   model for a 3N-bus network, `pgm::pgm_3ph_maps` supplies the object-ID maps a sensor needs to
+   resolve against it, and `measurement::measurements_from_pgm_3ph` maps sensors onto phase-expanded
+   targets. `tests/se_three_phase_test.rs` estimates power-grid-model's `transmission-case` in the
+   phase domain and matches the answer it published for that network solved asymmetrically — all 33
+   phase-buses to 1e-6, with angles agreeing up to the single rotation nothing measures.
+
+   Nothing in the estimator changed for it. `Target`, `StateLayout`, the Jacobian, the constraints,
+   both methods and the batch solver carry over untouched, because a three-phase branch terminal is a
+   six-coefficient `CurrentFunctional` where a scalar one has two. A branch is indexed
+   `3·branch + phase` to match the `3·node + phase` bus convention, which is what keeps `Target`
+   identical between the two domains.
+
+   The symmetric sensors that fixture carries need no conversion beyond a rotation, and it is worth
+   recording why: a voltage reading is line-to-line over `u_rated` in the scalar case and
+   line-to-neutral over `u_rated/√3` here, which is the same number for a balanced set, and a power
+   reading is a three-phase total over `s_base` against a per-phase value over `s_base/3`, likewise.
+   So the value replicates and only the angle rotates by 0/−120/+120 — which is exactly
+   power-grid-model's own `ComplexValue<asymmetric_t>` broadcast.
+
+   Asymmetric sensors describe their three phases separately here rather than reducing to the
+   symmetric problem: `asym_voltage_sensor`, `asym_power_sensor` and `asym_current_sensor` each
+   select their own phase's reading, against a line-to-neutral voltage base and a `s_base/3` power
+   base. Checked against `single-node-source-asym-voltage-sensor`, where the sensor determines the
+   answer outright and power-grid-model reports back exactly what it read.
+
+   **What is left is one modelling difference, and it is worth stating precisely.** Voltage
+   magnitudes alone do not determine a phase relationship. With flows in the set the source
+   impedance couples the phases — a flow through it depends on all six of its phasors — but given
+   only magnitudes the three per-phase rotations are three separate symmetries where `StateLayout`
+   removes one, and the gain matrix is correctly singular. power-grid-model answers such a case
+   because its source is a *boundary condition*, a fixed balanced three-phase voltage; gridoxide's
+   is an unknown behind a synthesized impedance, the same difference that leaves
+   `SeReport::unconstrained` naming a virtual bus per source on the symmetric side.
+
+   The obvious fix is wrong, and it was tried rather than assumed. gridoxide *builds* that virtual
+   bus balanced, so constraining its three angles to differ by ±120° looks like free information and
+   removes exactly the two directions in question. It also contradicts the data: power-grid-model's
+   own `single-node-source-asym-voltage-sensor` reads three phases whose sequence angles are 0.1,
+   0.2 and 0.3, on a node with no appliance — zero injection, so zero current through the source
+   branch, so `V_virtual = V_node` exactly. The virtual bus is as unbalanced as the measurement says
+   the node is, and the constraint moves that fixture's answer from 0.1 to 0.2. The balance is a
+   property of the initial state gridoxide synthesizes, not of the equivalent it represents.
+
+   So this is not a missing feature but a real limit: those two directions are undetermined, and
+   reporting singular is the correct answer. power-grid-model answers instead because it has no
+   source-internal bus to be undetermined about. Both directions are asserted in
+   `tests/se_three_phase_test.rs`, so a change that supplies them will announce itself.
+
+   `pgm_3ph_maps` refuses the components the three-phase conversion does not model — `link`,
+   `three_winding_transformer`, `voltage_regulator`, and any transformer winding pair outside Dyn
+   and YNyn — with a typed error rather than dropping them silently or, in the last case, panicking
+   from inside `transformer_seq_params`.
+
+2. ~~**Current sensors.**~~ **Done.** `sym_current_sensor` and `asym_current_sensor` are read in both
+   angle frames, on both calculation methods, checked against power-grid-model's own
+   `global-current-sensor` and `local-current-sensor` fixtures — which are identical but for the
+   frame and converge to visibly different states, so the distinction is genuinely exercised rather
+   than nominally supported.
+
+   Stored decomposed into real and imaginary components rather than as a magnitude and an angle,
+   following power-grid-model, and for a decisive reason of gridoxide's own: `arg(I)` has a branch
+   cut and gridoxide has no `phase_mod_2pi` anywhere, so a polar residual taken near ±π would
+   silently chase a 2π error. `|I|` also has an unbounded derivative on an unloaded branch. The
+   variance decomposition reproduces power-grid-model's second-order formula exactly.
+
+   Two rules are enforced that power-grid-model checks only in its Python validation layer, its C++
+   core accepting and double-counting the mixture: a power sensor and a current sensor may not share
+   a terminal, and two current sensors on one terminal may not disagree about the frame. A current
+   sensor on a `link` is refused outright — a link's admittance is a regularization constant, so the
+   current through one is an artifact of that choice rather than a measurement.
+
+   One divergence worth recording: power-grid-model refuses to run at all when a global-angle sensor
+   has no voltage angle to reference, raising `NotObservableError`. gridoxide reports it through
+   `ObservabilityReport::global_current_without_angle_reference` instead. The state is fully
+   determined there — determined to the *wrong* reference, since `StateLayout` pins a bus the sensor
+   contradicts — so calling it unobservable would misname it.
+3. ~~**Batch state estimation.**~~ **Done.** `se::batch::SeBatchSolver` (`src/se/batch.rs`) estimates
+   many scenarios over one topology and measurement structure, parallel across cores, each worker
+   amortizing one symbolic factorization — the same shape `batch::BatchSolver` has for power flow,
+   and exactly what `PersistentEstimator`'s already-written cache-validity condition allows.
+   `MeasurementOverride` varies values and sigmas and refuses to vary `kind` or `target`, mirroring
+   `BusOverride`'s refusal to change `bus_type`. Exposed as
+   `StateEstimationModel.solve_batch(scenarios, threads)`. Checked against power-grid-model's own
+   `sensor-update-*` and `unbalanced-power-measurements-*` batch fixtures, and asserted bit-for-bit
+   identical to a sequential loop at every thread count.
+
+On speed, the iterative-linear method runs 1.6-2.0x behind power-grid-model's across an order of
+magnitude of problem size (`scripts/bench/README.md` §7). Measured rather than inferred, that is
+entirely an iteration-count gap: gridoxide's own iterations are 30-40% *cheaper* than
+power-grid-model's and it takes about three times as many, and undamped its map does not converge at
+all. See `docs/src/state_estimation/iterative.md`.
+
+A fourth gap surfaced while closing the third and is now closed too: **de-energized islands**.
+power-grid-model reports a node in a component containing no source as `energized: 0` with a state of
+exactly zero — topology decides it, and a voltage sensor on such a node is simply ignored. gridoxide
+had no equivalent, and the consequence was not a wrong answer but no answer:
+`jacobian::mask_untouched` pins a column nothing *structurally* touches, which catches a fully
+isolated node, but a de-energized node reached by a zero-injection constraint or by its own sensor is
+touched and undetermined, so the gain matrix came back singular. `SeNetwork::energized` now carries
+the same topological verdict `solver::PersistentSolver` has always applied on the power-flow side
+(`network::connected_components` + `mark_unreferenced_islands`): such a bus contributes no rows and
+no constraints, and is reported at zero.
+
+Two smaller gaps have closed. A sensor on a three-winding transformer side (`measured_terminal_type`
+6/7/8) used to return `MeasurementError::UnsupportedTerminalType`; it now maps to the corresponding
+leg's `From` terminal, since a three-winding transformer is already resolved into three two-winding
+branches around a star bus. And the estimator no longer starts flat: `se::nr::linear_start` carries
+the network's structural phase shifts, without which Gauss-Newton converges to a *different*
+stationary point on any network containing a phase-shifting transformer — reporting success, with an
+objective nine orders of magnitude worse than the true optimum.
+
+One caveat on all of the above that is about evidence rather than features: every benchmark and
+fixture here estimates from data that is either perfectly consistent or hand-authored. Nothing in
+this repo generates realistically noisy or corrupted measurements, so gridoxide's bad-data
+advantage — lead 1 — has never actually been measured against anything. Bad-data behaviour needs a
+harness that does not exist yet.
 
 ## Note on realistic benchmark coverage
 

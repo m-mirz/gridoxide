@@ -1,6 +1,6 @@
 # gridoxide
 
-`gridoxide` is an AC power flow analysis tool written in Rust. It solves the power flow equations for
+`gridoxide` is an AC power flow and state estimation tool written in Rust. It solves the power flow equations for
 an electrical grid with the Newton-Raphson method, using a sparse Jacobian throughout — assembly,
 factorization, and solve.
 
@@ -38,6 +38,11 @@ See [Building and Running](docs/src/getting_started/building.md) and
 - **Newton-Raphson AC power flow**, symmetric and asymmetric, with a sparse Jacobian and symbolic
   factorization reused across both NR iterations and repeated solves
   (`solver::PersistentSolver`) — see [Backends and Factorization Reuse](docs/src/solvers/backends.md).
+- **Weighted-least-squares state estimation** — recovers the most likely grid state from noisy,
+  redundant, partial measurements, with [observability analysis and bad-data
+  detection](docs/src/state_estimation/diagnostics.md) and zero injections enforced as hard
+  constraints rather than high-weight guesses. Validated against power-grid-model's own fixtures; see
+  [The State Estimation Problem](docs/src/state_estimation/index.md).
 - **Five interchangeable linear-solver backends** — `faer` (`Scalar`), a hand-written block LU
   (`Block`), vendored SuiteSparse KLU over FFI (`Klu`), a from-scratch Rust translation of KLU
   (`KluNative`, always built), and Intel oneMKL PARDISO (`Pardiso`). All five produce identical
@@ -62,6 +67,14 @@ gridoxide is one of two solvers out of six that converge on all 12 real IEEE/MAT
 its `Klu` backend is frequently faster than lightsim2grid's own KLU-backed C++ solver on real
 transmission topology — while power-grid-model remains clearly faster on synthetic radial
 distribution grids, a real standing gap.
+
+On **state estimation** the same pattern holds in both directions: gridoxide's Newton-Raphson
+estimator is the only one of the two that answers at all above 300 buses, where power-grid-model's
+raises `SparseMatrixError` on documents its own iterative-linear method estimates from without
+complaint; on iterative-linear itself power-grid-model is 1.6-2.0x faster across an order of
+magnitude of problem size, the clearest standing gap on that side. That gap is a convergence-rate
+one, not a linear-algebra one — gridoxide's iterations are 30-40% cheaper and it takes three times
+as many of them.
 
 ## License
 
