@@ -38,14 +38,23 @@ against `f96a660`.
 > disagreement elsewhere is explained — see §6.1, which the results corrected in a direction this
 > document did not anticipate.
 >
-> *Phase 2* added `src/switches.rs` (`SwitchTreatment::Regularize`, with a switch's position carried
+> *Phase 2* — **gate met, and it went further than the gate asked.** Every node-breaker
+> configuration in the tree except FullGrid now solves under *every* retention policy, including the
+> full node-breaker view: MiniGrid (105 buses, 90 switches), SmallGrid (1,369 buses, 1,266 switches)
+> and Svedala (1,179 buses, 1,464 switches), each in the same iteration count as its own bus-branch
+> solve. §1.1(d) records the consequence: §4.1's "dead on arrival at real scale" is refuted.
+> FullGrid fails on both paths and is pre-existing.
+>
+> It added `src/switches.rs` (`SwitchTreatment::Regularize`, with a switch's position carried
 > as terminal *status* so a state change moves Y-bus values without moving the sparsity pattern) and
 > `cgmes::cgmes_node_breaker_to_buses_and_branches`, which derives buses from a `BusView` and reuses
 > every existing equipment loop. **Its gate is met**: MiniGrid converges under
 > `RetainAdjacentToBusbar` with 30 retained switches, each reporting a flow, and SmallGrid converges
 > at real scale — 540 buses with 373 retained switches. Two caveats are recorded in
 > `tests/cgmes_node_breaker_solve_test.rs` and §9. §1.1(d) also records a negative result worth
-> reading before phase 3.
+> reading before phase 3, and two latent bugs in shared code that node-breaker import surfaced:
+> `connected_components` counting an out-of-service branch as a connection, and `classify` counting
+> a de-energized placeholder as a reference bus. Both are fixed.
 >
 > Phases 3–7 are not started.
 
@@ -158,15 +167,23 @@ solve diverged on FullGrid with "20-odd" large-admittance switch branches active
 switches — the numbers agree. SmallGrid has 1,266 and Svedala 1,464, i.e. **45–52× past the count
 already measured to diverge**. That is not a margin to be optimistic about.
 
-> **Phase 2 tried to reproduce this and could not.** `switches::conditioning_probe` builds chains,
-> stars and rings of stiff branches at counts from 1 to 1,464, with the admittance both inductive
-> and capacitive. *Every* case converged in two iterations with a plausible voltage profile
-> (`examples/switch_ceiling.rs`). So switch count, switch arrangement and admittance sign do not, on
-> their own, explain the historical divergence. This does not clear `Regularize` — the probe's
-> networks are uniform and FullGrid's are not — but it does mean the "45–52× past divergence"
-> extrapolation rests on an anecdote whose mechanism is not understood, and the real ceiling is
-> unknown rather than known to be ~30. Settling it needs `Regularize` run against a real CGMES
-> node-breaker import, which phase 2 did not build.
+> **Refuted (phase 2).** Both models converge with *every* switch retained — SmallGrid at 1,266 and
+> Svedala at 1,464 — in the same iteration count as the bus-branch solve of the same model
+> (`tests/cgmes_node_breaker_solve_test.rs`). The synthetic probe found no divergence either, at any
+> count, arrangement or admittance sign (`switches::conditioning_probe`).
+>
+> Both models *did* fail at first, which is what made this look confirmed. The cause was a bug with
+> nothing to do with switches: a de-energized bus is `Slack` at `V = 0`, a placeholder rather than a
+> reference, and `network::classify` counted it as one. A live `PQ` bus paired with such a
+> placeholder then gets an identically zero angle row, since `H_ii = −Q_i − V_i²B_ii` cancels exactly
+> at zero volts. The bus-branch importer never produces that pair — it merges the dead node into a
+> live one — so the bug was latent until node-breaker import stopped merging.
+>
+> So the scaling argument against `Regularize` does not survive contact with the data, and the
+> historical FullGrid divergence remains unexplained by count, shape, sign or scale. `Constrain`
+> keeps its other advantages — no large number in the matrix, and a principled answer for a switch
+> flow inside a loop of closed switches (§4.3) — but §4.1 should no longer be cited as the reason
+> to build it.
 
 ---
 
@@ -764,9 +781,8 @@ Two caveats, both in the open rather than in a footnote:
 - **FullGrid does not converge on *either* path.** The ordinary `TopologicalNode` importer returns
   `MaxIterationsReached` on it too. Pre-existing and unrelated — there is no `cgmes_fullgrid_test`
   in the tree for the same reason.
-- **Svedala converges on the TN path but not the node-breaker one**, and `MergeAll` fails
-  identically, so retaining switches is not the cause. **Still open**, and narrowed rather than
-  solved. Three hypotheses were tested and eliminated:
+- **Svedala — resolved.** It failed on the node-breaker path at *zero* retained switches. Three
+  hypotheses were tested and eliminated before the real cause was found:
   1. *Multi-slack components.* The TN path has **more** of them (7 vs 5) and converges, and all of
      them on both paths are all-placeholder (`V = 0`, zero injection) components with nothing to
      solve. Not the cause.
@@ -776,11 +792,13 @@ Two caveats, both in the open rather than in a footnote:
   3. *Out-of-service branches counting as connections.* Real, and fixed — see below — but not the
      cause of this.
 
-  What remains is one 108-bus island reported `Singular` with a single slack and no dead rows. The
-  other three singular islands are almost certainly collateral: `IslandStatus::Singular`'s own doc
-  records that when the shared solve fails, *every* still-unconverged component is marked singular
-  "whether or not it was the actual cause". Fixing this is a precondition for trusting the
-  node-breaker path on arbitrary data, and for interpreting the `RetainAll` result below.
+  The 108-bus island that remained under suspicion turned out to be full rank (182 of 182) in
+  isolation — collateral, exactly as `IslandStatus::Singular`'s own doc warns ("*every*
+  still-unconverged component is marked singular whether or not it was the actual cause"). Rank
+  analysis of every component, with sourceless ones pinned first, found the real culprit: a two-bus
+  component holding one live `PQ` bus and one de-energized `V = 0` placeholder, whose angle column
+  was identically zero. `classify` now disregards a zero-voltage slack as a reference, which fixes
+  Svedala and, with it, SmallGrid under `RetainAll` — see §1.1(d).
 
 **Phase 3 — `Constrain` for AC Newton-Raphson.**
 Explicit AC state layout, dummy variables, constraint rows, Kruskal spanning forest, union-pattern
