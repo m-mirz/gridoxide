@@ -501,12 +501,13 @@ mod tests {
         let view = bus_view(&topo, &RetentionPolicy::RetainAll);
         let ybus = build_ybus(2, &[], &regularized_branches(&view)).finish();
 
-        // The structural entry survives — that is the point — so the *value* is
-        // what carries the position.
+        // The structural entry survives — that is the point, since it is what
+        // keeps the sparsity pattern constant across a position change — so
+        // the *value* is what carries the position.
         assert!(ybus.row(0).iter().any(|&(j, _)| j == 1), "structural entry was dropped");
         assert_eq!(ybus.get(0, 1), Complex::new(0.0, 0.0), "an open switch still conducts");
-        // `connected_components` reads structure, so it cannot see the opening —
-        // the same limitation `BatchSolver::solve_contingencies` works around.
-        assert_eq!(connected_components(&ybus).len(), 1);
+        // And `connected_components` reads the value, not merely the structure,
+        // so it sees the separation: two components, not one.
+        assert_eq!(connected_components(&ybus).len(), 2);
     }
 }

@@ -8,12 +8,12 @@
 //! Measured across the four node-breaker configurations, comparing the
 //! node-breaker import against the `TopologicalNode` path on the same file:
 //!
-//! | Config | TN path | Node-breaker `MergeAll` | Node-breaker busbar-retained |
-//! |---|---|---|---|
-//! | MiniGrid | converges | converges | converges, 30 switches retained |
-//! | SmallGrid | converges | converges | converges, 373 switches retained |
-//! | FullGrid | **fails** | fails | fails |
-//! | Svedala | converges | **fails** | fails |
+//! | Config | TN path | `MergeAll` | busbar-retained | `RetainAll` |
+//! |---|---|---|---|---|
+//! | MiniGrid | converges | converges | converges (30 retained) | converges (90 retained) |
+//! | SmallGrid | converges | converges | converges (373 retained) | **fails** (1,266 retained) |
+//! | FullGrid | **fails** | fails | fails | fails |
+//! | Svedala | converges | **fails** | fails | fails |
 //!
 //! **FullGrid fails on both paths** — `MaxIterationsReached` from the ordinary
 //! `TopologicalNode` importer too. That is pre-existing and unrelated to
@@ -29,6 +29,13 @@
 //! switches: `MergeAll` fails identically. Diagnosing it means working out how
 //! Svedala's angle references distribute across a finer partition, which is
 //! separate work.
+//!
+//! **SmallGrid under `RetainAll` fails**, where 373 retained switches succeed
+//! and 1,266 do not. That is the shape `plans/NODE_BREAKER_PLAN.md` §4.1
+//! predicts for `Regularize`, but it cannot yet be attributed to conditioning:
+//! Svedala fails at *zero* retained switches, so a bus-derivation problem of
+//! the same family is a live alternative explanation. Separating the two needs
+//! Svedala fixed first.
 //!
 //! So the gate is met and the capability is real, on models whose reference
 //! structure survives the finer partition. That caveat belongs in the open, not
@@ -73,6 +80,10 @@ fn load(dir: &str, prefix: &str) -> Option<gridoxide::cgmes::CimDataset> {
 /// **Phase 2's gate.** MiniGrid, imported as a node-breaker model with its
 /// busbar-adjacent switches retained as real elements, converges — and every
 /// retained switch carries a reportable flow.
+///
+/// MiniGrid also converges under `RetainAll`, i.e. the *full* node-breaker
+/// view: 105 buses and all 90 switches retained, in two iterations. That is
+/// covered by `minigrid_converges_under_the_full_node_breaker_view` below.
 #[test]
 fn minigrid_converges_with_retained_switches_and_reports_their_flows() {
     let Some(ds) = load("MiniGrid/MiniGrid-Merged", "MiniGrid") else { return };
@@ -184,7 +195,8 @@ fn retaining_switches_does_not_change_the_solution() {
 
 /// SmallGrid at real scale: 1,369 connectivity nodes and 1,266 switches, of
 /// which the busbar policy retains 373. `plans/NODE_BREAKER_PLAN.md` §4.1
-/// predicts `Regularize` cannot cope at this count; on this model it does.
+/// predicts `Regularize` cannot cope at this count; with 373 retained it does.
+/// (`RetainAll`, at 1,266, does not — see this file's header.)
 #[test]
 fn smallgrid_converges_at_real_node_breaker_scale() {
     let Some(ds) = load("SmallGrid/SmallGrid-Merged", "SmallGrid") else { return };
@@ -239,4 +251,29 @@ fn merge_treatment_refuses_a_retaining_policy() {
         SwitchTreatment::Merge,
     )
     .is_ok());
+}
+
+/// The full node-breaker view on a real model: every connectivity node its own
+/// bus, every switch retained. MiniGrid is small enough that `RetainAll` is
+/// tractable, and it is the strongest available demonstration that the
+/// formulation works end to end.
+#[test]
+fn minigrid_converges_under_the_full_node_breaker_view() {
+    let Some(ds) = load("MiniGrid/MiniGrid-Merged", "MiniGrid") else { return };
+
+    let (buses, lines, transformers, shunts, view) = cgmes_node_breaker_to_buses_and_branches(
+        &ds,
+        100e6,
+        &RetentionPolicy::RetainAll,
+        SwitchTreatment::Regularize,
+    )
+    .expect("conversion failed");
+
+    assert_eq!(view.retained().len(), 90, "every MiniGrid switch should be retained");
+    assert!(buses.len() >= 100, "RetainAll should merge almost nothing, got {} buses", buses.len());
+
+    let mut ybus = build_ybus(buses.len(), &lines, &transformers);
+    stamp_shunts(&mut ybus, &shunts);
+    let report = run_power_flow_analysis_from_ybus(buses, ybus);
+    assert_eq!(report.stats.status, SolveStatus::Converged);
 }

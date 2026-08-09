@@ -674,6 +674,7 @@ Plus a `--topology` / `--retain` pair on the CLI in `src/main.rs`, and a book pa
 | **Silent behaviour change in existing paths** | The real regression risk | Phase 0's gate is bit-identical results on all 14 CGMES fixture tests plus the full PGM suite |
 | **Loop indeterminacy surprises users** | Certain, if undocumented | §4.3's note goes in the book, not just here |
 | **Index-space confusion** | Already bitten this codebase once | `NodeIdx`/`BusIdx` newtypes from phase 0, before any new code depends on the old convention |
+| **An out-of-service branch counted as a connection** | **Was real, now fixed.** `connected_components` walked the Y-bus's *structure*, so a transformer with an open terminal — whose entries `build_ybus` stamps at zero regardless — made the bus behind it a member of somebody else's island, with an all-zero Jacobian row. Node-breaker import surfaced it because it stops merging such nodes away | `connected_components` now ignores numerically-zero off-diagonals. This also removes the phase-0 caveat that the Y-bus and branch-list partitions disagree about half-open transformers — they now agree |
 | **Stale cached Jacobian across switching states** | **Has already bitten the AC contingency work.** A constant sparsity pattern makes the *symbolic factorization* reusable but not `JacobianPattern`, which caches the admittance per entry (§5.1). Silent: every state is correct when solved alone | Use `PersistentSolver::invalidate_admittances`, not `reset`, so the symbolic half survives. Test by **interleaving** states in one batch and asserting each state matches its own isolated solve — a per-scenario test cannot see this |
 
 ---
@@ -748,8 +749,15 @@ The importer wiring landed too: `build_node_breaker_skeleton` derives buses from
 cares how a bus came to exist, since it all resolves through `terms.bus(...)`.
 
 **Gate met:** MiniGrid converges under `RetainAdjacentToBusbar` (45 buses, 30 retained switches, all
-reporting flows), and SmallGrid converges at real scale (540 buses, 373 retained). This document's
-§4.1 predicts `Regularize` cannot cope at SmallGrid's switch count; on this model it does.
+reporting flows) **and under `RetainAll`** — the full node-breaker view, 105 buses and all 90
+switches retained, in two iterations. SmallGrid converges at 540 buses with 373 retained.
+
+**On §4.1's prediction.** SmallGrid under `RetainAll` (1,266 retained) *does* fail, which is the
+shape §4.1 predicts. But it cannot yet be attributed to conditioning, because Svedala fails at
+**zero** retained switches — so a bus-derivation problem of the same family is a live alternative
+explanation, and the two cannot be separated until Svedala is fixed. Combined with §1.1(d)'s
+synthetic result (no divergence at any count, shape or sign), the honest position is that §4.1
+remains unproven in either direction.
 
 Two caveats, both in the open rather than in a footnote:
 
@@ -757,12 +765,22 @@ Two caveats, both in the open rather than in a footnote:
   `MaxIterationsReached` on it too. Pre-existing and unrelated — there is no `cgmes_fullgrid_test`
   in the tree for the same reason.
 - **Svedala converges on the TN path but not the node-breaker one**, and `MergeAll` fails
-  identically, so retaining switches is not the cause. The two partitions differ — gridoxide honors
-  29 open switches the exporter merged across (§6.1) — and on this model the finer partition leaves
-  **5 connected components carrying more than one slack bus**, which
-  `IslandStatus::AmbiguousReferenceBus` documents as over-determined. Working out how Svedala's
-  angle references should distribute across a finer partition is separate work, and it is a
-  precondition for trusting the node-breaker path on arbitrary data.
+  identically, so retaining switches is not the cause. **Still open**, and narrowed rather than
+  solved. Three hypotheses were tested and eliminated:
+  1. *Multi-slack components.* The TN path has **more** of them (7 vs 5) and converges, and all of
+     them on both paths are all-placeholder (`V = 0`, zero injection) components with nothing to
+     solve. Not the cause.
+  2. *Numerically-dead rows.* 34 split-off connectivity nodes have no equipment and no conducting
+     connection, but each forms its own component and is correctly pinned `NoReferenceBus`. Zero
+     dead rows survive inside any singular island.
+  3. *Out-of-service branches counting as connections.* Real, and fixed — see below — but not the
+     cause of this.
+
+  What remains is one 108-bus island reported `Singular` with a single slack and no dead rows. The
+  other three singular islands are almost certainly collateral: `IslandStatus::Singular`'s own doc
+  records that when the shared solve fails, *every* still-unconverged component is marked singular
+  "whether or not it was the actual cause". Fixing this is a precondition for trusting the
+  node-breaker path on arbitrary data, and for interpreting the `RetainAll` result below.
 
 **Phase 3 — `Constrain` for AC Newton-Raphson.**
 Explicit AC state layout, dummy variables, constraint rows, Kruskal spanning forest, union-pattern

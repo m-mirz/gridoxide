@@ -131,8 +131,15 @@ pub fn connected_components(ybus: &YBusSparse) -> Vec<Vec<usize>> {
         visited[start] = true;
         while let Some(i) = stack.pop() {
             members.push(i);
-            for &(j, _) in ybus.row(i) {
-                if j != i && !visited[j] {
+            for &(j, y) in ybus.row(i) {
+                // A structurally-present but numerically *zero* entry does not
+                // connect anything. `build_ybus` stamps one for every
+                // transformer regardless of terminal status, and
+                // `build_ybus_with_outages` does the same deliberately, so
+                // ignoring the value here would call an out-of-service branch a
+                // connection — and leave the bus behind it with an all-zero
+                // Jacobian row inside somebody else's island.
+                if j != i && y != Complex::new(0.0, 0.0) && !visited[j] {
                     visited[j] = true;
                     stack.push(j);
                 }
