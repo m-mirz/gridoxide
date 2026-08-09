@@ -22,20 +22,30 @@ against `f96a660`.
 > §1.1's counts, `se::constraints::augment`'s generic signature, and `measurement::Target`'s
 > variants are all unchanged.
 >
-> **Implementation status.** **Phases 0 and 1 are done** (§9). `src/topology/` is now a directory —
-> `model` (`NodeIdx`/`BusIdx`/`SwitchIdx`, `Switch`, `SwitchKind`, `NodeBreakerTopology`),
-> `bus_view` (`BusView`, `RetentionPolicy`, `bus_view`) and `reduction` (everything that was
-> `topology.rs`, at its original paths) — and `cgmes::merge_closed_switches` is rerouted through it
-> via `cgmes::switch_topology` + `RetentionPolicy::MergeAll`. The gate held: all 14 CGMES fixture
+> **Implementation status.** **Phases 0 and 1 are done; phase 2 is partly done** (§9).
+>
+> *Phase 0* turned `src/topology.rs` into a directory — `model`
+> (`NodeIdx`/`BusIdx`/`SwitchIdx`, `Switch`, `SwitchKind`, `NodeBreakerTopology`), `bus_view`
+> (`BusView`, `RetentionPolicy`, `bus_view`) and `reduction` (everything that was there, at its
+> original paths) — and rerouted `cgmes::merge_closed_switches` through it. All 14 CGMES fixture
 > tests and the full PGM suite are unchanged.
 >
-> Phase 1 added `cgmes::cgmes_node_breaker_topology` — `ConnectivityNode`s as nodes, the nine switch
-> classes plus `Junction` as edges, `BusbarSection`s as busbars — and validated it against the
+> *Phase 1* added `cgmes::cgmes_node_breaker_topology` — `ConnectivityNode`s as nodes, the nine
+> switch classes plus `Junction` as edges, `BusbarSection`s as busbars — validated against the
 > exporter's own `TopologicalNode` partition on all four node-breaker configurations
 > (`tests/cgmes_node_breaker_test.rs`). **MiniGrid reproduces the exporter exactly**: 103
 > connectivity nodes and 90 switches reduce to precisely its 13 topological nodes. Every
-> disagreement elsewhere is explained — see §6.1, which the results corrected in one direction the
-> plan did not anticipate. Phases 2–7 are not started.
+> disagreement elsewhere is explained — see §6.1, which the results corrected in a direction this
+> document did not anticipate.
+>
+> *Phase 2* added `src/switches.rs`: `SwitchTreatment::Regularize`, with a switch's position carried
+> as terminal *status* so a state change moves Y-bus values without moving the sparsity pattern.
+> Its gate is **not met** — there is still no way to get a node-breaker network into the solver,
+> because the CGMES importer builds buses from `TopologicalNode`. §1.1(d) also records a negative
+> result worth reading before phase 3: the attempt to reproduce `Regularize`'s historical divergence
+> synthetically failed at every count, shape and admittance sign tried.
+>
+> Phases 3–7 are not started.
 
 This document answers: *what would it take for gridoxide to model node-breaker topology as a
 first-class thing, across every calculation it already supports — AC Newton-Raphson, DC Bθ, the
@@ -141,10 +151,20 @@ makes the retention policy (§3.3) load-bearing rather than a convenience.
 is 1:1 CN:TN with zero switches. It is already a bus-branch export. So the performance risk of this
 work does not land on the headline benchmark, which is a genuinely favourable accident.
 
-**(d) The `Regularize` approach is dead on arrival at real scale, and now quantifiably so.** §4.1
-recounts that the AC solve diverged on FullGrid with "20-odd" large-admittance switch branches
-active. FullGrid has 29 switches — the numbers agree. SmallGrid has 1,266 and Svedala 1,464, i.e.
-**45–52× past the count already measured to diverge**. That is not a margin to be optimistic about.
+**(d) The `Regularize` approach looks dead on arrival at real scale.** §4.1 recounts that the AC
+solve diverged on FullGrid with "20-odd" large-admittance switch branches active. FullGrid has 29
+switches — the numbers agree. SmallGrid has 1,266 and Svedala 1,464, i.e. **45–52× past the count
+already measured to diverge**. That is not a margin to be optimistic about.
+
+> **Phase 2 tried to reproduce this and could not.** `switches::conditioning_probe` builds chains,
+> stars and rings of stiff branches at counts from 1 to 1,464, with the admittance both inductive
+> and capacitive. *Every* case converged in two iterations with a plausible voltage profile
+> (`examples/switch_ceiling.rs`). So switch count, switch arrangement and admittance sign do not, on
+> their own, explain the historical divergence. This does not clear `Regularize` — the probe's
+> networks are uniform and FullGrid's are not — but it does mean the "45–52× past divergence"
+> extrapolation rests on an anecdote whose mechanism is not understood, and the real ceiling is
+> unknown rather than known to be ~30. Settling it needs `Regularize` run against a real CGMES
+> node-breaker import, which phase 2 did not build.
 
 ---
 
@@ -702,12 +722,30 @@ Two notes for later phases:
   `nodes: Vec<Node>` — `CgmesNodeBreaker::node_mrids` is exactly the data such a record would hold,
   currently carried alongside rather than inside.
 
-**Phase 2 — switch identity via `Regularize`.**
-Retained switches as branches at `IDEAL_CONNECTION_Y`; switch flows; `set_switch_open` with a model
-rebuild. Cheap, uses only existing machinery, and delivers most of the visible user value early.
-*Gate: MiniGrid (90 switches) under `RetainAdjacentToBusbar` converges and reports switch flows.*
-Document the ~30-switch ceiling honestly — and expect `RetainAll` on SmallGrid/Svedala to fail here,
-which is the point: it is the empirical case for phase 3.
+**Phase 2 — switch identity via `Regularize`. ⚠️ Partly done.**
+Retained switches as branches; switch flows; `set_switch_open`. *Gate: MiniGrid (90 switches) under
+`RetainAdjacentToBusbar` converges and reports switch flows.* — **not met.**
+
+Done: `src/switches.rs` with `SwitchTreatment`, `regularized_branches`, `degenerate_switches`, and
+`conditioning_probe`. Two design points worth carrying forward:
+
+- **Position is carried as terminal status, not by adding and removing branches.** An open switch
+  keeps its structural Y-bus entries at zero, exactly as `build_ybus_with_outages` does for an
+  outaged branch, so *flipping a switch preserves the sparsity pattern*. This document attributes
+  that property to `Constrain` alone (§4.2); `Regularize` has it too. What `Regularize` still lacks
+  is the scaling, not the pattern stability. The corollary is that
+  `PersistentSolver::invalidate_admittances` — not `reset` — is the right call after a position
+  change, for the reason §5.1 now spells out.
+- **A regularized switch is purely inductive**, unlike `IDEAL_CONNECTION_Y`, so DC needs no guard
+  for it. See §6.2.
+
+Not done: the CGMES importer still builds buses from `TopologicalNode`, so there is no way to get a
+node-breaker network into the solver and the gate cannot be attempted. That wiring —
+`build_ac_bus_skeleton` deriving buses from a `BusView`, with `u_rated` read through
+`ConnectivityNode.ConnectivityNodeContainer` → `VoltageLevel.BaseVoltage` — is the remaining work,
+and it is larger than the switch formulation itself. `RetainAll` on SmallGrid/Svedala is expected to
+fail here; §1.1(d) records that the attempt to reproduce that failure synthetically did not
+succeed.
 
 **Phase 3 — `Constrain` for AC Newton-Raphson.**
 Explicit AC state layout, dummy variables, constraint rows, Kruskal spanning forest, union-pattern
