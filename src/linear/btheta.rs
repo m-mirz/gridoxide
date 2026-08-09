@@ -298,12 +298,14 @@ pub fn dc_branches(
 /// wagging the dog, and [`topology::UnionFind`](crate::topology::UnionFind)
 /// already exists for exactly this.
 ///
-/// The two partitions can genuinely differ, in one case: a **half-open
-/// transformer** joins its two ends under `connected_components`, because
-/// `network::stamp_transformers` inserts the structural `(from, to)` entry
-/// even when `branch_calc_param` has zeroed its value. Here it does not,
-/// because a branch with no series path cannot carry DC flow. Where they
-/// disagree, this is the physically correct partition for DC.
+/// The two used to disagree about a **half-open transformer**, which
+/// `connected_components` counted as a connection because
+/// `network::stamp_transformers` inserts the structural `(from, to)` entry even
+/// when `branch_calc_param` has zeroed its value. That is fixed —
+/// `connected_components` now ignores numerically-zero off-diagonals — so the
+/// two partitions agree. This function still exists because building a complex
+/// Y-bus purely to partition a branch-list solver would be the tail wagging the
+/// dog, not because it answers differently.
 fn dc_components(n: usize, branches: &[DcBranch]) -> Vec<Vec<usize>> {
     let mut uf = union_all(n, branches.iter().map(|b| (b.from, b.to)));
     let mut comp_of_root = vec![usize::MAX; n];
