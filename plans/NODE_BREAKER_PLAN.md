@@ -22,13 +22,20 @@ against `f96a660`.
 > §1.1's counts, `se::constraints::augment`'s generic signature, and `measurement::Target`'s
 > variants are all unchanged.
 >
-> **Implementation status.** **Phase 0 is done** (§9). `src/topology/` is now a directory —
+> **Implementation status.** **Phases 0 and 1 are done** (§9). `src/topology/` is now a directory —
 > `model` (`NodeIdx`/`BusIdx`/`SwitchIdx`, `Switch`, `SwitchKind`, `NodeBreakerTopology`),
 > `bus_view` (`BusView`, `RetentionPolicy`, `bus_view`) and `reduction` (everything that was
 > `topology.rs`, at its original paths) — and `cgmes::merge_closed_switches` is rerouted through it
 > via `cgmes::switch_topology` + `RetentionPolicy::MergeAll`. The gate held: all 14 CGMES fixture
-> tests and the full PGM suite are unchanged, on a tree that now carries 13 more unit tests and no
-> new warnings. Phases 1–7 are not started.
+> tests and the full PGM suite are unchanged.
+>
+> Phase 1 added `cgmes::cgmes_node_breaker_topology` — `ConnectivityNode`s as nodes, the nine switch
+> classes plus `Junction` as edges, `BusbarSection`s as busbars — and validated it against the
+> exporter's own `TopologicalNode` partition on all four node-breaker configurations
+> (`tests/cgmes_node_breaker_test.rs`). **MiniGrid reproduces the exporter exactly**: 103
+> connectivity nodes and 90 switches reduce to precisely its 13 topological nodes. Every
+> disagreement elsewhere is explained — see §6.1, which the results corrected in one direction the
+> plan did not anticipate. Phases 2–7 are not started.
 
 This document answers: *what would it take for gridoxide to model node-breaker topology as a
 first-class thing, across every calculation it already supports — AC Newton-Raphson, DC Bθ, the
@@ -244,6 +251,18 @@ retain the twenty switches you intend to operate, merge the other 1,246.
 
 The policy is therefore not a configuration nicety. It is the mechanism that keeps node-breaker
 support from being a 16× performance regression, and it should exist from phase 0.
+
+**Measured (phase 1), confirming one half and correcting the other.** `RetainAll` on SmallGrid comes
+out at ~5,270 AC unknowns against `MergeAll`'s ~334 — a 15.8× blowup, against the ~5,264 estimated
+just above. That estimate was sound and `MergeAll` staying the default is not negotiable.
+
+But `RetainAdjacentToBusbar` is **not** "a retained count in the tens". That holds only on the small
+models (30 on MiniGrid, 26 on FullGrid); on the real ones it is **373 on SmallGrid and 857 on
+Svedala** — the latter retaining more switches than SmallGrid despite having fewer nodes, because it
+is the most switch-dense model in the tree. It still buys a 3× reduction against `RetainAll`, so it
+remains the right shape for a bus-breaker view, but a contingency campaign wanting a handful of
+switches must reach for `Explicit` rather than assume this policy is already small. Full numbers in
+`scripts/bench/README.md` §10.
 
 **`MergeAll` must be the default everywhere.** The regression gate for phase 0 is that all 14 CGMES
 fixture tests produce bit-identical results after the importer is rerouted through this layer.
@@ -537,6 +556,32 @@ the assertion is "the EQ+SSH partition refines to the TP partition under the sam
 state", and where the two genuinely disagree the test should record the discrepancy count per
 configuration rather than assert zero blindly.
 
+**Measured (phase 1).** The caveat was right to expect disagreement, and wrong about its direction —
+disagreement runs *both* ways, and the unanticipated one is the more interesting.
+
+| Config | CN | switches (conducting) | TN | buses | splits | multi-TN buses |
+|---|---:|---:|---:|---:|---:|---:|
+| MiniGrid | 103 | 90 (90) | 13 | 13 | 0 | 0 |
+| FullGrid | 48 | 29 (28) | 25 | 22 | 1 | 2 |
+| SmallGrid | 1,369 | 1,266 (1,203) | 167 | 167 | 4 | 1 |
+| Svedala | 1,179 | 1,464 (988) | 191 | 228 | 29 | 0 |
+
+*MiniGrid agrees exactly*, which is the result this section was hoping for.
+
+A *multi-TN bus* is the anticipated direction: gridoxide merging further than the exporter, because
+a closed switch was left unreduced. FullGrid has 2 and SmallGrid 1.
+
+A *split* is the direction the plan did not anticipate: the exporter put connectivity nodes in one
+topological node that gridoxide keeps **apart**. All 34 of them, across three configurations, have
+one cause — the nodes are joined only by switches that are open or out of service. On FullGrid it is
+a single open `GroundDisconnector`; on Svedala it is 29, unsurprising for a model with 1,464 switches
+of which only 988 conduct. gridoxide is right here and the exporter is loose: an open switch does not
+tie two points together.
+
+So "refines" is not the right relation in either direction, and the test asserts the *cause* instead:
+every split must be bridged solely by non-conducting switches. That would fail if the reader ever
+missed an edge, which a bare discrepancy count would not.
+
 ### 6.2 PGM
 
 power-grid-model has no node-breaker concept, so nothing is required. One optional improvement:
@@ -638,11 +683,24 @@ Two notes for later phases, from doing it:
   That makes `NodeBreakerTopology::switches` order load-bearing, which every future importer must
   respect.
 
-**Phase 1 — CGMES node-breaker import without TP.**
-`CgmesTopologyMode`, `ConnectivityNode`/`BusbarSection`/containment reading. *Gate: the EQ+SSH-derived
-bus view reproduces the TP partition on MiniGrid, FullGrid, SmallGrid and Svedala (§6.1).* Add a
-node-count and import-time benchmark row. No solver changes in this phase — it ends with a validated
-topology processor and nothing consuming it yet.
+**Phase 1 — CGMES node-breaker import without TP. ✅ Done.**
+`CgmesTopologyMode`, `ConnectivityNode`/`BusbarSection` reading, as
+`cgmes::cgmes_node_breaker_topology`. *Gate: the EQ+SSH-derived bus view reproduces the TP partition
+on MiniGrid, FullGrid, SmallGrid and Svedala (§6.1).* — met, in the sharper form §6.1 now records:
+MiniGrid exactly, and every disagreement elsewhere explained by an open switch or an unreduced
+export. Benchmark row added as `scripts/bench/README.md` §10 via
+`examples/bench_node_breaker.rs`; reading the switch graph costs 1.5–5.4% of the XML decode that has
+to happen anyway. No solver changes — it ends with a validated topology processor and nothing
+consuming it yet, exactly as scoped.
+
+Two notes for later phases:
+
+- **Substation/voltage-level/bay containment is not read.** Nothing needs it yet: the only policy
+  that consults structure is `RetainAdjacentToBusbar`, which needs busbars alone. A policy that
+  retains per substation or per bay would need it, and that is when to add it.
+- **Node identity is now real**, so `NodeBreakerTopology`'s `n_nodes: usize` is ready to become
+  `nodes: Vec<Node>` — `CgmesNodeBreaker::node_mrids` is exactly the data such a record would hold,
+  currently carried alongside rather than inside.
 
 **Phase 2 — switch identity via `Regularize`.**
 Retained switches as branches at `IDEAL_CONNECTION_Y`; switch flows; `set_switch_open` with a model

@@ -103,6 +103,11 @@ path = "tests/pardiso_jacobian_test.rs"
 required-features = ["pardiso"]
 
 [[test]]
+name = "cgmes_node_breaker_test"
+path = "tests/cgmes_node_breaker_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_smoke_test"
 path = "tests/cgmes_smoke_test.rs"
 required-features = ["cgmes"]
@@ -170,6 +175,11 @@ required-features = ["cgmes"]
 [[test]]
 name = "cgmes_microgrid_type3_test"
 path = "tests/cgmes_microgrid_type3_test.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "bench_node_breaker"
+path = "examples/bench_node_breaker.rs"
 required-features = ["cgmes"]
 
 [[example]]
