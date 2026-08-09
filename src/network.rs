@@ -666,57 +666,20 @@ pub fn effective_injection(bus: &Bus) -> (f64, f64) {
 /// step damping or voltage clamping beyond this — a better initial guess is
 /// its only robustness mechanism, needed on networks combining weak sources
 /// with large transformer phase shifts where plain flat-start NR diverges.
+///
+/// The solve itself lives in
+/// [`linear::impedance`](crate::linear::impedance), which offers the same
+/// linearization as a standalone power-flow method
+/// ([`linear::linear_power_flow`](crate::linear::linear_power_flow)). This
+/// entry point stays deliberately island-unaware: it runs *before* the
+/// solver's own `classify`/`mark_unreferenced_islands` pass, so it must not
+/// mutate bus types, and a singular result here is simply a warm start that
+/// did not happen rather than a failure to report.
 pub fn linear_initial_guess(buses: &mut [Bus], ybus: &YBusSparse) {
     let n = buses.len();
-    let unknown_idx: Vec<usize> = (0..n).filter(|&i| matches!(buses[i].bus_type, BusType::PQ)).collect();
-    if unknown_idx.is_empty() {
-        return;
-    }
-    let m = unknown_idx.len();
-
-    // Map physical bus index -> reduced (unknown-system) index.
-    let mut reduced_pos: Vec<Option<usize>> = vec![None; n];
-    for (r, &i) in unknown_idx.iter().enumerate() {
-        reduced_pos[i] = Some(r);
-    }
-
-    // Walk each unknown bus's actual admittance neighbors (from the sparse
-    // Y-bus's row structure) instead of the full unknown×unknown cross
-    // product — neighbors that are themselves unknown become reduced-system
-    // triplets; neighbors that are known (Slack, including de-energized
-    // buses) move to the RHS via their fixed voltage.
-    let mut triplets: Vec<(usize, usize, Complex<f64>)> = Vec::new();
-    let mut rhs = vec![Complex::new(0.0, 0.0); m];
-    for (r, &i) in unknown_idx.iter().enumerate() {
-        let (p, q) = effective_injection(&buses[i]);
-        let y_load = -Complex::new(p, q).conj();
-        let mut diag_seen = false;
-        for &(j, y_ij) in ybus.row(i) {
-            let y_ij = if j == i {
-                diag_seen = true;
-                y_ij + y_load
-            } else {
-                y_ij
-            };
-            match reduced_pos[j] {
-                Some(c) => triplets.push((r, c, y_ij)),
-                None => {
-                    let u_j = Complex::from_polar(buses[j].voltage_mag, buses[j].voltage_ang);
-                    rhs[r] -= y_ij * u_j;
-                }
-            }
-        }
-        if !diag_seen {
-            triplets.push((r, r, y_load));
-        }
-    }
-
-    if let Some(sol) = sparse::solve_complex(m, &triplets, &rhs) {
-        for (r, &i) in unknown_idx.iter().enumerate() {
-            buses[i].voltage_mag = sol[r].norm();
-            buses[i].voltage_ang = sol[r].arg();
-        }
-    }
+    let unknown_idx: Vec<usize> =
+        (0..n).filter(|&i| matches!(buses[i].bus_type, BusType::PQ)).collect();
+    crate::linear::impedance::solve_constant_admittance(buses, ybus, &unknown_idx);
 }
 
 pub fn power_injections(

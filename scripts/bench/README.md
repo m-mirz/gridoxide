@@ -721,3 +721,83 @@ same problem. `bench_se.rs` also synthesizes bus-injection measurements (11,189 
 document's 9,318), and an injection row is a full Y-bus row rather than a two-bus branch row, so its gain
 matrix is substantially denser. The emitted document drops them because PGM has no counterpart sensor.
 **Compare numbers within one harness, never across the two.**
+
+## 8. DC (Bθ) power flow and sensitivity factors
+
+`examples/bench_dc.rs`, on the MATPOWER cases from §4, converted the same way:
+
+```bash
+python scripts/bench/matpower_to_pgm.py tests/data/benchmark-grids/matpower/case9241pegase.m /tmp/case9241pegase.json
+cargo build --release --example bench_dc
+./target/release/examples/bench_dc /tmp/case9241pegase.json 20 solve
+./target/release/examples/bench_dc /tmp/case1354pegase.json 5 ptdf   # or lodf
+```
+
+### Timing results
+
+`solve` is one full `dc_power_flow` per repeat — branch reduction, island partition, one
+factorization per island, back-substitution and branch flows. The AC column is
+`examples/bench_network.rs` in `warm` mode with the `scalar` backend, i.e. the *fastest* AC
+configuration, so the ratio is a conservative statement of what DC buys.
+
+| Case | Buses | Branches | DC solve | AC solve (warm, scalar) | Speedup |
+|---|---|---|---|---|---|
+| case118 | 119 | 187 | 0.046 ms | 0.197 ms | 4.3x |
+| case1354pegase | 1,355 | 1,992 | 1.268 ms | 8.550 ms | 6.7x |
+| case9241pegase | 9,242 | 16,050 | 13.40 ms | 106.4 ms | 7.9x |
+
+The gap widens with size, which is what the two methods' structure predicts: DC pays one
+factorization while AC pays one *per iteration* (4–5 of them here), and the per-iteration Jacobian
+refill grows with the network too.
+
+Sensitivity sweeps produce every column once — `ptdf` over every bus, `lodf` over every branch —
+against a single factorization built in `DcSensitivity::new`:
+
+| Case | PTDF sweep | per column | LODF sweep | per column |
+|---|---|---|---|---|
+| case118 | 0.389 ms (119 cols) | 3.3 µs | 0.609 ms (177 cols) | 3.4 µs |
+| case1354pegase | 30.5 ms (1,355 cols) | 23.3 µs | 45.5 ms (1,430 cols) | 31.8 µs |
+| case9241pegase | — | — | 2,848 ms (14,384 cols) | 198 µs |
+
+The case9241pegase LODF sweep produces 14,384 columns from 16,050 branches; the remaining 1,666
+are radial or carry no DC flow, and return `None` without a back-substitution.
+
+The per-column figure is the one worth quoting, and it is the entire argument for
+`sparse::RealFactorization`: these are `n` triangular solves against **one** factorization. Routing
+them through `solver::LinearSolver`, whose contract refactorizes on every call, would have made a
+PTDF sweep `n` factorizations rather than one — at case1354pegase that is the difference between
+22.5 µs and something on the order of a full DC solve, per column.
+
+Note that neither sweep materializes a dense matrix. At case9241pegase a dense PTDF is 1.19 GB and
+a dense LODF 2.06 GB; the column API exists so that cost is optional.
+
+### Accuracy results
+
+DC has no convergence tolerance — it is a direct solve — so the meaningful quantity is the
+factorization residual `max |Σ(flows out of bus) − P_bus|`, reported as
+`DcSolution::max_residual`:
+
+| Case | Buses | max residual (p.u.) |
+|---|---|---|
+| case118 | 119 | 1.3e-12 |
+| case1354pegase | 1,355 | 2.8e-10 |
+| case9241pegase | 9,242 | 1.3e-9 |
+
+All round-off, growing with problem size as expected. Two observations from this run worth
+recording:
+
+- **case9241pegase contains 16 branches with negative reactance** — series capacitors, which
+  `dc_power_flow` reports through `DcSolution::negative_reactance_branches` rather than passing over
+  in silence. They make `B` indefinite without making it singular. This is the case that justifies
+  `dc_branches` guarding the PGM-link sign on the *exact admittance constant* rather than on
+  `x < 0` generally: a blanket clamp would have silently corrupted 16 real branches here.
+- **Residual is the early-warning signal for clamped zero-impedance branches.** A clamped branch
+  carries `b ≈ 2.8e5` against ordinary branches' `b ≈ 5–50`, spreading `B`'s condition number by
+  four orders of magnitude — and unlike Newton, DC has no iterative refinement to hide that behind.
+  On `tests/data/pgm/powerflow/link/dummy-test`, which is full of them, the residual still comes in
+  under 1e-9 (asserted in `tests/dc_powerflow_test.rs`).
+
+Cross-tool accuracy against MATPOWER's own `rundcpf` is **not** yet covered here. The
+`dc_flows_match_the_lossless_ac_limit` oracle in `tests/dc_powerflow_test.rs` checks DC against
+gridoxide's own AC branch-flow code on a lossless network, which pins the formulation's conventions
+but says nothing about agreement with another tool's choices on real data.

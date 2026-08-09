@@ -271,7 +271,13 @@ impl BatchSolver {
                             collected
                                 .lock()
                                 .expect("batch result mutex poisoned by a panicking worker")
-                                .push((i, PowerFlowReport { buses, islands, stats }));
+                                .push((i, PowerFlowReport {
+                                buses,
+                                islands,
+                                stats,
+                                dc: None,
+                                linear: None,
+                            }));
                         }
                     });
                 }

@@ -24,13 +24,68 @@ carries a full worked example of that input format.
 ## API
 
 - `PowerFlowModel.from_pgm_json(path, backend="scalar", tol=1e-6, max_iter=20, s_base_va=1e6,
-  freq_hz=50.0)` — loads a PGM JSON file and builds the Y-bus admittance matrix.
-- `model.n_nodes` — number of buses, including one virtual slack bus per active `source`.
-- `model.solve()` — runs Newton-Raphson from a flat/linear-initial-guess start; raises
-  `RuntimeError` if it doesn't converge within `max_iter` iterations.
+  freq_hz=50.0, method="newton_raphson", dc_approximation="ignore_r")` — loads a PGM JSON file and
+  builds the Y-bus admittance matrix.
+- `model.n_nodes` / `model.n_branches` — bus count (including one virtual slack bus per active
+  `source`) and branch count (lines first, then transformers — the index every branch-keyed vector
+  below uses).
+- `model.solve()` — runs whichever `method` the model was built with; raises `RuntimeError` if it
+  doesn't converge within `max_iter` iterations, or if a direct method's matrix is singular.
 - `model.reset()` — discards the cached symbolic factorization; call before the next `solve()` if
   the topology has changed.
 - `model.voltage_mag()` / `model.voltage_ang()` — per-bus results in node order.
+
+### Linear methods
+
+`method` selects between three solvers. `"newton_raphson"` is the default and the full nonlinear
+solve; `"dc"` is real Bθ; `"linear_impedance"` is the complex constant-admittance linearization
+(power-grid-model's `CalculationMethod.linear`). The two are different algorithms rather than two
+spellings of one — see [DC (Bθ) Power Flow](../powerflow/dc.md) and
+[The Constant-Admittance Linearization](../powerflow/linear_impedance.md).
+
+```python
+model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", method="dc")
+model.solve()
+flows = model.branch_flow_p()          # per-unit, at each branch's from terminal
+pickup = model.dc_slack_pickup()       # [(bus_indices, p_pu)] per island
+```
+
+- `model.solve_dc()` — runs a DC solve on a model built for any method, so a Newton model can take
+  a DC reading without being rebuilt.
+- `model.branch_flow_p()` — per-branch active flow, per-unit. DC only; the other methods produce
+  complex flows, computed from the solved voltages.
+- `model.dc_slack_pickup()` / `model.dc_max_residual()` — per-island reference supply, and the
+  solve's residual (round-off on a healthy network; large means `B` was ill-conditioned).
+- `dc_approximation` is `"ignore_r"` (default, `b = 1/x`, what every other tool computes) or
+  `"ignore_g"` (`b = x/(r²+x²)`, the exact coefficient). They differ only where `r/x` varies across
+  the network — a uniform ratio makes the difference a pure rescaling of the angles.
+
+### Sensitivity factors
+
+PTDF and LODF are properties of the topology, not of an operating point, so these need no `solve()`
+first. The factorization behind them is built on first use and reused until `reset()`.
+
+```python
+model = gridoxide.PowerFlowModel.from_pgm_json("grid.json")
+overloaded = model.ptdf_row(branch=12)         # sensitivity to every bus, one solve
+if not model.is_radial(7):
+    redistribution = model.lodf_column(7)      # who picks up branch 7's flow if it trips
+```
+
+- `model.ptdf_column(bus)` — `∂P_branch/∂P_bus` over every branch. `None` if the bus is in an
+  island with no reference.
+- `model.ptdf_row(branch)` — the same factors over every bus, in **one** solve rather than one per
+  bus (the reduced susceptance matrix is symmetric).
+- `model.lodf_column(branch)` — the fraction of that branch's flow each other branch picks up when
+  it trips. `None` if the branch is radial.
+- `model.is_radial(branch)` — whether removing it would disconnect the network, in which case no
+  redistribution factors exist.
+- `model.transfer_factors(injections)` — branch-flow response to an arbitrary per-bus injection
+  pattern; the primitive the others are special cases of.
+
+There is deliberately no dense-matrix accessor here: a full PTDF on `case9241pegase` is 1.19 GB and
+a full LODF 2.06 GB. The Rust API offers them (`ptdf_dense`/`lodf_dense`) with those numbers in
+their doc comments.
 
 ## Reusing factorization across repeated solves
 

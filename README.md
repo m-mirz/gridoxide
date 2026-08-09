@@ -38,6 +38,14 @@ See [Building and Running](docs/src/getting_started/building.md) and
 - **Newton-Raphson AC power flow**, symmetric and asymmetric, with a sparse Jacobian and symbolic
   factorization reused across both NR iterations and repeated solves
   (`solver::PersistentSolver`) — see [Backends and Factorization Reuse](docs/src/solvers/backends.md).
+- **Two linear power flows**, both first-class modes rather than internal warm starts:
+  [DC (Bθ)](docs/src/powerflow/dc.md) — real, lossless, one factorization and no iterations, with
+  phase shifters, both of powsybl's susceptance variants, and
+  [PTDF/LODF sensitivity factors](docs/src/powerflow/dc.md#sensitivity-factors-ptdf-and-lodf) for
+  contingency screening — and [the constant-admittance
+  linearization](docs/src/powerflow/linear_impedance.md), which keeps resistance and produces
+  voltage magnitudes (power-grid-model's `CalculationMethod.linear`). Either can also warm-start
+  Newton.
 - **Weighted-least-squares state estimation** — recovers the most likely grid state from noisy,
   redundant, partial measurements, with [observability analysis and bad-data
   detection](docs/src/state_estimation/diagnostics.md) and zero injections enforced as hard
