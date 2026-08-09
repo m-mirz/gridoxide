@@ -1937,3 +1937,191 @@ pub fn cgmes_resolve_dc_converters(
         status,
     }))
 }
+
+/// Where a bus view's node set comes from.
+///
+/// CGMES carries connectivity at two levels, and which one is available
+/// depends on how the model was exported rather than on anything intrinsic.
+/// `ConnectivityNode` (EQ) is the substation-level truth — every point where
+/// terminals meet. `TopologicalNode` (TP) is a *partial reduction of it* that
+/// the exporter already performed, usually but not always collapsing closed
+/// switches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CgmesTopologyMode {
+    /// Node-breaker when EQ carries `ConnectivityNode`s, otherwise the TP path.
+    ///
+    /// Not yet the default anywhere — nothing in the solver pipeline consumes a
+    /// node-breaker view, so selecting one automatically would only change
+    /// which code path produced an identical answer. It becomes meaningful when
+    /// a retention policy can keep a switch.
+    Auto,
+    /// `TopologicalNode` *is* the bus. gridoxide's historical path, and still
+    /// what every importer entry point uses.
+    #[default]
+    BusBranchFromTp,
+    /// `ConnectivityNode`s are the nodes and switches are edges between them.
+    NodeBreakerFromEq,
+}
+
+/// The node-breaker graph read out of EQ+SSH, with the identity needed to map
+/// back to the source model.
+///
+/// Both mrid vectors are indexed by the corresponding newtype's `.0`, so
+/// `node_mrids[node.0]` is the `ConnectivityNode` a [`NodeIdx`] came from and
+/// `switch_mrids[switch.0]` is the switching device a [`SwitchIdx`] came from.
+///
+/// [`NodeIdx`]: crate::topology::NodeIdx
+/// [`SwitchIdx`]: crate::topology::SwitchIdx
+#[derive(Clone, Debug)]
+pub struct CgmesNodeBreaker {
+    pub topology: crate::topology::NodeBreakerTopology,
+    pub node_mrids: Vec<String>,
+    pub switch_mrids: Vec<String>,
+    /// `ConnectivityNode` mrid -> the `TopologicalNode` mrid the exporter
+    /// assigned it, where it assigned one.
+    ///
+    /// This is the exporter's own answer to the same question
+    /// [`bus_view`](crate::topology::bus_view) computes, which makes it free
+    /// ground truth — see `tests/cgmes_node_breaker_test.rs`. Boundary nodes
+    /// legitimately have none.
+    pub tn_of_node: Vec<Option<String>>,
+}
+
+/// Reads the node-breaker graph: `ConnectivityNode`s as nodes, the nine CIM
+/// switch classes plus `Junction` as edges, `BusbarSection`s as busbars.
+///
+/// Independent of [`build_ac_bus_skeleton`]'s `TopologicalNode` path, and
+/// deliberately so — the point of this function is to derive connectivity
+/// *without* relying on the reduction an exporter may or may not have
+/// performed. It needs EQ (for `ConnectivityNode` and equipment) and SSH (for
+/// switch positions); it does not need TP at all.
+///
+/// Switch order matches `switch_topology`'s and, through it, the historical
+/// order of `merge_closed_switches` — see
+/// [`NodeBreakerTopology::switches`](crate::topology::NodeBreakerTopology::switches)
+/// for why that is load-bearing.
+pub fn cgmes_node_breaker_topology(ds: &CimDataset) -> Result<CgmesNodeBreaker, CgmesError> {
+    use crate::topology::model::{NodeIdx, Switch as TopoSwitch, SwitchKind};
+
+    // Nodes, in `by_type` order.
+    let cn_mrids = by_type(ds, "ConnectivityNode");
+    let mut node_of_cn: HashMap<&str, usize> = HashMap::with_capacity(cn_mrids.len());
+    let mut node_mrids: Vec<String> = Vec::with_capacity(cn_mrids.len());
+    let mut tn_of_node: Vec<Option<String>> = Vec::with_capacity(cn_mrids.len());
+    for mrid in cn_mrids {
+        let cn: &cimstructs::ConnectivityNode =
+            require(ds, mrid, "ConnectivityNode", mrid, "(self)")?;
+        node_of_cn.insert(mrid.as_str(), node_mrids.len());
+        node_mrids.push(mrid.clone());
+        tn_of_node.push(cn.topological_node.as_ref().map(|r| r.mrid.clone()));
+    }
+
+    // Terminal -> node, and equipment -> its terminals ordered by
+    // `sequenceNumber`. A terminal with no `ConnectivityNode` reference is not
+    // an error: a bus-branch export has none at all, which is exactly the case
+    // `CgmesTopologyMode::Auto` distinguishes.
+    let mut node_of_terminal: HashMap<&str, usize> = HashMap::new();
+    let mut terminals_of_equipment: HashMap<&str, Vec<(i64, &str)>> = HashMap::new();
+    for t_mrid in by_type(ds, "Terminal") {
+        let t: &Terminal = require(ds, t_mrid, "Terminal", t_mrid, "(self)")?;
+        if let Some(cn) = &t.connectivity_node {
+            if let Some(&node) = node_of_cn.get(cn.mrid.as_str()) {
+                node_of_terminal.insert(t_mrid.as_str(), node);
+            }
+        }
+        if let Some(ce) = &t.conducting_equipment {
+            terminals_of_equipment
+                .entry(ce.mrid.as_str())
+                .or_default()
+                .push((t.base.sequence_number.unwrap_or(1), t_mrid.as_str()));
+        }
+    }
+    for list in terminals_of_equipment.values_mut() {
+        list.sort();
+    }
+
+    let mut topology = crate::topology::NodeBreakerTopology::new(node_mrids.len());
+    let mut switch_mrids: Vec<String> = Vec::new();
+
+    let add = |topology: &mut crate::topology::NodeBreakerTopology,
+                   switch_mrids: &mut Vec<String>,
+                   mrid: &String,
+                   kind: SwitchKind,
+                   in_service: bool,
+                   open: bool| {
+        let Some(terms) = terminals_of_equipment.get(mrid.as_str()) else { return };
+        if terms.len() < 2 {
+            return;
+        }
+        let (Some(&a), Some(&b)) = (
+            node_of_terminal.get(terms[0].1),
+            node_of_terminal.get(terms[1].1),
+        ) else {
+            return;
+        };
+        topology.add_switch(TopoSwitch {
+            kind,
+            nodes: [NodeIdx(a), NodeIdx(b)],
+            open,
+            in_service,
+        });
+        switch_mrids.push(mrid.clone());
+    };
+
+    for mrid in by_type(ds, "Switch") {
+        let sw: &cimstructs::Switch = require(ds, mrid, "Switch", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Generic, equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service), sw.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Breaker") {
+        let br: &cimstructs::Breaker = require(ds, mrid, "Breaker", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Breaker, equipment_in_service(br.base.base.base.base.in_service, br.base.base.base.base.normally_in_service), br.base.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "LoadBreakSwitch") {
+        let lbs: &cimstructs::LoadBreakSwitch = require(ds, mrid, "LoadBreakSwitch", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::LoadBreakSwitch, equipment_in_service(lbs.base.base.base.base.in_service, lbs.base.base.base.base.normally_in_service), lbs.base.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "DisconnectingCircuitBreaker") {
+        let dcb: &cimstructs::DisconnectingCircuitBreaker = require(ds, mrid, "DisconnectingCircuitBreaker", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::DisconnectingCircuitBreaker, equipment_in_service(dcb.base.base.base.base.base.in_service, dcb.base.base.base.base.base.normally_in_service), dcb.base.base.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Disconnector") {
+        let d: &cimstructs::Disconnector = require(ds, mrid, "Disconnector", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Disconnector, equipment_in_service(d.base.base.base.in_service, d.base.base.base.normally_in_service), d.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "GroundDisconnector") {
+        let g: &cimstructs::GroundDisconnector = require(ds, mrid, "GroundDisconnector", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::GroundDisconnector, equipment_in_service(g.base.base.base.in_service, g.base.base.base.normally_in_service), g.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Jumper") {
+        let j: &cimstructs::Jumper = require(ds, mrid, "Jumper", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Jumper, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), j.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Cut") {
+        let c: &cimstructs::Cut = require(ds, mrid, "Cut", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Cut, equipment_in_service(c.base.base.base.in_service, c.base.base.base.normally_in_service), c.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Fuse") {
+        let f: &cimstructs::Fuse = require(ds, mrid, "Fuse", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Fuse, equipment_in_service(f.base.base.base.in_service, f.base.base.base.normally_in_service), f.base.open.unwrap_or(false));
+    }
+    for mrid in by_type(ds, "Junction") {
+        let j: &cimstructs::Junction = require(ds, mrid, "Junction", mrid, "(self)")?;
+        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Junction, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), false);
+    }
+
+    // Busbars, for `RetentionPolicy::RetainAdjacentToBusbar`. A busbar section
+    // is single-terminal equipment, so it contributes the node its one terminal
+    // sits on.
+    for mrid in by_type(ds, "BusbarSection") {
+        let Some(terms) = terminals_of_equipment.get(mrid.as_str()) else { continue };
+        for &(_, t) in terms {
+            if let Some(&node) = node_of_terminal.get(t) {
+                topology.busbars.push(NodeIdx(node));
+            }
+        }
+    }
+    topology.busbars.sort_unstable();
+    topology.busbars.dedup();
+
+    Ok(CgmesNodeBreaker { topology, node_mrids, switch_mrids, tn_of_node })
+}

@@ -931,3 +931,69 @@ Cross-tool comparison against another package's contingency module is not covere
 oracle above is stronger for the question that matters here — whether the fast path equals the slow
 one — but it says nothing about agreeing with, say, lightsim2grid's `SecurityAnalysis` on the same
 case.
+
+## 10. Node-breaker topology import
+
+`examples/bench_node_breaker.rs`, over the four genuine node-breaker configurations in
+`tests/data/CGMES-Test-Configurations/v3.0/`. EQ+EQBD+SSH only — the reader does not need TP.
+
+```bash
+cargo build --release --features cgmes --example bench_node_breaker
+D=tests/data/CGMES-Test-Configurations/v3.0/SmallGrid/SmallGrid-Merged
+./target/release/examples/bench_node_breaker $D/SmallGrid_EQBD.xml $D/SmallGrid_EQ.xml $D/SmallGrid_SSH.xml
+```
+
+### Timing results
+
+| Config | Nodes | Switches (conducting) | Busbars | Decode | Topology read |
+|---|---:|---:|---:|---:|---:|
+| MiniGrid | 103 | 90 (90) | 11 | 4.10 ms | 0.10 ms (2.5%) |
+| FullGrid | 48 | 29 (28) | 8 | 7.45 ms | 0.11 ms (1.5%) |
+| SmallGrid | 1,369 | 1,266 (1,203) | 115 | 59.89 ms | 3.25 ms (5.4%) |
+| Svedala | 1,179 | 1,464 (988) | 128 | 57.54 ms | 2.72 ms (4.7%) |
+
+Reading the switch graph costs 1.5–5.4% of the XML decode that has to happen anyway, and deriving a
+bus view from it is well under a millisecond even at 1,464 switches. Import cost is not what makes
+node-breaker support expensive.
+
+### What it costs to keep switches
+
+The AC unknown count under a constrained formulation is roughly `2·buses + 2·retained_edges` — two
+per non-slack bus, two per retained edge. That is the number that decides whether a retention policy
+can be a default:
+
+| Config | `MergeAll` | `RetainAdjacentToBusbar` | `RetainAll` |
+|---|---|---|---|
+| MiniGrid | 13 buses, ~26 unknowns | 43 buses, 30 retained, ~146 | 103 buses, 90 retained, ~386 |
+| FullGrid | 22 buses, ~44 | 45 buses, 26 retained, ~142 | 48 buses, 29 retained, ~154 |
+| SmallGrid | 167 buses, ~334 | 540 buses, 373 retained, ~1,826 | 1,369 buses, 1,266 retained, ~5,270 |
+| Svedala | 228 buses, ~456 | 638 buses, 857 retained, ~2,990 | 1,179 buses, 1,464 retained, ~5,286 |
+
+Two things fall out, one confirming `plans/NODE_BREAKER_PLAN.md` §3.3 and one correcting it.
+
+**Confirmed: `RetainAll` really is a ~16x blowup.** SmallGrid goes from ~334 unknowns to ~5,270,
+against the plan's predicted ~5,264. `MergeAll` staying the default is not a stylistic preference.
+
+**Corrected: `RetainAdjacentToBusbar` is not "a retained count in the tens".** That holds on the small
+models (26 on FullGrid, 30 on MiniGrid) and fails on the real ones — 373 on SmallGrid and 857 on
+Svedala, the latter retaining *more* switches than SmallGrid despite having fewer nodes, because
+Svedala is the most switch-dense model in the tree. It still buys a 3x reduction against `RetainAll`
+on SmallGrid, so it remains the right default *for a bus-breaker view*; it is just not the small
+number the plan expected, and a contingency campaign wanting a handful of switches should use
+`RetentionPolicy::Explicit` rather than assume this policy is already small.
+
+### Accuracy results
+
+There is no tolerance here — the bus view is a partition, so it is either the exporter's or it is
+not. `tests/cgmes_node_breaker_test.rs` compares the EQ+SSH-derived partition against the
+`TopologicalNode` partition the same files publish, which is free ground truth requiring no fixture
+authoring. See that file's header for the full table; the two results worth repeating:
+
+- **MiniGrid agrees exactly.** 103 connectivity nodes and 90 switches reduce to precisely the 13
+  topological nodes the exporter published.
+- **Every disagreement elsewhere is explained.** Where gridoxide merges further than the exporter
+  (FullGrid, SmallGrid) it is a closed switch the export left unreduced — the case
+  `merge_closed_switches` was written for. Where gridoxide merges *less* (34 cases across FullGrid,
+  SmallGrid and Svedala) the nodes are joined only by switches that are open or out of service, and
+  the exporter merged across them anyway. The test asserts that cause rather than the count, so it
+  would fail if the reader ever missed an edge.
