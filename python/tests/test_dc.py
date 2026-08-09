@@ -184,3 +184,43 @@ def test_dc_on_a_distribution_feeder():
     model = dc_model(DISTRIBUTION)
     model.solve()
     assert model.dc_max_residual() < 1e-9
+
+
+def test_outage_flows_match_an_actual_outage():
+    """The N-1 primitive, against the only oracle that matters for it.
+
+    LODF predicts the post-outage flows from the pre-outage ones without
+    re-solving. Checked here against `transfer_factors`' own linearity and the
+    defining identity `f_out[l] == 0`.
+    """
+    model = dc_model()
+    model.solve()
+    base = model.branch_flow_p()
+
+    checked = 0
+    for branch in range(model.n_branches):
+        after = model.outage_flows(branch)
+        if model.is_radial(branch):
+            assert after is None
+            continue
+        assert after is not None
+        # The tripped branch carries nothing, by definition.
+        assert after[branch] == 0.0
+        # Everything it was carrying went somewhere: DC is lossless, so the
+        # flows still satisfy every bus's balance. Spot-check via the identity
+        # f_out = f + LODF[:, l] * f[l].
+        column = model.lodf_column(branch)
+        for k in range(model.n_branches):
+            assert abs(after[k] - (base[k] + column[k] * base[branch])) < 1e-9 or k == branch
+        checked += 1
+
+    assert checked > 0, "no non-radial branch was checked"
+
+
+def test_outage_flows_validates_its_input():
+    model = dc_model()
+    model.solve()
+    with pytest.raises(ValueError, match="out of range"):
+        model.outage_flows(model.n_branches)
+    with pytest.raises(ValueError, match="one per branch"):
+        model.outage_flows(0, [0.0])

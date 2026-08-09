@@ -512,6 +512,36 @@ impl PowerFlowModel {
         Ok(self.require_sensitivity()?.is_radial(branch))
     }
 
+    /// Branch flows after `branch` trips, given the flows before it did — the
+    /// N-1 screening primitive, one solve and no re-solve of the network.
+    ///
+    /// `base_flows` defaults to the last DC solve's own flows, so the common
+    /// case is `model.solve(); model.outage_flows(7)`. Pass an explicit vector
+    /// to screen a contingency against some other operating point.
+    ///
+    /// `None` if the branch is radial: removing it islands the network, so its
+    /// power has nowhere to redistribute to.
+    #[pyo3(signature = (branch, base_flows=None))]
+    fn outage_flows(
+        &mut self,
+        branch: usize,
+        base_flows: Option<Vec<f64>>,
+    ) -> PyResult<Option<Vec<f64>>> {
+        self.check_branch(branch)?;
+        let base = match base_flows {
+            Some(f) => f,
+            None => self.require_dc()?.branch_p.clone(),
+        };
+        let n = self.lines.len() + self.transformers.len();
+        if base.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "base_flows has {} entries, expected one per branch ({n})",
+                base.len()
+            )));
+        }
+        Ok(self.require_sensitivity()?.outage_flows(&base, branch))
+    }
+
     /// Branch-flow response to an arbitrary per-bus injection pattern, in
     /// per-unit. The primitive `ptdf_column` is a special case of; within
     /// each island whatever does not sum to zero is absorbed at its

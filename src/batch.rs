@@ -112,6 +112,15 @@ pub enum BatchError {
     BusOutOfRange { scenario: usize, bus: usize, n_buses: usize },
     /// `rayon` refused to build the requested thread pool.
     ThreadPool(String),
+    /// The reduced susceptance matrix was singular, so no scenario in a
+    /// [`linear::batch::DcBatchSolver`](crate::linear::batch::DcBatchSolver)
+    /// batch can be solved.
+    ///
+    /// Unlike the Newton path — where a scenario that fails is reported *in*
+    /// its own result and never poisons the batch — this is a property of the
+    /// shared topology rather than of any one scenario, so it fails the whole
+    /// call.
+    DcSingular,
 }
 
 impl fmt::Display for BatchError {
@@ -127,6 +136,10 @@ impl fmt::Display for BatchError {
                 "scenario {scenario} overrides bus {bus}, but the template has only {n_buses} bus(es)"
             ),
             BatchError::ThreadPool(e) => write!(f, "building the rayon thread pool failed: {e}"),
+            BatchError::DcSingular => write!(
+                f,
+                "the reduced susceptance matrix is singular, so no DC scenario can be solved"
+            ),
         }
     }
 }

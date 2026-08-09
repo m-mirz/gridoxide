@@ -82,6 +82,18 @@ if not model.is_radial(7):
   redistribution factors exist.
 - `model.transfer_factors(injections)` — branch-flow response to an arbitrary per-bus injection
   pattern; the primitive the others are special cases of.
+- `model.outage_flows(branch, base_flows=None)` — the N-1 primitive: flows *after* that branch
+  trips, one solve and no re-solve of the network. Defaults to the last DC solve's own flows, so
+  the usual call is `model.solve(); model.outage_flows(7)`.
+
+```python
+model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", method="dc")
+model.solve()
+for branch in range(model.n_branches):
+    after = model.outage_flows(branch)        # None if the branch is radial
+    if after and max(map(abs, after)) > limit:
+        print(f"outage of {branch} overloads the network")
+```
 
 There is deliberately no dense-matrix accessor here: a full PTDF on `case9241pegase` is 1.19 GB and
 a full LODF 2.06 GB. The Rust API offers them (`ptdf_dense`/`lodf_dense`) with those numbers in

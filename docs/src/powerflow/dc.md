@@ -213,6 +213,39 @@ since DC is linear, so this is the derivative rather than an approximation of it
 checked by actually opening the branch and re-solving, then confirming each surviving
 branch picked up the predicted fraction. Both hold to \\(10^{-9}\\).
 
+## Batching and contingencies
+
+Two things fall out of DC being exactly linear, and they are what make it the method people
+actually run at scale.
+
+**A batch costs one factorization, not one per scenario.** `B` depends only on topology, so
+a bus-injection scenario changes nothing but the right-hand side, and a scenario's answer is
+the base solve plus the response to that scenario's injection *delta*:
+
+\\[ \theta_s = \theta_{base} + \Delta\theta(\Delta P_s), \qquad
+   P^{f}_s = P^{f}_{base} + \Delta P^{f}(\Delta P_s) \\]
+
+`linear::batch::DcBatchSolver` does exactly that, reusing `DcSensitivity`'s per-island
+factorization. It is a stronger guarantee than `batch::BatchSolver` can make on the AC side,
+which reuses only the *symbolic* half — Newton's Jacobian changes numerically at every
+iteration of every scenario. Measured at 9x (case118) to 55x (case9241pegase) per scenario
+against independent solves, widening with size because the factorization is what gets hoisted
+(`scripts/bench/README.md` §8). It is not an approximation:
+`tests/dc_batch_test.rs::batch_matches_a_sequential_loop_exactly` checks it against a plain
+loop over `dc_power_flow` at \\(10^{-12}\\).
+
+**An outage needs no re-solve at all.** `DcSensitivity::outage_flows` gives post-outage flows
+as \\(f + \mathrm{LODF}[:, l]\cdot f_l\\) — one triangular solve against the same
+factorization. This is why `Scenario::branch_outages` is rejected by the DC batch solver as it
+is by the AC one, but for the opposite reason: on AC it is unimplemented because an outage
+gives each scenario its own sparsity pattern; here it is *unnecessary*, and folding it into a
+scenario type built around per-bus overrides would be a worse API than the one that already
+exists. Radial branches return `None`, since removing one islands the network rather than
+rerouting anything.
+
+Simultaneous multi-branch outages are not covered: those need the multi-outage LODF, which
+inverts a submatrix over the outaged set rather than scaling a single column.
+
 ## Tool reference
 
 | Tool | Susceptance | Phase shift | Where |

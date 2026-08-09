@@ -771,6 +771,21 @@ PTDF sweep `n` factorizations rather than one — at case1354pegase that is the 
 Note that neither sweep materializes a dense matrix. At case9241pegase a dense PTDF is 1.19 GB and
 a dense LODF 2.06 GB; the column API exists so that cost is optional.
 
+`linear::batch::DcBatchSolver` runs many bus-injection scenarios against **one** numeric
+factorization for the whole batch — `B` depends only on topology, so a scenario changes nothing but
+the right-hand side. `./target/release/examples/bench_dc <case> 2000 batch`:
+
+| Case | Independent solve | Batched, per scenario | Speedup |
+|---|---|---|---|
+| case118 | 0.046 ms | 0.0051 ms | 9.0x |
+| case1354pegase | 1.268 ms | 0.0373 ms | 34x |
+| case9241pegase | 13.40 ms | 0.2423 ms | 55x |
+
+The ratio grows with size because the factorization is what gets hoisted, and it is the part that
+scales worst. This is a stronger guarantee than `batch::BatchSolver` can offer on the AC side, which
+reuses only the *symbolic* half — Newton's Jacobian changes numerically at every iteration of every
+scenario, so the numeric factorization cannot be shared.
+
 ### Accuracy results
 
 DC has no convergence tolerance — it is a direct solve — so the meaningful quantity is the
@@ -797,7 +812,53 @@ recording:
   On `tests/data/pgm/powerflow/link/dummy-test`, which is full of them, the residual still comes in
   under 1e-9 (asserted in `tests/dc_powerflow_test.rs`).
 
-Cross-tool accuracy against MATPOWER's own `rundcpf` is **not** yet covered here. The
-`dc_flows_match_the_lossless_ac_limit` oracle in `tests/dc_powerflow_test.rs` checks DC against
-gridoxide's own AC branch-flow code on a lossless network, which pins the formulation's conventions
-but says nothing about agreement with another tool's choices on real data.
+### Cross-validation against MATPOWER's own DC formulation
+
+`check_dc_matpower.py` rebuilds the DC system straight from each `.m` file following `makeBdc.m`
+and `dcpf.m`, then pushes *both* angle vectors through the same `Pf = (Bf·Va + Pfinj)·baseMVA` so
+the comparison lands on branch flows in MW and needs no mapping between MATPOWER's branch rows and
+gridoxide's flat branch index. No second tool is used as a reference — this is the same
+self-contained approach as `check_matpower_residual.py`, and it is what the in-repo oracle
+(`dc_flows_match_the_lossless_ac_limit`, which checks DC against gridoxide's *own* AC branch-flow
+code) structurally cannot provide.
+
+```bash
+python scripts/bench/check_dc_matpower.py --all --zero-phase-shifts --ignore-gs
+```
+
+| Case | Buses | Branches | max Δangle | max Δflow | peak flow |
+|---|---|---|---|---|---|
+| case14 | 14 | 20 | 2.2e-14° | 2.1e-13 MW | 147.8 MW |
+| case118 | 118 | 186 | 4.0e-13° | 4.4e-12 MW | 450.0 MW |
+| case_illinois200 | 200 | 245 | 3.8e-13° | 4.0e-12 MW | 371.8 MW |
+| case300 | 300 | 411 | 1.6e-13° | 5.7e-12 MW | 1292.0 MW |
+| case1354pegase | 1,354 | 1,991 | 2.3e-12° | 3.0e-10 MW | 1504.8 MW |
+| case1888rte | 1,888 | 2,531 | 1.2e-11° | 2.9e-10 MW | 1456.7 MW |
+| case2848rte | 2,848 | 3,776 | 2.1e-12° | 7.1e-11 MW | 1442.0 MW |
+| case2869pegase | 2,869 | 4,582 | 6.8e-12° | 1.8e-10 MW | 1585.6 MW |
+| case3120sp | 3,120 | 3,693 | 1.8e-11° | 5.1e-10 MW | 850.2 MW |
+| case6495rte | 6,495 | 9,019 | 6.9e-12° | 3.7e-10 MW | 1527.0 MW |
+| case6515rte | 6,515 | 9,037 | 1.4e-11° | 3.1e-10 MW | 1519.5 MW |
+| case9241pegase | 9,241 | 16,049 | 1.6e-10° | 1.1e-9 MW | 1947.1 MW |
+
+**Exact agreement on all twelve** — the worst disagreement across the suite is 1.1e-9 MW against
+peak flows of ~1,900 MW, i.e. round-off. gridoxide's Bθ is the same formulation MATPOWER computes,
+including the phase-shift and transformer-ratio conventions.
+
+The two flags each isolate one known, documented model difference, and both leave a real
+discrepancy visible when omitted:
+
+- **`--ignore-gs`.** MATPOWER folds bus shunt conductance into `Pbus` as a constant real load at
+  |V| = 1; gridoxide's DC deliberately ignores all shunts (`docs/src/powerflow/dc.md`, Scope).
+  Without the flag, exactly the three cases with nonzero `ΣGs` disagree and no others — case300
+  (ΣGs = 1.3 MW) by 1.30 MW, case2869pegase (9.9) by 2.45 MW, case9241pegase (56.9) by 13.2 MW.
+  That one-to-one correspondence is what identifies the gap as *this* modeling choice rather than a
+  solver error, and it quantifies what adopting MATPOWER's convention would be worth.
+- **`--zero-phase-shifts`.** `gridoxide.matpower` rounds `angle` to the nearest 60-degree clock
+  position, which for every shift in these cases means dropping it. Without the flag the
+  disagreement reaches **5.1e4 MW** on case1888rte — and its max Δangle comes out at 9.92°, which is
+  that case's known 9.95-degree shifter. This is the same conversion loss `check_matpower_residual.py`
+  documents for AC, and it bites far harder here, because a phase shift enters the DC right-hand
+  side directly rather than as a second-order term. It is a limitation of the PGM conversion, not of
+  the DC solver: `tests/dc_powerflow_test.rs` exercises phase shifters natively and matches the AC
+  limit to 1e-6.

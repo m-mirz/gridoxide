@@ -21,6 +21,11 @@
 //! - `lodf` — the same, sweeping `lodf_column` over every branch. Radial
 //!   branches return `None` without a back-substitution, so the count of
 //!   columns actually produced is reported alongside the timing.
+//! - `batch` — `repeat` load-scaling scenarios through `DcBatchSolver`, which
+//!   performs exactly *one* numeric factorization for the whole batch (DC's `B`
+//!   depends only on topology, so a scenario changes only the right-hand side).
+//!   Compare its per-scenario figure against `solve`'s per-run figure to see
+//!   what hoisting the factorization is worth.
 //!
 //! Note that neither sensitivity mode materializes a dense matrix: at
 //! `case9241pegase` those are 1.19 GB and 2.06 GB respectively, and the point
@@ -30,7 +35,8 @@ use std::env;
 use std::fs;
 use std::time::Instant;
 
-use gridoxide::linear::{dc_branches, dc_power_flow, DcOptions, DcSensitivity};
+use gridoxide::batch::{uniform_load_scaling, Scenario};
+use gridoxide::linear::{dc_branches, dc_power_flow, DcBatchSolver, DcOptions, DcSensitivity};
 use gridoxide::pgm::pgm_to_buses_and_branches;
 
 fn main() {
@@ -83,7 +89,16 @@ fn main() {
                 }
             }
         }
-        other => panic!("unknown mode {other:?}; expected solve, ptdf or lodf"),
+        "batch" => {
+            let scenarios: Vec<Scenario> = (0..repeat)
+                .map(|k| uniform_load_scaling(&buses, 0.5 + 0.001 * k as f64))
+                .collect();
+            let results = DcBatchSolver::new()
+                .solve(&buses, &lines, &transformers, opts, &scenarios)
+                .expect("batch failed");
+            produced = results.len();
+        }
+        other => panic!("unknown mode {other:?}; expected solve, ptdf, lodf or batch"),
     }
     let elapsed = start.elapsed();
 
@@ -91,6 +106,12 @@ fn main() {
     println!("{total_ms:.3} ms total, {:.3} ms/run over {repeat} run(s)", total_ms / repeat as f64);
     match mode.as_str() {
         "solve" => println!("  {} branch flow(s) per run", produced / repeat.max(1)),
+        "batch" => {
+            println!("  {produced} scenario(s), one factorization for all of them");
+            if produced > 0 {
+                println!("  {:.4} ms/scenario", total_ms / produced as f64);
+            }
+        }
         _ => {
             println!("  {produced} column(s) produced per run");
             if produced > 0 {

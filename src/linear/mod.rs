@@ -26,6 +26,7 @@
 //! converter stations. That module models real DC hardware; this one
 //! approximates AC.
 
+pub mod batch;
 pub mod btheta;
 pub mod impedance;
 pub mod sensitivity;
@@ -33,6 +34,7 @@ pub mod sensitivity;
 pub use btheta::{
     dc_branches, dc_power_flow, DcBranch, DcIslandReport, DcIslandStatus, DcSolution,
 };
+pub use batch::{DcBatchResult, DcBatchSolver};
 pub use impedance::{linear_power_flow, LinearIslandReport, LinearIslandStatus, LinearReport};
 pub use sensitivity::{DcSensitivity, DenseMatrix};
 

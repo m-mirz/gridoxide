@@ -248,20 +248,71 @@ impl DcSensitivity {
     ///
     /// Costs one solve per island that the pattern actually touches.
     pub fn transfer_factors(&self, injections: &[f64]) -> Option<Vec<f64>> {
+        self.response(injections).map(|(_, flows)| flows)
+    }
+
+    /// Both halves of the response to an injection pattern: the change in
+    /// every bus angle and the change in every branch flow.
+    ///
+    /// Returns `(d_angle, d_flow)`, indexed by bus and by flat branch index.
+    /// This is what [`linear::batch`](super::batch) builds a whole batch on:
+    /// because DC is exactly linear, a scenario's answer is the base solve
+    /// plus this response to the scenario's injection *delta* — one solve
+    /// against a factorization computed once, rather than a fresh solve per
+    /// scenario.
+    ///
+    /// Islands the pattern does not touch are skipped without a solve, and
+    /// contribute nothing.
+    pub fn response(&self, injections: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
         if injections.len() != self.n_buses {
             return None;
         }
-        let mut out = vec![0.0; self.n_branches];
+        let mut d_angle = vec![0.0; self.n_buses];
+        let mut d_flow = vec![0.0; self.n_branches];
         for island in &self.islands {
             let rhs: Vec<f64> = island.unknown.iter().map(|&i| injections[i]).collect();
             if rhs.iter().all(|v| *v == 0.0) {
                 continue;
             }
             let theta = island.factorization.solve(&rhs)?;
-            for (dst, src) in out.iter_mut().zip(self.flows_from_angles(island, &theta)) {
+            for (dst, src) in d_flow.iter_mut().zip(self.flows_from_angles(island, &theta)) {
                 *dst += src;
             }
+            for (r, &bus) in island.unknown.iter().enumerate() {
+                d_angle[bus] += theta[r];
+            }
         }
+        Some((d_angle, d_flow))
+    }
+
+    /// Branch flows after `branch` trips, given the flows before it did.
+    ///
+    /// This is the N-1 screening primitive: `f + LODF[:, l]·f[l]`, one solve
+    /// against the cached factorization and no re-solve of the network. The
+    /// outaged branch itself comes back at exactly zero.
+    ///
+    /// `None` if `branch` is radial — removing it islands the network, so its
+    /// power has nowhere to redistribute to and no post-outage flow exists —
+    /// or if it is out of range or in an unreferenced island. Use
+    /// [`is_radial`](Self::is_radial) to tell those apart in advance.
+    ///
+    /// `base_flows` must be indexed by flat branch index, as
+    /// [`DcSolution::branch_p`](super::btheta::DcSolution::branch_p) is.
+    pub fn outage_flows(&self, base_flows: &[f64], branch: usize) -> Option<Vec<f64>> {
+        if base_flows.len() != self.n_branches {
+            return None;
+        }
+        let column = self.lodf_column(branch)?;
+        let lost = base_flows[branch];
+        let mut out: Vec<f64> = base_flows
+            .iter()
+            .zip(&column)
+            .map(|(f, factor)| f + factor * lost)
+            .collect();
+        // `column[branch]` is exactly -1, so this is already zero up to
+        // round-off; setting it makes that exact, since "the branch that
+        // tripped carries nothing" is a fact rather than a computed value.
+        out[branch] = 0.0;
         Some(out)
     }
 
