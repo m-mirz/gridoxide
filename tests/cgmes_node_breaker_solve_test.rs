@@ -1,45 +1,51 @@
 //! Solving a CGMES model as a node-breaker network, with retained switches.
 //!
 //! This is `plans/NODE_BREAKER_PLAN.md` phase 2's gate: MiniGrid under
-//! `RetainAdjacentToBusbar` must converge and report switch flows. It does.
-//!
-//! # Where it works, and where it does not
-//!
-//! Measured across the four node-breaker configurations, comparing the
-//! node-breaker import against the `TopologicalNode` path on the same file:
+//! `RetainAdjacentToBusbar` must converge and report switch flows. It does —
+//! and so does every other node-breaker configuration in the tree except one,
+//! at every retention policy including the full node-breaker view.
 //!
 //! | Config | TN path | `MergeAll` | busbar-retained | `RetainAll` |
 //! |---|---|---|---|---|
 //! | MiniGrid | converges | converges | converges (30 retained) | converges (90 retained) |
-//! | SmallGrid | converges | converges | converges (373 retained) | **fails** (1,266 retained) |
+//! | SmallGrid | converges | converges | converges (373 retained) | converges (1,266 retained) |
+//! | Svedala | converges | converges | converges (857 retained) | converges (1,464 retained) |
 //! | FullGrid | **fails** | fails | fails | fails |
-//! | Svedala | converges | **fails** | fails | fails |
 //!
-//! **FullGrid fails on both paths** — `MaxIterationsReached` from the ordinary
-//! `TopologicalNode` importer too. That is pre-existing and unrelated to
+//! # The one bug behind two failures
+//!
+//! Svedala and SmallGrid-under-`RetainAll` both reported `Singular` at first,
+//! and both had the same cause — not the switches.
+//!
+//! A de-energized bus is `Slack` at `V = 0`: a placeholder, not a reference.
+//! `network::classify` counted it as one, so a component consisting of a live
+//! `PQ` bus and a dead placeholder came back "solvable" with nothing to solve
+//! against. That `PQ` bus then gets an identically zero angle row, because
+//! `H_ii = −Q_i − V_i²B_ii` cancels exactly when the only neighbour sits at
+//! zero volts. The bus-branch importer never produced such a pair, since it
+//! merges the dead node into a live one; node-breaker import stops merging, so
+//! it does. Fixed in `classify`, regression-tested in `network`'s own unit
+//! tests.
+//!
+//! # What that settles about §4.1
+//!
+//! `plans/NODE_BREAKER_PLAN.md` §4.1 calls `SwitchTreatment::Regularize` "dead
+//! on arrival at real scale", reasoning from a recorded divergence at ~30
+//! switches to SmallGrid's 1,266 and Svedala's 1,464 being "45–52x past the
+//! count already measured to diverge".
+//!
+//! Measured: both converge with **every** switch retained, in the same
+//! iteration count as the bus-branch solve of the same model. The scaling
+//! argument against `Regularize` does not survive contact with the data.
+//! `Constrain` keeps its other advantages — no large number in the matrix, and
+//! a principled answer for switch flows inside a loop — but not that one.
+//!
+//! # The remaining failure
+//!
+//! FullGrid fails on **both** paths: the ordinary `TopologicalNode` importer
+//! returns `MaxIterationsReached` on it too. Pre-existing and unrelated to
 //! node-breaker support; there is no `cgmes_fullgrid_test` in the tree for the
 //! same reason.
-//!
-//! **Svedala is a genuine limitation of the node-breaker import.** The two
-//! partitions differ — gridoxide honors 29 open switches the exporter merged
-//! across (see `cgmes_node_breaker_test.rs`) — and on this model that
-//! rearrangement leaves **5 connected components carrying more than one slack
-//! bus**, which `IslandStatus::AmbiguousReferenceBus` documents as
-//! over-determined and not reliably solvable. It is not caused by retaining
-//! switches: `MergeAll` fails identically. Diagnosing it means working out how
-//! Svedala's angle references distribute across a finer partition, which is
-//! separate work.
-//!
-//! **SmallGrid under `RetainAll` fails**, where 373 retained switches succeed
-//! and 1,266 do not. That is the shape `plans/NODE_BREAKER_PLAN.md` §4.1
-//! predicts for `Regularize`, but it cannot yet be attributed to conditioning:
-//! Svedala fails at *zero* retained switches, so a bus-derivation problem of
-//! the same family is a live alternative explanation. Separating the two needs
-//! Svedala fixed first.
-//!
-//! So the gate is met and the capability is real, on models whose reference
-//! structure survives the finer partition. That caveat belongs in the open, not
-//! in a footnote.
 
 use std::path::{Path, PathBuf};
 
@@ -193,15 +199,22 @@ fn retaining_switches_does_not_change_the_solution() {
     assert!((hi_m - hi_r).abs() < 1e-4, "max |V| moved: {hi_m} vs {hi_r}");
 }
 
-/// SmallGrid at real scale: 1,369 connectivity nodes and 1,266 switches, of
-/// which the busbar policy retains 373. `plans/NODE_BREAKER_PLAN.md` §4.1
-/// predicts `Regularize` cannot cope at this count; with 373 retained it does.
-/// (`RetainAll`, at 1,266, does not — see this file's header.)
+/// SmallGrid and Svedala at full node-breaker scale — 1,266 and 1,464 retained
+/// switches. `plans/NODE_BREAKER_PLAN.md` §4.1 predicts `Regularize` cannot
+/// cope at these counts. It can.
 #[test]
-fn smallgrid_converges_at_real_node_breaker_scale() {
-    let Some(ds) = load("SmallGrid/SmallGrid-Merged", "SmallGrid") else { return };
+fn the_largest_models_converge_with_every_switch_retained() {
+  for (dir, prefix, min_retained) in [
+      ("SmallGrid/SmallGrid-Merged", "SmallGrid", 1266usize),
+      ("Svedala/Svedala-Merged", "Svedala", 1464),
+  ] {
+    let Some(ds) = load(dir, prefix) else { continue };
 
-    for policy in [RetentionPolicy::MergeAll, RetentionPolicy::RetainAdjacentToBusbar] {
+    for policy in [
+        RetentionPolicy::MergeAll,
+        RetentionPolicy::RetainAdjacentToBusbar,
+        RetentionPolicy::RetainAll,
+    ] {
         let (buses, lines, transformers, shunts, view) =
             cgmes_node_breaker_to_buses_and_branches(
                 &ds,
@@ -220,12 +233,18 @@ fn smallgrid_converges_at_real_node_breaker_scale() {
             SolveStatus::Converged,
             "{policy:?}: {n_buses} buses, {retained} retained switches"
         );
+        if policy == RetentionPolicy::RetainAll {
+            assert!(
+                retained >= min_retained,
+                "{prefix}: RetainAll kept only {retained} switches"
+            );
+        }
         eprintln!(
-            "SmallGrid {policy:?}: {n_buses} buses, {retained} retained, \
-             {} iterations",
+            "{prefix} {policy:?}: {n_buses} buses, {retained} retained, {} iterations",
             report.stats.iterations()
         );
     }
+  }
 }
 
 /// `SwitchTreatment::Merge` must refuse a policy that retained something,
