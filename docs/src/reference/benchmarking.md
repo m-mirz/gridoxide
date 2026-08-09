@@ -28,6 +28,7 @@ sysctl kernel.perf_event_paranoid=1
 | §6 | The CGMES conformance test configurations |
 | §7 | State estimation — both gridoxide methods against both power-grid-model methods |
 | §8 | DC (Bθ) power flow against the AC solve, and the cost of a PTDF/LODF column |
+| §9 | AC N-1 contingency screening: factorization reuse across an outage sweep |
 
 ## The two benchmark shapes
 

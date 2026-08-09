@@ -62,10 +62,12 @@ See [Building and Running](docs/src/getting_started/building.md) and
   [reactive power limits](docs/src/powerflow/q_limits.md) (PV→PQ switching),
   [zero-impedance branches](docs/src/powerflow/zero_impedance_branches.md), and
   [multi-island solves](docs/src/powerflow/multi_island.md) with a per-island status report.
-- **Batched solving** over one shared topology, parallel across cores via rayon
-  (`batch::BatchSolver`). In DC, a whole batch shares a *single* numeric factorization
-  (`linear::batch::DcBatchSolver`, 9–55x per scenario), and an N-1 outage needs no re-solve at all
-  (`DcSensitivity::outage_flows`).
+- **Batched solving and N-1/N-k contingency screening** over one shared topology, parallel across
+  cores via rayon. AC contingencies keep the symbolic factorization across a whole outage sweep
+  (`batch::BatchSolver::solve_contingencies`, 2.0–2.7x single-threaded before parallelism); in DC a
+  whole batch shares a *single* numeric factorization (`linear::batch::DcBatchSolver`, 9–55x per
+  scenario), and outages need no re-solve at all — N-1 via `DcSensitivity::outage_flows`, N-k via
+  the generalized `multi_outage_flows`.
 
 [Feature Comparison](docs/src/reference/feature_comparison.md) is a detailed survey against five
 other power flow tools, including the gaps gridoxide hasn't closed.

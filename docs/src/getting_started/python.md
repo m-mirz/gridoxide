@@ -92,6 +92,28 @@ if not model.is_radial(7):
   Two individually non-radial lines can be jointly breaking, which is exactly what single-branch
   screening misses.
 
+### AC contingency screening
+
+For the full nonlinear answer rather than the DC approximation:
+
+```python
+model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", backend="klu_native")
+results = model.solve_contingencies([[b] for b in range(model.n_branches)])
+for branch, (status, vm, va) in enumerate(results):
+    if status != "converged" or min(vm) < 0.9:
+        print(f"outage of {branch}: {status}, min |V| = {min(vm):.3f}")
+```
+
+- `model.solve_contingencies(contingencies, threads=None)` — one entry per scenario, each a list of
+  flat branch indices to take out. Returns `(status, voltage_mag, voltage_ang)` per scenario, in
+  order. `status` is `"converged"`, `"max_iterations"` or `"singular"`; a contingency that leaves an
+  unsolvable network is a screening *result*, so it does not raise.
+
+The symbolic factorization is shared across every contingency that leaves the network connected —
+2.0–2.7x against independent solves before any parallelism. Contingencies that sever the network
+fall back to a full rebuild, and their orphaned buses come back pinned to zero rather than as a
+spurious singular solve.
+
 ```python
 model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", method="dc")
 model.solve()

@@ -26,7 +26,7 @@ use crate::linear::{
     dc_branches, dc_power_flow, linear_power_flow, DcApproximation, DcIslandStatus, DcOptions,
     DcSensitivity, DcSolution, LinearIslandStatus,
 };
-use crate::network::{build_ybus, linear_initial_guess, stamp_shunts, YBusSparse};
+use crate::network::{build_ybus, linear_initial_guess, stamp_shunts, ShuntAdm, YBusSparse};
 use crate::pgm::PgmInput;
 use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, PowerFlowMethod, SolveStatus};
 use crate::types::{Bus, Line, Transformer};
@@ -151,6 +151,9 @@ struct PowerFlowModel {
     /// too. Newton and the constant-admittance method use only `ybus`.
     lines: Vec<Line>,
     transformers: Vec<Transformer>,
+    /// Kept for the same reason as the branch lists: a contingency sweep
+    /// rebuilds the Y-bus per scenario and has to re-stamp them.
+    shunts: Vec<ShuntAdm>,
     solver: PersistentSolver,
     backend: JacobianBackend,
     method: PowerFlowMethod,
@@ -239,6 +242,7 @@ impl PowerFlowModel {
             ybus,
             lines,
             transformers,
+            shunts,
             solver: PersistentSolver::new(backend),
             backend,
             method: parse_method(method)?,
@@ -307,6 +311,7 @@ impl PowerFlowModel {
             ybus,
             lines,
             transformers,
+            shunts,
             solver: PersistentSolver::new(backend),
             backend,
             method: parse_method(method)?,
@@ -574,6 +579,59 @@ impl PowerFlowModel {
             )));
         }
         Ok(self.require_sensitivity()?.multi_outage_flows(&base, &branches))
+    }
+
+    /// Runs an AC N-1/N-k contingency sweep: one entry in `contingencies` per
+    /// scenario, each a list of flat branch indices to take out of service.
+    ///
+    /// Returns `(status, voltage_mag, voltage_ang)` per scenario, in order.
+    /// `status` is `"converged"`, `"max_iterations"` or `"singular"` — a
+    /// contingency that leaves an unsolvable network is a screening result, not
+    /// an error, so it does not raise.
+    ///
+    /// The symbolic factorization is shared across every contingency that
+    /// leaves the network connected; those that sever it fall back to a full
+    /// rebuild, and their orphaned buses come back pinned to zero rather than
+    /// as a spurious singular solve.
+    #[pyo3(signature = (contingencies, threads=None))]
+    fn solve_contingencies(
+        &mut self,
+        contingencies: Vec<Vec<usize>>,
+        threads: Option<usize>,
+    ) -> PyResult<Vec<(String, Vec<f64>, Vec<f64>)>> {
+        let scenarios: Vec<Scenario> = contingencies
+            .into_iter()
+            .map(|branch_outages| Scenario { bus_overrides: Vec::new(), branch_outages })
+            .collect();
+        let batch = match threads {
+            Some(t) => BatchSolver::with_threads(self.backend, t.max(1))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+            None => BatchSolver::new(self.backend),
+        };
+        let reports = batch
+            .solve_contingencies(
+                &self.buses_template,
+                &self.lines,
+                &self.transformers,
+                &self.shunts,
+                &scenarios,
+                self.tol,
+                self.max_iter,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(reports
+            .into_iter()
+            .map(|r| {
+                let status = match r.stats.status {
+                    SolveStatus::Converged => "converged",
+                    SolveStatus::MaxIterationsReached => "max_iterations",
+                    SolveStatus::Singular => "singular",
+                };
+                let vm = r.buses.iter().map(|b| b.voltage_mag).collect();
+                let va = r.buses.iter().map(|b| b.voltage_ang).collect();
+                (status.to_string(), vm, va)
+            })
+            .collect())
     }
 
     /// Whether removing every branch in `branches` at once would disconnect the

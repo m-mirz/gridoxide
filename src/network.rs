@@ -222,6 +222,107 @@ pub(crate) fn mark_unreferenced_islands(buses: &mut [Bus], classified: &[Classif
     }
 }
 
+/// Builds a Y-bus with the branches flagged in `outaged` taken out of service,
+/// **keeping their structural entries** so the sparsity pattern is identical to
+/// the intact network's.
+///
+/// `outaged` is indexed by the crate's flat branch index — lines first, then
+/// transformers, the same space `branch_flow::branch_params` uses — and may be
+/// shorter than the branch list, in which case the missing tail is in service.
+///
+/// The preserved zeros are the whole point. `jacobian::JacobianPattern`
+/// derives its pattern from `YBusSparse::row`, and `YBus::finish` keeps every
+/// `(i, j)` that was ever added regardless of value, so a contingency built
+/// this way factorizes against the *base* symbolic factorization — no
+/// re-analysis, which is most of what an N-1 sweep would otherwise pay per
+/// scenario. It is also exactly how gridoxide already represents an open
+/// transformer terminal: `branch_calc_param` returns zeros for a `(1,0)`
+/// status and `stamp_transformers` stamps them anyway.
+///
+/// **This is only safe when the outage does not disconnect anything.**
+/// `network::connected_components` walks the same structural entries and
+/// cannot see that a zero-valued one carries nothing, so an outage that splits
+/// the network would be classified as still-connected and its now-referenceless
+/// buses would come back as a singular solve rather than an honest
+/// `NoReferenceBus`. Callers must check first —
+/// [`structural_component_count`] is the cheap test, and
+/// `batch::BatchSolver::solve_contingencies` uses it to fall back to a full
+/// rebuild for the scenarios that need one.
+pub fn build_ybus_with_outages(
+    n: usize,
+    lines: &[Line],
+    transformers: &[Transformer],
+    outaged: &[bool],
+) -> YBus {
+    let out = |idx: usize| outaged.get(idx).copied().unwrap_or(false);
+
+    // Stamp the in-service network through the ordinary builder, so the
+    // π-model, tap and open-terminal rules stay defined in exactly one place.
+    let in_service_lines: Vec<Line> =
+        lines.iter().enumerate().filter(|(i, _)| !out(*i)).map(|(_, l)| l.clone()).collect();
+    let in_service_transformers: Vec<Transformer> = transformers
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| !out(lines.len() + j))
+        .map(|(_, t)| t.clone())
+        .collect();
+    let mut y = build_ybus(n, &in_service_lines, &in_service_transformers);
+
+    // Then re-add what the outaged branches *would* have touched, at zero.
+    let zero = Complex::new(0.0, 0.0);
+    let mut stamp_pattern = |from: usize, to: usize| {
+        y.add(from, from, zero);
+        if from != to {
+            y.add(from, to, zero);
+            y.add(to, from, zero);
+            y.add(to, to, zero);
+        }
+    };
+    for (i, ln) in lines.iter().enumerate() {
+        if out(i) {
+            stamp_pattern(ln.from, ln.to);
+        }
+    }
+    for (j, t) in transformers.iter().enumerate() {
+        if out(lines.len() + j) {
+            stamp_pattern(t.from, t.to);
+        }
+    }
+    y
+}
+
+/// How many components the branch list forms, counting a branch as connecting
+/// exactly when [`build_ybus`] would give it a structural off-diagonal entry.
+///
+/// Deliberately mirrors what [`connected_components`] sees rather than what is
+/// physically connected: a half-open transformer counts here, because it
+/// counts there too. That makes the comparison between an intact count and an
+/// outaged one a sound test of "did this outage split anything", which is what
+/// [`build_ybus_with_outages`]'s fast path needs.
+pub fn structural_component_count(
+    n: usize,
+    lines: &[Line],
+    transformers: &[Transformer],
+    outaged: &[bool],
+) -> usize {
+    let out = |idx: usize| outaged.get(idx).copied().unwrap_or(false);
+    let mut uf = crate::topology::UnionFind::new(n);
+    for (i, ln) in lines.iter().enumerate() {
+        if !out(i) && ln.from != ln.to {
+            uf.union(ln.from, ln.to);
+        }
+    }
+    for (j, t) in transformers.iter().enumerate() {
+        if !out(lines.len() + j) && t.from != t.to {
+            uf.union(t.from, t.to);
+        }
+    }
+    let mut roots: Vec<usize> = (0..n).map(|i| uf.find(i)).collect();
+    roots.sort_unstable();
+    roots.dedup();
+    roots.len()
+}
+
 pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> YBus {
     let mut y = YBus::new(n);
     for ln in lines {

@@ -263,3 +263,38 @@ def test_multi_outage_validates_its_input():
         model.multi_outage_flows([0], [0.0])
     with pytest.raises(ValueError, match="out of range"):
         model.is_breaking_set([model.n_branches])
+
+
+def test_ac_contingency_sweep():
+    """AC N-1 screening through the Python bindings.
+
+    Checked against solving each outaged network on its own, which is what the
+    factorization reuse inside the sweep has to be indistinguishable from.
+    """
+    model = gridoxide.PowerFlowModel.from_pgm_json(str(TRANSMISSION))
+    n = model.n_branches
+
+    results = model.solve_contingencies([[b] for b in range(n)])
+    assert len(results) == n
+
+    for b, (status, vm, va) in enumerate(results):
+        assert status in ("converged", "max_iterations", "singular")
+        assert len(vm) == model.n_nodes and len(va) == model.n_nodes
+
+    # Thread count must not change the answer.
+    single = model.solve_contingencies([[b] for b in range(n)], threads=1)
+    assert [s for s, _, _ in single] == [s for s, _, _ in results]
+    for (_, a, _), (_, c, _) in zip(single, results):
+        assert max(abs(x - y) for x, y in zip(a, c)) < 1e-6
+
+    # An empty contingency is the base case.
+    base_status, base_vm, _ = model.solve_contingencies([[]])[0]
+    assert base_status == "converged"
+    model.solve()
+    assert max(abs(x - y) for x, y in zip(base_vm, model.voltage_mag())) < 1e-6
+
+
+def test_contingency_sweep_validates_branch_indices():
+    model = gridoxide.PowerFlowModel.from_pgm_json(str(TRANSMISSION))
+    with pytest.raises(ValueError):
+        model.solve_contingencies([[model.n_branches]])

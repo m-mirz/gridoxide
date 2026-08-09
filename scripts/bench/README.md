@@ -878,3 +878,56 @@ discrepancy visible when omitted:
   side directly rather than as a second-order term. It is a limitation of the PGM conversion, not of
   the DC solver: `tests/dc_powerflow_test.rs` exercises phase shifters natively and matches the AC
   limit to 1e-6.
+
+## 9. AC N-1 contingency screening
+
+`examples/bench_contingency.rs`, sweeping single-branch outages through
+`batch::BatchSolver::solve_contingencies` and comparing against solving each outaged network
+independently — the same work with no factorization reuse, which is what a naive contingency loop
+does.
+
+```bash
+cargo build --release --example bench_contingency
+./target/release/examples/bench_contingency /tmp/case9241pegase.json 60 klu_native
+```
+
+### Timing results
+
+**Both sides run single-threaded**, so this isolates factorization reuse from parallelism; the
+`solve_contingencies` sweep parallelizes on top of what is shown here.
+
+| Case | Outages swept | Severing | Batched | Independent | Speedup |
+|---|---|---|---|---|---|
+| case118 | 187 (all) | 10 | 0.198 ms/outage | 0.393 ms/outage | 1.98x |
+| case1354pegase | 200 | 65 | 4.823 ms/outage | 10.008 ms/outage | 2.08x |
+| case9241pegase | 60 | 2 | 42.17 ms/outage | 114.50 ms/outage | 2.72x |
+
+The ~2x floor is what the repo's own "symbolic factorization is ~45% of solve time" figure predicts,
+and the ratio grows with size because that share does. The reuse here is narrower than an ordinary
+batch's: each outage has its own Y-bus, so the Jacobian's cached per-nonzero recipe must be
+re-analyzed every scenario (O(nonzeros), `PersistentSolver::invalidate_admittances`). What survives
+is the symbolic factorization — the fill-reducing ordering and elimination structure — because
+`network::build_ybus_with_outages` keeps the outaged branch's structural entries and so leaves the
+sparsity pattern bit-for-bit intact.
+
+The **severing** column counts contingencies that disconnect the network. Those cannot use that
+trick, because `connected_components` reads the same structural entries and cannot tell a zeroed one
+from a live one; they are detected up front with `network::structural_component_count` and fall back
+to a full rebuild with a fresh factorization. That fallback is what lets an islanded contingency come
+back as an honest `IslandStatus::NoReferenceBus` rather than a singular solve — and note it is not
+rare: 65 of case1354pegase's first 200 branches sever something.
+
+### Accuracy results
+
+`tests/ac_contingency_test.rs` checks every single-branch contingency on both committed PGM fixtures
+against a direct solve of the network built without that branch — same status, and voltages agreeing
+to the solver's own `1e-6` tolerance. It runs at one thread as well as four: a single worker means
+every scenario shares one `PersistentSolver`, which is the sharpest test of the cache-reuse claim,
+and it is the configuration that caught the one real bug in this work (a `JacobianPattern` carried
+across contingencies silently solves the *previous* outage's network, because the pattern caches the
+admittance each entry was analyzed against).
+
+Cross-tool comparison against another package's contingency module is not covered. The direct-solve
+oracle above is stronger for the question that matters here — whether the fast path equals the slow
+one — but it says nothing about agreeing with, say, lightsim2grid's `SecurityAnalysis` on the same
+case.
