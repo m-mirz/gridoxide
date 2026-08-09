@@ -38,12 +38,14 @@ against `f96a660`.
 > disagreement elsewhere is explained — see §6.1, which the results corrected in a direction this
 > document did not anticipate.
 >
-> *Phase 2* added `src/switches.rs`: `SwitchTreatment::Regularize`, with a switch's position carried
-> as terminal *status* so a state change moves Y-bus values without moving the sparsity pattern.
-> Its gate is **not met** — there is still no way to get a node-breaker network into the solver,
-> because the CGMES importer builds buses from `TopologicalNode`. §1.1(d) also records a negative
-> result worth reading before phase 3: the attempt to reproduce `Regularize`'s historical divergence
-> synthetically failed at every count, shape and admittance sign tried.
+> *Phase 2* added `src/switches.rs` (`SwitchTreatment::Regularize`, with a switch's position carried
+> as terminal *status* so a state change moves Y-bus values without moving the sparsity pattern) and
+> `cgmes::cgmes_node_breaker_to_buses_and_branches`, which derives buses from a `BusView` and reuses
+> every existing equipment loop. **Its gate is met**: MiniGrid converges under
+> `RetainAdjacentToBusbar` with 30 retained switches, each reporting a flow, and SmallGrid converges
+> at real scale — 540 buses with 373 retained switches. Two caveats are recorded in
+> `tests/cgmes_node_breaker_solve_test.rs` and §9. §1.1(d) also records a negative result worth
+> reading before phase 3.
 >
 > Phases 3–7 are not started.
 
@@ -722,7 +724,7 @@ Two notes for later phases:
   `nodes: Vec<Node>` — `CgmesNodeBreaker::node_mrids` is exactly the data such a record would hold,
   currently carried alongside rather than inside.
 
-**Phase 2 — switch identity via `Regularize`. ⚠️ Partly done.**
+**Phase 2 — switch identity via `Regularize`. ✅ Done.**
 Retained switches as branches; switch flows; `set_switch_open`. *Gate: MiniGrid (90 switches) under
 `RetainAdjacentToBusbar` converges and reports switch flows.* — **not met.**
 
@@ -739,13 +741,28 @@ Done: `src/switches.rs` with `SwitchTreatment`, `regularized_branches`, `degener
 - **A regularized switch is purely inductive**, unlike `IDEAL_CONNECTION_Y`, so DC needs no guard
   for it. See §6.2.
 
-Not done: the CGMES importer still builds buses from `TopologicalNode`, so there is no way to get a
-node-breaker network into the solver and the gate cannot be attempted. That wiring —
-`build_ac_bus_skeleton` deriving buses from a `BusView`, with `u_rated` read through
-`ConnectivityNode.ConnectivityNodeContainer` → `VoltageLevel.BaseVoltage` — is the remaining work,
-and it is larger than the switch formulation itself. `RetainAll` on SmallGrid/Svedala is expected to
-fail here; §1.1(d) records that the attempt to reproduce that failure synthetically did not
-succeed.
+The importer wiring landed too: `build_node_breaker_skeleton` derives buses from a `BusView`, with
+`u_rated` read through `ConnectivityNode.ConnectivityNodeContainer` → `VoltageLevel.BaseVoltage`
+(via `Bay` where the container is one). The equipment conversion was factored into
+`convert_equipment` and is shared verbatim with the bus-branch path — nothing below the skeleton
+cares how a bus came to exist, since it all resolves through `terms.bus(...)`.
+
+**Gate met:** MiniGrid converges under `RetainAdjacentToBusbar` (45 buses, 30 retained switches, all
+reporting flows), and SmallGrid converges at real scale (540 buses, 373 retained). This document's
+§4.1 predicts `Regularize` cannot cope at SmallGrid's switch count; on this model it does.
+
+Two caveats, both in the open rather than in a footnote:
+
+- **FullGrid does not converge on *either* path.** The ordinary `TopologicalNode` importer returns
+  `MaxIterationsReached` on it too. Pre-existing and unrelated — there is no `cgmes_fullgrid_test`
+  in the tree for the same reason.
+- **Svedala converges on the TN path but not the node-breaker one**, and `MergeAll` fails
+  identically, so retaining switches is not the cause. The two partitions differ — gridoxide honors
+  29 open switches the exporter merged across (§6.1) — and on this model the finer partition leaves
+  **5 connected components carrying more than one slack bus**, which
+  `IslandStatus::AmbiguousReferenceBus` documents as over-determined. Working out how Svedala's
+  angle references should distribute across a finer partition is separate work, and it is a
+  precondition for trusting the node-breaker path on arbitrary data.
 
 **Phase 3 — `Constrain` for AC Newton-Raphson.**
 Explicit AC state layout, dummy variables, constraint rows, Kruskal spanning forest, union-pattern

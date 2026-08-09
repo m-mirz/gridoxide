@@ -812,7 +812,23 @@ pub fn cgmes_topological_node_bus_index(ds: &CimDataset) -> Result<HashMap<Strin
 pub fn cgmes_to_buses_and_branches(
     ds: &CimDataset, s_base_va: f64,
 ) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
-    let (mut buses, idx_of, terms) = build_ac_bus_skeleton(ds)?;
+    let skeleton = build_ac_bus_skeleton(ds)?;
+    convert_equipment(ds, s_base_va, skeleton)
+}
+
+/// Converts a CGMES dataset's equipment onto an already-built bus skeleton.
+///
+/// Split out from [`cgmes_to_buses_and_branches`] so the node-breaker path
+/// ([`cgmes_node_breaker_to_buses_and_branches`]) can reuse every equipment
+/// loop unchanged. Nothing below this point cares how a bus came to exist —
+/// it all resolves through `terms.bus(...)` — which is exactly why the two
+/// skeletons are interchangeable.
+fn convert_equipment(
+    ds: &CimDataset,
+    s_base_va: f64,
+    skeleton: (Vec<Bus>, HashMap<String, usize>, TerminalIndex),
+) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
+    let (mut buses, idx_of, terms) = skeleton;
 
     // --- Step 3: loads/injections (EnergyConsumer + subtypes + EquivalentInjection) ---
     // Both P and Q use CGMES's uniform SSH "load sign convention" (positive =
@@ -2124,4 +2140,199 @@ pub fn cgmes_node_breaker_topology(ds: &CimDataset) -> Result<CgmesNodeBreaker, 
     topology.busbars.dedup();
 
     Ok(CgmesNodeBreaker { topology, node_mrids, switch_mrids, tn_of_node })
+}
+
+/// A `ConnectivityNode`'s nominal voltage in volts, resolved through its
+/// container.
+///
+/// `ConnectivityNode` has no `BaseVoltage` of its own — a `TopologicalNode`
+/// does, which is why the bus-branch path never needed this. The chain is
+/// `ConnectivityNodeContainer`, which is a `VoltageLevel` directly or a `Bay`
+/// that names one.
+///
+/// `None` where the container is neither — most often a CGMES `Line`
+/// container holding a boundary node, which genuinely has no voltage level.
+/// Measured on the four node-breaker configurations: 0 nodes with no container
+/// at all, and 2/5/3/0 whose container is something else.
+fn connectivity_node_voltage(ds: &CimDataset, cn_mrid: &str) -> Option<f64> {
+    let cn: &cimstructs::ConnectivityNode = get(ds, cn_mrid)?;
+    let container = cn.connectivity_node_container.as_ref()?;
+
+    let vl_mrid = match get::<cimstructs::VoltageLevel>(ds, &container.mrid) {
+        Some(_) => container.mrid.clone(),
+        None => {
+            let bay: &cimstructs::Bay = get(ds, &container.mrid)?;
+            bay.voltage_level.as_ref()?.mrid.clone()
+        }
+    };
+    let vl: &cimstructs::VoltageLevel = get(ds, &vl_mrid)?;
+    let bv: &BaseVoltage = get(ds, &vl.base_voltage.as_ref()?.mrid)?;
+    // CGMES gives nominalVoltage in kV; `Bus::u_rated` is documented in V.
+    Some(bv.nominal_voltage? * 1e3)
+}
+
+/// Builds the bus skeleton from a node-breaker bus view rather than from
+/// `TopologicalNode`s.
+///
+/// Produces exactly what [`build_ac_bus_skeleton`] does — buses, a
+/// `TopologicalNode`-keyed index, and a terminal resolver — so every equipment
+/// loop in [`convert_equipment`] works against it unchanged. The difference is
+/// only in what a bus *is*: a group of connectivity nodes under `policy`,
+/// rather than a topological node.
+///
+/// `idx_of` is still keyed by `TopologicalNode` mrid, populated through
+/// `CgmesNodeBreaker::tn_of_node`, so the downstream code that resolves an
+/// angle reference or an HVDC converter by TN keeps working. It is empty when
+/// TP was not loaded, which those paths already tolerate.
+fn build_node_breaker_skeleton(
+    ds: &CimDataset,
+    policy: &crate::topology::RetentionPolicy,
+) -> Result<
+    (Vec<Bus>, HashMap<String, usize>, TerminalIndex, CgmesNodeBreaker, crate::topology::BusView),
+    CgmesError,
+> {
+    use crate::topology::model::{BusIdx, NodeIdx};
+
+    let nb = cgmes_node_breaker_topology(ds)?;
+    if nb.topology.n_nodes == 0 {
+        return Err(CgmesError::NoTopologicalNodes);
+    }
+    let view = crate::topology::bus_view(&nb.topology, policy);
+
+    // One bus per view bus. `u_rated` comes from the first member node that
+    // resolves one; a bus whose members are all boundary nodes keeps 0.0,
+    // which `Bus::u_rated` documents as "not set" — the same thing the
+    // bus-branch path produces for a synthesized boundary bus.
+    let mut buses: Vec<Bus> = (0..view.n_buses())
+        .map(|b| {
+            let u_rated = view
+                .nodes_of(BusIdx(b))
+                .iter()
+                .find_map(|n| connectivity_node_voltage(ds, &nb.node_mrids[n.0]))
+                .unwrap_or(0.0);
+            Bus {
+                idx: b,
+                bus_type: BusType::PQ,
+                voltage_mag: 1.0,
+                voltage_ang: 0.0,
+                p_spec: 0.0,
+                q_spec: 0.0,
+                q_min: -f64::INFINITY,
+                q_max: f64::INFINITY,
+                u_rated,
+                zip_terms: Vec::new(),
+            }
+        })
+        .collect();
+
+    let mut node_of_cn: HashMap<&str, usize> = HashMap::with_capacity(nb.node_mrids.len());
+    for (i, mrid) in nb.node_mrids.iter().enumerate() {
+        node_of_cn.insert(mrid.as_str(), i);
+    }
+
+    // The terminal resolver, built the same way as the bus-branch one except
+    // that a terminal resolves through its `ConnectivityNode` rather than its
+    // `TopologicalNode`.
+    let mut raw: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    let mut bus_of: HashMap<String, usize> = HashMap::new();
+    let mut connected_of: HashMap<String, bool> = HashMap::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    for t_mrid in by_type(ds, "Terminal") {
+        let t: &Terminal = require(ds, t_mrid, "Terminal", t_mrid, "(self)")?;
+        connected_of.insert(t_mrid.clone(), t.base.connected.unwrap_or(true));
+        if let Some(ce) = &t.conducting_equipment {
+            let seq = t.base.sequence_number.unwrap_or(1);
+            raw.entry(ce.mrid.clone()).or_default().push((seq, t_mrid.clone()));
+        }
+        match t.connectivity_node.as_ref().and_then(|cn| node_of_cn.get(cn.mrid.as_str())) {
+            Some(&node) => {
+                bus_of.insert(t_mrid.clone(), view.bus_of(NodeIdx(node)).0);
+            }
+            None => unresolved.push(t_mrid.clone()),
+        }
+    }
+
+    // A terminal with no ConnectivityNode gets a bus of its own, mirroring the
+    // bus-branch path's boundary-node synthesis. It has no voltage level to
+    // read, so `u_rated` stays unset.
+    for t_mrid in unresolved {
+        let idx = buses.len();
+        buses.push(Bus {
+            idx,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            q_min: -f64::INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 0.0,
+            zip_terms: Vec::new(),
+        });
+        bus_of.insert(t_mrid, idx);
+    }
+
+    let by_equipment = raw
+        .into_iter()
+        .map(|(eq, mut v)| {
+            v.sort_by_key(|(seq, _)| *seq);
+            (eq, v.into_iter().map(|(_, m)| m).collect())
+        })
+        .collect();
+
+    // TopologicalNode -> bus, for the angle-reference and HVDC paths.
+    let mut idx_of: HashMap<String, usize> = HashMap::new();
+    for (node, tn) in nb.tn_of_node.iter().enumerate() {
+        if let Some(tn) = tn {
+            idx_of.insert(tn.clone(), view.bus_of(NodeIdx(node)).0);
+        }
+    }
+
+    Ok((buses, idx_of, TerminalIndex { by_equipment, bus_of, connected_of }, nb, view))
+}
+
+/// Converts a CGMES dataset into a **node-breaker** network: buses from
+/// connectivity nodes under `policy`, plus the branches that give retained
+/// switches identity under `treatment`.
+///
+/// The returned transformer list is the model's own transformers followed by
+/// one branch per non-degenerate retained switch, so a switch's flat branch
+/// index is `lines.len() + model_transformers + n` for the *n*th entry of
+/// [`BusView::retained`](crate::topology::BusView::retained) that survived. The
+/// returned [`BusView`](crate::topology::BusView) is what maps those back.
+///
+/// With [`RetentionPolicy::MergeAll`](crate::topology::RetentionPolicy::MergeAll)
+/// this is an ordinary bus-branch conversion that happens to have derived its
+/// buses from EQ rather than TP — useful on a dataset with no TP profile at
+/// all, which [`cgmes_to_buses_and_branches`] cannot read.
+pub fn cgmes_node_breaker_to_buses_and_branches(
+    ds: &CimDataset,
+    s_base_va: f64,
+    policy: &crate::topology::RetentionPolicy,
+    treatment: crate::switches::SwitchTreatment,
+) -> Result<
+    (Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>, crate::topology::BusView),
+    CgmesError,
+> {
+    let (buses, idx_of, terms, _nb, view) = build_node_breaker_skeleton(ds, policy)?;
+    let (buses, lines, mut transformers, shunts) =
+        convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
+
+    match treatment {
+        crate::switches::SwitchTreatment::Merge => {
+            if !view.retained().is_empty() {
+                return Err(CgmesError::UnsupportedTransformer {
+                    mrid: "(retention policy)".to_string(),
+                    reason: "SwitchTreatment::Merge cannot represent a retained switch; use \
+                             RetentionPolicy::MergeAll or SwitchTreatment::Regularize"
+                        .to_string(),
+                });
+            }
+        }
+        crate::switches::SwitchTreatment::Regularize => {
+            transformers.extend(crate::switches::regularized_branches(&view));
+        }
+    }
+
+    Ok((buses, lines, transformers, shunts, view))
 }
