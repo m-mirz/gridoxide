@@ -270,3 +270,282 @@ fn outage_flows_refuse_a_radial_branch() {
     // A mismatched base-flow vector is rejected rather than read out of bounds.
     assert!(sensitivity.outage_flows(&[0.0], 0).is_none());
 }
+
+/// **The N-k oracle.** Predicting a simultaneous multi-branch outage must match
+/// actually removing every one of them and re-solving.
+///
+/// See `chaining_single_outages_is_not_a_substitute` for why this cannot be
+/// assembled from single-branch LODF columns.
+#[test]
+fn multi_outage_flows_match_an_actual_n_minus_2_resolve() {
+    let (buses, lines, transformers) = load("symmetric/transmission-case");
+    let opts = DcOptions::default();
+    let n_branches = lines.len() + transformers.len();
+
+    let mut base_buses = buses.clone();
+    let base = dc_power_flow(&mut base_buses, &lines, &transformers, opts);
+    let branches = dc_branches(&lines, &transformers, opts);
+    let sensitivity = DcSensitivity::new(&base_buses, &branches, n_branches).unwrap();
+
+    let mut checked = 0;
+    for a in 0..lines.len() {
+        for b in (a + 1)..lines.len() {
+            let Some(predicted) = sensitivity.multi_outage_flows(&base.branch_p, &[a, b]) else {
+                continue;
+            };
+
+            let mut opened = lines.clone();
+            opened[a].to = opened[a].from;
+            opened[b].to = opened[b].from;
+            let mut scratch = buses.clone();
+            let actual =
+                dc_power_flow(&mut scratch, &opened, &transformers, opts).branch_p;
+
+            for k in 0..n_branches {
+                assert!(
+                    (predicted[k] - actual[k]).abs() < 1e-9,
+                    "outage of {a}+{b}: branch {k} predicted {} but re-solve gives {}",
+                    predicted[k],
+                    actual[k]
+                );
+            }
+            assert_eq!(predicted[a], 0.0);
+            assert_eq!(predicted[b], 0.0);
+            checked += 1;
+        }
+    }
+
+    assert!(checked > 0, "no solvable branch pair was checked");
+}
+
+/// A one-element set must reproduce the single-branch result exactly — the two
+/// entry points share one implementation, and this pins that they stay shared.
+#[test]
+fn a_single_element_set_matches_the_single_branch_result() {
+    let (buses, lines, transformers) = load("symmetric/transmission-case");
+    let opts = DcOptions::default();
+    let n_branches = lines.len() + transformers.len();
+
+    let mut base_buses = buses.clone();
+    let base = dc_power_flow(&mut base_buses, &lines, &transformers, opts);
+    let branches = dc_branches(&lines, &transformers, opts);
+    let sensitivity = DcSensitivity::new(&base_buses, &branches, n_branches).unwrap();
+
+    for branch in 0..n_branches {
+        assert_eq!(
+            sensitivity.outage_flows(&base.branch_p, branch),
+            sensitivity.multi_outage_flows(&base.branch_p, &[branch]),
+            "branch {branch}"
+        );
+    }
+}
+
+/// A set whose removal disconnects the network has no post-outage flows, and
+/// says so rather than returning a large number. Built by hand, because it
+/// needs a pair that is individually meshed but jointly breaking — exactly the
+/// case single-branch screening misses.
+#[test]
+fn a_breaking_pair_is_reported_even_when_neither_branch_is_radial() {
+    let mk = |idx, bus_type| Bus {
+        idx,
+        bus_type,
+        voltage_mag: 1.0,
+        voltage_ang: 0.0,
+        p_spec: if bus_type == BusType::Slack { 0.0 } else { -0.3 },
+        q_spec: 0.0,
+        q_min: 0.0,
+        q_max: 0.0,
+        u_rated: 0.0,
+        zip_terms: Vec::new(),
+    };
+    let line = |from, to, x| Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 };
+
+    // Buses 0-1 joined by two parallel lines, then a tail to bus 2. Neither
+    // parallel line is radial on its own; together they are the only path.
+    let buses = vec![mk(0, BusType::Slack), mk(1, BusType::PQ), mk(2, BusType::PQ)];
+    let lines = vec![line(0, 1, 0.1), line(0, 1, 0.2), line(1, 2, 0.3)];
+    let opts = DcOptions::default();
+
+    let mut scratch = buses.clone();
+    let base = dc_power_flow(&mut scratch, &lines, &[], opts);
+    let branches = dc_branches(&lines, &[], opts);
+    let sensitivity = DcSensitivity::new(&scratch, &branches, lines.len()).unwrap();
+
+    // Fixture assumption: neither of the parallel pair is radial by itself.
+    assert!(!sensitivity.is_radial(0) && !sensitivity.is_radial(1));
+    assert!(sensitivity.outage_flows(&base.branch_p, 0).is_some());
+    assert!(sensitivity.outage_flows(&base.branch_p, 1).is_some());
+
+    // Together they are the only path to buses 1 and 2.
+    assert!(sensitivity.is_breaking_set(&[0, 1]));
+    assert!(sensitivity.multi_outage_flows(&base.branch_p, &[0, 1]).is_none());
+
+    // Branch 2 is radial on its own, so any set containing it breaks too.
+    assert!(sensitivity.is_breaking_set(&[2]));
+    assert!(sensitivity.is_breaking_set(&[0, 2]));
+}
+
+/// Degenerate and malformed sets are handled explicitly rather than falling
+/// through to a singular solve that would look like a breaking set.
+#[test]
+fn empty_and_malformed_outage_sets() {
+    let (buses, lines, transformers) = load("symmetric/transmission-case");
+    let opts = DcOptions::default();
+    let n_branches = lines.len() + transformers.len();
+
+    let mut base_buses = buses.clone();
+    let base = dc_power_flow(&mut base_buses, &lines, &transformers, opts);
+    let branches = dc_branches(&lines, &transformers, opts);
+    let sensitivity = DcSensitivity::new(&base_buses, &branches, n_branches).unwrap();
+
+    // Outaging nothing changes nothing.
+    assert_eq!(
+        sensitivity.multi_outage_flows(&base.branch_p, &[]).unwrap(),
+        base.branch_p
+    );
+    // A repeated index is malformed input, not a breaking set.
+    assert!(sensitivity.multi_outage_flows(&base.branch_p, &[0, 0]).is_none());
+    // Out of range, and a mismatched base-flow vector.
+    assert!(sensitivity.multi_outage_flows(&base.branch_p, &[n_branches]).is_none());
+    assert!(sensitivity.multi_outage_flows(&[0.0], &[0]).is_none());
+}
+
+/// N-3 on a densely meshed hand-built network, against the same re-solve
+/// oracle — the formulation is not special-cased for k = 2.
+#[test]
+fn three_simultaneous_outages_match_a_resolve() {
+    let mk = |idx, bus_type, p| Bus {
+        idx,
+        bus_type,
+        voltage_mag: 1.0,
+        voltage_ang: 0.0,
+        p_spec: p,
+        q_spec: 0.0,
+        q_min: 0.0,
+        q_max: 0.0,
+        u_rated: 0.0,
+        zip_terms: Vec::new(),
+    };
+    let line = |from, to, x| Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 };
+
+    // Five buses, fully meshed enough that removing three still leaves a
+    // connected network.
+    let buses = vec![
+        mk(0, BusType::Slack, 0.0),
+        mk(1, BusType::PQ, -0.4),
+        mk(2, BusType::PQ, -0.3),
+        mk(3, BusType::PQ, -0.2),
+        mk(4, BusType::PQ, 0.5),
+    ];
+    let lines = vec![
+        line(0, 1, 0.10),
+        line(1, 2, 0.15),
+        line(2, 3, 0.20),
+        line(3, 4, 0.25),
+        line(4, 0, 0.30),
+        line(0, 2, 0.35),
+        line(1, 3, 0.40),
+        line(2, 4, 0.45),
+    ];
+    let opts = DcOptions::default();
+
+    let mut scratch = buses.clone();
+    let base = dc_power_flow(&mut scratch, &lines, &[], opts);
+    let branches = dc_branches(&lines, &[], opts);
+    let sensitivity = DcSensitivity::new(&scratch, &branches, lines.len()).unwrap();
+
+    let set = [1usize, 5, 7];
+    let predicted = sensitivity
+        .multi_outage_flows(&base.branch_p, &set)
+        .expect("this triple should leave the network connected");
+
+    let mut opened = lines.clone();
+    for &l in &set {
+        opened[l].to = opened[l].from;
+    }
+    let mut scratch = buses.clone();
+    let actual = dc_power_flow(&mut scratch, &opened, &[], opts).branch_p;
+
+    for k in 0..lines.len() {
+        assert!(
+            (predicted[k] - actual[k]).abs() < 1e-9,
+            "branch {k}: predicted {} but re-solve gives {}",
+            predicted[k],
+            actual[k]
+        );
+    }
+}
+
+/// Why the simultaneous formulation exists: applying two single-branch LODF
+/// columns one after another does **not** give the N-2 answer.
+///
+/// The second branch's LODF was computed on the *intact* network, so chaining
+/// ignores how the first outage changed the way the second one's power
+/// redistributes. Algebraically, the sequential route solves
+/// `(1 - Ψ_aa)·c_a = f_a` and drops the `-Ψ_ab·c_b` coupling term that the
+/// simultaneous system carries — so the two agree only where `Ψ_ab = 0`, which
+/// is exactly what a meshed network does not give you.
+#[test]
+fn chaining_single_outages_is_not_a_substitute() {
+    let mk = |idx, bus_type, p| Bus {
+        idx,
+        bus_type,
+        voltage_mag: 1.0,
+        voltage_ang: 0.0,
+        p_spec: p,
+        q_spec: 0.0,
+        q_min: 0.0,
+        q_max: 0.0,
+        u_rated: 0.0,
+        zip_terms: Vec::new(),
+    };
+    let line = |from, to, x| Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 };
+
+    let buses = vec![
+        mk(0, BusType::Slack, 0.0),
+        mk(1, BusType::PQ, -0.4),
+        mk(2, BusType::PQ, -0.3),
+        mk(3, BusType::PQ, -0.2),
+        mk(4, BusType::PQ, 0.5),
+    ];
+    let lines = vec![
+        line(0, 1, 0.10),
+        line(1, 2, 0.15),
+        line(2, 3, 0.20),
+        line(3, 4, 0.25),
+        line(4, 0, 0.30),
+        line(0, 2, 0.35),
+        line(1, 3, 0.40),
+        line(2, 4, 0.45),
+    ];
+    let opts = DcOptions::default();
+
+    let mut scratch = buses.clone();
+    let base = dc_power_flow(&mut scratch, &lines, &[], opts);
+    let branches = dc_branches(&lines, &[], opts);
+    let sensitivity = DcSensitivity::new(&scratch, &branches, lines.len()).unwrap();
+
+    let (a, b) = (1usize, 6usize);
+
+    // Ground truth: open both and re-solve.
+    let mut opened = lines.clone();
+    opened[a].to = opened[a].from;
+    opened[b].to = opened[b].from;
+    let mut scratch = buses.clone();
+    let actual = dc_power_flow(&mut scratch, &opened, &[], opts).branch_p;
+
+    let simultaneous = sensitivity.multi_outage_flows(&base.branch_p, &[a, b]).unwrap();
+    let first = sensitivity.outage_flows(&base.branch_p, a).unwrap();
+    let chained = sensitivity.outage_flows(&first, b).unwrap();
+
+    let worst = |v: &[f64]| {
+        v.iter().zip(&actual).map(|(x, t)| (x - t).abs()).fold(0.0f64, f64::max)
+    };
+    assert!(worst(&simultaneous) < 1e-9, "simultaneous is off by {}", worst(&simultaneous));
+    assert!(
+        worst(&chained) > 1e-3,
+        "chaining happened to agree here, so this fixture cannot show the \
+         difference (gap {})",
+        worst(&chained)
+    );
+}

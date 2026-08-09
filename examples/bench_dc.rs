@@ -21,6 +21,10 @@
 //! - `lodf` — the same, sweeping `lodf_column` over every branch. Radial
 //!   branches return `None` without a back-substitution, so the count of
 //!   columns actually produced is reported alongside the timing.
+//! - `n2` — an N-2 sweep: `multi_outage_flows` over every branch *pair* drawn
+//!   from the first `repeat` branches, which is the shape a contingency screen
+//!   actually has. Breaking pairs are reported separately, since they return
+//!   without a solve.
 //! - `batch` — `repeat` load-scaling scenarios through `DcBatchSolver`, which
 //!   performs exactly *one* numeric factorization for the whole batch (DC's `B`
 //!   depends only on topology, so a scenario changes only the right-hand side).
@@ -89,6 +93,21 @@ fn main() {
                 }
             }
         }
+        "n2" => {
+            let mut scratch = buses.clone();
+            let base = dc_power_flow(&mut scratch, &lines, &transformers, opts);
+            let branches = dc_branches(&lines, &transformers, opts);
+            let sensitivity = DcSensitivity::new(&scratch, &branches, n_branches)
+                .expect("reduced B is singular, so there are no sensitivities to benchmark");
+            let span = repeat.min(n_branches);
+            for a in 0..span {
+                for b in (a + 1)..span {
+                    if sensitivity.multi_outage_flows(&base.branch_p, &[a, b]).is_some() {
+                        produced += 1;
+                    }
+                }
+            }
+        }
         "batch" => {
             let scenarios: Vec<Scenario> = (0..repeat)
                 .map(|k| uniform_load_scaling(&buses, 0.5 + 0.001 * k as f64))
@@ -98,7 +117,7 @@ fn main() {
                 .expect("batch failed");
             produced = results.len();
         }
-        other => panic!("unknown mode {other:?}; expected solve, ptdf, lodf or batch"),
+        other => panic!("unknown mode {other:?}; expected solve, ptdf, lodf, n2 or batch"),
     }
     let elapsed = start.elapsed();
 
@@ -106,6 +125,13 @@ fn main() {
     println!("{total_ms:.3} ms total, {:.3} ms/run over {repeat} run(s)", total_ms / repeat as f64);
     match mode.as_str() {
         "solve" => println!("  {} branch flow(s) per run", produced / repeat.max(1)),
+        "n2" => {
+            let span = repeat.min(n_branches);
+            println!("  {} pair(s) screened, {produced} solvable", span * (span - 1) / 2);
+            if produced > 0 {
+                println!("  {:.4} ms/solvable pair", total_ms / produced as f64);
+            }
+        }
         "batch" => {
             println!("  {produced} scenario(s), one factorization for all of them");
             if produced > 0 {

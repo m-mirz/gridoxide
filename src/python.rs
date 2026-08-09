@@ -542,6 +542,49 @@ impl PowerFlowModel {
         Ok(self.require_sensitivity()?.outage_flows(&base, branch))
     }
 
+    /// Branch flows after **every** branch in `branches` trips at once — the
+    /// N-2/N-k generalization of `outage_flows`.
+    ///
+    /// Not obtainable by applying `outage_flows` repeatedly: each single-branch
+    /// factor was computed on the intact network, so chaining them ignores how
+    /// the outages interact. One `k × k` solve on top of `k` triangular solves
+    /// gives the exact answer.
+    ///
+    /// `None` if removing the whole set would disconnect the network (see
+    /// `is_breaking_set`), or if an index is repeated or out of range. An empty
+    /// set returns the base flows unchanged.
+    #[pyo3(signature = (branches, base_flows=None))]
+    fn multi_outage_flows(
+        &mut self,
+        branches: Vec<usize>,
+        base_flows: Option<Vec<f64>>,
+    ) -> PyResult<Option<Vec<f64>>> {
+        for &b in &branches {
+            self.check_branch(b)?;
+        }
+        let base = match base_flows {
+            Some(f) => f,
+            None => self.require_dc()?.branch_p.clone(),
+        };
+        let n = self.lines.len() + self.transformers.len();
+        if base.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "base_flows has {} entries, expected one per branch ({n})",
+                base.len()
+            )));
+        }
+        Ok(self.require_sensitivity()?.multi_outage_flows(&base, &branches))
+    }
+
+    /// Whether removing every branch in `branches` at once would disconnect the
+    /// network — the multi-branch analogue of `is_radial`.
+    fn is_breaking_set(&mut self, branches: Vec<usize>) -> PyResult<bool> {
+        for &b in &branches {
+            self.check_branch(b)?;
+        }
+        Ok(self.require_sensitivity()?.is_breaking_set(&branches))
+    }
+
     /// Branch-flow response to an arbitrary per-bus injection pattern, in
     /// per-unit. The primitive `ptdf_column` is a special case of; within
     /// each island whatever does not sum to zero is absorbed at its

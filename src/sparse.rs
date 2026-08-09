@@ -260,9 +260,74 @@ impl RealFactorization {
     }
 }
 
+/// Solves a small dense `A x = b` by Gaussian elimination with partial
+/// pivoting. Returns `None` if `A` is singular — no pivot clears a small
+/// absolute threshold.
+///
+/// Deliberately dense and deliberately unsophisticated: both callers pass a
+/// matrix whose order is a handful, where a sparse factorization's setup
+/// would cost more than the whole solve. `dc::solve_dc_network` uses it for
+/// the HVDC Newton step, and `linear::sensitivity` for the `k × k`
+/// generalized-LODF system over an outage set of `k` branches. It lives here
+/// rather than in either of those because it is a numeric utility with no
+/// power-system content, and because a reader looking for the crate's linear
+/// algebra looks here.
+///
+/// The absolute pivot threshold is meaningful for both callers: their
+/// matrices are O(1)-scaled (a Jacobian in per-unit, and `I - Ψ` whose
+/// entries are transfer fractions), so "no pivot above 1e-12" really does mean
+/// structurally singular rather than merely badly scaled.
+pub(crate) fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for col in 0..n {
+        let pivot_row = (col..n).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+        if a[pivot_row][col].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(col, pivot_row);
+        b.swap(col, pivot_row);
+        for row in (col + 1)..n {
+            let factor = a[row][col] / a[col][col];
+            if factor == 0.0 {
+                continue;
+            }
+            for k in col..n {
+                a[row][k] -= factor * a[col][k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for row in (0..n).rev() {
+        let sum: f64 = (row + 1..n).map(|k| a[row][k] * x[k]).sum();
+        x[row] = (b[row] - sum) / a[row][row];
+    }
+    Some(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solve_dense_matches_a_hand_solution() {
+        // [[2,1],[1,3]] x = [5,10] => x = [1,3]
+        let x = solve_dense(vec![vec![2.0, 1.0], vec![1.0, 3.0]], vec![5.0, 10.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12, "{x:?}");
+    }
+
+    /// Partial pivoting must handle a zero leading pivot rather than dividing
+    /// by it.
+    #[test]
+    fn solve_dense_pivots_past_a_zero_diagonal() {
+        let x = solve_dense(vec![vec![0.0, 2.0], vec![1.0, 1.0]], vec![4.0, 3.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12, "{x:?}");
+    }
+
+    #[test]
+    fn solve_dense_singular_returns_none() {
+        assert!(solve_dense(vec![vec![1.0, 1.0], vec![2.0, 2.0]], vec![1.0, 2.0]).is_none());
+    }
 
     #[test]
     fn solve_complex_simple_system() {

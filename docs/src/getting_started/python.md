@@ -85,6 +85,12 @@ if not model.is_radial(7):
 - `model.outage_flows(branch, base_flows=None)` — the N-1 primitive: flows *after* that branch
   trips, one solve and no re-solve of the network. Defaults to the last DC solve's own flows, so
   the usual call is `model.solve(); model.outage_flows(7)`.
+- `model.multi_outage_flows(branches, base_flows=None)` — N-2 and N-k, for a whole set tripping at
+  once. **Not** the same as calling `outage_flows` repeatedly: each single-branch factor was
+  computed on the intact network, so chaining them ignores how the outages interact.
+- `model.is_breaking_set(branches)` — whether removing the whole set would disconnect the network.
+  Two individually non-radial lines can be jointly breaking, which is exactly what single-branch
+  screening misses.
 
 ```python
 model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", method="dc")

@@ -786,6 +786,22 @@ scales worst. This is a stronger guarantee than `batch::BatchSolver` can offer o
 reuses only the *symbolic* half — Newton's Jacobian changes numerically at every iteration of every
 scenario, so the numeric factorization cannot be shared.
 
+N-2 screening via `DcSensitivity::multi_outage_flows`, over every pair drawn from the first 200
+branches (`./target/release/examples/bench_dc <case> 200 n2`). Removing `k` branches is a rank-`k`
+update, so each pair costs `k` triangular solves plus one `k × k` dense solve — never a
+refactorization:
+
+| Case | Pairs screened | Solvable | per solvable pair | Full DC re-solve | Speedup |
+|---|---|---|---|---|---|
+| case118 | 17,391 | 15,502 | 0.0050 ms | 0.046 ms | 9.2x |
+| case1354pegase | 19,900 | 9,017 | 0.0966 ms | 1.268 ms | 13x |
+| case9241pegase | 19,900 | 18,432 | 0.3955 ms | 13.40 ms | 34x |
+
+The unsolvable pairs are *breaking sets* — removing both branches disconnects the network, so no
+post-outage flow exists and `multi_outage_flows` returns `None` without a solve. They are the case
+single-branch screening misses entirely: two parallel lines are each individually non-radial, but
+together they may be the only path.
+
 ### Accuracy results
 
 DC has no convergence tolerance — it is a direct solve — so the meaningful quantity is the

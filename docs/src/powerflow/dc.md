@@ -243,8 +243,29 @@ scenario type built around per-bus overrides would be a worse API than the one t
 exists. Radial branches return `None`, since removing one islands the network rather than
 rerouting anything.
 
-Simultaneous multi-branch outages are not covered: those need the multi-outage LODF, which
-inverts a submatrix over the outaged set rather than scaling a single column.
+**Simultaneous outages need one more step, and it is not optional.**
+`DcSensitivity::multi_outage_flows` handles a whole set at once. Removing `k` branches is a
+rank-`k` update to \\(B\\), so Woodbury reduces the entire problem to one \\(k\times k\\) solve on
+top of the same \\(k\\) triangular solves a set of single outages would need:
+
+\\[ (I - \Psi_{LL})\,c = f_L, \qquad f^{new} = f + \sum_{l \in L} c_l\,\psi[:, l] \\]
+
+where \\(\psi[m][l]\\) is the flow appearing on branch \\(m\\) per unit of power transferred across
+branch \\(l\\)'s terminals. At \\(k = 1\\) this collapses to \\(c = f_l/(1 - d_l)\\) and the familiar
+LODF column, which is why `outage_flows` simply delegates here rather than keeping a second
+implementation.
+
+Applying single-branch LODF columns one after another is *not* a substitute. Each was computed on
+the intact network, so chaining ignores how the first outage changes the way the second one's power
+redistributes — algebraically, the sequential route drops the \\(-\Psi_{ab}c_b\\) coupling term, so
+the two agree only where \\(\Psi_{ab} = 0\\). `chaining_single_outages_is_not_a_substitute` measures
+that gap on a meshed five-bus network: the simultaneous answer matches a re-solve to \\(10^{-9}\\)
+while the chained one is out by more than \\(10^{-3}\\).
+
+\\(I - \Psi_{LL}\\) is singular exactly when the set is *breaking* — removing all of it disconnects
+the network. `is_breaking_set` reports that, and it is the case single-branch screening misses
+entirely: two parallel lines are each individually non-radial, but together they may be the only
+path.
 
 ## Tool reference
 

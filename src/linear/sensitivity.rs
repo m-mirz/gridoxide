@@ -299,21 +299,109 @@ impl DcSensitivity {
     /// `base_flows` must be indexed by flat branch index, as
     /// [`DcSolution::branch_p`](super::btheta::DcSolution::branch_p) is.
     pub fn outage_flows(&self, base_flows: &[f64], branch: usize) -> Option<Vec<f64>> {
+        self.multi_outage_flows(base_flows, &[branch])
+    }
+
+    /// Branch flows after **every** branch in `branches` trips at once.
+    ///
+    /// The N-2 (and N-k) generalization of [`outage_flows`](Self::outage_flows),
+    /// and not obtainable by applying single-branch LODF columns one after
+    /// another: simultaneous outages interact, because each one changes how the
+    /// others' power redistributes.
+    ///
+    /// # The generalized formulation
+    ///
+    /// Removing a set `L` is a rank-`k` update to `B`, so Woodbury gives the
+    /// whole answer in one `k × k` solve. With `ψ[m][l]` the flow appearing on
+    /// branch `m` per unit of power transferred across branch `l`'s terminals —
+    /// one triangular solve against the cached factorization per outaged branch,
+    /// exactly what a single-branch outage already needs:
+    ///
+    /// \\[ (I - \Psi_{LL})\,c = f_L, \qquad
+    ///     f^{new} = f + \sum_{l \in L} c_l\, \psi[:, l] \\]
+    ///
+    /// For `k = 1` this collapses to `c = f_l/(1 - d_l)` and the familiar
+    /// `LODF[:, l] = ψ[:, l]/(1 - d_l)`, which is why
+    /// [`outage_flows`](Self::outage_flows) simply delegates here rather than
+    /// keeping a second implementation.
+    ///
+    /// # When it returns `None`
+    ///
+    /// `I - Ψ_LL` is singular exactly when the set is *breaking* — removing all
+    /// of it disconnects the network, so the power has nowhere to redistribute
+    /// to and no post-outage flow exists. That is the multi-branch analogue of
+    /// a radial branch, and it is a structural fact rather than a numerical
+    /// accident, so it is reported rather than papered over. Also `None` for a
+    /// repeated index, an out-of-range index, or a branch that carries no DC
+    /// flow.
+    ///
+    /// An empty set returns `base_flows` unchanged.
+    pub fn multi_outage_flows(
+        &self,
+        base_flows: &[f64],
+        branches: &[usize],
+    ) -> Option<Vec<f64>> {
         if base_flows.len() != self.n_branches {
             return None;
         }
-        let column = self.lodf_column(branch)?;
-        let lost = base_flows[branch];
-        let mut out: Vec<f64> = base_flows
-            .iter()
-            .zip(&column)
-            .map(|(f, factor)| f + factor * lost)
-            .collect();
-        // `column[branch]` is exactly -1, so this is already zero up to
-        // round-off; setting it makes that exact, since "the branch that
-        // tripped carries nothing" is a fact rather than a computed value.
-        out[branch] = 0.0;
+        if branches.is_empty() {
+            return Some(base_flows.to_vec());
+        }
+        // A repeated branch would make `I - Ψ_LL` singular for a reason that
+        // has nothing to do with the network, so reject it as malformed input
+        // rather than reporting it as a breaking set.
+        for (i, a) in branches.iter().enumerate() {
+            if branches[i + 1..].contains(a) {
+                return None;
+            }
+        }
+
+        // One solve per outaged branch. `psi[l]` is the full flow response to a
+        // unit transfer across branches[l]'s terminals — zero outside that
+        // branch's own island, which is what makes an outage set spanning
+        // several islands fall out correctly: Ψ_LL is block diagonal and the
+        // system decouples on its own.
+        let k = branches.len();
+        let mut psi = Vec::with_capacity(k);
+        for &l in branches {
+            psi.push(self.outage_response(l)?.0);
+        }
+
+        // M = I - Ψ_LL, with Ψ_LL[m][l] the flow on outaged branch m caused by
+        // a unit transfer at outaged branch l.
+        let mut m = vec![vec![0.0; k]; k];
+        for (row, &branch_m) in branches.iter().enumerate() {
+            for (col, _) in branches.iter().enumerate() {
+                let identity = if row == col { 1.0 } else { 0.0 };
+                m[row][col] = identity - psi[col][branch_m];
+            }
+        }
+        let rhs: Vec<f64> = branches.iter().map(|&l| base_flows[l]).collect();
+        let c = crate::sparse::solve_dense(m, rhs)?;
+
+        let mut out = base_flows.to_vec();
+        for (idx, &factor) in c.iter().enumerate() {
+            for (dst, src) in out.iter_mut().zip(&psi[idx]) {
+                *dst += factor * src;
+            }
+        }
+        // A branch that has been removed carries nothing. That is a fact about
+        // the post-outage network, not a computed value — the formula above
+        // instead yields the compensating transfer `c_l` in that slot.
+        for &l in branches {
+            out[l] = 0.0;
+        }
         Some(out)
+    }
+
+    /// Whether removing every branch in `branches` at once would disconnect the
+    /// network, leaving no post-outage flows to compute.
+    ///
+    /// The multi-branch analogue of [`is_radial`](Self::is_radial), and `true`
+    /// for the same malformed inputs [`multi_outage_flows`](Self::multi_outage_flows)
+    /// rejects.
+    pub fn is_breaking_set(&self, branches: &[usize]) -> bool {
+        self.multi_outage_flows(&vec![0.0; self.n_branches], branches).is_none()
     }
 
     /// `∂P_branch/∂P_bus` over every branch, for injection at one bus.

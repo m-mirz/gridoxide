@@ -224,3 +224,42 @@ def test_outage_flows_validates_its_input():
         model.outage_flows(model.n_branches)
     with pytest.raises(ValueError, match="one per branch"):
         model.outage_flows(0, [0.0])
+
+
+def test_multi_outage_flows_and_breaking_sets():
+    """N-2 screening, and the reason it is not just N-1 applied twice."""
+    model = dc_model()
+    model.solve()
+    base = model.branch_flow_p()
+
+    # An empty set changes nothing; a repeated index is malformed input.
+    assert model.multi_outage_flows([]) == base
+    assert model.multi_outage_flows([0, 0]) is None
+
+    checked, breaking = 0, 0
+    for a in range(model.n_branches):
+        for b in range(a + 1, model.n_branches):
+            after = model.multi_outage_flows([a, b])
+            if after is None:
+                assert model.is_breaking_set([a, b])
+                breaking += 1
+                continue
+            # Both outaged branches carry nothing afterwards.
+            assert after[a] == 0.0 and after[b] == 0.0
+            # A one-element set must agree with the single-branch entry point.
+            assert model.multi_outage_flows([a]) == model.outage_flows(a)
+            checked += 1
+
+    assert checked > 0, "no solvable pair was screened"
+    assert breaking > 0, "no breaking pair was found, so is_breaking_set is untested"
+
+
+def test_multi_outage_validates_its_input():
+    model = dc_model()
+    model.solve()
+    with pytest.raises(ValueError, match="out of range"):
+        model.multi_outage_flows([model.n_branches])
+    with pytest.raises(ValueError, match="one per branch"):
+        model.multi_outage_flows([0], [0.0])
+    with pytest.raises(ValueError, match="out of range"):
+        model.is_breaking_set([model.n_branches])
