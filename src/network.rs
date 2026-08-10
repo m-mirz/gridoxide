@@ -3,6 +3,7 @@ use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, 
 use super::sparse;
 
 /// A lumped shunt admittance to be added to the Y-bus diagonal at bus `at`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShuntAdm {
     pub at: usize,
     pub y: Complex<f64>,
