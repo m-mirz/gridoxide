@@ -11,6 +11,19 @@ An unobservable system is not a numerical accident, and treating it as one produ
 diagnostic available — a factorization that failed, with no indication why. The useful answer names
 the unknowns nobody is watching.
 
+Two things determine state, and the analysis has to count both.
+
+**Constraints determine state too.** A zero injection is not a measurement, but it is information —
+`se::constraints` puts its rows into the very system the estimator solves, so a state those rows
+determine really is estimated. `analyze` used to look only at \(H\), and would call such a state
+unobservable: a diagnosis that sends the user hunting for a sensor they do not need. It now takes the
+constraint set and folds those rows into the rank computation at unit weight — the magnitude is
+irrelevant, since \(\operatorname{rank}(H^{T}WH) = \operatorname{rank}(H)\) for any positive
+\(W\), and a hard equality is a measurement of unbounded weight.
+
+That was already wrong on ordinary data. It becomes acute on node-breaker models, where a merged
+group's internal structure is entirely constraint-determined.
+
 There are two distinct failures.
 
 **Structural.** A column of \\(H\\) that is identically zero: no measurement function mentions that

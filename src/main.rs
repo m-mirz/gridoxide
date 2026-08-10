@@ -201,7 +201,16 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
     }
 
     let layout = StateLayout::new(&buses, &measurements, &se_net);
-    let obs = observability::analyze(&measurements, &buses, &se_net, &layout);
+    // The same constraints the estimator itself enforces — a state a
+    // zero-injection constraint determines is observable, and reporting it
+    // otherwise would send the user hunting for a sensor they do not need.
+    let obs = observability::analyze(
+        &measurements,
+        &buses,
+        &se_net,
+        &layout,
+        &Constraints::new(&se_net),
+    );
     println!(
         "\nObservability: rank {} of {} unknown(s)",
         obs.rank, obs.n_unknowns

@@ -65,8 +65,14 @@ against `f96a660`.
 > `tests/cgmes_node_breaker_solve_test.rs`. `switches::NodeBreakerNetwork` owns the switch↔branch
 > mapping and offers `switch_flow`/`set_switch_open`/`is_switch_open`, which is §7's Rust surface.
 >
+> *Phase 5 is begun*: the observability gap §5.5 identifies is fixed —
+> `se::observability::analyze` now counts constraint rows in the rank, which was already wrong on
+> ordinary PGM data. The rest of phase 5 needs state estimation to accept a non-PGM network at all
+> (`SeNetwork::new` takes `&pgm::PgmNetwork`), which this document does not mention and which is the
+> real prerequisite.
+>
 > Phase 3 is not started, and its justification is weaker than this document argues — see §1.1(d).
-> Phase 5 (state estimation) and the CLI/Python half of §7 are not started.
+> The CLI/Python half of §7 is not started.
 
 This document answers: *what would it take for gridoxide to model node-breaker topology as a
 first-class thing, across every calculation it already supports — AC Newton-Raphson, DC Bθ, the
@@ -530,7 +536,12 @@ The least new machinery, because the augmented system is already there.
   — every one is an exact zero injection, which is *information*, and `Constraints` already exploits
   it. Node-breaker import therefore tends to *improve* observability while enlarging the system. Both
   effects need measuring.
-- **Observability has a gap to close first.** `se::observability::analyze(measurements, buses, net,
+- **Observability has a gap to close first. ✅ Done** — `se::observability::analyze` now takes the
+  constraint set and counts those rows in the rank, at unit weight (rank is weight-independent for
+  any positive `W`, and a hard equality is a measurement of unbounded weight). Worth doing on its own
+  merits, exactly as this bullet says: it was already wrong on ordinary PGM data, where a
+  zero-injection bus was reported unobservable despite the estimator solving it exactly.
+  Original text: `se::observability::analyze(measurements, buses, net,
   layout)` takes no constraints, so it currently judges observability from measurements alone and
   ignores the zero-injection constraints that in fact determine part of the state. That is already
   slightly wrong today; with node-breaker it becomes badly wrong, since a merged group's internal
