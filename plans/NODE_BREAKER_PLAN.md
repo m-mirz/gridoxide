@@ -22,7 +22,8 @@ against `f96a660`.
 > §1.1's counts, `se::constraints::augment`'s generic signature, and `measurement::Target`'s
 > variants are all unchanged.
 >
-> **Implementation status.** **Phases 0 and 1 are done; phase 2 is partly done** (§9).
+> **Implementation status.** **Phases 0, 1, 2, 4 and 6 are done** (§9). Phases 3, 5 and part of 7
+> remain.
 >
 > *Phase 0* turned `src/topology.rs` into a directory — `model`
 > (`NodeIdx`/`BusIdx`/`SwitchIdx`, `Switch`, `SwitchKind`, `NodeBreakerTopology`), `bus_view`
@@ -56,7 +57,16 @@ against `f96a660`.
 > `connected_components` counting an out-of-service branch as a connection, and `classify` counting
 > a de-energized placeholder as a reference bus. Both are fixed.
 >
-> Phases 3–7 are not started.
+> *Phases 4 and 6 are substantially done, and came free.* A retained switch **is** a branch, so the
+> existing machinery works on one without knowing it is a switch: DC solves a node-breaker network
+> and reports switch flows at their own branch indices (§5.2); a switch's `DcSensitivity::lodf_column`
+> *is* its bus-split distribution factor (§5.4's headline capability); and a switching campaign is an
+> ordinary `BatchSolver::solve_contingencies` sweep (§5.6). All three are asserted on MiniGrid in
+> `tests/cgmes_node_breaker_solve_test.rs`. `switches::NodeBreakerNetwork` owns the switch↔branch
+> mapping and offers `switch_flow`/`set_switch_open`/`is_switch_open`, which is §7's Rust surface.
+>
+> Phase 3 is not started, and its justification is weaker than this document argues — see §1.1(d).
+> Phase 5 (state estimation) and the CLI/Python half of §7 are not started.
 
 This document answers: *what would it take for gridoxide to model node-breaker topology as a
 first-class thing, across every calculation it already supports — AC Newton-Raphson, DC Bθ, the
@@ -809,7 +819,20 @@ retained switch back and forth within one batch and assert each state matches it
 solve. That is the test that catches the cache hazard, and it costs nothing to write before the
 feature exists.
 
-**Phase 4 — DC, linear impedance, and switching contingencies.**
+**Phase 4 — DC, linear impedance, and switching contingencies. ✅ Substantially done, for free.**
+Nothing had to be built: `regularized_branches` makes a retained switch an ordinary
+[`Transformer`], so `dc_power_flow`, `linear_power_flow`, `DcSensitivity` and
+`BatchSolver::solve_contingencies` all accept one already. Verified on MiniGrid — DC residual under
+1e-9 with switch flows at their own branch indices, LODF columns for every non-radial switch, and a
+30-scenario switch-opening sweep in which every non-convergent case is a radial switch (i.e. an
+island, which is a screening result rather than a failure).
+
+What is *not* covered is what §5.4 describes as sensitivities "through the augmented system" — that
+belongs to `Constrain` and therefore to phase 3. Under `Regularize` a switch is just a branch with a
+finite (very large) susceptance, so classical LODF applies to it directly, which is why this came
+free at all.
+
+Original scope, for reference:
 §5.2, §5.3, then §5.4's Woodbury bus-split sensitivities. Smaller than originally scoped: the
 Woodbury machinery landed with `DcSensitivity::multi_outage_flows`, so what remains is applying it
 to a switch-state flip against the augmented matrix rather than to a branch removal against `B`.
@@ -820,8 +843,15 @@ to the bus splits operators actually perform.
 Generalized `Constraints`, `Target::SwitchFlow`, and the observability constraint-accounting fix
 (§5.5) — which is worth doing on its own merits even if node-breaker were dropped.
 
-**Phase 6 — batch switching campaigns.**
-`SwitchingScenario` over the existing `BatchSolver`. Small, given phase 3.
+**Phase 6 — batch switching campaigns. ✅ Done, for free.**
+No `SwitchingScenario` type was needed: a switch has a branch index, so
+`Scenario::branch_outages` already expresses "open this breaker", and
+`BatchSolver::solve_contingencies` already shares one symbolic factorization across the sweep.
+`NodeBreakerNetwork::switch_branches` supplies the indices.
+
+`opening_a_switch_changes_the_solution_but_not_the_pattern` also pins the property §4.2 rests on,
+now measured on real data rather than argued: flipping a switch through `set_switch_open` moves the
+solution but leaves the Y-bus sparsity pattern bit-identical.
 
 **Phase 7 — API, CLI, Python, benchmarks.**
 Ongoing through 2–6 rather than deferred; called out separately only for the cross-cutting bits

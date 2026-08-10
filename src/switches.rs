@@ -73,6 +73,7 @@
 use num_complex::Complex;
 
 use crate::topology::bus_view::{BusView, RetainedSwitch};
+use crate::topology::model::SwitchIdx;
 use crate::topology::ideal_connection_z;
 use crate::types::Transformer;
 
@@ -509,5 +510,153 @@ mod tests {
         // And `connected_components` reads the value, not merely the structure,
         // so it sees the separation: two components, not one.
         assert_eq!(connected_components(&ybus).len(), 2);
+    }
+}
+
+/// A network whose retained switches are addressable elements.
+///
+/// The problem this solves is index arithmetic. `regularized_branches` appends
+/// switch branches to a transformer list, so a switch's flat branch index is
+/// `lines.len() + model_transformers + n` — which the caller had to compute,
+/// and which silently desynchronizes the moment anything about the branch order
+/// changes. Owning the mapping removes that whole class of mistake, and it is
+/// what makes the rest of the crate usable on switches without knowing they are
+/// switches.
+///
+/// # What comes free
+///
+/// A retained switch *is* a branch, so nothing else needed changing to make the
+/// existing machinery work on one:
+///
+/// - **DC** — `linear::dc_power_flow` takes the branch lists, so a switch's
+///   active flow appears in `DcSolution::branch_p` at its own index.
+/// - **Sensitivities** — `DcSensitivity::lodf_column` at a switch's branch index
+///   *is* its bus-split distribution factor, which
+///   `plans/NODE_BREAKER_PLAN.md` §5.4 calls the highest-value remaining item.
+/// - **AC contingencies** — `batch::BatchSolver::solve_contingencies` outages a
+///   switch by its branch index like any other branch, so a switching campaign
+///   is an ordinary contingency sweep.
+///
+/// The one thing that is *not* free is the flow through a closed switch inside
+/// a loop of closed switches: see [`degenerate_switches`] and
+/// `zero_impedance_branches.md`.
+#[derive(Clone, Debug)]
+pub struct NodeBreakerNetwork {
+    pub buses: Vec<crate::types::Bus>,
+    pub lines: Vec<crate::types::Line>,
+    /// The model's own transformers, followed by one branch per non-degenerate
+    /// retained switch.
+    pub transformers: Vec<Transformer>,
+    pub shunts: Vec<crate::network::ShuntAdm>,
+    pub view: BusView,
+    /// Position in [`BusView::retained`] -> flat branch index, or `None` for a
+    /// degenerate switch that was not stamped.
+    branch_of_retained: Vec<Option<usize>>,
+}
+
+impl NodeBreakerNetwork {
+    /// Assembles the network, stamping retained switches under `treatment`.
+    pub fn new(
+        buses: Vec<crate::types::Bus>,
+        lines: Vec<crate::types::Line>,
+        mut transformers: Vec<Transformer>,
+        shunts: Vec<crate::network::ShuntAdm>,
+        view: BusView,
+        treatment: SwitchTreatment,
+    ) -> Self {
+        let mut branch_of_retained = vec![None; view.retained().len()];
+        if treatment == SwitchTreatment::Regularize {
+            let base = lines.len() + transformers.len();
+            let mut stamped = 0;
+            for (n, r) in view.retained().iter().enumerate() {
+                if view.is_degenerate(r) {
+                    continue;
+                }
+                branch_of_retained[n] = Some(base + stamped);
+                stamped += 1;
+            }
+            transformers.extend(regularized_branches(&view));
+            debug_assert_eq!(lines.len() + transformers.len(), base + stamped);
+        }
+        Self { buses, lines, transformers, shunts, view, branch_of_retained }
+    }
+
+    /// Total branch count — the length of every branch-indexed vector the
+    /// solvers return for this network.
+    pub fn n_branches(&self) -> usize {
+        self.lines.len() + self.transformers.len()
+    }
+
+    /// The flat branch index of the `n`th retained switch, or `None` if it was
+    /// degenerate (both ends on one bus) and therefore not stamped.
+    pub fn branch_of_retained(&self, n: usize) -> Option<usize> {
+        self.branch_of_retained.get(n).copied().flatten()
+    }
+
+    /// The flat branch index of a switch named by its position in the source
+    /// topology, or `None` if it was not retained or was degenerate.
+    pub fn branch_of_switch(&self, switch: SwitchIdx) -> Option<usize> {
+        let n = self.view.retained().iter().position(|r| r.switch == switch)?;
+        self.branch_of_retained(n)
+    }
+
+    /// Every retained switch's `(SwitchIdx, branch index)`, skipping degenerate
+    /// ones — the list a contingency campaign iterates.
+    pub fn switch_branches(&self) -> Vec<(SwitchIdx, usize)> {
+        self.view
+            .retained()
+            .iter()
+            .enumerate()
+            .filter_map(|(n, r)| self.branch_of_retained(n).map(|b| (r.switch, b)))
+            .collect()
+    }
+
+    /// Opens or closes a retained switch in place.
+    ///
+    /// Changes Y-bus *values* only — the branch keeps its structural entries at
+    /// zero when open, so the sparsity pattern is unchanged and a cached
+    /// symbolic factorization stays valid. A cached
+    /// [`JacobianPattern`](crate::jacobian::JacobianPattern) does **not**:
+    /// it stores each entry's admittance, so a solver reused across a position
+    /// change needs
+    /// [`PersistentSolver::invalidate_admittances`](crate::solver::PersistentSolver::invalidate_admittances)
+    /// — not `reset`, which would throw away the factorization this is designed
+    /// to keep.
+    ///
+    /// Returns `false` if the switch is not retained or was degenerate.
+    pub fn set_switch_open(&mut self, switch: SwitchIdx, open: bool) -> bool {
+        let Some(branch) = self.branch_of_switch(switch) else { return false };
+        let status = u8::from(!open);
+        let t = &mut self.transformers[branch - self.lines.len()];
+        t.from_status = status;
+        t.to_status = status;
+        true
+    }
+
+    /// Whether a retained switch is currently open. `None` if it is not
+    /// retained or was degenerate.
+    pub fn is_switch_open(&self, switch: SwitchIdx) -> Option<bool> {
+        let branch = self.branch_of_switch(switch)?;
+        Some(self.transformers[branch - self.lines.len()].from_status == 0)
+    }
+
+    /// Complex power entering a switch at its `from` terminal, given solved bus
+    /// voltages. `None` if the switch has no branch.
+    ///
+    /// This is `branch_flow::terminal_flow` at the switch's own index — a
+    /// switch reports its flow through exactly the same path any other branch
+    /// does.
+    pub fn switch_flow(
+        &self,
+        switch: SwitchIdx,
+        voltages: &[num_complex::Complex<f64>],
+    ) -> Option<(f64, f64)> {
+        let branch = self.branch_of_switch(switch)?;
+        let params = crate::branch_flow::branch_params(&self.lines, &self.transformers);
+        Some(crate::branch_flow::terminal_flow(
+            &params[branch],
+            crate::branch_flow::Terminal::From,
+            voltages,
+        ))
     }
 }

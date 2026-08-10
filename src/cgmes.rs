@@ -2310,29 +2310,26 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
     s_base_va: f64,
     policy: &crate::topology::RetentionPolicy,
     treatment: crate::switches::SwitchTreatment,
-) -> Result<
-    (Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>, crate::topology::BusView),
-    CgmesError,
-> {
+) -> Result<crate::switches::NodeBreakerNetwork, CgmesError> {
     let (buses, idx_of, terms, _nb, view) = build_node_breaker_skeleton(ds, policy)?;
-    let (buses, lines, mut transformers, shunts) =
+    let (buses, lines, transformers, shunts) =
         convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
 
-    match treatment {
-        crate::switches::SwitchTreatment::Merge => {
-            if !view.retained().is_empty() {
-                return Err(CgmesError::UnsupportedTransformer {
-                    mrid: "(retention policy)".to_string(),
-                    reason: "SwitchTreatment::Merge cannot represent a retained switch; use \
-                             RetentionPolicy::MergeAll or SwitchTreatment::Regularize"
-                        .to_string(),
-                });
-            }
-        }
-        crate::switches::SwitchTreatment::Regularize => {
-            transformers.extend(crate::switches::regularized_branches(&view));
-        }
+    if treatment == crate::switches::SwitchTreatment::Merge && !view.retained().is_empty() {
+        return Err(CgmesError::UnsupportedTransformer {
+            mrid: "(retention policy)".to_string(),
+            reason: "SwitchTreatment::Merge cannot represent a retained switch; use \
+                     RetentionPolicy::MergeAll or SwitchTreatment::Regularize"
+                .to_string(),
+        });
     }
 
-    Ok((buses, lines, transformers, shunts, view))
+    Ok(crate::switches::NodeBreakerNetwork::new(
+        buses,
+        lines,
+        transformers,
+        shunts,
+        view,
+        treatment,
+    ))
 }
