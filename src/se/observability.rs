@@ -234,9 +234,26 @@ pub fn analyze(
     buses: &[Bus],
     net: &SeNetwork,
     layout: &StateLayout,
+    constraints: &crate::se::constraints::Constraints,
 ) -> ObservabilityReport {
     let n = layout.n_unknowns();
-    let rows = measurement_jacobian(measurements, buses, net, layout);
+
+    // Measurements *and* constraints determine state, and until now only the
+    // former were counted — so a bus whose voltage is fixed by a zero-injection
+    // constraint was reported unobservable even though the estimator solves it
+    // exactly. `se::constraints::augment` has always put these rows into the
+    // system; this analysis simply did not know about them.
+    //
+    // A constraint is a hard equality, i.e. a measurement of unbounded weight.
+    // Rank does not depend on the magnitude — `rank(HᵀWH) = rank(H)` for any
+    // positive `W` — so unit weight is the right choice here, and avoids
+    // putting a huge number into a matrix that is about to be factorized.
+    let mut rows = measurement_jacobian(measurements, buses, net, layout);
+    let mut weights: Vec<f64> = measurements.iter().map(|m| m.weight()).collect();
+    let (_, constraint_rows) = constraints.evaluate(buses, net, layout);
+    let n_constraints = constraint_rows.len();
+    rows.extend(constraint_rows);
+    weights.extend(std::iter::repeat_n(1.0, n_constraints));
 
     // A global-angle current sensor supplies an absolute phase; a voltage angle
     // is what gives that phase a meaning. `StateLayout` pins a reference bus
@@ -285,8 +302,7 @@ pub fn analyze(
     }
 
     let mut g = Mat::<f64>::zeros(n, n);
-    for (row, m) in rows.iter().zip(measurements) {
-        let w = m.weight();
+    for (row, &w) in rows.iter().zip(&weights) {
         if !w.is_finite() || w == 0.0 {
             continue;
         }
@@ -326,6 +342,7 @@ mod tests {
     use super::*;
     use crate::branch_flow::Terminal;
     use crate::measurement::{MeasurementKind, Target};
+    use crate::se::constraints::Constraints;
 
     fn m(kind: MeasurementKind, target: Target) -> Measurement {
         Measurement { kind, target, value: 0.0, sigma: 0.01 }
@@ -389,12 +406,78 @@ mod tests {
             ),
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout);
+        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
         assert!(
             report.is_observable(),
             "expected observable, got {report:?}"
         );
         assert_eq!(report.rank, report.n_unknowns);
+    }
+
+    /// A zero-injection constraint determines state just as a measurement does,
+    /// and the report has to say so.
+    ///
+    /// This was wrong until `analyze` took the constraints: `se::constraints`
+    /// has always put these rows into the system the estimator actually solves,
+    /// so a state they determine *is* estimated — but the observability report
+    /// looked only at measurements and called it unobservable, sending a user
+    /// hunting for a sensor they do not need. Node-breaker models make it acute,
+    /// since a merged group's internal structure is entirely
+    /// constraint-determined, but it was already wrong on ordinary data.
+    #[test]
+    fn a_zero_injection_constraint_makes_state_observable() {
+        let (net, buses) = crate::se::tests::two_bus_net();
+        // Bus 1's own injection is not measured; only its magnitude is.
+        let measurements = vec![
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(0)),
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(1)),
+        ];
+        let layout = StateLayout::new(&buses, &measurements, &net);
+
+        let without =
+            analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+        assert!(!without.is_observable(), "the fixture must be under-determined without help");
+
+        // Declaring bus 1 a zero-injection node supplies the missing rows.
+        let mut flags = vec![false; buses.len()];
+        flags[1] = true;
+        let with = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&flags),
+        );
+        assert!(
+            with.rank > without.rank,
+            "a zero-injection constraint determined nothing: rank {} vs {}",
+            with.rank,
+            without.rank
+        );
+    }
+
+    /// Constraints must not be able to *reduce* what is reported as
+    /// determined — adding rows to a rank computation can only raise it.
+    #[test]
+    fn constraints_never_lower_the_reported_rank() {
+        let (net, buses) = crate::se::tests::two_bus_net();
+        let measurements = vec![
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(0)),
+            m(MeasurementKind::VoltageMagnitude, Target::Bus(1)),
+            m(MeasurementKind::ActivePower, Target::Bus(1)),
+            m(MeasurementKind::ReactivePower, Target::Bus(1)),
+        ];
+        let layout = StateLayout::new(&buses, &measurements, &net);
+        let bare = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+
+        let mut flags = vec![false; buses.len()];
+        flags[1] = true;
+        let constrained =
+            analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&flags));
+        assert!(constrained.rank >= bare.rank);
+        assert!(
+            constrained.structurally_unmeasured.len() <= bare.structurally_unmeasured.len()
+        );
     }
 
     /// One voltage magnitude cannot determine three unknowns, and the report
@@ -405,7 +488,7 @@ mod tests {
         let (net, buses) = crate::se::tests::two_bus_net();
         let measurements = vec![m(MeasurementKind::VoltageMagnitude, Target::Bus(0))];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout);
+        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
 
         assert!(!report.is_observable());
         assert_eq!(report.rank, 1, "only the measured magnitude is determined");
@@ -442,7 +525,7 @@ mod tests {
             ),
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout);
+        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
 
         assert_eq!(report.n_unknowns, 3);
         assert!(
@@ -476,7 +559,7 @@ mod tests {
             flow,
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout);
+        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
 
         assert_eq!(measurements.len(), report.n_unknowns, "as many rows as unknowns");
         assert_eq!(report.rank, 2, "but only two of them are independent");
@@ -504,7 +587,7 @@ mod tests {
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
         assert!(layout.angle_ref.is_some(), "no angle measured, so one is pinned");
-        let report = analyze(&measurements, &buses, &net, &layout);
+        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
         assert!(report.is_observable(), "{report:?}");
     }
 }

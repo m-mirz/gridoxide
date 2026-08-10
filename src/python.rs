@@ -1157,6 +1157,7 @@ impl StateEstimationModel {
             &self.buses,
             &self.se_net,
             &layout,
+            &crate::se::constraints::Constraints::new(&self.se_net),
         );
         report
             .unobservable

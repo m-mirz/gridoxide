@@ -400,7 +400,16 @@ fn fixtures_are_observable_in_their_physical_unknowns() {
         let mut buses = net.buses.clone();
         linear_start(&mut buses, &se_net, &measurements);
         let layout = StateLayout::new(&buses, &measurements, &se_net);
-        let report = analyze(&measurements, &buses, &se_net, &layout);
+        // The same constraints the estimator enforces: a state a zero-injection
+        // constraint determines is observable, and reporting it otherwise would
+        // send a user hunting for a sensor they do not need.
+        let report = analyze(
+            &measurements,
+            &buses,
+            &se_net,
+            &layout,
+            &Constraints::new(&se_net),
+        );
         assert!(!report.skipped_numerical, "{name}: fixture should be small enough to analyze");
 
         // Physical nodes occupy the first `id_to_idx.len()` bus indices.
