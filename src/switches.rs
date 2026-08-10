@@ -549,6 +549,15 @@ pub struct NodeBreakerNetwork {
     pub transformers: Vec<Transformer>,
     pub shunts: Vec<crate::network::ShuntAdm>,
     pub view: BusView,
+    /// The switch graph the view was derived from, kept so a switch can report
+    /// its own kind — a caller deciding whether to operate something needs to
+    /// know a breaker from a disconnector, and neither [`BusView`] nor
+    /// [`RetainedSwitch`] carries that.
+    pub topology: crate::topology::NodeBreakerTopology,
+    /// Per switch, a human-meaningful identifier from the source model (a CGMES
+    /// mRID). Empty when the source has none, in which case callers fall back
+    /// to [`SwitchIdx`].
+    pub switch_labels: Vec<String>,
     /// Position in [`BusView::retained`] -> flat branch index, or `None` for a
     /// degenerate switch that was not stamped.
     branch_of_retained: Vec<Option<usize>>,
@@ -556,12 +565,15 @@ pub struct NodeBreakerNetwork {
 
 impl NodeBreakerNetwork {
     /// Assembles the network, stamping retained switches under `treatment`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         buses: Vec<crate::types::Bus>,
         lines: Vec<crate::types::Line>,
         mut transformers: Vec<Transformer>,
         shunts: Vec<crate::network::ShuntAdm>,
         view: BusView,
+        topology: crate::topology::NodeBreakerTopology,
+        switch_labels: Vec<String>,
         treatment: SwitchTreatment,
     ) -> Self {
         let mut branch_of_retained = vec![None; view.retained().len()];
@@ -578,7 +590,30 @@ impl NodeBreakerNetwork {
             transformers.extend(regularized_branches(&view));
             debug_assert_eq!(lines.len() + transformers.len(), base + stamped);
         }
-        Self { buses, lines, transformers, shunts, view, branch_of_retained }
+        Self {
+            buses,
+            lines,
+            transformers,
+            shunts,
+            view,
+            topology,
+            switch_labels,
+            branch_of_retained,
+        }
+    }
+
+    /// A switch's kind — breaker, disconnector, fuse and so on.
+    pub fn switch_kind(&self, switch: SwitchIdx) -> Option<crate::topology::SwitchKind> {
+        self.topology.switches.get(switch.0).map(|s| s.kind)
+    }
+
+    /// A switch's source-model identifier, or its index rendered as text when
+    /// the source supplied none.
+    pub fn switch_label(&self, switch: SwitchIdx) -> String {
+        self.switch_labels
+            .get(switch.0)
+            .cloned()
+            .unwrap_or_else(|| format!("switch{}", switch.0))
     }
 
     /// Total branch count — the length of every branch-indexed vector the
@@ -613,15 +648,25 @@ impl NodeBreakerNetwork {
 
     /// Opens or closes a retained switch in place.
     ///
-    /// Changes Y-bus *values* only — the branch keeps its structural entries at
-    /// zero when open, so the sparsity pattern is unchanged and a cached
-    /// symbolic factorization stays valid. A cached
-    /// [`JacobianPattern`](crate::jacobian::JacobianPattern) does **not**:
-    /// it stores each entry's admittance, so a solver reused across a position
-    /// change needs
-    /// [`PersistentSolver::invalidate_admittances`](crate::solver::PersistentSolver::invalidate_admittances)
-    /// — not `reset`, which would throw away the factorization this is designed
-    /// to keep.
+    /// Changes Y-bus *values* only: the branch keeps its structural entries at
+    /// zero when open, so the **Y-bus** sparsity pattern is unchanged.
+    ///
+    /// The **Jacobian** pattern is a separate question, and the distinction
+    /// matters for what a caller must invalidate:
+    ///
+    /// - A cached [`JacobianPattern`](crate::jacobian::JacobianPattern) is
+    ///   always stale afterwards, since it stores each entry's admittance.
+    /// - Its *size* changes too whenever the flip severs part of the network:
+    ///   `connected_components` sees the opening (it reads values, not just
+    ///   structure), `mark_unreferenced_islands` pins the stranded buses to
+    ///   `Slack`, and the unknown count moves with them.
+    ///
+    /// So [`PersistentSolver::invalidate_admittances`](crate::solver::PersistentSolver::invalidate_admittances)
+    /// — which keeps the symbolic factorization — is correct only for a switch
+    /// the caller knows cannot island anything. Otherwise use
+    /// [`reset`](crate::solver::PersistentSolver::reset). Getting this wrong
+    /// used to panic inside `faer`; `RealSparseSystem::solve_values` now
+    /// refuses the mismatched call instead, so it surfaces as a failed solve.
     ///
     /// Returns `false` if the switch is not retained or was degenerate.
     pub fn set_switch_open(&mut self, switch: SwitchIdx, open: bool) -> bool {

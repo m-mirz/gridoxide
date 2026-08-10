@@ -71,6 +71,19 @@ fn parse_method(name: &str) -> PyResult<PowerFlowMethod> {
     }
 }
 
+#[cfg(feature = "cgmes")]
+fn parse_retention(name: &str) -> PyResult<crate::topology::RetentionPolicy> {
+    use crate::topology::RetentionPolicy;
+    match name {
+        "none" => Ok(RetentionPolicy::MergeAll),
+        "all" => Ok(RetentionPolicy::RetainAll),
+        "busbar_adjacent" => Ok(RetentionPolicy::RetainAdjacentToBusbar),
+        other => Err(PyValueError::new_err(format!(
+            "unknown retain '{other}', expected 'none', 'busbar_adjacent' or 'all'"
+        ))),
+    }
+}
+
 fn parse_dc_approximation(name: &str) -> PyResult<DcApproximation> {
     match name {
         "ignore_r" => Ok(DcApproximation::IgnoreR),
@@ -170,6 +183,12 @@ struct PowerFlowModel {
     batch: Option<(usize, BatchSolver)>,
     tol: f64,
     max_iter: usize,
+    /// The node-breaker network, when the model was built with
+    /// `topology="node_breaker"`. Owns the switch-to-branch mapping, which is
+    /// what makes a switch addressable by identity rather than by index
+    /// arithmetic.
+    #[cfg(feature = "cgmes")]
+    node_breaker: Option<crate::switches::NodeBreakerNetwork>,
     /// `TopologicalNode` mrid -> bus index, populated by `from_cgmes` (empty
     /// for `from_pgm_json`, which has no mrid concept at all) — lets Python
     /// callers look up a specific bus's solved voltage by mrid to compare
@@ -252,6 +271,8 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            #[cfg(feature = "cgmes")]
+            node_breaker: None,
             batch: None,
             tol,
             max_iter,
@@ -282,7 +303,10 @@ impl PowerFlowModel {
         s_base_va=100e6,
         method="newton_raphson",
         dc_approximation="ignore_r",
+        topology="bus_branch",
+        retain="none",
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn from_cgmes(
         paths: Vec<String>,
         backend: &str,
@@ -291,16 +315,67 @@ impl PowerFlowModel {
         s_base_va: f64,
         method: &str,
         dc_approximation: &str,
+        topology: &str,
+        retain: &str,
     ) -> PyResult<Self> {
         let path_refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
         let ds = load_profiles(&path_refs)
             .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))?;
-        let (mut buses_template, lines, transformers, shunts) = cgmes_to_buses_and_branches(&ds, s_base_va)
-            .map_err(|e| PyRuntimeError::new_err(format!("converting CGMES model: {e}")))?;
-        cgmes_resolve_dc_converters(&ds, &mut buses_template, s_base_va)
-            .map_err(|e| PyRuntimeError::new_err(format!("resolving CGMES HVDC converters: {e}")))?;
-        let tn_bus_index = cgmes_topological_node_bus_index(&ds)
-            .map_err(|e| PyRuntimeError::new_err(format!("resolving CGMES bus index: {e}")))?;
+
+        let (buses_template, lines, transformers, shunts, tn_bus_index, node_breaker) =
+            match topology {
+                "bus_branch" => {
+                    if retain != "none" {
+                        return Err(PyValueError::new_err(
+                            "retain= only applies to topology=\"node_breaker\"; the bus-branch \
+                             view has already merged every switch away",
+                        ));
+                    }
+                    let (mut buses, lines, transformers, shunts) =
+                        cgmes_to_buses_and_branches(&ds, s_base_va).map_err(|e| {
+                            PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
+                        })?;
+                    cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va).map_err(|e| {
+                        PyRuntimeError::new_err(format!(
+                            "resolving CGMES HVDC converters: {e}"
+                        ))
+                    })?;
+                    let tn = cgmes_topological_node_bus_index(&ds).map_err(|e| {
+                        PyRuntimeError::new_err(format!("resolving CGMES bus index: {e}"))
+                    })?;
+                    (buses, lines, transformers, shunts, tn, None)
+                }
+                "node_breaker" => {
+                    let policy = parse_retention(retain)?;
+                    let net = crate::cgmes::cgmes_node_breaker_to_buses_and_branches(
+                        &ds,
+                        s_base_va,
+                        &policy,
+                        crate::switches::SwitchTreatment::Regularize,
+                    )
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
+                    })?;
+                    // HVDC converters resolve by `TopologicalNode`, which the
+                    // node-breaker path indexes too — but its bus numbering is
+                    // its own, so the mapping is left empty rather than handing
+                    // back indices from the other view.
+                    (
+                        net.buses.clone(),
+                        net.lines.clone(),
+                        net.transformers.clone(),
+                        net.shunts.clone(),
+                        std::collections::HashMap::new(),
+                        Some(net),
+                    )
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown topology '{other}', expected 'bus_branch' or 'node_breaker'"
+                    )))
+                }
+            };
+
         let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
         stamp_shunts(&mut ybus, &shunts);
         let ybus = ybus.finish();
@@ -321,6 +396,7 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            node_breaker,
             batch: None,
             tol,
             max_iter,
@@ -658,6 +734,108 @@ impl PowerFlowModel {
         self.require_sensitivity()?
             .transfer_factors(&injections)
             .ok_or_else(|| PyRuntimeError::new_err("the reduced susceptance matrix is singular"))
+    }
+
+    /// Every retained switch: `(switch_id, label, kind, bus_from, bus_to,
+    /// open, branch_index)`.
+    ///
+    /// `switch_id` indexes the source topology's own switch list, so it is
+    /// stable across retention policies and is what `set_switch` takes.
+    /// `branch_index` is the flat branch index the switch occupies, which is
+    /// what `lodf_column`, `outage_flows` and a contingency scenario all want —
+    /// a switch is an ordinary branch to everything downstream.
+    ///
+    /// Empty unless the model was built with `topology="node_breaker"`.
+    #[cfg(feature = "cgmes")]
+    fn switches(&self) -> Vec<(usize, String, String, usize, usize, bool, usize)> {
+        let Some(net) = self.node_breaker.as_ref() else { return Vec::new() };
+        net.view
+            .retained()
+            .iter()
+            .enumerate()
+            .filter_map(|(n, r)| {
+                let branch = net.branch_of_retained(n)?;
+                let kind = net
+                    .switch_kind(r.switch)
+                    .map(|k| format!("{k:?}"))
+                    .unwrap_or_else(|| "Unknown".to_string());
+                Some((
+                    r.switch.0,
+                    net.switch_label(r.switch),
+                    kind,
+                    r.buses[0].0,
+                    r.buses[1].0,
+                    // The *current* position, read from the stamped branch —
+                    // `RetainedSwitch::open` is the state the view was built
+                    // with and does not follow `set_switch`.
+                    net.is_switch_open(r.switch).unwrap_or(r.open),
+                    branch,
+                ))
+            })
+            .collect()
+    }
+
+    /// Opens or closes a retained switch, rebuilding the admittance matrix.
+    ///
+    /// The Y-bus *values* change; its sparsity pattern does not, because an
+    /// open switch keeps its structural entries at zero. So the symbolic
+    /// factorization survives and only the Jacobian's cached admittances are
+    /// dropped — which is why this calls `invalidate_admittances` rather than
+    /// `reset`, and why a switching campaign costs one symbolic factorization
+    /// rather than one per state.
+    ///
+    /// Raises if the model is not node-breaker, or the switch was not retained
+    /// (or was degenerate — both ends already on one bus, so its position
+    /// cannot affect connectivity).
+    #[cfg(feature = "cgmes")]
+    fn set_switch(&mut self, switch: usize, open: bool) -> PyResult<()> {
+        let Some(net) = self.node_breaker.as_mut() else {
+            return Err(PyRuntimeError::new_err(
+                "this model is not node-breaker; build it with topology=\"node_breaker\"",
+            ));
+        };
+        if !net.set_switch_open(crate::topology::SwitchIdx(switch), open) {
+            return Err(PyValueError::new_err(format!(
+                "switch {switch} is not retained in this view, or is degenerate"
+            )));
+        }
+        self.transformers = net.transformers.clone();
+
+        let mut ybus = build_ybus(self.buses_template.len(), &self.lines, &self.transformers);
+        stamp_shunts(&mut ybus, &self.shunts);
+        self.ybus = ybus.finish();
+
+        // A full reset, not `invalidate_admittances`, and the distinction is
+        // subtle enough to be worth stating: the *Y-bus* pattern really is
+        // unchanged — an open switch keeps its structural entries at zero — but
+        // the *Jacobian* pattern need not be. Opening a switch can sever part
+        // of the network, `mark_unreferenced_islands` then pins those buses to
+        // `Slack`, and the unknown count changes with them. A caller that knows
+        // its switch cannot island anything may keep the factorization with
+        // `invalidate_admittances`; this binding cannot know that.
+        self.solver.reset();
+        self.sensitivity = None;
+        self.dc_solution = None;
+        Ok(())
+    }
+
+    /// Active power entering each retained switch at its `from` terminal, in
+    /// per-unit, in `switches()` order.
+    ///
+    /// Uses the voltages from the last `solve()`.
+    #[cfg(feature = "cgmes")]
+    fn switch_flow_p(&self) -> PyResult<Vec<f64>> {
+        let Some(net) = self.node_breaker.as_ref() else {
+            return Err(PyRuntimeError::new_err(
+                "this model is not node-breaker; build it with topology=\"node_breaker\"",
+            ));
+        };
+        let v = crate::branch_flow::bus_voltages(&self.buses);
+        Ok(net
+            .switch_branches()
+            .into_iter()
+            .map(|(switch, _)| net.switch_flow(switch, &v).map(|(p, _)| p).unwrap_or(0.0))
+            .collect())
     }
 
     /// Total branch count (lines plus transformers) — the length of every

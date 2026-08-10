@@ -2311,7 +2311,7 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
     policy: &crate::topology::RetentionPolicy,
     treatment: crate::switches::SwitchTreatment,
 ) -> Result<crate::switches::NodeBreakerNetwork, CgmesError> {
-    let (buses, idx_of, terms, _nb, view) = build_node_breaker_skeleton(ds, policy)?;
+    let (buses, idx_of, terms, nb, view) = build_node_breaker_skeleton(ds, policy)?;
     let (buses, lines, transformers, shunts) =
         convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
 
@@ -2330,6 +2330,8 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
         transformers,
         shunts,
         view,
+        nb.topology,
+        nb.switch_mrids,
         treatment,
     ))
 }

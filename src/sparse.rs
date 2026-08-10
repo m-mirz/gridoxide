@@ -89,6 +89,10 @@ pub fn solve_complex(
 /// cached order.
 pub struct RealSparseSystem {
     n: usize,
+    /// How many values the cached argsort expects — i.e. `entries.len()` at
+    /// construction. Kept so a mismatched call can be refused rather than
+    /// tripping an assertion inside `faer`; see [`solve_values`](Self::solve_values).
+    n_values: usize,
     symbolic_mat: SymbolicSparseColMat<usize>,
     argsort: Argsort<usize>,
     symbolic_lu: SymbolicLu<usize>,
@@ -105,7 +109,7 @@ impl RealSparseSystem {
             entries.iter().map(|&(r, c, _)| Pair { row: r, col: c }).collect();
         let (symbolic_mat, argsort) = SymbolicSparseColMat::try_new_from_indices(n, n, &pairs).ok()?;
         let symbolic_lu = SymbolicLu::try_new(symbolic_mat.rb()).ok()?;
-        Some(Self { n, symbolic_mat, argsort, symbolic_lu })
+        Some(Self { n, n_values: entries.len(), symbolic_mat, argsort, symbolic_lu })
     }
 
     /// Numeric-only refactorization against the cached symbolic pattern and
@@ -120,7 +124,19 @@ impl RealSparseSystem {
     /// The body of [`factor_and_solve`](Self::factor_and_solve) once the
     /// `(row, col)` half of the triplets has been dropped — which this
     /// backend never needed after `new` built the argsort.
+    ///
+    /// A `vals` length other than the one `new` was given means the caller's
+    /// pattern is not this factorization's — a stale cache, which
+    /// [`PersistentSolver::invalidate_admittances`](crate::solver::PersistentSolver::invalidate_admittances)
+    /// can produce when a topology change alters the *bus types* and therefore
+    /// the unknown count. That is refused here rather than left to trip an
+    /// assertion inside `faer`: this type's whole contract is `None` on a
+    /// system it cannot solve, and a panic crossing an FFI boundary is a much
+    /// worse failure than a reported one.
     pub fn solve_values(&self, vals: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        if vals.len() != self.n_values || rhs.len() < self.n {
+            return None;
+        }
         let mat = SparseColMat::new_from_argsort(self.symbolic_mat.clone(), &self.argsort, vals).ok()?;
         let lu = Lu::try_new_with_symbolic(self.symbolic_lu.clone(), mat.as_ref()).ok()?;
         let b = Col::<f64>::from_fn(self.n, |i| rhs[i]);

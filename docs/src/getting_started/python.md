@@ -92,6 +92,49 @@ if not model.is_radial(7):
   Two individually non-radial lines can be jointly breaking, which is exactly what single-branch
   screening misses.
 
+### Node-breaker topology and switches
+
+CGMES models carry their substation switching arrangement; `topology="node_breaker"` keeps it
+instead of merging it away at import, so a breaker becomes an element with an identity, a flow and a
+position you can change.
+
+```python
+model = gridoxide.PowerFlowModel.from_cgmes(
+    paths, topology="node_breaker", retain="busbar_adjacent"
+)
+model.solve()
+for switch_id, mrid, kind, bus_from, bus_to, is_open, branch in model.switches():
+    print(f"{kind} {mrid}: buses {bus_from}-{bus_to}, {'open' if is_open else 'closed'}")
+
+model.set_switch(switch_id, open=True)   # no re-import
+model.solve()
+```
+
+- `topology` is `"bus_branch"` (default, every switch merged — gridoxide's historical behaviour) or
+  `"node_breaker"`.
+- `retain` selects which switches survive as elements: `"none"` (merge them all, but still derive
+  buses from `ConnectivityNode`), `"busbar_adjacent"` (the bus-breaker view) or `"all"` (the full
+  node-breaker view). It is rejected with `topology="bus_branch"`, where it would mean nothing.
+- `model.switches()` — one tuple per retained switch, identified by its **CGMES mRID**. `is_open` is
+  the current position, so it follows `set_switch`.
+- `model.set_switch(switch_id, open)` — flips a breaker and rebuilds the admittance matrix.
+- `model.switch_flow_p()` — active power through each switch after a `solve()`, in `switches()` order.
+
+Retention is what keeps this affordable. On SmallGrid, `"none"` gives 167 buses and `"all"` gives
+1,369 — roughly a 16x larger system answering the same question — so keep only the switches you
+intend to operate. See [DC (Bθ) Power Flow](../powerflow/dc.md) for what a switch costs once
+retained.
+
+**A switch is an ordinary branch to everything else**, which is the point of representing it this
+way. Its `branch` index works with `lodf_column`, `outage_flows` and `solve_contingencies` with no
+new machinery — a bus-split contingency is just a branch outage:
+
+```python
+for *_, branch in model.switches():
+    if not model.is_radial(branch):
+        redistribution = model.lodf_column(branch)   # who picks up its flow
+```
+
 ### AC contingency screening
 
 For the full nonlinear answer rather than the DC approximation:
