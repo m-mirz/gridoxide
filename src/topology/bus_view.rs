@@ -89,6 +89,14 @@ pub struct RetainedSwitch {
     /// treat it as a self-loop rather than as a constraint between two
     /// distinct buses. See [`BusView::is_degenerate`].
     pub buses: [BusIdx; 2],
+    /// The position the view was derived *with*.
+    ///
+    /// A snapshot, not a live value: once a switch has been stamped as a
+    /// branch, its position lives there, and
+    /// [`NodeBreakerNetwork::set_switch_open`](crate::switches::NodeBreakerNetwork::set_switch_open)
+    /// changes that rather than this. Ask
+    /// [`is_switch_open`](crate::switches::NodeBreakerNetwork::is_switch_open)
+    /// for the current one.
     pub open: bool,
 }
 
