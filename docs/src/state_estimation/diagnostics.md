@@ -22,7 +22,17 @@ irrelevant, since \(\operatorname{rank}(H^{T}WH) = \operatorname{rank}(H)\) for 
 \(W\), and a hard equality is a measurement of unbounded weight.
 
 That was already wrong on ordinary data. It becomes acute on node-breaker models, where a merged
-group's internal structure is entirely constraint-determined.
+group's internal structure is entirely constraint-determined. Measured on MiniGrid's node-breaker
+view: 37 of its 45 buses are constrained rather than sensed, and dropping the constraint rows takes
+the same sensor set from observable to not.
+
+**A de-energized bus is not an unobservable one.** Its unknowns are zero columns of \(H\) — nothing
+measures a node that carries no voltage, and no sensor plan would change that. But it is not
+undetermined: every estimator path here reports it at exactly zero, which is power-grid-model's own
+`energized: 0` convention. `analyze` reports those unknowns separately, in `de_energized`, and leaves
+them out of both the rank test and the `structurally_unmeasured` list. Folding them in would call
+every CGMES model with one switched-out node unobservable — the same mistake as ignoring the
+constraint rows, in the same function.
 
 There are two distinct failures.
 

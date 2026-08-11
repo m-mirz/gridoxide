@@ -561,6 +561,13 @@ pub struct NodeBreakerNetwork {
     /// Position in [`BusView::retained`] -> flat branch index, or `None` for a
     /// degenerate switch that was not stamped.
     branch_of_retained: Vec<Option<usize>>,
+    /// Per bus, whether no injecting equipment terminates on it.
+    ///
+    /// State estimation's reason for existing on this network: a bay's internal
+    /// nodes carry switches and nothing else, so the finer the topology, the
+    /// more of the state is pinned by exact zero-injection constraints rather
+    /// than by sensors. See [`NodeBreakerNetwork::se_network`].
+    pub zero_injection: Vec<bool>,
 }
 
 impl NodeBreakerNetwork {
@@ -574,6 +581,7 @@ impl NodeBreakerNetwork {
         view: BusView,
         topology: crate::topology::NodeBreakerTopology,
         switch_labels: Vec<String>,
+        zero_injection: Vec<bool>,
         treatment: SwitchTreatment,
     ) -> Self {
         let mut branch_of_retained = vec![None; view.retained().len()];
@@ -599,6 +607,7 @@ impl NodeBreakerNetwork {
             topology,
             switch_labels,
             branch_of_retained,
+            zero_injection,
         }
     }
 
@@ -683,6 +692,35 @@ impl NodeBreakerNetwork {
     pub fn is_switch_open(&self, switch: SwitchIdx) -> Option<bool> {
         let branch = self.branch_of_switch(switch)?;
         Some(self.transformers[branch - self.lines.len()].from_status == 0)
+    }
+
+    /// The measurement model for state estimation over this network.
+    ///
+    /// `ybus` must be the one built from *these* lines and transformers with
+    /// [`stamp_shunts`](crate::network::stamp_shunts) applied — the estimator
+    /// reads the branch list a second time to build its functionals, and a
+    /// disagreement produces an estimate that converges confidently to the
+    /// wrong answer.
+    ///
+    /// The retained switches are already in the branch list, so a measurement on
+    /// a breaker is an ordinary branch-terminal measurement at
+    /// [`branch_of_switch`](Self::branch_of_switch) — as with power flow, the
+    /// estimator never learns that any of its branches is a switch.
+    ///
+    /// What *is* specific to this view is the constraint set. Almost every bus
+    /// the node-breaker topology adds is a bay-internal node with nothing
+    /// attached, so [`zero_injection`](Self::zero_injection) is dense here in a
+    /// way it never is on a bus-branch model, and those buses are observable
+    /// only because of it.
+    pub fn se_network(&self, ybus: crate::network::YBusSparse) -> crate::se::SeNetwork {
+        crate::se::SeNetwork::from_bus_network(
+            &self.buses,
+            ybus,
+            &self.lines,
+            &self.transformers,
+            &self.shunts,
+            self.zero_injection.clone(),
+        )
     }
 
     /// Complex power entering a switch at its `from` terminal, given solved bus

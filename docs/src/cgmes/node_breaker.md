@@ -133,6 +133,46 @@ for switch_id, mrid, kind, bus_from, bus_to, is_open, branch in model.switches()
 model.set_switch(switch_id, True)
 ```
 
+## State estimation
+
+```rust
+let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+stamp_shunts(&mut ybus, &net.shunts);
+let se = net.se_network(ybus.finish());
+
+let mut buses = net.buses.clone();
+se::nr::linear_start(&mut buses, &se, &measurements);
+let report = se::nr::estimate(&measurements, &mut buses, &se, &SeOptions::default());
+```
+
+The measurement model needs no changes at all: a sensor on a breaker is a `Target::BranchTerminal`
+at `branch_of_switch(switch)`, and the estimator never learns that any of its branches is a switch —
+the same reason phases 4 and 6 of the plan came free.
+
+What *is* different is the constraint set, and it inverts the usual proportions. A bus-branch model
+has a handful of zero-injection buses; a node-breaker model is mostly zero-injection buses, since
+every internal node of a bay carries switches and nothing else. MiniGrid goes from 7 constrained
+buses to 37. That is exact, free information — no sensor, no noise, no weight — and it is why the
+finer topology is observable without any more sensors than the coarse one needs. gridoxide has
+carried zero-injection buses as hard equality constraints (the KKT augmented system) all along; see
+[The State Estimation Problem](../state_estimation/index.md).
+
+The flags come from the model's structure, not from the snapshot's numbers. A load whose SSH `p` and
+`q` happen to be zero this hour is not a bus that injects nothing, and a hard constraint saying
+otherwise would bias every estimate around it.
+
+Two things are worth knowing before running one:
+
+- **Start with `linear_start`, not `flat_start`.** CGMES marks a de-energized bus by leaving it out
+  of every `TopologicalIsland`, and such a bus must *start* at zero. Nothing measures it, so it is
+  pinned wherever the start left it; pinned at 1 p.u. when the truth is 0, it poisons every
+  measurement that touches it. On MiniGrid a flat start diverges to an objective of 2.2e4 where
+  `linear_start` converges in three iterations to 4e-10.
+- **De-energized buses are not an observability gap.** `observability::analyze` reports their
+  unknowns separately, in `de_energized`, and excludes them from the rank test — they are determined
+  by the network at exactly zero rather than by any sensor. Counting them would report every model
+  with one switched-out node as unobservable.
+
 ## From the command line
 
 ```
@@ -159,10 +199,10 @@ gridoxide will not invent one.
 
 ## What is not there yet
 
-- **State estimation** cannot consume a node-breaker network: `SeNetwork::new` takes a
-  `pgm::PgmNetwork`, so measurements cannot attach to a breaker yet. The observability rank
-  computation *has* been fixed to count constraint rows, which was a prerequisite (and was wrong on
-  ordinary data too — see [Observability and Bad Data](../state_estimation/diagnostics.md)).
+- **Measurements** are not read from CGMES. The estimator accepts a node-breaker network (below),
+  but the profiles carry nothing to feed it: only the OP profile holds `Analog`/`AnalogValue`, only
+  FullGrid ships one in the conformance set, and it holds four of them. A caller supplies its own
+  measurements.
 - **The equality-constrained formulation** (`SwitchTreatment::Constrain`) is unimplemented.
   Regularization was expected to fail at scale and did not, so the case for it is weaker than it
   looked; it remains the right answer if a model ever appears where regularization *does* break down.

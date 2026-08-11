@@ -73,17 +73,7 @@ impl StateLayout {
             .iter()
             .any(|m| m.kind == MeasurementKind::VoltageAngle && m.weight() > 0.0);
 
-        let angle_ref = (!phase_is_measured).then(|| {
-            net.source_branches
-                .iter()
-                .position(|feeding| !feeding.is_empty())
-                .or_else(|| {
-                    buses
-                        .iter()
-                        .position(|b| matches!(b.bus_type, crate::types::BusType::Slack))
-                })
-                .unwrap_or(0)
-        });
+        let angle_ref = (!phase_is_measured).then(|| net.reference_bus(buses));
 
         let mut theta_pos = vec![None; buses.len()];
         let mut next = 0;

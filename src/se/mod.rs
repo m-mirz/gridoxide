@@ -127,11 +127,6 @@ impl SeNetwork {
         shunts: &[crate::network::ShuntAdm],
     ) -> Self {
         let n = ybus.n();
-        let mut shunt_y = vec![Complex::new(0.0, 0.0); n];
-        for s in shunts {
-            shunt_y[s.at] += s.y;
-        }
-
         let terminals = terminals_from_params(&branch_params(&net.lines, &net.transformers));
         let mut source_branches = vec![Vec::new(); n];
         for (&_id, &branch) in &net.source_branch_idx {
@@ -155,7 +150,78 @@ impl SeNetwork {
             }
         }
 
-        let zero_injection = net.zero_injection.clone();
+        Self::from_parts(
+            ybus,
+            terminals,
+            shunts,
+            source_branches,
+            net.zero_injection.clone(),
+            energized,
+        )
+    }
+
+    /// Builds the model for a network whose sources are **bus types** rather
+    /// than synthesized source branches — everything that does not come through
+    /// [`pgm`](crate::pgm), which for now means CGMES, including the
+    /// node-breaker view.
+    ///
+    /// The two differ in exactly one thing, and it is not the measurement model:
+    /// power-grid-model gives a source its own virtual bus behind a Thévenin
+    /// impedance, so "is this bus fed?" is answered by a branch list, while
+    /// CGMES marks a reference bus as `BusType::Slack` and injects nothing extra.
+    /// `source_branches` is therefore empty here, and every place that consulted
+    /// it for a *reference* goes through [`SeNetwork::reference_bus`] instead.
+    ///
+    /// `zero_injection` is the caller's: which buses carry no appliance at all.
+    /// It has to be structural, not a test on `p_spec`/`q_spec` — a load that
+    /// happens to sit at zero in one snapshot is not a bus that injects nothing,
+    /// and a hard constraint saying otherwise biases the estimate.
+    pub fn from_bus_network(
+        buses: &[Bus],
+        ybus: YBusSparse,
+        lines: &[crate::types::Line],
+        transformers: &[crate::types::Transformer],
+        shunts: &[crate::network::ShuntAdm],
+        zero_injection: Vec<bool>,
+    ) -> Self {
+        let n = ybus.n();
+        let components = crate::network::connected_components(&ybus);
+
+        // A component with no reference bus carries nothing any measurement can
+        // resolve, which is what `energized` means here. `network::classify`
+        // owns that rule for power flow — including the part that is easy to get
+        // wrong, that a `Slack` bus at `V = 0` is a de-energized placeholder and
+        // not a reference — so it decides it here too rather than being
+        // reimplemented a second way.
+        let mut energized = vec![false; n];
+        for c in crate::network::classify(buses, &components) {
+            if !c.slack_indices.is_empty() {
+                for &i in &c.bus_indices {
+                    energized[i] = true;
+                }
+            }
+        }
+
+        let terminals = terminals_from_params(&branch_params(lines, transformers));
+        let mut zero_injection = zero_injection;
+        zero_injection.resize(n, false);
+        Self::from_parts(ybus, terminals, shunts, vec![Vec::new(); n], zero_injection, energized)
+    }
+
+    /// The common tail of both constructors: everything that does not depend on
+    /// where the network came from.
+    fn from_parts(
+        ybus: YBusSparse,
+        terminals: Vec<[functional::CurrentFunctional; 2]>,
+        shunts: &[crate::network::ShuntAdm],
+        source_branches: Vec<Vec<usize>>,
+        zero_injection: Vec<bool>,
+        energized: Vec<bool>,
+    ) -> Self {
+        let mut shunt_y = vec![Complex::new(0.0, 0.0); ybus.n()];
+        for s in shunts {
+            shunt_y[s.at] += s.y;
+        }
         Self {
             ybus,
             terminals,
@@ -164,6 +230,32 @@ impl SeNetwork {
             zero_injection,
             energized,
         }
+    }
+
+    /// The bus whose angle is held fixed when nothing measures phase.
+    ///
+    /// With no angle measurement anywhere, the state is determined only up to a
+    /// common rotation: one angle has to be pinned or the gain matrix is
+    /// singular by construction. *Which* one is arbitrary mathematically, but it
+    /// must be a bus that carries voltage at all — pinning a de-energized bus
+    /// pins nothing and leaves the rotation free.
+    ///
+    /// A source's own bus is the natural choice and is what a power flow would
+    /// use. The `Slack` fallback is what makes a CGMES network work, since it
+    /// has no source branches; the final `0` is unreachable in practice and is
+    /// there so this never panics on a degenerate network that the estimator
+    /// will reject a moment later anyway.
+    pub fn reference_bus(&self, buses: &[Bus]) -> usize {
+        self.source_branches
+            .iter()
+            .position(|feeding| !feeding.is_empty())
+            .or_else(|| {
+                buses.iter().position(|b| {
+                    b.bus_type == crate::types::BusType::Slack && b.voltage_mag != 0.0
+                })
+            })
+            .or_else(|| self.energized.iter().position(|&live| live))
+            .unwrap_or(0)
     }
 
     /// Builds the model for a three-phase network.
