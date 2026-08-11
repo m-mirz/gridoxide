@@ -22,8 +22,8 @@ against `f96a660`.
 > §1.1's counts, `se::constraints::augment`'s generic signature, and `measurement::Target`'s
 > variants are all unchanged.
 >
-> **Implementation status.** **Phases 0, 1, 2, 4 and 6 are done** (§9). Phases 3, 5 and part of 7
-> remain.
+> **Implementation status.** **Phases 0, 1, 2, 4, 6 and 7 are done** (§9). Phase 3 and most of
+> phase 5 remain.
 >
 > *Phase 0* turned `src/topology.rs` into a directory — `model`
 > (`NodeIdx`/`BusIdx`/`SwitchIdx`, `Switch`, `SwitchKind`, `NodeBreakerTopology`), `bus_view`
@@ -71,8 +71,14 @@ against `f96a660`.
 > (`SeNetwork::new` takes `&pgm::PgmNetwork`), which this document does not mention and which is the
 > real prerequisite.
 >
+> *Phase 7 is done*: `switches::NodeBreakerNetwork` (Rust), `from_cgmes(topology=, retain=)` plus
+> `switches()`/`set_switch()`/`switch_flow_p()` (Python), a `gridoxide switches` subcommand with
+> `tests/cli_switches_test.rs` — the first test coverage the CLI has ever had — and
+> `scripts/bench/README.md` §10. The user-facing documentation is
+> `docs/src/cgmes/node_breaker.md`; `feature_comparison.md`'s switch row went from "consumed, not
+> modeled" to a full entry.
+>
 > Phase 3 is not started, and its justification is weaker than this document argues — see §1.1(d).
-> The CLI/Python half of §7 is not started.
 
 This document answers: *what would it take for gridoxide to model node-breaker topology as a
 first-class thing, across every calculation it already supports — AC Newton-Raphson, DC Bθ, the
@@ -864,9 +870,25 @@ No `SwitchingScenario` type was needed: a switch has a branch index, so
 now measured on real data rather than argued: flipping a switch through `set_switch_open` moves the
 solution but leaves the Y-bus sparsity pattern bit-identical.
 
-**Phase 7 — API, CLI, Python, benchmarks.**
-Ongoing through 2–6 rather than deferred; called out separately only for the cross-cutting bits
-(`--topology` flag, Python surface, a benchmark section in `scripts/bench/README.md`).
+**Phase 7 — API, CLI, Python, benchmarks. ✅ Done.**
+- *Rust*: `switches::NodeBreakerNetwork` — `switch_branches`, `switch_flow`, `set_switch_open`,
+  `is_switch_open`, `switch_kind`, `switch_label`.
+- *Python*: `from_cgmes(topology=, retain=)`, `switches()`, `set_switch()`, `switch_flow_p()`,
+  documented in `docs/src/getting_started/python.md`.
+- *CLI*: `gridoxide switches <profile.xml>... [--retain] [--open] [--solve]`. Not the `--topology`
+  flag this section imagined, because there was no CGMES command to add a flag *to* — every other
+  mode reads power-grid-model JSON. A switch is only visible in the node-breaker view, so the view
+  is what the command selects.
+- *Benchmarks*: `scripts/bench/README.md` §10, via `examples/bench_node_breaker.rs`.
+
+`tests/cli_switches_test.rs` drives the built binary through `CARGO_BIN_EXE_gridoxide` — the CLI had
+no test coverage at all before, and its argument handling is hand-rolled.
+
+One wrinkle worth knowing: the node-breaker *topology* needs only EQ+SSH, but converting the
+equipment still needs TP+SV, because the angle reference comes from
+`TopologicalIsland.AngleRefTopologicalNode`. So `switches` without `--solve` still wants the full
+profile set. Deriving a reference from EQ alone is not attempted — there is no principled way to pick
+one, and §3.3's rule against fabricating a slack applies here too.
 
 ---
 

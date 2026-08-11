@@ -103,6 +103,11 @@ path = "tests/pardiso_jacobian_test.rs"
 required-features = ["pardiso"]
 
 [[test]]
+name = "cli_switches_test"
+path = "tests/cli_switches_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_node_breaker_solve_test"
 path = "tests/cgmes_node_breaker_solve_test.rs"
 required-features = ["cgmes"]
