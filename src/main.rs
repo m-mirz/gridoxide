@@ -37,6 +37,15 @@ usage:
                                 containing sym_voltage_sensor/sym_power_sensor.
                                 The default method is Newton-Raphson; the flag
                                 selects the faster, less exact linearized one.
+  gridoxide switches <profile.xml>... [--retain none|busbar_adjacent|all]
+                     [--open <mrid>] [--solve]
+                                list a CGMES model's switching devices, read
+                                from EQ+SSH rather than merged away at import.
+                                --retain chooses which survive as elements
+                                (default busbar_adjacent); --open flips one
+                                before solving; --solve runs a power flow and
+                                reports each switch's own flow.
+                                Needs the `cgmes` feature.
   gridoxide dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]
                                 run a DC (Bθ) power flow over a PGM JSON
                                 document, printing bus angles, branch flows and
@@ -81,6 +90,12 @@ fn main() {
                 std::process::exit(2);
             }
         },
+        Some("switches") => {
+            if let Err(message) = run_switches(&args[1..]) {
+                eprintln!("error: {message}");
+                std::process::exit(1);
+            }
+        }
         Some("-h") | Some("--help") | Some("help") => print!("{USAGE}"),
         Some(other) => {
             eprintln!("error: unknown command {other:?}\n\n{USAGE}");
@@ -402,4 +417,130 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+
+/// Lists a CGMES model's switching devices, and optionally solves with them
+/// retained as real elements.
+///
+/// This is the one command that reads a CGMES model at all — every other mode
+/// takes power-grid-model JSON. It exists because a switch is only visible in
+/// the node-breaker view, and that view is what `--retain` selects.
+#[cfg(feature = "cgmes")]
+fn run_switches(args: &[String]) -> Result<(), String> {
+    use gridoxide::cgmes::{cgmes_node_breaker_to_buses_and_branches, load_profiles};
+    use gridoxide::switches::SwitchTreatment;
+    use gridoxide::topology::{RetentionPolicy, SwitchIdx};
+
+    let paths: Vec<&String> = args.iter().take_while(|a| !a.starts_with("--")).collect();
+    if paths.is_empty() {
+        return Err("switches needs at least one CGMES profile file".to_string());
+    }
+    let flags = &args[paths.len()..];
+
+    let retain = flag_value(flags, "--retain")?.unwrap_or_else(|| "busbar_adjacent".to_string());
+    let policy = match retain.as_str() {
+        "none" => RetentionPolicy::MergeAll,
+        "busbar_adjacent" => RetentionPolicy::RetainAdjacentToBusbar,
+        "all" => RetentionPolicy::RetainAll,
+        other => {
+            return Err(format!(
+                "--retain: unknown policy {other:?}, expected none, busbar_adjacent or all"
+            ))
+        }
+    };
+    let open = flag_value(flags, "--open")?;
+    let solve = flags.iter().any(|a| a == "--solve");
+
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| std::path::Path::new(p.as_str())).collect();
+    let ds = load_profiles(&path_refs).map_err(|e| format!("decoding CGMES profiles: {e}"))?;
+    let mut net = cgmes_node_breaker_to_buses_and_branches(
+        &ds,
+        100e6,
+        &policy,
+        SwitchTreatment::Regularize,
+    )
+    .map_err(|e| format!("converting CGMES model: {e}"))?;
+
+    if let Some(wanted) = &open {
+        let target = net
+            .view
+            .retained()
+            .iter()
+            .map(|r| r.switch)
+            .find(|s| &net.switch_label(*s) == wanted || s.0.to_string() == *wanted)
+            .ok_or_else(|| {
+                format!("--open: no retained switch matches {wanted:?} (try --retain all)")
+            })?;
+        if !net.set_switch_open(target, true) {
+            return Err(format!("--open: switch {wanted} is degenerate, so its position is moot"));
+        }
+        println!("opened {}\n", net.switch_label(target));
+    }
+
+    println!(
+        "{} bus(es) from {} connectivity node(s); retain = {retain}",
+        net.buses.len(),
+        net.view.n_nodes()
+    );
+    let stamped = net.switch_branches();
+    let degenerate = gridoxide::switches::degenerate_switches(&net.view).len();
+    println!(
+        "{} switch(es) in the model, {} retained, {stamped_len} stamped as branches{}",
+        net.topology.switches.len(),
+        net.view.retained().len(),
+        if degenerate > 0 {
+            format!(" ({degenerate} degenerate — both ends already one bus)")
+        } else {
+            String::new()
+        },
+        stamped_len = stamped.len(),
+    );
+
+    let flows = if solve {
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &net.shunts);
+        let report = gridoxide::run_power_flow_analysis_from_ybus(net.buses.clone(), ybus);
+        println!("\npower flow: {:?} in {} iteration(s)", report.stats.status, report.stats.iterations());
+        let v = gridoxide::branch_flow::bus_voltages(&report.buses);
+        Some(
+            stamped
+                .iter()
+                .map(|(s, _)| net.switch_flow(*s, &v).unwrap_or((0.0, 0.0)))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+
+    println!();
+    print!("{:<40} {:<28} {:>6} {:>6} {:>7} {:>7}", "mrid", "kind", "bus", "bus", "state", "branch");
+    if flows.is_some() {
+        print!(" {:>12}", "P (MW)");
+    }
+    println!();
+    for (n, (switch, branch)) in stamped.iter().enumerate() {
+        let r = net.view.retained().iter().find(|r| r.switch == *switch).expect("stamped");
+        print!(
+            "{:<40} {:<28} {:>6} {:>6} {:>7} {:>7}",
+            net.switch_label(*switch),
+            net.switch_kind(*switch).map(|k| format!("{k:?}")).unwrap_or_default(),
+            r.buses[0].0,
+            r.buses[1].0,
+            if net.is_switch_open(*switch).unwrap_or(false) { "open" } else { "closed" },
+            branch,
+        );
+        if let Some(flows) = &flows {
+            print!(" {:>12.3}", flows[n].0 * 100.0);
+        }
+        println!();
+    }
+
+    let _ = SwitchIdx(0);
+    Ok(())
+}
+
+#[cfg(not(feature = "cgmes"))]
+fn run_switches(_args: &[String]) -> Result<(), String> {
+    Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
 }
