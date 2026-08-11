@@ -67,6 +67,30 @@ analogue in either simpler approach — but it's also the only one of the three 
 terminals numerically distinct after the fact, which matters if anything downstream needs to report or
 reason about flow through each side of the connection separately.
 
+#### What implementing it settled
+
+`constrained::solve_constrained` implements this, and `tests/constrained_switch_test.rs` checks it
+against approach 2 on networks the two must agree on. Four things the sketch above did not predict:
+
+- **The spanning tree is not extra bookkeeping** — it is a disjoint-set forest built in one pass over
+  the switch list, and it does double duty. Seed it with the buses whose unknown is *already fixed*,
+  all in one set, and "these two are already connected" catches both redundancies with one test: a
+  cycle of closed switches, and a run of switches whose two ends are both `Slack`. The second is the
+  one that bites — SmallGrid's full node-breaker view contains it, and it produces a duplicate row and
+  a singular matrix. Looking at each switch's own two ends does not find it.
+- **The redundant edges are not "inactive"** — they keep their rows and columns and constrain
+  \(P_s = Q_s = 0\) instead. That is what keeps the sparsity pattern identical across switching
+  states, which is the same trick an open switch uses.
+- **A flat start does not work on real data.** The guess has to see the switches, which means one
+  linear solve against a Y-bus that *does* stamp them stiffly. The conditioning argument survives
+  intact — a starting guess is discarded on the first step, and the matrix Newton factorizes never
+  contains the constant — but the formulation is not usable without it.
+- **It is not faster, and it was never the reason to want it.** Every node-breaker configuration
+  converges in the same iteration count under both approaches (2 on MiniGrid, 5 on SmallGrid, 6 on
+  Svedala, with all 1,464 of Svedala's switches constrained). What approach 3 gives that approach 2
+  cannot is an *honest* answer where the flow is undetermined: a loop of closed switches has a free
+  parameter in it, and regularization resolves it with the stiffness it happened to pick.
+
 ## Where this fits in gridoxide today
 
 gridoxide's solver core has no node-breaker layer: every `Bus` reaching `network::build_ybus` is

@@ -241,7 +241,7 @@ pub struct SolveStats {
 }
 
 impl SolveStats {
-    fn from_loop(status: SolveStatus, mismatch_history: Vec<f64>) -> Self {
+    pub(crate) fn from_loop(status: SolveStatus, mismatch_history: Vec<f64>) -> Self {
         Self {
             status,
             mismatch_history,

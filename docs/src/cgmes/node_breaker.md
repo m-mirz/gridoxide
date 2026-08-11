@@ -73,6 +73,11 @@ what the alternative formulations would have cost.
 
 ## How a retained switch is represented
 
+Two treatments, selected by `SwitchTreatment`.
+
+`Regularize` is the default and the one everything else in this chapter assumes. `Constrain` enforces
+the switch exactly instead — see [below](#constrain-the-exact-alternative).
+
 A retained switch is stamped as an ordinary branch with a small series reactance — the
 **regularization** approach. Two consequences follow, and both are the reason this approach was
 chosen over merging:
@@ -132,6 +137,31 @@ for switch_id, mrid, kind, bus_from, bus_to, is_open, branch in model.switches()
     ...
 model.set_switch(switch_id, True)
 ```
+
+### `Constrain`: the exact alternative
+
+`SwitchTreatment::Constrain` puts no admittance in the matrix at all. A closed switch's flow becomes
+an unknown and the physics becomes two exact equations, \(θ_i = θ_j\) and \(V_i = V_j\) — approach
+3 of [Ideal Switches and Zero-Impedance Branches](../powerflow/zero_impedance_branches.md). The
+network it produces carries **no switch branches**, so it is solved by `constrained::solve_constrained`
+rather than by the ordinary Newton loop:
+
+```rust
+let net = cgmes_node_breaker_to_buses_and_branches(
+    &ds, 100e6, &policy, SwitchTreatment::Constrain,
+)?;
+let solution = constrained::solve_constrained(
+    &mut buses, &ybus, &net.constrained_switches(), 1e-6, 30,
+);
+for (n, (p, q)) in solution.flows.iter().enumerate() { … }
+```
+
+It is not the faster or the more robust of the two — both converge in identical iteration counts on
+every configuration in the tree, including Svedala with all 1,464 switches constrained. It gives one
+thing `Regularize` cannot: an honest answer where the flow is genuinely undetermined. A loop of closed
+switches has a free parameter in it — the network does not decide how a bus coupler splits current
+with a parallel one — and `solution.indeterminate` names those switches instead of reporting the split
+that the chosen stiffness happens to produce.
 
 ## State estimation
 
@@ -203,7 +233,4 @@ gridoxide will not invent one.
   but the profiles carry nothing to feed it: only the OP profile holds `Analog`/`AnalogValue`, only
   FullGrid ships one in the conformance set, and it holds four of them. A caller supplies its own
   measurements.
-- **The equality-constrained formulation** (`SwitchTreatment::Constrain`) is unimplemented.
-  Regularization was expected to fail at scale and did not, so the case for it is weaker than it
-  looked; it remains the right answer if a model ever appears where regularization *does* break down.
 - **FullGrid** does not solve on either path. This is pre-existing and unrelated to switches.
