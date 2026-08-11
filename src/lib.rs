@@ -6,6 +6,7 @@ pub mod branch_flow;
 pub mod measurement;
 pub mod se;
 pub mod solver;
+pub mod constrained;
 pub mod jacobian;
 pub mod batch;
 pub mod bde;

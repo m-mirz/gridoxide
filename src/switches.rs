@@ -89,6 +89,15 @@ pub enum SwitchTreatment {
     /// [`topology::IDEAL_CONNECTION_Y`](crate::topology::IDEAL_CONNECTION_Y)
     /// gives a merged zero-impedance connection.
     Regularize,
+    /// An exact equality: `θ_i = θ_j`, `V_i = V_j`, with the switch's flow as an
+    /// unknown. No admittance, and no constant to choose.
+    ///
+    /// Solved by [`constrained::solve_constrained`](crate::constrained::solve_constrained)
+    /// rather than by the ordinary Newton loop, since the system it builds is a
+    /// KKT system rather than a power-flow Jacobian. A network built under this
+    /// treatment therefore carries **no switch branches at all** — see
+    /// [`NodeBreakerNetwork::constrained_switches`].
+    Constrain,
 }
 
 /// The impedance a regularized switch is given: purely inductive, at the
@@ -692,6 +701,31 @@ impl NodeBreakerNetwork {
     pub fn is_switch_open(&self, switch: SwitchIdx) -> Option<bool> {
         let branch = self.branch_of_switch(switch)?;
         Some(self.transformers[branch - self.lines.len()].from_status == 0)
+    }
+
+    /// This network's retained switches as equality constraints, for
+    /// [`constrained::solve_constrained`](crate::constrained::solve_constrained).
+    ///
+    /// Positionally matches [`BusView::retained`](crate::topology::BusView::retained),
+    /// including the degenerate switches — a switch whose two ends already share
+    /// a bus becomes a self-loop, which the constrained solver reports as
+    /// indeterminate rather than skipping. Keeping them here is what lets a
+    /// caller index straight from a switch to its flow.
+    ///
+    /// Only meaningful under [`SwitchTreatment::Constrain`]. Under
+    /// [`Regularize`](SwitchTreatment::Regularize) the switches are already in
+    /// the branch list, and passing them here as well would model each of them
+    /// twice.
+    pub fn constrained_switches(&self) -> Vec<crate::constrained::ConstrainedSwitch> {
+        self.view
+            .retained()
+            .iter()
+            .map(|r| crate::constrained::ConstrainedSwitch {
+                from: r.buses[0].0,
+                to: r.buses[1].0,
+                open: r.open,
+            })
+            .collect()
     }
 
     /// The measurement model for state estimation over this network.

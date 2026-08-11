@@ -22,8 +22,8 @@ against `f96a660`.
 > §1.1's counts, `se::constraints::augment`'s generic signature, and `measurement::Target`'s
 > variants are all unchanged.
 >
-> **Implementation status.** **Phases 0, 1, 2, 4, 5, 6 and 7 are done** (§9), phase 5 to the limit
-> the data allows. Phase 3 remains.
+> **Implementation status.** **Every phase is done** (§9) — phase 5 to the limit the data allows,
+> since CGMES carries no measurements worth reading.
 >
 > *Phase 0* turned `src/topology.rs` into a directory — `model`
 > (`NodeIdx`/`BusIdx`/`SwitchIdx`, `Switch`, `SwitchKind`, `NodeBreakerTopology`), `bus_view`
@@ -93,7 +93,26 @@ against `f96a660`.
 > `docs/src/cgmes/node_breaker.md`; `feature_comparison.md`'s switch row went from "consumed, not
 > modeled" to a full entry.
 >
-> Phase 3 is not started, and its justification is weaker than this document argues — see §1.1(d).
+> *Phase 3 is done.* `src/constrained.rs` implements `SwitchTreatment::Constrain` — the switch's flow
+> as an unknown, `θ_i = θ_j` and `V_i = V_j` as exact rows, solved as a KKT system. Every node-breaker
+> configuration solves under it, including Svedala with all 1,464 switches constrained, in the *same*
+> iteration count as the regularized solve of the same model. Four things this document did not
+> anticipate, recorded in `zero_impedance_branches.md` §3:
+>
+> - The spanning-tree bookkeeping §4.3 calls the approach's main cost is one disjoint-set forest built
+>   in a single pass. Seeded with the already-fixed buses, one test catches both redundancies.
+> - The second redundancy is not a cycle at all: a run of closed switches whose ends are both `Slack`
+>   duplicates a row. SmallGrid's full view contains one, and checking each switch's own two ends does
+>   not find it.
+> - Redundant edges keep their rows and constrain `P_s = Q_s = 0`, which is what holds the sparsity
+>   pattern constant across switching states.
+> - A flat start does not converge on CGMES data. The starting guess needs one linear solve against a
+>   Y-bus that *does* stamp the switches stiffly. The conditioning argument is unaffected — the matrix
+>   Newton factorizes never contains the constant — but the formulation is unusable without it.
+>
+> §1.1(d) still stands on the substance: `Constrain` is not needed for scale, because `Regularize`
+> does not fail at scale. What it adds is an honest `indeterminate` where a loop of closed switches
+> leaves the flow a free parameter, which regularization silently resolves with its own stiffness.
 
 This document answers: *what would it take for gridoxide to model node-breaker topology as a
 first-class thing, across every calculation it already supports — AC Newton-Raphson, DC Bθ, the

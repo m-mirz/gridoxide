@@ -468,3 +468,146 @@ fn opening_a_switch_changes_the_solution_but_not_the_pattern() {
         assert!((a.voltage_ang - b.voltage_ang).abs() < 1e-9);
     }
 }
+
+/// **Phase 3's gate on real data.** MiniGrid solved with its retained switches
+/// as exact equality constraints rather than as stiff branches, and the two
+/// treatments agreeing.
+///
+/// The two share nothing below the Y-bus. `Regularize` puts a large admittance
+/// into the matrix and runs the ordinary Newton loop; `Constrain` puts no number
+/// in at all, adds two rows and columns per switch, and solves an indefinite KKT
+/// system. That they land on the same state — to within the voltage drop the
+/// stiff branches themselves introduce — is the check worth having.
+#[test]
+fn minigrid_solves_with_switches_as_constraints_and_agrees_with_regularize() {
+    let Some(ds) = load("MiniGrid/MiniGrid-Merged", "MiniGrid") else { return };
+    let policy = RetentionPolicy::RetainAdjacentToBusbar;
+
+    let reg = cgmes_node_breaker_to_buses_and_branches(
+        &ds, 100e6, &policy, SwitchTreatment::Regularize,
+    )
+    .expect("regularized conversion failed");
+    let mut ybus = build_ybus(reg.buses.len(), &reg.lines, &reg.transformers);
+    stamp_shunts(&mut ybus, &reg.shunts);
+    let regularized = run_power_flow_analysis_from_ybus(reg.buses.clone(), ybus);
+    assert_eq!(regularized.stats.status, SolveStatus::Converged);
+
+    let con = cgmes_node_breaker_to_buses_and_branches(
+        &ds, 100e6, &policy, SwitchTreatment::Constrain,
+    )
+    .expect("constrained conversion failed");
+    // Nothing was stamped: the switches are not in the branch list at all.
+    assert_eq!(
+        con.transformers.len() + con.lines.len(),
+        reg.lines.len() + reg.transformers.len() - reg.switch_branches().len(),
+        "the constrained network should carry no switch branches"
+    );
+
+    let switches = con.constrained_switches();
+    assert_eq!(switches.len(), 30, "the busbar policy retains 30 switches on MiniGrid");
+    let mut buses = con.buses.clone();
+    let mut y = build_ybus(buses.len(), &con.lines, &con.transformers);
+    stamp_shunts(&mut y, &con.shunts);
+    let solution =
+        gridoxide::constrained::solve_constrained(&mut buses, &y.finish(), &switches, 1e-8, 30);
+    assert_eq!(
+        solution.stats.status,
+        SolveStatus::Converged,
+        "the constrained solve did not converge"
+    );
+
+    // Same state, to within the drop across the regularized switches: ~5e-6 p.u.
+    // per switch at 1 p.u., and no path here crosses more than a handful.
+    for (i, (r, c)) in regularized.buses.iter().zip(&buses).enumerate() {
+        assert!(
+            (r.voltage_mag - c.voltage_mag).abs() < 1e-4
+                && (r.voltage_ang - c.voltage_ang).abs() < 1e-4,
+            "bus {i}: regularized ({:.6}, {:.6}) vs constrained ({:.6}, {:.6})",
+            r.voltage_mag, r.voltage_ang, c.voltage_mag, c.voltage_ang
+        );
+    }
+
+    // And the switch flows agree, switch for switch.
+    let v = bus_voltages(&regularized.buses);
+    let mut compared = 0;
+    for (n, retained) in con.view.retained().iter().enumerate() {
+        if solution.indeterminate.contains(&n) {
+            continue;
+        }
+        let Some((p_reg, q_reg)) = reg.switch_flow(retained.switch, &v) else {
+            continue; // degenerate under `Regularize`: never stamped, no flow
+        };
+        let (p_con, q_con) = solution.flows[n];
+        assert!(
+            (p_reg - p_con).abs() < 1e-4 && (q_reg - q_con).abs() < 1e-4,
+            "switch {n}: regularized ({p_reg:.6}, {q_reg:.6}) vs constrained ({p_con:.6}, {q_con:.6})"
+        );
+        compared += 1;
+    }
+    assert!(compared >= 20, "only {compared} switch flows were comparable");
+}
+
+/// `Constrain` at real scale: every switch in the two largest node-breaker
+/// configurations, enforced exactly.
+///
+/// The interesting number is the iteration count, which is the same one the
+/// bus-branch solve of the same model takes — 5 for SmallGrid, 6 for Svedala.
+/// Adding 2,532 rows and columns to Svedala's system does not cost an iteration,
+/// which is what "no large number in the matrix" is supposed to buy.
+///
+/// SmallGrid's full view is also what found the one non-obvious redundancy in
+/// the formulation. A run of closed switches whose two ends are both `Slack`
+/// makes the second tie a duplicate of the first — a singular matrix — and no
+/// amount of looking at a switch's own two ends catches it. Seeding the
+/// disjoint-set forest with the already-fixed buses does; see
+/// `constrained::solve_constrained`.
+#[test]
+fn the_largest_models_solve_with_every_switch_constrained() {
+    for (dir, prefix, iterations) in
+        [("SmallGrid/SmallGrid-Merged", "SmallGrid", 5), ("Svedala/Svedala-Merged", "Svedala", 6)]
+    {
+        let Some(ds) = load(dir, prefix) else { return };
+        let net = cgmes_node_breaker_to_buses_and_branches(
+            &ds,
+            100e6,
+            &RetentionPolicy::RetainAll,
+            SwitchTreatment::Constrain,
+        )
+        .expect("conversion failed");
+
+        let switches = net.constrained_switches();
+        assert!(switches.len() > 1000, "{prefix} retained only {} switches", switches.len());
+
+        let mut buses = net.buses.clone();
+        let mut y = build_ybus(buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut y, &net.shunts);
+        let solution =
+            gridoxide::constrained::solve_constrained(&mut buses, &y.finish(), &switches, 1e-6, 30);
+
+        assert_eq!(
+            solution.stats.status,
+            SolveStatus::Converged,
+            "{prefix} did not converge with {} constrained switches",
+            switches.len()
+        );
+        assert_eq!(
+            solution.stats.iterations(),
+            iterations,
+            "{prefix} took {} iterations, not the {iterations} its bus-branch solve takes",
+            solution.stats.iterations()
+        );
+        // Every closed, determinate switch ties its two ends exactly — that is
+        // the whole claim, and it costs nothing to check all of them.
+        for (n, sw) in switches.iter().enumerate() {
+            if sw.open || solution.indeterminate.contains(&n) {
+                continue;
+            }
+            let (a, b) = (&buses[sw.from], &buses[sw.to]);
+            assert!(
+                (a.voltage_mag - b.voltage_mag).abs() < 1e-9
+                    && (a.voltage_ang - b.voltage_ang).abs() < 1e-9,
+                "{prefix} switch {n} did not tie its ends: {a:?} vs {b:?}"
+            );
+        }
+    }
+}
