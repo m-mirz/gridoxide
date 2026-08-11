@@ -22,8 +22,8 @@ against `f96a660`.
 > §1.1's counts, `se::constraints::augment`'s generic signature, and `measurement::Target`'s
 > variants are all unchanged.
 >
-> **Implementation status.** **Phases 0, 1, 2, 4, 6 and 7 are done** (§9). Phase 3 and most of
-> phase 5 remain.
+> **Implementation status.** **Phases 0, 1, 2, 4, 5, 6 and 7 are done** (§9), phase 5 to the limit
+> the data allows. Phase 3 remains.
 >
 > *Phase 0* turned `src/topology.rs` into a directory — `model`
 > (`NodeIdx`/`BusIdx`/`SwitchIdx`, `Switch`, `SwitchKind`, `NodeBreakerTopology`), `bus_view`
@@ -65,11 +65,26 @@ against `f96a660`.
 > `tests/cgmes_node_breaker_solve_test.rs`. `switches::NodeBreakerNetwork` owns the switch↔branch
 > mapping and offers `switch_flow`/`set_switch_open`/`is_switch_open`, which is §7's Rust surface.
 >
-> *Phase 5 is begun*: the observability gap §5.5 identifies is fixed —
-> `se::observability::analyze` now counts constraint rows in the rank, which was already wrong on
-> ordinary PGM data. The rest of phase 5 needs state estimation to accept a non-PGM network at all
-> (`SeNetwork::new` takes `&pgm::PgmNetwork`), which this document does not mention and which is the
-> real prerequisite.
+> *Phase 5 is done at the Rust level.* Two things it identified: the observability rank now counts
+> constraint rows (§5.5), which was already wrong on ordinary PGM data. And the real prerequisite,
+> which this document does not mention: `SeNetwork::new` took a `&pgm::PgmNetwork`, so *no* CGMES
+> model could reach the estimator. `SeNetwork::from_bus_network` closes that — a CGMES network's
+> sources are bus *types* rather than synthesized source branches, which is the only thing that
+> differed — and `NodeBreakerNetwork::se_network` is the bridge.
+>
+> Two findings from `tests/cgmes_node_breaker_se_test.rs`, neither anticipated here:
+>
+> - **`flat_start` does not converge on CGMES data**, and the switches have nothing to do with it. A
+>   de-energized bus must start at zero; pinned at 1 p.u. it poisons every measurement touching it.
+>   `linear_start` already zeroes them.
+> - **A de-energized bus was being counted as an observability failure.** Same class of bug as the
+>   constraint-row one and in the same function; `analyze` now reports those unknowns in
+>   `de_energized` and excludes them from the rank test.
+>
+> What is *not* done: measurements are not read from CGMES, and there is nothing much to read. Only
+> the OP profile carries `Analog`/`AnalogValue`, only FullGrid ships one in the conformance set, and
+> it holds four. A caller supplies its own measurements, which is why the Python
+> `StateEstimationModel` stays PGM-only — it loads its sensors from the document.
 >
 > *Phase 7 is done*: `switches::NodeBreakerNetwork` (Rust), `from_cgmes(topology=, retain=)` plus
 > `switches()`/`set_switch()`/`switch_flow_p()` (Python), a `gridoxide switches` subcommand with

@@ -125,6 +125,22 @@ pub struct ObservabilityReport {
     /// Set when the system was too large to analyze densely, in which case only
     /// the structural half of the report is filled in.
     pub skipped_numerical: bool,
+    /// Unknowns belonging to buses that carry no voltage at all.
+    ///
+    /// These are not a gap in the sensor plan and no sensor would close them.
+    /// A de-energized bus is reported at exactly zero by every estimator path
+    /// here — `nr::estimate` writes it, `iterative::estimate` skips its rows,
+    /// `linear_start` starts it there — so its columns are determined by the
+    /// network rather than by measurements, and they are zero columns of `H` by
+    /// construction. Counting them against the rank would report every CGMES
+    /// model containing one switched-out node as unobservable, which is the
+    /// same mistake, in the same function, that ignoring constraint rows was.
+    ///
+    /// They are excluded from
+    /// [`structurally_unmeasured`](Self::structurally_unmeasured),
+    /// [`unobservable`](Self::unobservable) and
+    /// [`is_observable`](Self::is_observable), and reported here instead.
+    pub de_energized: Vec<Unknown>,
     /// A global-angle current sensor is present with nothing to measure its
     /// angle against.
     ///
@@ -152,7 +168,8 @@ impl ObservabilityReport {
     /// that state is fully determined, just to the wrong reference, and calling
     /// it unobservable would misname it.
     pub fn is_observable(&self) -> bool {
-        self.rank == self.n_unknowns && self.structurally_unmeasured.is_empty()
+        self.rank + self.de_energized.len() == self.n_unknowns
+            && self.structurally_unmeasured.is_empty()
     }
 }
 
@@ -285,17 +302,23 @@ pub fn analyze(
             }
         }
     }
+    let live = |u: &Unknown| net.energized.get(u.bus).copied().unwrap_or(true);
+    let de_energized: Vec<Unknown> =
+        (0..n).map(|c| describe(layout, c)).filter(|u| !live(u)).collect();
+    let untouched = (0..n).filter(|&c| !touched[c]).count();
     let structurally_unmeasured: Vec<Unknown> = (0..n)
         .filter(|&c| !touched[c])
         .map(|c| describe(layout, c))
+        .filter(live)
         .collect();
 
     if n > DENSE_LIMIT {
         return ObservabilityReport {
             n_unknowns: n,
-            rank: n - structurally_unmeasured.len(),
+            rank: n - untouched,
             structurally_unmeasured,
             unobservable: Vec::new(),
+            de_energized,
             skipped_numerical: true,
             global_current_without_angle_reference,
         };
@@ -320,18 +343,21 @@ pub fn analyze(
             n_unknowns: n,
             rank: 0,
             structurally_unmeasured,
-            unobservable: (0..n).map(|c| describe(layout, c)).collect(),
+            unobservable: (0..n).map(|c| describe(layout, c)).filter(live).collect(),
+            de_energized,
             skipped_numerical: false,
             global_current_without_angle_reference,
         };
     };
-    let unobservable = perm[rank..].iter().map(|&c| describe(layout, c)).collect();
+    let unobservable =
+        perm[rank..].iter().map(|&c| describe(layout, c)).filter(live).collect();
 
     ObservabilityReport {
         n_unknowns: n,
         rank,
         structurally_unmeasured,
         unobservable,
+        de_energized,
         skipped_numerical: false,
         global_current_without_angle_reference,
     }

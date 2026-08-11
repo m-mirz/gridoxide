@@ -262,6 +262,76 @@ impl TerminalIndex {
     }
 }
 
+/// Every CGMES class that puts power into or takes power out of a bus.
+///
+/// This is deliberately *wider* than the set [`convert_equipment`] actually
+/// converts, and the asymmetry is the safe direction: the list is used to decide
+/// which buses inject **nothing**, and a class named here that gridoxide ignores
+/// merely leaves a bus unconstrained. A class *missing* here would do the
+/// opposite — assert as exact fact that a real appliance's bus injects zero.
+const INJECTING_CLASSES: &[&str] = &[
+    "EnergyConsumer",
+    "ConformLoad",
+    "NonConformLoad",
+    "StationSupply",
+    "EnergySource",
+    "SynchronousMachine",
+    "AsynchronousMachine",
+    "RotatingMachine",
+    "EquivalentInjection",
+    "ExternalNetworkInjection",
+    "PowerElectronicsConnection",
+    "StaticVarCompensator",
+    "LinearShuntCompensator",
+    "NonlinearShuntCompensator",
+    "ShuntCompensator",
+    "GroundingImpedance",
+    "PetersenCoil",
+    "EarthFaultCompensator",
+    "Ground",
+    "VsConverter",
+    "CsConverter",
+    "ACDCConverter",
+];
+
+/// Per bus, whether *no* injecting equipment terminates on it.
+///
+/// This is the network property state estimation turns into a hard equality
+/// constraint (`P = Q = 0` exactly, no sensor and no noise — see
+/// [`se::constraints`](crate::se::constraints)), so it has to be read from the
+/// model's structure rather than from the snapshot's numbers. A load whose SSH
+/// `p`/`q` happen to be zero this hour is not a bus that injects nothing, and
+/// constraining it would bias every estimate around it.
+///
+/// It matters most in the node-breaker view, and that is the point of computing
+/// it at all: the internal nodes of a bay carry switches and nothing else, so
+/// almost every bus the finer topology adds is exactly this case. A bus-branch
+/// model hides them by merging them away.
+fn zero_injection_flags(ds: &CimDataset, terms: &TerminalIndex, n_buses: usize) -> Vec<bool> {
+    let mut zero = vec![true; n_buses];
+    for class in INJECTING_CLASSES {
+        for mrid in by_type(ds, class) {
+            let Some(terminals) = terms.by_equipment.get(mrid) else {
+                continue;
+            };
+            for t in terminals {
+                // A *disconnected* terminal injects nothing, and CGMES says so
+                // in SSH — but this deliberately ignores that. `connected` is a
+                // snapshot flag like `p` and `q`; the estimator's constraint
+                // asserts a property of the network, and "there is a generator
+                // here, currently open" is not the same claim as "nothing can
+                // inject here".
+                if let Some(&bus) = terms.bus_of.get(t) {
+                    if bus < n_buses {
+                        zero[bus] = false;
+                    }
+                }
+            }
+        }
+    }
+    zero
+}
+
 /// Merges buses tied together by a *closed*, in-service switch (`Breaker`,
 /// `Switch`, `Disconnector`, `LoadBreakSwitch`, `DisconnectingCircuitBreaker`,
 /// `GroundDisconnector`, `Jumper`, `Cut`, `Fuse`) into one bus each, before
@@ -2312,8 +2382,13 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
     treatment: crate::switches::SwitchTreatment,
 ) -> Result<crate::switches::NodeBreakerNetwork, CgmesError> {
     let (buses, idx_of, terms, nb, view) = build_node_breaker_skeleton(ds, policy)?;
+    let mut zero_injection = zero_injection_flags(ds, &terms, buses.len());
     let (buses, lines, transformers, shunts) =
         convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
+    // Conversion appends buses of its own — a three-winding transformer's star
+    // point, chiefly. Nothing terminates on those by construction, which is
+    // what `true` says: they are the textbook zero-injection bus.
+    zero_injection.resize(buses.len(), true);
 
     if treatment == crate::switches::SwitchTreatment::Merge && !view.retained().is_empty() {
         return Err(CgmesError::UnsupportedTransformer {
@@ -2332,6 +2407,7 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
         view,
         nb.topology,
         nb.switch_mrids,
+        zero_injection,
         treatment,
     ))
 }
