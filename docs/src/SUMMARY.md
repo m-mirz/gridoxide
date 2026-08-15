@@ -16,6 +16,11 @@
 - [Ideal Switches and Zero-Impedance Branches](./powerflow/zero_impedance_branches.md)
 - [Multi-Island Power Flow](./powerflow/multi_island.md)
 
+# Short Circuit
+
+- [The Short-Circuit Problem](./short_circuit/index.md)
+- [Fault Types and Their Boundary Conditions](./short_circuit/faults.md)
+
 # State Estimation
 
 - [The State Estimation Problem](./state_estimation/index.md)

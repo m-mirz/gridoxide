@@ -1390,11 +1390,168 @@ impl StateEstimationModel {
     }
 }
 
+/// One node's short-circuit result.
+#[pyclass]
+struct ShortCircuitNode {
+    /// The document's own node id.
+    #[pyo3(get)]
+    id: u64,
+    /// Per-phase voltage magnitude, per unit, as `[a, b, c]`.
+    #[pyo3(get)]
+    u_pu: [f64; 3],
+    /// Per-phase voltage angle, radians.
+    #[pyo3(get)]
+    u_angle: [f64; 3],
+    /// Per-phase voltage magnitude in volts, line-to-neutral.
+    #[pyo3(get)]
+    u: [f64; 3],
+    #[pyo3(get)]
+    energized: bool,
+    /// Symmetrical-component magnitudes `(zero, positive, negative)` of this
+    /// node's voltage — the view IEC 60909 and powsybl's short-circuit API are
+    /// both written in. A three-phase fault leaves only the positive
+    /// component; a two-phase fault clear of ground has no zero component at
+    /// all.
+    #[pyo3(get)]
+    sequence: (f64, f64, f64),
+}
+
+/// One fault's current.
+#[pyclass]
+struct ShortCircuitFault {
+    #[pyo3(get)]
+    id: u64,
+    /// Per-phase fault-current magnitude, amperes.
+    #[pyo3(get)]
+    i_f: [f64; 3],
+    /// Per-phase fault-current angle, radians.
+    #[pyo3(get)]
+    i_f_angle: [f64; 3],
+}
+
+/// One source's contribution to the fault.
+#[pyclass]
+struct ShortCircuitSource {
+    #[pyo3(get)]
+    id: u64,
+    #[pyo3(get)]
+    i: [f64; 3],
+    #[pyo3(get)]
+    i_angle: [f64; 3],
+}
+
+/// The result of [`short_circuit`].
+#[pyclass]
+struct ShortCircuitResult {
+    #[pyo3(get)]
+    nodes: Vec<Py<ShortCircuitNode>>,
+    #[pyo3(get)]
+    faults: Vec<Py<ShortCircuitFault>>,
+    #[pyo3(get)]
+    sources: Vec<Py<ShortCircuitSource>>,
+}
+
+/// Runs an IEC 60909 short-circuit calculation over a PGM-format JSON file.
+///
+/// Unlike `PowerFlowModel`, this is a plain function rather than a
+/// construct-then-solve class: a short-circuit calculation is a single direct
+/// solve with nothing worth caching between calls — no factorization is reused,
+/// because the fault boundary conditions change the matrix itself.
+///
+/// `scaling` is `"max"` (default) or `"min"`, choosing the IEC 60909 voltage
+/// factor `c`. The maximum is what equipment ratings are sized against; the
+/// minimum is the protection-sensitivity study.
+#[pyfunction]
+#[pyo3(signature = (path, scaling = "max", s_base_va = 1e6, freq_hz = 50.0))]
+fn short_circuit(
+    py: Python<'_>,
+    path: &str,
+    scaling: &str,
+    s_base_va: f64,
+    freq_hz: f64,
+) -> PyResult<ShortCircuitResult> {
+    use crate::shortcircuit::{
+        short_circuit_from_pgm, SequenceValue, ShortCircuitOptions, VoltageScaling,
+    };
+
+    let scaling = match scaling {
+        "max" | "maximum" => VoltageScaling::Maximum,
+        "min" | "minimum" => VoltageScaling::Minimum,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "scaling must be \"max\" or \"min\", got {other:?}"
+            )))
+        }
+    };
+
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+    let input: PgmInput = serde_json::from_str(&raw)
+        .map_err(|e| PyValueError::new_err(format!("parsing {path}: {e}")))?;
+
+    let (net, report) =
+        short_circuit_from_pgm(&input, s_base_va, freq_hz, ShortCircuitOptions { scaling })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    // Node index → the document's own id, so Python sees the ids it wrote
+    // rather than gridoxide's internal ordering.
+    let mut id_of = vec![0u64; net.n_nodes];
+    for (&id, &idx) in &net.node_idx {
+        id_of[idx] = id;
+    }
+
+    let nodes = report
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, n)| {
+            let s = SequenceValue::from_phase(&report.u_bus[idx]);
+            Py::new(
+                py,
+                ShortCircuitNode {
+                    id: id_of[idx],
+                    u_pu: n.u_pu,
+                    u_angle: n.u_angle,
+                    u: n.u,
+                    energized: n.energized,
+                    sequence: (s.zero.norm(), s.positive.norm(), s.negative.norm()),
+                },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let faults = report
+        .faults
+        .iter()
+        .map(|f| {
+            Py::new(
+                py,
+                ShortCircuitFault { id: f.id, i_f: f.i_f, i_f_angle: f.i_f_angle },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let sources = report
+        .sources
+        .iter()
+        .map(|s| {
+            Py::new(py, ShortCircuitSource { id: s.id, i: s.i, i_angle: s.i_angle })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    Ok(ShortCircuitResult { nodes, faults, sources })
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     m.add_class::<BatchResult>()?;
     m.add_class::<StateEstimationModel>()?;
     m.add_class::<SeBatchOutcome>()?;
+    m.add_class::<ShortCircuitResult>()?;
+    m.add_class::<ShortCircuitNode>()?;
+    m.add_class::<ShortCircuitFault>()?;
+    m.add_class::<ShortCircuitSource>()?;
+    m.add_function(wrap_pyfunction!(short_circuit, m)?)?;
     Ok(())
 }

@@ -96,4 +96,19 @@ pub struct Line3Ph {
     pub r0: f64,
     pub x0: f64,
     pub b0: f64, // total zero-sequence shunt susceptance (p.u.)
+    /// Total positive-sequence shunt *conductance* (p.u.), the dielectric-loss
+    /// term power-grid-model writes as `tan δ`: its line shunt is
+    /// `2πf·c·(tan δ + j)`, so `g = b · tan δ`.
+    ///
+    /// Defaulted to zero throughout the symmetric fixtures (which all specify
+    /// `tan1 = tan0 = 0`) and therefore invisible to them — but not to a real
+    /// cable, and not to `dummy-test-line-into-itself`, which is where its
+    /// absence first showed up. Kept as a separate field rather than folding
+    /// the shunt into one complex so that `Line3Ph` stays parallel to
+    /// [`Line`]'s own `b_shunt`/`g_shunt` pair.
+    #[doc(alias = "tan1")]
+    pub g1: f64,
+    /// Total zero-sequence shunt conductance (p.u.) — `b0 · tan δ₀`.
+    #[doc(alias = "tan0")]
+    pub g0: f64,
 }

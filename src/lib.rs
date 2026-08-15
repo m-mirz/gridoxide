@@ -12,6 +12,7 @@ pub mod batch;
 pub mod bde;
 pub mod dc;
 pub mod linear;
+pub mod shortcircuit;
 pub mod json;
 pub mod pgm;
 pub mod sparse;

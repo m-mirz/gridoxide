@@ -47,6 +47,23 @@ impl YBus {
         self.entries.push((i, j, val));
     }
 
+    /// The raw, unconsolidated COO triplets, for callers that need to modify
+    /// the matrix *by column* before solving.
+    ///
+    /// [`finish`](Self::finish) is the normal exit and gives a row-major
+    /// structure ([`YBusSparse::row`]) that cannot serve a column-wise
+    /// rewrite. `shortcircuit` needs exactly that: a bolted fault zeroes the
+    /// faulted bus's whole column, which is a filter over these triplets.
+    ///
+    /// **Zeroing a column means removing its entries, not adding a
+    /// compensating one.** Duplicate `(row, col)` triplets are *summed*, both
+    /// here in `finish` and in `sparse::solve_complex`'s own
+    /// `try_new_from_triplets`, so an added negative would cancel only the
+    /// entries it was computed against and silently leave anything else.
+    pub fn into_entries(self) -> Vec<(usize, usize, Complex<f64>)> {
+        self.entries
+    }
+
     /// Consolidates the accumulated triplets into the frozen, sparse form
     /// used for the actual power-flow solve. Call once all `build_ybus*`/
     /// `stamp_*` contributions have been added.
@@ -374,8 +391,8 @@ pub fn build_ybus(n: usize, lines: &[Line], transformers: &[Transformer]) -> YBu
 /// confidently to the wrong answer, which is the failure mode
 /// `tests/measurement_residual_test.rs` exists to catch on the symmetric side.
 pub fn line3ph_blocks(ln: &Line3Ph) -> [[[Complex<f64>; 3]; 3]; 4] {
-    let y_c1 = Complex::new(0.0, ln.b1);
-    let y_c0 = Complex::new(0.0, ln.b0);
+    let y_c1 = Complex::new(ln.g1, ln.b1);
+    let y_c0 = Complex::new(ln.g0, ln.b0);
     let zero = [[Complex::new(0.0, 0.0); 3]; 3];
 
     // A `from == to` line is gridoxide's half-open branch: the whole equivalent
@@ -540,60 +557,140 @@ fn fortescue_to_phase(y0: Complex<f64>, y1: Complex<f64>, y2: Complex<f64>) -> [
     out
 }
 
+/// PGM's `WindingType` codes, as they appear on `PgmTransformer`'s
+/// `winding_from`/`winding_to` (`common/enum.hpp`).
+pub const WYE: u8 = 0;
+pub const WYE_N: u8 = 1;
+pub const DELTA: u8 = 2;
+pub const ZIGZAG: u8 = 3;
+pub const ZIGZAG_N: u8 = 4;
+
+/// Whether a winding offers the zero sequence a path of its own, given what
+/// sits on the other side — PGM's `zero_seq_available` lambda
+/// (`component/transformer.hpp`). A wye_n winding needs the other side to be
+/// wye_n or delta to have somewhere for zero-sequence current to go; a
+/// zigzag_n winding always does; nothing else ever does.
+///
+/// The sides where this is false are exactly the ones that pick up the
+/// artificial low-susceptance term, which exists to keep such a side from
+/// floating free of ground in the zero-sequence network (an all-zero row is
+/// a singular matrix, not a physical answer).
+fn zero_seq_available(this_side: u8, other_side: u8) -> bool {
+    match this_side {
+        WYE_N => other_side == WYE_N || other_side == DELTA,
+        ZIGZAG_N => true,
+        _ => false,
+    }
+}
+
 /// Computes sequence-domain `(y0, y1, y2)` branch admittance parameters
 /// (each `[yff, yft, ytf, ytt]`) for a two-winding transformer, needed for
-/// asymmetric (3-phase) power flow.
+/// asymmetric (3-phase) power flow and for short-circuit calculation.
 ///
 /// Positive/negative sequence reuse `branch_calc_param` with the tap rotated
-/// by ±clock (mirrors PGM's `asym_calc_param`). Zero sequence supports exactly
-/// two winding combinations, matching gridoxide's test fixtures — any other
-/// combination panics rather than silently computing physically wrong results:
+/// by ±clock (mirrors PGM's `asym_calc_param`).
 ///
-/// - Dyn (`winding_from` = delta = 2, `winding_to` = wye_n = 1): PGM's "*yn"
-///   branch — a ground path via the magnetizing branch plus, since the "from"
-///   side is a delta winding, an additional path via the series impedance —
-///   plus the artificial low-susceptance term PGM adds on the delta side
-///   (which has no zero-sequence path of its own).
-/// - YNyn (`winding_from` = `winding_to` = wye_n = 1): PGM's full two-port
-///   zero-sequence branch, `z0_series = 1/y_series + 3·(z_grounding_to +
-///   z_grounding_from/k²)`. gridoxide has no grounding-impedance fields on
-///   `PgmTransformer` (none of its fixtures specify them, and PGM itself
-///   defaults unset grounding r/x to 0), so both terms are taken as zero,
-///   collapsing `z0_series` to `1/y_series` — i.e. `y0_series = y_series`.
-///   The zero-sequence tap picks up a 180° flip for clock ∈ {2, 6, 10}
-///   (reverse-connected variants); otherwise it matches the untransformed
-///   magnitude `k`.
+/// Zero sequence follows PGM's own general algorithm
+/// (`component/transformer.hpp`, the `sc_calc_param`/`calc_param_asym` zero-
+/// sequence block) rather than enumerating winding pairs. Four cases, in
+/// PGM's own order — the first three are mutually exclusive, the zigzag pair
+/// is additive on top:
+///
+/// - **YNyn** — the full two-port zero-sequence branch, `z0_series =
+///   1/y_series + 3·(z_grounding_to + z_grounding_from/k²)`, with the tap's
+///   phase picking up a 180° flip for clock ∈ {2, 6, 10} (reverse-connected
+///   variants).
+/// - **YN\*** (from side wye_n, in service) — a ground path via the
+///   magnetizing branch, plus a path via the series impedance when the *other*
+///   side is delta; a one-port term on `yff`, scaled by `1/k²`.
+/// - **\*yn** (to side wye_n, in service) — the mirror, a one-port term on
+///   `ytt`. Dyn is this case, and was the only form of it gridoxide
+///   previously implemented.
+/// - **ZN\*/\*zn** — a zigzag_n winding's zero-sequence impedance is taken as
+///   10% of its positive-sequence value.
+///
+/// Then every side without a zero-sequence path of its own
+/// ([`zero_seq_available`]) and in service picks up
+/// `−j·1e-8·sn/s_base/uk`.
+///
+/// # Two modelling substitutions
+///
+/// gridoxide has no `i0_zero_sequence`/`p0_zero_sequence` fields on
+/// `PgmTransformer`, so the zero-sequence magnetizing admittance is taken as
+/// the positive-sequence one, `y0_shunt = y_shunt`. That is not an
+/// approximation this crate invents: it is exactly what PGM computes when
+/// those two fields are left unset, since it defaults `i0_zero_sequence` to
+/// `i0` and `p0_zero_sequence` to `p0` in that case.
+///
+/// Likewise there are no grounding-impedance fields, so `z_grounding_from =
+/// z_grounding_to = 0` throughout (PGM defaults them to zero too). That is
+/// what collapses YNyn's `z0_series` to `1/y_series` — i.e. `y0_series =
+/// y_series` — and drops the `3·z_grounding` term from the one-port cases,
+/// where it would otherwise sit in series with `1/y0`.
 pub fn transformer_seq_params(
     y_series: Complex<f64>, y_shunt: Complex<f64>, tap: Complex<f64>,
     from_status: u8, to_status: u8,
     winding_from: u8, winding_to: u8,
     sn: f64, uk: f64, s_base_va: f64, clock: i32,
 ) -> ([Complex<f64>; 4], [Complex<f64>; 4], [Complex<f64>; 4]) {
+    let zero = Complex::new(0.0, 0.0);
     let y1 = branch_calc_param(y_series, y_shunt, tap, from_status, to_status);
     let y2 = branch_calc_param(y_series, y_shunt, tap.conj(), from_status, to_status);
 
-    let y0 = match (winding_from, winding_to) {
-        (2, 1) => {
-            let mut y0 = [Complex::new(0.0, 0.0); 4];
-            if to_status == 1 {
-                y0[3] = y_shunt + y_series;
-            }
-            if from_status == 1 {
-                let low_susceptance = -1e-8 * sn / s_base_va / uk;
-                y0[0] += Complex::new(0.0, low_susceptance);
-            }
-            y0
+    let k = tap.norm();
+    // See the doc comment: PGM's own default when the zero-sequence
+    // magnetizing fields are unset, which is the only case gridoxide models.
+    let y0_shunt = y_shunt;
+
+    let mut y0 = [zero; 4];
+    if winding_from == WYE_N && winding_to == WYE_N {
+        // YNyn. With both grounding impedances zero, `z0_series` collapses to
+        // `1/y_series`, so `y0_series` is just `y_series`.
+        let phase_shift_0 = if matches!(clock, 2 | 6 | 10) { std::f64::consts::PI } else { 0.0 };
+        let tap0 = Complex::from_polar(k, phase_shift_0);
+        y0 = branch_calc_param(y_series, y0_shunt, tap0, from_status, to_status);
+    } else if winding_from == WYE_N && from_status == 1 {
+        // YN*: ground path via the magnetizing branch, plus one via zk when
+        // the other side is delta.
+        let mut y = y0_shunt;
+        if winding_to == DELTA {
+            y += y_series;
         }
-        (1, 1) => {
-            let phase_shift_0 = if matches!(clock, 2 | 6 | 10) { std::f64::consts::PI } else { 0.0 };
-            let k = tap.norm();
-            let tap0 = Complex::from_polar(k, phase_shift_0);
-            branch_calc_param(y_series, y_shunt, tap0, from_status, to_status)
+        // Guarded exactly as PGM guards it: with no magnetizing branch and no
+        // delta on the far side there is no zero-sequence path at all, and
+        // `1/y` would be a division by zero rather than the zero it means.
+        if y != zero {
+            y0[0] = y / (k * k);
         }
-        _ => panic!(
-            "transformer_seq_params only supports Dyn (winding_from=2, winding_to=1) or YNyn (winding_from=1, winding_to=1); got ({winding_from}, {winding_to})"
-        ),
-    };
+    } else if winding_to == WYE_N && to_status == 1 {
+        // *yn — the mirror of the above. Dyn lands here.
+        let mut y = y0_shunt;
+        if winding_from == DELTA {
+            y += y_series;
+        }
+        if y != zero {
+            y0[3] = y;
+        }
+    }
+
+    // Zigzag windings are additive on top of the above, not an alternative to
+    // it — PGM writes these as separate `if`s, not `else if`s. A zigzag_n
+    // winding's zero-sequence series impedance is approximated as 10% of its
+    // positive-sequence value, so its admittance is 10x.
+    if winding_from == ZIGZAG_N && from_status == 1 {
+        y0[0] = y_series * 10.0 / (k * k);
+    }
+    if winding_to == ZIGZAG_N && to_status == 1 {
+        y0[3] = y_series * 10.0;
+    }
+
+    let low_susceptance = -1e-8 * sn / s_base_va / uk;
+    if !zero_seq_available(winding_from, winding_to) && from_status == 1 {
+        y0[0] += Complex::new(0.0, low_susceptance);
+    }
+    if !zero_seq_available(winding_to, winding_from) && to_status == 1 {
+        y0[3] += Complex::new(0.0, low_susceptance);
+    }
 
     (y0, y1, y2)
 }
@@ -826,6 +923,112 @@ pub fn power_injections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nameplate numbers shared by the `transformer_seq_params` cases below,
+    /// picked so `y_shunt` is nonzero (the magnetizing branch is the only
+    /// zero-sequence path a YN winding has when the far side is not delta,
+    /// so a zero one would hide the difference between the arms).
+    fn seq_fixture() -> (Complex<f64>, Complex<f64>, Complex<f64>) {
+        let y_series = Complex::new(2.0, -6.0);
+        let y_shunt = Complex::new(1e-4, -5e-4);
+        let tap = Complex::from_polar(1.05, std::f64::consts::PI / 6.0);
+        (y_series, y_shunt, tap)
+    }
+
+    fn seq_params_for(winding_from: u8, winding_to: u8, clock: i32) -> [Complex<f64>; 4] {
+        let (y_series, y_shunt, tap) = seq_fixture();
+        let (y0, _, _) = transformer_seq_params(
+            y_series, y_shunt, tap, 1, 1, winding_from, winding_to,
+            2e7, 0.05, 1e6, clock,
+        );
+        y0
+    }
+
+    /// YNd is the pair 11 of power-grid-model's 15 short-circuit fixtures use,
+    /// and the one the old two-arm implementation panicked on. Its
+    /// zero-sequence branch is a one-port term on the *from* side: the
+    /// magnetizing branch in parallel with the series impedance (the delta on
+    /// the far side gives zero-sequence current a circulating path), scaled by
+    /// `1/k²`.
+    #[test]
+    fn ynd_gets_a_from_side_zero_sequence_path() {
+        let (y_series, y_shunt, tap) = seq_fixture();
+        let k = tap.norm();
+        let y0 = seq_params_for(WYE_N, DELTA, 1);
+
+        let expected_yff = (y_shunt + y_series) / (k * k);
+        assert!((y0[0] - expected_yff).norm() < 1e-15, "yff = {}, want {expected_yff}", y0[0]);
+        // A delta winding has no zero-sequence path of its own, so the to side
+        // carries only the artificial low-susceptance term.
+        let low = -1e-8 * 2e7 / 1e6 / 0.05;
+        assert!((y0[3] - Complex::new(0.0, low)).norm() < 1e-18, "ytt = {}", y0[3]);
+        // A one-port term couples nothing across the branch.
+        assert_eq!(y0[1], Complex::new(0.0, 0.0));
+        assert_eq!(y0[2], Complex::new(0.0, 0.0));
+    }
+
+    /// Dyn is YNd's mirror, and was the one arm the old implementation had.
+    /// Pinning both together is what shows the generalization did not quietly
+    /// transpose the sides.
+    #[test]
+    fn dyn_is_the_mirror_of_ynd() {
+        let (y_series, y_shunt, _) = seq_fixture();
+        let y0 = seq_params_for(DELTA, WYE_N, 5);
+
+        // The `*yn` arm carries no `1/k²` — the to side is the per-unit base.
+        assert!((y0[3] - (y_shunt + y_series)).norm() < 1e-15, "ytt = {}", y0[3]);
+        let low = -1e-8 * 2e7 / 1e6 / 0.05;
+        assert!((y0[0] - Complex::new(0.0, low)).norm() < 1e-18, "yff = {}", y0[0]);
+    }
+
+    /// The reverse-connected clock positions flip the zero-sequence tap by
+    /// 180°, which the two-port YNyn arm is the only one to see.
+    #[test]
+    fn ynyn_flips_the_zero_sequence_tap_when_reverse_connected() {
+        let straight = seq_params_for(WYE_N, WYE_N, 0);
+        let reversed = seq_params_for(WYE_N, WYE_N, 6);
+
+        // yff/ytt are magnitude-only and so unmoved; the coupling terms carry
+        // the flip, and a 180° rotation is exactly a sign change.
+        assert!((straight[0] - reversed[0]).norm() < 1e-15);
+        assert!((straight[3] - reversed[3]).norm() < 1e-15);
+        assert!((straight[1] + reversed[1]).norm() < 1e-15, "{} vs {}", straight[1], reversed[1]);
+        assert!((straight[2] + reversed[2]).norm() < 1e-15, "{} vs {}", straight[2], reversed[2]);
+        // Both sides are wye_n, so neither picks up a low-susceptance term.
+        assert!(straight[1].norm() > 0.0);
+    }
+
+    /// A winding pair with no zero-sequence path at either end must not come
+    /// back all-zero: an all-zero row is a singular matrix, not an answer.
+    /// Both sides get the artificial low susceptance instead.
+    #[test]
+    fn a_pair_with_no_zero_sequence_path_is_not_left_floating() {
+        let y0 = seq_params_for(WYE, DELTA, 1);
+        let low = -1e-8 * 2e7 / 1e6 / 0.05;
+        assert!((y0[0] - Complex::new(0.0, low)).norm() < 1e-18, "yff = {}", y0[0]);
+        assert!((y0[3] - Complex::new(0.0, low)).norm() < 1e-18, "ytt = {}", y0[3]);
+    }
+
+    /// A zigzag_n winding's zero-sequence impedance is taken as 10% of its
+    /// positive-sequence value, so its admittance is 10x — and it always has a
+    /// path of its own, so it never picks up the low-susceptance term.
+    #[test]
+    fn zigzag_n_carries_ten_times_the_series_admittance() {
+        let (y_series, _, _) = seq_fixture();
+        let y0 = seq_params_for(WYE, ZIGZAG_N, 1);
+        assert!((y0[3] - y_series * 10.0).norm() < 1e-15, "ytt = {}", y0[3]);
+    }
+
+    /// An out-of-service terminal contributes nothing at all — not even the
+    /// low-susceptance term, which exists to ground a *connected* winding.
+    #[test]
+    fn an_open_terminal_contributes_no_zero_sequence_term() {
+        let (y_series, y_shunt, tap) = seq_fixture();
+        let (y0, _, _) = transformer_seq_params(
+            y_series, y_shunt, tap, 1, 0, WYE_N, DELTA, 2e7, 0.05, 1e6, 1,
+        );
+        assert_eq!(y0[3], Complex::new(0.0, 0.0));
+    }
 
     fn bus_at(idx: usize, bus_type: BusType, voltage_mag: f64) -> Bus {
         Bus {
