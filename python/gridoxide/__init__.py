@@ -1,6 +1,7 @@
 """gridoxide: AC power flow analysis (Newton-Raphson) — Python bindings.
 
-`PowerFlowModel`, `StateEstimationModel` and `short_circuit` are implemented in Rust
+`PowerFlowModel`, `StateEstimationModel`, `AcSensitivityModel` and
+`short_circuit` are implemented in Rust
 (`src/python.rs`) and built as the
 private `_gridoxide` compiled extension alongside this package (see
 `pyproject.toml`'s `python-source`/`module-name`), re-exported here so
@@ -11,6 +12,16 @@ gridoxide[matpower]`) converts raw MATPOWER case files into the PGM JSON
 `PowerFlowModel.from_pgm_json` reads — imported lazily, not here, so the
 core bindings never require numpy/scipy.
 """
-from ._gridoxide import PowerFlowModel, StateEstimationModel, short_circuit
+from ._gridoxide import (
+    AcSensitivityModel,
+    PowerFlowModel,
+    StateEstimationModel,
+    short_circuit,
+)
 
-__all__ = ["PowerFlowModel", "StateEstimationModel", "short_circuit"]
+__all__ = [
+    "AcSensitivityModel",
+    "PowerFlowModel",
+    "StateEstimationModel",
+    "short_circuit",
+]

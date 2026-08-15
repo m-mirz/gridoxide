@@ -1542,6 +1542,233 @@ fn short_circuit(
     Ok(ShortCircuitResult { nodes, faults, sources })
 }
 
+/// How the network responds to one variable — the forward direction.
+#[pyclass]
+struct SensitivityColumn {
+    /// dP/dp for every branch, in flat branch order (lines, then transformers).
+    #[pyo3(get)]
+    d_branch_active: Vec<f64>,
+    /// dQ/dp for every branch.
+    #[pyo3(get)]
+    d_branch_reactive: Vec<f64>,
+    /// d|V|/dp for every bus, per unit.
+    #[pyo3(get)]
+    d_voltage_magnitude: Vec<f64>,
+    /// dθ/dp for every bus, radians.
+    #[pyo3(get)]
+    d_voltage_angle: Vec<f64>,
+}
+
+/// What moves one quantity — the adjoint direction.
+#[pyclass]
+struct SensitivityRow {
+    /// df/dP for every bus.
+    #[pyo3(get)]
+    d_active_injection: Vec<f64>,
+    /// df/dQ for every bus.
+    #[pyo3(get)]
+    d_reactive_injection: Vec<f64>,
+    /// df/dk for every branch — zero for a line.
+    #[pyo3(get)]
+    d_transformer_ratio: Vec<f64>,
+    /// df/dα for every branch, per radian — zero for a line.
+    #[pyo3(get)]
+    d_phase_shift: Vec<f64>,
+}
+
+/// A converged AC operating point, factorized once and ready to differentiate.
+///
+/// Construct it from a PGM-format file, then ask as many questions as you like:
+/// every accessor is a triangular solve against the one factorization taken at
+/// construction, never a refactorization. That is why this is a class where
+/// `short_circuit` is a plain function — here there is genuinely something
+/// worth holding on to between calls.
+///
+/// ```python
+/// s = gridoxide.AcSensitivityModel("network.json")
+/// col = s.column(active_injection=2)      # bus 2 ramps — what responds?
+/// row = s.row(branch=8)                   # branch 8 is loaded — what moves it?
+/// ```
+#[pyclass(unsendable)]
+struct AcSensitivityModel {
+    inner: crate::ac_sensitivity::AcSensitivity,
+    n_buses: usize,
+    n_branches: usize,
+}
+
+fn parse_terminal(name: &str) -> PyResult<crate::branch_flow::Terminal> {
+    match name {
+        "from" => Ok(crate::branch_flow::Terminal::From),
+        "to" => Ok(crate::branch_flow::Terminal::To),
+        other => Err(PyValueError::new_err(format!(
+            "terminal must be \"from\" or \"to\", got {other:?}"
+        ))),
+    }
+}
+
+#[pymethods]
+impl AcSensitivityModel {
+    /// Solves the AC power flow in `path` and factorizes its Jacobian.
+    ///
+    /// Raises if the power flow does not converge: a derivative taken at a
+    /// non-converged point is meaningless rather than merely imprecise, and
+    /// silently returning one would be the worst of both.
+    #[new]
+    #[pyo3(signature = (path, s_base_va = 1e6, freq_hz = 50.0, tol = 1e-8, max_iter = 50))]
+    fn new(
+        path: &str,
+        s_base_va: f64,
+        freq_hz: f64,
+        tol: f64,
+        max_iter: usize,
+    ) -> PyResult<Self> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+        let input: PgmInput = serde_json::from_str(&raw)
+            .map_err(|e| PyValueError::new_err(format!("parsing {path}: {e}")))?;
+        let (buses, lines, transformers) =
+            crate::pgm::pgm_to_buses_and_branches(input, s_base_va, freq_hz);
+
+        let opts = crate::solver::PowerFlowOptions { tol, max_iter, ..Default::default() };
+        let report = crate::run_power_flow(buses, &lines, &transformers, &[], opts);
+        if report.stats.status != SolveStatus::Converged {
+            return Err(PyRuntimeError::new_err(format!(
+                "the power flow did not converge ({:?}); there is no operating point to \
+                 differentiate",
+                report.stats.status
+            )));
+        }
+
+        let ybus = build_ybus(report.buses.len(), &lines, &transformers).finish();
+        let n_buses = report.buses.len();
+        let n_branches = lines.len() + transformers.len();
+        let inner =
+            crate::ac_sensitivity::AcSensitivity::new(&report.buses, &ybus, &lines, &transformers)
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("the Jacobian is singular at the solved point")
+                })?;
+        Ok(Self { inner, n_buses, n_branches })
+    }
+
+    #[getter]
+    fn n_buses(&self) -> usize {
+        self.n_buses
+    }
+
+    /// Branch count, in the flat order every returned vector uses: lines first,
+    /// then transformers.
+    #[getter]
+    fn n_branches(&self) -> usize {
+        self.n_branches
+    }
+
+    /// The forward direction: pick exactly one variable, get the whole
+    /// network's response.
+    ///
+    /// Exactly one of the four keyword arguments must be given. `active_injection`
+    /// and `reactive_injection` take a bus index; `transformer_ratio` and
+    /// `phase_shift` take a branch index.
+    #[pyo3(signature = (*, active_injection = None, reactive_injection = None,
+                           transformer_ratio = None, phase_shift = None,
+                           terminal = "from"))]
+    fn column(
+        &self,
+        active_injection: Option<usize>,
+        reactive_injection: Option<usize>,
+        transformer_ratio: Option<usize>,
+        phase_shift: Option<usize>,
+        terminal: &str,
+    ) -> PyResult<SensitivityColumn> {
+        use crate::ac_sensitivity::Variable;
+        let chosen: Vec<Variable> = [
+            active_injection.map(Variable::ActiveInjection),
+            reactive_injection.map(Variable::ReactiveInjection),
+            transformer_ratio.map(Variable::TransformerRatio),
+            phase_shift.map(Variable::PhaseShift),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let [variable] = chosen[..] else {
+            return Err(PyValueError::new_err(
+                "pass exactly one of active_injection, reactive_injection, \
+                 transformer_ratio or phase_shift",
+            ));
+        };
+
+        let terminal = parse_terminal(terminal)?;
+        let flows = self
+            .inner
+            .branch_response(variable, terminal)
+            .ok_or_else(|| PyValueError::new_err("index out of range, or a singular solve"))?;
+        let state = self
+            .inner
+            .state_response(variable)
+            .ok_or_else(|| PyValueError::new_err("index out of range, or a singular solve"))?;
+
+        Ok(SensitivityColumn {
+            d_branch_active: flows.iter().map(|(p, _)| *p).collect(),
+            d_branch_reactive: flows.iter().map(|(_, q)| *q).collect(),
+            d_voltage_magnitude: state.d_vmag,
+            d_voltage_angle: state.d_theta,
+        })
+    }
+
+    /// The adjoint direction: pick one quantity, get everything that moves it.
+    ///
+    /// Either a `branch` (with `quantity` "active" or "reactive") or a `bus`
+    /// (with `quantity` "magnitude" or "angle").
+    #[pyo3(signature = (*, branch = None, bus = None, quantity = "active", terminal = "from"))]
+    fn row(
+        &self,
+        branch: Option<usize>,
+        bus: Option<usize>,
+        quantity: &str,
+        terminal: &str,
+    ) -> PyResult<SensitivityRow> {
+        use crate::ac_sensitivity::Function;
+        let function = match (branch, bus) {
+            (Some(branch), None) => {
+                let terminal = parse_terminal(terminal)?;
+                match quantity {
+                    "active" => Function::BranchActivePower { branch, terminal },
+                    "reactive" => Function::BranchReactivePower { branch, terminal },
+                    other => {
+                        return Err(PyValueError::new_err(format!(
+                            "for a branch, quantity must be \"active\" or \"reactive\", got {other:?}"
+                        )))
+                    }
+                }
+            }
+            (None, Some(bus)) => match quantity {
+                "magnitude" | "active" => Function::VoltageMagnitude(bus),
+                "angle" => Function::VoltageAngle(bus),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "for a bus, quantity must be \"magnitude\" or \"angle\", got {other:?}"
+                    )))
+                }
+            },
+            _ => {
+                return Err(PyValueError::new_err(
+                    "pass exactly one of branch or bus",
+                ))
+            }
+        };
+
+        let row = self
+            .inner
+            .function_row(function)
+            .ok_or_else(|| PyValueError::new_err("index out of range, or a singular solve"))?;
+        Ok(SensitivityRow {
+            d_active_injection: row.d_active,
+            d_reactive_injection: row.d_reactive,
+            d_transformer_ratio: row.d_ratio,
+            d_phase_shift: row.d_phase,
+        })
+    }
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
@@ -1553,5 +1780,8 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShortCircuitFault>()?;
     m.add_class::<ShortCircuitSource>()?;
     m.add_function(wrap_pyfunction!(short_circuit, m)?)?;
+    m.add_class::<AcSensitivityModel>()?;
+    m.add_class::<SensitivityColumn>()?;
+    m.add_class::<SensitivityRow>()?;
     Ok(())
 }

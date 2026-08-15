@@ -23,6 +23,8 @@ described on the page that covers it
 
 ## Running
 
+With no arguments the binary runs a bundled power-flow demo:
+
 ```bash
 cargo run
 ```
@@ -33,6 +35,34 @@ Or run the built executable directly from the project root:
 ./target/debug/gridoxide     # debug build
 ./target/release/gridoxide   # release build
 ```
+
+### Subcommands
+
+`gridoxide --help` prints the full argument list. Each subcommand reads a
+[power-grid-model JSON](../cgmes/index.md) document, except `switches`, which reads CGMES profiles.
+
+| Command | What it does |
+|---|---|
+| `estimate <path> [--iterative-linear]` | [State estimation](../state_estimation/index.md) over a document containing sensors. Newton-Raphson by default; the flag selects the faster linearized method. |
+| `dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]` | [DC power flow](../powerflow/dc.md), optionally printing one sensitivity column. |
+| `sensitivity <path> [--dp\|--dq <bus>] [--dk\|--dalpha <branch>] [--watch <branch>] [--terminal from\|to]` | [AC sensitivity](../sensitivity/ac.md). The first four flags each pick one variable and report what responds; `--watch` picks one branch and reports what would move it. |
+| `short-circuit <path> [--scaling max\|min]` | [IEC 60909 fault currents](../short_circuit/index.md). `--scaling` picks the voltage factor `c`. |
+| `switches <profile.xml>… [--retain …] [--open <mrid>] [--solve]` | [Node-breaker switching devices](../cgmes/node_breaker.md) read from CGMES EQ+SSH. Needs the `cgmes` feature. |
+
+Bus and branch arguments are gridoxide's own 0-based indices, and branches are ordered lines first
+then transformers — the tables each command prints say which is which.
+
+```bash
+# Which injection would relieve an overload on branch 8?
+cargo run -- sensitivity grid.json --watch 8
+
+# The largest three-phase fault current this network can produce.
+cargo run -- short-circuit grid.json --scaling max
+```
+
+Argument handling is deliberately hand-rolled rather than pulled from a CLI crate: a handful of
+modes and one path each does not justify the dependency, and the library — not the binary — is the
+intended interface for anything more involved.
 
 ## Testing
 
