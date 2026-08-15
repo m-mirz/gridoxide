@@ -3,7 +3,7 @@ use serde::Deserialize;
 use super::branch_flow::Terminal;
 use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use super::network::{
-    half_open_branch_shunt,
+    branch_calc_param, half_open_branch_shunt,
     source_impedance_pu, source_impedance_pu_seq, transformer_tap, transformer_admittances,
     transformer_admittances_ex, transformer_seq_params, tap_ratio_from_voltages, three_winding_star_params,
     ShuntAdm, ShuntAdm3Ph,
@@ -53,6 +53,11 @@ pub struct PgmData {
     pub sym_current_sensor: Vec<PgmSymCurrentSensor>,
     #[serde(default)]
     pub asym_current_sensor: Vec<PgmAsymCurrentSensor>,
+    /// Short-circuit fault locations. Read only by the short-circuit path
+    /// (`crate::shortcircuit`); every other calculation ignores them, exactly
+    /// as power-grid-model does.
+    #[serde(default)]
+    pub fault: Vec<PgmFault>,
 }
 
 #[derive(Deserialize)]
@@ -128,6 +133,11 @@ fn default_sk() -> f64 { 1e10 }
 /// power-grid-model's documented `source.rx_ratio` default (`components.md`).
 fn default_rx_ratio() -> f64 { 0.1 }
 fn nan3() -> [f64; 3] { [f64::NAN; 3] }
+fn one_u8() -> u8 { 1 }
+/// power-grid-model's `FaultPhase::default_value`. Not a phase: a sentinel
+/// meaning "whichever phases this fault type implies", resolved against the
+/// fault type by `shortcircuit::FaultPhase::resolve`.
+fn default_fault_phase() -> i8 { -1 }
 
 /// Deserializes a number that power-grid-model may also write as the string
 /// `"inf"`.
@@ -175,6 +185,19 @@ pub struct PgmSource {
     /// falls back to 1.0 p.u. here.
     #[serde(default = "one")]
     pub u_ref: f64,
+    /// Reference voltage angle, radians.
+    ///
+    /// **Read by the short-circuit path only.** `pgm_to_3ph_network` and
+    /// `pgm_to_buses_and_branches` both build their virtual slack buses at
+    /// angle zero (or, in the three-phase case, at the nominal phase angles)
+    /// and ignore this field, which is what they have always done. No
+    /// power-flow or state-estimation fixture in this tree sets it, so
+    /// honouring it there would be an unvalidated behaviour change to those
+    /// paths; the short-circuit fixtures *do* set it, which is why it is read
+    /// here. Making the power-flow path honour it is a separate change that
+    /// needs its own reference outputs.
+    #[serde(default)]
+    pub u_ref_angle: f64,
     /// Short-circuit power, VA. PGM's documented default is 1e10.
     #[serde(default = "default_sk")]
     pub sk: f64,
@@ -280,6 +303,37 @@ pub struct PgmAsymGen {
     pub p_specified: [f64; 3],
     #[serde(default = "nan3")]
     pub q_specified: [f64; 3],
+}
+
+/// A short-circuit fault location, per power-grid-model's `fault` component
+/// (`docs/user_manual/components.md`). A fault can only happen at a node.
+///
+/// **`r_f`/`x_f` default to zero, and zero means a *bolted* fault** — a dead
+/// short, `y_fault = 1/0 = ∞` — not a fault that draws no current. That is
+/// power-grid-model's documented default, it is what every one of its
+/// `update_batch.json` scenarios drives, and it is the reading that makes the
+/// component meaningful: a fault with no admittance would not be a fault.
+/// `shortcircuit` handles the infinite-admittance case on its own code path
+/// rather than letting an infinity into the matrix.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct PgmFault {
+    pub id: u64,
+    /// Whether the fault is active. Defaulted because power-grid-model's own
+    /// batch scenarios omit it when only re-aiming an already-active fault.
+    #[serde(default = "one_u8")]
+    pub status: u8,
+    /// `FaultType`: 0 three-phase, 1 single-phase-to-ground, 2 two-phase,
+    /// 3 two-phase-to-ground. Interpreted by `shortcircuit::FaultType`.
+    pub fault_type: i8,
+    /// `FaultPhase`: 0 abc, 1 a, 2 b, 3 c, 4 ab, 5 ac, 6 bc, -1 default.
+    #[serde(default = "default_fault_phase")]
+    pub fault_phase: i8,
+    /// The id of the faulted `node`.
+    pub fault_object: u64,
+    #[serde(default)]
+    pub r_f: f64,
+    #[serde(default)]
+    pub x_f: f64,
 }
 
 #[derive(Deserialize)]
@@ -561,6 +615,96 @@ pub struct PgmNodeAsymOutput {
     pub id: u64,
     pub u_pu: [f64; 3],
     pub u_angle: [f64; 3],
+}
+
+// ── Short-circuit output structs ──────────────────────────────────────────────
+//
+// Short-circuit output is always asymmetric, whatever the fault type — so
+// every quantity here is a three-element array, unlike the symmetric
+// power-flow records above. Each component list is `#[serde(default)]`
+// because power-grid-model's fixtures omit the ones a given network has none
+// of.
+
+#[derive(Debug, Deserialize)]
+pub struct PgmScOutput {
+    pub data: PgmScOutputData,
+}
+
+/// A batch short-circuit output: one entry per scenario, in scenario order.
+#[derive(Debug, Deserialize)]
+pub struct PgmScBatchOutput {
+    pub data: Vec<PgmScOutputData>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PgmScOutputData {
+    #[serde(default)]
+    pub node: Vec<PgmScNodeOutput>,
+    #[serde(default)]
+    pub fault: Vec<PgmScFaultOutput>,
+    #[serde(default)]
+    pub source: Vec<PgmScApplianceOutput>,
+    #[serde(default)]
+    pub line: Vec<PgmScBranchOutput>,
+    #[serde(default)]
+    pub transformer: Vec<PgmScBranchOutput>,
+}
+
+// Every quantity is optional: power-grid-model's fixtures assert only the
+// attributes each one is about, so a fixture may carry `u_pu` and no angle at
+// all. `Option` rather than a zero default, so a test can tell "not asserted"
+// from "asserted to be zero" — the two are very different when a bolted fault
+// legitimately drives a voltage to zero.
+
+#[derive(Debug, Deserialize)]
+pub struct PgmScNodeOutput {
+    pub id: u64,
+    #[serde(default)]
+    pub energized: Option<u8>,
+    #[serde(default)]
+    pub u_pu: Option<[f64; 3]>,
+    #[serde(default)]
+    pub u_angle: Option<[f64; 3]>,
+    #[serde(default)]
+    pub u: Option<[f64; 3]>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PgmScFaultOutput {
+    pub id: u64,
+    #[serde(default)]
+    pub energized: Option<u8>,
+    #[serde(default)]
+    pub i_f: Option<[f64; 3]>,
+    #[serde(default)]
+    pub i_f_angle: Option<[f64; 3]>,
+}
+
+/// A `source` or `shunt` short-circuit record — a one-terminal appliance.
+#[derive(Debug, Deserialize)]
+pub struct PgmScApplianceOutput {
+    pub id: u64,
+    #[serde(default)]
+    pub energized: Option<u8>,
+    #[serde(default)]
+    pub i: Option<[f64; 3]>,
+    #[serde(default)]
+    pub i_angle: Option<[f64; 3]>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PgmScBranchOutput {
+    pub id: u64,
+    #[serde(default)]
+    pub energized: Option<u8>,
+    #[serde(default)]
+    pub i_from: Option<[f64; 3]>,
+    #[serde(default)]
+    pub i_from_angle: Option<[f64; 3]>,
+    #[serde(default)]
+    pub i_to: Option<[f64; 3]>,
+    #[serde(default)]
+    pub i_to_angle: Option<[f64; 3]>,
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────────
@@ -1250,21 +1394,11 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
     if !input.data.link.is_empty() {
         return Err(Unsupported3Ph::Link);
     }
-    // `transformer_seq_params` panics outside these two, and a panic reached
-    // from a document is not a diagnosis. Checked here rather than there because
-    // that function is on the power-flow path, whose callers chose their own
-    // documents; an estimate's caller may not have.
-    if let Some(t) = input
-        .data
-        .transformer
-        .iter()
-        .find(|t| !matches!((t.winding_from, t.winding_to), (2, 1) | (1, 1)))
-    {
-        return Err(Unsupported3Ph::WindingPair {
-            from: t.winding_from,
-            to: t.winding_to,
-        });
-    }
+    // There used to be a winding-pair guard here, because
+    // `transformer_seq_params` panicked outside Dyn and YNyn and a panic
+    // reached from a document is not a diagnosis. That function now implements
+    // PGM's general zero-sequence algorithm and has no unsupported pairs left
+    // to guard against, so the check went with it.
 
     let node_idx = node_id_to_idx(input);
     let n_physical = input.data.node.len();
@@ -1354,9 +1488,6 @@ pub enum Unsupported3Ph {
     ThreeWindingTransformer,
     VoltageRegulator,
     Link,
-    /// A transformer winding pair outside Dyn `(2, 1)` and YNyn `(1, 1)`, the
-    /// two `transformer_seq_params` derives zero-sequence parameters for.
-    WindingPair { from: u8, to: u8 },
 }
 
 impl std::fmt::Display for Unsupported3Ph {
@@ -1365,19 +1496,227 @@ impl std::fmt::Display for Unsupported3Ph {
             Self::ThreeWindingTransformer => "three_winding_transformer",
             Self::VoltageRegulator => "voltage_regulator",
             Self::Link => "link",
-            Self::WindingPair { from, to } => {
-                return write!(
-                    f,
-                    "the three-phase conversion derives zero-sequence parameters only for Dyn \
-                     and YNyn windings, not for the pair ({from}, {to})"
-                )
-            }
         };
         write!(f, "the three-phase conversion does not model `{what}`")
     }
 }
 
 impl std::error::Error for Unsupported3Ph {}
+
+/// Converts a document's `line` entries to per-unit three-phase branches.
+///
+/// Extracted from [`pgm_to_3ph_network`] so the short-circuit path
+/// ([`pgm_to_3ph_sc_network`]) can reuse the conversion without also picking
+/// up that function's injection accumulation and virtual slack buses, neither
+/// of which a short-circuit calculation wants. `pgm_transformers_3ph` and
+/// `pgm_shunts_3ph` were already standalone; the line conversion was the last
+/// piece still inlined.
+///
+/// A line with exactly one live terminal collapses to a self-loop carrying
+/// only its own shunt, and a fully open line yields no branch at all — so the
+/// returned order is *not* document order, which is why `PgmNetwork3Ph`
+/// derives its `branch_idx` from the same rules rather than from position.
+pub fn pgm_lines_3ph(
+    input: &PgmInput,
+    id_to_idx: &HashMap<u64, usize>,
+    s_base_va: f64,
+    freq_hz: f64,
+) -> Vec<Line3Ph> {
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
+    let two_pi_f = 2.0 * std::f64::consts::PI * freq_hz;
+
+    let mut lines: Vec<Line3Ph> = Vec::new();
+    for ln in &input.data.line {
+        let u_rated_from = id_to_u_rated[&ln.from_node];
+        let z_base = u_rated_from * u_rated_from / s_base_va;
+        let b1 = two_pi_f * ln.c1 * z_base;
+        let b0 = two_pi_f * ln.c0 * z_base;
+        // power-grid-model's line shunt is `2πf·c·(tan δ + j)`, so the loss
+        // factor turns into a conductance alongside the susceptance. `tan1`
+        // and `tan0` are zero in almost every fixture, which is why this term
+        // went unmodelled until a short-circuit fixture that sets them
+        // (`dummy-test-line-into-itself`) made it visible.
+        let g1 = b1 * ln.tan1;
+        let g0 = b0 * ln.tan0;
+        let r1_pu = ln.r1 / z_base;
+        let x1_pu = ln.x1 / z_base;
+        let r0_pu = ln.r0 / z_base;
+        let x0_pu = ln.x0 / z_base;
+        let from_phys = id_to_idx[&ln.from_node];
+        let to_phys = id_to_idx[&ln.to_node];
+
+        match (ln.from_status, ln.to_status) {
+            (1, 1) => {
+                lines.push(Line3Ph {
+                    from: from_phys,
+                    to: to_phys,
+                    r1: r1_pu, x1: x1_pu, b1, g1,
+                    r0: r0_pu, x0: x0_pu, b0, g0,
+                });
+            }
+            (1, 0) => {
+                lines.push(Line3Ph {
+                    from: from_phys, to: from_phys,
+                    r1: 0.0, x1: 0.0, b1, g1,
+                    r0: 0.0, x0: 0.0, b0, g0,
+                });
+            }
+            (0, 1) => {
+                lines.push(Line3Ph {
+                    from: to_phys, to: to_phys,
+                    r1: 0.0, x1: 0.0, b1, g1,
+                    r0: 0.0, x0: 0.0, b0, g0,
+                });
+            }
+            _ => {}
+        }
+    }
+    lines
+}
+
+/// One active `source`, reduced to the Norton equivalent a short-circuit
+/// calculation needs: an internal admittance at its node, behind a fixed EMF.
+#[derive(Clone, Copy, Debug)]
+pub struct ScSource {
+    /// The document's own `source` id.
+    pub id: u64,
+    /// Physical node index the source sits on.
+    pub node: usize,
+    /// Positive- (= negative-) sequence internal admittance, per unit.
+    pub y1: Complex<f64>,
+    /// Zero-sequence internal admittance, per unit.
+    pub y0: Complex<f64>,
+    /// `u_ref_angle`, the only part of the source's voltage specification that
+    /// survives into a short-circuit calculation — see
+    /// [`pgm_to_3ph_sc_network`].
+    pub u_ref_angle: f64,
+    /// Rated line-to-line voltage of the node this source sits on, which is
+    /// what selects its IEC 60909 voltage-scaling factor `c`.
+    pub u_rated: f64,
+}
+
+/// The network a short-circuit calculation solves: the passive circuit plus
+/// its sources as Norton equivalents.
+pub struct ScNetwork3Ph {
+    /// Physical node count. Bus `k`'s phases are rows `3k`, `3k+1`, `3k+2`.
+    pub n_nodes: usize,
+    pub lines: Vec<Line3Ph>,
+    pub transformers: Vec<Transformer3PhSeq>,
+    pub shunts: Vec<ShuntAdm3Ph>,
+    pub sources: Vec<ScSource>,
+    /// Node id → physical node index.
+    pub node_idx: HashMap<u64, usize>,
+    /// Per physical node, its rated line-to-line voltage — needed to convert
+    /// per-unit result voltages back to volts.
+    pub u_rated: Vec<f64>,
+    /// The three-phase base power the per-unit quantities are referred to.
+    /// Carried alongside so results can be converted back to volts and amperes
+    /// without the caller having to remember what it passed in.
+    pub s_base_va: f64,
+}
+
+/// Builds the three-phase network a short-circuit calculation solves.
+///
+/// Differs from [`pgm_to_3ph_network`] in exactly two ways, both required by
+/// IEC 60909:
+///
+/// 1. **No loads and no generation.** The standard deliberately isolates the
+///    short-circuit current from the pre-fault dispatch, so every `sym_load`,
+///    `asym_load`, `sym_gen` and `asym_gen` is ignored. Shunt admittances are
+///    *kept* — power-grid-model's own documentation calls that exception out
+///    explicitly, and it is a passive element rather than a dispatch decision.
+/// 2. **Sources become Norton equivalents, not virtual slack buses.**
+///    `pgm_to_3ph_network` appends a virtual slack bus and an impedance branch
+///    per source, which is right for a power flow whose unknowns include the
+///    source's own power. Here the source's internal admittance is folded onto
+///    its node's own diagonal and its EMF becomes a current injection, which
+///    is what power-grid-model's `add_sources` does and what keeps the result
+///    indexed by physical node.
+///
+/// The EMF itself is *not* built here — it depends on the voltage-scaling
+/// choice, which is a per-calculation option rather than a property of the
+/// network, so [`ScSource`] carries the angle and the rated voltage and
+/// `shortcircuit` combines them with `c`.
+pub fn pgm_to_3ph_sc_network(
+    input: &PgmInput,
+    s_base_va: f64,
+    freq_hz: f64,
+) -> ScNetwork3Ph {
+    let node_idx = node_id_to_idx(input);
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
+
+    let lines = pgm_lines_3ph(input, &node_idx, s_base_va, freq_hz);
+    let mut transformers = pgm_transformers_3ph(input, &node_idx, s_base_va);
+    let shunts = pgm_shunts_3ph(input, &node_idx, s_base_va);
+
+    // Links, appended after the transformers. An ideal connection looks the
+    // same to all three sequences — it is a plain series admittance with no
+    // shunt, no tap and no phase shift — so the sequence parameters are just
+    // `branch_calc_param` three times over.
+    //
+    // Dropping them is not an option, even though the three-phase power-flow
+    // path does exactly that (`Unsupported3Ph::Link`): a link is what holds
+    // two nodes together, and silently losing one leaves whatever hangs off
+    // it de-energized and absent from the answer. That is precisely what
+    // `dummy-test-line-into-itself` catches.
+    for lk in &input.data.link {
+        if lk.from_status == 0 && lk.to_status == 0 {
+            continue;
+        }
+        let y = branch_calc_param(
+            LINK_Y,
+            Complex::new(0.0, 0.0),
+            Complex::new(1.0, 0.0),
+            lk.from_status,
+            lk.to_status,
+        );
+        transformers.push(Transformer3PhSeq {
+            from: node_idx[&lk.from_node],
+            to: node_idx[&lk.to_node],
+            y0: y,
+            y1: y,
+            y2: y,
+        });
+    }
+
+    let sources = input
+        .data
+        .source
+        .iter()
+        .filter(|s| s.status != 0)
+        .map(|src| {
+            let (r1, x1, r0, x0) =
+                source_impedance_pu_seq(src.sk, src.rx_ratio, src.z01_ratio, s_base_va);
+            let one = Complex::new(1.0, 0.0);
+            ScSource {
+                id: src.id,
+                node: node_idx[&src.node],
+                y1: one / Complex::new(r1, x1),
+                y0: one / Complex::new(r0, x0),
+                u_ref_angle: src.u_ref_angle,
+                u_rated: id_to_u_rated[&src.node],
+            }
+        })
+        .collect();
+
+    let mut u_rated = vec![0.0; input.data.node.len()];
+    for n in &input.data.node {
+        u_rated[node_idx[&n.id]] = n.u_rated;
+    }
+
+    ScNetwork3Ph {
+        n_nodes: input.data.node.len(),
+        lines,
+        transformers,
+        shunts,
+        sources,
+        node_idx,
+        u_rated,
+        s_base_va,
+    }
+}
 
 pub fn pgm_to_3ph_network(
     input: PgmInput,
@@ -1389,7 +1728,6 @@ pub fn pgm_to_3ph_network(
         input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
 
     let n_nodes = input.data.node.len();
-    let two_pi_f = 2.0 * std::f64::consts::PI * freq_hz;
     let phase_ang = [0.0_f64, -2.0 * std::f64::consts::PI / 3.0, 2.0 * std::f64::consts::PI / 3.0];
 
     // Per-node, per-phase net injection [phase_a, phase_b, phase_c] in p.u.,
@@ -1483,46 +1821,7 @@ pub fn pgm_to_3ph_network(
         }
     }
 
-    // Build Line3Ph list.
-    let mut lines: Vec<Line3Ph> = Vec::new();
-    for ln in &input.data.line {
-        let u_rated_from = id_to_u_rated[&ln.from_node];
-        let z_base = u_rated_from * u_rated_from / s_base_va;
-        let b1 = two_pi_f * ln.c1 * z_base;
-        let b0 = two_pi_f * ln.c0 * z_base;
-        let r1_pu = ln.r1 / z_base;
-        let x1_pu = ln.x1 / z_base;
-        let r0_pu = ln.r0 / z_base;
-        let x0_pu = ln.x0 / z_base;
-        let from_phys = id_to_idx[&ln.from_node];
-        let to_phys = id_to_idx[&ln.to_node];
-
-        match (ln.from_status, ln.to_status) {
-            (1, 1) => {
-                lines.push(Line3Ph {
-                    from: from_phys,
-                    to: to_phys,
-                    r1: r1_pu, x1: x1_pu, b1,
-                    r0: r0_pu, x0: x0_pu, b0,
-                });
-            }
-            (1, 0) => {
-                lines.push(Line3Ph {
-                    from: from_phys, to: from_phys,
-                    r1: 0.0, x1: 0.0, b1,
-                    r0: 0.0, x0: 0.0, b0,
-                });
-            }
-            (0, 1) => {
-                lines.push(Line3Ph {
-                    from: to_phys, to: to_phys,
-                    r1: 0.0, x1: 0.0, b1,
-                    r0: 0.0, x0: 0.0, b0,
-                });
-            }
-            _ => {}
-        }
-    }
+    let mut lines = pgm_lines_3ph(&input, &id_to_idx, s_base_va, freq_hz);
 
     // Virtual Slack buses + source-impedance lines for each active source.
     for (i, src) in input.data.source.iter().filter(|s| s.status != 0).enumerate() {
@@ -1546,11 +1845,13 @@ pub fn pgm_to_3ph_network(
             });
         }
 
+        // A source's internal impedance is a pure series branch — no shunt at
+        // all, hence no charging susceptance and no dielectric loss.
         lines.push(Line3Ph {
             from: virtual_phys,
             to: id_to_idx[&src.node],
-            r1: r1_s, x1: x1_s, b1: 0.0,
-            r0: r0_s, x0: x0_s, b0: 0.0,
+            r1: r1_s, x1: x1_s, b1: 0.0, g1: 0.0,
+            r0: r0_s, x0: x0_s, b0: 0.0, g0: 0.0,
         });
     }
 

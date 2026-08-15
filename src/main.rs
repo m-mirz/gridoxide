@@ -27,6 +27,9 @@ use gridoxide::se::jacobian::StateLayout;
 use gridoxide::se::nr::{estimate, linear_start, SeMethod, SeOptions, SeStatus};
 use gridoxide::se::observability;
 use gridoxide::se::SeNetwork;
+use gridoxide::shortcircuit::{
+    short_circuit_from_pgm, SequenceValue, ShortCircuitOptions, VoltageScaling,
+};
 use gridoxide::solver::SolveStatus;
 
 const USAGE: &str = "\
@@ -46,6 +49,14 @@ usage:
                                 before solving; --solve runs a power flow and
                                 reports each switch's own flow.
                                 Needs the `cgmes` feature.
+  gridoxide short-circuit <path> [--scaling max|min]
+                                run an IEC 60909 short-circuit calculation over
+                                a PGM JSON document containing `fault` entries,
+                                printing per-node voltages, per-fault currents
+                                and each source's contribution.
+                                --scaling picks the voltage factor c (default
+                                max, for the largest current; min is the
+                                sensitivity study).
   gridoxide dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]
                                 run a DC (Bθ) power flow over a PGM JSON
                                 document, printing bus angles, branch flows and
@@ -87,6 +98,18 @@ fn main() {
             }
             _ => {
                 eprintln!("error: dc needs a path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("short-circuit") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_short_circuit(path, &args[2..]) {
+                    eprintln!("error: {message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("error: short-circuit needs a path\n\n{USAGE}");
                 std::process::exit(2);
             }
         },
@@ -305,6 +328,101 @@ fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
         return Err(format!("{flag}: {value} is out of range (0..{limit})"));
     }
     Ok(value)
+}
+
+/// Runs an IEC 60909 short-circuit calculation over the PGM document at `path`.
+///
+/// Prints the three things a protection study actually reads off: what each
+/// fault draws, what each source contributes to it, and how far the voltage
+/// collapses across the rest of the network while it does.
+fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
+    let s_base_va = 1e6;
+    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let input: PgmInput =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+
+    let scaling = match flag_value(flags, "--scaling")?.as_deref() {
+        None | Some("max") | Some("maximum") => VoltageScaling::Maximum,
+        Some("min") | Some("minimum") => VoltageScaling::Minimum,
+        Some(other) => return Err(format!("--scaling: expected max or min, got {other:?}")),
+    };
+    let opts = ShortCircuitOptions { scaling };
+
+    let (net, report) = short_circuit_from_pgm(&input, s_base_va, 50.0, opts)
+        .map_err(|e| format!("{e}"))?;
+
+    if report.faults.is_empty() {
+        println!(
+            "note: this document declares no active `fault`, so what follows is the \
+             pre-fault state under the scaled source voltages"
+        );
+    }
+
+    println!(
+        "{} node(s), {} fault(s), {} source(s), voltage scaling = {}",
+        net.n_nodes,
+        report.faults.len(),
+        report.sources.len(),
+        match scaling {
+            VoltageScaling::Maximum => "c_max (largest current)",
+            VoltageScaling::Minimum => "c_min (smallest current)",
+        }
+    );
+
+    // Node ids, not gridoxide's indices: a fault is reported against the
+    // document the user wrote.
+    let mut by_index: Vec<(u64, usize)> =
+        net.node_idx.iter().map(|(&id, &idx)| (id, idx)).collect();
+    by_index.sort();
+
+    if !report.faults.is_empty() {
+        println!("\nfault currents (A):");
+        for fault in &report.faults {
+            println!(
+                "  fault {:>6}: a = {:>12.2}, b = {:>12.2}, c = {:>12.2}",
+                fault.id, fault.i_f[0], fault.i_f[1], fault.i_f[2]
+            );
+        }
+    }
+
+    println!("\nsource contributions (A):");
+    for source in &report.sources {
+        println!(
+            "  source {:>5}: a = {:>12.2}, b = {:>12.2}, c = {:>12.2}",
+            source.id, source.i[0], source.i[1], source.i[2]
+        );
+    }
+
+    println!("\nnode voltages (p.u.):");
+    for (id, idx) in &by_index {
+        let node = &report.nodes[*idx];
+        let mark = if node.energized { ' ' } else { '*' };
+        println!(
+            "  node {:>6}{mark}: a = {:>8.5}, b = {:>8.5}, c = {:>8.5}",
+            id, node.u_pu[0], node.u_pu[1], node.u_pu[2]
+        );
+    }
+    if report.nodes.iter().any(|n| !n.energized) {
+        println!("  (* = de-energized: no path to any source, pinned at zero)");
+    }
+
+    // The sequence view, which is where a fault type's signature is legible:
+    // a three-phase fault is pure positive sequence, a two-phase fault clear
+    // of ground has no zero-sequence component at all, and anything involving
+    // ground has one.
+    println!("\nsymmetrical components of node voltage (p.u.):");
+    for (id, idx) in &by_index {
+        let s = SequenceValue::from_phase(&report.u_bus[*idx]);
+        println!(
+            "  node {:>6}: zero = {:>8.5}, positive = {:>8.5}, negative = {:>8.5}",
+            id,
+            s.zero.norm(),
+            s.positive.norm(),
+            s.negative.norm()
+        );
+    }
+
+    Ok(())
 }
 
 /// Runs a DC power flow over the PGM document at `path` and prints it.
