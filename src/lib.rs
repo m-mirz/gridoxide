@@ -10,6 +10,7 @@ pub mod constrained;
 pub mod jacobian;
 pub mod batch;
 pub mod bde;
+pub mod ac_sensitivity;
 pub mod dc;
 pub mod linear;
 pub mod shortcircuit;
