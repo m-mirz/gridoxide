@@ -11,6 +11,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use gridoxide::ac_sensitivity::{AcSensitivity, Function, Variable};
+use gridoxide::branch_flow::Terminal;
 use gridoxide::json::NetworkData;
 use gridoxide::linear::{
     dc_branches, dc_power_flow, DcApproximation, DcOptions, DcSensitivity,
@@ -20,7 +22,7 @@ use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{
     node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches, pgm_to_network, PgmInput,
 };
-use gridoxide::run_power_flow_analysis;
+use gridoxide::{run_power_flow, run_power_flow_analysis};
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
@@ -30,7 +32,7 @@ use gridoxide::se::SeNetwork;
 use gridoxide::shortcircuit::{
     short_circuit_from_pgm, SequenceValue, ShortCircuitOptions, VoltageScaling,
 };
-use gridoxide::solver::SolveStatus;
+use gridoxide::solver::{PowerFlowOptions, SolveStatus};
 
 const USAGE: &str = "\
 usage:
@@ -57,6 +59,16 @@ usage:
                                 --scaling picks the voltage factor c (default
                                 max, for the largest current; min is the
                                 sensitivity study).
+  gridoxide sensitivity <path> [--dp <bus>] [--dq <bus>] [--dk <branch>]
+                     [--dalpha <branch>] [--watch <branch>] [--terminal from|to]
+                                solve an AC power flow and differentiate it.
+                                --dp/--dq/--dk/--dalpha each pick one variable
+                                (active/reactive injection, transformer ratio,
+                                phase-shifter angle) and print how every branch
+                                flow and bus voltage responds to it.
+                                --watch picks one branch instead and prints the
+                                reverse: what every injection and every tap
+                                would do to *its* flow. At least one is needed.
   gridoxide dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]
                                 run a DC (Bθ) power flow over a PGM JSON
                                 document, printing bus angles, branch flows and
@@ -98,6 +110,18 @@ fn main() {
             }
             _ => {
                 eprintln!("error: dc needs a path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("sensitivity") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_sensitivity(path, &args[2..]) {
+                    eprintln!("error: {message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("error: sensitivity needs a path\n\n{USAGE}");
                 std::process::exit(2);
             }
         },
@@ -328,6 +352,159 @@ fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
         return Err(format!("{flag}: {value} is out of range (0..{limit})"));
     }
     Ok(value)
+}
+
+/// Solves an AC power flow over the PGM document at `path` and differentiates
+/// it.
+///
+/// Offers both directions the library does, because they answer different
+/// questions: `--dp` and friends ask "this moves — what responds?", `--watch`
+/// asks "this is overloaded — what would relieve it?".
+fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
+    let s_base_va = 1e6;
+    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let input: PgmInput =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+
+    let terminal = match flag_value(flags, "--terminal")?.as_deref() {
+        None | Some("from") => Terminal::From,
+        Some("to") => Terminal::To,
+        Some(other) => return Err(format!("--terminal: expected from or to, got {other:?}")),
+    };
+
+    // The linearization is only as meaningful as the point it is taken at, so
+    // this refuses to differentiate a solve that did not converge rather than
+    // printing derivatives of nothing.
+    let report = run_power_flow(buses, &lines, &transformers, &[], PowerFlowOptions::default());
+    if report.stats.status != SolveStatus::Converged {
+        return Err(format!(
+            "the power flow did not converge ({:?}), so there is no operating point to \
+             differentiate",
+            report.stats.status
+        ));
+    }
+    let buses = report.buses;
+    let n_branches = lines.len() + transformers.len();
+
+    let ybus = {
+        let mut y = build_ybus(buses.len(), &lines, &transformers);
+        stamp_shunts(&mut y, &[]);
+        y.finish()
+    };
+    let sensitivity = AcSensitivity::new(&buses, &ybus, &lines, &transformers)
+        .ok_or("the Jacobian is singular at the solved point")?;
+
+    println!(
+        "{} bus(es), {} branch(es); differentiated at the converged point ({} iteration(s))",
+        buses.len(),
+        n_branches,
+        report.stats.mismatch_history.len()
+    );
+    println!("branch indices are lines first ({}), then transformers", lines.len());
+
+    let mut did_something = false;
+
+    for (flag, make) in [
+        ("--dp", &Variable::ActiveInjection as &dyn Fn(usize) -> Variable),
+        ("--dq", &Variable::ReactiveInjection),
+    ] {
+        if let Some(raw) = flag_value(flags, flag)? {
+            let bus = parse_index(&raw, flag, buses.len())?;
+            print_forward(&sensitivity, make(bus), terminal, flag, bus, &buses)?;
+            did_something = true;
+        }
+    }
+    for (flag, make) in [
+        ("--dk", &Variable::TransformerRatio as &dyn Fn(usize) -> Variable),
+        ("--dalpha", &Variable::PhaseShift),
+    ] {
+        if let Some(raw) = flag_value(flags, flag)? {
+            let branch = parse_index(&raw, flag, n_branches)?;
+            print_forward(&sensitivity, make(branch), terminal, flag, branch, &buses)?;
+            did_something = true;
+        }
+    }
+
+    if let Some(raw) = flag_value(flags, "--watch")? {
+        let branch = parse_index(&raw, "--watch", n_branches)?;
+        let row = sensitivity
+            .function_row(Function::BranchActivePower { branch, terminal })
+            .ok_or("the adjoint solve is singular")?;
+
+        println!("\nwhat moves the active flow on branch {branch} ({terminal:?} terminal):");
+        println!("  by injection (p.u. per p.u.):");
+        for bus in 0..buses.len() {
+            if row.d_active[bus].abs() < 1e-9 && row.d_reactive[bus].abs() < 1e-9 {
+                continue;
+            }
+            println!(
+                "    bus {bus:>4}: dP {:>10.5}, dQ {:>10.5}",
+                row.d_active[bus], row.d_reactive[bus]
+            );
+        }
+        let taps: Vec<usize> = (0..n_branches)
+            .filter(|&b| row.d_ratio[b].abs() > 1e-9 || row.d_phase[b].abs() > 1e-9)
+            .collect();
+        if taps.is_empty() {
+            println!("  by tap: none (no transformer affects this flow)");
+        } else {
+            println!("  by tap (p.u. per unit ratio, p.u. per radian):");
+            for b in taps {
+                println!(
+                    "    branch {b:>4}: dk {:>10.5}, dalpha {:>10.5}",
+                    row.d_ratio[b], row.d_phase[b]
+                );
+            }
+        }
+        did_something = true;
+    }
+
+    if !did_something {
+        return Err(
+            "nothing to do — pass at least one of --dp, --dq, --dk, --dalpha or --watch"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Prints one forward column: how every branch flow and bus voltage responds to
+/// a single variable.
+fn print_forward(
+    sensitivity: &AcSensitivity,
+    variable: Variable,
+    terminal: Terminal,
+    flag: &str,
+    index: usize,
+    buses: &[gridoxide::types::Bus],
+) -> Result<(), String> {
+    let flows = sensitivity
+        .branch_response(variable, terminal)
+        .ok_or_else(|| format!("{flag} {index}: the solve is singular"))?;
+    let state = sensitivity
+        .state_response(variable)
+        .ok_or_else(|| format!("{flag} {index}: the solve is singular"))?;
+
+    println!("\n{flag} {index}: branch flow response ({terminal:?} terminal, p.u. per unit):");
+    for (b, (dp, dq)) in flows.iter().enumerate() {
+        if dp.abs() < 1e-9 && dq.abs() < 1e-9 {
+            continue;
+        }
+        println!("  branch {b:>4}: dP {dp:>10.5}, dQ {dq:>10.5}");
+    }
+
+    println!("{flag} {index}: bus voltage response:");
+    for bus in 0..buses.len() {
+        if state.d_theta[bus].abs() < 1e-9 && state.d_vmag[bus].abs() < 1e-9 {
+            continue;
+        }
+        println!(
+            "  bus {bus:>4}: d|V| {:>10.5} p.u., dtheta {:>10.5} rad",
+            state.d_vmag[bus], state.d_theta[bus]
+        );
+    }
+    Ok(())
 }
 
 /// Runs an IEC 60909 short-circuit calculation over the PGM document at `path`.

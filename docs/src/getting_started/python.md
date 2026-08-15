@@ -60,7 +60,7 @@ pickup = model.dc_slack_pickup()       # [(bus_indices, p_pu)] per island
   `"ignore_g"` (`b = x/(r²+x²)`, the exact coefficient). They differ only where `r/x` varies across
   the network — a uniform ratio makes the difference a pure rescaling of the angles.
 
-### Sensitivity factors
+### DC sensitivity factors (PTDF and LODF)
 
 PTDF and LODF are properties of the topology, not of an operating point, so these need no `solve()`
 first. The factorization behind them is built on first use and reused until `reset()`.
@@ -91,6 +91,75 @@ if not model.is_radial(7):
 - `model.is_breaking_set(branches)` — whether removing the whole set would disconnect the network.
   Two individually non-radial lines can be jointly breaking, which is exactly what single-branch
   screening misses.
+
+### AC sensitivity
+
+The DC factors above are exact but blind to voltage and reactive power. `AcSensitivityModel`
+differentiates a converged *AC* operating point instead — so it has a solve behind it, and the
+answers are local derivatives rather than global constants. See
+[AC Sensitivity Analysis](../sensitivity/ac.md) for the formulation and the trade-off.
+
+It is a class rather than a function because there is something worth keeping between calls: one
+Jacobian factorization, arbitrarily many questions.
+
+```python
+s = gridoxide.AcSensitivityModel("grid.json")
+
+col = s.column(active_injection=2)   # bus 2 ramps — what responds?
+row = s.row(branch=8)                # branch 8 is loaded — what moves it?
+
+# Which tap has the most leverage on branch 8?
+best = max(range(s.n_branches), key=lambda b: abs(row.d_transformer_ratio[b]))
+```
+
+- `AcSensitivityModel(path, s_base_va=1e6, freq_hz=50.0, tol=1e-8, max_iter=50)` — solves the power
+  flow and factorizes its Jacobian. **Raises if the solve does not converge**: a derivative taken at
+  a non-converged point is meaningless rather than merely imprecise.
+- `s.column(...)` — the *forward* direction, one solve per variable. Pass exactly one of
+  `active_injection=bus`, `reactive_injection=bus`, `transformer_ratio=branch` or
+  `phase_shift=branch`, plus `terminal="from"|"to"`. Returns `d_branch_active`,
+  `d_branch_reactive` (per branch) and `d_voltage_magnitude`, `d_voltage_angle` (per bus).
+- `s.row(...)` — the *adjoint* direction, one solve per monitored quantity. Pass either
+  `branch=` with `quantity="active"|"reactive"`, or `bus=` with `quantity="magnitude"|"angle"`.
+  Returns `d_active_injection`, `d_reactive_injection` (per bus) and `d_transformer_ratio`,
+  `d_phase_shift` (per branch).
+- `s.n_buses`, `s.n_branches` — branch indices are lines first, then transformers.
+
+Pick the direction by which side is small: forward when few inputs move and many outputs are
+watched, adjoint when one output is watched and many inputs could move. Both cost one triangular
+solve against the same factorization.
+
+Two contracts worth knowing. A variable the solve itself determines has an identically **zero**
+column — a slack bus's injection, or reactive power where the voltage is held — and that is the
+correct derivative, not a gap. And a line has no tap, so its `d_transformer_ratio` and
+`d_phase_shift` entries are zero rather than an error.
+
+### Short-circuit calculation
+
+`short_circuit` is a plain function, not a class: it is a single direct solve with nothing worth
+caching between calls, because the fault's boundary conditions change the matrix itself. The fault
+is declared in the document as power-grid-model's `fault` component. See
+[The Short-Circuit Problem](../short_circuit/index.md).
+
+```python
+result = gridoxide.short_circuit("grid.json", scaling="max")
+
+for fault in result.faults:
+    print(fault.id, fault.i_f)          # per-phase current, amperes
+
+# A two-phase fault clear of ground has no zero-sequence component at all —
+# the sharpest available check that a result is sane.
+for node in result.nodes:
+    zero, positive, negative = node.sequence
+```
+
+- `short_circuit(path, scaling="max", s_base_va=1e6, freq_hz=50.0)` — `scaling` picks the IEC 60909
+  voltage factor `c`: `"max"` for the largest current (what equipment ratings are sized against),
+  `"min"` for the smallest (the protection-sensitivity study).
+- `result.nodes` — per node: `u_pu`, `u_angle`, `u` (line-to-neutral volts), `energized`, and
+  `sequence` as `(zero, positive, negative)` magnitudes.
+- `result.faults` — per fault: `i_f`, `i_f_angle`, per phase.
+- `result.sources` — each source's contribution, `i` and `i_angle`.
 
 ### Node-breaker topology and switches
 
