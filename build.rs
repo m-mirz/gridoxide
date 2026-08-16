@@ -3,6 +3,122 @@ fn main() {
     klu::build();
     #[cfg(feature = "pardiso")]
     pardiso::build();
+    #[cfg(feature = "opf-highs")]
+    highs::build();
+}
+
+/// Links a system HiGHS install and generates its FFI bindings, only when the
+/// `opf-highs` feature is enabled — see `src/opf/highs.rs` and
+/// `plans/OPF_PLAN.md`.
+///
+/// Deliberately the same shape as [`pardiso`] below: nothing vendored, nothing
+/// compiled from source, bindings generated against the install's own header.
+/// The differences from that module are only where HiGHS's layout differs.
+#[cfg(feature = "opf-highs")]
+mod highs {
+    use std::env;
+    use std::path::PathBuf;
+
+    pub fn build() {
+        // `/usr` is the default because that is where every distribution
+        // package lands; `HIGHS_ROOT` covers a local build or a non-standard
+        // prefix, playing the role `MKLROOT` plays for `pardiso`.
+        let root = PathBuf::from(env::var("HIGHS_ROOT").unwrap_or_else(|_| "/usr".to_string()));
+
+        // NOT pkg-config, and not by oversight. HiGHS ships `highs.pc.in`, but
+        // Ubuntu's built `highs.pc` (1.12.0+ds1-3ubuntu1) has a doubled
+        // prefix in every path — `libdir=/usr/usr/lib/x86_64-linux-gnu`,
+        // `includedir=/usr/usr/include/highs` — so it points nowhere. Probing
+        // the standard locations directly is both correct here and one fewer
+        // build dependency. Revisit only if that packaging bug is fixed *and*
+        // something needs a prefix this probe cannot find.
+        let include_dir = root.join("include/highs");
+        let header = include_dir.join("interfaces/highs_c_api.h");
+        if !header.is_file() {
+            panic!(
+                "couldn't find {} — the `opf-highs` feature needs a local HiGHS \
+                 *with its development files* (on Debian/Ubuntu: `apt install \
+                 libhighs-dev`; the runtime `libhighs1` package alone is not \
+                 enough, as it ships neither the headers nor the `libhighs.so` \
+                 link symlink). Set HIGHS_ROOT if it is installed somewhere \
+                 other than {}.",
+                header.display(),
+                root.display()
+            );
+        }
+
+        // Distributions put the shared library in the multiarch directory;
+        // a from-source install uses a flat `lib/`. Probe both, as `pardiso`
+        // probes `lib` and `lib/intel64`.
+        let lib_dir = [
+            root.join("lib").join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
+                |_| "x86_64-linux-gnu".to_string(),
+                |arch| format!("{arch}-linux-gnu"),
+            )),
+            root.join("lib"),
+            root.join("lib64"),
+        ]
+        .into_iter()
+        .find(|p| p.join("libhighs.so").is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "found HiGHS headers under {} but no `libhighs.so` beside them — \
+                 `libhighs.so.1` alone is not linkable, and the unversioned \
+                 symlink comes from the development package (`libhighs-dev`)",
+                include_dir.display()
+            )
+        });
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=highs");
+        // HiGHS is C++ internally even though the API crossed here is pure C,
+        // so the C++ standard library has to come along.
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+
+        generate_bindings(&include_dir, &header);
+
+        println!("cargo:rerun-if-env-changed=HIGHS_ROOT");
+        println!("cargo:rerun-if-changed={}", header.display());
+    }
+
+    fn generate_bindings(include_dir: &std::path::Path, header: &std::path::Path) {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let mut builder = bindgen::Builder::default()
+            .header(header.to_str().unwrap())
+            // The header's own includes (`util/HighsInt.h`, `HConfig.h`) are
+            // written relative to the `highs/` directory, not to itself.
+            .clang_arg(format!("-I{}", include_dir.display()))
+            .allowlist_function("Highs_.*")
+            .allowlist_type("Highs.*")
+            .allowlist_var("k?Highs.*");
+
+        // Same libclang-without-a-full-clang-toolchain fallback the other two
+        // bindgen invocations need; see `klu::find_gcc_builtin_include`.
+        if let Some(gcc_builtin_include) = find_gcc_builtin_include() {
+            builder = builder.clang_arg(format!("-I{}", gcc_builtin_include.display()));
+        }
+
+        // `HighsInt` is `int64_t` or `int` depending on whether the build
+        // defined `HIGHSINT64`, and `HConfig.h` records which. Letting bindgen
+        // read that is the whole reason this is generated rather than
+        // hand-written: hard-coding the wrong width would not fail to compile,
+        // it would silently misread every index array handed across.
+        let bindings = builder.generate().expect("failed to generate HiGHS FFI bindings");
+
+        bindings
+            .write_to_file(out_dir.join("highs_bindings.rs"))
+            .expect("failed to write HiGHS FFI bindings");
+    }
+
+    fn find_gcc_builtin_include() -> Option<PathBuf> {
+        let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        path.is_dir().then_some(path)
+    }
 }
 
 /// Compiles the vendored SuiteSparse KLU solver (`vendor/suitesparse/`) and

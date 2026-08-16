@@ -12,6 +12,8 @@ pub mod batch;
 pub mod bde;
 pub mod ac_sensitivity;
 pub mod dc;
+#[cfg(feature = "opf")]
+pub mod opf;
 pub mod linear;
 pub mod shortcircuit;
 pub mod json;
