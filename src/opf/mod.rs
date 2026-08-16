@@ -44,6 +44,8 @@ pub mod highs;
 pub mod ac;
 pub mod dc;
 pub mod ipm;
+#[cfg(feature = "opf-ipopt")]
+pub mod ipopt;
 pub mod nlp;
 pub mod model;
 

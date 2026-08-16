@@ -120,6 +120,28 @@ opf = []
 # either could produce alone, and worth keeping the feature for even though it
 # is no longer needed to solve anything.
 opf-highs = ["opf", "dep:bindgen"]
+# Builds the IPOPT backend for `opf`'s *nonlinear* solver (src/opf/ipopt.rs) —
+# the AC-OPF counterpart of what `opf-highs` is for DC. Same arrangement again:
+# nothing vendored, nothing compiled from source, bindings generated via
+# `bindgen` against a *system* IPOPT's own `IpStdCInterface.h`.
+#
+# That arrangement is what keeps IPOPT's EPL-2.0 licence off this crate's
+# `license` field. Nothing IPOPT-derived is redistributed here; the feature
+# links a library the user installed, exactly as `pardiso` links a
+# separately-licensed oneMKL. Enabling it in a *distributed binary* is the
+# user's licensing decision, not this crate's.
+#
+# Needs `libclang` (for `bindgen`) plus a local IPOPT with its development
+# files — on Debian/Ubuntu that is `apt install coinor-libipopt-dev`. Found at
+# `/usr` by default; set `IPOPT_ROOT` for anything else.
+#
+# Not built or tested in CI, and nothing depends on it: `opf::nlp` is the
+# default nonlinear solver and this is the *reference* the two are
+# cross-checked against, the same role `opf-highs` plays for `opf::ipm`. On a
+# nonconvex problem the two need not agree — they may find different local
+# optima — which makes the comparison weaker than the convex one and worth
+# reading carefully rather than as a pass/fail.
+opf-ipopt = ["opf", "dep:bindgen"]
 
 [[test]]
 name = "cli_opf_test"
@@ -140,6 +162,11 @@ required-features = ["opf"]
 name = "opf_ipm_test"
 path = "tests/opf_ipm_test.rs"
 required-features = ["opf"]
+
+[[test]]
+name = "opf_ipopt_test"
+path = "tests/opf_ipopt_test.rs"
+required-features = ["opf-ipopt"]
 
 [[test]]
 name = "opf_pwl_test"

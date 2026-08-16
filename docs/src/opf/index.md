@@ -421,6 +421,45 @@ rather than read out of the solver; and prices checked against a numerical
 \\(\partial\text{cost}/\partial\text{load}\\) — which caught a sign error that produced
 prices of exactly the right magnitude, negated, on every bus of every case.
 
+### IPOPT as a reference
+
+`opf::nlp` has a reference backend the same way `opf::ipm` has HiGHS: **IPOPT**, behind the
+opt-in `opf-ipopt` feature, reached through gridoxide's own bindgen bindings against a system
+install's `IpStdCInterface.h`. Nothing depends on it — the in-house solver is the default and
+needs nothing installed.
+
+Across the pglib fixtures the two agree to **5e-9 relative**, and both match the published
+objectives.
+
+The comparison is weaker than the convex one, and the difference matters. On a convex problem
+the optimum is unique, so two solvers disagreeing means one is wrong. AC-OPF is nonconvex: two
+correct solvers may find different local optima and neither is at fault. Agreement is therefore
+strong evidence, and disagreement would be a question rather than a verdict.
+
+What it corroborates unambiguously is the **model**. IPOPT consumes the same objective, Jacobian
+and Hessian through a completely different algorithm, so reaching the same point tests the
+derivative algebra from outside this crate.
+
+Two conventions have to be translated, and both are silent when wrong — they converge to the
+wrong point rather than failing:
+
+| | gridoxide | IPOPT |
+|---|---|---|
+| Hessian | \\(\nabla^2 f - \sum_i y_i \nabla^2 c_i\\) | \\(\sigma \nabla^2 f + \sum_i \lambda_i \nabla^2 c_i\\) |
+| Triangle | Full symmetric | Lower only, each off-diagonal once |
+
+The \\(\sigma\\) is not decoration: IPOPT sets it to zero in its restoration phase, so the
+objective's own Hessian has to be separated out and rescaled rather than assumed to carry a
+factor of one.
+
+> **A packaging trap worth knowing about.** Debian's and Ubuntu's `libipopt` is built against
+> MUMPS, which is built against OpenMPI. OpenMPI runs transport discovery in a *load-time
+> initializer*, and where the facilities it probes for are absent that discovery hangs — so the
+> process hangs before `main`, before any Rust code runs. No amount of care inside the binding
+> can catch it; a plain C program that merely links `-lipopt` and calls nothing hangs
+> identically, which is how it was pinned on the package rather than the binding.
+> `.cargo/config.toml` sets `OMPI_MCA_btl=self` to skip the probe.
+
 ### Starting points matter
 
 A nonconvex solver returns the optimum in whichever basin it starts. On these networks every

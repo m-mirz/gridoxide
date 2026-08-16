@@ -1,0 +1,25 @@
+# Environment for `cargo build`/`run`/`test` in this workspace.
+
+[env]
+# **Only needed by the `opf-ipopt` feature, and only because of how Debian and
+# Ubuntu package IPOPT.** Harmless otherwise — nothing else in this crate loads
+# OpenMPI.
+#
+# `libipopt.so` there is built against MUMPS, which is built against OpenMPI,
+# so `libmpi.so.40` and `libscalapack-openmpi` come along. OpenMPI runs its
+# transport discovery in a **load-time initializer**, and in an environment
+# without the network and shared-memory facilities it probes for, that
+# discovery hangs. The result is a process that hangs before `main` — before
+# any Rust code runs at all, so no amount of care inside the binding can catch
+# it or work around it. A plain C program that merely links `-lipopt` and calls
+# nothing hangs identically, which is how this was pinned on the package rather
+# than on the binding.
+#
+# Restricting the byte transport layer to loopback skips the probe. `self` is
+# sufficient: MUMPS is used single-process here, so there is no inter-rank
+# communication to carry. (`^tcp` and `^openib,tcp` — excluding transports
+# rather than restricting to one — do *not* help; the discovery still runs.)
+#
+# Not forced, so anyone who has a working OpenMPI setup and sets their own
+# value keeps it.
+OMPI_MCA_btl = "self"
