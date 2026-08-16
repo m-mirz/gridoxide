@@ -11,6 +11,7 @@ pub mod jacobian;
 pub mod batch;
 pub mod bde;
 pub mod ac_sensitivity;
+pub mod injection_hessian;
 pub mod dc;
 #[cfg(feature = "opf")]
 pub mod opf;

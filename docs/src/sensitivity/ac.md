@@ -238,3 +238,55 @@ best = max(range(s.n_branches), key=lambda b: abs(row.d_transformer_ratio[b]))
 
 `AcSensitivityModel` is a class rather than a function because there is genuinely something
 worth keeping between calls: one factorization, arbitrarily many questions.
+
+## Second derivatives
+
+`ac_sensitivity` differentiates the operating point once. [`injection_hessian`] differentiates
+it twice, and exists for one reason: any interior-point method for AC-OPF needs the Hessian of
+the Lagrangian,
+
+\\[ \nabla^2_{xx} L = \nabla^2 f + \sum_i \lambda_i \nabla^2 P_i + \sum_i \mu_i \nabla^2 Q_i \\]
+
+whose objective term is trivial and whose constraint terms are these.
+
+[`injection_hessian`]: https://docs.rs/gridoxide/latest/gridoxide/injection_hessian/index.html
+
+Three design choices are worth stating, because each is the opposite of what the power-flow code
+does and each has a reason.
+
+**The weighted sum, never one \\(\nabla^2 P_i\\) at a time.** Each individual Hessian is a
+sparse \\(2n \times 2n\\) matrix and there are \\(2n\\) of them, so materializing them
+separately would cost \\(O(n)\\) matrices to build one. Accumulating as we go makes it a
+single pass over the Y-bus — the same cost as assembling the Jacobian.
+
+**The full \\(2n\\) state, not the reduced one.** Newton drops the slack angle and every PV
+magnitude, because it solves with bus types fixed. AC-OPF makes generator voltages *decision
+variables*, so the rows Newton discards are exactly the ones the optimizer needs. Emitting
+everything and letting the caller select is both more general and easier to check.
+
+**No fill beyond the Jacobian.** This is not obvious and it is what keeps AC-OPF tractable:
+\\(\nabla^2 P_i\\) has *no* entry coupling two distinct neighbours of bus \\(i\\), even
+though both appear in \\(P_i\\). Each term of \\(P_i\\) involves exactly one neighbour, so
+differentiating twice can never bring two together. A second-order method therefore needs no
+more sparsity budget than a first-order one.
+
+### How it is checked
+
+Hessians are hard to test — hand-deriving them twice tends to reproduce the same mistake twice —
+so the validation is deliberately two-staged, with each stage grounded outside the code it
+tests.
+
+1. **A second Jacobian, checked against the first.** `injection_jacobian` computes the same
+   first derivatives as `jacobian::JacobianPattern` by a different route: summing over
+   neighbours directly, where the power-flow assembler reads its diagonal blocks out of
+   precomputed injections (`H_ii = −Q_i − V_i²B_ii`). They share no code, so the mature
+   assembler serves as an independent oracle. On `case118_ieee` that is over a thousand entries
+   agreeing to 1e-9.
+2. **The Hessian, central-differenced against that verified Jacobian.** Since stage one
+   established the Jacobian independently, this grounds the second derivatives in something
+   outside their own implementation.
+
+Doing it in one step — second-order differences of the injections themselves — would work in
+principle and be much weaker in practice. A second difference has an error floor of
+\\(O(h^2 + \epsilon/h^2)\\), leaving roughly six usable digits where a first difference of an
+exact Jacobian gives ten.
