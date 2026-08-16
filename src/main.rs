@@ -60,15 +60,17 @@ usage:
                                 max, for the largest current; min is the
                                 sensitivity study).
   gridoxide opf <network.json> [--data <opf.json>] [--no-shedding]
-                     [--shed-price <$/MWh>] [--ignore-r]
+                     [--shed-price <$/MWh>] [--ignore-r] [--highs]
                                 run a DC optimal power flow: least-cost dispatch
                                 subject to generator limits and branch ratings,
                                 printing the dispatch, locational marginal
                                 prices and whatever is binding.
                                 Costs and limits come from a companion document,
                                 defaulting to <network>.opf.json — the pair
-                                `gridoxide-matpower` writes. Needs the
-                                `opf-highs` feature.
+                                `gridoxide-matpower` writes. Needs the `opf`
+                                feature; --highs selects the reference HiGHS
+                                backend instead of the built-in interior-point
+                                one, and additionally needs `opf-highs`.
                                 --ignore-r uses b = 1/x instead of the default
                                 b = x/(r²+x²). Note this is the opposite default
                                 from `dc` above, on purpose: each matches what
@@ -386,10 +388,9 @@ fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
 /// Prints what a dispatcher reads off one: what each unit should produce, what
 /// it costs, what a marginal megawatt is worth at each bus, and which limits
 /// are the reason the answer is not simply "run the cheapest unit".
-#[cfg(feature = "opf-highs")]
+#[cfg(feature = "opf")]
 fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
-    use gridoxide::opf::highs::HighsSolver;
     use gridoxide::opf::model::OpfData;
     use gridoxide::opf::{OptStatus, Solver};
 
@@ -437,8 +438,28 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     let total_load: f64 = network.loads.iter().map(|l| l.p).sum::<f64>() * network.base_mva;
 
     let opf = DcOpf::build(network, options).map_err(|e| e.to_string())?;
-    let mut solver = HighsSolver::new().map_err(|e| e.to_string())?;
-    let solution = solver.solve(opf.problem()).map_err(|e| e.to_string())?;
+
+    // The in-house interior-point method is the default because it needs no
+    // system install; `--highs` reaches the reference backend where one is
+    // available. The two are cross-checked in `tests/opf_cross_test.rs`, so
+    // this is a choice about dependencies rather than about the answer.
+    let solution = if flags.iter().any(|f| f == "--highs") {
+        #[cfg(feature = "opf-highs")]
+        {
+            let mut solver = gridoxide::opf::highs::HighsSolver::new()
+                .map_err(|e| e.to_string())?;
+            solver.solve(opf.problem()).map_err(|e| e.to_string())?
+        }
+        #[cfg(not(feature = "opf-highs"))]
+        {
+            return Err("--highs needs the `opf-highs` feature, which links a local \
+                        HiGHS install (on Debian/Ubuntu, `apt install libhighs-dev`)"
+                .to_string());
+        }
+    } else {
+        let mut solver = gridoxide::opf::ipm::IpmSolver::new();
+        solver.solve(opf.problem()).map_err(|e| e.to_string())?
+    };
     let result = opf.interpret(&solution);
 
     if result.status != OptStatus::Optimal {
@@ -511,11 +532,9 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(feature = "opf-highs"))]
+#[cfg(not(feature = "opf"))]
 fn run_opf(_path: &str, _flags: &[String]) -> Result<(), String> {
-    Err("this build has no OPF solver; rebuild with `cargo build --features opf-highs` \
-         (needs a local HiGHS — on Debian/Ubuntu, `apt install libhighs-dev`)"
-        .to_string())
+    Err("this build has no OPF solver; rebuild with `cargo build --features opf`".to_string())
 }
 
 /// Solves an AC power flow over the PGM document at `path` and differentiates

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use gridoxide::linear::DcApproximation;
 use gridoxide::linear::btheta::DcBranch;
 use gridoxide::opf::dc::{DcGenerator, DcLoad, DcOpf, DcOpfNetwork, DcOpfOptions};
-use gridoxide::opf::highs::HighsSolver;
+use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::opf::model::{CostCurve, OpfData};
 use gridoxide::opf::{OptStatus, Solver};
 use gridoxide::pgm::PgmInput;
@@ -38,12 +38,14 @@ fn fixture(name: &str, suffix: &str) -> PathBuf {
         .join(format!("{name}{suffix}"))
 }
 
-fn solver() -> HighsSolver {
-    let s = HighsSolver::new().expect("HiGHS is required by this feature");
-    // DC-OPF is a QP wherever a cost curve is quadratic, so it inherits the
-    // interior-point tolerance discussed in `opf_highs_test.rs`.
-    s.set_tolerance(1e-10, 1e-10).unwrap();
-    s
+/// The in-house interior-point method — the default backend, and the one that
+/// needs no system install, so these tests run everywhere.
+///
+/// `tests/opf_cross_test.rs` holds it against HiGHS on these same fixtures
+/// wherever HiGHS is available, which is what lets this file treat one
+/// backend's answer as the answer.
+fn solver() -> IpmSolver {
+    IpmSolver::new()
 }
 
 fn load_documents(name: &str) -> (PgmInput, OpfData) {

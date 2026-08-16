@@ -286,15 +286,19 @@ already nonlinear.
 Dispatch, objective, and — because the duals come free — **LMPs** and the list of binding
 constraints. Congestion rent and the shadow price of each limit fall out of the same vector.
 
-## 6. Toward AC-OPF (phases 4–5)
+## 6. Toward AC-OPF (phases 5–6)
 
-**Phase 4: second derivatives.** Any AC-OPF interior-point method needs the Hessian of the
+*Numbering note: this section originally called these phases 4 and 5. §8's table is
+authoritative — the in-house QP solver is phase 4, injection Hessians are phase 5, AC-OPF is
+phase 6 — and the headings here have been corrected to match.*
+
+**Phase 5: second derivatives.** Any AC-OPF interior-point method needs the Hessian of the
 Lagrangian, which means \\(\partial^2 g/\partial x^2\\) — the second derivatives of the power
 injections. This is self-contained, independently useful, and validated the same way the AC
 sensitivities were: finite-difference the *existing* Jacobian, which shares no code with the new
-Hessian. Landing it separately keeps phase 5 from mixing two kinds of risk.
+Hessian. Landing it separately keeps phase 6 from mixing two kinds of risk.
 
-**Phase 5: AC-OPF.** Nonconvex, so HiGHS does not apply and the optimizer question genuinely
+**Phase 6: AC-OPF.** Nonconvex, so HiGHS does not apply and the optimizer question genuinely
 reopens. Controls: generator \\(P\\) and \\(Q\\)/\\(|V|\\), taps and phase shifters (derivatives
 already available and validated by the AC sensitivity work), load shedding.
 
@@ -318,7 +322,7 @@ is a trivial NLP. That is not a reason to use it for phase 3: it would forgo the
 and the pwl-as-LP path in §5.2, and front-load the heaviest dependency into the lowest-risk
 phase.
 
-This phase should get its own plan revision once phase 4 lands and the sparsity and conditioning
+This phase should get its own plan revision once phase 5 lands and the sparsity and conditioning
 of the KKT system are measurable rather than guessed at. Committing to either path now would be
 guessing.
 
@@ -389,17 +393,20 @@ the same matrices. That is what the analytic small cases are for.
 
 | # | Deliverable | Gate |
 |---|---|---|
-| 1 | Cost/limit data layer; `matpower.py` reads `gencost`, limits, ratings; pglib-opf fixtures vendored | Round-trips every fixture without loss |
-| 2 | `LinearProgram` boundary; `opf-highs` backend via own bindgen against `highs_c_api.h` | Solves a hand-built LP and QP with correct duals |
-| 3 | **DC-OPF** — dispatch, objective, LMPs, binding constraints; CLI and Python | KKT residuals; analytic cases; existing suites unmoved |
-| 4 | In-house convex QP interior-point method, second backend behind the same boundary | KKT residuals; **agrees with HiGHS** on every fixture (§7.4) |
+| 1 | ✅ **Done.** Cost/limit data layer; `matpower.py` reads `gencost`, limits, ratings; pglib-opf fixtures vendored | Round-trips every fixture without loss |
+| 2 | ✅ **Done.** `LinearProgram` boundary; `opf-highs` backend via own bindgen against `highs_c_api.h` | Solves a hand-built LP and QP with correct duals |
+| 3 | ✅ **Done.** **DC-OPF** — dispatch, objective, LMPs, binding constraints; CLI and Python | KKT residuals; analytic cases; pglib published objectives to <0.03% |
+| 4 | ✅ **Done.** In-house convex QP interior-point method (`src/opf/ipm.rs`), second backend behind the same boundary, now the *default* | KKT residuals; agrees with HiGHS to 1.1e-11 relative on every fixture and on 300 randomized convex QPs (§7.4); OPF now runs in CI |
 | 5 | Injection Hessians | Finite-difference against the existing Jacobian |
 | 6 | **AC-OPF** — all four control families | KKT; published pglib/MATPOWER objectives |
 
-Phases 1–3 are the first shippable unit, though `opf-highs` needs a system HiGHS install to build.
-**Phase 4 is what makes DC-OPF portable** — it becomes the default backend and drops the install
-requirement, so it is not optional polish. 5 is independently useful. 6 needs its own revision
-first.
+Phases 1–4 are done. Phase 4 delivered what it was for: DC-OPF now builds and tests with no system
+library, `opf` is exercised in CI, and HiGHS has become the optional reference rather than a
+requirement. It also paid off as a *gate* rather than merely a port — the randomized
+solver-vs-solver comparison caught a split primal/dual step length that is correct for LPs and
+breaks QPs, a defect none of the fixtures exposed.
+
+Phase 5 is independently useful. Phase 6 needs its own revision first.
 
 ## 9. Risks
 

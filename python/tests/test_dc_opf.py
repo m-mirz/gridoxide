@@ -139,6 +139,26 @@ def test_the_companion_document_can_be_given_explicitly():
     assert explicit.objective == pytest.approx(implicit.objective, rel=1e-12)
 
 
+def test_the_solver_backend_is_selectable():
+    """`ipm` is the default and needs nothing installed. `highs` is the
+    reference backend; where it was built in the two must agree, and where it
+    was not the error should say so rather than failing obscurely."""
+    default = gridoxide.dc_opf(case("pglib_opf_case5_pjm"))
+    ipm = gridoxide.dc_opf(case("pglib_opf_case5_pjm"), solver="ipm")
+    assert default.objective == pytest.approx(ipm.objective, rel=1e-12)
+
+    try:
+        highs = gridoxide.dc_opf(case("pglib_opf_case5_pjm"), solver="highs")
+    except ValueError as e:
+        assert "opf-highs" in str(e)
+    else:
+        # Two independent solvers on a convex problem must agree.
+        assert highs.objective == pytest.approx(ipm.objective, rel=1e-9)
+
+    with pytest.raises(ValueError, match="unknown solver"):
+        gridoxide.dc_opf(case("pglib_opf_case5_pjm"), solver="nonsense")
+
+
 def test_missing_files_are_reported_clearly():
     with pytest.raises(RuntimeError, match="reading"):
         gridoxide.dc_opf(case("no_such_case"))

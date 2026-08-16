@@ -1770,7 +1770,7 @@ impl AcSensitivityModel {
 }
 
 /// A branch at its limit, and what relieving it is worth.
-#[cfg(feature = "opf-highs")]
+#[cfg(feature = "opf")]
 #[pyclass]
 struct DcOpfBinding {
     /// Flat branch index — lines first, then transformers.
@@ -1788,7 +1788,7 @@ struct DcOpfBinding {
 }
 
 /// The result of a DC optimal power flow.
-#[cfg(feature = "opf-highs")]
+#[cfg(feature = "opf")]
 #[pyclass]
 struct DcOpfResult {
     /// Total cost, $/h.
@@ -1836,6 +1836,12 @@ struct DcOpfResult {
 /// *where* demand could not be served; turning it off makes such a case
 /// infeasible instead, which is sometimes the answer wanted.
 ///
+/// `solver` is `"ipm"` (default) — the built-in interior-point method, which
+/// needs nothing installed — or `"highs"`, the reference backend, available
+/// only when the extension was built with the `opf-highs` feature. The two are
+/// cross-checked against each other in `tests/opf_cross_test.rs`, so this
+/// picks a dependency rather than an answer.
+///
 /// `dc_approximation` is `"ignore_g"` (default here, `b = x/(r²+x²)`) or
 /// `"ignore_r"` (`b = 1/x`). Note the default is the opposite of
 /// `PowerFlowModel.from_pgm_json`'s, and deliberately so: each matches what
@@ -1845,11 +1851,11 @@ struct DcOpfResult {
 /// `makeBdc` and pandapower use for power flow. The difference is not
 /// cosmetic — `1/x` overstates susceptance on resistive branches, which on
 /// `case30_ieee` lands on a congested branch and moves the objective 0.4%.
-#[cfg(feature = "opf-highs")]
+#[cfg(feature = "opf")]
 #[pyfunction]
 #[pyo3(signature = (path, data_path = None, shed_price = 10_000.0,
                     allow_shedding = true, dc_approximation = "ignore_g",
-                    freq_hz = 50.0))]
+                    solver = "ipm", freq_hz = 50.0))]
 fn dc_opf(
     py: Python<'_>,
     path: &str,
@@ -1857,10 +1863,11 @@ fn dc_opf(
     shed_price: f64,
     allow_shedding: bool,
     dc_approximation: &str,
+    solver: &str,
     freq_hz: f64,
 ) -> PyResult<DcOpfResult> {
     use crate::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
-    use crate::opf::highs::HighsSolver;
+    use crate::opf::ipm::IpmSolver;
     use crate::opf::model::OpfData;
     use crate::opf::{OptStatus, Solver};
 
@@ -1891,10 +1898,32 @@ fn dc_opf(
 
     let opf = DcOpf::build(network, options)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let mut solver = HighsSolver::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    let solution = solver
-        .solve(opf.problem())
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let solution = match solver {
+        "ipm" => {
+            let mut s = IpmSolver::new();
+            s.solve(opf.problem()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        }
+        "highs" => {
+            #[cfg(feature = "opf-highs")]
+            {
+                let mut s = crate::opf::highs::HighsSolver::new()
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                s.solve(opf.problem()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            }
+            #[cfg(not(feature = "opf-highs"))]
+            {
+                return Err(PyValueError::new_err(
+                    "solver='highs' needs the extension built with the opf-highs \
+                     feature, which links a local HiGHS install",
+                ));
+            }
+        }
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown solver '{other}', expected 'ipm' or 'highs'"
+            )))
+        }
+    };
     let result = opf.interpret(&solution);
 
     if result.status != OptStatus::Optimal {
@@ -1942,9 +1971,9 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AcSensitivityModel>()?;
     m.add_class::<SensitivityColumn>()?;
     m.add_class::<SensitivityRow>()?;
-    // Only present when a solver backend was built in — see the `opf-highs`
+    // Only present when the optimization layer was built in — see the `opf`
     // feature. `hasattr(gridoxide, "dc_opf")` is the check a caller makes.
-    #[cfg(feature = "opf-highs")]
+    #[cfg(feature = "opf")]
     {
         m.add_class::<DcOpfResult>()?;
         m.add_class::<DcOpfBinding>()?;

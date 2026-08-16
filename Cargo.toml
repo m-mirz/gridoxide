@@ -91,11 +91,15 @@ pardiso = ["dep:bindgen"]
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]
-# The optimization layer's solver-independent half: `opf::LinearProgram`,
-# `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs). Pure Rust with
-# no dependencies and no backend of its own — enabling it alone gets you the
-# problem and answer types, which is what a second backend is written against.
-# See plans/OPF_PLAN.md; the in-house convex QP solver lands under this feature.
+# The optimization layer, complete and self-contained: `opf::LinearProgram`,
+# `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs), DC-OPF
+# (src/opf/dc.rs), and the in-house primal-dual interior-point QP solver
+# (src/opf/ipm.rs) that answers them. Pure Rust on this crate's own sparse
+# factorization — no system libraries, no C toolchain, nothing to install — so
+# unlike `klu`/`pardiso`/`opf-highs` this one *is* built and tested in CI.
+#
+# This is what `gridoxide opf` and the Python `dc_opf` need. `opf-highs` below
+# is an optional second backend, not a requirement.
 opf = []
 # Builds the HiGHS backend for `opf` (src/opf/highs.rs). Like `pardiso`,
 # nothing is vendored or compiled from source: this links a *system* HiGHS
@@ -108,26 +112,39 @@ opf = []
 # found at `/usr` by default; set `HIGHS_ROOT` for anything else.
 #
 # Not built or tested in CI, since no runner has HiGHS installed — the same
-# local/manual-verification-only position `pardiso` is in. Unlike `pardiso`
-# that is temporary: OPF_PLAN.md phase 4 adds an in-house convex QP solver
-# under plain `opf`, which becomes the portable default and makes *this*
-# backend the optional reference implementation the two cross-check against.
+# local/manual-verification-only position `pardiso` is in. Unlike `pardiso`,
+# nothing depends on it: `opf`'s own interior-point solver is the default
+# backend, and this one is the *reference* the two are cross-checked against in
+# tests/opf_cross_test.rs. On a convex problem the optimum is unique, so a
+# disagreement between them is a bug in one — which is a sharper signal than
+# either could produce alone, and worth keeping the feature for even though it
+# is no longer needed to solve anything.
 opf-highs = ["opf", "dep:bindgen"]
 
 [[test]]
 name = "cli_opf_test"
 path = "tests/cli_opf_test.rs"
-required-features = ["opf-highs"]
+required-features = ["opf"]
 
 [[test]]
 name = "opf_dc_test"
 path = "tests/opf_dc_test.rs"
-required-features = ["opf-highs"]
+required-features = ["opf"]
 
 [[test]]
 name = "opf_data_test"
 path = "tests/opf_data_test.rs"
 required-features = ["opf"]
+
+[[test]]
+name = "opf_ipm_test"
+path = "tests/opf_ipm_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_cross_test"
+path = "tests/opf_cross_test.rs"
+required-features = ["opf-highs"]
 
 [[test]]
 name = "opf_highs_test"
