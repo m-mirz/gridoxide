@@ -142,6 +142,11 @@ path = "tests/opf_ipm_test.rs"
 required-features = ["opf"]
 
 [[test]]
+name = "opf_pwl_test"
+path = "tests/opf_pwl_test.rs"
+required-features = ["opf"]
+
+[[test]]
 name = "opf_ac_test"
 path = "tests/opf_ac_test.rs"
 required-features = ["opf"]
