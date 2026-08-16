@@ -9,6 +9,13 @@ need them opt in explicitly.
 | `CGMES-Test-Configurations/` | submodule | ~158 MB |
 | `benchmark-grids/` | submodule | ~5 MB |
 | `pgm/` | committed | ~3.5 MB |
+| `pglib-opf/` | committed | ~300 kB |
+
+`pglib-opf/` holds both the upstream MATPOWER `.m` cases and the documents
+`python/gridoxide/matpower.py` converts them into, because the Rust tests read
+JSON rather than MATLAB. Keeping both means they can drift, so
+`python/tests/test_matpower_opf.py` regenerates and compares them. Its own
+README explains why these cases replace `benchmark-grids/` for OPF work.
 
 
 ## Submodules

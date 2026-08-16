@@ -41,6 +41,7 @@
 
 #[cfg(feature = "opf-highs")]
 pub mod highs;
+pub mod model;
 
 /// A convex quadratic program — or a linear one, when [`hessian`] is `None`.
 ///

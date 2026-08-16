@@ -115,6 +115,11 @@ opf = []
 opf-highs = ["opf", "dep:bindgen"]
 
 [[test]]
+name = "opf_data_test"
+path = "tests/opf_data_test.rs"
+required-features = ["opf"]
+
+[[test]]
 name = "opf_highs_test"
 path = "tests/opf_highs_test.rs"
 required-features = ["opf-highs"]
