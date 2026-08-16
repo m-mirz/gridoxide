@@ -79,3 +79,18 @@ gap is a question to investigate rather than an immediate failure. And the AC
 column is a *local* optimum found by an interior-point method, so at phase 6 a
 disagreement may mean a different local solution rather than a bug; that
 comparison must report feasibility alongside the objective.
+
+**The first caveat paid off immediately.** Phase 3's initial run matched four
+cases to better than 0.04% and `case30_ieee` to only 0.42%. The convention
+that differed was not one of the two guessed above but the *susceptance
+formula*: PowerModels builds its DC model from the full series admittance
+(`b = x/(r²+x²)`), while MATPOWER's `makeBdc` — and gridoxide's DC power flow,
+and pandapower, and lightsim2grid — use `b = 1/x`. On resistive branches these
+differ materially, and `case30_ieee` happens to be congested on one
+(`r = 0.0192, x = 0.0575`, a 10% overstatement), so the error landed directly
+on a binding constraint. Adopting the series form for OPF brought every case
+inside 0.03%. `src/opf/dc.rs` carries the full table and reasoning.
+
+The transferable point: matching a published objective to 0.4% is *not*
+reassurance. It was the one case that disagreed by ten times the others that
+exposed a formula wrong in all five.

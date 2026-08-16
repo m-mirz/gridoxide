@@ -20,6 +20,10 @@
 
 - [AC Sensitivity Analysis](./sensitivity/ac.md)
 
+# Optimal Power Flow
+
+- [The Optimal Power Flow Problem](./opf/index.md)
+
 # Short Circuit
 
 - [The Short-Circuit Problem](./short_circuit/index.md)

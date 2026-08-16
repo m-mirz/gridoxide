@@ -1835,16 +1835,28 @@ struct DcOpfResult {
 /// rare, since shedding keeps an over-committed case solvable and reports
 /// *where* demand could not be served; turning it off makes such a case
 /// infeasible instead, which is sometimes the answer wanted.
+///
+/// `dc_approximation` is `"ignore_g"` (default here, `b = x/(r²+x²)`) or
+/// `"ignore_r"` (`b = 1/x`). Note the default is the opposite of
+/// `PowerFlowModel.from_pgm_json`'s, and deliberately so: each matches what
+/// its own domain's reference implementations compute. `"ignore_g"` is what
+/// PowerModels builds its DC model from, and what pglib-opf's published
+/// objectives were produced with, while `b = 1/x` is what MATPOWER's
+/// `makeBdc` and pandapower use for power flow. The difference is not
+/// cosmetic — `1/x` overstates susceptance on resistive branches, which on
+/// `case30_ieee` lands on a congested branch and moves the objective 0.4%.
 #[cfg(feature = "opf-highs")]
 #[pyfunction]
 #[pyo3(signature = (path, data_path = None, shed_price = 10_000.0,
-                    allow_shedding = true, freq_hz = 50.0))]
+                    allow_shedding = true, dc_approximation = "ignore_g",
+                    freq_hz = 50.0))]
 fn dc_opf(
     py: Python<'_>,
     path: &str,
     data_path: Option<&str>,
     shed_price: f64,
     allow_shedding: bool,
+    dc_approximation: &str,
     freq_hz: f64,
 ) -> PyResult<DcOpfResult> {
     use crate::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
@@ -1872,7 +1884,8 @@ fn dc_opf(
         .map_err(|e| PyValueError::new_err(format!("parsing {}: {e}", data_path.display())))?;
 
     let options = DcOpfOptions { shed_price, allow_shedding };
-    let network = DcOpfNetwork::from_pgm(input, &data, freq_hz)
+    let approximation = parse_dc_approximation(dc_approximation)?;
+    let network = DcOpfNetwork::from_pgm(input, &data, freq_hz, approximation)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let generator_index: Vec<usize> = network.generators.iter().map(|g| g.index).collect();
 

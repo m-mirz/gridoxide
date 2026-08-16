@@ -60,7 +60,7 @@ usage:
                                 max, for the largest current; min is the
                                 sensitivity study).
   gridoxide opf <network.json> [--data <opf.json>] [--no-shedding]
-                     [--shed-price <$/MWh>]
+                     [--shed-price <$/MWh>] [--ignore-r]
                                 run a DC optimal power flow: least-cost dispatch
                                 subject to generator limits and branch ratings,
                                 printing the dispatch, locational marginal
@@ -69,6 +69,10 @@ usage:
                                 defaulting to <network>.opf.json — the pair
                                 `gridoxide-matpower` writes. Needs the
                                 `opf-highs` feature.
+                                --ignore-r uses b = 1/x instead of the default
+                                b = x/(r²+x²). Note this is the opposite default
+                                from `dc` above, on purpose: each matches what
+                                its own field's reference tools compute.
   gridoxide sensitivity <path> [--dp <bus>] [--dq <bus>] [--dk <branch>]
                      [--dalpha <branch>] [--watch <branch>] [--terminal from|to]
                                 solve an AC power flow and differentiate it.
@@ -419,7 +423,15 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
             .map_err(|_| format!("--shed-price: {raw:?} is not a number"))?;
     }
 
-    let network = DcOpfNetwork::from_pgm(input, &data, 50.0).map_err(|e| e.to_string())?;
+    // DC-OPF defaults to the true series susceptance rather than the `1/x`
+    // the `dc` command uses; see `DcOpfOptions` for why the two differ.
+    let approximation = if flags.iter().any(|f| f == "--ignore-r") {
+        gridoxide::linear::DcApproximation::IgnoreR
+    } else {
+        gridoxide::linear::DcApproximation::IgnoreG
+    };
+    let network =
+        DcOpfNetwork::from_pgm(input, &data, 50.0, approximation).map_err(|e| e.to_string())?;
     let n_buses = network.n_buses;
     let generators = network.generators.clone();
     let total_load: f64 = network.loads.iter().map(|l| l.p).sum::<f64>() * network.base_mva;
