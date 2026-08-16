@@ -134,6 +134,54 @@ column — a slack bus's injection, or reactive power where the voltage is held 
 correct derivative, not a gap. And a line has no tap, so its `d_transformer_ratio` and
 `d_phase_shift` entries are zero rather than an error.
 
+### DC optimal power flow
+
+`dc_opf` answers *what should each generator produce, so demand is met at least cost without
+overloading anything*. A plain function rather than a class: each solve builds its own program,
+so there is nothing worth keeping between calls.
+
+**Only present when the extension was built with the `opf-highs` feature**, which needs a local
+HiGHS (`apt install libhighs-dev` on Debian/Ubuntu). Importing `gridoxide` never fails for want
+of a solver — `dc_opf` is simply absent, so `hasattr(gridoxide, "dc_opf")` is the check.
+
+```python
+import gridoxide
+
+result = gridoxide.dc_opf("grid.json")
+
+print(result.objective)                       # total cost, $/h
+for index, mw in zip(result.generator_index, result.dispatch):
+    print(index, mw)
+
+# The price spread between buses *is* the congestion.
+spread = max(result.lmp) - min(result.lmp)
+for b in result.binding:
+    print(f"branch {b.branch} at {b.flow:.1f}/{b.rate:.1f} MW, "
+          f"worth {abs(b.price):.2f} $/MWh to relieve")
+```
+
+- `dc_opf(path, data_path=None, shed_price=10000.0, allow_shedding=True, freq_hz=50.0)` — costs
+  and limits come from a companion OPF document, defaulting to `path` with its extension
+  replaced by `.opf.json`, which is the pair `gridoxide-matpower` writes. Raises if no optimal
+  dispatch exists.
+- `result.objective` — total cost, $/h.
+- `result.dispatch` / `result.generator_index` — MW per generator, and the source case's own
+  generator index for each, so results match back to the case file.
+- `result.lmp` — **locational marginal price** per bus, $/MWh: the cost of serving one more MW
+  there. Uniform when nothing is congested.
+- `result.flows`, `result.angles` — per branch and per bus.
+- `result.shed` — MW of unserved demand per load. All zero on a case that can be served; with
+  `allow_shedding=False` such a case raises instead, which is sometimes the answer wanted.
+- `result.binding` — the branches at their limit, each with `branch`, `flow`, `rate` and
+  `price`.
+
+Costs, limits and ratings are not in the PGM network document — it has nowhere to put them — so
+`gridoxide-matpower` writes both files from a MATPOWER case:
+
+```bash
+python -m gridoxide.matpower case14.m case14.json    # also writes case14.opf.json
+```
+
 ### Short-circuit calculation
 
 `short_circuit` is a plain function, not a class: it is a single direct solve with nothing worth

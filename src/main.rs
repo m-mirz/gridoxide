@@ -59,6 +59,16 @@ usage:
                                 --scaling picks the voltage factor c (default
                                 max, for the largest current; min is the
                                 sensitivity study).
+  gridoxide opf <network.json> [--data <opf.json>] [--no-shedding]
+                     [--shed-price <$/MWh>]
+                                run a DC optimal power flow: least-cost dispatch
+                                subject to generator limits and branch ratings,
+                                printing the dispatch, locational marginal
+                                prices and whatever is binding.
+                                Costs and limits come from a companion document,
+                                defaulting to <network>.opf.json — the pair
+                                `gridoxide-matpower` writes. Needs the
+                                `opf-highs` feature.
   gridoxide sensitivity <path> [--dp <bus>] [--dq <bus>] [--dk <branch>]
                      [--dalpha <branch>] [--watch <branch>] [--terminal from|to]
                                 solve an AC power flow and differentiate it.
@@ -110,6 +120,18 @@ fn main() {
             }
             _ => {
                 eprintln!("error: dc needs a path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("opf") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_opf(path, &args[2..]) {
+                    eprintln!("error: {message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("error: opf needs a network path\n\n{USAGE}");
                 std::process::exit(2);
             }
         },
@@ -352,6 +374,136 @@ fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
         return Err(format!("{flag}: {value} is out of range (0..{limit})"));
     }
     Ok(value)
+}
+
+/// Runs a DC optimal power flow over the PGM document at `path` and its
+/// companion OPF document.
+///
+/// Prints what a dispatcher reads off one: what each unit should produce, what
+/// it costs, what a marginal megawatt is worth at each bus, and which limits
+/// are the reason the answer is not simply "run the cheapest unit".
+#[cfg(feature = "opf-highs")]
+fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+    use gridoxide::opf::highs::HighsSolver;
+    use gridoxide::opf::model::OpfData;
+    use gridoxide::opf::{OptStatus, Solver};
+
+    // The converter writes `<network>.opf.json` beside the network document,
+    // so defaulting to that makes the common case a single argument.
+    let data_path = match flag_value(flags, "--data")? {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(path).with_extension("opf.json"),
+    };
+
+    let network_text = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let data_text = fs::read_to_string(&data_path).map_err(|e| {
+        format!(
+            "reading {}: {e} — pass --data if the companion OPF document is elsewhere",
+            data_path.display()
+        )
+    })?;
+
+    let input: PgmInput =
+        serde_json::from_str(&network_text).map_err(|e| format!("parsing {path}: {e}"))?;
+    let data = OpfData::from_json(&data_text)
+        .map_err(|e| format!("parsing {}: {e}", data_path.display()))?;
+
+    let mut options = DcOpfOptions {
+        allow_shedding: !flags.iter().any(|a| a == "--no-shedding"),
+        ..Default::default()
+    };
+    if let Some(raw) = flag_value(flags, "--shed-price")? {
+        options.shed_price = raw
+            .parse()
+            .map_err(|_| format!("--shed-price: {raw:?} is not a number"))?;
+    }
+
+    let network = DcOpfNetwork::from_pgm(input, &data, 50.0).map_err(|e| e.to_string())?;
+    let n_buses = network.n_buses;
+    let generators = network.generators.clone();
+    let total_load: f64 = network.loads.iter().map(|l| l.p).sum::<f64>() * network.base_mva;
+
+    let opf = DcOpf::build(network, options).map_err(|e| e.to_string())?;
+    let mut solver = HighsSolver::new().map_err(|e| e.to_string())?;
+    let solution = solver.solve(opf.problem()).map_err(|e| e.to_string())?;
+    let result = opf.interpret(&solution);
+
+    if result.status != OptStatus::Optimal {
+        return Err(format!(
+            "no optimal dispatch ({:?}). An infeasible case usually means demand cannot be \
+             served within the limits — try without --no-shedding to see where",
+            result.status
+        ));
+    }
+
+    println!(
+        "{n_buses} bus(es), {} generator(s), {:.1} MW of demand",
+        generators.len(),
+        total_load
+    );
+    println!("total cost: {:.2} $/h", result.objective);
+
+    println!("\ndispatch (MW):");
+    for (g, generator) in generators.iter().enumerate() {
+        let p = result.dispatch[g];
+        // A unit at a limit is the interesting one — it is where the answer is
+        // being shaped by something other than price.
+        let at = if (p - generator.p_max * opf.network().base_mva).abs() < 1e-6 {
+            " (at max)"
+        } else if (p - generator.p_min * opf.network().base_mva).abs() < 1e-6 {
+            " (at min)"
+        } else {
+            ""
+        };
+        println!("  generator {:>4}: {:>10.3}{at}", generator.index, p);
+    }
+
+    println!("\nlocational marginal price ($/MWh):");
+    let min = result.lmp.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = result.lmp.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if (max - min).abs() < 1e-9 {
+        println!("  uniform at {min:.4} — nothing is congested");
+    } else {
+        for (bus, price) in result.lmp.iter().enumerate() {
+            println!("  bus {bus:>4}: {price:>10.4}");
+        }
+        println!("  spread: {:.4} (the congestion)", max - min);
+    }
+
+    if result.binding.is_empty() {
+        println!("\nno binding branch limits");
+    } else {
+        println!("\nbinding branch limits:");
+        for b in &result.binding {
+            println!(
+                "  branch {:>4}: flow {:>10.3} of {:>9.3} MW, worth {:>9.4} $/MWh to relieve",
+                b.branch,
+                b.flow,
+                b.rate,
+                b.price.abs()
+            );
+        }
+    }
+
+    let shed: f64 = result.shed.iter().sum();
+    if shed > 1e-6 {
+        println!("\nload shed: {shed:.3} MW — demand could not be served in full");
+        for (d, amount) in result.shed.iter().enumerate() {
+            if *amount > 1e-6 {
+                println!("  load {d:>4}: {amount:>10.3} MW");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "opf-highs"))]
+fn run_opf(_path: &str, _flags: &[String]) -> Result<(), String> {
+    Err("this build has no OPF solver; rebuild with `cargo build --features opf-highs` \
+         (needs a local HiGHS — on Debian/Ubuntu, `apt install libhighs-dev`)"
+        .to_string())
 }
 
 /// Solves an AC power flow over the PGM document at `path` and differentiates

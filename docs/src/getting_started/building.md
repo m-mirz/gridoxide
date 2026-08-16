@@ -47,12 +47,16 @@ Or run the built executable directly from the project root:
 | `dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]` | [DC power flow](../powerflow/dc.md), optionally printing one sensitivity column. |
 | `sensitivity <path> [--dp\|--dq <bus>] [--dk\|--dalpha <branch>] [--watch <branch>] [--terminal from\|to]` | [AC sensitivity](../sensitivity/ac.md). The first four flags each pick one variable and report what responds; `--watch` picks one branch and reports what would move it. |
 | `short-circuit <path> [--scaling max\|min]` | [IEC 60909 fault currents](../short_circuit/index.md). `--scaling` picks the voltage factor `c`. |
+| `opf <network.json> [--data <opf.json>] [--no-shedding] [--shed-price <$/MWh>]` | DC optimal power flow: least-cost dispatch subject to generator limits and branch ratings, reporting dispatch, locational marginal prices and what binds. Costs and limits come from a companion document, defaulting to `<network>.opf.json`. Needs the `opf-highs` feature. |
 | `switches <profile.xml>… [--retain …] [--open <mrid>] [--solve]` | [Node-breaker switching devices](../cgmes/node_breaker.md) read from CGMES EQ+SSH. Needs the `cgmes` feature. |
 
 Bus and branch arguments are gridoxide's own 0-based indices, and branches are ordered lines first
 then transformers — the tables each command prints say which is which.
 
 ```bash
+# Least-cost dispatch, and what the network is costing you.
+cargo run --features opf-highs -- opf grid.json
+
 # Which injection would relieve an overload on branch 8?
 cargo run -- sensitivity grid.json --watch 8
 
