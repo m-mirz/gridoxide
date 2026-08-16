@@ -1787,6 +1787,47 @@ struct DcOpfBinding {
     price: f64,
 }
 
+/// The result of an AC optimal power flow.
+#[cfg(feature = "opf")]
+#[pyclass]
+struct AcOpfResult {
+    /// Total cost, $/h. **A local optimum** — AC-OPF is nonconvex, so no
+    /// solver certifies more, and this is what published AC objectives mean.
+    #[pyo3(get)]
+    objective: f64,
+    /// Active dispatch per generator, MW, in the OPF document's order.
+    #[pyo3(get)]
+    p_gen: Vec<f64>,
+    /// Reactive dispatch per generator, MVAr.
+    #[pyo3(get)]
+    q_gen: Vec<f64>,
+    /// The `index` each dispatch entry belongs to.
+    #[pyo3(get)]
+    generator_index: Vec<usize>,
+    /// Bus voltage magnitudes, per-unit.
+    #[pyo3(get)]
+    magnitudes: Vec<f64>,
+    /// Bus voltage angles, radians.
+    #[pyo3(get)]
+    angles: Vec<f64>,
+    /// `(P, Q)` entering each branch at its from-terminal, MW and MVAr.
+    #[pyo3(get)]
+    flows: Vec<(f64, f64)>,
+    /// Active-power locational marginal price per bus, $/MWh.
+    #[pyo3(get)]
+    lmp_p: Vec<f64>,
+    /// Reactive-power price per bus, $/MVArh.
+    #[pyo3(get)]
+    lmp_q: Vec<f64>,
+    #[pyo3(get)]
+    iterations: usize,
+    /// Largest constraint violation, per-unit. **Read this with the
+    /// objective**: on a nonconvex problem a lower cost at an infeasible point
+    /// is not a better answer.
+    #[pyo3(get)]
+    violation: f64,
+}
+
 /// The result of a DC optimal power flow.
 #[cfg(feature = "opf")]
 #[pyclass]
@@ -1957,6 +1998,90 @@ fn dc_opf(
     })
 }
 
+/// Solves an AC optimal power flow.
+///
+/// The full problem `dc_opf` linearizes: real voltage magnitudes, reactive
+/// power and losses, optimizing generator active *and* reactive output
+/// together.
+///
+/// **Nonconvex**, so the answer is a local optimum satisfying the first-order
+/// conditions rather than a proven global one. That is the state of the art
+/// and what every published AC-OPF objective means — but it makes
+/// `result.violation` part of the answer rather than diagnostics: a lower cost
+/// at an infeasible point is not better.
+///
+/// Costs, limits and per-bus voltage bounds come from the companion OPF
+/// document, defaulting to `<path>` with its extension replaced by
+/// `.opf.json`.
+#[cfg(feature = "opf")]
+#[pyfunction]
+#[pyo3(signature = (path, data_path = None, enforce_limits = true,
+                    max_iterations = 300, tolerance = 1e-8, freq_hz = 50.0))]
+fn ac_opf(
+    py: Python<'_>,
+    path: &str,
+    data_path: Option<&str>,
+    enforce_limits: bool,
+    max_iterations: usize,
+    tolerance: f64,
+    freq_hz: f64,
+) -> PyResult<AcOpfResult> {
+    use crate::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+    use crate::opf::model::OpfData;
+
+    let data_path = match data_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::path::PathBuf::from(path).with_extension("opf.json"),
+    };
+    let network_text = std::fs::read_to_string(path)
+        .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+    let data_text = std::fs::read_to_string(&data_path).map_err(|e| {
+        PyRuntimeError::new_err(format!(
+            "reading {}: {e} — pass data_path if the companion OPF document is elsewhere",
+            data_path.display()
+        ))
+    })?;
+    let input: PgmInput = serde_json::from_str(&network_text)
+        .map_err(|e| PyValueError::new_err(format!("parsing {path}: {e}")))?;
+    let data = OpfData::from_json(&data_text)
+        .map_err(|e| PyValueError::new_err(format!("parsing {}: {e}", data_path.display())))?;
+
+    let mut options = AcOpfOptions { enforce_limits, ..AcOpfOptions::default() };
+    options.nlp.max_iterations = max_iterations;
+    options.nlp.tolerance = tolerance;
+
+    // Released for the duration of the solve: an AC-OPF on a large network is
+    // seconds of pure computation touching no Python object, so holding the
+    // interpreter lock through it would serialize callers for no reason.
+    // (`detach` is pyo3 0.29's name for what was `allow_threads`.)
+    let result = py.detach(|| {
+        let network = AcOpfNetwork::from_pgm(input, &data, freq_hz, &options)?;
+        AcOpf::build(network, options)?.solve()
+    });
+    let result = result.map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    if result.status != crate::opf::OptStatus::Optimal {
+        return Err(PyRuntimeError::new_err(format!(
+            "no optimal dispatch ({:?}), largest constraint violation {:.3e} pu",
+            result.status, result.violation
+        )));
+    }
+
+    Ok(AcOpfResult {
+        objective: result.objective,
+        p_gen: result.p_gen,
+        q_gen: result.q_gen,
+        generator_index: result.generator_index,
+        magnitudes: result.magnitudes,
+        angles: result.angles,
+        flows: result.flows,
+        lmp_p: result.lmp_p,
+        lmp_q: result.lmp_q,
+        iterations: result.iterations,
+        violation: result.violation,
+    })
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
@@ -1971,13 +2096,16 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AcSensitivityModel>()?;
     m.add_class::<SensitivityColumn>()?;
     m.add_class::<SensitivityRow>()?;
+
     // Only present when the optimization layer was built in — see the `opf`
     // feature. `hasattr(gridoxide, "dc_opf")` is the check a caller makes.
     #[cfg(feature = "opf")]
     {
         m.add_class::<DcOpfResult>()?;
         m.add_class::<DcOpfBinding>()?;
+        m.add_class::<AcOpfResult>()?;
         m.add_function(wrap_pyfunction!(dc_opf, m)?)?;
+        m.add_function(wrap_pyfunction!(ac_opf, m)?)?;
     }
     Ok(())
 }

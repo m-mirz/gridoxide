@@ -179,6 +179,34 @@ for b in result.binding:
 - `result.lmp` — **locational marginal price** per bus, $/MWh: the cost of serving one more MW
   there. Uniform when nothing is congested.
 - `result.flows`, `result.angles` — per branch and per bus.
+
+### AC optimal power flow
+
+`ac_opf` solves the full problem `dc_opf` linearizes — real voltage magnitudes, reactive power
+and losses, optimizing generator active *and* reactive output together.
+
+```python
+r = gridoxide.ac_opf("grid.json")
+
+print(f"{r.objective:.2f} $/h in {r.iterations} iterations")
+print(f"largest violation: {r.violation:.2e} pu")
+print(f"voltage range: {min(r.magnitudes):.4f} - {max(r.magnitudes):.4f} pu")
+
+for index, p, q in zip(r.generator_index, r.p_gen, r.q_gen):
+    print(f"generator {index}: {p:8.2f} MW  {q:8.2f} MVAr")
+```
+
+- `ac_opf(path, data_path=None, enforce_limits=True, max_iterations=300, tolerance=1e-8,
+  freq_hz=50.0)` — the companion document supplies costs, branch ratings *and* per-bus voltage
+  limits. Raises if no first-order point is reached.
+- `result.p_gen` / `result.q_gen` — MW and MVAr per generator.
+- `result.magnitudes`, `result.angles` — per-unit and radians, per bus.
+- `result.lmp_p`, `result.lmp_q` — active and reactive prices, $/MWh and $/MVArh.
+- `result.flows` — `(P, Q)` entering each branch at its from-terminal.
+- `result.violation` — **part of the answer, not diagnostics.** AC-OPF is nonconvex, so the
+  objective is a *local* optimum and a lower cost at an infeasible point is not a better one.
+  Reported so a caller can tell the two apart; see
+  [Optimal Power Flow](../opf/index.md#ac-opf).
 - `result.shed` — MW of unserved demand per load. All zero on a case that can be served; with
   `allow_shedding=False` such a case raises instead, which is sometimes the answer wanted.
 - `result.binding` — the branches at their limit, each with `branch`, `flow`, `rate` and
