@@ -160,10 +160,14 @@ for b in result.binding:
           f"worth {abs(b.price):.2f} $/MWh to relieve")
 ```
 
-- `dc_opf(path, data_path=None, shed_price=10000.0, allow_shedding=True, freq_hz=50.0)` — costs
-  and limits come from a companion OPF document, defaulting to `path` with its extension
-  replaced by `.opf.json`, which is the pair `gridoxide-matpower` writes. Raises if no optimal
-  dispatch exists.
+- `dc_opf(path, data_path=None, shed_price=10000.0, allow_shedding=True,
+  dc_approximation="ignore_g", freq_hz=50.0)` — costs and limits come from a companion OPF
+  document, defaulting to `path` with its extension replaced by `.opf.json`, which is the pair
+  `gridoxide-matpower` writes. Raises if no optimal dispatch exists.
+- `dc_approximation` defaults to `"ignore_g"` (`b = x/(r²+x²)`), the *opposite* of
+  `PowerFlowModel.from_pgm_json`'s default and deliberately so — each matches what its own
+  field's reference tools compute. The choice moves which branch binds, so it is not cosmetic;
+  see [Optimal Power Flow](../opf/index.md#which-susceptance--and-why-it-is-not-a-detail).
 - `result.objective` — total cost, $/h.
 - `result.dispatch` / `result.generator_index` — MW per generator, and the source case's own
   generator index for each, so results match back to the case file.

@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use gridoxide::linear::DcApproximation;
 use gridoxide::linear::btheta::DcBranch;
 use gridoxide::opf::dc::{DcGenerator, DcLoad, DcOpf, DcOpfNetwork, DcOpfOptions};
 use gridoxide::opf::highs::HighsSolver;
@@ -45,12 +46,21 @@ fn solver() -> HighsSolver {
     s
 }
 
-fn load_case(name: &str) -> DcOpfNetwork {
+fn load_documents(name: &str) -> (PgmInput, OpfData) {
     let network_text = std::fs::read_to_string(fixture(name, ".json")).unwrap();
     let opf_text = std::fs::read_to_string(fixture(name, ".opf.json")).unwrap();
-    let input: PgmInput = serde_json::from_str(&network_text).unwrap();
-    let data = OpfData::from_json(&opf_text).unwrap();
-    DcOpfNetwork::from_pgm(input, &data, 50.0).unwrap()
+    (
+        serde_json::from_str(&network_text).unwrap(),
+        OpfData::from_json(&opf_text).unwrap(),
+    )
+}
+
+/// Every case is built with the susceptance OPF defaults to; see
+/// `the_textbook_susceptance_is_measurably_further_from_the_baseline` for why
+/// that is `IgnoreG` and not the `1/x` the `dc` command uses.
+fn load_case(name: &str) -> DcOpfNetwork {
+    let (input, data) = load_documents(name);
+    DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG).unwrap()
 }
 
 /// Checks the returned point satisfies the KKT conditions of the program it
@@ -253,38 +263,33 @@ fn every_pglib_case_solves_to_a_certified_optimum() {
 ///
 /// | Case | Gap | Binding |
 /// |---|---|---|
-/// | `case3_lmbd` | −0.037% | 1 |
+/// | `case3_lmbd` | −0.0001% | 1 |
 /// | `case5_pjm` | −0.0006% | 1 |
 /// | `case14_ieee` | +0.0013% | 0 |
-/// | `case30_ieee` | **+0.42%** | 1 |
-/// | `case118_ieee` | +0.034% | 2 |
+/// | `case30_ieee` | −0.025% | 1 |
+/// | `case118_ieee` | −0.013% | 2 |
 ///
-/// Four of five agree to better than 0.04%. `case30_ieee` is ten times worse,
-/// and **that is an open question rather than a resolved one.** What has been
-/// ruled out:
+/// All five agree to better than 0.03%, which for an independently written
+/// formulation compared against published figures rounded to five significant
+/// digits is about as close as the comparison can resolve.
 ///
-/// - *Not the network.* Every branch susceptance was compared against
-///   MATPOWER's own `makeBdc` (`b = 1/x/tap`), matched by endpoints rather
-///   than index — 41 of 41 identical to 1e-9 relative, tap handling included.
-/// - *Not missing limits.* Removing branch limits moves every case far in the
-///   other direction (−24% on `case30`), so PowerModels enforces them too and
-///   so do we.
-/// - *Not phase shifters.* None of these cases has one, so the converter's
-///   documented 60°-rounding of shifts cannot be involved.
-/// - *Not our solver.* `assert_kkt` certifies the returned point is optimal
-///   **for the program we posed**, which is what separates "our model differs"
-///   from "our answer is wrong".
+/// Getting there took one real modelling correction, kept here because the
+/// symptom was so easy to misread. `case30_ieee` originally sat +0.42% high
+/// while the others were inside 0.04%, and the natural reading — a bad limit,
+/// a missing constraint, a converter bug — was wrong in every case. Ruled out
+/// by direct comparison against the `.m` file: all 41 susceptances, all 41
+/// branch limits, every per-bus load, the generator boxes, and (via
+/// [`assert_kkt`]) our own optimality. The cause was the *susceptance
+/// formula*: branch 1→2 has `r = 0.0192, x = 0.0575`, resistive enough that
+/// `b = 1/x` overstates it by 10%, and that branch is congested at the
+/// optimum, so the error landed straight on a binding constraint. Switching to
+/// `b = x/(r² + x²)` — what PowerModels computes, and what produced these
+/// published numbers — fixed `case30` *and* improved all four others.
 ///
-/// What remains is a difference in the constraint set between this formulation
-/// and PowerModels'. The most likely candidate not yet examined is the
-/// branch angle-difference limits (`angmin`/`angmax`), which PowerModels
-/// enforces and this formulation does not — though that would make us *less*
-/// constrained, and our objective is *higher*, so it does not obviously fit
-/// either.
-///
-/// The bound below is set to catch a real regression while tolerating the
-/// known gap. Tightening it is the right move once the difference is
-/// explained.
+/// The lesson worth keeping: a discrepancy isolated to one case is not
+/// evidence that the fault is isolated to one case. The formula was wrong
+/// everywhere; only `case30` was congested on a branch resistive enough to
+/// show it.
 #[test]
 fn objectives_match_the_published_dc_baseline() {
     for &(name, published) in PUBLISHED_DC {
@@ -296,33 +301,49 @@ fn objectives_match_the_published_dc_baseline() {
         let result = opf.interpret(&solution);
         let relative = (result.objective - published).abs() / published.abs();
         assert!(
-            relative < 5e-3,
-            "{name}: objective {:.4e} vs published {published:.4e} ({:.3}% apart)",
+            relative < 5e-4,
+            "{name}: objective {:.4e} vs published {published:.4e} ({:.4}% apart)",
             result.objective,
             relative * 100.0
         );
     }
 }
 
-/// The four cases that agree closely must keep agreeing *closely* — a bound
-/// loose enough for `case30_ieee` would let a real regression through on the
-/// others unnoticed.
+/// The susceptance choice is load-bearing, so it is pinned rather than left as
+/// a default someone could flip while the suite stayed green.
+///
+/// `b = 1/x` is not *wrong* — it is the textbook DC approximation and what the
+/// `dc` power-flow command computes, for the good reason that MATPOWER,
+/// pandapower and lightsim2grid all use it. It is simply not the model these
+/// published objectives came from. This test asserts the difference is real
+/// and lands where the analysis said it does: concentrated on `case30_ieee`,
+/// small elsewhere.
 #[test]
-fn the_well_matched_cases_stay_well_matched() {
-    for &(name, published) in PUBLISHED_DC {
-        if name == "pglib_opf_case30_ieee" {
-            continue;
-        }
-        let network = load_case(name);
+fn the_textbook_susceptance_is_measurably_further_from_the_baseline() {
+    let gap = |name: &str, approximation| {
+        let (input, data) = load_documents(name);
+        let network = DcOpfNetwork::from_pgm(input, &data, 50.0, approximation).unwrap();
         let opf = DcOpf::build(network, DcOpfOptions::default()).unwrap();
-        let solution = solver().solve(opf.problem()).unwrap();
-        let result = opf.interpret(&solution);
-        let relative = (result.objective - published).abs() / published.abs();
+        let published = PUBLISHED_DC.iter().find(|(n, _)| *n == name).unwrap().1;
+        let objective = opf.interpret(&solver().solve(opf.problem()).unwrap()).objective;
+        (objective - published) / published
+    };
+
+    let case30 = gap("pglib_opf_case30_ieee", DcApproximation::IgnoreR);
+    assert!(
+        (case30 - 0.00423).abs() < 5e-4,
+        "case30 with b = 1/x should sit ~+0.42% above the baseline, got {:.4}%",
+        case30 * 100.0
+    );
+
+    // And the correction is a strict improvement, not a trade — no case is
+    // made worse by it.
+    for &(name, _) in PUBLISHED_DC {
+        let textbook = gap(name, DcApproximation::IgnoreR).abs();
+        let series = gap(name, DcApproximation::IgnoreG).abs();
         assert!(
-            relative < 1e-3,
-            "{name}: {:.4e} vs published {published:.4e} ({:.4}% apart)",
-            result.objective,
-            relative * 100.0
+            series <= textbook + 1e-9,
+            "{name}: b = x/(r²+x²) is {series:.2e} off, worse than b = 1/x at {textbook:.2e}"
         );
     }
 }

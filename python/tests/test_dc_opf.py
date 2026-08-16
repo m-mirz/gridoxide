@@ -64,10 +64,26 @@ def test_generation_meets_demand_exactly(congested):
 
 @pytest.mark.parametrize("name,published", sorted(PUBLISHED.items()))
 def test_objectives_track_the_published_dc_baseline(name, published):
-    """case30_ieee sits 0.42% off for a reason recorded in
-    `tests/opf_dc_test.rs`; the rest agree far more closely."""
+    """All five agree to better than 0.03%; the Rust suite pins the gaps
+    case by case."""
     result = gridoxide.dc_opf(case(name))
-    assert result.objective == pytest.approx(published, rel=5e-3)
+    assert result.objective == pytest.approx(published, rel=5e-4)
+
+
+def test_the_susceptance_choice_is_exposed_and_changes_the_answer():
+    """`dc_approximation` defaults to the series susceptance PowerModels uses.
+    The textbook `1/x` is reachable, and on case30 it is measurably worse —
+    see `DcOpfOptions` for why."""
+    name = "pglib_opf_case30_ieee"
+    published = PUBLISHED[name]
+    default = gridoxide.dc_opf(case(name)).objective
+    textbook = gridoxide.dc_opf(case(name), dc_approximation="ignore_r").objective
+
+    assert abs(default - published) < abs(textbook - published)
+    assert textbook == pytest.approx(published * 1.00423, rel=5e-4)
+
+    with pytest.raises(ValueError, match="dc_approximation"):
+        gridoxide.dc_opf(case(name), dc_approximation="nonsense")
 
 
 def test_prices_spread_only_where_something_binds(congested):

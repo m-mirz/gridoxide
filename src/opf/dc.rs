@@ -112,10 +112,18 @@ impl DcOpfNetwork {
     ///   it. The physical end of a source branch is the reference bus.
     /// - **Branch limits are keyed by PGM component id, not by flat index.**
     ///   `PgmNetwork::branch_idx` is the translation.
+    ///
+    /// `approximation` picks how branch susceptance is formed, and it is not a
+    /// cosmetic choice — see [`DcOpfOptions`] for the measured effect on the
+    /// published baseline. [`DcApproximation::IgnoreG`] is what OPF should
+    /// normally use.
+    ///
+    /// [`DcApproximation::IgnoreG`]: crate::linear::DcApproximation::IgnoreG
     pub fn from_pgm(
         input: crate::pgm::PgmInput,
         opf: &OpfData,
         freq_hz: f64,
+        approximation: crate::linear::DcApproximation,
     ) -> Result<Self, OpfError> {
         let base_mva = opf.base_mva;
         let s_base_va = base_mva * 1e6;
@@ -133,7 +141,7 @@ impl DcOpfNetwork {
         let branches: Vec<DcBranch> = crate::linear::btheta::dc_branches(
             &net.lines,
             &net.transformers,
-            crate::linear::DcOptions::default(),
+            crate::linear::DcOptions { approximation, ..crate::linear::DcOptions::default() },
         )
         .into_iter()
         // A branch touching a virtual bus is a synthesized source connection.
@@ -194,6 +202,40 @@ impl DcOpfNetwork {
 }
 
 /// Options for a DC-OPF.
+///
+/// # Which susceptance the branches get
+///
+/// Not held here — it is fixed when the network is built, by the
+/// `approximation` argument to [`DcOpfNetwork::from_pgm`] — but this is where
+/// a caller will look for it, so the reasoning is recorded here.
+///
+/// DC has two defensible susceptances, and OPF is far more sensitive to the
+/// choice than DC power flow is, because it moves the *constraint set* and not
+/// just the reported flows. Against pglib-opf's published DC objectives:
+///
+/// | case | `IgnoreR` (`b = 1/x`) | `IgnoreG` (`b = x/(r²+x²)`) |
+/// |---|---|---|
+/// | `case3_lmbd`   | −0.037% | −0.0001% |
+/// | `case5_pjm`    | −0.001% | −0.001% |
+/// | `case14_ieee`  | +0.001% | +0.001% |
+/// | `case30_ieee`  | **+0.423%** | −0.025% |
+/// | `case118_ieee` | +0.034% | −0.013% |
+///
+/// `case30_ieee` is the case that separates them, and it is worth
+/// understanding rather than tuning around: its branch 1→2 has
+/// `r = 0.0192, x = 0.0575`, an r/x ratio high enough that `1/x` overstates
+/// the susceptance by 10%. That branch is congested at the optimum, so the
+/// overstatement lands directly on a binding constraint and lifts the cost.
+///
+/// So [`IgnoreG`] is the right default *for OPF*, and it is the same
+/// principle that makes [`IgnoreR`] the right default for the `dc` power flow
+/// command: each defaults to what the reference implementations in its own
+/// domain compute. PowerModels — which produced these published numbers —
+/// builds its DC model from the full series admittance; MATPOWER's `makeBdc`,
+/// pandapower and lightsim2grid all use `1/x` for power flow.
+///
+/// [`IgnoreG`]: crate::linear::DcApproximation::IgnoreG
+/// [`IgnoreR`]: crate::linear::DcApproximation::IgnoreR
 #[derive(Clone, Copy, Debug)]
 pub struct DcOpfOptions {
     /// Price of shedding load, \\$/MWh. Deliberately far above any plausible
