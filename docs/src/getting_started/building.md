@@ -17,7 +17,7 @@ cargo build --release
 
 A default build needs no C compiler, no system libraries, and no environment variables. The `opf`
 feature ([optimal power flow](../opf/index.md)) keeps that property — it is pure Rust and adds no
-dependencies. Everything else — the `klu`, `pardiso`, `opf-highs`, `cgmes`, and `python` features —
+dependencies. Everything else — the `klu`, `pardiso`, `opf-highs`, `opf-ipopt`, `cgmes`, and `python` features —
 is opt-in and needs something installed; each is described on the page that covers it
 ([backends](../solvers/backends.md), [CGMES input](../cgmes/index.md),
 [Python bindings](./python.md)).

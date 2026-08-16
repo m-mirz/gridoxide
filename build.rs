@@ -5,6 +5,115 @@ fn main() {
     pardiso::build();
     #[cfg(feature = "opf-highs")]
     highs::build();
+    #[cfg(feature = "opf-ipopt")]
+    ipopt::build();
+}
+
+/// Links a system IPOPT install and generates its FFI bindings, only when the
+/// `opf-ipopt` feature is enabled — see `src/opf/ipopt.rs`.
+///
+/// The third instance of the same shape as [`pardiso`] and [`highs`]: nothing
+/// vendored, nothing compiled from source, bindings generated against the
+/// install's own header. IPOPT is EPL-2.0, and this arrangement is what keeps
+/// that off `Cargo.toml`'s `license` field — the crate redistributes no
+/// IPOPT-derived code, it only links a library the user installed. The same
+/// argument the `pardiso` feature makes for proprietary oneMKL.
+#[cfg(feature = "opf-ipopt")]
+mod ipopt {
+    use std::env;
+    use std::path::PathBuf;
+
+    pub fn build() {
+        let root = PathBuf::from(env::var("IPOPT_ROOT").unwrap_or_else(|_| "/usr".to_string()));
+
+        // Unlike HiGHS — whose Ubuntu `.pc` has a doubled prefix in every path
+        // and is therefore unusable — IPOPT's is correct here. It is still not
+        // used, for consistency and one fewer build dependency: `pkg-config`
+        // is not installed on every machine that can build this crate, and
+        // probing two directories is not the part of this file worth
+        // outsourcing. The paths below match what `ipopt.pc` reports.
+        let include_dir = root.join("include/coin-or");
+        let header = include_dir.join("IpStdCInterface.h");
+        if !header.is_file() {
+            panic!(
+                "couldn't find {} — the `opf-ipopt` feature needs a local IPOPT \
+                 *with its development files* (on Debian/Ubuntu: `apt install \
+                 coinor-libipopt-dev`). Set IPOPT_ROOT if it is installed \
+                 somewhere other than {}.",
+                header.display(),
+                root.display()
+            );
+        }
+
+        let lib_dir = [
+            root.join("lib").join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
+                |_| "x86_64-linux-gnu".to_string(),
+                |arch| format!("{arch}-linux-gnu"),
+            )),
+            root.join("lib"),
+            root.join("lib64"),
+        ]
+        .into_iter()
+        .find(|p| p.join("libipopt.so").is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "found IPOPT headers under {} but no `libipopt.so` beside them — \
+                 the unversioned symlink comes from the development package",
+                include_dir.display()
+            )
+        });
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=ipopt");
+        // IPOPT is C++ internally, as HiGHS is.
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+
+        generate_bindings(&include_dir, &header);
+
+        println!("cargo:rerun-if-env-changed=IPOPT_ROOT");
+        println!("cargo:rerun-if-changed={}", header.display());
+    }
+
+    fn generate_bindings(include_dir: &std::path::Path, header: &std::path::Path) {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let mut builder = bindgen::Builder::default()
+            .header(header.to_str().unwrap())
+            .clang_arg(format!("-I{}", include_dir.display()))
+            // `ipopt.pc` puts this in its own Cflags; the header's `bool`
+            // handling depends on it.
+            .clang_arg("-DHAVE_CSTDDEF")
+            .allowlist_function("(Create|Free|Add|Open|Close|Set|Get)?Ipopt.*")
+            .allowlist_type("Ipopt.*|Eval_.*|ip(index|number)|UserDataPtr|ApplicationReturnStatus")
+            .allowlist_var("IPOPT_.*");
+
+        // Same libclang-without-a-full-clang-toolchain fallback the other
+        // bindgen invocations need; kept per-module rather than shared, as
+        // they all are, so each feature's module stands alone.
+        if let Some(gcc_builtin_include) = find_gcc_builtin_include() {
+            builder = builder.clang_arg(format!("-I{}", gcc_builtin_include.display()));
+        }
+
+        // `ipindex` and `ipnumber` are typedefs whose width the install
+        // chooses (`int`/`int64_t`, `double`/`float`). Reading them from the
+        // installed header is the whole reason these bindings are generated:
+        // a hard-coded guess would compile and then misread every index array
+        // crossed.
+        let bindings = builder.generate().expect("failed to generate IPOPT FFI bindings");
+
+        bindings
+            .write_to_file(out_dir.join("ipopt_bindings.rs"))
+            .expect("failed to write IPOPT FFI bindings");
+    }
+
+    fn find_gcc_builtin_include() -> Option<PathBuf> {
+        let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        path.is_dir().then_some(path)
+    }
 }
 
 /// Links a system HiGHS install and generates its FFI bindings, only when the
