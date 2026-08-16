@@ -119,8 +119,14 @@ except ImportError as e:  # pragma: no cover
     ) from e
 
 BUS_I, BUS_TYPE, PD, QD, GS, BS, _AREA, VM, VA, _BASE_KV, _ZONE, _VMAX, _VMIN = range(13)
-GEN_BUS, PG, QG, QMAX, QMIN, VG, _MBASE, GEN_STATUS = range(8)
-F_BUS, T_BUS, BR_R, BR_X, BR_B, _RATE_A, _RATE_B, _RATE_C, RATIO, ANGLE, BR_STATUS = range(11)
+GEN_BUS, PG, QG, QMAX, QMIN, VG, _MBASE, GEN_STATUS, PMAX, PMIN = range(10)
+F_BUS, T_BUS, BR_R, BR_X, BR_B, RATE_A, _RATE_B, _RATE_C, RATIO, ANGLE, BR_STATUS = range(11)
+
+# `mpc.gencost` columns. MODEL is 1 for piecewise linear and 2 for polynomial;
+# NCOST counts coefficients for a polynomial and breakpoints for a piecewise
+# curve, and the data follows from COST onward.
+COST_MODEL, _COST_STARTUP, _COST_SHUTDOWN, COST_NCOST, COST_DATA = 0, 1, 2, 3, 4
+COST_MODEL_PIECEWISE, COST_MODEL_POLYNOMIAL = 1, 2
 
 PQ, PV, REF, ISOLATED = 1, 2, 3, 4
 
@@ -145,7 +151,7 @@ def parse_matpower_m(m_path: Path) -> dict:
     result: dict = {"version": "2"}
     base_mva_match = re.search(r"mpc\.baseMVA\s*=\s*([\d.eE+-]+)\s*;", text)
     result["baseMVA"] = float(base_mva_match.group(1)) if base_mva_match else 100.0
-    for name in ("bus", "gen", "branch"):
+    for name in ("bus", "gen", "branch", "gencost"):
         block_match = re.search(rf"mpc\.{name}\s*=\s*\[(.*?)\];", text, re.DOTALL)
         if not block_match:
             result[name] = np.zeros((0, 0))
@@ -156,6 +162,14 @@ def parse_matpower_m(m_path: Path) -> dict:
             if not line:
                 continue
             rows.append([float(x) for x in line.split()])
+        # `gencost` rows need not all be the same length: a piecewise-linear
+        # curve carries two numbers per breakpoint, and nothing requires every
+        # generator to have the same number of breakpoints. Pad with NaN so
+        # this stays a rectangular float array (`np.array` on ragged input
+        # raises), and read only as far as each row's own NCOST says.
+        width = max((len(r) for r in rows), default=0)
+        for r in rows:
+            r.extend([float("nan")] * (width - len(r)))
         result[name] = np.array(rows)
     return result
 
@@ -169,6 +183,116 @@ def load_mpc(mat_path: Path) -> dict:
 
     data = sio.loadmat(mat_path, simplify_cells=True)
     return data["mpc"] if "mpc" in data else data
+
+
+def _cost_curve(row, n_cost: int) -> dict | None:
+    """Converts one `mpc.gencost` row into the companion document's form.
+
+    Two things differ from MATPOWER's own encoding, both deliberately:
+
+    - **Polynomial coefficients come back ascending**, so `coefficients[k]` is
+      the coefficient of `p**k`. MATPOWER stores them highest-degree first,
+      which is a legacy ordering that nothing else about the format explains
+      and that is easy to reverse by accident. Self-describing indexing is
+      worth the one-line reversal here.
+    - **A model code becomes a name.** `1`/`2` carry no meaning at the point of
+      use; `"piecewise_linear"`/`"polynomial"` do.
+
+    Returns `None` for a model this converter does not recognise, so an
+    unfamiliar case degrades to "no cost curve" rather than a wrong one.
+    """
+    model = int(row[COST_MODEL])
+    if model == COST_MODEL_POLYNOMIAL:
+        # NCOST is the coefficient *count*, highest degree first.
+        highest_first = [float(v) for v in row[COST_DATA : COST_DATA + n_cost]]
+        return {"model": "polynomial", "coefficients": list(reversed(highest_first))}
+    if model == COST_MODEL_PIECEWISE:
+        # NCOST is the breakpoint count, each contributing an (x, y) pair.
+        flat = [float(v) for v in row[COST_DATA : COST_DATA + 2 * n_cost]]
+        return {
+            "model": "piecewise_linear",
+            "points": [[flat[i], flat[i + 1]] for i in range(0, len(flat), 2)],
+        }
+    return None
+
+
+def build_opf_data(mpc: dict, branch_ids: dict[int, int], load_ids: dict[int, int]) -> dict:
+    """Builds the companion OPF document: the cost and limit data the PGM
+    document has nowhere to put.
+
+    **Generators are listed independently of the PGM document, not keyed into
+    it.** `convert` aggregates generators per bus — several MATPOWER
+    generators at one bus become a single `sym_gen`, and the reference bus's
+    generator becomes a `source` with no generator record at all. That is right
+    for a power flow, where only the bus's net injection matters, and wrong for
+    an OPF, which dispatches each unit against its own cost curve and its own
+    limits. So each generator here carries its MATPOWER row `index` and the
+    `node` it sits on, and the OPF builds its own dispatchable set.
+
+    Branch limits *are* keyed by PGM id, because branches are one-to-one with
+    PGM components; `branch_ids` maps MATPOWER row to the id `convert`
+    assigned. Loads likewise.
+
+    **Units are MATPOWER's own** — MW, MVAr, MVA, and dollars per MWh — not the
+    PGM document's watts. Cost curves are quoted per MW by every source that
+    publishes them, so converting the power without converting the curve would
+    be a silent factor of `1e6` (or `1e12` on the quadratic term). Keeping the
+    original units also means a value here can be read straight against the
+    `.m` file it came from. The single conversion happens on the Rust side,
+    where the system base is known.
+    """
+    gen = np.atleast_2d(mpc["gen"])
+    gencost = np.atleast_2d(mpc.get("gencost", np.zeros((0, 0))))
+    branch = np.atleast_2d(mpc["branch"])
+
+    generators = []
+    for g in range(len(gen)):
+        if gen[g, GEN_STATUS] <= 0:
+            continue
+        entry = {
+            "index": g,
+            "node": int(gen[g, GEN_BUS]),
+            "p_min": float(gen[g, PMIN]),
+            "p_max": float(gen[g, PMAX]),
+        }
+        # MATPOWER writes literal +-Inf for an absent reactive limit on some
+        # real cases; omit the key rather than emit a non-JSON `Infinity`
+        # token, matching how `convert` already handles the same situation for
+        # `voltage_regulator`.
+        for key, column in (("q_min", QMIN), ("q_max", QMAX)):
+            value = float(gen[g, column])
+            if math.isfinite(value):
+                entry[key] = value
+
+        # `gencost` may carry 2*ngen rows when reactive-power costs are also
+        # given; the active-power curves are the first ngen of them.
+        if g < len(gencost):
+            curve = _cost_curve(gencost[g], int(gencost[g, COST_NCOST]))
+            if curve is not None:
+                entry["cost"] = curve
+        generators.append(entry)
+
+    branch_limits = []
+    for row, pgm_id in sorted(branch_ids.items()):
+        rate = float(branch[row, RATE_A])
+        # MATPOWER's own convention: a rate of zero means *unlimited*, not a
+        # binding zero. Recorded explicitly rather than dropped, so the Rust
+        # side does not have to guess why a branch is missing.
+        branch_limits.append({"id": pgm_id, "rate_a": rate, "unlimited": rate == 0.0})
+
+    loads = [
+        {"id": pgm_id, "node": node_id}
+        for node_id, pgm_id in sorted(load_ids.items())
+    ]
+
+    return {
+        "version": "1.0",
+        "type": "opf_input",
+        "base_mva": float(mpc["baseMVA"]),
+        "generator": generators,
+        "branch_limit": branch_limits,
+        "load": loads,
+    }
 
 
 class _IdCounter:
@@ -186,7 +310,7 @@ class _IdCounter:
         return self._next
 
 
-def convert(mat_path: Path, output_path: Path) -> None:
+def convert(mat_path: Path, output_path: Path, opf_path: Path | None = None) -> None:
     mpc = load_mpc(mat_path)
     next_id = _IdCounter()
     base_mva = float(mpc["baseMVA"])
@@ -203,6 +327,10 @@ def convert(mat_path: Path, output_path: Path) -> None:
     z_base = (U_RATED_UNIFORM ** 2) / s_base_va
 
     sym_loads = []
+    # MATPOWER row / node -> the PGM id `convert` assigns, so the companion
+    # OPF document can key its limits into the same components.
+    load_ids: dict[int, int] = {}
+    branch_ids: dict[int, int] = {}
     shunts = []
     for row in range(len(bus)):
         if bus[row, BUS_TYPE] == ISOLATED:
@@ -210,7 +338,9 @@ def convert(mat_path: Path, output_path: Path) -> None:
         node_id = int(bus_ids[row])
         pd, qd = bus[row, PD], bus[row, QD]
         if pd != 0.0 or qd != 0.0:
-            sym_loads.append({"id": next_id(), "node": node_id, "status": 1, "type": 0,
+            load_id = next_id()
+            load_ids[node_id] = load_id
+            sym_loads.append({"id": load_id, "node": node_id, "status": 1, "type": 0,
                                "p_specified": pd * 1e6, "q_specified": qd * 1e6})
         gs, bs = bus[row, GS], bus[row, BS]
         if gs != 0.0 or bs != 0.0:
@@ -318,7 +448,9 @@ def convert(mat_path: Path, output_path: Path) -> None:
             # "possibly singular matrix" error during PowerGridModel
             # construction. MATPOWER has no equivalent loss-angle concept,
             # so 0.0 (lossless shunt) is the only sensible value.
-            lines.append({"id": next_id(), "from_node": f_id, "to_node": t_id,
+            line_id = next_id()
+            branch_ids[row] = line_id
+            lines.append({"id": line_id, "from_node": f_id, "to_node": t_id,
                            "from_status": 1, "to_status": 1,
                            "r1": r_ohm, "x1": x_ohm, "c1": c1, "tan1": 0.0,
                            "r0": r_ohm, "x0": x_ohm, "c0": c1, "tan0": 0.0})
@@ -370,8 +502,10 @@ def convert(mat_path: Path, output_path: Path) -> None:
         else:
             tap_pos, tap_nom = 0, 1
             tap_size = U_RATED_UNIFORM * (1.0 - effective_ratio)
+        transformer_id = next_id()
+        branch_ids[row] = transformer_id
         transformers.append({
-            "id": next_id(), "from_node": f_id, "to_node": t_id,
+            "id": transformer_id, "from_node": f_id, "to_node": t_id,
             "from_status": 1, "to_status": 1,
             "u1": U_RATED_UNIFORM, "u2": U_RATED_UNIFORM,
             "sn": sn, "uk": uk, "pk": pk, "i0": 0.0, "p0": 0.0,
@@ -409,14 +543,23 @@ def convert(mat_path: Path, output_path: Path) -> None:
     }
     output_path.write_text(json.dumps(output))
 
+    # The companion OPF document, written whenever the case carries the data
+    # for one. A case with no `gencost` still gets a file: the generator
+    # limits and branch ratings are useful on their own, and a missing file
+    # would be indistinguishable from a conversion that silently skipped it.
+    opf_path = opf_path or output_path.with_suffix(".opf.json")
+    opf_path.write_text(json.dumps(build_opf_data(mpc, branch_ids, load_ids)))
+
 
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 2:
+    if len(argv) not in (2, 3):
         print(__doc__)
         raise SystemExit(1)
-    convert(Path(argv[0]), Path(argv[1]))
-    print(f"wrote {argv[1]}")
+    opf_path = Path(argv[2]) if len(argv) == 3 else None
+    convert(Path(argv[0]), Path(argv[1]), opf_path)
+    written = opf_path or Path(argv[1]).with_suffix(".opf.json")
+    print(f"wrote {argv[1]} and {written}")
 
 
 if __name__ == "__main__":

@@ -340,20 +340,29 @@ the answer is wrong, an analytic case tells you which part.
 **Published objective values.** MATPOWER and pglib-opf publish reference objectives per case, and
 they are independent of anything here.
 
-**One honest caveat about that third gate.** Published objectives are overwhelmingly **AC**-OPF
-numbers — pglib-opf's benchmark tables and MATPOWER's documented results are `runopf`, not
-`rundcopf`. There is no comparable published table for DC-OPF. So:
+**Correction to an earlier draft.** This section previously claimed that published objectives
+are "overwhelmingly AC-OPF numbers", that "there is no comparable published table for DC-OPF",
+and concluded that phase 3 would ship without an external number to point at. That was wrong,
+and checking pglib rather than recalling it settled it: **`BASELINE.md` publishes a DC column
+beside the AC one**, per case, produced by PowerModels.jl with IPOPT.
 
-- for **DC-OPF** (phase 3) the real gates are KKT plus the analytic cases, which between them
-  certify optimality rather than merely corroborate it;
-- **published objectives become the primary external cross-check at phase 5**, where the problem
-  is nonconvex and a KKT point is only *locally* optimal — precisely where an independent number
-  is worth most.
+| Case | DC ($/h) | AC ($/h) |
+|---|---|---|
+| `case3_lmbd` | 5.6959e+03 | 5.8126e+03 |
+| `case5_pjm` | 1.7480e+04 | 1.7552e+04 |
+| `case14_ieee` | 2.0515e+03 | 2.1781e+03 |
+| `case30_ieee` | 7.4728e+03 | 8.2085e+03 |
+| `case118_ieee` | 9.3101e+04 | 9.7214e+04 |
 
-That is a coherent split rather than a gap, but it does mean phase 3 ships without an external
-number to point at. If that turns out to be uncomfortable, pypower is installed and could
-generate DC-OPF reference solutions on the committed MATPOWER cases; that option is left open
-and deliberately not taken.
+So **phase 3 has an external published reference after all**, and all three gates apply to it
+rather than two. The pypower fallback the earlier draft held in reserve is unnecessary.
+
+Two caveats remain, and they are about interpretation rather than availability. PowerModels' DC
+formulation need not share every convention with this one — reference-bus handling and whether
+line limits apply to the DC approximation are both places implementations differ — so a small
+gap is a question to investigate, not an immediate failure. And the AC column is a *local*
+optimum, so at phase 6 a disagreement may mean a different local solution; that comparison has
+to report feasibility alongside the objective (§9 risk 2).
 
 ### 7.4 Two independent solvers — a fourth gate, from §5.2a
 
@@ -394,8 +403,12 @@ first.
 
 ## 9. Risks
 
-1. **DC-OPF has no published external reference.** Addressed in §7 — KKT is a proof for a convex
-   problem, not a proxy. Worth restating whenever the result is reported.
+1. **Conventions differ between DC-OPF formulations.** pglib does publish DC reference
+   objectives (§7), so the external gate exists — but PowerModels' DC model need not match this
+   one on reference-bus handling or on whether limits apply to the linearized flows. A gap of a
+   fraction of a percent is a convention question; a large one is a bug. KKT remains the check
+   that decides which, since for a convex problem it proves optimality rather than corroborating
+   it.
 2. **AC-OPF is nonconvex.** A KKT point is locally optimal; disagreeing with a published
    objective may mean a different local optimum rather than a bug. Any phase-5 comparison has to
    report the objective *and* whether the point is feasible, not just the gap.
