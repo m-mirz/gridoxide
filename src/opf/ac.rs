@@ -387,6 +387,14 @@ pub struct AcOpf {
     vm: usize,
     pg: usize,
     qg: usize,
+    /// Generator index → its epigraph column, for those that have one. No
+    /// block-start field beside it: unlike `theta`/`vm`/`pg`/`qg`, nothing
+    /// indexes this block positionally, because a generator without a
+    /// piecewise cost has no column in it at all.
+    cost_col: Vec<Option<usize>>,
+    /// `(epigraph column, generator column, slope, intercept)` per segment,
+    /// one constraint row each.
+    cost_rows: Vec<(usize, usize, f64, f64)>,
 }
 
 impl AcOpf {
@@ -434,17 +442,57 @@ impl AcOpf {
             })
             .collect();
 
+        // **Piecewise-linear costs enter through an epigraph**, exactly as in
+        // `dc`: `min f(p)` becomes `min z` subject to `z ≥ (segment i)(p)`.
+        //
+        // Here it buys something DC does not need. `CostCurve::evaluate` and
+        // `marginal` handle a piecewise curve correctly, so feeding it to the
+        // objective directly gives the right *values* — but the objective is
+        // then only C⁰, and a Newton method assumes C². The gradient jumps at
+        // every breakpoint, and an optimum very often sits exactly on one,
+        // since a breakpoint is where marginal cost changes. The epigraph
+        // makes the objective linear in `z` and pushes the kinks into
+        // constraints, which the solver handles exactly.
+        let mut cost_col = vec![None; g];
+        let mut cost_rows = Vec::new();
+        let mut n_cost = 0;
+        for (k, unit) in network.generators.iter().enumerate() {
+            if let Some(CostCurve::PiecewiseLinear { points }) = &unit.cost {
+                if !unit.cost.as_ref().is_some_and(|c| c.is_convex()) {
+                    return Err(OpfError::Backend(format!(
+                        "generator {} has a non-convex piecewise-linear cost; its epigraph \
+                         describes the convex envelope instead, which charges less than the \
+                         curve does",
+                        unit.index
+                    )));
+                }
+                let column = 2 * n + 2 * g + n_cost;
+                cost_col[k] = Some(column);
+                n_cost += 1;
+                for pair in points.windows(2) {
+                    let ((p0, c0), (p1, c1)) = (pair[0], pair[1]);
+                    if p1 == p0 {
+                        continue;
+                    }
+                    let slope = (c1 - c0) / (p1 - p0);
+                    cost_rows.push((column, 2 * n + k, slope, c0 - slope * p0));
+                }
+            }
+        }
+
         Ok(Self {
             options,
             ybus,
             params,
             limit_rows,
             template,
-            n_vars: 2 * n + 2 * g,
+            n_vars: 2 * n + 2 * g + n_cost,
             theta: 0,
             vm: n,
             pg: 2 * n,
             qg: 2 * n + g,
+            cost_col,
+            cost_rows,
             network,
         })
     }
@@ -574,7 +622,7 @@ impl NonlinearProblem for AcOpf {
     }
 
     fn n_constraints(&self) -> usize {
-        2 * self.network.n_buses + self.limit_rows.len()
+        2 * self.network.n_buses + self.limit_rows.len() + self.cost_rows.len()
     }
 
     fn var_bounds(&self) -> (Vec<f64>, Vec<f64>) {
@@ -598,6 +646,12 @@ impl NonlinearProblem for AcOpf {
             lower[self.qg + k] = unit.q_min;
             upper[self.qg + k] = unit.q_max;
         }
+        // Epigraph variables are free; the segment rows bound them from below
+        // and minimizing drives them down to the curve.
+        for column in self.cost_col.iter().flatten() {
+            lower[*column] = f64::NEG_INFINITY;
+            upper[*column] = f64::INFINITY;
+        }
         let _ = g;
         (lower, upper)
     }
@@ -610,6 +664,11 @@ impl NonlinearProblem for AcOpf {
             lower.push(f64::NEG_INFINITY);
             upper.push(limit.rate_squared);
         }
+        // `z − m·p ≥ k`, one row per segment.
+        for &(_, _, _, intercept) in &self.cost_rows {
+            lower.push(intercept);
+            upper.push(f64::INFINITY);
+        }
         (lower, upper)
     }
 
@@ -619,6 +678,12 @@ impl NonlinearProblem for AcOpf {
             .iter()
             .enumerate()
             .map(|(k, unit)| match &unit.cost {
+                // A piecewise-linear unit's cost is carried by its epigraph
+                // variable, not evaluated on the curve — that is what keeps
+                // the objective smooth.
+                Some(CostCurve::PiecewiseLinear { .. }) => {
+                    x[self.cost_col[k].expect("assigned in build")]
+                }
                 Some(curve) => curve.evaluate(x[self.pg + k]),
                 None => 0.0,
             })
@@ -628,8 +693,12 @@ impl NonlinearProblem for AcOpf {
     fn gradient(&self, x: &[f64]) -> Vec<f64> {
         let mut out = vec![0.0; self.n_vars];
         for (k, unit) in self.network.generators.iter().enumerate() {
-            if let Some(curve) = &unit.cost {
-                out[self.pg + k] = curve.marginal(x[self.pg + k]);
+            match &unit.cost {
+                Some(CostCurve::PiecewiseLinear { .. }) => {
+                    out[self.cost_col[k].expect("assigned in build")] = 1.0;
+                }
+                Some(curve) => out[self.pg + k] = curve.marginal(x[self.pg + k]),
+                None => {}
             }
         }
         out
@@ -640,7 +709,7 @@ impl NonlinearProblem for AcOpf {
         let buses = self.buses_at(x);
         let (p_inj, q_inj) = power_injections(&buses, &self.ybus);
 
-        let mut out = vec![0.0; 2 * n + self.limit_rows.len()];
+        let mut out = vec![0.0; 2 * n + self.limit_rows.len() + self.cost_rows.len()];
         for i in 0..n {
             out[i] = p_inj[i] + self.network.p_load[i];
             out[n + i] = q_inj[i] + self.network.q_load[i];
@@ -660,6 +729,10 @@ impl NonlinearProblem for AcOpf {
                 &vm,
             );
             out[2 * n + r] = d.p * d.p + d.q * d.q;
+        }
+        let base = 2 * n + self.limit_rows.len();
+        for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
+            out[base + r] = x[epigraph] - slope * x[column];
         }
         out
     }
@@ -688,6 +761,13 @@ impl NonlinearProblem for AcOpf {
                     2.0 * (d.p * d.dp[local] + d.q * d.dq[local]),
                 ));
             }
+        }
+        // The epigraph rows are linear, so their Jacobian is constant — and
+        // for the same reason they contribute nothing to the Hessian.
+        let base = 2 * n + self.limit_rows.len();
+        for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
+            out.push((base + r, epigraph, 1.0));
+            out.push((base + r, column, -slope));
         }
         out
     }
@@ -800,6 +880,13 @@ impl NonlinearProblem for AcOpf {
             // needs depends on the voltage profile being solved for, so the
             // box midpoint is as good a guess as any.
             x[self.qg + k] = midpoint(unit.q_min, unit.q_max);
+        }
+        // Seed each epigraph variable on its own curve, so the segment rows
+        // start satisfied rather than needing to be dragged into feasibility.
+        for (k, unit) in self.network.generators.iter().enumerate() {
+            if let (Some(column), Some(curve)) = (self.cost_col[k], unit.cost.as_ref()) {
+                x[column] = curve.evaluate(x[self.pg + k]);
+            }
         }
         x
     }

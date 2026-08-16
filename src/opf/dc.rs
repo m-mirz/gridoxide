@@ -266,6 +266,11 @@ struct Layout {
     generator: usize,
     shed: usize,
     n_shed: usize,
+    /// Generator index → its epigraph column, for those that have one. There
+    /// is no block-start field beside it: unlike the other blocks nothing
+    /// indexes this one positionally, since a generator without a piecewise
+    /// cost has no column here at all.
+    cost_col: Vec<Option<usize>>,
     balance_row: usize,
     limit_rows: Vec<(usize, usize)>,
 }
@@ -340,15 +345,37 @@ impl DcOpf {
         let n_gen = network.generators.len();
         let n_shed = if options.allow_shedding { network.loads.len() } else { 0 };
 
+        // **Piecewise-linear costs enter through an epigraph.** A convex
+        // piecewise-linear function is the upper envelope of its segments, so
+        // `min f(p)` is `min z` subject to `z ≥ (line of segment i)(p)` for
+        // every segment — turning a curve the objective cannot express into
+        // ordinary rows the objective can. That is exactly why §5.2 of
+        // `plans/OPF_PLAN.md` insisted on an LP-capable solver.
+        //
+        // Exactness needs convexity, which `is_convex` has already required
+        // above: on a non-convex curve the same rows describe the convex
+        // envelope instead, which is a *relaxation* — a lower cost than the
+        // curve actually charges. Silently returning that would be the same
+        // class of failure this block exists to fix.
+        let mut cost_col = vec![None; n_gen];
+        let mut n_cost = 0;
+        for (g, generator) in network.generators.iter().enumerate() {
+            if matches!(generator.cost, Some(CostCurve::PiecewiseLinear { .. })) {
+                cost_col[g] = Some(n_buses + n_gen + n_shed + n_cost);
+                n_cost += 1;
+            }
+        }
+
         let layout = Layout {
             theta: 0,
             generator: n_buses,
             shed: n_buses + n_gen,
             n_shed,
+            cost_col,
             balance_row: 0,
             limit_rows: Vec::new(),
         };
-        let n_vars = n_buses + n_gen + n_shed;
+        let n_vars = n_buses + n_gen + n_shed + n_cost;
         let mut lp = LinearProgram::new(n_vars);
 
         // ── Variables ────────────────────────────────────────────────────
@@ -366,19 +393,37 @@ impl DcOpf {
             lp.col_lower[col] = generator.p_min;
             lp.col_upper[col] = generator.p_max;
 
-            if let Some(CostCurve::Polynomial { coefficients }) = &generator.cost {
-                // The objective is `½ xᵀQx + cᵀx`, and the cost is
-                // `c₂p² + c₁p + c₀`, so the diagonal Hessian entry is **twice**
-                // the quadratic coefficient. Dropping that factor of two is
-                // silent — it still produces a plausible dispatch, just the
-                // wrong one.
-                if let Some(&c2) = coefficients.get(2) {
-                    if c2 != 0.0 {
-                        hessian.push((col, col, 2.0 * c2));
+            // Matched exhaustively rather than with `if let`. The `if let`
+            // this replaces skipped a piecewise-linear curve in silence,
+            // leaving the generator's objective coefficient at zero — so it
+            // looked *free* and the optimizer preferred it, producing a wrong
+            // dispatch with no error. An exhaustive match makes a future
+            // variant a compile error instead.
+            match &generator.cost {
+                Some(CostCurve::Polynomial { coefficients }) => {
+                    // The objective is `½ xᵀQx + cᵀx`, and the cost is
+                    // `c₂p² + c₁p + c₀`, so the diagonal Hessian entry is
+                    // **twice** the quadratic coefficient. Dropping that factor
+                    // of two is silent — it still produces a plausible
+                    // dispatch, just the wrong one.
+                    if let Some(&c2) = coefficients.get(2) {
+                        if c2 != 0.0 {
+                            hessian.push((col, col, 2.0 * c2));
+                        }
                     }
+                    lp.col_cost[col] = coefficients.get(1).copied().unwrap_or(0.0);
+                    lp.offset += coefficients.first().copied().unwrap_or(0.0);
                 }
-                lp.col_cost[col] = coefficients.get(1).copied().unwrap_or(0.0);
-                lp.offset += coefficients.first().copied().unwrap_or(0.0);
+                Some(CostCurve::PiecewiseLinear { .. }) => {
+                    // The cost is carried by the epigraph variable; the rows
+                    // tying it to `p` are added below, once the row block is
+                    // being built.
+                    let epigraph = layout.cost_col[g].expect("counted above");
+                    lp.col_cost[epigraph] = 1.0;
+                    lp.col_lower[epigraph] = f64::NEG_INFINITY;
+                    lp.col_upper[epigraph] = f64::INFINITY;
+                }
+                None => {}
             }
         }
 
@@ -459,6 +504,47 @@ impl DcOpf {
                 rate + offset,
             );
             limit_rows.push((row, branch.index));
+        }
+
+        // ── Epigraph rows for piecewise-linear costs ─────────────────────
+        // One row per segment: `z ≥ m·p + k`, written `z − m·p ≥ k` so the
+        // variables stay on the left. With `z` minimized, the binding row at
+        // any `p` is the segment lying highest there — which for a convex
+        // curve is the segment `p` actually sits on, so `z` equals the true
+        // cost rather than merely bounding it.
+        for (g, generator) in network.generators.iter().enumerate() {
+            let Some(CostCurve::PiecewiseLinear { points }) = &generator.cost else {
+                continue;
+            };
+            let epigraph = layout.cost_col[g].expect("assigned above");
+            let column = layout.generator + g;
+
+            if points.len() < 2 {
+                // A single point fixes the cost but says nothing about how it
+                // varies, so there is no segment to write. Treated as a
+                // constant rather than as free, which is the reading that
+                // cannot mislead.
+                lp.col_cost[epigraph] = 0.0;
+                lp.offset += points.first().map(|p| p.1).unwrap_or(0.0);
+                continue;
+            }
+
+            for pair in points.windows(2) {
+                let ((p0, c0), (p1, c1)) = (pair[0], pair[1]);
+                if p1 == p0 {
+                    // A vertical segment carries no slope; skipping it is
+                    // right, since the neighbouring segments already bound `z`
+                    // there.
+                    continue;
+                }
+                let slope = (c1 - c0) / (p1 - p0);
+                let intercept = c0 - slope * p0;
+                lp.add_row(
+                    &[(epigraph, 1.0), (column, -slope)],
+                    intercept,
+                    f64::INFINITY,
+                );
+            }
         }
 
         let layout = Layout { limit_rows, ..layout };

@@ -47,6 +47,34 @@ contribution of any fixed phase shift \\(\alpha\\).
 With quadratic costs this is a convex QP; with piecewise-linear costs it is an LP. Both go to
 the same solver through the same interface.
 
+### Piecewise-linear costs enter through an epigraph
+
+MATPOWER's cost model 1 gives a curve the objective cannot express directly. A convex
+piecewise-linear function is the upper envelope of its segments, so \\(\min f(p)\\) becomes
+\\(\min z\\) subject to \\(z \ge m_i p + k_i\\) for every segment — ordinary rows, which is
+exactly why an LP-capable solver was a requirement rather than a preference.
+
+Exactness needs convexity, which is checked and enforced: the epigraph of a **non-convex** curve
+is its convex envelope, which charges less than the curve does, so such a curve is refused
+rather than silently relaxed.
+
+AC-OPF uses the same reformulation for a different reason. `CostCurve::evaluate` handles a
+piecewise curve correctly, so feeding it to the objective gives the right *values* — but the
+objective is then only \\(C^0\\), and a Newton method assumes \\(C^2\\). The gradient jumps at
+every breakpoint, and an optimum very often sits exactly on one, since a breakpoint is where
+marginal cost changes. The epigraph makes the objective linear and moves the kinks into
+constraints, which the solver handles exactly.
+
+> This was a real bug, not a hypothetical. Both formulations read costs with
+> `if let Some(CostCurve::Polynomial { .. })`, so a piecewise curve fell through in silence and
+> left the generator's objective coefficient at zero — it looked **free**, and the optimizer
+> dispatched it first. Wrong dispatch, wrong cost, no error, reachable straight from the
+> documented converter. What hid it was that every committed fixture used model 2; the plan had
+> already flagged that as the reason the feature could not be claimed. `case5_pjm_pwl.m` is now
+> committed as an *exactly equivalent* rewrite of `case5_pjm` — every generator there has
+> \\(c_2 = 0\\), so three collinear points reproduce the cost precisely while still producing two
+> segments — which makes the test a question with a known answer.
+
 ### The balance row is written generation-minus-outflow
 
 The balance constraint could equally be written with load on the left. Putting it on the

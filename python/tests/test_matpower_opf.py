@@ -51,13 +51,19 @@ def test_committed_documents_match_a_fresh_conversion(case):
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_cost_coefficients_are_reversed_into_ascending_order(case):
-    """MATPOWER stores polynomial coefficients highest-degree first; the
-    document stores them ascending, so `coefficients[k]` multiplies `p**k`.
+def test_cost_curves_are_transcribed_faithfully(case):
+    """Both MATPOWER cost models, checked against the raw `.m` rather than
+    against the converter's own output — so a transcription that got dropped
+    fails here rather than passing trivially.
 
-    Checked against the raw `.m` rather than against the converter's own
-    output, so a reversal that got dropped would fail here rather than pass
-    trivially.
+    Model 2 (polynomial) stores coefficients highest-degree first and the
+    document stores them ascending, so `coefficients[k]` multiplies `p**k`.
+    Model 1 (piecewise-linear) stores a flat run of alternating `x, y`, which
+    becomes a list of pairs.
+
+    Both are covered rather than only the one every case happened to use:
+    piecewise costs went unexercised for exactly that reason, and both OPF
+    formulations silently ignored them as a result.
     """
     mpc = load_mpc(FIXTURES / f"{case}.m")
     gencost = np.atleast_2d(mpc["gencost"])
@@ -72,15 +78,28 @@ def test_cost_coefficients_are_reversed_into_ascending_order(case):
             continue
         model = int(gencost[row, 0])
         n_cost = int(gencost[row, 3])
-        if model != COST_MODEL_POLYNOMIAL:
-            continue
-        raw = [float(v) for v in gencost[row, 4 : 4 + n_cost]]
-        assert entry["cost"]["coefficients"] == list(reversed(raw)), (
-            f"{case} generator {row}: raw {raw} should reverse to "
-            f"{entry['cost']['coefficients']}"
-        )
+        raw = [float(v) for v in gencost[row, 4 : 4 + n_cost * (1 if model == COST_MODEL_POLYNOMIAL else 2)]]
+
+        if model == COST_MODEL_POLYNOMIAL:
+            assert entry["cost"]["model"] == "polynomial"
+            assert entry["cost"]["coefficients"] == list(reversed(raw)), (
+                f"{case} generator {row}: raw {raw} should reverse to "
+                f"{entry['cost']['coefficients']}"
+            )
+        else:
+            assert entry["cost"]["model"] == "piecewise_linear"
+            pairs = [[raw[i], raw[i + 1]] for i in range(0, len(raw), 2)]
+            assert entry["cost"]["points"] == pairs, (
+                f"{case} generator {row}: raw {raw} should pair up to "
+                f"{entry['cost']['points']}"
+            )
+            # The breakpoints must ascend, or "the segment p sits on" is not
+            # well defined and every downstream reading of the curve is
+            # ambiguous.
+            xs = [x for x, _ in pairs]
+            assert xs == sorted(xs), f"{case} generator {row}: breakpoints not ascending"
         checked += 1
-    assert checked > 0, f"{case}: no polynomial cost rows were actually compared"
+    assert checked > 0, f"{case}: no cost rows were actually compared"
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -137,9 +156,17 @@ def test_a_case_without_ratings_is_marked_unlimited_not_dropped():
 
 
 def test_piecewise_costs_are_read_as_point_pairs():
-    """No committed fixture uses MATPOWER's model 1, so this exercises it on a
-    synthetic case rather than leaving the path untested until real data hits
-    it."""
+    """The converter's model-1 path on a minimal synthetic case.
+
+    `case5_pjm_pwl.m` now covers it on a realistic network too, but this stays:
+    it pins the raw `x, y, x, y` unpacking against a curve small enough to read
+    at a glance, which is the part a realistic fixture makes harder to see.
+
+    Worth noting what this test did *not* catch. The converter was correct all
+    along — it was the two OPF formulations that ignored the curve it produced,
+    leaving the generator free. Testing a converter against its own output
+    format says nothing about whether anything downstream reads it.
+    """
     case = """
 function mpc = tiny
 mpc.version = '2';
