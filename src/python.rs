@@ -1769,6 +1769,152 @@ impl AcSensitivityModel {
     }
 }
 
+/// A branch at its limit, and what relieving it is worth.
+#[cfg(feature = "opf-highs")]
+#[pyclass]
+struct DcOpfBinding {
+    /// Flat branch index — lines first, then transformers.
+    #[pyo3(get)]
+    branch: usize,
+    /// Flow, MW. Signed, so it says which of the two limits is active.
+    #[pyo3(get)]
+    flow: f64,
+    /// The rating it reached, MW.
+    #[pyo3(get)]
+    rate: f64,
+    /// Shadow price, $/MWh — what one more MW of capacity here would save.
+    #[pyo3(get)]
+    price: f64,
+}
+
+/// The result of a DC optimal power flow.
+#[cfg(feature = "opf-highs")]
+#[pyclass]
+struct DcOpfResult {
+    /// Total cost, $/h.
+    #[pyo3(get)]
+    objective: f64,
+    /// Dispatch per generator, MW, in the OPF document's generator order.
+    #[pyo3(get)]
+    dispatch: Vec<f64>,
+    /// The `index` each dispatch entry belongs to, so results can be matched
+    /// back to the source case's generator table.
+    #[pyo3(get)]
+    generator_index: Vec<usize>,
+    /// Bus voltage angles, radians.
+    #[pyo3(get)]
+    angles: Vec<f64>,
+    /// Flow per branch, MW.
+    #[pyo3(get)]
+    flows: Vec<f64>,
+    /// **Locational marginal price** per bus, $/MWh — the cost of serving one
+    /// more MW there. Uniform when nothing is congested; the spread between
+    /// buses *is* the congestion.
+    #[pyo3(get)]
+    lmp: Vec<f64>,
+    /// Load shed, MW, per load in the OPF document. All zero on a case whose
+    /// demand can be served.
+    #[pyo3(get)]
+    shed: Vec<f64>,
+    #[pyo3(get)]
+    binding: Vec<Py<DcOpfBinding>>,
+}
+
+/// Runs a DC optimal power flow: least-cost dispatch subject to generator
+/// limits and branch ratings.
+///
+/// A plain function rather than a class, unlike `AcSensitivityModel` — each
+/// solve builds its own program, so there is nothing worth keeping between
+/// calls.
+///
+/// Costs and limits come from the companion OPF document, which defaults to
+/// `<path>` with its extension replaced by `.opf.json` — the pair
+/// `gridoxide-matpower` writes.
+///
+/// Raises if no optimal dispatch exists. With `allow_shedding` left on that is
+/// rare, since shedding keeps an over-committed case solvable and reports
+/// *where* demand could not be served; turning it off makes such a case
+/// infeasible instead, which is sometimes the answer wanted.
+#[cfg(feature = "opf-highs")]
+#[pyfunction]
+#[pyo3(signature = (path, data_path = None, shed_price = 10_000.0,
+                    allow_shedding = true, freq_hz = 50.0))]
+fn dc_opf(
+    py: Python<'_>,
+    path: &str,
+    data_path: Option<&str>,
+    shed_price: f64,
+    allow_shedding: bool,
+    freq_hz: f64,
+) -> PyResult<DcOpfResult> {
+    use crate::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+    use crate::opf::highs::HighsSolver;
+    use crate::opf::model::OpfData;
+    use crate::opf::{OptStatus, Solver};
+
+    let data_path = match data_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::path::PathBuf::from(path).with_extension("opf.json"),
+    };
+
+    let network_text = std::fs::read_to_string(path)
+        .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+    let data_text = std::fs::read_to_string(&data_path).map_err(|e| {
+        PyRuntimeError::new_err(format!(
+            "reading {}: {e} — pass data_path if the companion OPF document is elsewhere",
+            data_path.display()
+        ))
+    })?;
+
+    let input: PgmInput = serde_json::from_str(&network_text)
+        .map_err(|e| PyValueError::new_err(format!("parsing {path}: {e}")))?;
+    let data = OpfData::from_json(&data_text)
+        .map_err(|e| PyValueError::new_err(format!("parsing {}: {e}", data_path.display())))?;
+
+    let options = DcOpfOptions { shed_price, allow_shedding };
+    let network = DcOpfNetwork::from_pgm(input, &data, freq_hz)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let generator_index: Vec<usize> = network.generators.iter().map(|g| g.index).collect();
+
+    let opf = DcOpf::build(network, options)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let mut solver = HighsSolver::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let solution = solver
+        .solve(opf.problem())
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let result = opf.interpret(&solution);
+
+    if result.status != OptStatus::Optimal {
+        return Err(PyRuntimeError::new_err(format!(
+            "no optimal dispatch ({:?}); an infeasible case usually means demand cannot be \
+             served within the limits",
+            result.status
+        )));
+    }
+
+    let binding = result
+        .binding
+        .iter()
+        .map(|b| {
+            Py::new(
+                py,
+                DcOpfBinding { branch: b.branch, flow: b.flow, rate: b.rate, price: b.price },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    Ok(DcOpfResult {
+        objective: result.objective,
+        dispatch: result.dispatch,
+        generator_index,
+        angles: result.angles,
+        flows: result.flows,
+        lmp: result.lmp,
+        shed: result.shed,
+        binding,
+    })
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
@@ -1783,5 +1929,13 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AcSensitivityModel>()?;
     m.add_class::<SensitivityColumn>()?;
     m.add_class::<SensitivityRow>()?;
+    // Only present when a solver backend was built in — see the `opf-highs`
+    // feature. `hasattr(gridoxide, "dc_opf")` is the check a caller makes.
+    #[cfg(feature = "opf-highs")]
+    {
+        m.add_class::<DcOpfResult>()?;
+        m.add_class::<DcOpfBinding>()?;
+        m.add_function(wrap_pyfunction!(dc_opf, m)?)?;
+    }
     Ok(())
 }
