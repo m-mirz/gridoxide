@@ -34,3 +34,21 @@ jobs:
     # docs/src/solvers/backends.md).
     - name: Run tests
       run: cargo test --verbose
+    # `opf` *is* built and tested here, unlike the backends above, because it
+    # needs nothing installed: the interior-point QP solver in `src/opf/ipm.rs`
+    # is pure Rust on this crate's own sparse factorization. That was the point
+    # of writing it — before it existed the only backend was `opf-highs`, which
+    # links a system HiGHS no runner has, so the entire OPF surface (DC-OPF,
+    # the CLI subcommand, the Python binding) was invisible to CI.
+    #
+    # Still not built here: `opf-highs` itself, and with it
+    # `tests/opf_cross_test.rs`, which holds the two backends against each
+    # other. That gate runs where HiGHS is installed. Losing it in CI is the
+    # accepted cost of not making a system library a CI dependency — what CI
+    # does cover is the analytic battery in `tests/opf_ipm_test.rs` and the
+    # published pglib objectives in `tests/opf_dc_test.rs`, neither of which
+    # needs a second solver.
+    - name: Build and test the optimization layer
+      run: |
+        cargo build --verbose --features opf
+        cargo test --verbose --features opf

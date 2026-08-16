@@ -140,9 +140,10 @@ correct derivative, not a gap. And a line has no tap, so its `d_transformer_rati
 overloading anything*. A plain function rather than a class: each solve builds its own program,
 so there is nothing worth keeping between calls.
 
-**Only present when the extension was built with the `opf-highs` feature**, which needs a local
-HiGHS (`apt install libhighs-dev` on Debian/Ubuntu). Importing `gridoxide` never fails for want
-of a solver — `dc_opf` is simply absent, so `hasattr(gridoxide, "dc_opf")` is the check.
+**Only present when the extension was built with the `opf` feature.** That feature needs nothing
+installed — the solver is gridoxide's own interior-point method, pure Rust — so enabling it costs
+only build time. Importing `gridoxide` never fails for want of a solver; `dc_opf` is simply
+absent, so `hasattr(gridoxide, "dc_opf")` is the check.
 
 ```python
 import gridoxide
@@ -161,9 +162,13 @@ for b in result.binding:
 ```
 
 - `dc_opf(path, data_path=None, shed_price=10000.0, allow_shedding=True,
-  dc_approximation="ignore_g", freq_hz=50.0)` — costs and limits come from a companion OPF
+  dc_approximation="ignore_g", solver="ipm", freq_hz=50.0)` — costs and limits come from a companion OPF
   document, defaulting to `path` with its extension replaced by `.opf.json`, which is the pair
   `gridoxide-matpower` writes. Raises if no optimal dispatch exists.
+- `solver` is `"ipm"` (default), the built-in interior-point method, or `"highs"`, available only
+  when the extension was also built with `opf-highs` (which links a local HiGHS). The two are
+  cross-checked against each other, so this picks a dependency rather than an answer — see
+  [Optimal Power Flow](../opf/index.md#why-keep-both).
 - `dc_approximation` defaults to `"ignore_g"` (`b = x/(r²+x²)`), the *opposite* of
   `PowerFlowModel.from_pgm_json`'s default and deliberately so — each matches what its own
   field's reference tools compute. The choice moves which branch binds, so it is not cosmetic;

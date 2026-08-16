@@ -165,18 +165,47 @@ sets the other side infinite. Triplets rather than a compressed format because t
 shape the rest of the crate already speaks; the backend converts internally, where the
 conversion is tested once.
 
-The backend is **HiGHS**, reached through gridoxide's own bindgen-generated FFI rather than a
+There are **two backends** behind that interface, and having two is deliberate.
+
+**The default is gridoxide's own interior-point method** (`opf::ipm`) — Mehrotra
+predictor-corrector on the sparse factorization this crate already owns. Pure Rust, no system
+libraries, nothing to install, so it is built and tested in CI along with everything else.
+
+**HiGHS is the reference**, reached through gridoxide's own bindgen-generated FFI rather than a
 third-party wrapper crate — the same approach the [KLU and PARDISO backends](../solvers/backends.md)
-take, and for the same reason. It is enabled by the `opf-highs` feature, which requires a local
-HiGHS install (`libhighs-dev` on Debian/Ubuntu) and is therefore not exercised by CI.
+take, and for the same reason. It needs the `opf-highs` feature and a local HiGHS install
+(`libhighs-dev` on Debian/Ubuntu), so it is not exercised by CI. Nothing depends on it; it is
+selected with `--highs` or `solver="highs"`.
 
 One deliberate non-choice worth recording: `build.rs` does **not** use pkg-config, even though
 HiGHS ships a `.pc` file. Ubuntu's is broken — every path in it carries a doubled `/usr`
 prefix. Discovery uses standard paths with a `HIGHS_ROOT` override instead.
 
-Because the boundary is solver-independent, a second backend can be dropped behind it without
-touching any modelling code. That is the plan: an in-house convex QP interior-point method, at
-which point the two cross-validate each other and the portable one becomes the default.
+### Why keep both
+
+Because **two independent solvers are a validation gate**. On a convex problem the optimal
+objective is unique, so a disagreement between them is a bug in one — not a modelling
+convention, not a different local optimum, not a tolerance question. Across the pglib fixtures
+they agree to 1.1e-11 relative; `tests/opf_cross_test.rs` also runs 300 randomly generated
+convex QPs through both.
+
+That randomized comparison earned its keep immediately. It found a real defect in the
+interior-point method that no fixture exposed: the solver was taking **different primal and
+dual step lengths**, which is standard and strictly better for a linear program but silently
+breaks a quadratic one. Substituting the Newton step into the dual residual after a split step
+leaves
+
+\\[ r_d \leftarrow (1 - \alpha_d) r_d + (\alpha_p - \alpha_d) Q \Delta u \\]
+
+The first term is the contraction the method depends on; the second is pure error, vanishing
+only when \\(Q = 0\\) or the step lengths agree. Left in, the iterates settle into a limit
+cycle — one generated QP repeated with period 8 until the iteration limit while HiGHS solved it
+without trouble. Forcing a common step length whenever the objective is quadratic fixes it.
+
+**What the cross-check does not do is establish correctness.** Both backends receive the same
+`LinearProgram`. If the model is assembled wrongly, both agree perfectly on the wrong answer —
+which is exactly what would have happened with the susceptance bug above. Cross-validation
+tests the *solvers*; the published objectives test the *model*.
 
 ## Validation
 
@@ -186,8 +215,8 @@ DC-OPF is checked three ways, deliberately independent:
 two-bus case that must dispatch the cheap unit only, a congested one whose price split is known
 in closed form, and shedding cases with and without the option enabled.
 
-**2. KKT certificates.** For a convex problem the KKT conditions are a *proof* of optimality,
-not a comparison. Every pglib case asserts stationarity
+**2. KKT certificates and the second solver.** For a convex problem the KKT conditions are a
+*proof* of optimality, not a comparison. Every pglib case asserts stationarity
 (\\(\text{col\\_dual} = Qx + c - A^{\mathsf T}y\\)), primal and dual feasibility, and
 complementary slackness. This is what separates *"our model differs from theirs"* from *"our
 answer is wrong"* — and in the `case30` investigation above, it is what made the difference
@@ -240,20 +269,21 @@ Every number that makes this an OPF rather than a power flow is in the bottom tw
 price spread, and the single branch causing it.
 
 `--data <path>` names the companion document explicitly, `--no-shedding` removes the shedding
-option, `--shed-price` re-prices it, and `--ignore-r` selects the textbook \\(b = 1/x\\).
+option, `--shed-price` re-prices it, `--ignore-r` selects the textbook \\(b = 1/x\\), and
+`--highs` swaps in the reference backend.
 
 ### Rust
 
 ```rust
 use gridoxide::linear::DcApproximation;
 use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
-use gridoxide::opf::highs::HighsSolver;
+use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::opf::Solver;
 
 let network = DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG)?;
 let opf = DcOpf::build(network, DcOpfOptions::default())?;
 
-let mut solver = HighsSolver::new()?;
+let mut solver = IpmSolver::new();
 let result = opf.interpret(&solver.solve(opf.problem())?);
 
 println!("{:.2} $/h", result.objective);

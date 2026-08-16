@@ -525,14 +525,33 @@ impl DcOpf {
             .iter()
             .filter_map(|&(row, branch_index)| {
                 let price = solution.row_dual[row];
-                if price == 0.0 {
+                let rate = self.network.limits.get(&branch_index).copied().flatten()?;
+
+                // Binding is decided on the **flow**, not on the dual being
+                // exactly zero. That distinction is not pedantry: a simplex
+                // solve sets inactive duals to a hard 0.0, but an interior-
+                // point method only drives them toward it, leaving ~1e-12 on
+                // every inactive row. Testing `price == 0.0` therefore reports
+                // *every* limit as binding under one backend and the right
+                // ones under the other — which is exactly how the two-solver
+                // cross-check found this.
+                //
+                // The flow reaching its rating is also the definition a
+                // dispatcher means by "binding", and it is a primal fact both
+                // methods agree on to eight digits, so it is the more robust
+                // criterion as well as the more honest one. A branch at its
+                // limit whose dual is genuinely zero is weakly binding — real,
+                // and reported, with the zero price saying relieving it saves
+                // nothing.
+                let flow = flows[branch_index].abs();
+                let rate_mw = rate * base;
+                if (flow - rate_mw).abs() > 1e-6 * rate_mw.max(1.0) {
                     return None;
                 }
-                let rate = self.network.limits.get(&branch_index).copied().flatten()?;
                 Some(Binding {
                     branch: branch_index,
                     flow: flows[branch_index],
-                    rate: rate * base,
+                    rate: rate_mw,
                     // A limit's dual has the opposite sense to a balance
                     // row's: relaxing it *reduces* cost, so the saving per MW
                     // of extra capacity is the negated dual.
