@@ -91,6 +91,33 @@ pardiso = ["dep:bindgen"]
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]
+# The optimization layer's solver-independent half: `opf::LinearProgram`,
+# `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs). Pure Rust with
+# no dependencies and no backend of its own — enabling it alone gets you the
+# problem and answer types, which is what a second backend is written against.
+# See plans/OPF_PLAN.md; the in-house convex QP solver lands under this feature.
+opf = []
+# Builds the HiGHS backend for `opf` (src/opf/highs.rs). Like `pardiso`,
+# nothing is vendored or compiled from source: this links a *system* HiGHS
+# install and generates FFI bindings via `bindgen` against that install's own
+# `highs_c_api.h`, so nothing HiGHS-derived is redistributed and
+# `Cargo.toml`'s `license` field doesn't change (HiGHS is MIT in any case).
+#
+# Needs `libclang` (for `bindgen`) plus a local HiGHS with its development
+# files — on Debian/Ubuntu that is `apt install libhighs-dev`. The install is
+# found at `/usr` by default; set `HIGHS_ROOT` for anything else.
+#
+# Not built or tested in CI, since no runner has HiGHS installed — the same
+# local/manual-verification-only position `pardiso` is in. Unlike `pardiso`
+# that is temporary: OPF_PLAN.md phase 4 adds an in-house convex QP solver
+# under plain `opf`, which becomes the portable default and makes *this*
+# backend the optional reference implementation the two cross-check against.
+opf-highs = ["opf", "dep:bindgen"]
+
+[[test]]
+name = "opf_highs_test"
+path = "tests/opf_highs_test.rs"
+required-features = ["opf-highs"]
 
 [[test]]
 name = "klu_jacobian_test"
