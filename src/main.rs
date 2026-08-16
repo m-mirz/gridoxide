@@ -59,8 +59,9 @@ usage:
                                 --scaling picks the voltage factor c (default
                                 max, for the largest current; min is the
                                 sensitivity study).
-  gridoxide opf <network.json> [--data <opf.json>] [--no-shedding]
+  gridoxide opf <network.json> [--ac] [--data <opf.json>] [--no-shedding]
                      [--shed-price <$/MWh>] [--ignore-r] [--highs]
+                     [--no-limits] [--max-iter <n>]
                                 run a DC optimal power flow: least-cost dispatch
                                 subject to generator limits and branch ratings,
                                 printing the dispatch, locational marginal
@@ -75,6 +76,13 @@ usage:
                                 b = x/(r²+x²). Note this is the opposite default
                                 from `dc` above, on purpose: each matches what
                                 its own field's reference tools compute.
+                                --ac solves the full AC problem instead: real
+                                voltages, reactive power and losses, optimizing
+                                generator P and Q together. Nonconvex, so the
+                                answer is a local optimum. --no-limits drops the
+                                branch ratings and --max-iter caps the solve;
+                                --no-shedding/--shed-price/--ignore-r/--highs
+                                are DC-only.
   gridoxide sensitivity <path> [--dp <bus>] [--dq <bus>] [--dk <branch>]
                      [--dalpha <branch>] [--watch <branch>] [--terminal from|to]
                                 solve an AC power flow and differentiate it.
@@ -390,6 +398,9 @@ fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
 /// are the reason the answer is not simply "run the cheapest unit".
 #[cfg(feature = "opf")]
 fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
+    if flags.iter().any(|f| f == "--ac") {
+        return run_ac_opf(path, flags);
+    }
     use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
     use gridoxide::opf::model::OpfData;
     use gridoxide::opf::{OptStatus, Solver};
@@ -526,6 +537,139 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
             if *amount > 1e-6 {
                 println!("  load {d:>4}: {amount:>10.3} MW");
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// AC optimal power flow.
+///
+/// Prints the same things the DC form does plus what only AC has: voltage
+/// magnitudes, reactive dispatch, and the reactive price. The reported
+/// constraint violation is not decoration — on a nonconvex problem an
+/// objective at an infeasible point is not an answer, so the two belong
+/// together.
+#[cfg(feature = "opf")]
+fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+    use gridoxide::opf::model::OpfData;
+    use gridoxide::opf::OptStatus;
+
+    let data_path = match flag_value(flags, "--data")? {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(path).with_extension("opf.json"),
+    };
+    let network_text =
+        fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let data_text = fs::read_to_string(&data_path).map_err(|e| {
+        format!(
+            "reading {}: {e} — pass --data if the companion OPF document is elsewhere",
+            data_path.display()
+        )
+    })?;
+    let input: PgmInput =
+        serde_json::from_str(&network_text).map_err(|e| format!("parsing {path}: {e}"))?;
+    let data = OpfData::from_json(&data_text)
+        .map_err(|e| format!("parsing {}: {e}", data_path.display()))?;
+
+    let mut options = AcOpfOptions {
+        enforce_limits: !flags.iter().any(|f| f == "--no-limits"),
+        ..AcOpfOptions::default()
+    };
+    if let Some(raw) = flag_value(flags, "--max-iter")? {
+        options.nlp.max_iterations =
+            raw.parse().map_err(|_| format!("--max-iter: {raw:?} is not a number"))?;
+    }
+
+    let network = AcOpfNetwork::from_pgm(input, &data, 50.0, &options)
+        .map_err(|e| e.to_string())?;
+    let n_buses = network.n_buses;
+    let demand: f64 = network.p_load.iter().sum::<f64>() * network.base_mva;
+    let opf = AcOpf::build(network, options).map_err(|e| e.to_string())?;
+    let result = opf.solve().map_err(|e| e.to_string())?;
+
+    if result.status != OptStatus::Optimal {
+        return Err(format!(
+            "no optimal dispatch ({:?}), largest constraint violation {:.3e} pu. AC-OPF is \
+             nonconvex, so this means the method could not find a first-order point from \
+             its starting guess — not that none exists",
+            result.status, result.violation
+        ));
+    }
+
+    let network = opf.network();
+    println!(
+        "{n_buses} bus(es), {} generator(s), {:.1} MW of demand",
+        network.generators.len(),
+        demand
+    );
+    println!("total cost: {:.2} $/h", result.objective);
+    println!(
+        "converged in {} iterations, largest constraint violation {:.2e} pu",
+        result.iterations, result.violation
+    );
+    // Said plainly, because it is the difference between this and the DC form.
+    println!("this is a local optimum — AC-OPF is nonconvex and no solver certifies more");
+
+    println!("\ndispatch (MW, MVAr):");
+    for (k, unit) in network.generators.iter().enumerate() {
+        println!(
+            "  generator {:>4}: P {:>10.3}   Q {:>10.3}",
+            unit.index, result.p_gen[k], result.q_gen[k]
+        );
+    }
+
+    println!("\nvoltage magnitudes (pu):");
+    let lowest = result
+        .magnitudes
+        .iter()
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, v)| (i, *v));
+    let highest = result
+        .magnitudes
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, v)| (i, *v));
+    if let (Some((lo_bus, lo)), Some((hi_bus, hi))) = (lowest, highest) {
+        println!("  lowest  bus {lo_bus:>4}: {lo:.4}");
+        println!("  highest bus {hi_bus:>4}: {hi:.4}");
+    }
+
+    println!("\nlocational marginal price ($/MWh):");
+    let min = result.lmp_p.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = result.lmp_p.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if (max - min).abs() < 1e-6 {
+        println!("  uniform at {min:.4} — nothing is congested");
+    } else {
+        for (bus, price) in result.lmp_p.iter().enumerate() {
+            println!("  bus {bus:>4}: {price:>10.4}");
+        }
+        println!("  spread: {:.4} (the congestion)", max - min);
+    }
+
+    let base = network.base_mva;
+    let mut loaded: Vec<(usize, f64, f64)> = Vec::new();
+    for (flat, rate) in network.limits.iter() {
+        let Some(rate) = rate else { continue };
+        let Some(&(p, q)) = result.flows.get(*flat) else { continue };
+        let apparent = (p * p + q * q).sqrt() / base;
+        if apparent > 0.99 * rate {
+            loaded.push((*flat, apparent * base, rate * base));
+        }
+    }
+    loaded.sort_by(|a, b| (b.1 / b.2).total_cmp(&(a.1 / a.2)));
+    if loaded.is_empty() {
+        println!("\nno branch above 99% of its rating");
+    } else {
+        println!("\nbranches at or near their rating:");
+        for (branch, flow, rate) in loaded {
+            println!(
+                "  branch {branch:>4}: |S| {flow:>10.3} of {rate:>9.3} MVA ({:.1}%)",
+                flow / rate * 100.0
+            );
         }
     }
 

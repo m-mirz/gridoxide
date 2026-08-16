@@ -196,6 +196,31 @@ impl Generator {
     pub fn p_limits_pu(&self, base_mva: f64) -> (f64, f64) {
         (self.p_min / base_mva, self.p_max / base_mva)
     }
+
+    /// Reactive-power limits in per-unit on `base_mva`, with an absent bound
+    /// becoming an infinity.
+    ///
+    /// Unbounded rather than zero is the only safe reading: MATPOWER writes
+    /// literal infinities for an unlimited unit, which are not valid JSON and
+    /// so arrive here as `None`. Defaulting those to zero would silently forbid
+    /// the unit from producing *any* reactive power — turning a machine with no
+    /// stated limit into the most constrained one on the network, and doing it
+    /// in a way that looks like a converged answer rather than an error.
+    pub fn q_limits_pu(&self, base_mva: f64) -> (f64, f64) {
+        (
+            self.q_min.map_or(f64::NEG_INFINITY, |q| q / base_mva),
+            self.q_max.map_or(f64::INFINITY, |q| q / base_mva),
+        )
+    }
+}
+
+/// One bus's voltage magnitude limits, per-unit.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BusVoltage {
+    /// The network document's node id.
+    pub node: u64,
+    pub v_min: f64,
+    pub v_max: f64,
 }
 
 /// A branch's thermal rating.
@@ -235,6 +260,15 @@ pub struct OpfData {
     pub base_mva: f64,
     #[serde(default)]
     pub generator: Vec<Generator>,
+    /// Per-bus voltage magnitude limits, per-unit. Only AC-OPF uses these —
+    /// DC holds `|V| = 1`.
+    ///
+    /// Empty for a document written before they were emitted, which
+    /// [`AcOpfNetwork`](super::ac::AcOpfNetwork) treats as "fall back to the
+    /// option defaults" rather than as "unbounded". Silently unbounded
+    /// voltages would make every case solve, and solve wrongly.
+    #[serde(default)]
+    pub bus_voltage: Vec<BusVoltage>,
     #[serde(default)]
     pub branch_limit: Vec<BranchLimit>,
     #[serde(default)]

@@ -18,10 +18,11 @@ Those prices are usually the reason to run it:
 - **Shadow price of a branch limit** — what one more MW of capacity on that corridor would
   save per hour. This is the number that justifies a reinforcement.
 
-gridoxide currently implements **DC-OPF**. That restriction is what makes the problem a convex
-quadratic program, and therefore *provably* optimal rather than merely converged — a
-distinction that matters more here than in power flow, and that shapes how the whole thing is
-validated below.
+gridoxide implements both **DC-OPF** and **AC-OPF**, and the difference between them is not
+just accuracy. DC is a convex quadratic program, so its answer is *provably* optimal. AC is
+nonconvex, so its answer is a local optimum satisfying the first-order conditions — which is
+the state of the art, and what every published AC-OPF objective means. That distinction shapes
+how each is validated.
 
 ## The formulation
 
@@ -313,12 +314,118 @@ for b in r.binding:
 [`AcSensitivityModel`](../sensitivity/ac.md) — there is nothing worth keeping between calls:
 one solve answers one question.
 
+## AC-OPF
+
+The full problem: real voltage magnitudes, reactive power and losses, optimizing generator
+active *and* reactive output together.
+
+```bash
+gridoxide opf network.json --ac
+```
+
+### What changes
+
+Everything that made DC a convex QP goes away. The balance equations are trigonometric, so the
+feasible set is curved and generally nonconvex. In exchange, the two control families DC cannot
+express arrive: generator reactive power, and bus voltage magnitude.
+
+| | DC-OPF | AC-OPF |
+|---|---|---|
+| Problem class | Convex QP | Nonconvex NLP |
+| Guarantee | Provably global optimum | Local optimum (first-order conditions) |
+| Variables | \\(P_g, \theta, s\\) | \\(P_g, Q_g, \theta, \|V\|\\) |
+| Balance rows | \\(n\\), linear | \\(2n\\), trigonometric |
+| Branch limits | \\(\|b\,\Delta\theta\| \le \text{rate}\\) | \\(P^2 + Q^2 \le \text{rate}^2\\) |
+| Solver | `opf::ipm` (Mehrotra) | `opf::nlp` (line search + regularization) |
+
+Limits are squared rather than written as \\(\sqrt{P^2+Q^2}\\) so that no square root — whose
+derivative is undefined at zero flow — ever enters the model.
+
+### What nonconvexity costs the solver
+
+`opf::nlp` is a second interior-point method, not a reuse of the convex one, because three
+things change:
+
+- **A line search.** The step is a direction, not a destination — a full Newton step may
+  increase the objective or worsen feasibility, so it is accepted only if it reduces a merit
+  function trading the two off.
+- **Regularization driven by failure rather than structure.** In the QP, \\(\gamma\\) is a tiny
+  fixed value that only makes a rank-deficient matrix factorizable. Here the Hessian of the
+  Lagrangian can be genuinely indefinite and the Newton direction then points at a saddle, so
+  \\(\gamma\\) is raised by orders of magnitude until the direction is usable.
+- **A gradual barrier.** The QP drives \\(\mu \to 0\\) as fast as Mehrotra's heuristic allows,
+  because its model is exact. Here each barrier subproblem is solved loosely before \\(\mu\\)
+  drops; going faster produces a step that is accurate for a problem nobody asked about.
+
+### Where the derivatives come from
+
+The balance rows' first and second derivatives are
+[`injection_hessian`](../sensitivity/ac.md#second-derivatives)'s — that module exists for this.
+The branch limits need their own, and the structure turns out to be identical: a terminal flow
+
+\\[ P_{ft} = \|V_f\|^2 g_{self} + \|V_f\|\|V_t\| (g_{mut}\cos\theta_{ft} + b_{mut}\sin\theta_{ft}) \\]
+
+is algebraically **a bus injection with exactly one neighbour**, with \\(y_{ff}\\) as the
+self-admittance and \\(y_{ft}\\) the mutual one. The same trigonometry and the same derivative
+rotations apply.
+
+### Validation, and two bugs the objective alone would not have found
+
+All five pglib cases match the published AC objectives to **0.001%**, at constraint violations
+of 1e-9 or better. Getting there took two corrections, and in both cases what identified them
+was not the size of the gap but *which cases had one*:
+
+1. **Per-bus voltage limits.** Defaulting to `[0.9, 1.1]` matched `case3` and `case5` exactly
+   and left the other three low by 0.4–0.5%. Those three specify `[0.94, 1.06]` — the looser
+   default was buying a cheaper answer that was infeasible for the real case.
+2. **Bus shunts.** With voltage limits fixed, exactly the three cases carrying shunt capacitors
+   still disagreed, and the two with none matched to 0.001%. A shunt supplies reactive power for
+   free; dropping it makes the generators supply it instead, at a cost.
+
+> The same lesson as the susceptance bug above, in a different key: when some cases agree and
+> others do not, the question worth asking is what the disagreeing ones have in common — not
+> how big the gap is.
+
+Beyond the published objectives, three further checks run: the model's gradient, Jacobian and
+Hessian against central differences (a wrong derivative does not make a solver fail, it makes it
+converge confidently to the wrong point); feasibility re-derived from `network::power_injections`
+rather than read out of the solver; and prices checked against a numerical
+\\(\partial\text{cost}/\partial\text{load}\\) — which caught a sign error that produced
+prices of exactly the right magnitude, negated, on every bus of every case.
+
+### Starting points matter
+
+A nonconvex solver returns the optimum in whichever basin it starts. On these networks every
+start tested reaches the same objective to 1e-6, but that is an *empirical finding about these
+cases*, not a property of the method.
+
+It is also load-bearing for convergence. Starting each generator at its box midpoint — the
+obvious choice — leaves the dispatch about 23% short of demand on every pglib fixture, because
+`p_min` is usually zero. `case5_pjm` and `case118_ieee` then never recovered, stalling at the
+iteration limit. Distributing demand proportionally across the generators' ranges instead costs
+nothing and fixed both.
+
+### Reading the answer
+
+```python
+import gridoxide
+
+r = gridoxide.ac_opf("network.json")
+
+print(f"{r.objective:.2f} $/h in {r.iterations} iterations")
+print(f"largest violation: {r.violation:.2e} pu")   # read this with the objective
+print(f"voltage range: {min(r.magnitudes):.4f} – {max(r.magnitudes):.4f} pu")
+```
+
+`violation` is part of the answer rather than diagnostics. On a nonconvex problem a lower cost
+at an infeasible point is not a better result, so an objective reported without it can be badly
+misleading.
+
 ## What is not here yet
 
-**AC-OPF.** The real target, and a materially harder problem: nonconvex, so a solution is a
-local optimum rather than a proven global one, and it needs second derivatives of the injection
-equations that the sensitivity module currently stops short of. It also brings back the two
-control families DC cannot express.
+**Transformer taps and phase shifters as decision variables.** Both are read and held fixed.
+Taps are genuinely discrete, so a continuous relaxation gives a bound that needs rounding and a
+re-solve before anyone acts on it.
 
 **Unit commitment.** On/off decisions make this a mixed-integer program. HiGHS solves MIPs, so
 the backend would carry it, but nothing above the solver boundary models it.

@@ -397,8 +397,8 @@ the same matrices. That is what the analytic small cases are for.
 | 2 | ✅ **Done.** `LinearProgram` boundary; `opf-highs` backend via own bindgen against `highs_c_api.h` | Solves a hand-built LP and QP with correct duals |
 | 3 | ✅ **Done.** **DC-OPF** — dispatch, objective, LMPs, binding constraints; CLI and Python | KKT residuals; analytic cases; pglib published objectives to <0.03% |
 | 4 | ✅ **Done.** In-house convex QP interior-point method (`src/opf/ipm.rs`), second backend behind the same boundary, now the *default* | KKT residuals; agrees with HiGHS to 1.1e-11 relative on every fixture and on 300 randomized convex QPs (§7.4); OPF now runs in CI |
-| 5 | Injection Hessians | Finite-difference against the existing Jacobian |
-| 6 | **AC-OPF** — all four control families | KKT; published pglib/MATPOWER objectives |
+| 5 | ✅ **Done.** Injection Hessians (`src/injection_hessian.rs`) | Finite-differenced against the existing Jacobian; >1000 entries agree to 1e-9 on `case118_ieee` |
+| 6 | ✅ **Done.** **AC-OPF** (`src/opf/ac.rs`) on a bespoke nonlinear IPM (`src/opf/nlp.rs`) — generator P and Q, voltage magnitudes, apparent-power branch limits. Taps and phase shifters remain fixed | All five pglib **AC** objectives to 0.001% at violations ≤1e-9; derivatives finite-differenced; prices checked against a numerical d(cost)/d(load) |
 
 Phases 1–4 are done. Phase 4 delivered what it was for: DC-OPF now builds and tests with no system
 library, `opf` is exercised in CI, and HiGHS has become the optional reference rather than a
@@ -406,7 +406,23 @@ requirement. It also paid off as a *gate* rather than merely a port — the rand
 solver-vs-solver comparison caught a split primal/dual step length that is correct for LPs and
 breaks QPs, a defect none of the fixtures exposed.
 
-Phase 5 is independently useful. Phase 6 needs its own revision first.
+Phases 5 and 6 are done too. The §6 decision deferred to this point — IPOPT versus a bespoke
+IPM — went to the bespoke one, on the grounds §6 already listed: IPOPT is EPL-2.0 (which would
+change `Cargo.toml`'s `license` field), its Rust bindings have not been updated since December
+2024, and it wants Fortran plus MUMPS or HSL underneath. Phase 4 had also just built and
+validated the sparse KKT machinery a nonlinear IPM extends, so the marginal cost was much lower
+than it looked when this plan was written.
+
+What phase 6 actually cost, against what this document guessed: the algorithm was the *easy*
+part. Two modelling gaps — per-bus voltage limits and bus shunts — accounted for the entire
+disagreement with the published objectives, and a poor starting point (generator box midpoints,
+some 23% short of demand) accounted for both non-convergent cases. None of the three was a
+numerical-methods problem, which is worth remembering the next time a nonlinear solve is
+budgeted as one.
+
+Still absent: taps and phase shifters as decision variables (both discrete in reality, so a
+continuous relaxation needs rounding and a re-solve), unit commitment, and security-constrained
+OPF (§10).
 
 ## 9. Risks
 

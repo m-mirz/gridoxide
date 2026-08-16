@@ -118,7 +118,7 @@ except ImportError as e:  # pragma: no cover
         "gridoxide.matpower needs the 'matpower' extra: pip install gridoxide[matpower]"
     ) from e
 
-BUS_I, BUS_TYPE, PD, QD, GS, BS, _AREA, VM, VA, _BASE_KV, _ZONE, _VMAX, _VMIN = range(13)
+BUS_I, BUS_TYPE, PD, QD, GS, BS, _AREA, VM, VA, _BASE_KV, _ZONE, VMAX, VMIN = range(13)
 GEN_BUS, PG, QG, QMAX, QMIN, VG, _MBASE, GEN_STATUS, PMAX, PMIN = range(10)
 F_BUS, T_BUS, BR_R, BR_X, BR_B, RATE_A, _RATE_B, _RATE_C, RATIO, ANGLE, BR_STATUS = range(11)
 
@@ -244,6 +244,22 @@ def build_opf_data(mpc: dict, branch_ids: dict[int, int], load_ids: dict[int, in
     gen = np.atleast_2d(mpc["gen"])
     gencost = np.atleast_2d(mpc.get("gencost", np.zeros((0, 0))))
     branch = np.atleast_2d(mpc["branch"])
+    bus = np.atleast_2d(mpc["bus"])
+
+    # Per-bus voltage limits, which only AC-OPF uses — DC holds |V| = 1 and
+    # has nowhere to put them. Emitted for every bus rather than only the
+    # ones that differ from a default, because there is no safe default: on
+    # these very fixtures the limits are [0.9, 1.1] for two cases and
+    # [0.94, 1.06] for three, and assuming the looser pair on a case that
+    # wants the tighter one silently buys a cheaper, infeasible answer.
+    bus_voltages = [
+        {
+            "node": int(bus[r, BUS_I]),
+            "v_min": float(bus[r, VMIN]),
+            "v_max": float(bus[r, VMAX]),
+        }
+        for r in range(len(bus))
+    ]
 
     generators = []
     for g in range(len(gen)):
@@ -290,6 +306,7 @@ def build_opf_data(mpc: dict, branch_ids: dict[int, int], load_ids: dict[int, in
         "type": "opf_input",
         "base_mva": float(mpc["baseMVA"]),
         "generator": generators,
+        "bus_voltage": bus_voltages,
         "branch_limit": branch_limits,
         "load": loads,
     }
