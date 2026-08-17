@@ -52,3 +52,34 @@ jobs:
       run: |
         cargo build --verbose --features opf
         cargo test --verbose --features opf
+    # `capi` is built here for the same reason `opf` is: no system dependency.
+    # It is pure Rust plus cbindgen, which cargo fetches like any other crate —
+    # unlike klu/pardiso/opf-highs/opf-ipopt, which each need a library the
+    # runner does not have.
+    #
+    # The two example programs are the part `cargo test` cannot cover. They are
+    # what proves the generated header actually parses as C11 and C++17, that
+    # the `#[repr(C)]` layouts agree with what a real compiler computes, and
+    # that the exported symbols link — none of which a Rust test can check,
+    # since it never sees the header at all.
+    - name: Build and test the C ABI
+      run: |
+        cargo build --verbose --features capi
+        cargo test --verbose --features capi
+    - name: Compile and run the C and C++ examples
+      run: |
+        cargo build --release --features capi
+        cc  -std=c11   -Wall -Wextra -Werror -Iinclude \
+            capi/examples/powerflow.c   target/release/libgridoxide.a \
+            -o /tmp/powerflow_c   -lpthread -ldl -lm
+        c++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+            capi/examples/powerflow.cpp target/release/libgridoxide.a \
+            -o /tmp/powerflow_cpp -lpthread -ldl -lm
+        /tmp/powerflow_c   tests/data/pglib-opf/pglib_opf_case14_ieee.json
+        /tmp/powerflow_cpp tests/data/pglib-opf/pglib_opf_case14_ieee.json
+    # The header is committed so a prebuilt-artifact consumer needs no Rust
+    # toolchain. Nothing keeps it in step with the code unless something checks,
+    # and `cargo build --features capi` regenerates it — so a diff here means a
+    # contributor changed the ABI without committing the regenerated header.
+    - name: Check the committed header is not stale
+      run: git diff --exit-code -- include/gridoxide.h

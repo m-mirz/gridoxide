@@ -3,6 +3,8 @@ pub mod network;
 pub mod switches;
 pub mod topology;
 pub mod branch_flow;
+#[cfg(feature = "capi")]
+pub mod capi;
 pub mod measurement;
 pub mod se;
 pub mod solver;

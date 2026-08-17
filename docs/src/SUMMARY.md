@@ -6,6 +6,7 @@
 
 - [Building and Running](./getting_started/building.md)
 - [Python Bindings](./getting_started/python.md)
+- [C and C++ API](./getting_started/c_api.md)
 
 # Power Flow
 
