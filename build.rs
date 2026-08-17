@@ -7,6 +7,118 @@ fn main() {
     highs::build();
     #[cfg(feature = "opf-ipopt")]
     ipopt::build();
+    #[cfg(feature = "capi")]
+    capi::build();
+}
+
+/// Generates `include/gridoxide.h` from the C ABI in `src/capi/`, only when
+/// the `capi` feature is enabled.
+///
+/// **The mirror image of the four modules below.** They run `bindgen` over a
+/// system header so Rust can call a C library; this runs `cbindgen` over our
+/// own source so a C library can call us. Same shape, opposite direction.
+///
+/// Two departures from those four, both deliberate:
+///
+/// - **The output goes into the source tree, not `$OUT_DIR`.** A header in
+///   `$OUT_DIR` is unreachable for the case this feature exists to serve — a
+///   C++ project consuming a prebuilt `libgridoxide.a` with no cargo anywhere
+///   in its build. So `include/gridoxide.h` is generated *and committed*, and
+///   `tests/capi_test.rs` fails if the committed copy has drifted.
+/// - **A read-only source tree is a warning, not an error.** Generating into
+///   the tree is a convenience for developers; it must not be the thing that
+///   stops a vendored or sandboxed build from compiling at all.
+#[cfg(feature = "capi")]
+mod capi {
+    use std::env;
+    use std::path::PathBuf;
+
+    pub fn build() {
+        let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+        let header = manifest.join("include/gridoxide.h");
+
+        let generated = match generate(&manifest).map(inject_abi_version) {
+            Some(text) => text,
+            None => {
+                println!("cargo:warning=cbindgen could not parse src/capi; \
+                          include/gridoxide.h was left untouched");
+                return;
+            }
+        };
+
+        // Written only when it actually changed. Rewriting an identical file
+        // would bump its mtime on every build, which for a header means
+        // recompiling every C++ translation unit that includes it.
+        let current = std::fs::read_to_string(&header).unwrap_or_default();
+        if current == generated {
+            println!("cargo:rerun-if-changed=src/capi");
+            return;
+        }
+        if let Some(parent) = header.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&header, &generated).is_err() {
+            println!(
+                "cargo:warning=couldn't write {} (read-only tree?); the committed header \
+                 may be stale — run `cargo build --features capi` in a writable checkout",
+                header.display()
+            );
+        }
+        println!("cargo:rerun-if-changed=src/capi");
+    }
+
+    /// Adds `GRIDOXIDE_ABI_VERSION` to the header, taken from the Rust
+    /// constant rather than written twice.
+    ///
+    /// cbindgen could export it as a constant, but only by exporting *every*
+    /// `pub const` in the crate — `WYE`, `RANK_TOLERANCE` and a dozen others
+    /// that are not part of this ABI. Injecting the one that is keeps the
+    /// header honest and makes drift between the two impossible by
+    /// construction.
+    fn inject_abi_version(header: String) -> String {
+        let version = include_str!("src/capi/mod.rs")
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("pub const ABI_VERSION: u32 = ")
+                    .and_then(|rest| rest.trim_end_matches(';').parse::<u32>().ok())
+            })
+            .expect("src/capi/mod.rs must declare `pub const ABI_VERSION: u32 = <n>;`");
+        // Written as a literal multi-line string rather than with `\`
+        // continuations, which strip leading whitespace and so ate the aligned
+        // `*` out of the block comment.
+        let define = format!(
+            r#"
+/**
+ * The ABI this header describes. Compare it against `gridoxide_abi_version()`
+ * at run time when linking a prebuilt library, so a layout mismatch fails
+ * early instead of quietly corrupting a struct.
+ */
+#define GRIDOXIDE_ABI_VERSION {version}
+"#
+        );
+        match header.find("#define GRIDOXIDE_H") {
+            Some(at) => {
+                let end = at + "#define GRIDOXIDE_H".len();
+                format!("{}{}{}", &header[..end], define, &header[end..])
+            }
+            None => header,
+        }
+    }
+
+    fn generate(manifest: &std::path::Path) -> Option<String> {
+        let config = cbindgen::Config::from_root_or_default(manifest);
+        cbindgen::Builder::new()
+            .with_crate(manifest)
+            .with_config(config)
+            .generate()
+            .ok()
+            .map(|bindings| {
+                let mut buffer = Vec::new();
+                bindings.write(&mut buffer);
+                String::from_utf8_lossy(&buffer).into_owned()
+            })
+    }
 }
 
 /// Links a system IPOPT install and generates its FFI bindings, only when the
