@@ -240,16 +240,54 @@ fn threshold_mw(
 /// through [`DcSensitivity::multi_outage_flows`], so the whole sweep costs one
 /// factorization plus a small dense solve per outage.
 pub fn evaluate(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> SecurityResult {
+    evaluate_with(crac, network, resolution, &[])
+}
+
+/// Evaluate with a set of branches already opened.
+///
+/// `open` is how an applied *remedial action* reaches the evaluator: a
+/// topological action that disconnects a line is, electrically, the same thing
+/// as a contingency that trips it, so both go through the same Woodbury update.
+/// A contingency's own outages are unioned with these, which is what makes
+/// "this action, then that outage" a single rank-k correction rather than two
+/// nested ones.
+///
+/// Branch indices are flat, and duplicates are harmless.
+pub fn evaluate_with(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+) -> SecurityResult {
     let s_base_va = network.base_mva * 1e6;
     let options = DcOptions::default();
     let dc = dc_branches(network.lines, network.transformers, options);
 
-    // Base-case flows, per-unit, by flat branch index.
+    // Base-case flows, per-unit, by flat branch index — before any applied
+    // action.
     let mut buses = network.buses.to_vec();
     let solution = dc_power_flow(&mut buses, network.lines, network.transformers, options);
-    let base_flows = solution.branch_p;
+    let intact_flows = solution.branch_p;
 
     let sensitivity = DcSensitivity::new(network.buses, &dc, network.n_branches());
+
+    // The applied actions themselves are an outage set, so the "base case" a
+    // perimeter is measured against is already the post-action network.
+    let mut applied: Vec<usize> = open.to_vec();
+    applied.sort_unstable();
+    applied.dedup();
+    let (base_flows, base_severed) = if applied.is_empty() {
+        (intact_flows.clone(), false)
+    } else {
+        match sensitivity.as_ref().and_then(|s| {
+            (!s.is_breaking_set(&applied))
+                .then(|| s.multi_outage_flows(&intact_flows, &applied))
+                .flatten()
+        }) {
+            Some(f) => (f, false),
+            None => (outaged_flows(network, &applied, options), true),
+        }
+    };
 
     // Which CNECs belong to each state, and which had to be skipped.
     let mut skipped = Vec::new();
@@ -268,13 +306,19 @@ pub fn evaluate(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> 
         // Post-contingency flows. A preventive state is the base case; anything
         // else opens the contingency's elements.
         let (flows, severed) = match state.contingency {
-            None => (base_flows.clone(), false),
+            None => (base_flows.clone(), base_severed),
             Some(c) => {
-                let outages: Vec<usize> = crac.contingencies[c]
+                // The contingency's own elements *plus* whatever the applied
+                // actions opened: one rank-k correction against the intact
+                // network rather than a correction on a correction.
+                let mut outages: Vec<usize> = crac.contingencies[c]
                     .elements
                     .iter()
                     .filter_map(|e| resolution.branch(e))
+                    .chain(applied.iter().copied())
                     .collect();
+                outages.sort_unstable();
+                outages.dedup();
                 if outages.is_empty() {
                     // Nothing resolvable to open: the honest answer is the base
                     // case, flagged, rather than a silent pretence that the
@@ -283,7 +327,7 @@ pub fn evaluate(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> 
                 } else {
                     match sensitivity.as_ref().and_then(|s| {
                         (!s.is_breaking_set(&outages))
-                            .then(|| s.multi_outage_flows(&base_flows, &outages))
+                            .then(|| s.multi_outage_flows(&intact_flows, &outages))
                             .flatten()
                     }) {
                         Some(f) => (f, false),
