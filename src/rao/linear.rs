@@ -1,0 +1,754 @@
+//! The linear optimization of range actions over one perimeter.
+//!
+//! Given a state, the remedial actions available in it, and the flows that
+//! state produces, this chooses set-points for the *continuous* actions —
+//! phase-shifter angles and redispatch — to maximize the worst margin.
+//!
+//! # The formulation
+//!
+//! Variables, per perimeter:
+//!
+//! - \\(F(c)\\), the flow on each CNEC, MW.
+//! - \\(A(r)\\), the set-point of each range action: degrees for a phase
+//!   shifter, MW for a redispatch.
+//! - \\(\Delta^{+}(r), \Delta^{-}(r) \ge 0\\), its upward and downward
+//!   variation from where it started.
+//! - \\(MM\\), the minimum margin.
+//!
+//! The keystone is the linearization, which is what makes this an LP at all:
+//!
+//! \\[ F(c) \;=\; f_n(c) \;+\; \sum_r \sigma_n(r, c)\,\bigl[A(r) - \alpha_n(r)\bigr] \\]
+//!
+//! with \\(f_n\\) the flow at the current operating point and \\(\sigma_n\\)
+//! the sensitivity of that flow to the action, both recomputed each outer
+//! iteration. Then \\(MM \le f^{+}(c) - F(c)\\) and \\(MM \le F(c) - f^{-}(c)\\)
+//! per optimized CNEC, minimizing \\(-MM\\) plus a small penalty on
+//! \\(\Delta^{+} + \Delta^{-}\\) so that among equally good answers the one
+//! that moves least wins.
+//!
+//! # Why it iterates
+//!
+//! The linearization is exact in DC for a *redispatch*, because DC flow is
+//! linear in injection. It is **not** exact for a phase shifter: the
+//! sensitivity of a flow to a shift depends on the network's susceptances, not
+//! on the shift, so in pure DC it is also constant — but the tap-to-angle map
+//! is not linear, and a discrete tap lands somewhere the continuous solution
+//! did not ask for. So the loop solves, applies, recomputes, and keeps the
+//! result only if the true minimum margin improved.
+//!
+//! # What is not here
+//!
+//! One perimeter at a time. Chaining a curative action to the preventive one
+//! before it — the `relativeToPreviousInstant` range kind — needs several
+//! states in one problem, and belongs with the multi-perimeter work.
+//!
+//! **Network actions are not here.** This layer moves continuous set-points;
+//! choosing *which discrete actions to take* is the search tree's job, and the
+//! two are meant to interleave — a topological action changes the sensitivities
+//! the shifters are optimized against, so optimizing them separately gives a
+//! worse answer than optimizing them together.
+//!
+//! **MNECs are not constrained.** A monitored CNEC's margin must not get worse,
+//! which is a penalized soft constraint rather than something to maximize. This
+//! layer currently ignores them entirely: they are excluded from the objective,
+//! correctly, but nothing stops an action from degrading one.
+//!
+//! **HVDC range actions are recognised and skipped**: gridoxide models a DC
+//! network (`src/dc.rs`) but nothing connects it to a range action yet. A
+//! counter trade has no network sensitivity at all, which is why the reference
+//! leaves it out of its LP too.
+
+use crate::linear::btheta::{dc_branches, dc_power_flow, DcBranch};
+use crate::linear::sensitivity::DcSensitivity;
+use crate::linear::DcOptions;
+use crate::opf::{LinearProgram, OptStatus, Solver};
+use crate::types::Transformer;
+
+use super::crac::{Crac, RangeActionKind, State};
+use super::evaluate::{evaluate, Network, Resolution};
+
+/// How the optimizer should treat a phase shifter's taps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TapModel {
+    /// Optimize the angle continuously, then round to the nearest tap and
+    /// re-evaluate. Needs only an LP, so it runs on the in-house solver.
+    #[default]
+    Continuous,
+    /// Optimize the tap itself as an integer variable. Needs a MIP backend —
+    /// [`IpmSolver`](crate::opf::ipm) refuses, by design.
+    Discrete,
+}
+
+#[derive(Clone, Debug)]
+pub struct LinearOptions {
+    /// Outer iterations: solve, apply, recompute, keep if better.
+    pub max_iterations: usize,
+    /// Objective penalty per degree of phase-shifter movement. Small, so it
+    /// only breaks ties — but not zero, or the optimizer will happily move
+    /// every shifter by a rounding error's worth for no gain.
+    pub pst_penalty: f64,
+    /// Objective penalty per MW of redispatch.
+    pub injection_penalty: f64,
+    /// Sensitivities below this are treated as zero, which keeps the problem
+    /// sparse. In MW per degree.
+    pub sensitivity_threshold: f64,
+    pub tap_model: TapModel,
+}
+
+impl Default for LinearOptions {
+    fn default() -> Self {
+        Self {
+            max_iterations: 10,
+            pst_penalty: 0.01,
+            injection_penalty: 0.001,
+            sensitivity_threshold: 1e-6,
+            tap_model: TapModel::Continuous,
+        }
+    }
+}
+
+/// What one range action was moved to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Setpoint {
+    /// Index into [`Crac::range_actions`].
+    pub action: usize,
+    /// Degrees for a phase shifter, MW for a redispatch.
+    pub value: f64,
+    /// Where it started, so a caller can see the movement rather than infer it.
+    pub initial: f64,
+    /// The tap it corresponds to, for a phase shifter.
+    pub tap: Option<i32>,
+}
+
+impl Setpoint {
+    pub fn moved(&self) -> bool {
+        (self.value - self.initial).abs() > 1e-9
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearStatus {
+    /// An improving set of set-points was found.
+    Improved,
+    /// The problem solved, but nothing beat the starting point. Not a failure:
+    /// it is the answer when the range actions on offer cannot help.
+    NoImprovement,
+    /// The LP or MIP could not be solved.
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub struct LinearResult {
+    pub status: LinearStatus,
+    pub setpoints: Vec<Setpoint>,
+    /// Minimum margin over the perimeter's optimized CNECs, MW, before and
+    /// after.
+    pub initial_margin_mw: f64,
+    pub final_margin_mw: f64,
+    /// Outer iterations actually run.
+    pub iterations: usize,
+}
+
+impl LinearResult {
+    pub fn improvement(&self) -> f64 {
+        self.final_margin_mw - self.initial_margin_mw
+    }
+}
+
+/// The sensitivity of every branch's DC flow to a one-radian phase shift on
+/// `branch`, in per-unit power per radian.
+///
+/// Two terms, and omitting either is a silent error rather than a loud one:
+///
+/// - **indirect**, through the angles. `btheta` puts a shift on the right-hand
+///   side as an injection of `+b·α` at `from` and `−b·α` at `to`, so the
+///   response is exactly what those injections produce.
+/// - **direct**, on the shifting branch itself. Its flow is
+///   `b·(θ_f − θ_t − α)`, so the explicit `−α` contributes `−b` to its own
+///   sensitivity and to no other branch's.
+pub fn phase_shift_sensitivity(
+    sensitivity: &DcSensitivity,
+    branches: &[DcBranch],
+    branch: usize,
+) -> Option<Vec<f64>> {
+    let target = branches.iter().find(|b| b.index == branch)?;
+    let mut injections = vec![0.0; sensitivity.n_buses()];
+    *injections.get_mut(target.from)? += target.b;
+    *injections.get_mut(target.to)? -= target.b;
+    let (_, mut flows) = sensitivity.response(&injections)?;
+    if let Some(direct) = flows.get_mut(branch) {
+        *direct -= target.b;
+    }
+    Some(flows)
+}
+
+/// Everything the optimizer needs to know about one range action it can move.
+struct Control {
+    /// Index into [`Crac::range_actions`].
+    action: usize,
+    /// Sensitivity of each perimeter CNEC's flow to one unit of this control,
+    /// MW per degree (PST) or MW per MW (injection).
+    sensitivity: Vec<f64>,
+    /// Current set-point, in the control's own unit.
+    current: f64,
+    lower: f64,
+    upper: f64,
+    /// Objective penalty per unit moved.
+    penalty: f64,
+    /// For a phase shifter: the branch it sits on, and its tap table.
+    pst: Option<PstControl>,
+}
+
+struct PstControl {
+    branch: usize,
+    /// Ascending by tap.
+    tap_to_angle: Vec<(i32, f64)>,
+    tap: i32,
+}
+
+impl PstControl {
+    fn nearest_tap(&self, angle: f64) -> i32 {
+        self.tap_to_angle
+            .iter()
+            .min_by(|a, b| (a.1 - angle).abs().total_cmp(&(b.1 - angle).abs()))
+            .map(|(t, _)| *t)
+            .unwrap_or(self.tap)
+    }
+
+    fn angle_at(&self, tap: i32) -> Option<f64> {
+        self.tap_to_angle.binary_search_by_key(&tap, |(t, _)| *t).ok().map(|i| self.tap_to_angle[i].1)
+    }
+}
+
+/// Optimize the range actions available in `state`.
+///
+/// `transformers` is mutated: the returned set-points are *applied*, so the
+/// caller's network reflects the answer. That is deliberate — a search tree
+/// evaluates the next candidate against the network this left behind, and
+/// returning set-points without applying them invites the two to drift apart.
+pub fn optimize(
+    crac: &Crac,
+    network: &mut NetworkMut<'_>,
+    resolution: &Resolution,
+    state: &State,
+    solver: &mut dyn Solver,
+    options: &LinearOptions,
+) -> LinearResult {
+    let dc_options = DcOptions::default();
+
+    // The CNECs this perimeter optimizes, and the flows they start from.
+    let cnec_indices: Vec<usize> = crac
+        .flow_cnecs
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.state == *state && c.optimized)
+        .filter(|(_, c)| resolution.branch(&c.network_element).is_some())
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut best = measure(crac, network, resolution, state);
+    let initial_margin = best;
+    let mut setpoints: Vec<Setpoint> = Vec::new();
+    let mut iterations = 0;
+
+    if cnec_indices.is_empty() {
+        return LinearResult {
+            status: LinearStatus::NoImprovement,
+            setpoints,
+            initial_margin_mw: initial_margin,
+            final_margin_mw: best,
+            iterations,
+        };
+    }
+
+    // Where every control started, so `Setpoint::initial` is the pre-optimization
+    // value rather than the previous iteration's.
+    let mut controls = match build_controls(crac, network, resolution, state, dc_options, options) {
+        Some(c) if !c.is_empty() => c,
+        _ => {
+            return LinearResult {
+                status: LinearStatus::NoImprovement,
+                setpoints,
+                initial_margin_mw: initial_margin,
+                final_margin_mw: best,
+                iterations,
+            }
+        }
+    };
+    let starting: Vec<f64> = controls.iter().map(|c| c.current).collect();
+    let starting_taps: Vec<Option<i32>> =
+        controls.iter().map(|c| c.pst.as_ref().map(|p| p.tap)).collect();
+
+    for _ in 0..options.max_iterations {
+        iterations += 1;
+        let flows = perimeter_flows(crac, network, resolution, state, &cnec_indices);
+        let program = build_program(crac, &cnec_indices, &flows, &controls, options);
+        let Ok(solution) = solver.solve(&program) else {
+            break;
+        };
+        if solution.status != OptStatus::Optimal {
+            break;
+        }
+
+        // Read the new set-points, round a phase shifter to a real tap, and
+        // apply. Rounding *before* measuring is the point: the margin that
+        // matters is the one at a tap the operator can actually select.
+        let mut moved = false;
+        let mut proposed = Vec::with_capacity(controls.len());
+        for (k, control) in controls.iter().enumerate() {
+            let value = solution.primal[setpoint_column(k)];
+            let (value, tap) = match &control.pst {
+                Some(pst) => {
+                    let tap = pst.nearest_tap(value);
+                    (pst.angle_at(tap).unwrap_or(value), Some(tap))
+                }
+                None => (value, None),
+            };
+            if (value - control.current).abs() > 1e-9 {
+                moved = true;
+            }
+            proposed.push((value, tap));
+        }
+        if !moved {
+            break;
+        }
+
+        let previous: Vec<(f64, Option<i32>)> =
+            controls.iter().map(|c| (c.current, c.pst.as_ref().map(|p| p.tap))).collect();
+        apply(crac, network, &mut controls, &proposed);
+
+        let margin = measure(crac, network, resolution, state);
+        if margin > best + 1e-9 {
+            best = margin;
+            setpoints = controls
+                .iter()
+                .enumerate()
+                .map(|(k, c)| Setpoint {
+                    action: c.action,
+                    value: c.current,
+                    initial: starting[k],
+                    tap: c.pst.as_ref().map(|p| p.tap),
+                })
+                .collect();
+            // Relinearize around the new point.
+            if let Some(rebuilt) =
+                build_controls(crac, network, resolution, state, dc_options, options)
+            {
+                if rebuilt.len() == controls.len() {
+                    controls = rebuilt;
+                }
+            }
+        } else {
+            // Worse or equal: put the network back and stop. Keeping a move
+            // that did not help would leave the caller's network somewhere the
+            // result does not describe.
+            apply(crac, network, &mut controls, &previous);
+            break;
+        }
+    }
+
+    // Nothing kept means the network must be back where it started — the
+    // rejection path above restores it, and this asserts the invariant rather
+    // than assuming it.
+    if setpoints.is_empty() {
+        let restore: Vec<(f64, Option<i32>)> =
+            starting.iter().copied().zip(starting_taps.iter().copied()).collect();
+        apply(crac, network, &mut controls, &restore);
+    }
+
+    LinearResult {
+        status: if setpoints.iter().any(Setpoint::moved) {
+            LinearStatus::Improved
+        } else if iterations == 0 {
+            LinearStatus::Failed
+        } else {
+            LinearStatus::NoImprovement
+        },
+        setpoints,
+        initial_margin_mw: initial_margin,
+        final_margin_mw: best,
+        iterations,
+    }
+}
+
+/// The network, mutably, so set-points can be applied.
+pub struct NetworkMut<'a> {
+    pub buses: &'a [crate::types::Bus],
+    pub lines: &'a [crate::types::Line],
+    pub transformers: &'a mut Vec<Transformer>,
+    pub branch_ids: &'a [String],
+    pub base_mva: f64,
+}
+
+impl NetworkMut<'_> {
+    fn view(&self) -> Network<'_> {
+        Network {
+            buses: self.buses,
+            lines: self.lines,
+            transformers: self.transformers,
+            branch_ids: self.branch_ids,
+            base_mva: self.base_mva,
+        }
+    }
+}
+
+/// Column layout: `[A(0), Δ⁺(0), Δ⁻(0), A(1), …, MM]`.
+fn setpoint_column(k: usize) -> usize {
+    3 * k
+}
+fn up_column(k: usize) -> usize {
+    3 * k + 1
+}
+fn down_column(k: usize) -> usize {
+    3 * k + 2
+}
+
+fn margin_column(n_controls: usize) -> usize {
+    3 * n_controls
+}
+
+fn build_program(
+    crac: &Crac,
+    cnecs: &[usize],
+    flows: &[f64],
+    controls: &[Control],
+    options: &LinearOptions,
+) -> LinearProgram {
+    let n = controls.len();
+    let mm = margin_column(n);
+    let mut lp = LinearProgram::new(3 * n + 1);
+
+    for (k, control) in controls.iter().enumerate() {
+        lp.col_lower[setpoint_column(k)] = control.lower;
+        lp.col_upper[setpoint_column(k)] = control.upper;
+        for column in [up_column(k), down_column(k)] {
+            lp.col_lower[column] = 0.0;
+            lp.col_upper[column] = f64::INFINITY;
+            lp.col_cost[column] = control.penalty;
+        }
+        // A(r) − Δ⁺(r) + Δ⁻(r) = current
+        lp.add_row(
+            &[(setpoint_column(k), 1.0), (up_column(k), -1.0), (down_column(k), 1.0)],
+            control.current,
+            control.current,
+        );
+    }
+
+    // Maximize the minimum margin.
+    lp.col_lower[mm] = f64::NEG_INFINITY;
+    lp.col_upper[mm] = f64::INFINITY;
+    lp.col_cost[mm] = -1.0;
+
+    for (position, &index) in cnecs.iter().enumerate() {
+        let cnec = &crac.flow_cnecs[index];
+        let reference = flows[position];
+        // The flow is substituted directly rather than given a variable of its
+        // own: `F(c)` appears only in the two margin rows, so eliminating it
+        // halves the problem for no loss.
+        let terms: Vec<(usize, f64)> = controls
+            .iter()
+            .enumerate()
+            .filter_map(|(k, c)| {
+                let s = c.sensitivity.get(position).copied().unwrap_or(0.0);
+                (s.abs() >= options.sensitivity_threshold).then_some((setpoint_column(k), s))
+            })
+            .collect();
+        let constant: f64 = reference
+            - controls
+                .iter()
+                .enumerate()
+                .map(|(k, c)| {
+                    let s = c.sensitivity.get(position).copied().unwrap_or(0.0);
+                    if s.abs() >= options.sensitivity_threshold {
+                        let _ = k;
+                        s * c.current
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f64>();
+
+        for (upper, limit) in limits_of(cnec) {
+            // MM ≤ limit − F  (upper) or MM ≤ F − limit (lower), with
+            // F = constant + Σ σ·A.
+            let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
+            coefficients.push((mm, 1.0));
+            let sign = if upper { 1.0 } else { -1.0 };
+            for &(column, s) in &terms {
+                coefficients.push((column, sign * s));
+            }
+            let bound = if upper { limit - constant } else { constant - limit };
+            lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
+        }
+    }
+    lp
+}
+
+/// The absolute MW limits of a CNEC as `(is_upper, value)` pairs.
+///
+/// Both directions are emitted even when the CRAC states one, because the
+/// margin is against `|flow|` and a one-sided threshold still bounds the flow
+/// from that side only.
+fn limits_of(cnec: &super::crac::FlowCnec) -> Vec<(bool, f64)> {
+    let mut out = Vec::new();
+    for threshold in &cnec.thresholds {
+        if let Some(max) = threshold.max {
+            out.push((true, max - cnec.reliability_margin));
+        }
+        if let Some(min) = threshold.min {
+            out.push((false, min + cnec.reliability_margin));
+        }
+    }
+    out
+}
+
+fn build_controls(
+    crac: &Crac,
+    network: &NetworkMut<'_>,
+    resolution: &Resolution,
+    state: &State,
+    dc_options: DcOptions,
+    options: &LinearOptions,
+) -> Option<Vec<Control>> {
+    let cnecs: Vec<usize> = crac
+        .flow_cnecs
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.state == *state && c.optimized)
+        .filter(|(_, c)| resolution.branch(&c.network_element).is_some())
+        .map(|(i, _)| i)
+        .collect();
+    let cnec_branches: Vec<usize> = cnecs
+        .iter()
+        .map(|&i| resolution.branch(&crac.flow_cnecs[i].network_element).unwrap())
+        .collect();
+
+    let branches = dc_branches(network.lines, network.transformers, dc_options);
+    let sensitivity =
+        DcSensitivity::new(network.buses, &branches, network.lines.len() + network.transformers.len())?;
+
+    let mut controls = Vec::new();
+    for (index, action) in crac.range_actions.iter().enumerate() {
+        if !action.usage_rules.iter().any(|r| r.covers(state)) {
+            continue;
+        }
+        match &action.kind {
+            RangeActionKind::Pst { element, initial_tap, tap_to_angle } => {
+                let Some(branch) = resolution.branch(element) else { continue };
+                if tap_to_angle.is_empty() {
+                    continue;
+                }
+                let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else {
+                    continue;
+                };
+                // MW per degree: the column is per-unit per radian.
+                let scale = network.base_mva * std::f64::consts::PI / 180.0;
+                let sensitivity_mw: Vec<f64> =
+                    cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0) * scale).collect();
+
+                let mut table = tap_to_angle.clone();
+                table.sort_by_key(|(t, _)| *t);
+                // The live tap is whatever the transformer's angle is closest
+                // to, not the CRAC's `initialTap` — a search tree may have
+                // moved it since.
+                let live_angle = live_shift_degrees(network, branch).unwrap_or_else(|| {
+                    table
+                        .iter()
+                        .find(|(t, _)| t == initial_tap)
+                        .map(|(_, a)| *a)
+                        .unwrap_or(0.0)
+                });
+                let tap = table
+                    .iter()
+                    .min_by(|a, b| (a.1 - live_angle).abs().total_cmp(&(b.1 - live_angle).abs()))
+                    .map(|(t, _)| *t)
+                    .unwrap_or(*initial_tap);
+                let current = table
+                    .iter()
+                    .find(|(t, _)| *t == tap)
+                    .map(|(_, a)| *a)
+                    .unwrap_or(live_angle);
+
+                let (lower, upper) = tap_bounds(action, &table, *initial_tap);
+                controls.push(Control {
+                    action: index,
+                    sensitivity: sensitivity_mw,
+                    current,
+                    lower,
+                    upper,
+                    penalty: options.pst_penalty,
+                    pst: Some(PstControl { branch, tap_to_angle: table, tap }),
+                });
+            }
+            RangeActionKind::Injection { distribution } => {
+                // A redispatch shifts power between buses by its distribution
+                // keys. Its sensitivity is the PTDF combination those keys
+                // produce, which is exact in DC.
+                let mut injections = vec![0.0; sensitivity.n_buses()];
+                let mut usable = false;
+                for (element, key) in distribution {
+                    let Some(branch) = resolution.branch(element) else { continue };
+                    // An injection element is named by the equipment it sits
+                    // on; resolving it as a branch gives the bus at its `from`
+                    // end, which is where the power enters.
+                    let Some(bus) = branches.iter().find(|b| b.index == branch).map(|b| b.from)
+                    else {
+                        continue;
+                    };
+                    injections[bus] += key / network.base_mva;
+                    usable = true;
+                }
+                if !usable {
+                    continue;
+                }
+                let Some((_, column)) = sensitivity.response(&injections) else { continue };
+                let sensitivity_mw: Vec<f64> =
+                    cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0)).collect();
+                let (lower, upper) = standard_bounds(action);
+                controls.push(Control {
+                    action: index,
+                    sensitivity: sensitivity_mw,
+                    current: 0.0,
+                    lower,
+                    upper,
+                    penalty: options.injection_penalty,
+                    pst: None,
+                });
+            }
+            // Recognised and skipped: gridoxide models a DC network but nothing
+            // connects it to a range action, and a counter trade has no network
+            // sensitivity at all.
+            RangeActionKind::Hvdc { .. } | RangeActionKind::CounterTrade { .. } => {}
+        }
+    }
+    Some(controls)
+}
+
+/// The live phase shift of a branch, in degrees, if it is a transformer.
+fn live_shift_degrees(network: &NetworkMut<'_>, branch: usize) -> Option<f64> {
+    let i = branch.checked_sub(network.lines.len())?;
+    Some(network.transformers.get(i)?.tap.arg().to_degrees())
+}
+
+/// Angle bounds from a PST range action's tap ranges.
+fn tap_bounds(
+    action: &super::crac::RangeAction,
+    table: &[(i32, f64)],
+    initial_tap: i32,
+) -> (f64, f64) {
+    let (mut low, mut high) = (i32::MIN, i32::MAX);
+    for range in &action.ranges {
+        let (min, max) = match range.kind {
+            super::crac::RangeKind::RelativeToInitialNetwork => (
+                range.min.map(|m| initial_tap + m as i32),
+                range.max.map(|m| initial_tap + m as i32),
+            ),
+            _ => (range.min.map(|m| m as i32), range.max.map(|m| m as i32)),
+        };
+        if let Some(m) = min {
+            low = low.max(m);
+        }
+        if let Some(m) = max {
+            high = high.min(m);
+        }
+    }
+    let angles: Vec<f64> = table
+        .iter()
+        .filter(|(t, _)| *t >= low && *t <= high)
+        .map(|(_, a)| *a)
+        .collect();
+    if angles.is_empty() {
+        let all: Vec<f64> = table.iter().map(|(_, a)| *a).collect();
+        return (
+            all.iter().copied().fold(f64::INFINITY, f64::min),
+            all.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
+    }
+    (
+        angles.iter().copied().fold(f64::INFINITY, f64::min),
+        angles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    )
+}
+
+fn standard_bounds(action: &super::crac::RangeAction) -> (f64, f64) {
+    let mut low = f64::NEG_INFINITY;
+    let mut high = f64::INFINITY;
+    for range in &action.ranges {
+        if let Some(m) = range.min {
+            low = low.max(m);
+        }
+        if let Some(m) = range.max {
+            high = high.min(m);
+        }
+    }
+    if low > high {
+        return (0.0, 0.0);
+    }
+    (low, high)
+}
+
+/// Apply proposed set-points to the network and to the controls.
+fn apply(
+    _crac: &Crac,
+    network: &mut NetworkMut<'_>,
+    controls: &mut [Control],
+    proposed: &[(f64, Option<i32>)],
+) {
+    for (control, &(value, tap)) in controls.iter_mut().zip(proposed) {
+        control.current = value;
+        if let Some(pst) = control.pst.as_mut() {
+            if let Some(tap) = tap {
+                pst.tap = tap;
+            }
+            if let Some(i) = pst.branch.checked_sub(network.lines.len()) {
+                if let Some(transformer) = network.transformers.get_mut(i) {
+                    // Keep the ratio, replace the shift.
+                    let ratio = transformer.tap.norm();
+                    transformer.tap =
+                        num_complex::Complex::from_polar(ratio, value.to_radians());
+                }
+            }
+        }
+    }
+}
+
+/// The minimum margin over the perimeter's optimized CNECs, MW.
+fn measure(crac: &Crac, network: &NetworkMut<'_>, resolution: &Resolution, state: &State) -> f64 {
+    let view = network.view();
+    let result = evaluate(crac, &view, resolution);
+    result
+        .perimeters
+        .iter()
+        .find(|p| p.state == *state)
+        .and_then(|p| p.min_margin())
+        .unwrap_or(f64::INFINITY)
+}
+
+/// Flows on the perimeter's CNEC branches, MW, at the current operating point.
+fn perimeter_flows(
+    crac: &Crac,
+    network: &NetworkMut<'_>,
+    resolution: &Resolution,
+    state: &State,
+    cnecs: &[usize],
+) -> Vec<f64> {
+    let view = network.view();
+    let result = evaluate(crac, &view, resolution);
+    let perimeter = result.perimeters.iter().find(|p| p.state == *state);
+    cnecs
+        .iter()
+        .map(|&i| {
+            perimeter
+                .and_then(|p| p.cnecs.iter().find(|c| c.cnec == i))
+                .map(|c| c.flow_mw)
+                .unwrap_or(0.0)
+        })
+        .collect()
+}
+
+/// Base-case DC flows, exposed for callers that want the operating point
+/// without going through a full evaluation.
+pub fn base_flows(network: &Network<'_>) -> Vec<f64> {
+    let mut buses = network.buses.to_vec();
+    dc_power_flow(&mut buses, network.lines, network.transformers, DcOptions::default()).branch_p
+}
