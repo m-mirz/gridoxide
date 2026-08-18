@@ -65,6 +65,23 @@ jobs:
       run: |
         cargo build --verbose --features ucte
         cargo test --verbose --features ucte
+    # `iidm` costs one crate (quick-xml) and no system library, so it is in CI
+    # alongside `ucte`. It is built together with `ucte` because its strongest
+    # test needs both: three fixtures are pypowsybl exports of `.uct` files the
+    # UCTE suite has already checked, so gridoxide reads the same network
+    # through two parsers that share no code and the answers must agree.
+    - name: Build and test the IIDM importer
+      run: |
+        cargo build --verbose --features iidm
+        cargo test --verbose --features iidm,ucte
+    # Feature *unification* is its own failure mode, and the steps above cannot
+    # see it: each builds one feature at a time, while cargo builds whatever
+    # combination a consumer asks for. `iidm` and `cgmes` share quick-xml, and
+    # cimdecoder enables its `encoding` feature — which changes the shape of a
+    # public type. That combination compiled in neither step above and broke in
+    # the one nobody ran. This is that step.
+    - name: Build the CI-covered features together
+      run: cargo build --verbose --features cgmes,ucte,iidm,opf
     # `capi` is built here for the same reason `opf` is: no system dependency.
     # It is pure Rust plus cbindgen, which cargo fetches like any other crate —
     # unlike klu/pardiso/opf-highs/opf-ipopt, which each need a library the

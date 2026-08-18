@@ -35,6 +35,11 @@ num-complex = { version = "0.4.6", features = ["serde"] }
 # parallelism inside faer from oversubscribing the machine, and it means a
 # batch never pays thread-creation cost per call.
 rayon = "1.12"
+# The IIDM importer's XML reader (`iidm` feature). Already present in the tree
+# as a transitive dependency of `cimdecoder`, so enabling `iidm` adds nothing to
+# a build that already has `cgmes` — this promotes it to a direct dependency the
+# same way `rayon` was promoted for `src/batch.rs`.
+quick-xml = { version = "0.37", optional = true }
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -111,6 +116,20 @@ cgmes = ["dep:cimdecoder", "dep:cimstructs"]
 # *tables* — see `src/ratings.rs` and `types::TapChanger` for why those two
 # were the gap worth closing.
 ucte = []
+# Reads PowSyBl's IIDM network format (src/iidm.rs) — `.xiidm` files, the native
+# serialization of powsybl-core's network model, and the second of the two
+# formats the published remedial-action test material comes in.
+#
+# Deliberately **version-tolerant**: it accepts any `.../schema/iidm/1_*`
+# namespace and skips elements it does not know rather than failing. The 51
+# vendored fixtures span eleven schema versions (1_0 through 1_16) and the model
+# moved underneath them — limits are spelled `currentLimits1` in the older files
+# and `operationalLimitsGroup1` in the newer. A strict parser would rot against
+# the next powsybl release; this one is designed not to.
+#
+# Costs one dependency (`quick-xml`) and no system library, so like `ucte` and
+# `opf` it is built and tested in CI.
+iidm = ["dep:quick-xml"]
 # The optimization layer, complete and self-contained: `opf::LinearProgram`,
 # `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs), DC-OPF
 # (src/opf/dc.rs), and the in-house primal-dual interior-point QP solver
@@ -179,6 +198,11 @@ opf-ipopt = ["opf", "dep:bindgen"]
 # incompatible cdylibs from one `cargo` invocation. The same trap the `python`
 # feature already documents for tests and examples.
 capi = ["dep:cbindgen"]
+
+[[test]]
+name = "iidm_test"
+path = "tests/iidm_test.rs"
+required-features = ["iidm", "ucte"]
 
 [[test]]
 name = "ucte_test"

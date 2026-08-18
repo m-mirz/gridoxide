@@ -117,7 +117,9 @@ than committed, because of their own licensing — see `tests/data/cgmes/README.
 The UCTE-DEF fixtures under `tests/data/ucte/` **are** committed, and they are the one place in this
 repository where third-party source files are vendored rather than referenced. They come verbatim
 from [powsybl-open-rao](https://github.com/powsybl/powsybl-open-rao) and carry its
-**MPL-2.0** licence, not this crate's Apache-2.0.
+**MPL-2.0** licence, not this crate's Apache-2.0. The same applies to
+`tests/data/iidm/`, where five files are copied verbatim from the same source and three are
+pypowsybl conversions of the UCTE ones — derived works, so MPL-2.0 too.
 
 That is deliberate and it is safe: MPL-2.0 is a *per-file* copyleft. It attaches to the files it
 covers and does not reach the code that reads them, so vendoring six `.uct` files alongside an
