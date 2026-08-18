@@ -24,6 +24,8 @@ pub mod json;
 pub mod pgm;
 #[cfg(feature = "ucte")]
 pub mod ucte;
+#[cfg(feature = "iidm")]
+pub mod iidm;
 pub mod sparse;
 pub mod block_sparse;
 pub mod klu_native;

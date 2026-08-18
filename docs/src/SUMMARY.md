@@ -46,6 +46,7 @@
 # Data Import
 
 - [Reading UCTE-DEF Input](./import/ucte.md)
+- [Reading IIDM Input](./import/iidm.md)
 
 # CGMES Data Model
 
