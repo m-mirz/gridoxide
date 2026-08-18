@@ -1,0 +1,176 @@
+//! The `gridoxide security` subcommand.
+//!
+//! `main.rs`'s argument handling is hand-rolled, so it is pinned here by
+//! driving the built binary rather than calling into the library.
+//!
+//! The exit code carries meaning and is the point of most of these: 0 secure,
+//! 1 insecure, 2 the invocation was wrong. Conflating the last two is how a
+//! study silently passes because the CRAC failed to load.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn data(sub: &str, name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(sub).join(name)
+}
+
+fn run(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_gridoxide")).args(args).output().expect("run gridoxide")
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn an_insecure_network_reports_its_overloads_and_exits_one() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&["security", network.to_str().unwrap(), "--crac", crac.to_str().unwrap()]);
+    let text = stdout(&out);
+
+    assert!(text.contains("INSECURE"), "{text}");
+    assert!(text.contains("OVERLOAD"), "{text}");
+    // Every perimeter the CRAC defines should be named.
+    for instant in ["preventive", "outage", "auto", "curative"] {
+        assert!(text.contains(instant), "no `{instant}` perimeter in output:\n{text}");
+    }
+    assert_eq!(out.status.code(), Some(1), "an insecure network must exit 1:\n{text}");
+}
+
+#[test]
+fn the_json_form_is_machine_readable() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&[
+        "security",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--json",
+    ]);
+    let text = stdout(&out);
+    let doc: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON: {e}\n{text}"));
+
+    assert_eq!(doc["secure"], false);
+    assert!(doc["min_margin_mw"].as_f64().expect("a margin") < 0.0);
+    assert_eq!(doc["unresolved"], 0);
+    assert_eq!(doc["skipped_cnecs"], 0);
+    let perimeters = doc["perimeters"].as_array().expect("perimeters");
+    assert_eq!(perimeters.len(), 4);
+    // The base case is the one with no contingency, and there is exactly one.
+    let base: Vec<_> = perimeters.iter().filter(|p| p["contingency"].is_null()).collect();
+    assert_eq!(base.len(), 1);
+    assert!(!base[0]["cnecs"].as_array().expect("cnecs").is_empty());
+}
+
+#[test]
+fn a_secure_network_exits_zero() {
+    // Same network, but with every threshold relaxed far beyond any flow. This
+    // is the case that distinguishes "found no violations" from "found no
+    // CNECs", which would otherwise both print nothing and exit 0.
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let source = std::fs::read_to_string(data("rao", "crac-for-12nodes.json")).expect("crac");
+    let (crac, _) = gridoxide::rao::crac_json::parse(&source).expect("parse");
+    let mut relaxed = crac.clone();
+    for cnec in &mut relaxed.flow_cnecs {
+        for threshold in &mut cnec.thresholds {
+            threshold.unit = gridoxide::rao::Unit::Megawatt;
+            threshold.min = Some(-1e6);
+            threshold.max = Some(1e6);
+        }
+    }
+    let path = std::env::temp_dir().join("gridoxide-security-relaxed.rao.json");
+    std::fs::write(&path, relaxed.to_json().expect("serialize")).expect("write");
+
+    let out = run(&["security", network.to_str().unwrap(), "--crac", path.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("SECURE"), "{text}");
+    assert!(!text.contains("INSECURE"), "{text}");
+    assert!(text.contains("0 overload(s)"), "{text}");
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn the_native_companion_document_is_accepted_too() {
+    // `--crac` takes either format; the native one is tried first so that a
+    // malformed companion reports its own error rather than "not a CRAC".
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let source = std::fs::read_to_string(data("rao", "crac-for-12nodes.json")).expect("crac");
+    let (crac, _) = gridoxide::rao::crac_json::parse(&source).expect("parse");
+    let path = std::env::temp_dir().join("gridoxide-security-native.rao.json");
+    std::fs::write(&path, crac.to_json().expect("serialize")).expect("write");
+
+    let out = run(&["security", network.to_str().unwrap(), "--crac", path.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("INSECURE"), "{text}");
+    // Same answer as the OpenRAO-format run: a round trip must not change the
+    // verdict.
+    assert!(text.contains("241.7"), "{text}");
+    assert_eq!(out.status.code(), Some(1));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_broken_invocation_exits_two_rather_than_one() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+
+    // No --crac at all.
+    let out = run(&["security", network.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "missing --crac should exit 2");
+
+    // A CRAC that does not exist.
+    let out = run(&["security", network.to_str().unwrap(), "--crac", "/nonexistent.json"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    // A network whose format cannot be told.
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&["security", "network.wat", "--crac", crac.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("expected a .uct or .xiidm"));
+}
+
+#[test]
+fn an_unresolvable_element_is_warned_about_rather_than_ignored() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let source = std::fs::read_to_string(data("rao", "crac-for-12nodes.json")).expect("crac");
+    let (mut crac, _) = gridoxide::rao::crac_json::parse(&source).expect("parse");
+    crac.flow_cnecs[0].network_element = "NO SUCH BRANCH".into();
+    let path = std::env::temp_dir().join("gridoxide-security-unresolved.rao.json");
+    std::fs::write(&path, crac.to_json().expect("serialize")).expect("write");
+
+    let out = run(&["security", network.to_str().unwrap(), "--crac", path.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("warning"), "an unresolved element must be warned about:\n{text}");
+    assert!(text.contains("NO SUCH BRANCH"), "{text}");
+    assert!(text.contains("CNEC(s) skipped"), "{text}");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn iidm_networks_work_as_well_as_ucte() {
+    let network = data("iidm", "TestCase12Nodes.xiidm");
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&[
+        "security",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--json",
+    ]);
+    let text = stdout(&out);
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+    assert_eq!(doc["unresolved"], 0, "the CRAC should resolve against the IIDM form too");
+
+    // And it must reach the same verdict as the UCTE form of the same network,
+    // since the two importers agree on the flows.
+    let ucte = data("ucte", "TestCase12Nodes.uct");
+    let other = run(&["security", ucte.to_str().unwrap(), "--crac", crac.to_str().unwrap(), "--json"]);
+    let expected: serde_json::Value = serde_json::from_str(&stdout(&other)).expect("json");
+    assert_eq!(doc["secure"], expected["secure"]);
+    let a = doc["min_margin_mw"].as_f64().unwrap();
+    let b = expected["min_margin_mw"].as_f64().unwrap();
+    assert!((a - b).abs() < 1e-6, "IIDM says {a} MW, UCTE says {b} MW");
+}

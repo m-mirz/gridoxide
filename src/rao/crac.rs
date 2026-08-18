@@ -112,7 +112,10 @@ pub enum Side {
 pub enum Unit {
     Ampere,
     Megawatt,
-    /// A fraction of the branch's own `iMax`, expressed as a percentage.
+    /// A fraction of the branch's own `iMax`. **Despite the name this is a
+    /// fraction, not a percentage** — `1.0` means 100%, as the reference's own
+    /// `ThresholdAdder` javadoc states. Reading it as a percentage makes every
+    /// such threshold a hundred times too tight.
     PercentImax,
     Degree,
     Kilovolt,

@@ -6,6 +6,7 @@
 
 pub mod crac;
 pub mod crac_json;
+pub mod evaluate;
 
 pub use crac::{
     RaoDocument, DOCUMENT_TYPE, DOCUMENT_VERSION,
@@ -13,3 +14,4 @@ pub use crac::{
     RangeAction, RangeActionKind, RangeKind, Side, State, Threshold, Unit, UsageRule,
 };
 pub use crac_json::{CracError, CracReport};
+pub use evaluate::{evaluate, CnecResult, Network, PerimeterResult, Resolution, SecurityResult};
