@@ -6,7 +6,7 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > are met — see §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and
 > the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
-> drops the rest). Phases 4, 5 and 6 are done. Phases 7-12 are unstarted.
+> drops the rest). Phases 4, 5, 6 and 7 are done. Phases 8-12 are unstarted.
 >
 > The strongest result so far was not planned for. §6.2 justified building two importers as the only
 > route to the external gate; what it did not anticipate is that the two would gate *each other*.
@@ -492,7 +492,7 @@ Assert on the objective and on feasibility, never on the argmin.
 | 4 | ✅ **Done.** **CRAC data model and readers** (`src/rao/crac.rs`, `crac_json.rs`, `<network>.rao.json`) | All **428** CRACs in the checkout import, across 24 format versions — including the 98 that are not valid JSON (bare `NaN`). Dropped remedial actions: 4, all of kinds the model does not carry, all reported. Every fixture round-trips through the native format without loss |
 | 5 | ✅ **Done.** **Evaluation kernel** (`src/rao/evaluate.rs`) + `gridoxide security` | §8.2 met for branch outages: every Woodbury-screened flow matches a from-scratch re-solve to <1e-6 MW. Base-case flows are the DC solution exactly. A UCTE and an IIDM copy of one network reach the same verdict. Bus-split screening is not yet exercised — no vendored CRAC contains a switching contingency |
 | 6 | ✅ **Done.** **Integrality on the LP boundary** (`col_integral`, `set_binary`) + HiGHS MIP backend | Solves hand-built MILPs whose integer optimum differs from the relaxation in both objective and argument; `IpmSolver` refuses with `IntegralityUnsupported` rather than relaxing; MIQP rejected at `validate`; a MIP reports no duals rather than the winning node's. All 585 `opf-highs` tests still pass, so the continuous path is unperturbed |
-| 7 | **Linear optimizer** (`src/rao/linear.rs`) — core + margin + discrete-PST + usage-limit fillers, iterate-and-relinearize | §8.1 analytic cases; the Cucumber scenarios that use range actions only |
+| 7 | ✅ **Done** for one perimeter. **Linear optimizer** (`src/rao/linear.rs`) — flow linearization, max-min-margin, movement penalty, tap rounding, iterate-and-relinearize. Phase-shifter and redispatch controls | The phase-shift sensitivity is finite-differenced against a DC re-solve to <1e-6 pu/rad, including the direct term on the shifter's own branch. On the vendored case the preventive margin improves −241.7 → −137.1 MW by moving one PST to tap 16, and the network is left exactly where the result says. **Not yet:** MNEC soft constraints, RA usage limits, discrete-tap MILP mode, multi-perimeter chaining |
 | 8 | **Search tree** (`src/rao/search.rs`) — bloom, filters, deterministic ordering, parallel leaves | §8.3 on the preventive-only scenarios |
 | 9 | **Curative perimeters and `RaoResult`** — multi-instant, PATL/TATL, the pull-forward rule | §8.3 on the multi-step scenarios; CLI `gridoxide rao` and Python `rao()` |
 | 10 | **In-house branch-and-bound** over `IpmSolver`, MILP back in CI | §8.4 against HiGHS on every fixture and on randomized MILPs |

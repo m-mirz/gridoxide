@@ -133,9 +133,11 @@ iidm = ["dep:quick-xml"]
 # The remedial-action layer (src/rao/) — see plans/RAO_PLAN.md. At present the
 # CRAC data model and its readers; the optimizer follows.
 #
-# Pure Rust on serde, which the crate already depends on, so nothing new to
-# install and it is built and tested in CI.
-rao = []
+# Depends on `opf` for the `LinearProgram`/`Solver` boundary the range-action
+# optimization is written against — not on any *backend*, so the default
+# in-house interior-point solver serves and nothing needs installing. Built and
+# tested in CI.
+rao = ["opf"]
 # The optimization layer, complete and self-contained: `opf::LinearProgram`,
 # `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs), DC-OPF
 # (src/opf/dc.rs), and the in-house primal-dual interior-point QP solver
@@ -209,6 +211,11 @@ capi = ["dep:cbindgen"]
 name = "cli_security_test"
 path = "tests/cli_security_test.rs"
 required-features = ["rao", "ucte", "iidm"]
+
+[[test]]
+name = "rao_linear_test"
+path = "tests/rao_linear_test.rs"
+required-features = ["rao", "ucte"]
 
 [[test]]
 name = "rao_evaluate_test"
