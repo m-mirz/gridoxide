@@ -182,6 +182,32 @@ impl Solver for HighsSolver {
             check(status, "Highs_passHessian")?;
         }
 
+        if problem.has_integers() {
+            // Declared *after* `Highs_passLp`, which always builds a continuous
+            // model — this is the call that turns it into a MIP, and HiGHS then
+            // uses its branch-and-cut solver instead of the simplex.
+            let integrality: Vec<Int> = (0..n_col)
+                .map(|c| {
+                    if problem.is_integral(c) {
+                        bindings::kHighsVarTypeInteger
+                    } else {
+                        bindings::kHighsVarTypeContinuous
+                    }
+                })
+                .collect();
+            // SAFETY: the array is exactly `n_col` long, which is the range
+            // being changed, and HiGHS only reads it.
+            let status = unsafe {
+                bindings::Highs_changeColsIntegralityByRange(
+                    self.handle,
+                    0,
+                    n_col as Int - 1,
+                    integrality.as_ptr(),
+                )
+            };
+            check(status, "Highs_changeColsIntegralityByRange")?;
+        }
+
         // SAFETY: as above; `Highs_run` only mutates HiGHS-owned state.
         let status = unsafe { bindings::Highs_run(self.handle) };
         check(status, "Highs_run")?;
@@ -209,6 +235,17 @@ impl Solver for HighsSolver {
             )
         };
         check(get, "Highs_getSolution")?;
+
+        // A MIP has no duals. HiGHS fills the arrays anyway — with values from
+        // the final LP relaxation at the winning node, which are *not* shadow
+        // prices of the integer problem and mean nothing to a caller reading
+        // them as such. Clearing them makes the absence explicit rather than
+        // letting a plausible-looking number through.
+        let (col_dual, row_dual) = if problem.has_integers() {
+            (vec![0.0; n_col], vec![0.0; n_row])
+        } else {
+            (col_dual, row_dual)
+        };
 
         // SAFETY: reads HiGHS-owned state.
         let objective = unsafe { bindings::Highs_getObjectiveValue(self.handle) };
