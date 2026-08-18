@@ -50,6 +50,13 @@ usage:
                                 gridoxide's own <network>.rao.json companion.
                                 Exits 0 when every margin is non-negative and 1
                                 when any is not, so it can gate a pipeline.
+  gridoxide rao <network> --crac <crac.json> [--depth N] [--json]
+                                optimize remedial actions: search over the
+                                network actions the CRAC permits, re-optimizing
+                                the range actions at every candidate, and report
+                                what to do in each state. --depth bounds how
+                                many network actions may be stacked (default 2).
+                                Exits 0 when every perimeter ends secure.
   gridoxide switches <profile.xml>... [--retain none|busbar_adjacent|all]
                      [--open <mrid>] [--solve]
                                 list a CGMES model's switching devices, read
@@ -159,6 +166,23 @@ fn main() {
             },
             _ => {
                 eprintln!("error: security needs a network path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("rao") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => match run_rao(path, &args[2..]) {
+                Ok(secure) => {
+                    if !secure {
+                        std::process::exit(1);
+                    }
+                }
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    std::process::exit(2);
+                }
+            },
+            _ => {
+                eprintln!("error: rao needs a network path\n\n{USAGE}");
                 std::process::exit(2);
             }
         },
@@ -1369,6 +1393,152 @@ fn security_json(
 #[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
 fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
     Err("security needs the `rao` feature and an importer (`ucte` or `iidm`); \
+         rebuild with `--features rao,ucte`"
+        .to_string())
+}
+
+/// `gridoxide rao <network> --crac <crac.json> [--depth N] [--json]`
+///
+/// Each state the CRAC defines is optimized independently: the actions
+/// available there are searched, and the range actions re-optimized under each
+/// candidate. States are *not* chained — a curative perimeter here is solved as
+/// if the preventive one had done nothing, which is the multi-perimeter work
+/// still to come. The output says so rather than leaving it to be assumed.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
+    use gridoxide::opf::ipm::IpmSolver;
+    use gridoxide::rao::{crac_json, search, Network, Resolution, SearchOptions};
+
+    let crac_path = flag_value(flags, "--crac")?.ok_or("rao needs --crac <crac.json>")?;
+    let depth = match flag_value(flags, "--depth")? {
+        Some(value) => value.parse::<usize>().map_err(|_| format!("bad --depth `{value}`"))?,
+        None => 2,
+    };
+    let as_json = flags.iter().any(|f| f == "--json");
+
+    let network = load_network_for_security(path)?;
+    let text = std::fs::read_to_string(&crac_path)
+        .map_err(|e| format!("reading {crac_path}: {e}"))?;
+    let crac = match gridoxide::rao::Crac::from_json(&text) {
+        Ok(crac) => crac,
+        Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?.0,
+    };
+
+    let resolution = Resolution::new(&crac, &network.branch_ids);
+    let view = Network {
+        buses: &network.buses,
+        lines: &network.lines,
+        transformers: &network.transformers,
+        branch_ids: &network.branch_ids,
+        base_mva: network.base_mva,
+    };
+    let options = SearchOptions { max_depth: depth, ..Default::default() };
+
+    let mut secure = true;
+    let mut records = Vec::new();
+    for state in crac.states() {
+        let mut solver = IpmSolver::new();
+        let result = search(&crac, &view, &resolution, &state, &mut solver, &options);
+        if !result.is_secure() {
+            secure = false;
+        }
+        records.push((state, result));
+    }
+
+    if as_json {
+        let mut body = String::new();
+        for (i, (state, result)) in records.iter().enumerate() {
+            if i > 0 {
+                body.push(',');
+            }
+            let actions: Vec<String> = result
+                .network_actions
+                .iter()
+                .map(|&a| format!("{:?}", crac.network_actions[a].id))
+                .collect();
+            let setpoints: Vec<String> = result
+                .setpoints
+                .iter()
+                .filter(|s| s.moved())
+                .map(|s| {
+                    format!(
+                        "{{\"action\": {:?}, \"value\": {}, \"tap\": {}}}",
+                        crac.range_actions[s.action].id,
+                        s.value,
+                        s.tap.map(|t| t.to_string()).unwrap_or("null".into())
+                    )
+                })
+                .collect();
+            body.push_str(&format!(
+                "\n  {{\"instant\": {:?}, \"contingency\": {}, \"initial_margin_mw\": {}, \
+                 \"final_margin_mw\": {}, \"leaves\": {}, \"network_actions\": [{}], \
+                 \"setpoints\": [{}]}}",
+                crac.instants[state.instant].id,
+                match state.contingency {
+                    Some(c) => format!("{:?}", crac.contingencies[c].id),
+                    None => "null".to_string(),
+                },
+                result.initial_margin_mw,
+                result.final_margin_mw,
+                result.leaves,
+                actions.join(", "),
+                setpoints.join(", ")
+            ));
+        }
+        println!("{{\n \"secure\": {secure},\n \"perimeters\": [{body}\n ]\n}}");
+        return Ok(secure);
+    }
+
+    if !resolution.is_complete() {
+        println!(
+            "warning: {} element(s) not found in the network: {}",
+            resolution.unresolved.len(),
+            resolution.unresolved.join(", ")
+        );
+    }
+    for (state, result) in &records {
+        let instant = &crac.instants[state.instant].id;
+        let contingency = state
+            .contingency
+            .map(|c| crac.contingencies[c].id.as_str())
+            .unwrap_or("base case");
+        println!(
+            "\n{instant} / {contingency}: {:.1} -> {:.1} MW ({:+.1}), {} leaf/leaves",
+            result.initial_margin_mw,
+            result.final_margin_mw,
+            result.improvement(),
+            result.leaves
+        );
+        for &action in &result.network_actions {
+            println!("  APPLY  {}", crac.network_actions[action].id);
+        }
+        for setpoint in result.setpoints.iter().filter(|s| s.moved()) {
+            match setpoint.tap {
+                Some(tap) => println!(
+                    "  SET    {} to tap {tap} ({:.3} deg, was {:.3})",
+                    crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
+                ),
+                None => println!(
+                    "  SET    {} to {:.1} MW (was {:.1})",
+                    crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
+                ),
+            }
+        }
+        if result.network_actions.is_empty() && !result.setpoints.iter().any(|s| s.moved()) {
+            println!("  (nothing available helps)");
+        }
+    }
+    println!(
+        "\n{}: each state optimized independently — preventive actions are not \
+         carried into curative perimeters yet",
+        if secure { "SECURE" } else { "INSECURE" }
+    );
+    Ok(secure)
+}
+
+#[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
+fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
+    Err("rao needs the `rao` feature and an importer (`ucte` or `iidm`); \
          rebuild with `--features rao,ucte`"
         .to_string())
 }

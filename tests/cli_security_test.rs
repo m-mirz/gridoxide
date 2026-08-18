@@ -174,3 +174,93 @@ fn iidm_networks_work_as_well_as_ucte() {
     let b = expected["min_margin_mw"].as_f64().unwrap();
     assert!((a - b).abs() < 1e-6, "IIDM says {a} MW, UCTE says {b} MW");
 }
+
+// ---------------------------------------------------------------------------
+// `gridoxide rao`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_rao_command_reports_what_to_do() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-topology-helps.json");
+    let out = run(&["rao", network.to_str().unwrap(), "--crac", crac.to_str().unwrap()]);
+    let text = stdout(&out);
+    assert!(text.contains("APPLY"), "no action recommended:\n{text}");
+    assert!(text.contains("Open tie-line FR DE"), "{text}");
+    // The preventive perimeter goes from insecure to secure.
+    assert!(text.contains("-512.7 -> 500.0"), "{text}");
+    // The curative perimeter has nothing available and must say so rather than
+    // printing an empty section.
+    assert!(text.contains("nothing available helps"), "{text}");
+    // And the multi-perimeter limitation is stated rather than left to be
+    // assumed — a reader must not take these as a coordinated plan.
+    assert!(text.contains("not carried into curative"), "{text}");
+}
+
+#[test]
+fn the_rao_command_emits_json() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&[
+        "rao",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--json",
+    ]);
+    let text = stdout(&out);
+    let doc: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON: {e}\n{text}"));
+    let perimeters = doc["perimeters"].as_array().expect("perimeters");
+    assert_eq!(perimeters.len(), 4);
+
+    // The preventive perimeter should move the phase shifter and nothing else,
+    // since this fixture's network actions are all harmful.
+    let preventive = perimeters
+        .iter()
+        .find(|p| p["instant"] == "preventive")
+        .expect("a preventive perimeter");
+    assert!(preventive["network_actions"].as_array().expect("actions").is_empty());
+    let setpoints = preventive["setpoints"].as_array().expect("setpoints");
+    assert_eq!(setpoints.len(), 1);
+    assert!(setpoints[0]["tap"].as_i64().is_some(), "a PST set-point should carry its tap");
+    assert!(
+        preventive["final_margin_mw"].as_f64().unwrap()
+            > preventive["initial_margin_mw"].as_f64().unwrap(),
+        "{preventive}"
+    );
+    assert!(preventive["leaves"].as_u64().unwrap() > 0, "candidates should have been evaluated");
+}
+
+#[test]
+fn the_rao_depth_flag_is_honoured_and_validated() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-topology-helps.json");
+
+    let out = run(&[
+        "rao",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--depth",
+        "0",
+        "--json",
+    ]);
+    let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    for perimeter in doc["perimeters"].as_array().expect("perimeters") {
+        assert!(
+            perimeter["network_actions"].as_array().unwrap().is_empty(),
+            "depth 0 took an action: {perimeter}"
+        );
+    }
+
+    let out = run(&[
+        "rao",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--depth",
+        "banana",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "a bad --depth should exit 2");
+}
