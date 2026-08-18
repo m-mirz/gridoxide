@@ -236,6 +236,11 @@ path = "tests/cli_opf_test.rs"
 required-features = ["opf"]
 
 [[test]]
+name = "opf_milp_test"
+path = "tests/opf_milp_test.rs"
+required-features = ["opf"]
+
+[[test]]
 name = "opf_dc_test"
 path = "tests/opf_dc_test.rs"
 required-features = ["opf"]

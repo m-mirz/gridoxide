@@ -87,6 +87,19 @@ pub struct LinearProgram {
     pub rows: Vec<(usize, usize, f64)>,
     pub row_lower: Vec<f64>,
     pub row_upper: Vec<f64>,
+
+    /// Which columns must take integer values. **Empty means every column is
+    /// continuous**, which is what every caller written before this field
+    /// existed produces — so adding it changed no behaviour anywhere.
+    ///
+    /// Integrality is not a hint. A backend that cannot honour it must refuse
+    /// the problem rather than solve the relaxation, because a relaxed answer
+    /// to a discrete question is a plausible number that no one can act on: a
+    /// phase shifter cannot sit at tap 4.3, and reporting that it should is
+    /// worse than reporting nothing. [`ipm::IpmSolver`](crate::opf::ipm) is a
+    /// barrier method and refuses; [`highs::HighsSolver`](crate::opf::highs)
+    /// has a branch-and-cut MIP solver underneath and honours it.
+    pub col_integral: Vec<bool>,
 }
 
 impl LinearProgram {
@@ -96,6 +109,7 @@ impl LinearProgram {
         Self {
             n_vars,
             n_rows: 0,
+            col_integral: Vec::new(),
             col_lower: vec![f64::NEG_INFINITY; n_vars],
             col_upper: vec![f64::INFINITY; n_vars],
             col_cost: vec![0.0; n_vars],
@@ -130,6 +144,45 @@ impl LinearProgram {
     /// simply misinterpreted. Backends call this first so neither has to
     /// re-derive the checks — and so a bug is reported against the *problem*
     /// rather than surfacing as a solver failure.
+    /// Require column `col` to be integral, growing the vector if this is the
+    /// first such column.
+    pub fn set_integral(&mut self, col: usize) {
+        if self.col_integral.len() < self.n_vars {
+            self.col_integral.resize(self.n_vars, false);
+        }
+        if col < self.n_vars {
+            self.col_integral[col] = true;
+        }
+    }
+
+    /// Require column `col` to be binary — integral, with bounds `[0, 1]`.
+    ///
+    /// A convenience because the two go together every time: an activation
+    /// indicator that is integral but unbounded is not a binary, and big-M
+    /// constraints written against it are wrong in a way that only shows up on
+    /// the instances where the bound would have bound.
+    pub fn set_binary(&mut self, col: usize) {
+        self.set_integral(col);
+        if col < self.n_vars {
+            self.col_lower[col] = 0.0;
+            self.col_upper[col] = 1.0;
+        }
+    }
+
+    pub fn is_integral(&self, col: usize) -> bool {
+        self.col_integral.get(col).copied().unwrap_or(false)
+    }
+
+    /// True when any column is integral — the question a backend asks before
+    /// deciding whether it can take the problem at all.
+    pub fn has_integers(&self) -> bool {
+        self.col_integral.iter().any(|x| *x)
+    }
+
+    pub fn n_integers(&self) -> usize {
+        self.col_integral.iter().filter(|x| **x).count()
+    }
+
     pub fn validate(&self) -> Result<(), OpfError> {
         let n = self.n_vars;
         for (name, len) in [
@@ -172,6 +225,21 @@ impl LinearProgram {
             if self.row_lower[k] > self.row_upper[k] {
                 return Err(OpfError::CrossedBounds { index: k, kind: "row" });
             }
+        }
+        if !self.col_integral.is_empty() && self.col_integral.len() != n {
+            return Err(OpfError::Shape {
+                what: "col_integral",
+                expected: n,
+                got: self.col_integral.len(),
+            });
+        }
+        // A mixed-integer *quadratic* program is a different and much harder
+        // problem, and neither backend solves one: HiGHS's MIP solver takes an
+        // LP relaxation, and the in-house interior point method is continuous.
+        // Rejecting it here means no caller can build one and receive a
+        // silently linearized answer.
+        if self.has_integers() && self.hessian.is_some() {
+            return Err(OpfError::IntegerQuadratic);
         }
         Ok(())
     }
@@ -256,6 +324,13 @@ pub enum OpfError {
     Index { row: usize, col: usize },
     UpperTriangleHessian { row: usize, col: usize },
     CrossedBounds { index: usize, kind: &'static str },
+    /// The problem has integral columns and a Hessian. See
+    /// [`LinearProgram::validate`].
+    IntegerQuadratic,
+    /// The problem has integral columns and this backend cannot honour them.
+    /// Raised rather than solving the relaxation — see
+    /// [`LinearProgram::col_integral`].
+    IntegralityUnsupported { backend: &'static str, columns: usize },
     /// The backend rejected the problem or failed internally.
     Backend(String),
 }
@@ -277,6 +352,16 @@ impl std::fmt::Display for OpfError {
             Self::CrossedBounds { index, kind } => {
                 write!(f, "{kind} {index} has its lower bound above its upper bound")
             }
+            Self::IntegerQuadratic => write!(
+                f,
+                "the problem has both integral columns and a Hessian; neither backend \
+                 solves a mixed-integer quadratic program"
+            ),
+            Self::IntegralityUnsupported { backend, columns } => write!(
+                f,
+                "{columns} column(s) are integral and the {backend} backend cannot honour \
+                 that; solving the relaxation would return set-points nobody can act on"
+            ),
             Self::Backend(message) => write!(f, "{message}"),
         }
     }
