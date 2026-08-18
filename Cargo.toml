@@ -206,6 +206,16 @@ opf-ipopt = ["opf", "dep:bindgen"]
 capi = ["dep:cbindgen"]
 
 [[test]]
+name = "cli_security_test"
+path = "tests/cli_security_test.rs"
+required-features = ["rao", "ucte", "iidm"]
+
+[[test]]
+name = "rao_evaluate_test"
+path = "tests/rao_evaluate_test.rs"
+required-features = ["rao", "ucte"]
+
+[[test]]
 name = "rao_crac_test"
 path = "tests/rao_crac_test.rs"
 required-features = ["rao"]

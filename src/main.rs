@@ -42,6 +42,14 @@ usage:
                                 containing sym_voltage_sensor/sym_power_sensor.
                                 The default method is Newton-Raphson; the flag
                                 selects the faster, less exact linearized one.
+  gridoxide security <network> --crac <crac.json> [--json]
+                                assess a network against a CRAC: which critical
+                                elements are overloaded, in which state, and by
+                                how much. The network may be UCTE-DEF (.uct) or
+                                IIDM (.xiidm); the CRAC may be OpenRAO JSON or
+                                gridoxide's own <network>.rao.json companion.
+                                Exits 0 when every margin is non-negative and 1
+                                when any is not, so it can gate a pipeline.
   gridoxide switches <profile.xml>... [--retain none|busbar_adjacent|all]
                      [--open <mrid>] [--solve]
                                 list a CGMES model's switching devices, read
@@ -134,6 +142,23 @@ fn main() {
             }
             _ => {
                 eprintln!("error: dc needs a path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("security") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => match run_security(path, &args[2..]) {
+                Ok(secure) => {
+                    if !secure {
+                        std::process::exit(1);
+                    }
+                }
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    std::process::exit(2);
+                }
+            },
+            _ => {
+                eprintln!("error: security needs a network path\n\n{USAGE}");
                 std::process::exit(2);
             }
         },
@@ -1165,4 +1190,185 @@ fn run_switches(args: &[String]) -> Result<(), String> {
 #[cfg(not(feature = "cgmes"))]
 fn run_switches(_args: &[String]) -> Result<(), String> {
     Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
+}
+
+/// `gridoxide security <network> --crac <crac.json> [--json]`
+///
+/// Returns `Ok(true)` when every margin is non-negative. The caller turns that
+/// into an exit code, so this can gate a pipeline: a secure network exits 0, an
+/// insecure one exits 1, and a *broken invocation* exits 2. Conflating the last
+/// two is how a study silently passes because the CRAC failed to load.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
+    use gridoxide::rao::{crac_json, evaluate, Network, Resolution};
+
+    let crac_path = flag_value(flags, "--crac")?
+        .ok_or("security needs --crac <crac.json>")?;
+    let as_json = flags.iter().any(|f| f == "--json");
+
+    let network = load_network_for_security(path)?;
+    let text = std::fs::read_to_string(&crac_path)
+        .map_err(|e| format!("reading {crac_path}: {e}"))?;
+    // gridoxide's own companion document first, then OpenRAO's format. Trying
+    // ours first means a malformed companion reports its own error rather than
+    // the less helpful "document is not a CRAC".
+    let (crac, report) = match gridoxide::rao::Crac::from_json(&text) {
+        Ok(crac) => (crac, crac_json::CracReport::default()),
+        Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?,
+    };
+
+    let resolution = Resolution::new(&crac, &network.branch_ids);
+    let view = Network {
+        buses: &network.buses,
+        lines: &network.lines,
+        transformers: &network.transformers,
+        branch_ids: &network.branch_ids,
+        base_mva: network.base_mva,
+    };
+    let result = evaluate(&crac, &view, &resolution);
+
+    if as_json {
+        println!("{}", security_json(&crac, &result, &resolution));
+        return Ok(result.is_secure());
+    }
+
+    for note in &network.notes {
+        println!("note: {note}");
+    }
+    if let Some(version) = &report.version {
+        println!("crac format version {version}");
+    }
+    if !resolution.is_complete() {
+        println!(
+            "warning: {} element(s) not found in the network: {}",
+            resolution.unresolved.len(),
+            resolution.unresolved.join(", ")
+        );
+    }
+    if !result.skipped.is_empty() {
+        println!("warning: {} CNEC(s) skipped for want of their element", result.skipped.len());
+    }
+
+    for perimeter in &result.perimeters {
+        let instant = &crac.instants[perimeter.state.instant].id;
+        let contingency = perimeter
+            .state
+            .contingency
+            .map(|c| crac.contingencies[c].id.as_str())
+            .unwrap_or("base case");
+        let severed = if perimeter.severed { "  [not screenable; re-solved]" } else { "" };
+        println!(
+            "\n{instant} / {contingency}: {} monitored, worst margin {:.1} MW{severed}",
+            perimeter.cnecs.len(),
+            perimeter.min_margin().unwrap_or(f64::NAN)
+        );
+        for violation in perimeter.violations() {
+            println!(
+                "  OVERLOAD {:<28} flow {:>9.1}  limit {:>9.1}  by {:>8.1} MW",
+                crac.flow_cnecs[violation.cnec].id,
+                violation.flow_mw,
+                violation.limit_mw,
+                -violation.margin_mw
+            );
+        }
+    }
+
+    let violations = result.violations().count();
+    println!(
+        "\n{}: {violations} overload(s) across {} perimeter(s)",
+        if result.is_secure() { "SECURE" } else { "INSECURE" },
+        result.perimeters.len()
+    );
+    Ok(result.is_secure())
+}
+
+/// The subset of an import `run_security` needs, so the two importers can be
+/// handled without a trait.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+struct SecurityNetwork {
+    buses: Vec<gridoxide::types::Bus>,
+    lines: Vec<gridoxide::types::Line>,
+    transformers: Vec<gridoxide::types::Transformer>,
+    branch_ids: Vec<String>,
+    base_mva: f64,
+    notes: Vec<String>,
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
+    let lower = path.to_ascii_lowercase();
+    #[cfg(feature = "iidm")]
+    if lower.ends_with(".xiidm") || lower.ends_with(".xml") {
+        let n = gridoxide::iidm::read(path).map_err(|e| e.to_string())?;
+        return Ok(SecurityNetwork {
+            buses: n.buses,
+            lines: n.lines,
+            transformers: n.transformers,
+            branch_ids: n.branch_ids,
+            base_mva: n.base_mva,
+            notes: n.notes,
+        });
+    }
+    #[cfg(feature = "ucte")]
+    if lower.ends_with(".uct") || lower.ends_with(".ucte") {
+        let n = gridoxide::ucte::read(path).map_err(|e| e.to_string())?;
+        return Ok(SecurityNetwork {
+            buses: n.buses,
+            lines: n.lines,
+            transformers: n.transformers,
+            branch_ids: n.branch_ids,
+            base_mva: n.base_mva,
+            notes: n.notes,
+        });
+    }
+    Err(format!(
+        "cannot tell what `{path}` is; expected a .uct or .xiidm file"
+    ))
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn security_json(
+    crac: &gridoxide::rao::Crac,
+    result: &gridoxide::rao::SecurityResult,
+    resolution: &gridoxide::rao::Resolution,
+) -> String {
+    let mut perimeters = String::new();
+    for (i, p) in result.perimeters.iter().enumerate() {
+        if i > 0 {
+            perimeters.push(',');
+        }
+        let mut cnecs = String::new();
+        for (j, c) in p.cnecs.iter().enumerate() {
+            if j > 0 {
+                cnecs.push(',');
+            }
+            cnecs.push_str(&format!(
+                "\n    {{\"cnec\": {:?}, \"flow_mw\": {}, \"limit_mw\": {}, \"margin_mw\": {}}}",
+                crac.flow_cnecs[c.cnec].id, c.flow_mw, c.limit_mw, c.margin_mw
+            ));
+        }
+        perimeters.push_str(&format!(
+            "\n  {{\"instant\": {:?}, \"contingency\": {}, \"severed\": {}, \"cnecs\": [{cnecs}]}}",
+            crac.instants[p.state.instant].id,
+            match p.state.contingency {
+                Some(c) => format!("{:?}", crac.contingencies[c].id),
+                None => "null".to_string(),
+            },
+            p.severed
+        ));
+    }
+    format!(
+        "{{\n \"secure\": {},\n \"min_margin_mw\": {},\n \"unresolved\": {},\n \"skipped_cnecs\": {},\n \"perimeters\": [{perimeters}\n ]\n}}",
+        result.is_secure(),
+        result.min_margin().map(|m| m.to_string()).unwrap_or("null".into()),
+        resolution.unresolved.len(),
+        result.skipped.len()
+    )
+}
+
+#[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
+fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
+    Err("security needs the `rao` feature and an importer (`ucte` or `iidm`); \
+         rebuild with `--features rao,ucte`"
+        .to_string())
 }

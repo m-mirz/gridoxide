@@ -85,6 +85,7 @@ jobs:
       run: |
         cargo build --verbose --features rao
         cargo test --verbose --features rao
+        cargo test --verbose --features rao,ucte,iidm
     - name: Build the CI-covered features together
       run: cargo build --verbose --features cgmes,ucte,iidm,opf,rao
     # `capi` is built here for the same reason `opf` is: no system dependency.
