@@ -15,10 +15,12 @@ use num_complex::Complex;
 
 pub use cimdecoder::CimDataset;
 use cimstructs::{
-    ACDCConverterDCTerminal, ACLineSegment, BaseVoltage, CsConverter, DCBreaker, DCDisconnector,
+    ACDCConverterDCTerminal, ACLineSegment, BaseVoltage, CsConverter, CurrentLimit, DCBreaker,
+    DCDisconnector,
     DCGround, DCLineSegment, DCSeriesDevice, DCShunt, DCSwitch, DCTerminal, EnergyConsumer,
     EquivalentInjection, LinearShuntCompensator, NonlinearShuntCompensator,
-    NonlinearShuntCompensatorPoint, PhaseTapChangerAsymmetrical, PhaseTapChangerNonLinear,
+    NonlinearShuntCompensatorPoint, OperationalLimitSet, OperationalLimitType,
+    PhaseTapChangerAsymmetrical, PhaseTapChangerNonLinear,
     PhaseTapChangerSymmetrical, PowerElectronicsConnection, PowerTransformerEnd, RatioTapChanger,
     RegulatingControl, StaticVarCompensator, SynchronousMachine, Terminal, TopologicalIsland,
     TopologicalNode, VsConverter,
@@ -2410,4 +2412,197 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
         zero_injection,
         treatment,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Operational limits
+// ---------------------------------------------------------------------------
+
+/// The operating limits CGMES declares for one piece of equipment, indexed by
+/// terminal.
+///
+/// `terminals[i]` corresponds to the same `i` that [`TerminalIndex::bus`] uses
+/// — 0 is `sequenceNumber` 1, the branch's starting point — so a caller that
+/// already knows which end of a branch it is looking at can index straight in.
+/// Equipment whose limits are attached to the *equipment* rather than to a
+/// terminal (CGMES permits both) has them repeated on every terminal, which is
+/// the honest reading of a limit that names no side.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EquipmentLimits {
+    pub terminals: Vec<crate::ratings::BranchLimits>,
+}
+
+impl EquipmentLimits {
+    /// The limits of terminal `which`, or an empty set if that terminal has
+    /// none.
+    pub fn terminal(&self, which: usize) -> crate::ratings::BranchLimits {
+        self.terminals.get(which).cloned().unwrap_or_default()
+    }
+
+    /// The tightest permanent rating over every terminal — the single number to
+    /// use when a caller has one branch and no side in mind.
+    pub fn tightest_patl(&self) -> Option<f64> {
+        self.terminals.iter().filter_map(|t| t.patl_a).fold(None, |acc, v| {
+            Some(match acc {
+                Some(a) => f64::min(a, v),
+                None => v,
+            })
+        })
+    }
+}
+
+/// Read every `OperationalLimit` in the dataset, keyed by the mRID of the
+/// equipment it applies to.
+///
+/// **This is the only route by which a CGMES network acquires ratings.** Until
+/// this existed, `cgmes_to_buses_and_branches` produced `Line`s and
+/// `Transformer`s with impedances and nothing else, so the question "is this
+/// network secure" could not be asked of a CGMES input at all — even though
+/// every conformity fixture in the tree carries the answer (768 `CurrentLimit`
+/// objects in SmallGrid, 33,262 in RealGrid).
+///
+/// # What is read, and what is skipped
+///
+/// `CurrentLimit` only. `ActivePowerLimit`, `ApparentPowerLimit` and
+/// `VoltageLimit` are recognised and **counted** rather than converted:
+/// [`ratings::BranchLimits`](crate::ratings::BranchLimits) is expressed in
+/// amperes, and silently folding an MVA limit into an ampere field would need a
+/// voltage this function does not have. They are reported through the returned
+/// `skipped` count so their absence is visible rather than assumed.
+///
+/// A limit is classified permanent or temporary from its
+/// `OperationalLimitType`: `isInfiniteDuration`, or a `kind` of `patl`, makes it
+/// the PATL; anything with an `acceptableDuration` becomes a
+/// [`TemporaryLimit`](crate::ratings::TemporaryLimit). A type that says neither
+/// is treated as permanent, since an unqualified limit that always applies is
+/// what a bare `OperationalLimit` means.
+///
+/// `value` is preferred over `normalValue`, falling back to it — the conformity
+/// fixtures populate `normalValue` and leave `value` absent, so a reader that
+/// only looked at `value` would find every limit empty and report success.
+pub fn cgmes_operational_limits(
+    ds: &CimDataset,
+) -> Result<(HashMap<String, EquipmentLimits>, LimitImportReport), CgmesError> {
+    use crate::ratings::{BranchLimits, TemporaryLimit};
+
+    // Terminal mRID -> (equipment mRID, 0-based position after sequence sort).
+    let mut position_of: HashMap<String, (String, usize)> = HashMap::new();
+    let mut by_equipment: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for mrid in by_type(ds, "Terminal") {
+        let Some(t) = get::<Terminal>(ds, mrid) else { continue };
+        let Some(ce) = t.conducting_equipment.as_ref() else { continue };
+        by_equipment
+            .entry(ce.mrid.clone())
+            .or_default()
+            .push((t.base.sequence_number.unwrap_or(1), mrid.clone()));
+    }
+    let mut terminal_count: HashMap<String, usize> = HashMap::new();
+    for (equipment, mut terms) in by_equipment {
+        terms.sort_by_key(|(seq, _)| *seq);
+        terminal_count.insert(equipment.clone(), terms.len());
+        for (i, (_, t_mrid)) in terms.into_iter().enumerate() {
+            position_of.insert(t_mrid, (equipment.clone(), i));
+        }
+    }
+
+    // Limit-set mRID -> which terminals it covers. A set attached to the
+    // equipment rather than a terminal covers all of them.
+    let mut set_targets: HashMap<String, (String, Vec<usize>)> = HashMap::new();
+    for mrid in by_type(ds, "OperationalLimitSet") {
+        let Some(set) = get::<OperationalLimitSet>(ds, mrid) else { continue };
+        if let Some(t) = set.terminal.as_ref() {
+            if let Some((equipment, which)) = position_of.get(&t.mrid) {
+                set_targets.insert(mrid.clone(), (equipment.clone(), vec![*which]));
+                continue;
+            }
+        }
+        if let Some(e) = set.equipment.as_ref() {
+            let n = terminal_count.get(&e.mrid).copied().unwrap_or(0);
+            if n > 0 {
+                set_targets.insert(mrid.clone(), (e.mrid.clone(), (0..n).collect()));
+            }
+        }
+    }
+
+    let mut limits: HashMap<String, EquipmentLimits> = HashMap::new();
+    let mut report = LimitImportReport::default();
+
+    for mrid in by_type(ds, "CurrentLimit") {
+        let Some(limit) = get::<CurrentLimit>(ds, mrid) else { continue };
+        let Some(value) = limit.value.or(limit.normal_value) else {
+            report.without_value += 1;
+            continue;
+        };
+        let Some(set_ref) = limit.base.operational_limit_set.as_ref() else {
+            report.unattached += 1;
+            continue;
+        };
+        let Some((equipment, which)) = set_targets.get(&set_ref.mrid) else {
+            report.unattached += 1;
+            continue;
+        };
+
+        let (duration, permanent) = match limit.base.operational_limit_type.as_ref() {
+            Some(t) => match get::<OperationalLimitType>(ds, &t.mrid) {
+                Some(kind) => {
+                    let patl = kind.is_infinite_duration.unwrap_or(false)
+                        || kind
+                            .kind
+                            .as_ref()
+                            .is_some_and(|k| k.mrid.rsplit('.').next() == Some("patl"));
+                    (kind.acceptable_duration, patl || kind.acceptable_duration.is_none())
+                }
+                None => (None, true),
+            },
+            None => (None, true),
+        };
+
+        let entry = limits.entry(equipment.clone()).or_default();
+        let needed = which.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+        if entry.terminals.len() < needed {
+            entry.terminals.resize(needed, BranchLimits::default());
+        }
+        for &i in which {
+            let slot = &mut entry.terminals[i];
+            if permanent {
+                // Several PATLs on one terminal is malformed but does occur;
+                // honouring all of them means keeping the tightest.
+                slot.patl_a = Some(match slot.patl_a {
+                    Some(existing) => existing.min(value),
+                    None => value,
+                });
+            } else {
+                slot.tatl.push(TemporaryLimit {
+                    acceptable_duration_s: duration,
+                    value_a: value,
+                });
+            }
+        }
+        report.current_limits += 1;
+    }
+
+    for name in ["ActivePowerLimit", "ApparentPowerLimit", "VoltageLimit"] {
+        report.skipped += by_type(ds, name).len();
+    }
+
+    Ok((limits, report))
+}
+
+/// What [`cgmes_operational_limits`] did and did not convert.
+///
+/// Returned rather than logged because a rating that quietly failed to import
+/// reads downstream as "unlimited", which is the most dangerous possible
+/// default: a security analysis on a network with no limits reports everything
+/// secure.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LimitImportReport {
+    /// `CurrentLimit` objects converted.
+    pub current_limits: usize,
+    /// Limits whose `OperationalLimitSet` named no terminal or equipment this
+    /// dataset defines.
+    pub unattached: usize,
+    /// Limits carrying neither `value` nor `normalValue`.
+    pub without_value: usize,
+    /// Power and voltage limits, recognised but not expressible in amperes.
+    pub skipped: usize,
 }
