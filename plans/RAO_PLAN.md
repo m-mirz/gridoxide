@@ -2,11 +2,16 @@
 
 Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 landed 2026-08-18.
 
-> **Implementation status.** Phase 1 (UCTE importer) is done and its pypowsybl gate is met — see
-> §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and the CGMES
-> `OperationalLimit` importer converts every declared limit in every conformity fixture, but CGMES
-> tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and drops the
-> rest). Phases 3-12 are unstarted.
+> **Implementation status.** Phases 1 and 3 (the UCTE and IIDM importers) are done and both gates
+> are met — see §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and
+> the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
+> but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
+> drops the rest). Phases 4-12 are unstarted.
+>
+> The strongest result so far was not planned for. §6.2 justified building two importers as the only
+> route to the external gate; what it did not anticipate is that the two would gate *each other*.
+> Reading one network through both parsers gives bit-identical flows, which neither importer's own
+> comparison could establish.
 
 ## Context
 
@@ -483,7 +488,7 @@ Assert on the objective and on feasibility, never on the argmin.
 |---|---|---|
 | 1 | ✅ **Done.** **UCTE importer** (`src/ucte.rs`, feature `ucte`) | 175 of 176 vendored `.uct` files parse (the 176th is a deliberately malformed fixture pypowsybl rejects too). Against pypowsybl: exact to solver tolerance — <1e-9 pu voltage, <1e-6 deg, <1e-3 MW — on every fixture whose transformers declare no magnetizing admittance, **including a phase shifter at tap 16 of 16 and 400/225 transformers**. Where a magnetizing admittance is declared the gap is ~2e-4 deg / 0.3 MVar and is entirely the crate's π-split-vs-Γ shunt model: zeroing just those fields restores 2e-9 deg / 1.1e-7 MW |
 | 2 | ⏳ **Half done.** `ratings::BranchLimits`, `types::TapChanger`, `set_tap_position`, and the CGMES `OperationalLimit*` importer. **Still open:** retaining CGMES tap *tables* — `cgmes.rs` evaluates the current step and discards the rest, so a CGMES-sourced PST has no `TapChanger` | Limits: every declared `CurrentLimit` is accounted for — 13 → 8 PATL + 5 TATL on the PST fixture, 768 → 398 + 370 on SmallGrid, zero unattached, zero valueless. UCTE taps round-trip through import → `set_position` → re-read |
-| 3 | **IIDM importer** (`src/iidm.rs`, feature `iidm`) — version-tolerant `1_x`, bus-branch and node-breaker | All 51 `.xiidm` fixtures parse; `nordic32` and `ieee14` solve |
+| 3 | ✅ **Done.** **IIDM importer** (`src/iidm.rs`, feature `iidm`) — version-tolerant `1_x`, bus-branch *and* node-breaker, both limit spellings, boundary/tie lines | All 51 `.xiidm` fixtures parse across eleven schema versions. Cross-format: reading the same network as `.uct` and as `.xiidm` gives **bit-identical** flows on the twelve-node case (with the PST at neutral and at tap 16) and 6e-12 MW with 400/225 transformers and X-nodes. Against pypowsybl on natively-IIDM fixtures: `nordic32` (52 buses, 80 branches) to 1.2e-3 MVar, node-breaker `voltage_monitoring` to 1.4e-2 MVar |
 | 4 | **CRAC data model and readers** (`src/rao/crac.rs`, `crac_json.rs`, `<network>.rao.json`) | All 724 OpenRAO JSON CRACs import; round-trip through the native format without loss |
 | 5 | **Evaluation kernel** (`src/rao/evaluate.rs`) — perimeters, margins per CNEC per state, DC | §8.2: every screened flow matches a re-solve, bus splits included |
 | 6 | **Integrality on the LP boundary** (§5.3) + HiGHS MIP backend | Solves a hand-built MILP; `IpmSolver` refuses integrality rather than relaxing it |
