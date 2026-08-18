@@ -52,6 +52,19 @@ jobs:
       run: |
         cargo build --verbose --features opf
         cargo test --verbose --features opf
+    # `ucte` is in CI for the same reason `opf` and `capi` are, and with less
+    # excuse than either: UCTE-DEF is fixed-column text, so the importer pulls
+    # in no dependency at all — not even a parser crate.
+    #
+    # What the suite checks is not that files parse. It is that the imported
+    # network *solves to the same answer as pypowsybl*, against reference
+    # solutions committed as JSON under `tests/data/ucte/`. Those were generated
+    # once by `scripts/bench/ucte_reference.py`; the runner needs neither Python
+    # nor pypowsybl to check them, which is the whole point of committing them.
+    - name: Build and test the UCTE importer
+      run: |
+        cargo build --verbose --features ucte
+        cargo test --verbose --features ucte
     # `capi` is built here for the same reason `opf` is: no system dependency.
     # It is pure Rust plus cbindgen, which cargo fetches like any other crate —
     # unlike klu/pardiso/opf-highs/opf-ipopt, which each need a library the

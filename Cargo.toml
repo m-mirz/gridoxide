@@ -98,6 +98,19 @@ pardiso = ["dep:bindgen"]
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]
+# Reads UCTE-DEF network files (src/ucte.rs) — the fixed-column format the
+# continental-European TSOs exchanged snapshots in before CGMES, and the one
+# most published remedial-action test material is still written in.
+#
+# Unlike `cgmes` this pulls in **no dependency at all**: UCTE-DEF is plain
+# fixed-column text, so the importer is pure `std`. It is therefore built and
+# tested in CI, alongside `opf` and `capi` rather than alongside the
+# system-library features.
+#
+# It is also the only importer that arrives carrying branch *ratings* and tap
+# *tables* — see `src/ratings.rs` and `types::TapChanger` for why those two
+# were the gap worth closing.
+ucte = []
 # The optimization layer, complete and self-contained: `opf::LinearProgram`,
 # `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs), DC-OPF
 # (src/opf/dc.rs), and the in-house primal-dual interior-point QP solver
@@ -166,6 +179,11 @@ opf-ipopt = ["opf", "dep:bindgen"]
 # incompatible cdylibs from one `cargo` invocation. The same trap the `python`
 # feature already documents for tests and examples.
 capi = ["dep:cbindgen"]
+
+[[test]]
+name = "ucte_test"
+path = "tests/ucte_test.rs"
+required-features = ["ucte"]
 
 [[test]]
 name = "cli_opf_test"
@@ -250,6 +268,11 @@ required-features = ["cgmes"]
 [[test]]
 name = "cgmes_node_breaker_test"
 path = "tests/cgmes_node_breaker_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_limits_test"
+path = "tests/cgmes_limits_test.rs"
 required-features = ["cgmes"]
 
 [[test]]

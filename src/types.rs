@@ -112,3 +112,112 @@ pub struct Line3Ph {
     #[doc(alias = "tan0")]
     pub g0: f64,
 }
+
+/// The discrete tap positions of a transformer, retained.
+///
+/// [`Transformer::tap`] is one complex number — the ratio and phase shift the
+/// Y-bus needs, and nothing else. That is all a power flow wants, and it is
+/// why every importer until now computed the position it was told to use and
+/// threw the rest away: `network::transformer_tap` takes
+/// `(tap_pos, tap_min, tap_max, tap_nom, tap_size, clock)` and returns a single
+/// `Complex<f64>`.
+///
+/// Anything that *moves* a tap needs the discarded half back. A phase-shifter
+/// remedial action decides in taps, not degrees; the map between them is
+/// nonlinear (and, for an asymmetric changer, not even monotone in the angle),
+/// so it cannot be reconstructed from the current value plus a step size.
+///
+/// `steps[i]` is the value to assign to [`Transformer::tap`] at position
+/// `low + i as i32` — the *whole* ratio, nominal turns ratio included, not a
+/// multiplier to be applied to something else. That makes
+/// [`set_position`](Self::set_position) a straight assignment and leaves no
+/// room for a caller to combine the two halves differently from the importer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TapChanger {
+    /// Lowest valid position (inclusive). Often negative.
+    pub low: i32,
+    /// The position the network is currently at.
+    pub position: i32,
+    /// Neutral position — the one whose ratio is nominal. Reported rather than
+    /// derived: an asymmetric changer's neutral need not be `(low + high) / 2`.
+    pub neutral: i32,
+    /// One entry per position, from `low` upwards.
+    pub steps: Vec<Complex<f64>>,
+}
+
+impl TapChanger {
+    /// Highest valid position (inclusive).
+    pub fn high(&self) -> i32 {
+        self.low + self.steps.len() as i32 - 1
+    }
+
+    /// Number of positions.
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// The complex tap at `position`, or `None` when out of range.
+    pub fn at(&self, position: i32) -> Option<Complex<f64>> {
+        if position < self.low {
+            return None;
+        }
+        self.steps.get((position - self.low) as usize).copied()
+    }
+
+    /// The complex tap at the current position.
+    ///
+    /// `None` only if `position` is out of range, which a well-formed changer
+    /// never is — but importers read positions from files, so it is reachable.
+    pub fn current(&self) -> Option<Complex<f64>> {
+        self.at(self.position)
+    }
+
+    /// Phase shift at `position`, in degrees. The quantity a phase-shifter
+    /// range action's set-point is expressed in.
+    pub fn angle_deg(&self, position: i32) -> Option<f64> {
+        self.at(position).map(|t| t.arg().to_degrees())
+    }
+
+    /// Voltage-magnitude ratio at `position`.
+    pub fn ratio(&self, position: i32) -> Option<f64> {
+        self.at(position).map(|t| t.norm())
+    }
+
+    /// Move to `position` and write the corresponding tap into `transformer`.
+    ///
+    /// Returns `false` — leaving both the changer and the transformer
+    /// untouched — when the position is out of range, so a caller sweeping a
+    /// range never silently pins at an endpoint. This mirrors
+    /// `NodeBreakerNetwork::set_switch_open`, which reports the same way for
+    /// the same reason.
+    ///
+    /// Note what this does *not* do: the Y-bus is not rebuilt. A tap change
+    /// alters admittance values but not the sparsity pattern, so a
+    /// `PersistentSolver` keeps its symbolic factorization and needs only
+    /// `invalidate_admittances` — the same position a switch flip is in.
+    pub fn set_position(&mut self, transformer: &mut Transformer, position: i32) -> bool {
+        let Some(tap) = self.at(position) else { return false };
+        self.position = position;
+        transformer.tap = tap;
+        true
+    }
+
+    /// The position whose phase shift is closest to `angle_deg`.
+    ///
+    /// The rounding step every continuous-relaxation answer needs before
+    /// anyone can act on it. Searches rather than dividing by a step size
+    /// because the tap-to-angle map is not linear.
+    pub fn nearest_to_angle(&self, angle_deg: f64) -> Option<i32> {
+        (0..self.steps.len())
+            .min_by(|&a, &b| {
+                let da = (self.steps[a].arg().to_degrees() - angle_deg).abs();
+                let db = (self.steps[b].arg().to_degrees() - angle_deg).abs();
+                da.total_cmp(&db)
+            })
+            .map(|i| self.low + i as i32)
+    }
+}

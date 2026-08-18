@@ -113,3 +113,23 @@ To pick up a newer cimoxide schema or generator change:
 
 The CGMES conformance fixtures under `tests/data/cgmes/` are referenced via a git submodule rather
 than committed, because of their own licensing — see `tests/data/cgmes/README.md`.
+
+The UCTE-DEF fixtures under `tests/data/ucte/` **are** committed, and they are the one place in this
+repository where third-party source files are vendored rather than referenced. They come verbatim
+from [powsybl-open-rao](https://github.com/powsybl/powsybl-open-rao) and carry its
+**MPL-2.0** licence, not this crate's Apache-2.0.
+
+That is deliberate and it is safe: MPL-2.0 is a *per-file* copyleft. It attaches to the files it
+covers and does not reach the code that reads them, so vendoring six `.uct` files alongside an
+Apache-2.0 crate creates no obligation on `src/ucte.rs` — provided the files stay unmodified, stay
+identifiable, and keep their licence. All three hold: they sit in their own directory with a README
+naming the origin and the licence, and nothing edits them. `Cargo.toml`'s `license` field is
+therefore unchanged, since it describes the code this crate distributes as a library and these are
+test data.
+
+Worth separating from that: `src/ucte.rs` itself is **not** a translation of powsybl-open-rao or of
+powsybl-core's `ucte-network` module. The column positions and the tap-changer formulae in it were
+established from the format specification and then *verified against* those implementations — the
+`.pypowsybl.json` files record the verification. Reading a reference to check an answer is not the
+same as transcribing it, and only the latter would carry the licence across. The same distinction
+applies to `src/klu_native/`, which **is** a translation and is licensed accordingly above.
