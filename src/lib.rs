@@ -26,6 +26,8 @@ pub mod pgm;
 pub mod ucte;
 #[cfg(feature = "iidm")]
 pub mod iidm;
+#[cfg(feature = "rao")]
+pub mod rao;
 pub mod sparse;
 pub mod block_sparse;
 pub mod klu_native;

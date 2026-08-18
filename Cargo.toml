@@ -130,6 +130,12 @@ ucte = []
 # Costs one dependency (`quick-xml`) and no system library, so like `ucte` and
 # `opf` it is built and tested in CI.
 iidm = ["dep:quick-xml"]
+# The remedial-action layer (src/rao/) — see plans/RAO_PLAN.md. At present the
+# CRAC data model and its readers; the optimizer follows.
+#
+# Pure Rust on serde, which the crate already depends on, so nothing new to
+# install and it is built and tested in CI.
+rao = []
 # The optimization layer, complete and self-contained: `opf::LinearProgram`,
 # `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs), DC-OPF
 # (src/opf/dc.rs), and the in-house primal-dual interior-point QP solver
@@ -198,6 +204,11 @@ opf-ipopt = ["opf", "dep:bindgen"]
 # incompatible cdylibs from one `cargo` invocation. The same trap the `python`
 # feature already documents for tests and examples.
 capi = ["dep:cbindgen"]
+
+[[test]]
+name = "rao_crac_test"
+path = "tests/rao_crac_test.rs"
+required-features = ["rao"]
 
 [[test]]
 name = "iidm_test"

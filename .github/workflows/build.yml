@@ -80,8 +80,13 @@ jobs:
     # cimdecoder enables its `encoding` feature — which changes the shape of a
     # public type. That combination compiled in neither step above and broke in
     # the one nobody ran. This is that step.
+    # `rao` is pure Rust on serde, which the crate already depends on.
+    - name: Build and test the remedial-action layer
+      run: |
+        cargo build --verbose --features rao
+        cargo test --verbose --features rao
     - name: Build the CI-covered features together
-      run: cargo build --verbose --features cgmes,ucte,iidm,opf
+      run: cargo build --verbose --features cgmes,ucte,iidm,opf,rao
     # `capi` is built here for the same reason `opf` is: no system dependency.
     # It is pure Rust plus cbindgen, which cargo fetches like any other crate —
     # unlike klu/pardiso/opf-highs/opf-ipopt, which each need a library the
