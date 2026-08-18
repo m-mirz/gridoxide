@@ -43,6 +43,10 @@
 - [Backends and Factorization Reuse](./solvers/backends.md)
 - [Inside KLU: the Sparse Solve, Step by Step](./solvers/klu.md)
 
+# Data Import
+
+- [Reading UCTE-DEF Input](./import/ucte.md)
+
 # CGMES Data Model
 
 - [Reading CGMES Input](./cgmes/index.md)
