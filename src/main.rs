@@ -1286,6 +1286,8 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
         transformers: &network.transformers,
         branch_ids: &network.branch_ids,
         bus_ids: &network.bus_ids,
+        initially_open: &network.initially_open,
+        tap_changers: &network.tap_changers,
         base_mva: network.base_mva,
     };
     let result = evaluate(&crac, &view, &resolution);
@@ -1355,6 +1357,10 @@ struct SecurityNetwork {
     branch_ids: Vec<String>,
     /// Bus labels, so a redispatch's generators and loads resolve.
     bus_ids: Vec<String>,
+    /// Branches the file says are out of service.
+    initially_open: Vec<usize>,
+    /// Tap changers, so a CRAC that omits its own tap table still works.
+    tap_changers: Vec<Option<gridoxide::types::TapChanger>>,
     base_mva: f64,
     notes: Vec<String>,
 }
@@ -1371,6 +1377,10 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             transformers: n.transformers,
             branch_ids: n.branch_ids,
             bus_ids: n.bus_labels,
+            // The IIDM importer omits disconnected branches rather than keeping
+            // them openable, so there is nothing to seed here yet.
+            initially_open: Vec::new(),
+            tap_changers: n.tap_changers,
             base_mva: n.base_mva,
             notes: n.notes,
         });
@@ -1384,6 +1394,8 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             transformers: n.transformers,
             branch_ids: n.branch_ids,
             bus_ids: n.node_codes,
+            initially_open: n.initially_open,
+            tap_changers: n.tap_changers,
             base_mva: n.base_mva,
             notes: n.notes,
         });
@@ -1475,6 +1487,8 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         transformers: &network.transformers,
         branch_ids: &network.branch_ids,
         bus_ids: &network.bus_ids,
+        initially_open: &network.initially_open,
+        tap_changers: &network.tap_changers,
         base_mva: network.base_mva,
     };
     let options = SearchOptions { max_depth: depth, ..Default::default() };

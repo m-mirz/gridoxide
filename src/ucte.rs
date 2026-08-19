@@ -201,10 +201,52 @@ pub struct UcteImport {
     pub notes: Vec<String>,
     /// Element ids of branches left out because the file marked them out of
     /// operation (status 7, 8 or 9).
+    /// Flat branch indices the file marks out of operation (status 7, 8 or 9).
+    ///
+    /// These branches are **kept in the model**, with their real impedance, and
+    /// listed here as open. Dropping them would be simpler and would make a
+    /// whole class of remedial action inexpressible: an automaton that *closes*
+    /// a standby circuit is one of the commonest there is, and it cannot be
+    /// applied to a branch the importer discarded. See
+    /// [`as_switched`](Self::as_switched).
+    pub initially_open: Vec<usize>,
+    /// Element ids of those branches, parallel to `initially_open`.
     pub out_of_service: Vec<String>,
 }
 
 impl UcteImport {
+    /// Working copies of the branch arrays with every initially-open branch
+    /// made non-conducting.
+    ///
+    /// [`lines`](Self::lines) and [`transformers`](Self::transformers) hold
+    /// **every** branch the file describes, open ones included, with their real
+    /// impedance — that is what makes a "close this circuit" remedial action
+    /// expressible at all. It also means handing those arrays straight to a
+    /// power flow energises circuits the file says are out of service, so
+    /// anything that just wants to solve the network as given should solve
+    /// these instead.
+    ///
+    /// A consumer that tracks its own open set — the remedial-action layer does
+    /// — should ignore this and pass [`initially_open`](Self::initially_open)
+    /// through its own bookkeeping, so that closing a branch is a removal from
+    /// that set rather than a second copy of the arrays.
+    pub fn as_switched(&self) -> (Vec<Line>, Vec<Transformer>) {
+        let mut lines = self.lines.clone();
+        let mut transformers = self.transformers.clone();
+        for &branch in &self.initially_open {
+            if branch < lines.len() {
+                lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
+                lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
+                lines[branch].b_shunt = 0.0;
+                lines[branch].g_shunt = 0.0;
+            } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
+                t.from_status = 0;
+                t.to_status = 0;
+            }
+        }
+        (lines, transformers)
+    }
+
     pub fn s_base_va(&self) -> f64 {
         self.base_mva * 1e6
     }
@@ -740,6 +782,8 @@ fn convert(
     let mut transformer_limits = Vec::new();
     let mut tap_changers = Vec::new();
     let mut out_of_service = Vec::new();
+    let mut initially_open: Vec<usize> = Vec::new();
+    let mut initially_open_transformers: Vec<usize> = Vec::new();
     let mut couplers = 0usize;
 
     for branch in &branches {
@@ -765,9 +809,9 @@ fn convert(
             Some(_) => (node2, node1),
         };
 
-        if !status_in_service(branch.status) {
+        let in_service = status_in_service(branch.status);
+        if !in_service {
             out_of_service.push(branch.id.clone());
-            continue;
         }
         if status_is_coupler(branch.status) {
             couplers += 1;
@@ -793,6 +837,9 @@ fn convert(
                     b_shunt: branch.b * z_base,
                     g_shunt: 0.0,
                 });
+                if !in_service {
+                    initially_open.push(lines.len() - 1);
+                }
                 line_ids.push(branch.id.clone());
                 line_limits.push(limits);
             }
@@ -832,6 +879,12 @@ fn convert(
                 transformer_ids.push(branch.id.clone());
                 transformer_limits.push(limits);
                 tap_changers.push(changer);
+                if !in_service {
+                    // Recorded against the *flat* index, which for a
+                    // transformer is offset by the line count — resolved below,
+                    // once that count is final.
+                    initially_open_transformers.push(transformers.len() - 1);
+                }
             }
         }
     }
@@ -841,9 +894,13 @@ fn convert(
             "{couplers} closed busbar coupler(s) imported as near-zero-impedance branches"
         ));
     }
+    for i in initially_open_transformers {
+        initially_open.push(lines.len() + i);
+    }
+    initially_open.sort_unstable();
     if !out_of_service.is_empty() {
         notes.push(format!(
-            "{} branch(es) omitted as out of operation",
+            "{} branch(es) present but open (out of operation)",
             out_of_service.len()
         ));
     }
@@ -876,6 +933,7 @@ fn convert(
         p_limits,
         base_mva: options.base_mva,
         notes,
+        initially_open,
         out_of_service,
     })
 }

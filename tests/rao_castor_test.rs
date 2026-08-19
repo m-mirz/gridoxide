@@ -50,6 +50,8 @@ impl Case {
             transformers: &self.net.transformers,
             branch_ids: &self.net.branch_ids,
             bus_ids: &[],
+            initially_open: &[],
+            tap_changers: &[],
             base_mva: self.net.base_mva,
         }
     }
@@ -358,4 +360,130 @@ fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
         "the action alone should make things worse, got {topology_only} from {}",
         plan.initial_margin_mw
     );
+}
+
+// ---------------------------------------------------------------------------
+// Automatons
+// ---------------------------------------------------------------------------
+
+/// An automaton fires because its condition is met, not because it helps.
+///
+/// That is the whole difference between this and the search: the search asks
+/// which action would be best, and the simulator asks which will actually
+/// operate. A scheme that makes the objective worse still operates.
+#[test]
+fn automatons_are_simulated_rather_than_chosen() {
+    use gridoxide::rao::crac_json;
+
+    let net = ucte::read(ucte_fixture("TestCase8Nodes_15_11_6_1.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/crac_15_11_6_1.json"),
+    )
+    .expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+
+    let scenario = plan.scenarios.first().expect("a scenario");
+    let automatons = scenario.automatons.as_ref().expect("an auto perimeter");
+
+    // Four of the five available automatons operate.
+    assert_eq!(automatons.fired(), 4, "{automatons:?}");
+    assert_eq!(automatons.network_actions.len(), 2);
+    assert_eq!(automatons.range_actions.len(), 2);
+
+    // And the fifth does not, because an earlier one already relieved the
+    // constraint that would have triggered it. That is the property the whole
+    // speed-ordered, re-evaluate-between-batches structure exists for.
+    let fired: Vec<&str> = automatons
+        .network_actions
+        .iter()
+        .map(|&i| crac.network_actions[i].id.as_str())
+        .collect();
+    assert!(fired.contains(&"close_fr1_fr2_3"), "{fired:?}");
+    assert!(
+        !fired.contains(&"close_fr1_fr2_4"),
+        "the second circuit should not close: the first already fixed it"
+    );
+    assert!(fired.contains(&"close_fr5_fr6_2"), "{fired:?}");
+
+    // The phase shifters are sized against the CNECs their own rules name.
+    let taps: Vec<(&str, Option<i32>)> = automatons
+        .range_actions
+        .iter()
+        .map(|(i, _, tap)| (crac.range_actions[*i].id.as_str(), *tap))
+        .collect();
+    assert!(taps.contains(&("pst_fr3_fr4", Some(2))), "{taps:?}");
+    assert!(taps.contains(&("pst_fr7_fr8", Some(-3))), "{taps:?}");
+
+    // The perimeter ends secure, having started well overloaded.
+    assert!(automatons.initial_margin_mw < -100.0);
+    assert!(automatons.final_margin_mw > 0.0, "{}", automatons.final_margin_mw);
+}
+
+/// A standby circuit must survive import, or closing it is inexpressible.
+#[test]
+fn an_out_of_service_branch_can_be_closed_by_an_automaton() {
+    let net = ucte::read(ucte_fixture("TestCase8Nodes_15_11_6_1.uct")).expect("network");
+    assert!(!net.initially_open.is_empty(), "this fixture has out-of-service circuits");
+    for &branch in &net.initially_open {
+        // Present in the model with real impedance — that is what makes it
+        // closable — and open only by virtue of being in this list.
+        assert!(branch < net.n_branches());
+        if branch < net.lines.len() {
+            assert!(net.lines[branch].x.is_finite() && net.lines[branch].x < 1e6);
+        }
+    }
+}
+
+/// Automatons run before the curative perimeters and hand them their result.
+#[test]
+fn curative_perimeters_start_from_what_the_automatons_left() {
+    use gridoxide::rao::crac_json;
+
+    let net = ucte::read(ucte_fixture("TestCase12Nodes_15_11_5_1.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/crac_15_11_5_1.json"),
+    )
+    .expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+
+    for scenario in &plan.scenarios {
+        let Some(automatons) = &scenario.automatons else { continue };
+        for perimeter in &scenario.perimeters {
+            // Whatever the automatons opened is still open in the curative
+            // perimeter: a curative decision adds to their result, it does not
+            // replace it.
+            for branch in &automatons.open_branches {
+                assert!(
+                    perimeter.open_branches.contains(branch),
+                    "curative perimeter lost the automatons' switching"
+                );
+            }
+        }
+    }
 }

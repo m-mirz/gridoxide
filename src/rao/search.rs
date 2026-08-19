@@ -117,6 +117,10 @@ impl SearchResult {
 struct Effect {
     /// Branches to open, flat indices.
     open: Vec<usize>,
+    /// Branches to close — removed from the open set. A standby circuit the
+    /// network file marks out of service is closable precisely because the
+    /// importer keeps it.
+    close: Vec<usize>,
     /// `(branch, angle in degrees)` for a phase-shifter tap position.
     taps: Vec<(usize, f64)>,
 }
@@ -128,26 +132,24 @@ fn effect_of(
     resolution: &Resolution,
     lines: usize,
 ) -> Option<Effect> {
-    let mut effect = Effect { open: Vec::new(), taps: Vec::new() };
+    let mut effect = Effect { open: Vec::new(), close: Vec::new(), taps: Vec::new() };
     for elementary in &action.elementary {
         match elementary {
             ElementaryAction::TerminalsConnection { element, connected } => {
                 let branch = resolution.branch(element)?;
                 if *connected {
-                    // Closing a branch that this model already treats as closed
-                    // is a no-op, and closing one it treats as *absent* is not
-                    // expressible — the importers drop out-of-service branches
-                    // rather than carrying them as openable.
-                    return None;
+                    effect.close.push(branch);
+                } else {
+                    effect.open.push(branch);
                 }
-                effect.open.push(branch);
             }
             ElementaryAction::Switch { element, open } => {
                 let branch = resolution.branch(element)?;
-                if !*open {
-                    return None;
+                if *open {
+                    effect.open.push(branch);
+                } else {
+                    effect.close.push(branch);
                 }
-                effect.open.push(branch);
             }
             ElementaryAction::PstTapPosition { element, tap } => {
                 let branch = resolution.branch(element)?;
@@ -174,7 +176,8 @@ fn effect_of(
             | ElementaryAction::SwitchPair { .. } => return None,
         }
     }
-    (!effect.open.is_empty() || !effect.taps.is_empty()).then_some(effect)
+    (!effect.open.is_empty() || !effect.close.is_empty() || !effect.taps.is_empty())
+        .then_some(effect)
 }
 
 /// Whether two actions can be taken together.
@@ -216,9 +219,10 @@ pub fn search(
         .collect();
 
     // The root: no network action, range actions optimized.
+    let base_open: Vec<usize> = network.initially_open.to_vec();
     let (root_margin, root_setpoints, root_transformers, root_buses) =
-        leaf(crac, network, resolution, perimeter, solver, &options.linear, &[]);
-    let initial = margin_of(crac, network, resolution, perimeter, &[]);
+        leaf(crac, network, resolution, perimeter, solver, &options.linear, &base_open);
+    let initial = margin_of(crac, network, resolution, perimeter, &base_open);
 
     let mut chosen: Vec<usize> = Vec::new();
     let mut best_margin = root_margin;
@@ -229,10 +233,11 @@ pub fn search(
     let mut depth = 0usize;
 
     for _ in 0..options.max_depth {
-        let mut open_here: Vec<usize> = Vec::new();
+        let mut open_here: Vec<usize> = base_open.clone();
         for &index in &chosen {
             if let Some((_, effect)) = available.iter().find(|(i, _)| *i == index) {
                 open_here.extend(&effect.open);
+                open_here.retain(|b| !effect.close.contains(b));
             }
         }
 
@@ -250,6 +255,7 @@ pub fn search(
             }
             let mut open = open_here.clone();
             open.extend(&effect.open);
+            open.retain(|b| !effect.close.contains(b));
 
             let (margin, setpoints, transformers, buses) =
                 leaf(crac, network, resolution, perimeter, solver, &options.linear, &open);
@@ -280,10 +286,11 @@ pub fn search(
         depth += 1;
     }
 
-    let mut open_branches: Vec<usize> = Vec::new();
+    let mut open_branches: Vec<usize> = base_open.clone();
     for &index in &chosen {
         if let Some((_, effect)) = available.iter().find(|(i, _)| *i == index) {
             open_branches.extend(&effect.open);
+            open_branches.retain(|b| !effect.close.contains(b));
         }
     }
     open_branches.sort_unstable();
@@ -342,6 +349,8 @@ fn leaf(
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
+        initially_open: network.initially_open,
+        tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
     let result = optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, open);
@@ -373,8 +382,8 @@ fn optimize_with_open(
     let mut transformers = network.transformers.clone();
     for &branch in open {
         if branch < lines.len() {
-            lines[branch].r = f64::INFINITY;
-            lines[branch].x = f64::INFINITY;
+            lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
+            lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
             lines[branch].b_shunt = 0.0;
             lines[branch].g_shunt = 0.0;
         } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
@@ -388,6 +397,8 @@ fn optimize_with_open(
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
+        initially_open: network.initially_open,
+        tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
     let result = optimize(crac, &mut inner, resolution, perimeter, solver, options);

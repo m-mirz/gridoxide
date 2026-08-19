@@ -227,6 +227,22 @@ pub struct Network<'a> {
     /// Bus index → the id the CRAC would use, for resolving injections.
     /// May be empty, in which case no injection resolves.
     pub bus_ids: &'a [String],
+    /// Branches the network file itself says are out of service.
+    ///
+    /// Every evaluation starts from this set, and a remedial action that
+    /// *closes* a circuit works by removing from it. Without it a standby
+    /// circuit is silently in service, which both understates the flows and
+    /// makes "close this line" a no-op — an automaton that fires and changes
+    /// nothing.
+    pub initially_open: &'a [usize],
+    /// Tap changers, parallel to `transformers`.
+    ///
+    /// A CRAC's PST range action *may* carry its own tap-to-angle table and
+    /// often does not — the table is a property of the transformer, and a CRAC
+    /// written against a network that already describes it has no reason to
+    /// repeat it. Without this, such an action has no positions to choose
+    /// between and is silently skipped.
+    pub tap_changers: &'a [Option<crate::types::TapChanger>],
     pub base_mva: f64,
 }
 
@@ -304,7 +320,7 @@ fn threshold_mw(
 /// through [`DcSensitivity::multi_outage_flows`], so the whole sweep costs one
 /// factorization plus a small dense solve per outage.
 pub fn evaluate(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> SecurityResult {
-    evaluate_with(crac, network, resolution, &[])
+    evaluate_with(crac, network, resolution, network.initially_open)
 }
 
 /// Evaluate with a set of branches already opened.
@@ -446,8 +462,8 @@ fn outaged_flows(network: &Network<'_>, outages: &[usize], options: DcOptions) -
             // is opened by making it non-conducting instead — the same trick
             // `network::build_ybus_with_outages` uses to keep the sparsity
             // pattern.
-            lines[branch].r = 1e9;
-            lines[branch].x = 1e9;
+            lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
+            lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
             lines[branch].b_shunt = 0.0;
             lines[branch].g_shunt = 0.0;
         } else if let Some(t) = transformers.get_mut(branch - lines.len()) {

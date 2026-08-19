@@ -37,6 +37,7 @@ use crate::opf::Solver;
 use super::crac::{Crac, InstantKind, State};
 use super::evaluate::{evaluate_with, Network, Resolution};
 use super::linear::Setpoint;
+use super::automaton::{simulate, AutomatonResult};
 use super::search::{search, SearchOptions, SearchResult};
 
 /// What one perimeter was told to do.
@@ -78,6 +79,13 @@ impl PerimeterPlan {
 pub struct ScenarioPlan {
     /// Index into [`Crac::contingencies`].
     pub contingency: usize,
+    /// What the automatons did, before any curative perimeter was solved.
+    ///
+    /// `None` when this contingency has no `auto` state. Automatons are
+    /// *simulated*, not chosen, so this is a record of what the equipment did
+    /// rather than a decision — but the curative perimeters start from it, so
+    /// it belongs in the plan.
+    pub automatons: Option<AutomatonResult>,
     /// One entry per curative instant that had something to decide, in
     /// chronological order.
     pub perimeters: Vec<PerimeterPlan>,
@@ -137,11 +145,15 @@ pub fn run(
         let kind = crac.instants[state.instant].kind;
         let include = match kind {
             InstantKind::Preventive | InstantKind::Outage => true,
-            InstantKind::Auto | InstantKind::Curative => !actionable(state),
+            // An auto state is never pulled forward: its actions are forced
+            // rather than optimized, so "nothing can act on it" is decided by
+            // the simulator, not by whether an optimizer would choose to.
+            InstantKind::Auto => false,
+            InstantKind::Curative => !actionable(state),
         };
         if include {
             preventive_states.push(state.clone());
-            if matches!(kind, InstantKind::Auto | InstantKind::Curative) {
+            if matches!(kind, InstantKind::Curative) {
                 pulled_forward.extend(
                     crac.flow_cnecs
                         .iter()
@@ -156,7 +168,7 @@ pub fn run(
         preventive_states = states.clone();
     }
 
-    let initial = worst_margin(crac, network, resolution, &[], &states);
+    let initial = worst_margin(crac, network, resolution, network.initially_open, &states);
 
     let preventive = search(crac, network, resolution, &preventive_states, solver, options);
     let mut plan_preventive = PerimeterPlan {
@@ -180,24 +192,37 @@ pub fn run(
         let mut curative_instants: Vec<usize> = states
             .iter()
             .filter(|s| s.contingency == Some(contingency))
-            .filter(|s| {
-                matches!(
-                    crac.instants[s.instant].kind,
-                    InstantKind::Curative | InstantKind::Auto
-                )
-            })
+            .filter(|s| crac.instants[s.instant].kind == InstantKind::Curative)
             .filter(|s| actionable(s))
             .map(|s| s.instant)
             .collect();
         curative_instants.sort_unstable();
         curative_instants.dedup();
-        if curative_instants.is_empty() {
-            continue;
-        }
 
-        // Each curative instant is solved with the previous one's result fixed.
+        // Automatons fire before anything curative is decided, and what they
+        // leave behind is what the curative perimeters see.
         let mut open = carried_open.clone();
         let mut transformers = carried_transformers.clone();
+        let automatons = {
+            let view = Network {
+                buses: network.buses,
+                lines: network.lines,
+                transformers: &transformers,
+                branch_ids: network.branch_ids,
+                bus_ids: network.bus_ids,
+                initially_open: network.initially_open,
+                tap_changers: network.tap_changers,
+                base_mva: network.base_mva,
+            };
+            simulate(crac, &view, resolution, contingency, &open, &transformers)
+        };
+        if let Some(result) = &automatons {
+            open = result.open_branches.clone();
+            transformers = result.transformers.clone();
+        }
+        if curative_instants.is_empty() && automatons.is_none() {
+            continue;
+        }
         let mut perimeters = Vec::new();
         for instant in curative_instants {
             let state = State { instant, contingency: Some(contingency) };
@@ -207,6 +232,8 @@ pub fn run(
                 transformers: &transformers,
                 branch_ids: network.branch_ids,
                 bus_ids: network.bus_ids,
+                initially_open: network.initially_open,
+                tap_changers: network.tap_changers,
                 base_mva: network.base_mva,
             };
             let result = curative_search(
@@ -230,7 +257,7 @@ pub fn run(
             open = in_force;
             transformers = result.transformers;
         }
-        scenarios.push(ScenarioPlan { contingency, perimeters });
+        scenarios.push(ScenarioPlan { contingency, automatons, perimeters });
     }
 
     // The worst margin after everything, measured once over every state with
@@ -243,6 +270,13 @@ pub fn run(
                 .iter()
                 .flat_map(|s| s.perimeters.iter())
                 .map(|p| p.final_margin_mw)
+                .fold(f64::INFINITY, f64::min),
+        )
+        .min(
+            scenarios
+                .iter()
+                .filter_map(|s| s.automatons.as_ref())
+                .map(|a| a.final_margin_mw)
                 .fold(f64::INFINITY, f64::min),
         );
     plan_preventive.states = preventive_states;
@@ -283,8 +317,8 @@ fn curative_search(
     let mut transformers = network.transformers.to_vec();
     for &branch in already_open {
         if branch < lines.len() {
-            lines[branch].r = f64::INFINITY;
-            lines[branch].x = f64::INFINITY;
+            lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
+            lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
             lines[branch].b_shunt = 0.0;
             lines[branch].g_shunt = 0.0;
         } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
@@ -298,6 +332,8 @@ fn curative_search(
         transformers: &transformers,
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
+        initially_open: network.initially_open,
+        tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
     search(crac, &view, resolution, perimeter, solver, options)
