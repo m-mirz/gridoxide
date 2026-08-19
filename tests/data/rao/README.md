@@ -22,3 +22,27 @@ current and which no JSON parser accepts. 98 of the 428 CRACs in the reference
 checkout do. `crac_json::parse` neutralises those literals — outside strings
 only — on a retry, which is the difference between reading a third of the corpus
 and reading all of it.
+
+## `features/` — the external gate
+
+Eight scenarios copied verbatim from powsybl-open-rao's own Cucumber suite,
+together with the CRACs and `RaoParameters` files they name. Also MPL-2.0.
+
+They are the only check in this repository that gridoxide did not write for
+itself. A finite-differenced derivative proves a derivative; a
+screening-versus-resolve comparison proves two of gridoxide's own paths agree.
+These state margins to the decimal and name which remedial actions should be
+used, and their authors wrote them to judge a different implementation.
+
+The selection is every scenario in that suite that is `@dc` and `@rao`, uses a
+JSON CRAC and the `TestCase12Nodes` network, and needs none of loop flows,
+MNECs, relative margins, costly optimization, HVDC, second-preventive or MARMOT
+— the features `src/rao/` does not implement. That is 8 of roughly 500.
+
+**34 of 42 checkable assertions currently match**, at the reference's own
+tolerance (`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`). Six
+scenarios match completely. `tests/rao_cucumber_test.rs` documents exactly what
+the other eight assertions are and why.
+
+Steps are unmodified, including the file paths — the harness resolves them by
+basename, so the text stays as its authors wrote it.

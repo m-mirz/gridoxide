@@ -26,6 +26,18 @@
 //! \\(\Delta^{+} + \Delta^{-}\\) so that among equally good answers the one
 //! that moves least wins.
 //!
+//! # One definition of the margin
+//!
+//! The limits this optimizes against come from
+//! [`evaluate`](super::evaluate::evaluate), not from re-reading the CRAC's
+//! thresholds here. That is not tidiness. A CRAC states thresholds in MW, in
+//! amperes, or as a fraction of a rated current, and each needs a different
+//! conversion; doing that conversion twice invites the optimizer to maximize a
+//! quantity nobody measures. It did, briefly — the LP read an ampere threshold
+//! as MW and so optimized against a limit some 40% adrift of the real one,
+//! while the evaluator scored it correctly. Every margin stayed self-consistent
+//! and the answer was simply wrong.
+//!
 //! # Why it iterates
 //!
 //! The linearization is exact in DC for a *redispatch*, because DC flow is
@@ -199,6 +211,23 @@ struct Control {
     pst: Option<PstControl>,
 }
 
+/// Sign conversion between a CRAC's phase-shifter angles and
+/// [`Transformer::tap`]'s.
+///
+/// A CRAC states tap angles in **IIDM's** convention, and gridoxide's complex
+/// tap is the MATPOWER one, whose argument is its negation. Both importers
+/// already encode that — `iidm.rs` negates `alpha` when building the tap, and
+/// `ucte.rs` reverses the transformer for the same reason — so the two are
+/// consistently opposite, which is exactly why the conversion can live in one
+/// place instead of being decided per network.
+///
+/// Getting it wrong is almost invisible: the optimizer stays self-consistent
+/// and finds the physically correct angle, and only the *tap number* it reports
+/// comes out mirrored. On a symmetric phase shifter that means a plan saying
+/// "tap +16" for the position an operator knows as −16 — which is worse than a
+/// wrong margin, because the margin would have been questioned.
+const CRAC_ANGLE_SIGN: f64 = -1.0;
+
 struct PstControl {
     branch: usize,
     /// Ascending by tap.
@@ -281,8 +310,9 @@ pub fn optimize(
 
     for _ in 0..options.max_iterations {
         iterations += 1;
-        let flows = perimeter_flows(crac, network, resolution, perimeter, &cnec_indices);
-        let program = build_program(crac, &cnec_indices, &flows, &controls, options);
+        let (flows, limits) =
+            perimeter_flows(crac, network, resolution, perimeter, &cnec_indices);
+        let program = build_program(&cnec_indices, &flows, &limits, &controls, options);
         let Ok(solution) = solver.solve(&program) else {
             break;
         };
@@ -408,9 +438,9 @@ fn margin_column(n_controls: usize) -> usize {
 }
 
 fn build_program(
-    crac: &Crac,
     cnecs: &[usize],
     flows: &[f64],
+    limits: &[f64],
     controls: &[Control],
     options: &LinearOptions,
 ) -> LinearProgram {
@@ -439,9 +469,9 @@ fn build_program(
     lp.col_upper[mm] = f64::INFINITY;
     lp.col_cost[mm] = -1.0;
 
-    for (position, &index) in cnecs.iter().enumerate() {
-        let cnec = &crac.flow_cnecs[index];
+    for position in 0..cnecs.len() {
         let reference = flows[position];
+        let limit = limits[position];
         // The flow is substituted directly rather than given a variable of its
         // own: `F(c)` appears only in the two margin rows, so eliminating it
         // halves the problem for no loss.
@@ -468,38 +498,21 @@ fn build_program(
                 })
                 .sum::<f64>();
 
-        for (upper, limit) in limits_of(cnec) {
-            // MM ≤ limit − F  (upper) or MM ≤ F − limit (lower), with
-            // F = constant + Σ σ·A.
+        for upper in [true, false] {
+            // MM ≤ limit − F  (upper) or MM ≤ F + limit (lower), with
+            // F = constant + Σ σ·A. Both directions always, because the margin
+            // being maximized is against |F|.
             let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
             coefficients.push((mm, 1.0));
             let sign = if upper { 1.0 } else { -1.0 };
             for &(column, s) in &terms {
                 coefficients.push((column, sign * s));
             }
-            let bound = if upper { limit - constant } else { constant - limit };
+            let bound = if upper { limit - constant } else { constant + limit };
             lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
         }
     }
     lp
-}
-
-/// The absolute MW limits of a CNEC as `(is_upper, value)` pairs.
-///
-/// Both directions are emitted even when the CRAC states one, because the
-/// margin is against `|flow|` and a one-sided threshold still bounds the flow
-/// from that side only.
-fn limits_of(cnec: &super::crac::FlowCnec) -> Vec<(bool, f64)> {
-    let mut out = Vec::new();
-    for threshold in &cnec.thresholds {
-        if let Some(max) = threshold.max {
-            out.push((true, max - cnec.reliability_margin));
-        }
-        if let Some(min) = threshold.min {
-            out.push((false, min + cnec.reliability_margin));
-        }
-    }
-    out
 }
 
 fn build_controls(
@@ -541,8 +554,10 @@ fn build_controls(
                 let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else {
                     continue;
                 };
-                // MW per degree: the column is per-unit per radian.
-                let scale = network.base_mva * std::f64::consts::PI / 180.0;
+                // MW per degree *of the CRAC's angle*: the column is per-unit
+                // per radian of gridoxide's, so the sign flips with it.
+                let scale =
+                    CRAC_ANGLE_SIGN * network.base_mva * std::f64::consts::PI / 180.0;
                 let sensitivity_mw: Vec<f64> =
                     cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0) * scale).collect();
 
@@ -551,7 +566,7 @@ fn build_controls(
                 // The live tap is whatever the transformer's angle is closest
                 // to, not the CRAC's `initialTap` — a search tree may have
                 // moved it since.
-                let live_angle = live_shift_degrees(network, branch).unwrap_or_else(|| {
+                let live_angle = live_crac_angle(network, branch).unwrap_or_else(|| {
                     table
                         .iter()
                         .find(|(t, _)| t == initial_tap)
@@ -624,10 +639,11 @@ fn build_controls(
     Some(controls)
 }
 
-/// The live phase shift of a branch, in degrees, if it is a transformer.
-fn live_shift_degrees(network: &NetworkMut<'_>, branch: usize) -> Option<f64> {
+/// The live phase shift of a branch in the **CRAC's** convention, so it can be
+/// looked up in the CRAC's own tap table.
+fn live_crac_angle(network: &NetworkMut<'_>, branch: usize) -> Option<f64> {
     let i = branch.checked_sub(network.lines.len())?;
-    Some(network.transformers.get(i)?.tap.arg().to_degrees())
+    Some(CRAC_ANGLE_SIGN * network.transformers.get(i)?.tap.arg().to_degrees())
 }
 
 /// Angle bounds from a PST range action's tap ranges.
@@ -702,10 +718,13 @@ fn apply(
             }
             if let Some(i) = pst.branch.checked_sub(network.lines.len()) {
                 if let Some(transformer) = network.transformers.get_mut(i) {
-                    // Keep the ratio, replace the shift.
+                    // Keep the ratio, replace the shift — converting out of the
+                    // CRAC's convention on the way.
                     let ratio = transformer.tap.norm();
-                    transformer.tap =
-                        num_complex::Complex::from_polar(ratio, value.to_radians());
+                    transformer.tap = num_complex::Complex::from_polar(
+                        ratio,
+                        (CRAC_ANGLE_SIGN * value).to_radians(),
+                    );
                 }
             }
         }
@@ -736,7 +755,7 @@ fn perimeter_flows(
     resolution: &Resolution,
     perimeter: &[State],
     cnecs: &[usize],
-) -> Vec<f64> {
+) -> (Vec<f64>, Vec<f64>) {
     let view = network.view();
     let result = evaluate(crac, &view, resolution);
     cnecs
@@ -747,10 +766,10 @@ fn perimeter_flows(
                 .iter()
                 .filter(|p| perimeter.contains(&p.state))
                 .find_map(|p| p.cnecs.iter().find(|c| c.cnec == i))
-                .map(|c| c.flow_mw)
-                .unwrap_or(0.0)
+                .map(|c| (c.flow_mw, c.limit_mw))
+                .unwrap_or((0.0, f64::INFINITY))
         })
-        .collect()
+        .unzip()
 }
 
 /// Base-case DC flows, exposed for callers that want the operating point

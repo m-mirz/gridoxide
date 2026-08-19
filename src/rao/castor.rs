@@ -50,6 +50,15 @@ pub struct PerimeterPlan {
     pub initial_margin_mw: f64,
     pub final_margin_mw: f64,
     pub leaves: usize,
+    /// Branches left open by every decision in force here — this perimeter's
+    /// own and everything carried forward into it.
+    pub open_branches: Vec<usize>,
+    /// The transformers as this perimeter leaves them.
+    ///
+    /// Together with `open_branches` this is the network the perimeter's
+    /// figures describe, which is what lets a caller re-derive any quantity the
+    /// plan does not itself report — a per-CNEC margin, say.
+    pub transformers: Vec<crate::types::Transformer>,
 }
 
 impl PerimeterPlan {
@@ -155,6 +164,8 @@ pub fn run(
         initial_margin_mw: preventive.initial_margin_mw,
         final_margin_mw: preventive.final_margin_mw,
         leaves: preventive.leaves,
+        open_branches: preventive.open_branches.clone(),
+        transformers: preventive.transformers.clone(),
     };
 
     // Everything downstream sees the preventive decisions already taken.
@@ -197,6 +208,10 @@ pub fn run(
             let result = curative_search(
                 crac, &view, resolution, &[state.clone()], solver, options, &open,
             );
+            let mut in_force = open.clone();
+            in_force.extend(result.open_branches.iter().copied());
+            in_force.sort_unstable();
+            in_force.dedup();
             perimeters.push(PerimeterPlan {
                 states: vec![state],
                 network_actions: result.network_actions.clone(),
@@ -204,10 +219,10 @@ pub fn run(
                 initial_margin_mw: result.initial_margin_mw,
                 final_margin_mw: result.final_margin_mw,
                 leaves: result.leaves,
+                open_branches: in_force.clone(),
+                transformers: result.transformers.clone(),
             });
-            open.extend(result.open_branches.iter().copied());
-            open.sort_unstable();
-            open.dedup();
+            open = in_force;
             transformers = result.transformers;
         }
         scenarios.push(ScenarioPlan { contingency, perimeters });

@@ -28,7 +28,7 @@ struct Case {
 }
 
 /// Range actions help here and **topology does not**: opening either available
-/// line makes the preventive margin worse (-241.7 MW to -1384.6 or -257.6). That
+/// line makes the preventive margin worse. That
 /// makes it the fixture for "correctly declines", which is the property a greedy
 /// search is most likely to get wrong in the expensive direction.
 fn case() -> Case {

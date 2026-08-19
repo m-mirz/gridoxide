@@ -108,7 +108,7 @@ fn the_native_companion_document_is_accepted_too() {
     assert!(text.contains("INSECURE"), "{text}");
     // Same answer as the OpenRAO-format run: a round trip must not change the
     // verdict.
-    assert!(text.contains("241.7"), "{text}");
+    assert!(text.contains("182.3"), "{text}");
     assert_eq!(out.status.code(), Some(1));
     let _ = std::fs::remove_file(path);
 }
@@ -188,7 +188,7 @@ fn the_rao_command_reports_what_to_do() {
     assert!(text.contains("APPLY"), "no action recommended:\n{text}");
     assert!(text.contains("Open tie-line FR DE"), "{text}");
     // The preventive perimeter goes from insecure to secure.
-    assert!(text.contains("-512.7 -> 500.0"), "{text}");
+    assert!(text.contains("-460.8 -> 500.0"), "{text}");
     assert!(text.contains("SECURE"), "{text}");
     // Pulling a curative CNEC forward changes the answer, so it is reported.
     assert!(text.contains("no curative action"), "{text}");

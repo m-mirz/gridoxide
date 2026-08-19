@@ -213,10 +213,22 @@ fn threshold_mw(
         Side::Two => 1,
         _ => 0,
     };
+    // A current threshold has to be converted at the voltage it was *written*
+    // against, and the CRAC says which: `nominalV`. That is not always the
+    // network's own base — a UCTE 380 kV node is routinely operated at 400 kV,
+    // and the CRAC states 400. Converting at 380 instead makes every ampere
+    // threshold 5% tight, which reads as a network slightly more constrained
+    // than it is rather than as an error.
+    let voltage = cnec
+        .nominal_v
+        .and_then(|v| v[side].or(v[0]))
+        .map(|kv| kv * 1000.0)
+        .filter(|v| *v > 0.0)
+        .unwrap_or(u_rated_v);
     match threshold.unit {
         Unit::Megawatt => Some(magnitude),
         Unit::Ampere => {
-            Some(current_to_power_pu(magnitude, u_rated_v, s_base_va) * s_base_va / 1e6)
+            Some(current_to_power_pu(magnitude, voltage, s_base_va) * s_base_va / 1e6)
         }
         Unit::PercentImax => {
             // Despite the name this is a **fraction**, not a percentage: the
@@ -228,7 +240,7 @@ fn threshold_mw(
             // had come out with a 33 MW limit.
             let i_max = cnec.i_max?[side].or(cnec.i_max?[0])?;
             let amperes = i_max * magnitude;
-            Some(current_to_power_pu(amperes, u_rated_v, s_base_va) * s_base_va / 1e6)
+            Some(current_to_power_pu(amperes, voltage, s_base_va) * s_base_va / 1e6)
         }
         Unit::Degree | Unit::Kilovolt => None,
     }
