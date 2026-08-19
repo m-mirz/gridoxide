@@ -43,6 +43,7 @@ impl Case {
             lines: &self.net.lines,
             transformers: &self.net.transformers,
             branch_ids: &self.net.branch_ids,
+            bus_ids: &[],
             base_mva: self.net.base_mva,
         }
     }

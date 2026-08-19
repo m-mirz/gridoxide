@@ -34,20 +34,26 @@ screening-versus-resolve comparison proves two of gridoxide's own paths agree.
 These state margins to the decimal and name which remedial actions should be
 used, and their authors wrote them to judge a different implementation.
 
-The selection is every scenario in that suite that is `@dc` and `@rao`, uses a
-JSON CRAC and the `TestCase12Nodes` network, and needs none of loop flows,
-MNECs, relative margins, costly optimization, HVDC, second-preventive or MARMOT
-— the features `src/rao/` does not implement. That is 8 of roughly 500.
+The selection is every scenario in that suite that is `@dc` and `@rao` (and not
+`@ac`), uses a JSON CRAC, and needs none of loop flows, MNECs, relative margins,
+costly optimization, HVDC, second-preventive or MARMOT — the features `src/rao/`
+does not implement. That is 22 of roughly 500, across ten networks.
 
-**All 42 checkable assertions match**, at the reference's own tolerance
-(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`) — every margin,
-every tap, every named action, the action count and the security status, across
-all eight scenarios.
+**109 of 118 checkable assertions match**, at the reference's own tolerance
+(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`); eighteen of the
+22 scenarios match completely.
 
-Getting there took five fixes, listed in `tests/rao_cucumber_test.rs`. Note in
-particular that `Given network file is "..." for CORE CC` is **not** decoration:
-it rewrites every voltage level (380 kV to 400, 220 to 225), and since the
-nominal voltage is the per-unit base that moves every susceptance by 11%.
+Every remaining mismatch is in the reference's automaton feature group, whose
+expectations are stated *after* automatic remedial actions have fired —
+unimplemented here, and a phase of `plans/RAO_PLAN.md` not yet started.
+
+Getting there took eight fixes, listed in `tests/rao_cucumber_test.rs`. Two
+worth knowing about when adding scenarios: `Given network file is "..." for
+CORE CC` is **not** decoration — it rewrites every voltage level (380 kV to 400,
+220 to 225), and since the nominal voltage is the per-unit base that moves every
+susceptance by 11%. And `the initial margin on cnec` is a different step from
+`the margin on cnec ... after PRA`; reading them as one compares the optimized
+answer against the starting point.
 
 Steps are unmodified, including the file paths — the harness resolves them by
 basename, so the text stays as its authors wrote it.

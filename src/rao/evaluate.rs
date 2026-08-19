@@ -45,6 +45,14 @@ use super::crac::{Crac, FlowCnec, Side, State, Threshold, Unit};
 pub struct Resolution {
     /// Element id → flat branch index (lines then transformers).
     pub branch_of: HashMap<String, usize>,
+    /// Element id → bus index.
+    ///
+    /// A CNEC or a contingency names a *branch*; a redispatch names the
+    /// generators and loads it shifts power between, which are buses. Those are
+    /// different id spaces and resolving one against the other silently yields
+    /// nothing — which is how an injection range action comes to be dropped
+    /// from the optimization while every margin still looks right.
+    pub bus_of: HashMap<String, usize>,
     /// Element ids the network does not contain. **Not** an error on its own —
     /// a CRAC written for a merged model legitimately names elements outside
     /// any single file — but every consumer needs to know, because what it
@@ -60,6 +68,16 @@ impl Resolution {
     /// fixed-width and carry padding (`"BBE1AA1  BBE2AA1  1"`), and a CRAC
     /// written against the same network may or may not preserve it.
     pub fn new(crac: &Crac, branch_ids: &[String]) -> Self {
+        Self::with_buses(crac, branch_ids, &[])
+    }
+
+    /// Resolve against branches *and* buses.
+    ///
+    /// Bus ids are matched exactly, then trimmed, then with a trailing
+    /// `_generator` or `_load` removed: powsybl names a UCTE node's generator
+    /// `<node>_generator`, and a CRAC written against that network uses the
+    /// name powsybl gave it rather than the node code the file contains.
+    pub fn with_buses(crac: &Crac, branch_ids: &[String], bus_ids: &[String]) -> Self {
         let mut exact: HashMap<&str, usize> = HashMap::with_capacity(branch_ids.len());
         let mut trimmed: HashMap<&str, usize> = HashMap::with_capacity(branch_ids.len());
         for (i, id) in branch_ids.iter().enumerate() {
@@ -67,21 +85,52 @@ impl Resolution {
             trimmed.entry(id.trim()).or_insert(i);
         }
 
+        let mut bus_exact: HashMap<&str, usize> = HashMap::with_capacity(bus_ids.len());
+        let mut bus_trimmed: HashMap<&str, usize> = HashMap::with_capacity(bus_ids.len());
+        for (i, id) in bus_ids.iter().enumerate() {
+            bus_exact.entry(id.as_str()).or_insert(i);
+            bus_trimmed.entry(id.trim()).or_insert(i);
+        }
+        let find_bus = |element: &str| -> Option<usize> {
+            if let Some(&i) = bus_exact.get(element).or_else(|| bus_trimmed.get(element.trim())) {
+                return Some(i);
+            }
+            for suffix in ["_generator", "_load"] {
+                if let Some(stem) = element.strip_suffix(suffix) {
+                    if let Some(&i) =
+                        bus_exact.get(stem).or_else(|| bus_trimmed.get(stem.trim()))
+                    {
+                        return Some(i);
+                    }
+                }
+            }
+            None
+        };
+
         let mut branch_of = HashMap::new();
+        let mut bus_of = HashMap::new();
         let mut unresolved = Vec::new();
         for element in crac.network_elements() {
-            match exact.get(element).or_else(|| trimmed.get(element.trim())) {
-                Some(&i) => {
-                    branch_of.insert(element.to_string(), i);
-                }
-                None => unresolved.push(element.to_string()),
+            if let Some(&i) = exact.get(element).or_else(|| trimmed.get(element.trim())) {
+                branch_of.insert(element.to_string(), i);
+                continue;
             }
+            if let Some(i) = find_bus(element) {
+                bus_of.insert(element.to_string(), i);
+                continue;
+            }
+            unresolved.push(element.to_string());
         }
-        Self { branch_of, unresolved }
+        Self { branch_of, bus_of, unresolved }
     }
 
     pub fn branch(&self, element: &str) -> Option<usize> {
         self.branch_of.get(element).copied()
+    }
+
+    /// The bus an injection element sits on.
+    pub fn bus(&self, element: &str) -> Option<usize> {
+        self.bus_of.get(element).copied()
     }
 
     /// True when every element the CRAC names was found.
@@ -175,6 +224,9 @@ pub struct Network<'a> {
     pub transformers: &'a [Transformer],
     /// Flat branch index → the element id the CRAC would use.
     pub branch_ids: &'a [String],
+    /// Bus index → the id the CRAC would use, for resolving injections.
+    /// May be empty, in which case no injection resolves.
+    pub bus_ids: &'a [String],
     pub base_mva: f64,
 }
 

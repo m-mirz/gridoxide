@@ -209,6 +209,23 @@ struct Control {
     penalty: f64,
     /// For a phase shifter: the branch it sits on, and its tap table.
     pst: Option<PstControl>,
+    /// For a redispatch: `(bus, key)` pairs, and the set-point currently
+    /// written into the network. Applying works on the difference, so a
+    /// proposal that is tried and reverted leaves the buses exactly as they
+    /// were.
+    injection: Option<InjectionControl>,
+}
+
+struct InjectionControl {
+    distribution: Vec<(usize, f64)>,
+    applied: f64,
+    /// Sum of this action's distribution keys.
+    ///
+    /// Zero means the action moves power *between* buses and leaves the total
+    /// alone. Non-zero means it creates or destroys some, and it may only be
+    /// used alongside others that cancel it — which is what the balance row
+    /// enforces.
+    key_sum: f64,
 }
 
 /// Sign conversion between a CRAC's phase-shifter angles and
@@ -471,10 +488,15 @@ pub fn optimize(
 
 /// The network, mutably, so set-points can be applied.
 pub struct NetworkMut<'a> {
-    pub buses: &'a [crate::types::Bus],
+    /// Mutable, because a redispatch is applied by moving bus injections.
+    /// Without that an injection range action can be optimized and then never
+    /// take effect — the measurement sees an unchanged network, finds no
+    /// improvement, and the action is silently dropped from every answer.
+    pub buses: &'a mut Vec<crate::types::Bus>,
     pub lines: &'a [crate::types::Line],
     pub transformers: &'a mut Vec<Transformer>,
     pub branch_ids: &'a [String],
+    pub bus_ids: &'a [String],
     pub base_mva: f64,
 }
 
@@ -485,6 +507,7 @@ impl NetworkMut<'_> {
             lines: self.lines,
             transformers: self.transformers,
             branch_ids: self.branch_ids,
+            bus_ids: self.bus_ids,
             base_mva: self.base_mva,
         }
     }
@@ -530,6 +553,35 @@ fn build_program(
             control.current,
             control.current,
         );
+    }
+
+    // The network must still balance after any redispatch:
+    //
+    //     Σ_r (Δ⁺(r) − Δ⁻(r)) · Σ_d key_d(r) = 0
+    //
+    // An action whose keys sum to zero moves power between buses and is
+    // unaffected. One whose keys do not sum to zero creates or destroys power,
+    // and this row is what stops it being used alone — it may still be used
+    // *alongside* another that cancels it, which is exactly the case a
+    // single-action check would forbid and a real CRAC contains.
+    //
+    // Without this the optimizer happily invents generation and reports a
+    // margin no network could achieve.
+    let balance: Vec<(usize, f64)> = controls
+        .iter()
+        .enumerate()
+        .filter_map(|(k, c)| {
+            let sum = c.injection.as_ref()?.key_sum;
+            (sum.abs() > 1e-12).then_some((k, sum))
+        })
+        .collect();
+    if !balance.is_empty() {
+        let mut row: Vec<(usize, f64)> = Vec::with_capacity(balance.len() * 2);
+        for &(k, sum) in &balance {
+            row.push((up_column(k), sum));
+            row.push((down_column(k), -sum));
+        }
+        lp.add_row(&row, 0.0, 0.0);
     }
 
     // Maximize the minimum margin.
@@ -661,6 +713,7 @@ fn build_controls(
                     upper,
                     penalty: options.pst_penalty,
                     pst: Some(PstControl { branch, tap_to_angle: table, tap }),
+                    injection: None,
                 });
             }
             RangeActionKind::Injection { distribution } => {
@@ -668,17 +721,18 @@ fn build_controls(
                 // keys. Its sensitivity is the PTDF combination those keys
                 // produce, which is exact in DC.
                 let mut injections = vec![0.0; sensitivity.n_buses()];
+                let mut keys: Vec<(usize, f64)> = Vec::new();
                 let mut usable = false;
                 for (element, key) in distribution {
-                    let Some(branch) = resolution.branch(element) else { continue };
-                    // An injection element is named by the equipment it sits
-                    // on; resolving it as a branch gives the bus at its `from`
-                    // end, which is where the power enters.
-                    let Some(bus) = branches.iter().find(|b| b.index == branch).map(|b| b.from)
-                    else {
+                    // A redispatch names generators and loads, which are buses.
+                    // Resolving them as branches finds nothing and silently
+                    // drops the action.
+                    let Some(bus) = resolution.bus(element) else { continue };
+                    if bus >= injections.len() {
                         continue;
-                    };
+                    }
                     injections[bus] += key / network.base_mva;
+                    keys.push((bus, *key));
                     usable = true;
                 }
                 if !usable {
@@ -696,6 +750,11 @@ fn build_controls(
                     upper,
                     penalty: options.injection_penalty,
                     pst: None,
+                    injection: Some(InjectionControl {
+                        key_sum: keys.iter().map(|(_, k)| *k).sum(),
+                        distribution: keys,
+                        applied: 0.0,
+                    }),
                 });
             }
             // Recognised and skipped: gridoxide models a DC network but nothing
@@ -778,8 +837,23 @@ fn apply(
     controls: &mut [Control],
     proposed: &[(f64, Option<i32>)],
 ) {
+    let base_mva = network.base_mva;
     for (control, &(value, tap)) in controls.iter_mut().zip(proposed) {
         control.current = value;
+        if let Some(injection) = control.injection.as_mut() {
+            // Move the *difference*, so trying a proposal and reverting it
+            // returns the buses to exactly where they were rather than
+            // accumulating.
+            let delta = value - injection.applied;
+            if delta != 0.0 {
+                for &(bus, key) in &injection.distribution {
+                    if let Some(b) = network.buses.get_mut(bus) {
+                        b.p_spec += key * delta / base_mva;
+                    }
+                }
+                injection.applied = value;
+            }
+        }
         if let Some(pst) = control.pst.as_mut() {
             if let Some(tap) = tap {
                 pst.tap = tap;

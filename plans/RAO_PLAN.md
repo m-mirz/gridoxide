@@ -465,12 +465,12 @@ phase 1.
 
 **Wired up, and it earned its keep immediately.** `tests/rao_cucumber_test.rs` runs eight scenarios
 copied verbatim from the reference's suite — every one that is `@dc` and `@rao`, uses a JSON CRAC and
-`TestCase12Nodes`, and needs none of the features §11 puts out of scope. **All 42 checkable
-assertions match**, at the reference's own tolerance rather than one invented here: every margin,
-every tap, every named action, the action count and the security status.
+and needs none of the features §11 puts out of scope. That is **22 scenarios across ten networks**,
+and **109 of their 118 checkable assertions match** at the reference's own tolerance rather than one
+invented here. Eighteen scenarios match completely.
 
-It found **five** real defects in a single afternoon, none of which any internal check could have,
-and all of the same shape — internally consistent, externally wrong:
+It found **eight** real defects, none of which any internal check could have, and all of the same
+shape — internally consistent, externally wrong:
 
 1. **The phase-shifter tap sign was inverted.** A CRAC states tap angles in IIDM's convention and
    gridoxide's complex tap is the MATPOWER one, whose argument is its negation. The optimizer stayed
@@ -501,6 +501,22 @@ and all of the same shape — internally consistent, externally wrong:
    the same angle again. Observed as a 27.8 MW optimum reported as 17.9 MW, with the search
    perfectly convergent and perfectly wrong. Both bracketing taps are now measured and the better
    kept, which is what the reference's own `BestTapFinder` is for.
+
+Broadening the corpus from 8 scenarios to 22 then found three more, all in the **redispatch** path,
+which no test had exercised at all:
+
+6. **Injection elements were resolved as branches.** A redispatch names generators and loads, which
+   are buses; `Resolution` knew only branches, so every injection range action failed to resolve and
+   was silently dropped. `Resolution::with_buses` resolves them, stripping the `_generator`/`_load`
+   suffix powsybl appends to a UCTE node code.
+7. **The chosen set-point was never applied.** `apply` wrote phase-shifter taps and nothing else, so
+   a redispatch was optimized, measured against an unchanged network, found not to help, and
+   rejected. Bus injections are now moved — by the *difference*, so a proposal that is tried and
+   reverted leaves the buses exactly as they were.
+8. **Nothing enforced that a redispatch balances.** Without §7.3's global balance row the optimizer
+   invents generation and reports a margin no network could achieve. Two vendored scenarios exist
+   precisely to test this: one whose keys sum to 0.3 and must therefore go unused, and one with two
+   actions whose sums cancel and which may only be used together. Both now match.
 
 Worth recording what the sequence looked like from the inside: after the first three fixes the
 residual was confidently diagnosed as a missing `onNonRegulatedSide` threshold rule. It was not —
