@@ -465,10 +465,12 @@ phase 1.
 
 **Wired up, and it earned its keep immediately.** `tests/rao_cucumber_test.rs` runs eight scenarios
 copied verbatim from the reference's suite — every one that is `@dc` and `@rao`, uses a JSON CRAC and
-`TestCase12Nodes`, and needs none of the features §11 puts out of scope. **34 of 42 checkable
-assertions match**, at the reference's own tolerance rather than one invented here.
+`TestCase12Nodes`, and needs none of the features §11 puts out of scope. **All 42 checkable
+assertions match**, at the reference's own tolerance rather than one invented here: every margin,
+every tap, every named action, the action count and the security status.
 
-It found three real defects in a single afternoon, none of which any internal check could have:
+It found **five** real defects in a single afternoon, none of which any internal check could have,
+and all of the same shape — internally consistent, externally wrong:
 
 1. **The phase-shifter tap sign was inverted.** A CRAC states tap angles in IIDM's convention and
    gridoxide's complex tap is the MATPOWER one, whose argument is its negation. The optimizer stayed
@@ -485,11 +487,26 @@ It found three real defects in a single afternoon, none of which any internal ch
    consistent and the answer was simply wrong. The fix is structural: the LP now takes its limits
    from the evaluator, so there is one definition of the margin.
 
-The residual eight assertions are one named gap, not a mystery — see the constant's doc comment in
-the harness. Both remaining scenarios agree on security and on the worst margin inside tolerance;
-they differ on which tap, and measured identically the tap this finds scores *better*. The
-disagreement is in **measuring** the reference's tap, and those CRACs' thresholds carry
-`"rule": "onNonRegulatedSide"`, a side-selection rule `src/rao/` does not implement.
+4. **A `Given` step was being silently dropped.** `network file is "..." for CORE CC` is not
+   decoration: the reference's `CoreCcPreprocessor` rewrites every voltage level — 380 kV to 400,
+   220 to 225 — and the nominal voltage *is* the per-unit base, so that moves every susceptance by
+   11% and every ampere conversion by 5%. Two scenarios looked like optimizer defects and were an
+   unread input. `ucte::UcteOptions::core_capacity_calculation` now expresses it, applied to the
+   voltage class before anything is per-unitised, because rescaling an already-converted network
+   means touching impedances, shunts and tap ratios in three different directions.
+5. **Tap rounding settled on the wrong side of the optimum.** Margin as a function of tap is
+   piecewise linear with a kink wherever the binding CNEC changes, so the maximum sits *at* a kink
+   and the continuous optimum lands between two taps. Rounding to the nearest picks the worse one
+   about half the time, and the iteration then converges there — relinearizing at that tap proposes
+   the same angle again. Observed as a 27.8 MW optimum reported as 17.9 MW, with the search
+   perfectly convergent and perfectly wrong. Both bracketing taps are now measured and the better
+   kept, which is what the reference's own `BestTapFinder` is for.
+
+Worth recording what the sequence looked like from the inside: after the first three fixes the
+residual was confidently diagnosed as a missing `onNonRegulatedSide` threshold rule. It was not —
+that diagnosis fitted the evidence available and was wrong, and the real causes only became visible
+after measuring the margin at each tap rather than reasoning about it. Two of the five defects were
+found that way.
 
 Two honest caveats, stated now rather than discovered later. First, **the search tree is a heuristic**
 — agreement on the objective value is meaningful, but a different *set* of actions achieving the same

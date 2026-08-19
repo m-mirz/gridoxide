@@ -39,10 +39,15 @@ JSON CRAC and the `TestCase12Nodes` network, and needs none of loop flows,
 MNECs, relative margins, costly optimization, HVDC, second-preventive or MARMOT
 — the features `src/rao/` does not implement. That is 8 of roughly 500.
 
-**34 of 42 checkable assertions currently match**, at the reference's own
-tolerance (`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`). Six
-scenarios match completely. `tests/rao_cucumber_test.rs` documents exactly what
-the other eight assertions are and why.
+**All 42 checkable assertions match**, at the reference's own tolerance
+(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`) — every margin,
+every tap, every named action, the action count and the security status, across
+all eight scenarios.
+
+Getting there took five fixes, listed in `tests/rao_cucumber_test.rs`. Note in
+particular that `Given network file is "..." for CORE CC` is **not** decoration:
+it rewrites every voltage level (380 kV to 400, 220 to 225), and since the
+nominal voltage is the per-unit base that moves every susceptance by 11%.
 
 Steps are unmodified, including the file paths — the harness resolves them by
 basename, so the text stays as its authors wrote it.
