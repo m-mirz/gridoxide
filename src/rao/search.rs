@@ -82,6 +82,12 @@ pub struct SearchResult {
     /// re-deriving it is where the caller's idea of the winning network drifts
     /// from the searcher's.
     pub open_branches: Vec<usize>,
+    /// The buses at the winning leaf, redispatch included. Together with
+    /// `transformers` and `open_branches` this is the winning network — and a
+    /// redispatch lives *only* here, so a consumer that carries the
+    /// transformers and forgets the buses reproduces a network in which no
+    /// injection ever moved.
+    pub buses: Vec<crate::types::Bus>,
     /// The transformers at the winning leaf, tap movements included.
     ///
     /// Returned rather than applied in place. `optimize` mutates because it
@@ -210,7 +216,7 @@ pub fn search(
         .collect();
 
     // The root: no network action, range actions optimized.
-    let (root_margin, root_setpoints, root_transformers) =
+    let (root_margin, root_setpoints, root_transformers, root_buses) =
         leaf(crac, network, resolution, perimeter, solver, &options.linear, &[]);
     let initial = margin_of(crac, network, resolution, perimeter, &[]);
 
@@ -218,6 +224,7 @@ pub fn search(
     let mut best_margin = root_margin;
     let mut best_setpoints = root_setpoints;
     let mut best_transformers = root_transformers;
+    let mut best_buses = root_buses;
     let mut leaves = 0usize;
     let mut depth = 0usize;
 
@@ -229,7 +236,8 @@ pub fn search(
             }
         }
 
-        let mut winner: Option<(usize, f64, Vec<Setpoint>, Vec<crate::types::Transformer>)> = None;
+        type Leaf = (usize, f64, Vec<Setpoint>, Vec<crate::types::Transformer>, Vec<crate::types::Bus>);
+    let mut winner: Option<Leaf> = None;
         // A fixed order, so the search reproduces itself.
         for (index, effect) in &available {
             if chosen.contains(index) {
@@ -243,24 +251,24 @@ pub fn search(
             let mut open = open_here.clone();
             open.extend(&effect.open);
 
-            let (margin, setpoints, transformers) =
+            let (margin, setpoints, transformers, buses) =
                 leaf(crac, network, resolution, perimeter, solver, &options.linear, &open);
             leaves += 1;
 
             let better = match &winner {
                 None => true,
-                Some((best, previous, _, _)) => {
+                Some((best, previous, _, _, _)) => {
                     margin > *previous + 1e-12
                         || ((margin - *previous).abs() <= 1e-12
                             && crac.network_actions[*index].id < crac.network_actions[*best].id)
                 }
             };
             if better {
-                winner = Some((*index, margin, setpoints, transformers));
+                winner = Some((*index, margin, setpoints, transformers, buses));
             }
         }
 
-        let Some((index, margin, setpoints, transformers)) = winner else { break };
+        let Some((index, margin, setpoints, transformers, buses)) = winner else { break };
         if !improved_enough(best_margin, margin, options) {
             break;
         }
@@ -268,6 +276,7 @@ pub fn search(
         best_margin = margin;
         best_setpoints = setpoints;
         best_transformers = transformers;
+        best_buses = buses;
         depth += 1;
     }
 
@@ -289,6 +298,7 @@ pub fn search(
         depth,
         open_branches,
         transformers: best_transformers,
+        buses: best_buses,
     }
 }
 
@@ -320,17 +330,22 @@ fn leaf(
     solver: &mut dyn Solver,
     options: &LinearOptions,
     open: &[usize],
-) -> (f64, Vec<Setpoint>, Vec<crate::types::Transformer>) {
+) -> (f64, Vec<Setpoint>, Vec<crate::types::Transformer>, Vec<crate::types::Bus>) {
     let mut transformers = network.transformers.to_vec();
+    // The leaf gets its own copy of the buses as well as the transformers: a
+    // redispatch moves injections, and a candidate that is evaluated and
+    // discarded must not leave them moved.
+    let mut buses = network.buses.to_vec();
     let mut mutable = NetworkMut {
-        buses: network.buses,
+        buses: &mut buses,
         lines: network.lines,
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
+        bus_ids: network.bus_ids,
         base_mva: network.base_mva,
     };
     let result = optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, open);
-    (result.0, result.1, transformers)
+    (result.0, result.1, transformers, buses)
 }
 
 /// [`optimize`] against a network with branches already open.
@@ -372,6 +387,7 @@ fn optimize_with_open(
         lines: &lines,
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
+        bus_ids: network.bus_ids,
         base_mva: network.base_mva,
     };
     let result = optimize(crac, &mut inner, resolution, perimeter, solver, options);

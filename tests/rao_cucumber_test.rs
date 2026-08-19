@@ -19,15 +19,25 @@
 //!
 //! # What it found
 //!
-//! Five defects, in an afternoon, all of the same shape: internally consistent,
-//! externally wrong, and invisible to any test gridoxide could write for itself.
+//! Eight defects, all of the same shape: internally consistent, externally
+//! wrong, and invisible to any test gridoxide could write for itself.
+//!
 //! An inverted tap sign that left every margin correct and every tap label
 //! mirrored; ampere thresholds converted at the network's base rather than the
 //! voltage the CRAC names; an LP optimizing a different limit from the one being
 //! measured; a `for CORE CC` step this harness was dropping, which rewrites
-//! every nominal voltage and so moves every susceptance by 11%; and a
-//! tap-rounding rule that settled on the wrong side of the optimum and stayed
-//! there, convergent and wrong.
+//! every nominal voltage and so moves every susceptance by 11%; a tap-rounding
+//! rule that settled on the wrong side of the optimum and stayed there,
+//! convergent and wrong.
+//!
+//! Then, on broadening the corpus from 8 scenarios to 22, three more in the
+//! redispatch path — which had never been exercised at all. Injection elements
+//! were resolved as *branches* when a redispatch names generators and loads,
+//! which are buses, so every injection range action was silently dropped. Once
+//! they resolved, the chosen set-point was never written to the network, so the
+//! measurement saw no change and the action was rejected. And once it was
+//! applied, nothing enforced that a redispatch must balance — so the optimizer
+//! invented generation and reported margins no network could achieve.
 //!
 //! # What a failure means
 //!
@@ -63,6 +73,12 @@ enum Expect {
     Secured(bool),
     WorstMargin { value: f64, cnec: Option<String> },
     CnecMargin { cnec: String, value: f64 },
+    /// `the initial margin on cnec "X" should be N MW` — the *untouched*
+    /// network, before any remedial action. Distinct from the after-PRA one,
+    /// and a scenario routinely asserts both for the same CNEC: reading them
+    /// as the same step compares the optimized answer against the starting
+    /// point and fails on every scenario that improves anything.
+    InitialCnecMargin { cnec: String, value: f64 },
     PstTap { action: String, tap: i32 },
     ActionUsed { action: String },
     ActionCount(usize),
@@ -175,7 +191,9 @@ fn expectation(line: &str) -> Expect {
         };
     }
     if line.contains("margin on cnec") && line.contains(" MW") {
+        let initial = line.contains("initial margin on cnec");
         return match (quoted(line), number_after_quotes(line)) {
+            (Some(cnec), Some(value)) if initial => Expect::InitialCnecMargin { cnec, value },
             (Some(cnec), Some(value)) => Expect::CnecMargin { cnec, value },
             _ => Expect::Unsupported(line.to_string()),
         };
@@ -285,12 +303,13 @@ fn check(scenario: &Scenario) -> Outcome {
     let net = ucte::read_with(resolve(&scenario.network), &options).expect("network");
     let (crac, _) = crac_json::read(resolve(&scenario.crac)).expect("crac");
     let search_options = options_from(&resolve(&scenario.config));
-    let resolution = Resolution::new(&crac, &net.branch_ids);
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let view = Network {
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
         branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -299,15 +318,27 @@ fn check(scenario: &Scenario) -> Outcome {
     // Per-CNEC margins with the preventive decisions in force — what the
     // reference calls "after PRA".
     let after_pra = Network {
-        buses: &net.buses,
+        // The plan's own buses, not the file's: a redispatch lives only there,
+        // and re-evaluating against the original buses reports a network in
+        // which no injection ever moved.
+        buses: &plan.preventive.buses,
         lines: &net.lines,
         transformers: &plan.preventive.transformers,
         branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
         base_mva: net.base_mva,
     };
     let evaluated =
         evaluate_with(&crac, &after_pra, &resolution, &plan.preventive.open_branches);
     let margins: HashMap<&str, f64> = evaluated
+        .perimeters
+        .iter()
+        .flat_map(|p| p.cnecs.iter())
+        .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), c.margin_mw))
+        .collect();
+
+    let untouched = evaluate_with(&crac, &view, &resolution, &[]);
+    let initial_margins: HashMap<&str, f64> = untouched
         .perimeters
         .iter()
         .flat_map(|p| p.cnecs.iter())
@@ -356,6 +387,13 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("worst margin on `{id}` {got:?} (expected {value})"),
                 );
             }
+            Expect::InitialCnecMargin { cnec, value } => {
+                let got = initial_margins.get(cnec.as_str()).copied();
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= megawatt_tolerance(*value)),
+                    format!("initial margin on `{cnec}` {got:?} (expected {value})"),
+                );
+            }
             Expect::CnecMargin { cnec, value } => {
                 let got = margins.get(cnec.as_str()).copied();
                 record(
@@ -400,7 +438,7 @@ fn the_reference_implementations_own_expectations() {
     let text = std::fs::read_to_string(features_dir().join("dc_scenarios.feature"))
         .expect("feature file");
     let scenarios = parse(&text);
-    assert_eq!(scenarios.len(), 8, "expected 8 vendored scenarios");
+    assert_eq!(scenarios.len(), 22, "expected 22 vendored scenarios");
 
     let (mut matched, mut mismatched, mut unsupported) = (0usize, 0usize, 0usize);
     let mut report = String::new();
@@ -438,18 +476,27 @@ fn the_reference_implementations_own_expectations() {
     );
 }
 
-/// How many of the reference's assertions currently hold: **42 of 42**.
+/// How many of the reference's assertions currently hold: **109 of 118**,
+/// across 22 scenarios.
 ///
-/// All eight scenarios match completely — every margin, every tap, every named
+/// Eighteen scenarios match completely — every margin, every tap, every named
 /// action, the action count and the security status — at the reference's own
 /// tolerance.
 ///
+/// **Every one of the nine remaining mismatches is in the reference's automaton
+/// feature group** (`1_2_automatons`), and they fail for one reason: those
+/// scenarios state margins *after* automatic remedial actions have fired, and
+/// `src/rao/` does not simulate automatons. An `auto`-instant CNEC therefore
+/// comes out at its unmitigated value — −2280.95 MW where the reference, having
+/// run its automatons, reports −1945.45. That is a phase of
+/// `plans/RAO_PLAN.md` not yet started rather than a defect in what is here.
+///
 /// It is still a recorded number rather than an assertion of perfection. These
-/// are two heuristic search trees and `plans/RAO_PLAN.md` §8.3 says up front
-/// that a different set of actions reaching the same margin is not a defect; a
-/// future scenario may legitimately disagree. Raising this is progress, a drop
-/// is a regression, and the printed report says which assertion moved.
-const BASELINE_MATCHED: usize = 42;
+/// are two heuristic search trees and §8.3 says up front that a different set of
+/// actions reaching the same margin is not a defect; a future scenario may
+/// legitimately disagree. Raising this is progress, a drop is a regression, and
+/// the printed report says which assertion moved.
+const BASELINE_MATCHED: usize = 109;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

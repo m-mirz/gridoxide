@@ -1278,12 +1278,14 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
         Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?,
     };
 
-    let resolution = Resolution::new(&crac, &network.branch_ids);
+    let resolution =
+        Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
     let view = Network {
         buses: &network.buses,
         lines: &network.lines,
         transformers: &network.transformers,
         branch_ids: &network.branch_ids,
+        bus_ids: &network.bus_ids,
         base_mva: network.base_mva,
     };
     let result = evaluate(&crac, &view, &resolution);
@@ -1351,6 +1353,8 @@ struct SecurityNetwork {
     lines: Vec<gridoxide::types::Line>,
     transformers: Vec<gridoxide::types::Transformer>,
     branch_ids: Vec<String>,
+    /// Bus labels, so a redispatch's generators and loads resolve.
+    bus_ids: Vec<String>,
     base_mva: f64,
     notes: Vec<String>,
 }
@@ -1366,6 +1370,7 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             lines: n.lines,
             transformers: n.transformers,
             branch_ids: n.branch_ids,
+            bus_ids: n.bus_labels,
             base_mva: n.base_mva,
             notes: n.notes,
         });
@@ -1378,6 +1383,7 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             lines: n.lines,
             transformers: n.transformers,
             branch_ids: n.branch_ids,
+            bus_ids: n.node_codes,
             base_mva: n.base_mva,
             notes: n.notes,
         });
@@ -1461,12 +1467,14 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?.0,
     };
 
-    let resolution = Resolution::new(&crac, &network.branch_ids);
+    let resolution =
+        Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
     let view = Network {
         buses: &network.buses,
         lines: &network.lines,
         transformers: &network.transformers,
         branch_ids: &network.branch_ids,
+        bus_ids: &network.bus_ids,
         base_mva: network.base_mva,
     };
     let options = SearchOptions { max_depth: depth, ..Default::default() };

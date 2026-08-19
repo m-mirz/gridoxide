@@ -53,6 +53,8 @@ pub struct PerimeterPlan {
     /// Branches left open by every decision in force here — this perimeter's
     /// own and everything carried forward into it.
     pub open_branches: Vec<usize>,
+    /// The buses as this perimeter leaves them, redispatch included.
+    pub buses: Vec<crate::types::Bus>,
     /// The transformers as this perimeter leaves them.
     ///
     /// Together with `open_branches` this is the network the perimeter's
@@ -165,6 +167,7 @@ pub fn run(
         final_margin_mw: preventive.final_margin_mw,
         leaves: preventive.leaves,
         open_branches: preventive.open_branches.clone(),
+        buses: preventive.buses.clone(),
         transformers: preventive.transformers.clone(),
     };
 
@@ -203,6 +206,7 @@ pub fn run(
                 lines: network.lines,
                 transformers: &transformers,
                 branch_ids: network.branch_ids,
+                bus_ids: network.bus_ids,
                 base_mva: network.base_mva,
             };
             let result = curative_search(
@@ -220,6 +224,7 @@ pub fn run(
                 final_margin_mw: result.final_margin_mw,
                 leaves: result.leaves,
                 open_branches: in_force.clone(),
+                buses: result.buses.clone(),
                 transformers: result.transformers.clone(),
             });
             open = in_force;
@@ -292,6 +297,7 @@ fn curative_search(
         lines: &lines,
         transformers: &transformers,
         branch_ids: network.branch_ids,
+        bus_ids: network.bus_ids,
         base_mva: network.base_mva,
     };
     search(crac, &view, resolution, perimeter, solver, options)

@@ -137,11 +137,13 @@ fn optimizing_a_perimeter_improves_its_worst_margin() {
     let preventive = State::preventive(c.crac.preventive_instant().expect("preventive"));
 
     let mut transformers = c.net.transformers.clone();
+    let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
-        buses: &c.net.buses,
+        buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -173,11 +175,13 @@ fn a_phase_shifter_lands_on_a_tap_the_operator_can_select() {
     let resolution = c.resolution();
     let preventive = State::preventive(c.crac.preventive_instant().unwrap());
     let mut transformers = c.net.transformers.clone();
+    let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
-        buses: &c.net.buses,
+        buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -215,11 +219,13 @@ fn the_network_is_left_where_the_result_says_it_is() {
     let resolution = c.resolution();
     let preventive = State::preventive(c.crac.preventive_instant().unwrap());
     let mut transformers = c.net.transformers.clone();
+    let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
-        buses: &c.net.buses,
+        buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -232,6 +238,7 @@ fn the_network_is_left_where_the_result_says_it_is() {
         lines: &c.net.lines,
         transformers: &transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let after = evaluate(&c.crac, &view, &resolution);
@@ -258,11 +265,13 @@ fn a_perimeter_with_no_range_actions_reports_no_improvement() {
     let preventive = State::preventive(crac.preventive_instant().unwrap());
     let mut transformers = c.net.transformers.clone();
     let before = transformers.clone();
+    let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
-        buses: &c.net.buses,
+        buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -287,11 +296,13 @@ fn the_movement_penalty_prefers_the_smaller_move() {
 
     let run = |penalty: f64| {
         let mut transformers = c.net.transformers.clone();
+        let mut buses = c.net.buses.clone();
         let mut network = NetworkMut {
-            buses: &c.net.buses,
+            buses: &mut buses,
             lines: &c.net.lines,
             transformers: &mut transformers,
             branch_ids: &c.net.branch_ids,
+            bus_ids: &[],
             base_mva: c.net.base_mva,
         };
         let mut solver = IpmSolver::new();
@@ -331,11 +342,13 @@ fn a_curative_perimeter_optimizes_its_own_state() {
         .expect("a curative state");
 
     let mut transformers = c.net.transformers.clone();
+    let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
-        buses: &c.net.buses,
+        buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -350,6 +363,7 @@ fn a_curative_perimeter_optimizes_its_own_state() {
         lines: &c.net.lines,
         transformers: &c.net.transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let baseline = evaluate(&c.crac, &view, &resolution);
@@ -392,11 +406,13 @@ fn a_perimeter_of_monitored_only_cnecs_optimizes_nothing() {
     let resolution = c.resolution();
     let mut transformers = c.net.transformers.clone();
     let before = transformers.clone();
+    let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
-        buses: &c.net.buses,
+        buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -420,11 +436,13 @@ fn usage_rules_decide_which_perimeter_an_action_reaches() {
     let mut moved_in = Vec::new();
     for state in c.crac.states() {
         let mut transformers = c.net.transformers.clone();
+        let mut buses = c.net.buses.clone();
         let mut network = NetworkMut {
-            buses: &c.net.buses,
+            buses: &mut buses,
             lines: &c.net.lines,
             transformers: &mut transformers,
             branch_ids: &c.net.branch_ids,
+            bus_ids: &[],
             base_mva: c.net.base_mva,
         };
         let mut solver = IpmSolver::new();

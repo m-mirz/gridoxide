@@ -56,6 +56,7 @@ impl Case {
             lines: &self.net.lines,
             transformers: &self.net.transformers,
             branch_ids: &self.net.branch_ids,
+            bus_ids: &[],
             base_mva: self.net.base_mva,
         }
     }
@@ -163,6 +164,7 @@ fn the_reported_margin_matches_an_independent_evaluation_of_the_winning_network(
         lines: &c.net.lines,
         transformers: &result.transformers,
         branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
         base_mva: c.net.base_mva,
     };
     let independent = evaluate_with(&c.crac, &network, &c.resolution(), &result.open_branches);
