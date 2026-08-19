@@ -30,7 +30,17 @@
 //! rule that settled on the wrong side of the optimum and stayed there,
 //! convergent and wrong.
 //!
-//! Then, on broadening the corpus from 8 scenarios to 22, three more in the
+//! Implementing automaton simulation then found four more, three of them
+//! structural: a network file's out-of-service circuits were dropped at import,
+//! so an automaton that *closes* a standby circuit — one of the commonest there
+//! is — could not be applied at all; `initially_open` never reached the
+//! evaluation, so those circuits were silently in service; a PST range action
+//! whose CRAC omits its tap table was skipped, when the table is a property of
+//! the transformer and the network already describes it; and each automaton was
+//! sized against the perimeter's worst CNEC rather than the one its own rule
+//! names, which asks a scheme to relieve a flow it has no influence over.
+//!
+//! And on broadening the corpus from 8 scenarios to 22, three more in the
 //! redispatch path — which had never been exercised at all. Injection elements
 //! were resolved as *branches* when a redispatch names generators and loads,
 //! which are buses, so every injection range action was silently dropped. Once
@@ -38,6 +48,13 @@
 //! measurement saw no change and the action was rejected. And once it was
 //! applied, nothing enforced that a redispatch must balance — so the optimizer
 //! invented generation and reported margins no network could achieve.
+//!
+//! Then two more while building the automaton simulator: out-of-service
+//! branches were dropped at import, which makes "close this standby circuit" —
+//! among the commonest automatons there is — inexpressible; and a PST range
+//! action whose CRAC omits its tap table (they routinely do, since the table
+//! belongs to the transformer) had no positions to choose between and was
+//! skipped in silence, in the automaton *and* in the linear optimizer.
 //!
 //! # What a failure means
 //!
@@ -71,20 +88,56 @@ fn megawatt_tolerance(expected: f64) -> f64 {
 #[derive(Debug, Clone)]
 enum Expect {
     Secured(bool),
-    WorstMargin { value: f64, cnec: Option<String> },
-    CnecMargin { cnec: String, value: f64 },
+    WorstMargin { value: f64, cnec: Option<String>, stage: Stage },
+    CnecMargin { cnec: String, value: f64, stage: Stage },
     /// `the initial margin on cnec "X" should be N MW` — the *untouched*
     /// network, before any remedial action. Distinct from the after-PRA one,
     /// and a scenario routinely asserts both for the same CNEC: reading them
     /// as the same step compares the optimized answer against the starting
     /// point and fails on every scenario that improves anything.
     InitialCnecMargin { cnec: String, value: f64 },
-    PstTap { action: String, tap: i32 },
-    ActionUsed { action: String },
-    ActionCount(usize),
+    PstTap { action: String, tap: i32, at: Where },
+    ActionUsed { action: String, at: Where },
+    ActionCount { count: usize, at: Where },
     /// A step this harness does not implement, kept so it is counted rather
     /// than quietly dropped.
     Unsupported(String),
+}
+
+/// How far through the plan a margin assertion is measured.
+///
+/// `after PRA` is the network with only the preventive decisions in force;
+/// `after ARA` adds that contingency's automatons; `after CRA` adds its
+/// curative decisions too. They are three different networks, and measuring an
+/// `auto` CNEC against the preventive one reports the overload the automatons
+/// exist to remove.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stage {
+    Pra,
+    Ara,
+    Cra,
+}
+
+fn stage_of(line: &str) -> Stage {
+    if line.contains("after ARA") {
+        Stage::Ara
+    } else if line.contains("after CRA") {
+        Stage::Cra
+    } else {
+        Stage::Pra
+    }
+}
+
+/// Which perimeter an assertion is about.
+///
+/// A scenario says either "in preventive" or `after "<contingency>" at
+/// "<instant>"`. Reading the second as the first is not a small error: it asks
+/// the preventive perimeter about a decision only an automaton or a curative
+/// perimeter could have made, and the answer is always "nothing happened".
+#[derive(Debug, Clone, PartialEq)]
+enum Where {
+    Preventive,
+    After { contingency: String, instant: String },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -175,6 +228,21 @@ fn parse(text: &str) -> Vec<Scenario> {
     scenarios
 }
 
+/// `after "<contingency>" at "<instant>"`, if the step says so.
+fn where_of(line: &str) -> Where {
+    let Some(rest) = line.split_once(" after ").map(|(_, r)| r) else {
+        return Where::Preventive;
+    };
+    let quotes: Vec<&str> = rest.split('"').skip(1).step_by(2).collect();
+    match (quotes.first(), quotes.get(1)) {
+        (Some(contingency), Some(instant)) => Where::After {
+            contingency: contingency.trim().to_string(),
+            instant: instant.trim().to_string(),
+        },
+        _ => Where::Preventive,
+    }
+}
+
 fn expectation(line: &str) -> Expect {
     if line.contains("security status should be") {
         return match quoted(line).as_deref() {
@@ -186,7 +254,7 @@ fn expectation(line: &str) -> Expect {
     if line.contains("the worst margin is") && line.contains(" MW") {
         let cnec = line.contains("on cnec").then(|| quoted(line)).flatten();
         return match number_after_quotes(line) {
-            Some(value) => Expect::WorstMargin { value, cnec },
+            Some(value) => Expect::WorstMargin { value, cnec, stage: stage_of(line) },
             None => Expect::Unsupported(line.to_string()),
         };
     }
@@ -194,25 +262,29 @@ fn expectation(line: &str) -> Expect {
         let initial = line.contains("initial margin on cnec");
         return match (quoted(line), number_after_quotes(line)) {
             (Some(cnec), Some(value)) if initial => Expect::InitialCnecMargin { cnec, value },
-            (Some(cnec), Some(value)) => Expect::CnecMargin { cnec, value },
+            (Some(cnec), Some(value)) => {
+                Expect::CnecMargin { cnec, value, stage: stage_of(line) }
+            }
             _ => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("the tap of PstRangeAction") {
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(action), Some(tap)) => Expect::PstTap { action, tap: tap as i32 },
+            (Some(action), Some(tap)) => {
+                Expect::PstTap { action, tap: tap as i32, at: where_of(line) }
+            }
             _ => Expect::Unsupported(line.to_string()),
         };
     }
-    if line.contains("remedial action") && line.contains("is used in preventive") {
+    if line.contains("remedial action") && line.contains(" is used") && !line.contains("not used") {
         return match quoted(line) {
-            Some(action) => Expect::ActionUsed { action },
+            Some(action) => Expect::ActionUsed { action, at: where_of(line) },
             None => Expect::Unsupported(line.to_string()),
         };
     }
-    if line.contains("remedial actions are used in preventive") {
+    if line.contains("remedial actions are used") {
         return match number_after_quotes(line) {
-            Some(n) => Expect::ActionCount(n as usize),
+            Some(n) => Expect::ActionCount { count: n as usize, at: where_of(line) },
             None => Expect::Unsupported(line.to_string()),
         };
     }
@@ -285,6 +357,25 @@ fn options_from(config: &Path) -> SearchOptions {
     options
 }
 
+/// The margin of `cnec` at `stage`, falling back to the after-PRA map when the
+/// stage produced nothing for it — a CNEC in a contingency with no automaton or
+/// no curative perimeter is unchanged from PRA, which is the honest answer
+/// rather than a missing one.
+fn pick(
+    stage: Stage,
+    cnec: &str,
+    pra: &HashMap<&str, f64>,
+    ara: &HashMap<String, f64>,
+    cra: &HashMap<String, f64>,
+) -> Option<f64> {
+    let staged = match stage {
+        Stage::Pra => None,
+        Stage::Ara => ara.get(cnec).copied(),
+        Stage::Cra => cra.get(cnec).copied(),
+    };
+    staged.or_else(|| pra.get(cnec).copied())
+}
+
 struct Outcome {
     matched: Vec<String>,
     mismatched: Vec<String>,
@@ -310,6 +401,8 @@ fn check(scenario: &Scenario) -> Outcome {
         transformers: &net.transformers,
         branch_ids: &net.branch_ids,
         bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
@@ -317,6 +410,52 @@ fn check(scenario: &Scenario) -> Outcome {
 
     // Per-CNEC margins with the preventive decisions in force — what the
     // reference calls "after PRA".
+    // One margin map per stage. A CNEC is looked up in the map its step names,
+    // because the three describe genuinely different networks.
+    let margins_at = |stage: Stage| -> HashMap<String, f64> {
+        let mut out = HashMap::new();
+        for scenario in &plan.scenarios {
+            let contingency = Some(scenario.contingency);
+            let (open, transformers, buses) = match stage {
+                Stage::Cra => scenario
+                    .perimeters
+                    .last()
+                    .map(|p| (&p.open_branches, &p.transformers, &p.buses)),
+                Stage::Ara => scenario
+                    .automatons
+                    .as_ref()
+                    .map(|a| (&a.open_branches, &a.transformers, &plan.preventive.buses)),
+                Stage::Pra => None,
+            }
+            .unwrap_or((
+                &plan.preventive.open_branches,
+                &plan.preventive.transformers,
+                &plan.preventive.buses,
+            ));
+            let view = Network {
+                buses,
+                lines: &net.lines,
+                transformers,
+                branch_ids: &net.branch_ids,
+                bus_ids: &net.node_codes,
+                initially_open: &net.initially_open,
+                tap_changers: &net.tap_changers,
+                base_mva: net.base_mva,
+            };
+            for perimeter in evaluate_with(&crac, &view, &resolution, open).perimeters {
+                if perimeter.state.contingency != contingency {
+                    continue;
+                }
+                for c in &perimeter.cnecs {
+                    out.insert(crac.flow_cnecs[c.cnec].id.clone(), c.margin_mw);
+                }
+            }
+        }
+        out
+    };
+    let ara_margins = margins_at(Stage::Ara);
+    let cra_margins = margins_at(Stage::Cra);
+
     let after_pra = Network {
         // The plan's own buses, not the file's: a redispatch lives only there,
         // and re-evaluating against the original buses reports a network in
@@ -326,6 +465,8 @@ fn check(scenario: &Scenario) -> Outcome {
         transformers: &plan.preventive.transformers,
         branch_ids: &net.branch_ids,
         bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
     let evaluated =
@@ -344,6 +485,82 @@ fn check(scenario: &Scenario) -> Outcome {
         .flat_map(|p| p.cnecs.iter())
         .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), c.margin_mw))
         .collect();
+
+    // What each perimeter decided, keyed the way the steps address it.
+    let decisions = |at: &Where| -> (Vec<String>, HashMap<String, i32>) {
+        let mut used = Vec::new();
+        let mut taps = HashMap::new();
+        fn take_setpoints(
+            crac: &Crac,
+            setpoints: &[gridoxide::rao::Setpoint],
+            used: &mut Vec<String>,
+            taps: &mut HashMap<String, i32>,
+        ) {
+            for s in setpoints {
+                // "Used" means *moved*; a tap assertion asks where the shifter
+                // ended up, which is a question with an answer even when it
+                // stayed put.
+                if s.moved() {
+                    used.push(crac.range_actions[s.action].id.clone());
+                }
+                if let Some(tap) = s.tap {
+                    taps.insert(crac.range_actions[s.action].id.clone(), tap);
+                }
+            }
+        }
+        match at {
+            Where::Preventive => {
+                used.extend(
+                    plan.preventive
+                        .network_actions
+                        .iter()
+                        .map(|&a| crac.network_actions[a].id.clone()),
+                );
+                take_setpoints(&crac, &plan.preventive.setpoints, &mut used, &mut taps);
+            }
+            Where::After { contingency, instant } => {
+                for scenario in &plan.scenarios {
+                    if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
+                        continue;
+                    }
+                    if crac.instants.iter().any(|i| {
+                        i.id == *instant && i.kind == InstantKind::Auto
+                    }) {
+                        if let Some(a) = &scenario.automatons {
+                            used.extend(
+                                a.network_actions
+                                    .iter()
+                                    .map(|&i| crac.network_actions[i].id.clone()),
+                            );
+                            for (i, _, tap) in &a.range_actions {
+                                used.push(crac.range_actions[*i].id.clone());
+                                if let Some(tap) = tap {
+                                    taps.insert(crac.range_actions[*i].id.clone(), *tap);
+                                }
+                            }
+                        }
+                    }
+                    for perimeter in &scenario.perimeters {
+                        let matches = perimeter
+                            .states
+                            .iter()
+                            .any(|s| crac.instants[s.instant].id == *instant);
+                        if !matches {
+                            continue;
+                        }
+                        used.extend(
+                            perimeter
+                                .network_actions
+                                .iter()
+                                .map(|&a| crac.network_actions[a].id.clone()),
+                        );
+                        take_setpoints(&crac, &perimeter.setpoints, &mut used, &mut taps);
+                    }
+                }
+            }
+        }
+        (used, taps)
+    };
 
     let used: Vec<&str> = plan
         .preventive
@@ -373,15 +590,15 @@ fn check(scenario: &Scenario) -> Outcome {
                 let got = plan.is_secure();
                 record(got == *want, format!("security {got} (expected {want})"));
             }
-            Expect::WorstMargin { value, cnec: None } => {
+            Expect::WorstMargin { value, cnec: None, .. } => {
                 let got = plan.final_margin_mw;
                 record(
                     (got - value).abs() <= megawatt_tolerance(*value),
                     format!("worst margin {got:.2} MW (expected {value})"),
                 );
             }
-            Expect::WorstMargin { value, cnec: Some(id) } => {
-                let got = margins.get(id.as_str()).copied();
+            Expect::WorstMargin { value, cnec: Some(id), stage } => {
+                let got = pick(*stage, id, &margins, &ara_margins, &cra_margins);
                 record(
                     got.is_some_and(|g| (g - value).abs() <= megawatt_tolerance(*value)),
                     format!("worst margin on `{id}` {got:?} (expected {value})"),
@@ -394,29 +611,28 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("initial margin on `{cnec}` {got:?} (expected {value})"),
                 );
             }
-            Expect::CnecMargin { cnec, value } => {
-                let got = margins.get(cnec.as_str()).copied();
+            Expect::CnecMargin { cnec, value, stage } => {
+                let got = pick(*stage, cnec, &margins, &ara_margins, &cra_margins);
                 record(
                     got.is_some_and(|g| (g - value).abs() <= megawatt_tolerance(*value)),
                     format!("margin on `{cnec}` {got:?} (expected {value})"),
                 );
             }
-            Expect::PstTap { action, tap } => {
-                let got = plan
-                    .preventive
-                    .setpoints
-                    .iter()
-                    .find(|s| crac.range_actions[s.action].id == *action)
-                    .and_then(|s| s.tap);
-                record(got == Some(*tap), format!("tap of `{action}` {got:?} (expected {tap})"));
+            Expect::PstTap { action, tap, at } => {
+                let got = decisions(at).1.get(action).copied();
+                record(
+                    got == Some(*tap),
+                    format!("tap of `{action}` {got:?} (expected {tap}) {at:?}"),
+                );
             }
-            Expect::ActionUsed { action } => {
-                let got = used.contains(&action.as_str());
-                record(got, format!("`{action}` used: {got}"));
+            Expect::ActionUsed { action, at } => {
+                let (used, _) = decisions(at);
+                let got = used.iter().any(|u| u == action);
+                record(got, format!("`{action}` used: {got} {at:?}"));
             }
-            Expect::ActionCount(n) => {
-                let got = used.len();
-                record(got == *n, format!("{got} action(s) used (expected {n})"));
+            Expect::ActionCount { count, at } => {
+                let got = decisions(at).0.len();
+                record(got == *count, format!("{got} action(s) used (expected {count}) {at:?}"));
             }
             Expect::Unsupported(line) => outcome.unsupported.push(line.clone()),
         }
@@ -476,27 +692,26 @@ fn the_reference_implementations_own_expectations() {
     );
 }
 
-/// How many of the reference's assertions currently hold: **109 of 118**,
+/// How many of the reference's assertions currently hold: **120 of 124**,
 /// across 22 scenarios.
 ///
-/// Eighteen scenarios match completely — every margin, every tap, every named
+/// Twenty scenarios match completely — every margin, every tap, every named
 /// action, the action count and the security status — at the reference's own
 /// tolerance.
 ///
-/// **Every one of the nine remaining mismatches is in the reference's automaton
-/// feature group** (`1_2_automatons`), and they fail for one reason: those
-/// scenarios state margins *after* automatic remedial actions have fired, and
-/// `src/rao/` does not simulate automatons. An `auto`-instant CNEC therefore
-/// comes out at its unmitigated value — −2280.95 MW where the reference, having
-/// run its automatons, reports −1945.45. That is a phase of
-/// `plans/RAO_PLAN.md` not yet started rather than a defect in what is here.
+/// The four that remain are margins in three scenarios where automatons and
+/// curative perimeters interact, and they are genuine algorithmic differences
+/// rather than missing features: the automatons fire, the curative perimeters
+/// run, and both achieve less than the reference does. One of them is now
+/// +102.75 MW against an expected +414.58, having been −302.38 before the
+/// curative stage was measured at all, so the gap is narrowing rather than
+/// mysterious.
 ///
 /// It is still a recorded number rather than an assertion of perfection. These
 /// are two heuristic search trees and §8.3 says up front that a different set of
-/// actions reaching the same margin is not a defect; a future scenario may
-/// legitimately disagree. Raising this is progress, a drop is a regression, and
-/// the printed report says which assertion moved.
-const BASELINE_MATCHED: usize = 109;
+/// actions reaching the same margin is not a defect. Raising this is progress, a
+/// drop is a regression, and the printed report says which assertion moved.
+const BASELINE_MATCHED: usize = 120;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

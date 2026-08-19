@@ -61,6 +61,23 @@
 /// the exit — it imposes `V_i = V_j` exactly, with no large number anywhere.
 pub const IDEAL_CONNECTION_Y: num_complex::Complex<f64> = num_complex::Complex::new(2e5, 2e5);
 
+/// Per-unit impedance standing for an **open** branch — the dual of
+/// [`IDEAL_CONNECTION_Y`], and used for the same reason: a branch that has to
+/// stay in the model while carrying nothing.
+///
+/// A branch is opened by giving it this impedance rather than by removing it,
+/// because removal renumbers every later branch and the crate-wide flat index
+/// is what ties a `Line`, a `DcBranch`, a `BranchParams` and a CRAC element id
+/// together.
+///
+/// **Large and finite, not infinite.** `Complex::new(f64::INFINITY,
+/// f64::INFINITY).inv()` is `NaN`, not zero, so an "infinitely open" branch
+/// poisons the whole Y-bus and the solve reports `Singular` — which looks like
+/// a numerical problem and is a modelling mistake. At `1e9` per-unit the
+/// admittance is `1e-9`, below any tolerance that matters and finite
+/// everywhere.
+pub const OPEN_BRANCH_Z: f64 = 1e9;
+
 /// The impedance corresponding to [`IDEAL_CONNECTION_Y`]: `3.54e-6` p.u.
 ///
 /// What a branch caught by [`ZERO_IMPEDANCE_THRESHOLD`] is raised *to*.

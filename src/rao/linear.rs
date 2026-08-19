@@ -167,6 +167,37 @@ impl LinearResult {
     }
 }
 
+/// A phase shifter's tap-to-angle table, in the **CRAC's** sign convention.
+///
+/// Prefers the table the CRAC carries and falls back to the network's own,
+/// negating it: gridoxide's transformer angle is the negation of IIDM's, which
+/// is what a CRAC is written in.
+///
+/// The fallback is not a nicety. A CRAC's PST range action frequently omits the
+/// table — it is a property of the transformer, and a CRAC written against a
+/// network that already describes it has no reason to repeat it — and without
+/// the fallback such an action has no positions to choose between and is
+/// skipped without a word.
+pub fn tap_table(
+    declared: &[(i32, f64)],
+    tap_changers: &[Option<crate::types::TapChanger>],
+    branch: usize,
+    lines: usize,
+) -> Vec<(i32, f64)> {
+    if !declared.is_empty() {
+        let mut table = declared.to_vec();
+        table.sort_by_key(|(t, _)| *t);
+        return table;
+    }
+    let Some(changer) = branch.checked_sub(lines).and_then(|i| tap_changers.get(i)?.as_ref())
+    else {
+        return Vec::new();
+    };
+    (changer.low..=changer.high())
+        .filter_map(|tap| changer.angle_deg(tap).map(|a| (tap, CRAC_ANGLE_SIGN * a)))
+        .collect()
+}
+
 /// The sensitivity of every branch's DC flow to a one-radian phase shift on
 /// `branch`, in per-unit power per radian.
 ///
@@ -497,6 +528,8 @@ pub struct NetworkMut<'a> {
     pub transformers: &'a mut Vec<Transformer>,
     pub branch_ids: &'a [String],
     pub bus_ids: &'a [String],
+    pub initially_open: &'a [usize],
+    pub tap_changers: &'a [Option<crate::types::TapChanger>],
     pub base_mva: f64,
 }
 
@@ -508,6 +541,8 @@ impl NetworkMut<'_> {
             transformers: self.transformers,
             branch_ids: self.branch_ids,
             bus_ids: self.bus_ids,
+            initially_open: self.initially_open,
+            tap_changers: self.tap_changers,
             base_mva: self.base_mva,
         }
     }
@@ -668,7 +703,13 @@ fn build_controls(
         match &action.kind {
             RangeActionKind::Pst { element, initial_tap, tap_to_angle } => {
                 let Some(branch) = resolution.branch(element) else { continue };
-                if tap_to_angle.is_empty() {
+                let table = tap_table(
+                    tap_to_angle,
+                    network.tap_changers,
+                    branch,
+                    network.lines.len(),
+                );
+                if table.is_empty() {
                     continue;
                 }
                 let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else {
@@ -681,8 +722,6 @@ fn build_controls(
                 let sensitivity_mw: Vec<f64> =
                     cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0) * scale).collect();
 
-                let mut table = tap_to_angle.clone();
-                table.sort_by_key(|(t, _)| *t);
                 // The live tap is whatever the transformer's angle is closest
                 // to, not the CRAC's `initialTap` — a search tree may have
                 // moved it since.

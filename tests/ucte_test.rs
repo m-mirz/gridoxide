@@ -57,15 +57,19 @@ fn solve(
     net: &ucte::UcteImport,
 ) -> (HashMap<String, (f64, f64)>, HashMap<String, [f64; 4]>, SolveStatus) {
     let opts = PowerFlowOptions { method: PowerFlowMethod::NewtonRaphson, ..Default::default() };
+    // `as_switched`, not the raw arrays: an out-of-service branch is kept in the
+    // model so it can be closed by a remedial action, and solving the network
+    // "as given" means solving it with those branches open.
+    let (lines, transformers) = net.as_switched();
     let report = gridoxide::run_power_flow(
         net.buses.clone(),
-        &net.lines,
-        &net.transformers,
+        &lines,
+        &transformers,
         &net.shunts,
         opts,
     );
     let v = bus_voltages(&report.buses);
-    let params = branch_params(&net.lines, &net.transformers);
+    let params = branch_params(&lines, &transformers);
     let mva = net.base_mva;
 
     let buses = net
@@ -367,16 +371,27 @@ fn rounding_an_angle_to_a_tap_searches_rather_than_dividing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn out_of_service_branches_are_omitted_and_reported() {
+fn out_of_service_branches_are_kept_open_rather_than_dropped() {
+    // They are kept so that a "close this circuit" remedial action — one of the
+    // commonest automatons there is — can be applied to them at all. Dropping
+    // them would make that inexpressible, and a silently missing branch is also
+    // how an importer produces a plausible wrong answer.
     let net = ucte::read(fixture("TestCase16Nodes_with_different_imax.uct")).expect("import");
-    // Whatever the file marks out of operation must be named, not just dropped:
-    // a silently missing branch is how an importer produces a plausible wrong
-    // answer.
-    for id in &net.out_of_service {
-        assert!(!net.branch_ids.contains(id), "`{id}` was both omitted and kept");
+    assert_eq!(net.out_of_service.len(), net.initially_open.len());
+    for (id, &branch) in net.out_of_service.iter().zip(&net.initially_open) {
+        assert!(net.branch_ids.contains(id), "`{id}` was dropped");
+        assert_eq!(&net.branch_ids[branch], id, "initially_open does not line up with the ids");
     }
     if !net.out_of_service.is_empty() {
         assert!(net.notes.iter().any(|n| n.contains("out of operation")));
+        // And solving the network "as given" must leave them de-energised.
+        let (lines, transformers) = net.as_switched();
+        let open = net.initially_open[0];
+        if open < lines.len() {
+            assert!(lines[open].x > 1e6, "an open line is still conducting");
+        } else {
+            assert_eq!(transformers[open - lines.len()].from_status, 0);
+        }
     }
 }
 

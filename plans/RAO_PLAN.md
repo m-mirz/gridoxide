@@ -6,8 +6,9 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > are met — see §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and
 > the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
-> drops the rest). Phases 4 through 9 are done, and §8.3's external Cucumber gate is wired up and
-> passing at a recorded baseline. Phases 10-12 are unstarted.
+> drops the rest). Phases 4 through 9 and phase 12 are done, and §8.3's external Cucumber gate is
+> wired up and passing at a recorded baseline of 120 of 124 assertions. Phases 10 and 11 are
+> unstarted.
 >
 > The strongest result so far was not planned for. §6.2 justified building two importers as the only
 > route to the external gate; what it did not anticipate is that the two would gate *each other*.
@@ -556,7 +557,7 @@ Assert on the objective and on feasibility, never on the argmin.
 | 9 | ✅ **Done** (Rust + CLI; no Python yet). **Perimeters in order** (`src/rao/castor.rs`) — the preventive perimeter spans the base case *and* every outage state, curative perimeters run per contingency in chronological order carrying the preventive decisions forward, and the pull-forward rule moves an unactionable curative CNEC into the preventive perimeter and reports it | The decomposition changes the answer, which is the point: over the wider perimeter the twelve-node case now takes a line opening **and** a tap that help only together (−241.7 → −157.9, where the action alone gives −257.6 and the shifter alone nothing). A curative perimeter is asserted to start from the preventive result rather than the untouched network |
 | 10 | **In-house branch-and-bound** over `IpmSolver`, MILP back in CI | §8.4 against HiGHS on every fixture and on randomized MILPs |
 | 11 | **AC re-validation stage** — ToOp's second stage: re-check survivors in AC with explicit rejection thresholds | Rejection rate and reasons reported per case, not just a pass/fail |
-| 12 | **Automaton simulation** (`auto` instant) — speed-ordered forced actions | The Cucumber scenarios involving ARAs |
+| 12 | ✅ **Done.** **Automaton simulation** (`src/rao/automaton.rs`) — speed-ordered batches, conditions re-evaluated between them, network actions applied and range actions sized by formula | The reference's own five-automaton scenario passes 10/10: four operate, the fifth correctly does not because an earlier one already relieved its constraint, and both phase shifters land on the taps it names (2 and −3). Required keeping out-of-service circuits at import so a *closing* automaton is expressible at all |
 
 Phases 1–3 are independently useful and ship without any RAO. Phase 5 is a genuine deliverable on its
 own: a security analysis that says which CNECs are violated under which contingency, which gridoxide

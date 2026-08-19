@@ -44,6 +44,8 @@ impl Case {
             transformers: &self.net.transformers,
             branch_ids: &self.net.branch_ids,
             bus_ids: &[],
+            initially_open: &[],
+            tap_changers: &[],
             base_mva: self.net.base_mva,
         }
     }
