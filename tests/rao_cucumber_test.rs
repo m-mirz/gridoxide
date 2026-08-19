@@ -17,6 +17,18 @@
 //! in the reference. Using the tolerance its own authors judge it by is the only
 //! defensible choice; inventing one here would let a disagreement be tuned away.
 //!
+//! # What it found
+//!
+//! Five defects, in an afternoon, all of the same shape: internally consistent,
+//! externally wrong, and invisible to any test gridoxide could write for itself.
+//! An inverted tap sign that left every margin correct and every tap label
+//! mirrored; ampere thresholds converted at the network's base rather than the
+//! voltage the CRAC names; an LP optimizing a different limit from the one being
+//! measured; a `for CORE CC` step this harness was dropping, which rewrites
+//! every nominal voltage and so moves every susceptance by 11%; and a
+//! tap-rounding rule that settled on the wrong side of the optimum and stayed
+//! there, convergent and wrong.
+//!
 //! # What a failure means
 //!
 //! Not necessarily a bug. These are two heuristic search trees, and the plan's
@@ -63,6 +75,9 @@ enum Expect {
 struct Scenario {
     name: String,
     network: String,
+    /// The scenario asked for `for CORE CC`, which rewrites the network's
+    /// nominal voltages before anything else happens.
+    core_cc: bool,
     crac: String,
     config: String,
     expectations: Vec<Expect>,
@@ -124,6 +139,12 @@ fn parse(text: &str) -> Vec<Scenario> {
 
         if line.starts_with("Given network file is") {
             scenario.network = quoted(line).unwrap_or_default();
+            // `for CORE CC` is not decoration. The reference's own
+            // `CoreCcPreprocessor` rewrites every voltage level — 380 kV to 400,
+            // 220 to 225 — and since the nominal voltage *is* the per-unit base
+            // that moves every susceptance by 11%. Dropping the suffix silently
+            // is how two of these scenarios looked like optimizer defects.
+            scenario.core_cc = line.contains("for CORE CC");
         } else if line.starts_with("Given crac file is") {
             scenario.crac = quoted(line).unwrap_or_default();
         } else if line.starts_with("Given configuration file is") {
@@ -256,9 +277,14 @@ fn check(scenario: &Scenario) -> Outcome {
     let mut outcome =
         Outcome { matched: Vec::new(), mismatched: Vec::new(), unsupported: Vec::new() };
 
-    let net = ucte::read(resolve(&scenario.network)).expect("network");
+    let options = if scenario.core_cc {
+        ucte::UcteOptions::core_capacity_calculation()
+    } else {
+        ucte::UcteOptions::default()
+    };
+    let net = ucte::read_with(resolve(&scenario.network), &options).expect("network");
     let (crac, _) = crac_json::read(resolve(&scenario.crac)).expect("crac");
-    let options = options_from(&resolve(&scenario.config));
+    let search_options = options_from(&resolve(&scenario.config));
     let resolution = Resolution::new(&crac, &net.branch_ids);
     let view = Network {
         buses: &net.buses,
@@ -268,7 +294,7 @@ fn check(scenario: &Scenario) -> Outcome {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &view, &resolution, &mut solver, &options);
+    let plan = run(&crac, &view, &resolution, &mut solver, &search_options);
 
     // Per-CNEC margins with the preventive decisions in force — what the
     // reference calls "after PRA".
@@ -412,32 +438,18 @@ fn the_reference_implementations_own_expectations() {
     );
 }
 
-/// How many of the reference's assertions currently hold: **34 of 42**.
+/// How many of the reference's assertions currently hold: **42 of 42**.
 ///
-/// Deliberately a constant rather than "all of them", and worth saying exactly
-/// what the other 8 are, because "some fail" is not a useful record.
+/// All eight scenarios match completely — every margin, every tap, every named
+/// action, the action count and the security status — at the reference's own
+/// tolerance.
 ///
-/// Six of the eight scenarios match completely — every margin, every tap, every
-/// named action, the action count and the security status. The two that do not
-/// are the pair whose CRAC states its thresholds in **amperes**, and the
-/// residual there is understood:
-///
-/// - Both agree the network ends secure, and the worst margin agrees inside the
-///   reference's own tolerance.
-/// - They report the phase shifter at tap 4 and this finds tap 5. Measured the
-///   same way for both, tap 5 scores 18.07 MW and tap 4 scores 10.83 — so the
-///   *search* is finding the better point by the objective it is given.
-/// - The disagreement is in **measuring** tap 4: the reference makes it 15.07 MW
-///   where this makes it 10.83. Those CRACs' thresholds carry
-///   `"rule": "onNonRegulatedSide"`, a side-selection rule `src/rao/` does not
-///   implement — it takes the tightest threshold rather than the one that rule
-///   picks — and on a transformer the two sides differ.
-///
-/// So the honest reading is: the optimizer agrees, the threshold model does not
-/// yet, and the gap is one named feature rather than a mystery. Raising this
-/// number is progress; a drop is a regression, and the printed report says which
-/// assertion moved.
-const BASELINE_MATCHED: usize = 34;
+/// It is still a recorded number rather than an assertion of perfection. These
+/// are two heuristic search trees and `plans/RAO_PLAN.md` §8.3 says up front
+/// that a different set of actions reaching the same margin is not a defect; a
+/// future scenario may legitimately disagree. Raising this is progress, a drop
+/// is a regression, and the printed report says which assertion moved.
+const BASELINE_MATCHED: usize = 42;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

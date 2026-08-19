@@ -244,6 +244,37 @@ impl PstControl {
             .unwrap_or(self.tap)
     }
 
+    /// The taps worth trying for a continuous angle: the two that bracket it.
+    ///
+    /// Rounding to the nearest is not good enough, and the failure is not
+    /// subtle. The margin as a function of tap is piecewise linear with a kink
+    /// wherever the binding CNEC changes, so its maximum sits *at* a kink — and
+    /// the continuous optimum lands between two taps with the better one on
+    /// whichever side the kink fell. Nearest-rounding then picks the worse one
+    /// about half the time and the iteration converges there, because
+    /// relinearizing at that tap proposes the same angle again.
+    ///
+    /// Observed: an optimum of 27.8 MW at tap 4 reported as 17.9 MW at tap 3,
+    /// with the search perfectly convergent and perfectly wrong.
+    fn bracketing_taps(&self, angle: f64) -> Vec<i32> {
+        let mut below: Option<(i32, f64)> = None;
+        let mut above: Option<(i32, f64)> = None;
+        for &(tap, a) in &self.tap_to_angle {
+            if a <= angle && below.is_none_or(|(_, b)| a > b) {
+                below = Some((tap, a));
+            }
+            if a >= angle && above.is_none_or(|(_, b)| a < b) {
+                above = Some((tap, a));
+            }
+        }
+        let mut taps: Vec<i32> = below.into_iter().chain(above).map(|(t, _)| t).collect();
+        taps.dedup();
+        if taps.is_empty() {
+            taps.push(self.nearest_tap(angle));
+        }
+        taps
+    }
+
     fn angle_at(&self, tap: i32) -> Option<f64> {
         self.tap_to_angle.binary_search_by_key(&tap, |(t, _)| *t).ok().map(|i| self.tap_to_angle[i].1)
     }
@@ -323,28 +354,65 @@ pub fn optimize(
         // Read the new set-points, round a phase shifter to a real tap, and
         // apply. Rounding *before* measuring is the point: the margin that
         // matters is the one at a tap the operator can actually select.
-        let mut moved = false;
-        let mut proposed = Vec::with_capacity(controls.len());
-        for (k, control) in controls.iter().enumerate() {
-            let value = solution.primal[setpoint_column(k)];
-            let (value, tap) = match &control.pst {
-                Some(pst) => {
-                    let tap = pst.nearest_tap(value);
-                    (pst.angle_at(tap).unwrap_or(value), Some(tap))
-                }
-                None => (value, None),
-            };
-            if (value - control.current).abs() > 1e-9 {
-                moved = true;
-            }
-            proposed.push((value, tap));
-        }
-        if !moved {
-            break;
-        }
-
         let previous: Vec<(f64, Option<i32>)> =
             controls.iter().map(|c| (c.current, c.pst.as_ref().map(|p| p.tap))).collect();
+
+        // The LP's answer, rounded to the nearer bracketing tap as a starting
+        // point.
+        let mut proposed: Vec<(f64, Option<i32>)> = controls
+            .iter()
+            .enumerate()
+            .map(|(k, control)| {
+                let value = solution.primal[setpoint_column(k)];
+                match &control.pst {
+                    Some(pst) => {
+                        let tap = pst.nearest_tap(value);
+                        (pst.angle_at(tap).unwrap_or(value), Some(tap))
+                    }
+                    None => (value, None),
+                }
+            })
+            .collect();
+
+        // Then try the *other* bracketing tap for each shifter in turn, keeping
+        // it when the true margin improves. This is the step that stops the
+        // iteration settling on the wrong side of a kink — see
+        // `PstControl::bracketing_taps`.
+        apply(crac, network, &mut controls, &proposed);
+        let mut best_here = measure(crac, network, resolution, perimeter);
+        for k in 0..controls.len() {
+            let Some(pst) = controls[k].pst.as_ref() else { continue };
+            let target = solution.primal[setpoint_column(k)];
+            let candidates: Vec<i32> = pst
+                .bracketing_taps(target)
+                .into_iter()
+                .filter(|t| Some(*t) != proposed[k].1)
+                .collect();
+            for tap in candidates {
+                let Some(angle) = controls[k].pst.as_ref().and_then(|p| p.angle_at(tap)) else {
+                    continue;
+                };
+                let mut trial = proposed.clone();
+                trial[k] = (angle, Some(tap));
+                apply(crac, network, &mut controls, &trial);
+                let margin = measure(crac, network, resolution, perimeter);
+                if margin > best_here + 1e-9 {
+                    best_here = margin;
+                    proposed = trial;
+                } else {
+                    apply(crac, network, &mut controls, &proposed);
+                }
+            }
+        }
+
+        let moved = proposed
+            .iter()
+            .zip(&previous)
+            .any(|((value, _), (was, _))| (value - was).abs() > 1e-9);
+        if !moved {
+            apply(crac, network, &mut controls, &previous);
+            break;
+        }
         apply(crac, network, &mut controls, &proposed);
 
         let margin = measure(crac, network, resolution, perimeter);

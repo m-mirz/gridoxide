@@ -129,11 +129,42 @@ pub enum SlackPolicy {
 pub struct UcteOptions {
     pub base_mva: f64,
     pub slack: SlackPolicy,
+    /// Substitutions applied to the nominal voltage a node code implies, as
+    /// `(from_volts, to_volts)`.
+    ///
+    /// UCTE's voltage-level classes are *classes*, and some processes operate
+    /// them at a different figure: the CORE capacity-calculation convention
+    /// runs the 380 kV class at 400 kV and the 220 kV class at 225. That is not
+    /// cosmetic — the nominal voltage is the per-unit base, so a 5% change in it
+    /// moves every susceptance by 11% and every ampere-to-MW conversion by 5%.
+    ///
+    /// Applied to the *class* nominal before anything is per-unitised, which is
+    /// why it belongs here rather than in a caller's post-processing: rescaling
+    /// an already-converted network correctly means touching impedances, shunts
+    /// and tap ratios in three different directions.
+    ///
+    /// Empty by default, so the classes are used as UCTE defines them.
+    pub nominal_voltages: Vec<(f64, f64)>,
+}
+
+impl UcteOptions {
+    /// The CORE capacity-calculation convention: 380 kV class at 400, 220 at
+    /// 225.
+    pub fn core_capacity_calculation() -> Self {
+        Self {
+            nominal_voltages: vec![(380_000.0, 400_000.0), (220_000.0, 225_000.0)],
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for UcteOptions {
     fn default() -> Self {
-        Self { base_mva: DEFAULT_BASE_MVA, slack: SlackPolicy::default() }
+        Self {
+            base_mva: DEFAULT_BASE_MVA,
+            slack: SlackPolicy::default(),
+            nominal_voltages: Vec::new(),
+        }
     }
 }
 
@@ -632,8 +663,14 @@ fn convert(
 
     for (idx, node) in nodes.iter().enumerate() {
         let level = node.code.chars().nth(6).unwrap_or(' ');
-        let u_rated = voltage_level_v(level)
+        let class = voltage_level_v(level)
             .ok_or_else(|| UcteError::BadVoltageLevel { node: node.code.clone(), code: level })?;
+        let u_rated = options
+            .nominal_voltages
+            .iter()
+            .find(|(from, _)| (class - from).abs() < 1.0)
+            .map(|(_, to)| *to)
+            .unwrap_or(class);
         if node.code.starts_with('X') {
             x_nodes += 1;
         }
@@ -677,6 +714,17 @@ fn convert(
         node_codes.push(node.code.clone());
     }
 
+    if !options.nominal_voltages.is_empty() {
+        notes.push(format!(
+            "nominal voltages substituted: {}",
+            options
+                .nominal_voltages
+                .iter()
+                .map(|(a, b)| format!("{:.0}->{:.0} kV", a / 1000.0, b / 1000.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     if x_nodes > 0 {
         notes.push(format!(
             "{x_nodes} X-node(s) kept as ordinary buses; boundary-line semantics are not modelled"
