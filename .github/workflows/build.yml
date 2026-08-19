@@ -86,6 +86,12 @@ jobs:
         cargo build --verbose --features rao
         cargo test --verbose --features rao
         cargo test --verbose --features rao,ucte,iidm
+    # The external gate: `tests/rao_cucumber_test.rs` runs scenarios copied
+    # verbatim from powsybl-open-rao's own Cucumber suite and compares against
+    # expectations its authors wrote. It needs no network access and no Java —
+    # the scenarios, their CRACs and their parameter files are vendored — so it
+    # is an ordinary test, and it is the only check here that gridoxide did not
+    # write for itself.
     - name: Build the CI-covered features together
       run: cargo build --verbose --features cgmes,ucte,iidm,opf,rao
     # `capi` is built here for the same reason `opf` is: no system dependency.

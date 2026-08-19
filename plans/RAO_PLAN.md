@@ -6,7 +6,8 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > are met — see §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and
 > the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
-> drops the rest). Phases 4 through 9 are done. Phases 10-12 are unstarted.
+> drops the rest). Phases 4 through 9 are done, and §8.3's external Cucumber gate is wired up and
+> passing at a recorded baseline. Phases 10-12 are unstarted.
 >
 > The strongest result so far was not planned for. §6.2 justified building two importers as the only
 > route to the external gate; what it did not anticipate is that the two would gate *each other*.
@@ -462,8 +463,33 @@ phase 1.
 
 ### 8.3 OpenRAO's Cucumber expectations
 
-The external gate. 109 `.feature` files stating expected margins, costs and activated actions, run
-against the `.uct`/`.xiidm` networks the new importers read and the CRACs the JSON reader reads.
+**Wired up, and it earned its keep immediately.** `tests/rao_cucumber_test.rs` runs eight scenarios
+copied verbatim from the reference's suite — every one that is `@dc` and `@rao`, uses a JSON CRAC and
+`TestCase12Nodes`, and needs none of the features §11 puts out of scope. **34 of 42 checkable
+assertions match**, at the reference's own tolerance rather than one invented here.
+
+It found three real defects in a single afternoon, none of which any internal check could have:
+
+1. **The phase-shifter tap sign was inverted.** A CRAC states tap angles in IIDM's convention and
+   gridoxide's complex tap is the MATPOWER one, whose argument is its negation. The optimizer stayed
+   self-consistent and found the physically correct angle, so every margin was right and only the
+   *tap number* came out mirrored — a plan saying "tap +16" for the position an operator knows as
+   −16, which is worse than a wrong margin because a wrong margin would have been questioned.
+2. **Ampere thresholds were converted at the wrong voltage.** A CRAC states the `nominalV` its
+   threshold was written against, and for these UCTE-derived cases that is 400 kV where the node's
+   own base is 380. Converting at the base made every ampere threshold 5% tight — a network that
+   merely looked slightly more constrained than it was.
+3. **The LP optimized a different limit from the one being measured.** `linear.rs` re-read the CRAC's
+   thresholds itself and treated an ampere value as MW, so on ampere-threshold cases it maximized
+   against a limit 40% adrift while the evaluator scored correctly. Both halves were internally
+   consistent and the answer was simply wrong. The fix is structural: the LP now takes its limits
+   from the evaluator, so there is one definition of the margin.
+
+The residual eight assertions are one named gap, not a mystery — see the constant's doc comment in
+the harness. Both remaining scenarios agree on security and on the worst margin inside tolerance;
+they differ on which tap, and measured identically the tap this finds scores *better*. The
+disagreement is in **measuring** the reference's tap, and those CRACs' thresholds carry
+`"rule": "onNonRegulatedSide"`, a side-selection rule `src/rao/` does not implement.
 
 Two honest caveats, stated now rather than discovered later. First, **the search tree is a heuristic**
 — agreement on the objective value is meaningful, but a different *set* of actions achieving the same

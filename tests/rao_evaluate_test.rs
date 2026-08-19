@@ -114,8 +114,15 @@ fn an_unresolvable_element_is_reported_and_its_cnec_skipped() {
 
 #[test]
 fn an_ampere_threshold_converts_through_root_three() {
-    // 2165 A on a 380 kV branch is 1425 MW. Dropping the sqrt(3) gives 823 MW,
-    // which is wrong by 42% and still looks like a plausible line rating.
+    // 2165 A converts to 1500 MW — and at **400 kV**, not at the branch's own
+    // 380 kV base, because the CRAC states `nominalV: 400.0` and that is the
+    // voltage its author wrote the threshold against. A UCTE 380 kV node is
+    // routinely operated at 400; converting at the base instead makes every
+    // ampere threshold 5% tight, which reads as a slightly more constrained
+    // network rather than as an error.
+    //
+    // Dropping the sqrt(3) would give 866 MW, wrong by 42% and still a
+    // plausible-looking line rating.
     let c = case();
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
     let result = evaluate(&c.crac, &c.network(), &resolution);
@@ -124,9 +131,9 @@ fn an_ampere_threshold_converts_through_root_three() {
         .cnecs
         .iter()
         .map(|r| r.limit_mw)
-        .find(|l| (*l - 1425.0).abs() < 1.0)
-        .expect("a 2165 A threshold should convert to about 1425 MW");
-    assert!((limit - 1425.0).abs() < 1.0, "got {limit}");
+        .find(|l| (*l - 1500.0).abs() < 1.0)
+        .expect("a 2165 A threshold at 400 kV should convert to about 1500 MW");
+    assert!((limit - 1500.0).abs() < 1.0, "got {limit}");
 }
 
 /// `percent_imax` is a **fraction**, not a percentage.
