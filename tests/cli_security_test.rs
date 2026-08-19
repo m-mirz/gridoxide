@@ -189,12 +189,10 @@ fn the_rao_command_reports_what_to_do() {
     assert!(text.contains("Open tie-line FR DE"), "{text}");
     // The preventive perimeter goes from insecure to secure.
     assert!(text.contains("-512.7 -> 500.0"), "{text}");
-    // The curative perimeter has nothing available and must say so rather than
-    // printing an empty section.
-    assert!(text.contains("nothing available helps"), "{text}");
-    // And the multi-perimeter limitation is stated rather than left to be
-    // assumed — a reader must not take these as a coordinated plan.
-    assert!(text.contains("not carried into curative"), "{text}");
+    assert!(text.contains("SECURE"), "{text}");
+    // Pulling a curative CNEC forward changes the answer, so it is reported.
+    assert!(text.contains("no curative action"), "{text}");
+    assert!(text.contains("preventive perimeter"), "{text}");
 }
 
 #[test]
@@ -212,24 +210,25 @@ fn the_rao_command_emits_json() {
     let doc: serde_json::Value =
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON: {e}\n{text}"));
     let perimeters = doc["perimeters"].as_array().expect("perimeters");
-    assert_eq!(perimeters.len(), 4);
+    assert!(!perimeters.is_empty());
 
-    // The preventive perimeter should move the phase shifter and nothing else,
-    // since this fixture's network actions are all harmful.
-    let preventive = perimeters
-        .iter()
-        .find(|p| p["instant"] == "preventive")
-        .expect("a preventive perimeter");
-    assert!(preventive["network_actions"].as_array().expect("actions").is_empty());
-    let setpoints = preventive["setpoints"].as_array().expect("setpoints");
-    assert_eq!(setpoints.len(), 1);
-    assert!(setpoints[0]["tap"].as_i64().is_some(), "a PST set-point should carry its tap");
+    // The first is the preventive perimeter, which covers several instants.
+    let preventive = &perimeters[0];
+    assert!(preventive["contingency"].is_null(), "{preventive}");
+    let instants = preventive["instants"].as_array().expect("instants");
+    assert!(instants.len() >= 2, "the preventive perimeter should span states: {preventive}");
     assert!(
         preventive["final_margin_mw"].as_f64().unwrap()
             > preventive["initial_margin_mw"].as_f64().unwrap(),
         "{preventive}"
     );
+    // Both halves are used on this fixture, and neither helps alone.
+    assert!(!preventive["network_actions"].as_array().unwrap().is_empty(), "{preventive}");
+    let setpoints = preventive["setpoints"].as_array().expect("setpoints");
+    assert_eq!(setpoints.len(), 1);
+    assert!(setpoints[0]["tap"].as_i64().is_some(), "a PST set-point should carry its tap");
     assert!(preventive["leaves"].as_u64().unwrap() > 0, "candidates should have been evaluated");
+    assert!(doc["final_margin_mw"].as_f64().unwrap() > doc["initial_margin_mw"].as_f64().unwrap());
 }
 
 #[test]
@@ -253,6 +252,7 @@ fn the_rao_depth_flag_is_honoured_and_validated() {
             "depth 0 took an action: {perimeter}"
         );
     }
+    assert_eq!(doc["pulled_forward"].as_u64().unwrap(), 2, "{doc}");
 
     let out = run(&[
         "rao",

@@ -67,7 +67,7 @@ impl Case {
 
 fn run(c: &Case, options: &SearchOptions) -> gridoxide::rao::SearchResult {
     let mut solver = IpmSolver::new();
-    search(&c.crac, &c.network(), &c.resolution(), &c.preventive(), &mut solver, options)
+    search(&c.crac, &c.network(), &c.resolution(), std::slice::from_ref(&c.preventive()), &mut solver, options)
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ fn an_action_it_cannot_express_is_refused_whole_rather_than_applied_in_part() {
         &crac,
         &c.network(),
         &Resolution::new(&crac, &c.net.branch_ids),
-        &c.preventive(),
+        std::slice::from_ref(&c.preventive()),
         &mut solver,
         &SearchOptions::default(),
     );
@@ -303,7 +303,7 @@ fn an_action_naming_an_unknown_element_is_skipped() {
         &crac,
         &c.network(),
         &Resolution::new(&crac, &c.net.branch_ids),
-        &c.preventive(),
+        std::slice::from_ref(&c.preventive()),
         &mut solver,
         &SearchOptions::default(),
     );
@@ -327,7 +327,7 @@ fn actions_touching_the_same_element_are_not_stacked() {
         &crac,
         &c.network(),
         &Resolution::new(&crac, &c.net.branch_ids),
-        &c.preventive(),
+        std::slice::from_ref(&c.preventive()),
         &mut solver,
         &SearchOptions { max_depth: 2, ..Default::default() },
     );
@@ -355,7 +355,7 @@ fn only_actions_whose_usage_rules_reach_this_state_are_offered() {
         &c.crac,
         &c.network(),
         &c.resolution(),
-        &curative,
+        std::slice::from_ref(&curative),
         &mut solver,
         &SearchOptions::default(),
     );
@@ -379,7 +379,7 @@ fn a_state_with_no_network_action_still_optimizes_its_range_actions() {
         &crac,
         &c.network(),
         &Resolution::new(&crac, &c.net.branch_ids),
-        &c.preventive(),
+        std::slice::from_ref(&c.preventive()),
         &mut solver,
         &SearchOptions::default(),
     );

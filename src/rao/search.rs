@@ -192,13 +192,16 @@ pub fn search(
     crac: &Crac,
     network: &Network<'_>,
     resolution: &Resolution,
-    state: &State,
+    perimeter: &[State],
     solver: &mut dyn Solver,
     options: &SearchOptions,
 ) -> SearchResult {
     let available: Vec<(usize, Effect)> = crac
-        .network_actions_for(state)
-        .into_iter()
+        .network_actions
+        .iter()
+        .filter(|action| {
+            perimeter.iter().any(|s| action.usage_rules.iter().any(|r| r.covers(s)))
+        })
         .filter_map(|action| {
             let index = crac.network_actions.iter().position(|a| a.id == action.id)?;
             let effect = effect_of(action, crac, resolution, network.lines.len())?;
@@ -208,8 +211,8 @@ pub fn search(
 
     // The root: no network action, range actions optimized.
     let (root_margin, root_setpoints, root_transformers) =
-        leaf(crac, network, resolution, state, solver, &options.linear, &[]);
-    let initial = margin_of(crac, network, resolution, state, &[]);
+        leaf(crac, network, resolution, perimeter, solver, &options.linear, &[]);
+    let initial = margin_of(crac, network, resolution, perimeter, &[]);
 
     let mut chosen: Vec<usize> = Vec::new();
     let mut best_margin = root_margin;
@@ -241,7 +244,7 @@ pub fn search(
             open.extend(&effect.open);
 
             let (margin, setpoints, transformers) =
-                leaf(crac, network, resolution, state, solver, &options.linear, &open);
+                leaf(crac, network, resolution, perimeter, solver, &options.linear, &open);
             leaves += 1;
 
             let better = match &winner {
@@ -313,7 +316,7 @@ fn leaf(
     crac: &Crac,
     network: &Network<'_>,
     resolution: &Resolution,
-    state: &State,
+    perimeter: &[State],
     solver: &mut dyn Solver,
     options: &LinearOptions,
     open: &[usize],
@@ -326,7 +329,7 @@ fn leaf(
         branch_ids: network.branch_ids,
         base_mva: network.base_mva,
     };
-    let result = optimize_with_open(crac, &mut mutable, resolution, state, solver, options, open);
+    let result = optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, open);
     (result.0, result.1, transformers)
 }
 
@@ -338,13 +341,13 @@ fn optimize_with_open(
     crac: &Crac,
     network: &mut NetworkMut<'_>,
     resolution: &Resolution,
-    state: &State,
+    perimeter: &[State],
     solver: &mut dyn Solver,
     options: &LinearOptions,
     open: &[usize],
 ) -> (f64, Vec<Setpoint>) {
     if open.is_empty() {
-        let result = optimize(crac, network, resolution, state, solver, options);
+        let result = optimize(crac, network, resolution, perimeter, solver, options);
         return (result.final_margin_mw, result.setpoints);
     }
     // Opening a branch is expressed by removing it from the working copy's
@@ -371,7 +374,7 @@ fn optimize_with_open(
         branch_ids: network.branch_ids,
         base_mva: network.base_mva,
     };
-    let result = optimize(crac, &mut inner, resolution, state, solver, options);
+    let result = optimize(crac, &mut inner, resolution, perimeter, solver, options);
     // Carry any tap movement back to the caller's transformers.
     for (a, b) in network.transformers.iter_mut().zip(transformers.iter()) {
         a.tap = b.tap;
@@ -385,13 +388,13 @@ fn margin_of(
     crac: &Crac,
     network: &Network<'_>,
     resolution: &Resolution,
-    state: &State,
+    perimeter: &[State],
     open: &[usize],
 ) -> f64 {
     evaluate_with(crac, network, resolution, open)
         .perimeters
         .iter()
-        .find(|p| p.state == *state)
-        .and_then(|p| p.min_margin())
-        .unwrap_or(f64::INFINITY)
+        .filter(|p| perimeter.contains(&p.state))
+        .filter_map(|p| p.min_margin())
+        .fold(f64::INFINITY, f64::min)
 }

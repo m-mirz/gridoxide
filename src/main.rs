@@ -1407,7 +1407,7 @@ fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
 fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     use gridoxide::opf::ipm::IpmSolver;
-    use gridoxide::rao::{crac_json, search, Network, Resolution, SearchOptions};
+    use gridoxide::rao::{crac_json, Network, Resolution, SearchOptions};
 
     let crac_path = flag_value(flags, "--crac")?.ok_or("rao needs --crac <crac.json>")?;
     let depth = match flag_value(flags, "--depth")? {
@@ -1434,59 +1434,12 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     };
     let options = SearchOptions { max_depth: depth, ..Default::default() };
 
-    let mut secure = true;
-    let mut records = Vec::new();
-    for state in crac.states() {
-        let mut solver = IpmSolver::new();
-        let result = search(&crac, &view, &resolution, &state, &mut solver, &options);
-        if !result.is_secure() {
-            secure = false;
-        }
-        records.push((state, result));
-    }
+    let mut solver = IpmSolver::new();
+    let plan = gridoxide::rao::run(&crac, &view, &resolution, &mut solver, &options);
 
     if as_json {
-        let mut body = String::new();
-        for (i, (state, result)) in records.iter().enumerate() {
-            if i > 0 {
-                body.push(',');
-            }
-            let actions: Vec<String> = result
-                .network_actions
-                .iter()
-                .map(|&a| format!("{:?}", crac.network_actions[a].id))
-                .collect();
-            let setpoints: Vec<String> = result
-                .setpoints
-                .iter()
-                .filter(|s| s.moved())
-                .map(|s| {
-                    format!(
-                        "{{\"action\": {:?}, \"value\": {}, \"tap\": {}}}",
-                        crac.range_actions[s.action].id,
-                        s.value,
-                        s.tap.map(|t| t.to_string()).unwrap_or("null".into())
-                    )
-                })
-                .collect();
-            body.push_str(&format!(
-                "\n  {{\"instant\": {:?}, \"contingency\": {}, \"initial_margin_mw\": {}, \
-                 \"final_margin_mw\": {}, \"leaves\": {}, \"network_actions\": [{}], \
-                 \"setpoints\": [{}]}}",
-                crac.instants[state.instant].id,
-                match state.contingency {
-                    Some(c) => format!("{:?}", crac.contingencies[c].id),
-                    None => "null".to_string(),
-                },
-                result.initial_margin_mw,
-                result.final_margin_mw,
-                result.leaves,
-                actions.join(", "),
-                setpoints.join(", ")
-            ));
-        }
-        println!("{{\n \"secure\": {secure},\n \"perimeters\": [{body}\n ]\n}}");
-        return Ok(secure);
+        println!("{}", rao_json(&crac, &plan));
+        return Ok(plan.is_secure());
     }
 
     if !resolution.is_complete() {
@@ -1496,44 +1449,131 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
             resolution.unresolved.join(", ")
         );
     }
-    for (state, result) in &records {
-        let instant = &crac.instants[state.instant].id;
-        let contingency = state
-            .contingency
-            .map(|c| crac.contingencies[c].id.as_str())
-            .unwrap_or("base case");
+    if !plan.pulled_forward.is_empty() {
+        // This changes the answer rather than just organising the work, so it
+        // is reported rather than left to be inferred from the perimeter list.
         println!(
-            "\n{instant} / {contingency}: {:.1} -> {:.1} MW ({:+.1}), {} leaf/leaves",
-            result.initial_margin_mw,
-            result.final_margin_mw,
-            result.improvement(),
-            result.leaves
+            "note: {} curative CNEC(s) have no curative action and are secured preventively",
+            plan.pulled_forward.len()
         );
-        for &action in &result.network_actions {
-            println!("  APPLY  {}", crac.network_actions[action].id);
-        }
-        for setpoint in result.setpoints.iter().filter(|s| s.moved()) {
-            match setpoint.tap {
-                Some(tap) => println!(
-                    "  SET    {} to tap {tap} ({:.3} deg, was {:.3})",
-                    crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
-                ),
-                None => println!(
-                    "  SET    {} to {:.1} MW (was {:.1})",
-                    crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
-                ),
-            }
-        }
-        if result.network_actions.is_empty() && !result.setpoints.iter().any(|s| s.moved()) {
-            println!("  (nothing available helps)");
+    }
+
+    println!(
+        "\npreventive perimeter ({} state(s)): {:.1} -> {:.1} MW ({:+.1}), {} leaf/leaves",
+        plan.preventive.states.len(),
+        plan.preventive.initial_margin_mw,
+        plan.preventive.final_margin_mw,
+        plan.preventive.improvement(),
+        plan.preventive.leaves
+    );
+    print_actions(&crac, &plan.preventive);
+
+    for scenario in &plan.scenarios {
+        for perimeter in &scenario.perimeters {
+            let instant = perimeter
+                .states
+                .first()
+                .map(|s| crac.instants[s.instant].id.as_str())
+                .unwrap_or("?");
+            println!(
+                "\n{} after {}: {:.1} -> {:.1} MW ({:+.1}), {} leaf/leaves",
+                instant,
+                crac.contingencies[scenario.contingency].id,
+                perimeter.initial_margin_mw,
+                perimeter.final_margin_mw,
+                perimeter.improvement(),
+                perimeter.leaves
+            );
+            print_actions(&crac, perimeter);
         }
     }
+
     println!(
-        "\n{}: each state optimized independently — preventive actions are not \
-         carried into curative perimeters yet",
-        if secure { "SECURE" } else { "INSECURE" }
+        "\n{}: worst margin {:.1} MW (was {:.1})",
+        if plan.is_secure() { "SECURE" } else { "INSECURE" },
+        plan.final_margin_mw,
+        plan.initial_margin_mw
     );
-    Ok(secure)
+    Ok(plan.is_secure())
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn print_actions(crac: &gridoxide::rao::Crac, perimeter: &gridoxide::rao::PerimeterPlan) {
+    for &action in &perimeter.network_actions {
+        println!("  APPLY  {}", crac.network_actions[action].id);
+    }
+    for setpoint in perimeter.setpoints.iter().filter(|s| s.moved()) {
+        match setpoint.tap {
+            Some(tap) => println!(
+                "  SET    {} to tap {tap} ({:.3} deg, was {:.3})",
+                crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
+            ),
+            None => println!(
+                "  SET    {} to {:.1} MW (was {:.1})",
+                crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
+            ),
+        }
+    }
+    if perimeter.network_actions.is_empty() && !perimeter.setpoints.iter().any(|s| s.moved()) {
+        println!("  (nothing available helps)");
+    }
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn rao_json(crac: &gridoxide::rao::Crac, plan: &gridoxide::rao::Plan) -> String {
+    let one = |perimeter: &gridoxide::rao::PerimeterPlan, contingency: Option<usize>| -> String {
+        let actions: Vec<String> = perimeter
+            .network_actions
+            .iter()
+            .map(|&a| format!("{:?}", crac.network_actions[a].id))
+            .collect();
+        let setpoints: Vec<String> = perimeter
+            .setpoints
+            .iter()
+            .filter(|s| s.moved())
+            .map(|s| {
+                format!(
+                    "{{\"action\": {:?}, \"value\": {}, \"tap\": {}}}",
+                    crac.range_actions[s.action].id,
+                    s.value,
+                    s.tap.map(|t| t.to_string()).unwrap_or("null".into())
+                )
+            })
+            .collect();
+        let instants: Vec<String> = perimeter
+            .states
+            .iter()
+            .map(|s| format!("{:?}", crac.instants[s.instant].id))
+            .collect();
+        format!(
+            "{{\"instants\": [{}], \"contingency\": {}, \"initial_margin_mw\": {},              \"final_margin_mw\": {}, \"leaves\": {}, \"network_actions\": [{}],              \"setpoints\": [{}]}}",
+            instants.join(", "),
+            match contingency {
+                Some(c) => format!("{:?}", crac.contingencies[c].id),
+                None => "null".to_string(),
+            },
+            perimeter.initial_margin_mw,
+            perimeter.final_margin_mw,
+            perimeter.leaves,
+            actions.join(", "),
+            setpoints.join(", ")
+        )
+    };
+
+    let mut body = vec![format!("\n  {}", one(&plan.preventive, None))];
+    for scenario in &plan.scenarios {
+        for perimeter in &scenario.perimeters {
+            body.push(format!("\n  {}", one(perimeter, Some(scenario.contingency))));
+        }
+    }
+    format!(
+        "{{\n \"secure\": {},\n \"initial_margin_mw\": {},\n \"final_margin_mw\": {},\n          \"pulled_forward\": {},\n \"perimeters\": [{}\n ]\n}}",
+        plan.is_secure(),
+        plan.initial_margin_mw,
+        plan.final_margin_mw,
+        plan.pulled_forward.len(),
+        body.join(",")
+    )
 }
 
 #[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]

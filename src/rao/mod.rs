@@ -8,6 +8,7 @@ pub mod crac;
 pub mod crac_json;
 pub mod evaluate;
 pub mod linear;
+pub mod castor;
 pub mod search;
 
 pub use crac::{
@@ -16,6 +17,7 @@ pub use crac::{
     RangeAction, RangeActionKind, RangeKind, Side, State, Threshold, Unit, UsageRule,
 };
 pub use crac_json::{CracError, CracReport};
+pub use castor::{run, PerimeterPlan, Plan, ScenarioPlan};
 pub use search::{search, SearchOptions, SearchResult};
 pub use linear::{optimize, LinearOptions, LinearResult, LinearStatus, NetworkMut, Setpoint, TapModel};
 pub use evaluate::{evaluate, evaluate_with, CnecResult, Network, PerimeterResult, Resolution, SecurityResult};
