@@ -149,7 +149,7 @@ fn optimizing_a_perimeter_improves_its_worst_margin() {
         &c.crac,
         &mut network,
         &resolution,
-        &preventive,
+        std::slice::from_ref(&preventive),
         &mut solver,
         &LinearOptions::default(),
     );
@@ -182,7 +182,7 @@ fn a_phase_shifter_lands_on_a_tap_the_operator_can_select() {
     };
     let mut solver = IpmSolver::new();
     let result =
-        optimize(&c.crac, &mut network, &resolution, &preventive, &mut solver, &LinearOptions::default());
+        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &LinearOptions::default());
 
     for setpoint in &result.setpoints {
         let Some(tap) = setpoint.tap else { continue };
@@ -224,7 +224,7 @@ fn the_network_is_left_where_the_result_says_it_is() {
     };
     let mut solver = IpmSolver::new();
     let result =
-        optimize(&c.crac, &mut network, &resolution, &preventive, &mut solver, &LinearOptions::default());
+        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &LinearOptions::default());
 
     // Re-evaluate from scratch against the network as it now stands.
     let view = Network {
@@ -267,7 +267,7 @@ fn a_perimeter_with_no_range_actions_reports_no_improvement() {
     };
     let mut solver = IpmSolver::new();
     let result =
-        optimize(&crac, &mut network, &resolution, &preventive, &mut solver, &LinearOptions::default());
+        optimize(&crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &LinearOptions::default());
 
     assert_eq!(result.status, LinearStatus::NoImprovement);
     assert!(result.setpoints.is_empty());
@@ -296,7 +296,7 @@ fn the_movement_penalty_prefers_the_smaller_move() {
         };
         let mut solver = IpmSolver::new();
         let options = LinearOptions { pst_penalty: penalty, ..Default::default() };
-        optimize(&c.crac, &mut network, &resolution, &preventive, &mut solver, &options)
+        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &options)
     };
 
     let cheap = run(0.0);
@@ -340,7 +340,7 @@ fn a_curative_perimeter_optimizes_its_own_state() {
     };
     let mut solver = IpmSolver::new();
     let result =
-        optimize(&c.crac, &mut network, &resolution, &curative, &mut solver, &LinearOptions::default());
+        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&curative), &mut solver, &LinearOptions::default());
 
     // The starting margin here must be the *post-contingency* one, which
     // differs from the preventive margin — optimizing the wrong perimeter is
@@ -401,7 +401,7 @@ fn a_perimeter_of_monitored_only_cnecs_optimizes_nothing() {
     };
     let mut solver = IpmSolver::new();
     let result =
-        optimize(&c.crac, &mut network, &resolution, &auto, &mut solver, &LinearOptions::default());
+        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&auto), &mut solver, &LinearOptions::default());
     assert_eq!(result.status, LinearStatus::NoImprovement);
     assert_eq!(result.iterations, 0, "nothing to optimize means no LP is built");
     for (a, b) in transformers.iter().zip(&before) {
@@ -432,7 +432,7 @@ fn usage_rules_decide_which_perimeter_an_action_reaches() {
             &c.crac,
             &mut network,
             &resolution,
-            &state,
+            std::slice::from_ref(&state),
             &mut solver,
             &LinearOptions::default(),
         );

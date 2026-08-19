@@ -230,7 +230,7 @@ pub fn optimize(
     crac: &Crac,
     network: &mut NetworkMut<'_>,
     resolution: &Resolution,
-    state: &State,
+    perimeter: &[State],
     solver: &mut dyn Solver,
     options: &LinearOptions,
 ) -> LinearResult {
@@ -241,12 +241,12 @@ pub fn optimize(
         .flow_cnecs
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.state == *state && c.optimized)
+        .filter(|(_, c)| perimeter.contains(&c.state) && c.optimized)
         .filter(|(_, c)| resolution.branch(&c.network_element).is_some())
         .map(|(i, _)| i)
         .collect();
 
-    let mut best = measure(crac, network, resolution, state);
+    let mut best = measure(crac, network, resolution, perimeter);
     let initial_margin = best;
     let mut setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
@@ -263,7 +263,7 @@ pub fn optimize(
 
     // Where every control started, so `Setpoint::initial` is the pre-optimization
     // value rather than the previous iteration's.
-    let mut controls = match build_controls(crac, network, resolution, state, dc_options, options) {
+    let mut controls = match build_controls(crac, network, resolution, perimeter, dc_options, options) {
         Some(c) if !c.is_empty() => c,
         _ => {
             return LinearResult {
@@ -281,7 +281,7 @@ pub fn optimize(
 
     for _ in 0..options.max_iterations {
         iterations += 1;
-        let flows = perimeter_flows(crac, network, resolution, state, &cnec_indices);
+        let flows = perimeter_flows(crac, network, resolution, perimeter, &cnec_indices);
         let program = build_program(crac, &cnec_indices, &flows, &controls, options);
         let Ok(solution) = solver.solve(&program) else {
             break;
@@ -317,7 +317,7 @@ pub fn optimize(
             controls.iter().map(|c| (c.current, c.pst.as_ref().map(|p| p.tap))).collect();
         apply(crac, network, &mut controls, &proposed);
 
-        let margin = measure(crac, network, resolution, state);
+        let margin = measure(crac, network, resolution, perimeter);
         if margin > best + 1e-9 {
             best = margin;
             setpoints = controls
@@ -332,7 +332,7 @@ pub fn optimize(
                 .collect();
             // Relinearize around the new point.
             if let Some(rebuilt) =
-                build_controls(crac, network, resolution, state, dc_options, options)
+                build_controls(crac, network, resolution, perimeter, dc_options, options)
             {
                 if rebuilt.len() == controls.len() {
                     controls = rebuilt;
@@ -506,7 +506,7 @@ fn build_controls(
     crac: &Crac,
     network: &NetworkMut<'_>,
     resolution: &Resolution,
-    state: &State,
+    perimeter: &[State],
     dc_options: DcOptions,
     options: &LinearOptions,
 ) -> Option<Vec<Control>> {
@@ -514,7 +514,7 @@ fn build_controls(
         .flow_cnecs
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.state == *state && c.optimized)
+        .filter(|(_, c)| perimeter.contains(&c.state) && c.optimized)
         .filter(|(_, c)| resolution.branch(&c.network_element).is_some())
         .map(|(i, _)| i)
         .collect();
@@ -529,7 +529,7 @@ fn build_controls(
 
     let mut controls = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
-        if !action.usage_rules.iter().any(|r| r.covers(state)) {
+        if !perimeter.iter().any(|s| action.usage_rules.iter().any(|r| r.covers(s))) {
             continue;
         }
         match &action.kind {
@@ -713,15 +713,20 @@ fn apply(
 }
 
 /// The minimum margin over the perimeter's optimized CNECs, MW.
-fn measure(crac: &Crac, network: &NetworkMut<'_>, resolution: &Resolution, state: &State) -> f64 {
+fn measure(
+    crac: &Crac,
+    network: &NetworkMut<'_>,
+    resolution: &Resolution,
+    perimeter: &[State],
+) -> f64 {
     let view = network.view();
     let result = evaluate(crac, &view, resolution);
     result
         .perimeters
         .iter()
-        .find(|p| p.state == *state)
-        .and_then(|p| p.min_margin())
-        .unwrap_or(f64::INFINITY)
+        .filter(|p| perimeter.contains(&p.state))
+        .filter_map(|p| p.min_margin())
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Flows on the perimeter's CNEC branches, MW, at the current operating point.
@@ -729,17 +734,19 @@ fn perimeter_flows(
     crac: &Crac,
     network: &NetworkMut<'_>,
     resolution: &Resolution,
-    state: &State,
+    perimeter: &[State],
     cnecs: &[usize],
 ) -> Vec<f64> {
     let view = network.view();
     let result = evaluate(crac, &view, resolution);
-    let perimeter = result.perimeters.iter().find(|p| p.state == *state);
     cnecs
         .iter()
         .map(|&i| {
-            perimeter
-                .and_then(|p| p.cnecs.iter().find(|c| c.cnec == i))
+            result
+                .perimeters
+                .iter()
+                .filter(|p| perimeter.contains(&p.state))
+                .find_map(|p| p.cnecs.iter().find(|c| c.cnec == i))
                 .map(|c| c.flow_mw)
                 .unwrap_or(0.0)
         })
