@@ -180,7 +180,22 @@ pub struct CnecResult {
     /// Distance to the nearest binding threshold, MW. **Negative means
     /// violated**, and its magnitude is the overload.
     pub margin_mw: f64,
-    /// The threshold that bound, MW, as an absolute limit on |flow|.
+    /// Upper bound on the **signed** flow, MW; `INFINITY` when the CNEC has
+    /// none. Already tightened by the reliability margin.
+    pub upper_mw: f64,
+    /// Lower bound on the signed flow, MW; `NEG_INFINITY` when the CNEC has
+    /// none.
+    ///
+    /// Kept separate from [`upper_mw`](Self::upper_mw) because a CRAC's
+    /// thresholds are frequently **not** symmetric, and a margin computed from
+    /// `|flow|` against one magnitude is then a constraint nobody wrote.
+    pub lower_mw: f64,
+    /// The tightest bound's magnitude, MW — `min(|upper|, |lower|)`.
+    ///
+    /// For a symmetric CNEC this is the limit in the ordinary sense and
+    /// `margin_mw == limit_mw - |flow_mw|`. For a one-sided one that identity
+    /// does **not** hold, and the margin is the quantity to trust; this is kept
+    /// for display, where naming a number beats naming an infinity.
     pub limit_mw: f64,
     /// Distance to the nearest binding threshold in **amperes**, the unit most
     /// of the reference's own expectations are written in.
@@ -317,24 +332,88 @@ impl Network<'_> {
     }
 }
 
-/// Convert one threshold to an absolute MW limit on |flow|.
+/// The tightest bounds a CNEC's thresholds impose, accumulated one at a time.
 ///
-/// Returns `None` when the threshold cannot be expressed — a
-/// [`Unit::PercentImax`] threshold on a CNEC whose `iMax` the CRAC never stated,
-/// or a voltage/angle unit on a flow. Returning `None` rather than a default is
-/// the point: a fabricated limit is a constraint nobody wrote.
-fn threshold_mw(
+/// Each side is tracked with the voltage its own binding threshold named, so an
+/// ampere margin can be converted back at the right voltage even when a CNEC's
+/// thresholds disagree about which that is.
+struct Bounds {
+    upper: f64,
+    lower: f64,
+    u_upper: f64,
+    u_lower: f64,
+}
+
+impl Bounds {
+    fn unbounded(u_rated: f64) -> Self {
+        Self {
+            upper: f64::INFINITY,
+            lower: f64::NEG_INFINITY,
+            u_upper: u_rated,
+            u_lower: u_rated,
+        }
+    }
+
+    /// Fold in one threshold's bounds, each tightened by the reliability margin
+    /// and by whatever headroom reactive flow has already consumed.
+    fn tighten(&mut self, lower: f64, upper: f64, voltage: f64, frm: f64, charge: f64) {
+        let upper = upper - frm - charge;
+        let lower = lower + frm + charge;
+        if upper < self.upper {
+            self.upper = upper;
+            self.u_upper = voltage;
+        }
+        if lower > self.lower {
+            self.lower = lower;
+            self.u_lower = voltage;
+        }
+    }
+
+    /// Whether anything was ever folded in. A CNEC whose thresholds are all
+    /// inexpressible constrains nothing, which is better than constraining it
+    /// with a number nobody wrote.
+    fn is_constraining(&self) -> bool {
+        self.upper.is_finite() || self.lower.is_finite()
+    }
+
+    /// The margin against the signed flow, and the voltage of the bound that
+    /// produced it.
+    fn margin(&self, flow_mw: f64) -> (f64, f64) {
+        let from_upper = self.upper - flow_mw;
+        let from_lower = flow_mw - self.lower;
+        if from_upper <= from_lower { (from_upper, self.u_upper) } else { (from_lower, self.u_lower) }
+    }
+
+    /// The tighter bound's magnitude, for display.
+    fn magnitude(&self) -> f64 {
+        f64::min(self.upper.abs(), self.lower.abs())
+    }
+}
+
+/// The signed MW bounds one threshold puts on a flow, plus the voltage it was
+/// converted at.
+///
+/// Returns `(lower, upper, voltage)`, with `NEG_INFINITY`/`INFINITY` for a
+/// bound the threshold does not state. **The two are not assumed symmetric.**
+/// A CRAC routinely writes a one-sided threshold — `min: -1500, max: null`
+/// means "no more than 1500 A in the reverse direction, and nothing at all in
+/// the forward one" — and collapsing that to `|flow| ≤ 1500` invents a
+/// constraint nobody wrote, in the direction the flow is most likely to go.
+/// The reference's own "opposite CNEC" scenarios are exactly this case.
+///
+/// Returns `None` when the threshold cannot be expressed at all — a
+/// [`Unit::PercentImax`] threshold on a CNEC whose `iMax` the CRAC never
+/// stated, or a voltage/angle unit on a flow. `None` rather than a default is
+/// the point: a fabricated limit is a constraint nobody wrote either.
+fn threshold_bounds(
     threshold: &Threshold,
     cnec: &FlowCnec,
     u_rated_v: f64,
     s_base_va: f64,
-) -> Option<f64> {
-    let magnitude = match (threshold.min, threshold.max) {
-        (Some(min), Some(max)) => f64::min(min.abs(), max.abs()),
-        (Some(min), None) => min.abs(),
-        (None, Some(max)) => max.abs(),
-        (None, None) => return None,
-    };
+) -> Option<(f64, f64, f64)> {
+    if threshold.min.is_none() && threshold.max.is_none() {
+        return None;
+    }
     let side = match threshold.side {
         Side::Two => 1,
         _ => 0,
@@ -351,11 +430,13 @@ fn threshold_mw(
         .map(|kv| kv * 1000.0)
         .filter(|v| *v > 0.0)
         .unwrap_or(u_rated_v);
-    match threshold.unit {
-        Unit::Megawatt => Some(magnitude),
-        Unit::Ampere => {
-            Some(current_to_power_pu(magnitude, voltage, s_base_va) * s_base_va / 1e6)
-        }
+
+    // The scale from the threshold's own unit to MW. Always positive, so it
+    // carries the signs of `min` and `max` through unchanged — which is the
+    // whole reason the bounds can stay directional.
+    let scale = match threshold.unit {
+        Unit::Megawatt => 1.0,
+        Unit::Ampere => current_to_power_pu(1.0, voltage, s_base_va) * s_base_va / 1e6,
         Unit::PercentImax => {
             // Despite the name this is a **fraction**, not a percentage: the
             // reference's own `ThresholdAdder` javadoc says "the min/max value
@@ -365,11 +446,13 @@ fn threshold_mw(
             // overloaded, and it was caught only by noticing that a 380 kV line
             // had come out with a 33 MW limit.
             let i_max = cnec.i_max?[side].or(cnec.i_max?[0])?;
-            let amperes = i_max * magnitude;
-            Some(current_to_power_pu(amperes, voltage, s_base_va) * s_base_va / 1e6)
+            current_to_power_pu(i_max, voltage, s_base_va) * s_base_va / 1e6
         }
-        Unit::Degree | Unit::Kilovolt => None,
-    }
+        Unit::Degree | Unit::Kilovolt => return None,
+    };
+    let lower = threshold.min.map_or(f64::NEG_INFINITY, |v| v * scale);
+    let upper = threshold.max.map_or(f64::INFINITY, |v| v * scale);
+    Some((lower, upper, voltage))
 }
 
 /// Evaluate every perimeter the CRAC defines, in DC.
@@ -506,26 +589,25 @@ pub fn evaluate_with(
             // undoing the conversion that produced the limit, and on a CNEC
             // whose thresholds name different voltages any other choice is a
             // different number.
-            let mut limit_mw = f64::INFINITY;
-            let mut u_bind = u_rated;
+            let mut bound = Bounds::unbounded(u_rated);
             for t in &cnec.thresholds {
-                let Some(raw) = threshold_mw(t, cnec, u_rated, s_base_va) else { continue };
-                let effective = (raw - cnec.reliability_margin).max(0.0);
-                if effective < limit_mw {
-                    limit_mw = effective;
-                    u_bind = threshold_voltage(cnec, t, u_rated);
-                }
+                let Some((lo, hi, v)) = threshold_bounds(t, cnec, u_rated, s_base_va) else {
+                    continue;
+                };
+                bound.tighten(lo, hi, v, cnec.reliability_margin, 0.0);
             }
-            if !limit_mw.is_finite() {
+            if !bound.is_constraining() {
                 continue;
             }
-            let margin_mw = limit_mw - flow_mw.abs();
+            let (margin_mw, u_bind) = bound.margin(flow_mw);
             cnecs.push(CnecResult {
                 cnec: i,
                 branch,
                 flow_mw,
                 margin_mw,
-                limit_mw,
+                upper_mw: bound.upper,
+                lower_mw: bound.lower,
+                limit_mw: bound.magnitude(),
                 margin_a: to_amperes(margin_mw, u_bind),
                 current_a: to_amperes(flow_mw.abs(), u_bind),
             });
@@ -723,36 +805,34 @@ pub fn evaluate_ac(
             // signed, so the two models' outputs are directly comparable.
             let flow_mw = ends[0].0;
 
-            let mut limit_mw = f64::INFINITY;
-            let mut u_bind = u_rated;
+            let mut bound = Bounds::unbounded(u_rated);
             for t in &cnec.thresholds {
-                let Some(raw) = threshold_mw(t, cnec, u_rated, s_base_va) else { continue };
-                let end = match t.side {
-                    Side::Two => &ends[1],
-                    _ => &ends[0],
+                let Some((lo, hi, u_written)) = threshold_bounds(t, cnec, u_rated, s_base_va)
+                else {
+                    continue;
                 };
-                let (p_mw, q_mvar, u_actual) = *end;
+                let (p_mw, q_mvar, u_actual) = match t.side {
+                    Side::Two => ends[1],
+                    _ => ends[0],
+                };
                 let charge = match t.unit {
                     // An ampere limit binds apparent power, and at the voltage
                     // the bus is actually running at rather than the one the
-                    // threshold was written against.
+                    // threshold was written against. The headroom the reactive
+                    // part consumes is taken off *both* bounds, since it is
+                    // unavailable in either direction.
                     Unit::Ampere | Unit::PercentImax => {
-                        let u_written = threshold_voltage(cnec, t, u_rated);
                         let s_equiv = p_mw.hypot(q_mvar) * u_written / u_actual;
                         (s_equiv - p_mw.abs()).max(0.0)
                     }
-                    // Voltage and angle units never reach here: `threshold_mw`
+                    // Voltage and angle units never reach here: `threshold_bounds`
                     // returns `None` for them rather than inventing a flow
                     // limit, so the `continue` above has already fired.
                     Unit::Megawatt | Unit::Degree | Unit::Kilovolt => 0.0,
                 };
-                let effective = (raw - cnec.reliability_margin - charge).max(0.0);
-                if effective < limit_mw {
-                    limit_mw = effective;
-                    u_bind = threshold_voltage(cnec, t, u_rated);
-                }
+                bound.tighten(lo, hi, u_written, cnec.reliability_margin, charge);
             }
-            if !limit_mw.is_finite() {
+            if !bound.is_constraining() {
                 continue;
             }
 
@@ -769,13 +849,15 @@ pub fn evaluate_ac(
                 0.0
             };
 
-            let margin_mw = limit_mw - flow_mw.abs();
+            let (margin_mw, u_bind) = bound.margin(flow_mw);
             cnecs.push(CnecResult {
                 cnec: i,
                 branch,
                 flow_mw,
                 margin_mw,
-                limit_mw,
+                upper_mw: bound.upper,
+                lower_mw: bound.lower,
+                limit_mw: bound.magnitude(),
                 margin_a: to_amperes(margin_mw, u_bind),
                 current_a,
             });
@@ -794,18 +876,3 @@ fn to_amperes(power_mw: f64, voltage_v: f64) -> f64 {
     if voltage_v > 0.0 { power_mw * 1e6 / (3f64.sqrt() * voltage_v) } else { 0.0 }
 }
 
-/// The voltage a current threshold was written against — the CRAC's stated
-/// `nominalV` where it has one, the branch's rated voltage otherwise. Shared
-/// with [`threshold_mw`] so the AC path undoes exactly the conversion the DC
-/// path applied.
-fn threshold_voltage(cnec: &FlowCnec, threshold: &Threshold, u_rated_v: f64) -> f64 {
-    let side = match threshold.side {
-        Side::Two => 1,
-        _ => 0,
-    };
-    cnec.nominal_v
-        .and_then(|v| v[side].or(v[0]))
-        .map(|kv| kv * 1000.0)
-        .filter(|v| *v > 0.0)
-        .unwrap_or(u_rated_v)
-}

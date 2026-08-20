@@ -719,20 +719,6 @@ fn check(scenario: &Scenario) -> Outcome {
         (used, taps)
     };
 
-    let used: Vec<&str> = plan
-        .preventive
-        .network_actions
-        .iter()
-        .map(|&a| crac.network_actions[a].id.as_str())
-        .chain(
-            plan.preventive
-                .setpoints
-                .iter()
-                .filter(|s| s.moved())
-                .map(|s| crac.range_actions[s.action].id.as_str()),
-        )
-        .collect();
-
     let mut record = |ok: bool, detail: String| {
         if ok {
             outcome.matched.push(detail);
@@ -908,7 +894,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 /// the printed report says which assertion moved.
 const BASELINE_MATCHED_DC: usize = 124;
 
-/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **148 of 186**.
+/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **155 of 186**.
 ///
 /// Lower than the DC file's perfect score, and expected to be. These scenarios
 /// are judged on margins the reference measured with an AC load flow that also
@@ -916,7 +902,7 @@ const BASELINE_MATCHED_DC: usize = 124;
 /// still chooses its actions on DC sensitivities. Where the two models rank two
 /// candidates differently, the search takes the other one and every assertion
 /// downstream of that choice moves together.
-const BASELINE_MATCHED_AC: usize = 148;
+const BASELINE_MATCHED_AC: usize = 155;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

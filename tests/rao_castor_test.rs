@@ -208,9 +208,20 @@ fn the_plans_worst_margin_is_the_worst_of_its_perimeters() {
     for name in ["crac-for-12nodes.json", "crac-topology-helps.json"] {
         let c = case(name);
         let plan = c.plan();
+        // Automatons too, not just the perimeters. They are a stage of the
+        // plan and can carry its worst margin — on this fixture the automaton
+        // stage is 2.4e-6 MW below every perimeter — but they are a different
+        // type, so `perimeters()` cannot enumerate them and folding only over
+        // it would assert an identity that holds by luck.
         let worst = plan
             .perimeters()
             .map(|p| p.final_margin_mw)
+            .chain(
+                plan.scenarios
+                    .iter()
+                    .filter_map(|s| s.automatons.as_ref())
+                    .map(|a| a.final_margin_mw),
+            )
             .fold(f64::INFINITY, f64::min);
         assert!(
             (plan.final_margin_mw - worst).abs() < 1e-9,

@@ -1398,8 +1398,18 @@ fn security_json(
                 cnecs.push(',');
             }
             cnecs.push_str(&format!(
-                "\n    {{\"cnec\": {:?}, \"flow_mw\": {}, \"limit_mw\": {}, \"margin_mw\": {}}}",
-                crac.flow_cnecs[c.cnec].id, c.flow_mw, c.limit_mw, c.margin_mw
+                "\n    {{\"cnec\": {:?}, \"flow_mw\": {}, \"limit_mw\": {}, \"upper_mw\": {}, \
+                 \"lower_mw\": {}, \"margin_mw\": {}, \"margin_a\": {}}}",
+                crac.flow_cnecs[c.cnec].id,
+                c.flow_mw,
+                c.limit_mw,
+                // A one-sided CNEC has an infinite bound, which is not JSON.
+                // `null` says "no bound" where `Infinity` would say nothing at
+                // all, and both beat emitting a document no parser accepts.
+                json_number(c.upper_mw),
+                json_number(c.lower_mw),
+                c.margin_mw,
+                c.margin_a
             ));
         }
         perimeters.push_str(&format!(
@@ -1569,6 +1579,12 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         println!("\nREJECTED: the AC check does not support the plan");
     }
     Ok(plan.is_secure() && validation.is_accepted())
+}
+
+/// A finite float, or `null` for an infinity JSON cannot represent.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn json_number(value: f64) -> String {
+    if value.is_finite() { value.to_string() } else { "null".to_string() }
 }
 
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
