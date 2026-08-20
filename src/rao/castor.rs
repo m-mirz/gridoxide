@@ -308,9 +308,12 @@ fn curative_search(
     options: &SearchOptions,
     already_open: &[usize],
 ) -> SearchResult {
-    if already_open.is_empty() {
-        return search(crac, network, resolution, perimeter, solver, options);
-    }
+    // No early return for an empty set. "Nothing is open" is a *result* here —
+    // an automaton that closes the file's only standby circuit produces exactly
+    // that — and handing the unmodified network back would let `search` re-derive
+    // the open set from `initially_open` and undo the closure. The set has to be
+    // stated, including when it is empty.
+    //
     // Represent the already-open branches by removing them from the working
     // copy, so the search's own candidates compose with them naturally.
     let mut lines = network.lines.to_vec();
@@ -332,7 +335,13 @@ fn curative_search(
         transformers: &transformers,
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
-        initially_open: network.initially_open,
+        // Empty, deliberately: the open state is already baked into
+        // `lines`/`transformers` above. Leaving the file's own list here
+        // would re-open branches a *closing* remedial action has just shut,
+        // because `evaluate` derives its open set from this field. That is
+        // silent — every margin stays self-consistent and the optimizer
+        // simply measures a network in which the automaton never acted.
+        initially_open: &[],
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
