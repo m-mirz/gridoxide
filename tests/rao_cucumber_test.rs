@@ -418,6 +418,13 @@ fn options_from(config: &Path) -> SearchOptions {
     let Ok(text) = std::fs::read_to_string(config) else { return options };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return options };
 
+    // `SECURE_FLOW` means "stop once secure" rather than "maximize" —
+    // `TreeParameters.buildForPreventivePerimeter` turns it into
+    // `AT_TARGET_OBJECTIVE_VALUE` with a target of zero.
+    if doc.pointer("/objective-function/type").and_then(|v| v.as_str()) == Some("SECURE_FLOW") {
+        options.stop_at_target = Some(0.0);
+    }
+
     // The two knobs live under the search-tree extension, not beside the
     // thresholds above.
     if let Some(topology) = doc.pointer(
@@ -906,7 +913,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 /// the printed report says which assertion moved.
 const BASELINE_MATCHED_DC: usize = 124;
 
-/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **171 of 186**.
+/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **177 of 186**.
 ///
 /// Lower than the DC file's perfect score, and expected to be. These scenarios
 /// are judged on margins the reference measured with an AC load flow that also
@@ -914,7 +921,7 @@ const BASELINE_MATCHED_DC: usize = 124;
 /// still chooses its actions on DC sensitivities. Where the two models rank two
 /// candidates differently, the search takes the other one and every assertion
 /// downstream of that choice moves together.
-const BASELINE_MATCHED_AC: usize = 171;
+const BASELINE_MATCHED_AC: usize = 177;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
