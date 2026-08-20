@@ -206,6 +206,12 @@ pub struct CnecResult {
     /// threshold names. When a CNEC's thresholds disagree about voltage or
     /// side, the one that actually bound is the one that governs here.
     pub margin_a: f64,
+    /// The voltage the binding threshold was converted at, volts.
+    ///
+    /// Exposed so a caller can express this CNEC's margin in amperes without
+    /// re-deriving which threshold bound — the optimizer needs exactly that
+    /// factor to maximize an ampere objective.
+    pub conversion_v: f64,
     /// Current at the monitored terminal, amperes.
     ///
     /// Under [`FlowModel::Ac`] this is the real thing, `|S| / (√3·U)`. Under
@@ -216,6 +222,13 @@ pub struct CnecResult {
 }
 
 impl CnecResult {
+    /// Amperes per MW for this CNEC, at the voltage its binding threshold
+    /// names. `0.0` when no voltage is known, which leaves an ampere objective
+    /// indifferent to it rather than dividing by zero.
+    pub fn amperes_per_mw(&self) -> f64 {
+        if self.conversion_v > 0.0 { 1e6 / (3f64.sqrt() * self.conversion_v) } else { 0.0 }
+    }
+
     pub fn is_violated(&self) -> bool {
         self.margin_mw < 0.0
     }
@@ -608,6 +621,7 @@ pub fn evaluate_with(
                 upper_mw: bound.upper,
                 lower_mw: bound.lower,
                 limit_mw: bound.magnitude(),
+                conversion_v: u_bind,
                 margin_a: to_amperes(margin_mw, u_bind),
                 current_a: to_amperes(flow_mw.abs(), u_bind),
             });
@@ -858,6 +872,7 @@ pub fn evaluate_ac(
                 upper_mw: bound.upper,
                 lower_mw: bound.lower,
                 limit_mw: bound.magnitude(),
+                conversion_v: u_bind,
                 margin_a: to_amperes(margin_mw, u_bind),
                 current_a,
             });

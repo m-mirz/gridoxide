@@ -70,6 +70,7 @@ use std::path::{Path, PathBuf};
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
 use gridoxide::rao::evaluate::{evaluate_model, AcOptions, FlowModel};
+use gridoxide::rao::linear::ObjectiveUnit;
 use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
 
@@ -406,6 +407,13 @@ fn flow_model_from(config: &Path) -> FlowModel {
 
 fn options_from(config: &Path) -> SearchOptions {
     let mut options = SearchOptions::default();
+    // `RaoUtil.getFlowUnit`: megawatts for a DC load flow, amperes for an AC
+    // one. Not a setting of its own — the objective follows the flow model, and
+    // the minimum-impact thresholds below are stated in whichever unit results.
+    options.linear.objective_unit = match flow_model_from(config) {
+        FlowModel::Ac => ObjectiveUnit::Ampere,
+        FlowModel::Dc => ObjectiveUnit::Megawatt,
+    };
     let Ok(text) = std::fs::read_to_string(config) else { return options };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return options };
 
