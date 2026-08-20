@@ -169,33 +169,41 @@ impl LinearResult {
 
 /// A phase shifter's tap-to-angle table, in the **CRAC's** sign convention.
 ///
-/// Prefers the table the CRAC carries and falls back to the network's own,
-/// negating it: gridoxide's transformer angle is the negation of IIDM's, which
-/// is what a CRAC is written in.
+/// Prefers the **network's** table, falling back to the one the CRAC declares.
 ///
-/// The fallback is not a nicety. A CRAC's PST range action frequently omits the
-/// table — it is a property of the transformer, and a CRAC written against a
-/// network that already describes it has no reason to repeat it — and without
-/// the fallback such an action has no positions to choose between and is
-/// skipped without a word.
+/// Angles are negated on the way: gridoxide's transformer angle is the negation
+/// of IIDM's, which is what a CRAC is written in.
+///
+/// The order matters and is the opposite of the obvious one. A CRAC's table is a
+/// *description* of a tap changer; the tap changer is equipment. When they
+/// disagree the equipment wins, because the equipment is what the flows will
+/// actually see — and they do disagree on the vendored material, where one
+/// CRAC makes tap 16 6.23 degrees against the network's 9.06 because it was
+/// written for an earlier revision. Optimizing against the CRAC's number and
+/// applying the network's leaves the two halves modelling different machines.
+///
+/// The fallback still matters: a CRAC's PST range action frequently omits the
+/// table altogether, and without it such an action has no positions to choose
+/// between and is skipped without a word.
+///
+/// Tap *indices* are shared either way, so what gets reported is unaffected.
 pub fn tap_table(
     declared: &[(i32, f64)],
     tap_changers: &[Option<crate::types::TapChanger>],
     branch: usize,
     lines: usize,
 ) -> Vec<(i32, f64)> {
-    if !declared.is_empty() {
-        let mut table = declared.to_vec();
-        table.sort_by_key(|(t, _)| *t);
-        return table;
+    if let Some(changer) = branch.checked_sub(lines).and_then(|i| tap_changers.get(i)?.as_ref()) {
+        let table: Vec<(i32, f64)> = (changer.low..=changer.high())
+            .filter_map(|tap| changer.angle_deg(tap).map(|a| (tap, CRAC_ANGLE_SIGN * a)))
+            .collect();
+        if !table.is_empty() {
+            return table;
+        }
     }
-    let Some(changer) = branch.checked_sub(lines).and_then(|i| tap_changers.get(i)?.as_ref())
-    else {
-        return Vec::new();
-    };
-    (changer.low..=changer.high())
-        .filter_map(|tap| changer.angle_deg(tap).map(|a| (tap, CRAC_ANGLE_SIGN * a)))
-        .collect()
+    let mut table = declared.to_vec();
+    table.sort_by_key(|(t, _)| *t);
+    table
 }
 
 /// The sensitivity of every branch's DC flow to a one-radian phase shift on
@@ -898,14 +906,33 @@ fn apply(
                 pst.tap = tap;
             }
             if let Some(i) = pst.branch.checked_sub(network.lines.len()) {
+                // The **network's** own step is what gets applied, at the tap
+                // the optimizer chose — not the angle the CRAC's table gives for
+                // that tap.
+                //
+                // The two can disagree, and on the vendored material they do:
+                // one CRAC's table makes tap 16 6.23 degrees where the network's
+                // `##R` record makes it 9.06, because the CRAC was written
+                // against a different revision of the network. A tap changer is
+                // physical equipment and a table in a CRAC is a description of
+                // it; when they conflict the equipment wins. It is also what
+                // powsybl's own `PstRangeAction` does — it converts the
+                // set-point to a tap and sets the *position*, letting the
+                // network's steps decide the angle.
+                let from_network = network
+                    .tap_changers
+                    .get(i)
+                    .and_then(|c| c.as_ref())
+                    .and_then(|c| tap.and_then(|t| c.at(t)));
                 if let Some(transformer) = network.transformers.get_mut(i) {
-                    // Keep the ratio, replace the shift — converting out of the
-                    // CRAC's convention on the way.
                     let ratio = transformer.tap.norm();
-                    transformer.tap = num_complex::Complex::from_polar(
-                        ratio,
-                        (CRAC_ANGLE_SIGN * value).to_radians(),
-                    );
+                    transformer.tap = match from_network {
+                        Some(step) => num_complex::Complex::from_polar(ratio, step.arg()),
+                        None => num_complex::Complex::from_polar(
+                            ratio,
+                            (CRAC_ANGLE_SIGN * value).to_radians(),
+                        ),
+                    };
                 }
             }
         }

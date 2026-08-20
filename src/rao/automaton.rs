@@ -10,11 +10,27 @@
 //! # The order matters, and it is `speed`
 //!
 //! Automatons fire in ascending order of their stated speed, in batches, and
-//! **the trigger conditions are re-evaluated after each batch**. That is not a
-//! detail: a fast automaton that relieves an overload stops a slower one from
-//! ever seeing the condition that would have triggered it. One of the vendored
-//! scenarios exists precisely to check that — five automatons, of which one
-//! must *not* fire because an earlier one already solved its constraint.
+//! **the trigger conditions are re-evaluated between batches but not within
+//! one**. Both halves of that are load-bearing, and two vendored scenarios pin
+//! them from opposite sides:
+//!
+//! - Re-evaluating *between* batches is why a fast automaton that relieves an
+//!   overload stops a slower one from ever seeing the condition that would have
+//!   triggered it. One scenario has five automatons at four speeds, of which the
+//!   speed-2 one must not fire because the speed-1 one already fixed its CNEC.
+//! - **Not** re-evaluating *within* a batch is why an automaton whose CNEC is
+//!   healthy when the batch begins stays out of it, even if a sibling firing
+//!   alongside pushes that CNEC into overload. Another scenario has two
+//!   speed-less automatons — therefore one batch — where the second's CNEC sits
+//!   at +43.5 MW until the first fires. Equipment that sampled the grid
+//!   simultaneously would not see that, and the reference does not fire it.
+//!
+//! Range actions are the exception, and the reference's own description is
+//! explicit about the asymmetry: "First, **all** automatic network actions are
+//! applied… **Then**, automatic range actions are applied one by one, as long
+//! as some of the perimeter's CNECs are overloaded." A range action has a
+//! set-point to size against the flows as they stand, so it necessarily sees
+//! the state its predecessors left.
 //!
 //! # Two kinds, handled differently
 //!
@@ -116,6 +132,31 @@ pub fn simulate(
 
     for speed in speeds {
         result.batches += 1;
+
+        // One snapshot for the whole batch's *network* actions. Equipment in the
+        // same speed class samples the grid at the same moment; asking each in
+        // turn what its sibling just did is a different — and, on the vendored
+        // evidence, wrong — model.
+        let snapshot =
+            violated(crac, network, resolution, &state, &result.open_branches, &result.transformers);
+        for (index, action) in crac.network_actions.iter().enumerate() {
+            if result.network_actions.contains(&index) {
+                continue;
+            }
+            if action.speed.unwrap_or(i64::MAX) != speed {
+                continue;
+            }
+            if !triggered(&action.usage_rules, &state, &snapshot) {
+                continue;
+            }
+            if !apply_network_action(action, resolution, &mut result) {
+                continue;
+            }
+            result.network_actions.push(index);
+        }
+
+        // Then range actions, one at a time, each sized against the flows as
+        // they stand.
         let mut rounds = 0;
         loop {
             rounds += 1;
@@ -124,36 +165,6 @@ pub fn simulate(
             }
             let violations =
                 violated(crac, network, resolution, &state, &result.open_branches, &result.transformers);
-
-            // Network actions first: they are binary, so there is nothing to
-            // size, and applying them may remove the very constraint a range
-            // action would otherwise be sized against.
-            let mut acted = false;
-            for (index, action) in crac.network_actions.iter().enumerate() {
-                if result.network_actions.contains(&index) {
-                    continue;
-                }
-                if action.speed.unwrap_or(i64::MAX) != speed {
-                    continue;
-                }
-                if !triggered(&action.usage_rules, &state, &violations) {
-                    continue;
-                }
-                if !apply_network_action(action, resolution, &mut result) {
-                    continue;
-                }
-                result.network_actions.push(index);
-                acted = true;
-                // Re-evaluate before considering the next one in this batch:
-                // a scheme that has just relieved the overload must not trigger
-                // its neighbour.
-                break;
-            }
-            if acted {
-                continue;
-            }
-
-            // Then range actions, sized against the worst CNEC each is watching.
             let mut moved = false;
             for (index, action) in crac.range_actions.iter().enumerate() {
                 if result.range_actions.iter().any(|(i, _, _)| *i == index) {
@@ -171,11 +182,11 @@ pub fn simulate(
                 let Some(branch) = resolution.branch(element) else { continue };
                 let table =
                     tap_table(tap_to_angle, network.tap_changers, branch, network.lines.len());
-                // Sized against the CNECs *this* action watches, not the
-                // worst in the perimeter. A scheme is wired to a particular
-                // circuit; sizing it against somebody else's overload asks it
-                // to relieve a flow it may have no influence over at all, and
-                // the near-zero sensitivity then makes it decline to act.
+                // Sized against the CNECs *this* action watches, not the worst
+                // in the perimeter. A scheme is wired to a particular circuit;
+                // sizing it against somebody else's overload asks it to relieve
+                // a flow it may have no influence over at all, and the near-zero
+                // sensitivity then makes it decline to act.
                 let watched = watched_cnecs(&action.usage_rules, &state, &violations);
                 if watched.is_empty() {
                     continue;
@@ -186,12 +197,20 @@ pub fn simulate(
                     continue;
                 };
                 if let Some(i) = branch.checked_sub(network.lines.len()) {
+                    // The network's own step at the chosen tap — see the note in
+                    // `linear::apply`. A tap changer is equipment; a CRAC's table
+                    // describes it, and the equipment wins when they disagree.
+                    let from_network = network
+                        .tap_changers
+                        .get(i)
+                        .and_then(|c| c.as_ref())
+                        .and_then(|c| c.at(tap));
                     if let Some(t) = result.transformers.get_mut(i) {
                         let ratio = t.tap.norm();
-                        t.tap = num_complex::Complex::from_polar(
-                            ratio,
-                            (-angle).to_radians(),
-                        );
+                        t.tap = match from_network {
+                            Some(step) => num_complex::Complex::from_polar(ratio, step.arg()),
+                            None => num_complex::Complex::from_polar(ratio, (-angle).to_radians()),
+                        };
                     }
                 }
                 result.range_actions.push((index, angle, Some(tap)));

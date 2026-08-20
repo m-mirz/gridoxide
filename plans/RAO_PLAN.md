@@ -7,7 +7,7 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and §8.3's external Cucumber gate is
-> wired up and passing at a recorded baseline of 120 of 124 assertions. Phases 10 and 11 are
+> wired up and passing at a recorded baseline of 121 of 124 assertions. Phases 10 and 11 are
 > unstarted.
 >
 > The strongest result so far was not planned for. §6.2 justified building two importers as the only
