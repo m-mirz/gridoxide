@@ -48,6 +48,11 @@ jobs:
     # does cover is the analytic battery in `tests/opf_ipm_test.rs` and the
     # published pglib objectives in `tests/opf_dc_test.rs`, neither of which
     # needs a second solver.
+    # `opf` covers the mixed-integer path too, since `opf::bnb` branches and
+    # bounds over the in-house interior-point solver and needs no system
+    # library. Before it existed every discrete question had to go to HiGHS, so
+    # that whole half was verified only where libhighs-dev happened to be
+    # installed — which is not here.
     - name: Build and test the optimization layer
       run: |
         cargo build --verbose --features opf

@@ -218,3 +218,196 @@ fn the_two_backends_still_agree_where_both_apply() {
     let b = IpmSolver::new().solve(&lp).expect("ipm");
     assert!((a.objective - b.objective).abs() < 1e-7, "{} vs {}", a.objective, b.objective);
 }
+
+// ---------------------------------------------------------------------------
+// Branch and bound over the in-house solver — phase 10
+// ---------------------------------------------------------------------------
+
+use gridoxide::opf::bnb::BranchAndBound;
+
+/// The point of the whole exercise: a MILP solved with no system library.
+#[test]
+fn branch_and_bound_solves_the_integer_problem_in_pure_rust() {
+    let mut lp = textbook_program();
+    lp.set_integral(0);
+    lp.set_integral(1);
+
+    let mut solver = BranchAndBound::new();
+    let solution = solver.solve(&lp).expect("MILP solve");
+    assert_eq!(solution.status, OptStatus::Optimal);
+    assert!(
+        (solution.objective + 20.0).abs() < 1e-6,
+        "objective {} — 21 would mean the relaxation was solved",
+        solution.objective
+    );
+    assert!((solution.primal[0] - 4.0).abs() < 1e-9, "{:?}", solution.primal);
+    assert!(solution.primal[1].abs() < 1e-9, "{:?}", solution.primal);
+    // Proved, not merely found.
+    assert_eq!(solver.gap(), 0.0, "gap {}", solver.gap());
+    assert!(solver.nodes() > 0);
+}
+
+/// Values come back as exact integers, not as 3.9999999997.
+///
+/// The relaxation lands within tolerance and no closer. Handing that back makes
+/// every downstream `as i32` a rounding decision the caller did not know it was
+/// making — and `as i32` truncates, so 3.9999999997 becomes tap 3.
+#[test]
+fn integral_columns_come_back_exactly_integral() {
+    let mut lp = textbook_program();
+    lp.set_integral(0);
+    lp.set_integral(1);
+    let solution = BranchAndBound::new().solve(&lp).expect("solve");
+    for (i, x) in solution.primal.iter().enumerate() {
+        if lp.is_integral(i) {
+            assert_eq!(*x, x.round(), "column {i} came back at {x}");
+        }
+    }
+}
+
+#[test]
+fn a_continuous_problem_passes_straight_through() {
+    // No integrality means no branching, and the answer must be identical to
+    // the inner solver's — this wrapper is not allowed to perturb the LP path.
+    let lp = textbook_program();
+    let direct = IpmSolver::new().solve(&lp).expect("ipm");
+    let mut solver = BranchAndBound::new();
+    let wrapped = solver.solve(&lp).expect("bnb");
+    assert_eq!(wrapped.status, direct.status);
+    assert!((wrapped.objective - direct.objective).abs() < 1e-12);
+    assert_eq!(solver.nodes(), 0, "a continuous problem should branch not at all");
+    // And its duals survive, since a continuous solve has them.
+    assert!(wrapped.row_dual.iter().any(|d| d.abs() > 1e-9));
+}
+
+#[test]
+fn a_mixed_problem_leaves_its_continuous_columns_alone() {
+    // min -5x - 4y, x integral and y not. The optimum has y fractional.
+    let mut lp = textbook_program();
+    lp.set_integral(0);
+    let solution = BranchAndBound::new().solve(&lp).expect("solve");
+    assert_eq!(solution.status, OptStatus::Optimal);
+    assert_eq!(solution.primal[0], solution.primal[0].round(), "x should be integral");
+    // x = 3, y = 1.5 is feasible and better than any all-integer point.
+    assert!((solution.objective + 21.0).abs() < 1e-6, "{}", solution.objective);
+    assert!((solution.primal[1] - 1.5).abs() < 1e-6, "{:?}", solution.primal);
+}
+
+#[test]
+fn binaries_are_honoured() {
+    let mut lp = LinearProgram::new(3);
+    lp.col_cost = vec![-3.0, -2.0, -1.0];
+    for c in 0..3 {
+        lp.set_binary(c);
+    }
+    lp.add_row(&[(0, 1.0), (1, 1.0), (2, 1.0)], f64::NEG_INFINITY, 2.0);
+
+    let solution = BranchAndBound::new().solve(&lp).expect("solve");
+    assert_eq!(solution.status, OptStatus::Optimal);
+    // Take the two most valuable.
+    assert!((solution.objective + 5.0).abs() < 1e-6, "{}", solution.objective);
+    assert_eq!(solution.primal, vec![1.0, 1.0, 0.0]);
+}
+
+#[test]
+fn an_infeasible_integer_problem_is_reported_as_infeasible() {
+    // 2x = 1 with x integral: the relaxation solves at 0.5 and no integer point
+    // exists. Reporting "optimal" at 0 or 1 would be a wrong answer, and
+    // reporting a node limit would blame the budget for a genuine result.
+    let mut lp = LinearProgram::new(1);
+    lp.col_lower = vec![0.0];
+    lp.col_upper = vec![1.0];
+    lp.col_cost = vec![1.0];
+    lp.set_integral(0);
+    lp.add_row(&[(0, 2.0)], 1.0, 1.0);
+
+    let solution = BranchAndBound::new().solve(&lp).expect("solve");
+    assert_eq!(solution.status, OptStatus::Infeasible, "{solution:?}");
+}
+
+#[test]
+fn a_node_budget_is_reported_rather_than_silently_passed_off_as_optimal() {
+    let mut lp = textbook_program();
+    lp.set_integral(0);
+    lp.set_integral(1);
+    let mut solver = BranchAndBound::new();
+    solver.options_mut().max_nodes = 1;
+    let solution = solver.solve(&lp).expect("solve");
+    // Either it found nothing, or it found something it cannot call optimal.
+    // What it must never do is claim optimality it did not prove.
+    match solution.status {
+        OptStatus::Other(_) => {}
+        OptStatus::Optimal => assert_eq!(solver.gap(), 0.0, "claimed optimal with a gap"),
+        other => panic!("unexpected status {other:?}"),
+    }
+    assert!(solver.nodes() <= 1);
+}
+
+/// §8.4's cross-check, the third instance of it in this crate.
+///
+/// For a MILP the comparison is stronger than the nonconvex NLP case and weaker
+/// than the convex QP one: the optimal *objective* is unique, so a disagreement
+/// there is a bug in one of them — but the optimal *solution* need not be, so
+/// which columns took which values proves nothing. Assert on the objective and
+/// on feasibility, never on the argmin.
+#[cfg(feature = "opf-highs")]
+#[test]
+fn branch_and_bound_agrees_with_highs_on_randomised_milps() {
+    // A tiny deterministic generator: reproducibility matters more than
+    // statistical purity, and a failure has to be re-runnable.
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut uniform = move || (next() >> 11) as f64 / (1u64 << 53) as f64;
+
+    let mut compared = 0;
+    for case in 0..60 {
+        let n = 3 + (case % 4);
+        let mut lp = LinearProgram::new(n);
+        for c in 0..n {
+            lp.col_lower[c] = 0.0;
+            lp.col_upper[c] = 4.0;
+            lp.col_cost[c] = -(1.0 + 4.0 * uniform());
+            if c % 2 == 0 {
+                lp.set_integral(c);
+            }
+        }
+        for _ in 0..(2 + case % 3) {
+            let coefficients: Vec<(usize, f64)> =
+                (0..n).map(|c| (c, 0.5 + 2.0 * uniform())).collect();
+            lp.add_row(&coefficients, f64::NEG_INFINITY, 4.0 + 6.0 * uniform());
+        }
+
+        let mut highs = HighsSolver::new().expect("HiGHS instance");
+        highs.set_output(false).expect("quiet");
+        let reference = highs.solve(&lp).expect("highs");
+        let mut bnb = BranchAndBound::new();
+        let mine = bnb.solve(&lp).expect("bnb");
+
+        if reference.status != OptStatus::Optimal {
+            continue;
+        }
+        assert_eq!(mine.status, OptStatus::Optimal, "case {case}: {mine:?}");
+        assert!(
+            (mine.objective - reference.objective).abs()
+                <= 1e-6 * (reference.objective.abs() + 1.0),
+            "case {case}: bnb {} vs highs {}",
+            mine.objective,
+            reference.objective
+        );
+        // And the answer must actually be integral and feasible, not merely
+        // equal in objective.
+        for c in 0..n {
+            if lp.is_integral(c) {
+                assert_eq!(mine.primal[c], mine.primal[c].round(), "case {case} column {c}");
+            }
+            assert!(mine.primal[c] >= -1e-9 && mine.primal[c] <= 4.0 + 1e-9);
+        }
+        compared += 1;
+    }
+    assert!(compared >= 40, "only {compared} cases were comparable");
+}

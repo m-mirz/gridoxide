@@ -508,12 +508,39 @@ cases where the bound would have bound.
 | Backend | Integrality |
 |---|---|
 | `opf::ipm` (default, in CI) | **Refuses** — `OpfError::IntegralityUnsupported` |
+| `opf::bnb` (in CI) | Honoured, by branch and bound over `ipm` |
 | `opf::highs` (`opf-highs`) | Honoured, via HiGHS's branch-and-cut |
 
 A barrier method has no way to enforce an integer, and returning the relaxation would be the worst
 available answer: a phase shifter cannot sit at tap 4.3, and reporting that it should is a plausible
 number nobody can act on. Refusing is what lets a caller discover at the boundary that it needs the
 other backend.
+
+`opf::bnb::BranchAndBound` is what makes a discrete problem answerable without a system library, and
+therefore testable in CI:
+
+```rust
+let mut solver = BranchAndBound::new();      // over the in-house interior-point method
+let solution = solver.solve(&program)?;
+solver.nodes();                              // what the search cost
+solver.gap();                                // 0.0 means proven optimal
+```
+
+Depth-first, diving toward the rounded value, branching on the most fractional column. Best-first
+proves optimality with fewer nodes but spends a long time with no integer solution at all — and an
+incumbent is what lets the bound prune anything. The budget is a **node count** rather than a time
+limit, because a search that answers differently depending on machine speed cannot be
+regression-tested.
+
+Two things it is careful about. An exhausted tree *proves* optimality, so the gap is zero — the root
+relaxation's bound is a lower bound on the optimum, not evidence about the answer, and reporting the
+distance to it would call an exact result 5% uncertain. And integral columns come back as *exact*
+integers: the relaxation lands within tolerance and no closer, so handing back 3.9999999997 makes
+every downstream `as i32` a truncation the caller did not know it was making.
+
+No cutting planes, no presolve, no heuristics beyond the dive. For a few dozen discrete taps and
+activation indicators that is enough; a large or hard MILP should still go to HiGHS, and the two are
+cross-checked against each other on 60 randomised instances in `tests/opf_milp_test.rs`.
 
 Two further rules, both enforced by `validate`:
 
