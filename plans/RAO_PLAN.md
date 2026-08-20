@@ -491,7 +491,7 @@ regression in the other:
 | File | Scenarios | Assertions | Matching |
 |---|---|---|---|
 | `dc_scenarios.feature` | 22, across ten networks | 124 | **124** |
-| `ac_scenarios.feature` | 35, on TestCase12Nodes | 186 | **155** |
+| `ac_scenarios.feature` | 35, on TestCase12Nodes | 186 | **177** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -579,12 +579,34 @@ capability that had simply never been built:
     differently in the two units. Worth no assertions on this corpus, and included anyway because it
     is the reference's contract and because the search now reproduces its intermediate numbers.
 
-**The 31 that still differ** are dominated by one cause: gridoxide's search measures candidates with
-DC flows while the reference measures them with AC — with distributed slack and reactive limits on
-top. The signature is a tap one step from the reference's, or a minimum-impact threshold missed by a
-hair: on 3.2.1.4.a the improvement needs to clear 275 A and gridoxide computes 274.9. Closing it
-means an AC solve per leaf per outer iteration, which is a real cost and a real design decision
-rather than a fix.
+That diagnosis — "the search measures with DC while the reference measures with AC" — accounted for
+most of the rest, and acting on it found two more:
+
+13. **Candidates were scored with the wrong flow model.** `LinearOptions::flow_model` now selects what
+    "the truth" means when a leaf is scored and when the outer iteration decides whether a move
+    helped; sensitivities stay DC, since the loop re-measures after every move and an approximate
+    gradient never decides the answer. Worth 14.
+14. **`OPEN_BRANCH_Z` is open in DC and not in AC.** The search expresses "this branch is open" by
+    giving it a 1e9 impedance, which is genuinely open for a linear model but in AC leaves the bus
+    coupled through a ~1e-9 admittance — a nearly singular Jacobian whose answer is wrong rather than
+    absent. Opening FR1-FR2 together with FR1-FR3 scored 234 A against a direct evaluation's 1204, so
+    the search rejected a combination the reference takes. A leaf now states its effective open set
+    as outages as well, which costs the DC path nothing. Worth 2.
+15. **`SECURE_FLOW` is not a weaker `MAX_MIN_MARGIN`.** `TreeParameters` turns it into
+    `AT_TARGET_OBJECTIVE_VALUE` with a target of zero, checked before the first depth as well as
+    between them: an already-secure network gets **no** remedial action. Scenario 3.2.1.0.a asserts
+    exactly that, on a network gridoxide was improving from 500 MW to 834 — spending actions to gain
+    margin nobody asked for is a different answer, not a better one, and no gate comparing only
+    margins would have said so. Twelve of the 35 scenarios use this objective. Worth 6.
+
+**The 9 that still differ** are all one CRAC, `epic5/SL_ep5us1.json`, whose two CNECs sit on a single
+line. gridoxide's best single action scores 998.9 A where the reference reports 1149, and the two
+disagree about which combination is best. It is *not* slack distribution: that was built specifically
+to test the hypothesis (`AcOptions::distribute_slack`) and reproduces the single-slack margins to
+four significant figures, because these fixtures are essentially lossless. Nor is it a load-flow
+difference at all — DC and AC agree to 0.3 A on this network's base case. Something in how the
+reference converts a megawatt threshold into an ampere margin does not match, and it has not been
+found.
 
 Worth recording what the sequence looked like from the inside: after the first three fixes the
 residual was confidently diagnosed as a missing `onNonRegulatedSide` threshold rule. It was not —
