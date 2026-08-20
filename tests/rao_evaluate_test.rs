@@ -308,19 +308,36 @@ fn every_state_the_crac_defines_gets_a_perimeter() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_margin_is_the_limit_less_the_absolute_flow() {
+fn a_margin_is_the_distance_to_the_nearer_bound() {
+    // `min(upper - flow, flow - lower)`, the reference's own
+    // `computeMargin`, with an absent bound treated as infinite. For a
+    // symmetric CNEC that reduces to `limit - |flow|`; for a one-sided one it
+    // does not, and the difference is the whole point — a CNEC with no lower
+    // threshold puts no constraint on reverse flow at all.
     let c = case();
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
     let result = evaluate(&c.crac, &c.network(), &resolution);
+    let mut one_sided = 0;
     for perimeter in &result.perimeters {
         for r in &perimeter.cnecs {
+            let expected = f64::min(r.upper_mw - r.flow_mw, r.flow_mw - r.lower_mw);
             assert!(
-                (r.margin_mw - (r.limit_mw - r.flow_mw.abs())).abs() < 1e-9,
-                "margin does not agree with limit and flow: {r:?}"
+                (r.margin_mw - expected).abs() < 1e-9,
+                "margin does not agree with its bounds: {r:?}"
             );
             assert_eq!(r.is_violated(), r.margin_mw < 0.0);
+            if !r.upper_mw.is_finite() || !r.lower_mw.is_finite() {
+                one_sided += 1;
+            } else {
+                // The symmetric identity still holds where both bounds exist.
+                assert!(
+                    (r.margin_mw - (r.limit_mw - r.flow_mw.abs())).abs() < 1e-9,
+                    "a two-sided CNEC should still be limit - |flow|: {r:?}"
+                );
+            }
         }
     }
+    assert!(one_sided > 0, "this fixture should exercise a one-sided threshold");
 }
 
 #[test]

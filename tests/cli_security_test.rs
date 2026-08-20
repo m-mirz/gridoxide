@@ -188,7 +188,13 @@ fn the_rao_command_reports_what_to_do() {
     assert!(text.contains("APPLY"), "no action recommended:\n{text}");
     assert!(text.contains("Open tie-line FR DE"), "{text}");
     // The preventive perimeter goes from insecure to secure.
-    assert!(text.contains("-460.8 -> 500.0"), "{text}");
+    //
+    // 1039.2 and not 500.0: this fixture's `BBE2AA1  FFR3AA1  1` CNECs state an
+    // upper threshold and no lower one, and the flow ends up in the direction
+    // the CRAC left unbounded. Reading that as `|flow| <= 1500` — which the
+    // evaluator used to do — invents a constraint nobody wrote and reports the
+    // distance to it as the margin.
+    assert!(text.contains("-460.8 -> 1039.2"), "{text}");
     assert!(text.contains("SECURE"), "{text}");
     // Pulling a curative CNEC forward changes the answer, so it is reported.
     assert!(text.contains("no curative action"), "{text}");

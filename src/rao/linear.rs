@@ -577,7 +577,7 @@ fn margin_column(n_controls: usize) -> usize {
 fn build_program(
     cnecs: &[usize],
     flows: &[f64],
-    limits: &[f64],
+    limits: &[(f64, f64)],
     controls: &[Control],
     options: &LinearOptions,
 ) -> LinearProgram {
@@ -637,7 +637,7 @@ fn build_program(
 
     for position in 0..cnecs.len() {
         let reference = flows[position];
-        let limit = limits[position];
+        let (lower, upper) = limits[position];
         // The flow is substituted directly rather than given a variable of its
         // own: `F(c)` appears only in the two margin rows, so eliminating it
         // halves the problem for no loss.
@@ -664,17 +664,26 @@ fn build_program(
                 })
                 .sum::<f64>();
 
-        for upper in [true, false] {
-            // MM ≤ limit − F  (upper) or MM ≤ F + limit (lower), with
-            // F = constant + Σ σ·A. Both directions always, because the margin
-            // being maximized is against |F|.
+        // `MM ≤ upper − F` and `MM ≤ F − lower`, with `F = constant + Σ σ·A`.
+        //
+        // The two bounds are separate rather than one magnitude used twice. A
+        // CNEC with only a lower threshold has no upper row at all, and adding
+        // one — which is what a symmetric `|F| ≤ limit` does — constrains the
+        // flow in a direction the CRAC left free, so the optimizer refuses
+        // set-points that are perfectly legal. An infinite bound simply
+        // contributes no row.
+        for is_upper in [true, false] {
+            let limit = if is_upper { upper } else { lower };
+            if !limit.is_finite() {
+                continue;
+            }
             let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
             coefficients.push((mm, 1.0));
-            let sign = if upper { 1.0 } else { -1.0 };
+            let sign = if is_upper { 1.0 } else { -1.0 };
             for &(column, s) in &terms {
                 coefficients.push((column, sign * s));
             }
-            let bound = if upper { limit - constant } else { constant + limit };
+            let bound = if is_upper { limit - constant } else { constant - limit };
             lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
         }
     }
@@ -966,7 +975,7 @@ fn perimeter_flows(
     resolution: &Resolution,
     perimeter: &[State],
     cnecs: &[usize],
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<(f64, f64)>) {
     let view = network.view();
     let result = evaluate(crac, &view, resolution);
     cnecs
@@ -977,8 +986,8 @@ fn perimeter_flows(
                 .iter()
                 .filter(|p| perimeter.contains(&p.state))
                 .find_map(|p| p.cnecs.iter().find(|c| c.cnec == i))
-                .map(|c| (c.flow_mw, c.limit_mw))
-                .unwrap_or((0.0, f64::INFINITY))
+                .map(|c| (c.flow_mw, (c.lower_mw, c.upper_mw)))
+                .unwrap_or((0.0, (f64::NEG_INFINITY, f64::INFINITY)))
         })
         .unzip()
 }
