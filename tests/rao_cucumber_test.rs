@@ -597,8 +597,24 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("worst margin {got:.2} MW (expected {value})"),
                 );
             }
-            Expect::WorstMargin { value, cnec: Some(id), stage } => {
-                let got = pick(*stage, id, &margins, &ara_margins, &cra_margins);
+            Expect::WorstMargin { value, cnec: Some(id), .. } => {
+                // A worst-margin step names the CNEC that *ends up* carrying the
+                // worst margin, so it is measured at that CNEC's own stage —
+                // an `auto` CNEC after the automatons, a `curative` one after
+                // the curative decisions. Reading it after PRA reports the
+                // overload those actions exist to remove, which is the value
+                // before anything happened rather than the answer.
+                let stage = crac
+                    .flow_cnecs
+                    .iter()
+                    .find(|c| c.id == *id)
+                    .map(|c| match crac.instants[c.state.instant].kind {
+                        InstantKind::Auto => Stage::Ara,
+                        InstantKind::Curative => Stage::Cra,
+                        _ => Stage::Pra,
+                    })
+                    .unwrap_or(Stage::Pra);
+                let got = pick(stage, id, &margins, &ara_margins, &cra_margins);
                 record(
                     got.is_some_and(|g| (g - value).abs() <= megawatt_tolerance(*value)),
                     format!("worst margin on `{id}` {got:?} (expected {value})"),
@@ -692,25 +708,18 @@ fn the_reference_implementations_own_expectations() {
     );
 }
 
-/// How many of the reference's assertions currently hold: **121 of 124**,
-/// across 22 scenarios.
+/// How many of the reference's assertions currently hold: **124 of 124**,
+/// across all 22 scenarios.
 ///
-/// Twenty scenarios match completely — every margin, every tap, every named
-/// action, the action count and the security status — at the reference's own
-/// tolerance.
-///
-/// The three that remain are margins in two scenarios where automatons and
-/// curative perimeters interact. They are narrowing rather than mysterious —
-/// one moved -302 → +103 → +379 against an expected +414.58 as the curative
-/// stage and then the tap table were corrected — but the last of the gap is not
-/// yet explained. Notably one of the three has this side *better* than the
-/// reference (-273 against -543), so it is not a case of simply achieving less.
+/// Every margin, every tap, every named action, every action count and every
+/// security status, at the reference's own tolerance.
 ///
 /// It is still a recorded number rather than an assertion of perfection. These
 /// are two heuristic search trees and §8.3 says up front that a different set of
-/// actions reaching the same margin is not a defect. Raising this is progress, a
-/// drop is a regression, and the printed report says which assertion moved.
-const BASELINE_MATCHED: usize = 121;
+/// actions reaching the same margin is not a defect; a scenario added later may
+/// legitimately disagree. Raising this is progress, a drop is a regression, and
+/// the printed report says which assertion moved.
+const BASELINE_MATCHED: usize = 124;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

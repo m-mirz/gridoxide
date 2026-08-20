@@ -39,15 +39,12 @@ The selection is every scenario in that suite that is `@dc` and `@rao` (and not
 costly optimization, HVDC, second-preventive or MARMOT — the features `src/rao/`
 does not implement. That is 22 of roughly 500, across ten networks.
 
-**109 of 118 checkable assertions match**, at the reference's own tolerance
-(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`); eighteen of the
-22 scenarios match completely.
+**All 124 checkable assertions match**, at the reference's own tolerance
+(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`) — every margin,
+every tap, every named action, every action count and every security status,
+across all 22 scenarios.
 
-Every remaining mismatch is in the reference's automaton feature group, whose
-expectations are stated *after* automatic remedial actions have fired —
-unimplemented here, and a phase of `plans/RAO_PLAN.md` not yet started.
-
-Getting there took eight fixes, listed in `tests/rao_cucumber_test.rs`. Two
+Getting there took thirteen fixes, listed in `tests/rao_cucumber_test.rs`. Two
 worth knowing about when adding scenarios: `Given network file is "..." for
 CORE CC` is **not** decoration — it rewrites every voltage level (380 kV to 400,
 220 to 225), and since the nominal voltage is the per-unit base that moves every
