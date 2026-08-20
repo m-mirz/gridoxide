@@ -1250,6 +1250,7 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
         branch_ids: &network.branch_ids,
         bus_ids: &network.bus_ids,
         initially_open: &network.initially_open,
+        bus_countries: &network.bus_countries,
         tap_changers: &network.tap_changers,
         base_mva: network.base_mva,
     };
@@ -1322,6 +1323,9 @@ struct SecurityNetwork {
     bus_ids: Vec<String>,
     /// Branches the file says are out of service.
     initially_open: Vec<usize>,
+    /// ISO country per bus, for the search's "skip actions far from the most
+    /// limiting element" filter. Empty when the importer does not state them.
+    bus_countries: Vec<Option<String>>,
     /// Tap changers, so a CRAC that omits its own tap table still works.
     tap_changers: Vec<Option<gridoxide::types::TapChanger>>,
     /// Shunt admittances. Only the AC re-validation stage reads them; the DC
@@ -1346,6 +1350,9 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             // The IIDM importer omits disconnected branches rather than keeping
             // them openable, so there is nothing to seed here yet.
             initially_open: Vec::new(),
+            // IIDM states countries on substations, which `iidm.rs` skips, so
+            // the filter that reads this stays off for IIDM networks.
+            bus_countries: Vec::new(),
             tap_changers: n.tap_changers,
             shunts: n.shunts,
             base_mva: n.base_mva,
@@ -1362,6 +1369,7 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             branch_ids: n.branch_ids,
             bus_ids: n.node_codes,
             initially_open: n.initially_open,
+            bus_countries: n.bus_countries,
             tap_changers: n.tap_changers,
             shunts: n.shunts,
             base_mva: n.base_mva,
@@ -1457,6 +1465,7 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         branch_ids: &network.branch_ids,
         bus_ids: &network.bus_ids,
         initially_open: &network.initially_open,
+        bus_countries: &network.bus_countries,
         tap_changers: &network.tap_changers,
         base_mva: network.base_mva,
     };

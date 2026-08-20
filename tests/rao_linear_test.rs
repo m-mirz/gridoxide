@@ -145,6 +145,7 @@ fn optimizing_a_perimeter_improves_its_worst_margin() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -185,6 +186,7 @@ fn a_phase_shifter_lands_on_a_tap_the_operator_can_select() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -231,6 +233,7 @@ fn the_network_is_left_where_the_result_says_it_is() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -246,6 +249,7 @@ fn the_network_is_left_where_the_result_says_it_is() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -281,6 +285,7 @@ fn a_perimeter_with_no_range_actions_reports_no_improvement() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -314,6 +319,7 @@ fn the_movement_penalty_prefers_the_smaller_move() {
             branch_ids: &c.net.branch_ids,
             bus_ids: &[],
             initially_open: &[],
+            bus_countries: &[],
             tap_changers: &[],
             base_mva: c.net.base_mva,
         };
@@ -362,6 +368,7 @@ fn a_curative_perimeter_optimizes_its_own_state() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -379,6 +386,7 @@ fn a_curative_perimeter_optimizes_its_own_state() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -430,6 +438,7 @@ fn a_perimeter_of_monitored_only_cnecs_optimizes_nothing() {
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };
@@ -462,6 +471,7 @@ fn usage_rules_decide_which_perimeter_an_action_reaches() {
             branch_ids: &c.net.branch_ids,
             bus_ids: &[],
             initially_open: &[],
+            bus_countries: &[],
             tap_changers: &[],
             base_mva: c.net.base_mva,
         };

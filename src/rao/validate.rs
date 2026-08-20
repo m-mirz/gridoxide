@@ -152,6 +152,7 @@ fn validate_perimeter(
         // network's `initially_open`: a plan may have *closed* something that
         // started open, and re-deriving would silently re-open it.
         initially_open: &[],
+        bus_countries: network.bus_countries,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };

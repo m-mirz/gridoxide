@@ -58,6 +58,7 @@ impl Case {
             branch_ids: &self.net.branch_ids,
             bus_ids: &[],
             initially_open: &[],
+            bus_countries: &[],
             tap_changers: &[],
             base_mva: self.net.base_mva,
         }
@@ -168,6 +169,7 @@ fn the_reported_margin_matches_an_independent_evaluation_of_the_winning_network(
         branch_ids: &c.net.branch_ids,
         bus_ids: &[],
         initially_open: &[],
+        bus_countries: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };

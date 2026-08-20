@@ -177,6 +177,13 @@ pub struct UcteImport {
     pub shunts: Vec<ShuntAdm>,
     /// Bus index → the 8-character node code that produced it.
     pub node_codes: Vec<String>,
+    /// ISO country code per bus, parallel to `buses`, from the file's
+    /// `##Z<cc>` sub-headers. `None` where the file did not say.
+    ///
+    /// The only network fact `rao::search`'s "skip actions far from the most
+    /// limiting element" filter needs, and one no other importer here supplies
+    /// yet.
+    pub bus_countries: Vec<Option<String>>,
     /// Node code → bus index.
     pub node_index: HashMap<String, usize>,
     /// Flat branch index (lines first, then transformers — the crate-wide
@@ -347,6 +354,8 @@ fn voltage_level_v(code: char) -> Option<f64> {
 #[derive(Clone, Debug)]
 struct RawNode {
     code: String,
+    /// The ISO code from the `##Z<cc>` sub-header this node appeared under.
+    country: Option<String>,
     type_code: i32,
     voltage_reference: Option<f64>,
     active_load: Option<f64>,
@@ -479,6 +488,8 @@ fn parse_records(
     let mut branches = Vec::new();
     let mut regulations: HashMap<String, RawRegulation> = HashMap::new();
     let mut block = Block::None;
+    // The country in force, from the most recent `##Z<cc>` sub-header.
+    let mut country: Option<String> = None;
     let mut skipped: Vec<String> = Vec::new();
 
     for (n, raw) in bytes.split(|&b| b == b'\n').enumerate() {
@@ -494,8 +505,15 @@ fn parse_records(
                 }
                 Block::Skip
             } else if tag.starts_with('N') || tag.starts_with('Z') {
-                // `##Z<cc>` is a country sub-header *inside* the node block; it
-                // carries no data of its own, so both open the same block.
+                // `##Z<cc>` is a country sub-header *inside* the node block. It
+                // carries no record of its own, so both open the same block —
+                // but the two letters after the `Z` say which country every
+                // node until the next such header belongs to, and that is the
+                // only place a UCTE file states it.
+                if let Some(code) = tag.strip_prefix('Z') {
+                    let code = code.trim();
+                    country = (!code.is_empty()).then(|| code.to_string());
+                }
                 Block::Nodes
             } else if tag.starts_with('L') {
                 Block::Lines
@@ -518,7 +536,11 @@ fn parse_records(
             continue;
         }
         match block {
-            Block::Nodes => nodes.push(parse_node(&record, n + 1)?),
+            Block::Nodes => {
+                let mut node = parse_node(&record, n + 1)?;
+                node.country = country.clone();
+                nodes.push(node);
+            }
             Block::Lines => branches.push(parse_line(&record, n + 1)?),
             Block::Transformers => branches.push(parse_transformer(&record, n + 1)?),
             Block::Regulations => {
@@ -544,6 +566,9 @@ fn parse_node(record: &Record<'_>, line: usize) -> Result<RawNode, UcteError> {
         return Err(UcteError::TruncatedRecord { block: 'N', line });
     }
     Ok(RawNode {
+        // Filled in by the caller, which is the only place that knows which
+        // `##Z<cc>` sub-header this record fell under.
+        country: None,
         code: record.text(0, 8),
         type_code: record.digit_at(24).unwrap_or(0),
         voltage_reference: record.number(26, 32),
@@ -699,6 +724,7 @@ fn convert(
 
     let mut buses = Vec::with_capacity(nodes.len());
     let mut node_codes = Vec::with_capacity(nodes.len());
+    let mut bus_countries = Vec::with_capacity(nodes.len());
     let mut node_index = HashMap::with_capacity(nodes.len());
     let mut p_limits = Vec::with_capacity(nodes.len());
     let mut x_nodes = 0usize;
@@ -754,6 +780,7 @@ fn convert(
         });
         node_index.insert(node.code.clone(), idx);
         node_codes.push(node.code.clone());
+        bus_countries.push(node.country.clone());
     }
 
     if !options.nominal_voltages.is_empty() {
@@ -925,6 +952,7 @@ fn convert(
         transformers,
         shunts: Vec::new(),
         node_codes,
+        bus_countries,
         node_index,
         branch_ids,
         limits,

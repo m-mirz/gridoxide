@@ -50,6 +50,20 @@ pub struct SearchOptions {
     pub relative_min_impact: f64,
     /// Options handed to the per-leaf linear optimization.
     pub linear: LinearOptions,
+    /// Discard candidate actions that are too far, in country boundaries, from
+    /// the most limiting element. `None` disables the filter; `Some(0)` keeps
+    /// only actions in the same country as the worst CNEC.
+    ///
+    /// The reference's `skip-actions-far-from-most-limiting-element` together
+    /// with `max-number-of-boundaries-for-skipping-actions`. It exists because
+    /// an operator in one control area cannot generally be asked to act for an
+    /// overload in another, and it changes the answer: without it the search
+    /// takes actions the reference never offers itself and reports a better
+    /// margin than the problem actually allows.
+    ///
+    /// Needs [`Network::bus_countries`]; with no countries there is no notion
+    /// of far, and the filter passes everything.
+    pub skip_far_actions: Option<usize>,
 }
 
 impl Default for SearchOptions {
@@ -59,6 +73,7 @@ impl Default for SearchOptions {
             absolute_min_impact: 0.0,
             relative_min_impact: 0.0,
             linear: LinearOptions::default(),
+            skip_far_actions: None,
         }
     }
 }
@@ -249,8 +264,15 @@ pub fn search(
 
     // The root: no network action, range actions optimized.
     let base_open: Vec<usize> = network.initially_open.to_vec();
+    let available = match options.skip_far_actions {
+        Some(max) => {
+            near_most_limiting(crac, network, resolution, perimeter, &base_open, available, max)
+        }
+        None => available,
+    };
     let (root_margin, root_setpoints, root_transformers, root_buses) =
-        leaf(crac, network, resolution, perimeter, solver, &options.linear, &base_open, &[]);
+        leaf(crac, network, resolution, perimeter, solver, &options.linear,
+             Applied { open: &base_open, taps: &[] });
     let initial = margin_of(crac, network, resolution, perimeter, &base_open);
 
     let mut chosen: Vec<usize> = Vec::new();
@@ -291,7 +313,13 @@ pub fn search(
             taps.extend(&effect.taps);
 
             let (margin, setpoints, transformers, buses) = leaf(
-                crac, network, resolution, perimeter, solver, &options.linear, &open, &taps,
+                crac,
+                network,
+                resolution,
+                perimeter,
+                solver,
+                &options.linear,
+                Applied { open: &open, taps: &taps },
             );
             leaves += 1;
 
@@ -370,8 +398,7 @@ fn leaf(
     perimeter: &[State],
     solver: &mut dyn Solver,
     options: &LinearOptions,
-    open: &[usize],
-    taps: &[(usize, i32, f64)],
+    applied: Applied<'_>,
 ) -> (f64, Vec<Setpoint>, Vec<crate::types::Transformer>, Vec<crate::types::Bus>) {
     let mut transformers = network.transformers.to_vec();
     // A phase-shifter set-point is part of the candidate, so it has to be in
@@ -379,7 +406,7 @@ fn leaf(
     // out does not make the action fail loudly — it makes it evaluate as a
     // change that does nothing, so the search can never prefer it and would
     // misreport the network if it ever did.
-    apply_taps(&mut transformers, network.tap_changers, network.lines.len(), taps);
+    apply_taps(&mut transformers, network.tap_changers, network.lines.len(), applied.taps);
     // The leaf gets its own copy of the buses as well as the transformers: a
     // redispatch moves injections, and a candidate that is evaluated and
     // discarded must not leave them moved.
@@ -391,11 +418,25 @@ fn leaf(
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
         initially_open: network.initially_open,
+        bus_countries: network.bus_countries,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
-    let result = optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, open);
+    let result =
+        optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, applied.open);
     (result.0, result.1, transformers, buses)
+}
+
+/// The network state one candidate puts in force: which branches are open, and
+/// where the phase shifters sit.
+///
+/// The two travel together because they have to be applied together — a leaf
+/// optimized with one and scored with the other is measuring a network no
+/// decision produced.
+#[derive(Clone, Copy)]
+struct Applied<'a> {
+    open: &'a [usize],
+    taps: &'a [(usize, i32, f64)],
 }
 
 /// Put phase shifters on the tap positions a candidate names.
@@ -472,6 +513,7 @@ fn optimize_with_open(
         // silent — every margin stays self-consistent and the optimizer
         // simply measures a network in which the automaton never acted.
         initially_open: &[],
+        bus_countries: network.bus_countries,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
@@ -498,4 +540,152 @@ fn margin_of(
         .filter(|p| perimeter.contains(&p.state))
         .filter_map(|p| p.min_margin())
         .fold(f64::INFINITY, f64::min)
+}
+
+// ---------------------------------------------------------------------------
+// Actions too far from the most limiting element
+// ---------------------------------------------------------------------------
+
+/// The countries a branch touches — one, or two where it crosses a border.
+fn branch_countries(
+    network: &Network<'_>,
+    branch: usize,
+    dc: &[crate::linear::btheta::DcBranch],
+) -> Vec<String> {
+    let Some(b) = dc.iter().find(|b| b.index == branch) else { return Vec::new() };
+    [b.from, b.to]
+        .iter()
+        .filter_map(|&bus| network.bus_countries.get(bus)?.clone())
+        .collect()
+}
+
+/// Which countries share a border, from the branches that cross one.
+///
+/// Built from the network rather than from a table, exactly as the reference
+/// does: two countries are neighbours if some branch has one end in each. A
+/// border no branch crosses is not a border this network has.
+fn country_boundaries(
+    network: &Network<'_>,
+    dc: &[crate::linear::btheta::DcBranch],
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for b in dc {
+        let (Some(Some(x)), Some(Some(y))) =
+            (network.bus_countries.get(b.from), network.bus_countries.get(b.to))
+        else {
+            continue;
+        };
+        if x == y {
+            continue;
+        }
+        let pair = if x < y { (x.clone(), y.clone()) } else { (y.clone(), x.clone()) };
+        if !out.contains(&pair) {
+            out.push(pair);
+        }
+    }
+    out
+}
+
+/// Whether `a` and `b` are within `max_boundaries` borders of each other.
+///
+/// Zero means "the same country". Breadth-first rather than the reference's
+/// recursion, which revisits countries and can walk the same border twice; the
+/// answer is the same and the cost is not.
+fn within_boundaries(
+    a: &str,
+    b: &str,
+    boundaries: &[(String, String)],
+    max_boundaries: usize,
+) -> bool {
+    if a == b {
+        return true;
+    }
+    let mut seen: Vec<&str> = vec![a];
+    let mut frontier: Vec<&str> = vec![a];
+    for _ in 0..max_boundaries {
+        let mut next: Vec<&str> = Vec::new();
+        for country in &frontier {
+            for (x, y) in boundaries {
+                let other = if x == country {
+                    y.as_str()
+                } else if y == country {
+                    x.as_str()
+                } else {
+                    continue;
+                };
+                if other == b {
+                    return true;
+                }
+                if !seen.contains(&other) {
+                    seen.push(other);
+                    next.push(other);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    false
+}
+
+/// Drop candidates too far from the worst CNEC to be plausible remedies.
+///
+/// Two rules from the reference are load-bearing and both are permissive:
+/// an action whose location is unknown is **kept**, and a worst CNEC whose
+/// location is unknown filters **nothing**. A filter that silently discarded
+/// what it could not place would quietly shrink the search on any network
+/// whose importer does not supply countries.
+fn near_most_limiting(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    perimeter: &[State],
+    open: &[usize],
+    available: Vec<(usize, Effect)>,
+    max_boundaries: usize,
+) -> Vec<(usize, Effect)> {
+    if network.bus_countries.is_empty() {
+        return available;
+    }
+    let dc = crate::linear::btheta::dc_branches(
+        network.lines,
+        network.transformers,
+        crate::linear::DcOptions::default(),
+    );
+
+    // The most limiting element, measured on the network as it stands.
+    let evaluated = super::evaluate::evaluate_with(crac, network, resolution, open);
+    let worst = evaluated
+        .perimeters
+        .iter()
+        .filter(|p| perimeter.contains(&p.state))
+        .flat_map(|p| p.cnecs.iter())
+        .min_by(|a, b| a.margin_mw.total_cmp(&b.margin_mw));
+    let Some(worst) = worst else { return available };
+    let here = branch_countries(network, worst.branch, &dc);
+    if here.is_empty() {
+        return available;
+    }
+
+    let boundaries = country_boundaries(network, &dc);
+    available
+        .into_iter()
+        .filter(|(_, effect)| {
+            let mut touched: Vec<String> = Vec::new();
+            for &branch in effect.open.iter().chain(&effect.close) {
+                touched.extend(branch_countries(network, branch, &dc));
+            }
+            for &(branch, _, _) in &effect.taps {
+                touched.extend(branch_countries(network, branch, &dc));
+            }
+            if touched.is_empty() {
+                return true;
+            }
+            touched.iter().any(|t| {
+                here.iter().any(|h| within_boundaries(h, t, &boundaries, max_boundaries))
+            })
+        })
+        .collect()
 }

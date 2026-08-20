@@ -286,6 +286,13 @@ pub struct Network<'a> {
     /// makes "close this line" a no-op — an automaton that fires and changes
     /// nothing.
     pub initially_open: &'a [usize],
+    /// ISO country code per bus, parallel to `buses`. Empty when the importer
+    /// does not supply them, which disables the one thing that reads it —
+    /// `search`'s "skip actions far from the most limiting element" filter.
+    ///
+    /// Only `ucte` fills this in today (from the file's `##Z<cc>` sub-headers).
+    /// IIDM states countries on substations, which `iidm.rs` skips.
+    pub bus_countries: &'a [Option<String>],
     /// Tap changers, parallel to `transformers`.
     ///
     /// A CRAC's PST range action *may* carry its own tap-to-angle table and
