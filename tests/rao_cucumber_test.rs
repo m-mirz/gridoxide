@@ -692,26 +692,25 @@ fn the_reference_implementations_own_expectations() {
     );
 }
 
-/// How many of the reference's assertions currently hold: **120 of 124**,
+/// How many of the reference's assertions currently hold: **121 of 124**,
 /// across 22 scenarios.
 ///
 /// Twenty scenarios match completely — every margin, every tap, every named
 /// action, the action count and the security status — at the reference's own
 /// tolerance.
 ///
-/// The four that remain are margins in three scenarios where automatons and
-/// curative perimeters interact, and they are genuine algorithmic differences
-/// rather than missing features: the automatons fire, the curative perimeters
-/// run, and both achieve less than the reference does. One of them is now
-/// +102.75 MW against an expected +414.58, having been −302.38 before the
-/// curative stage was measured at all, so the gap is narrowing rather than
-/// mysterious.
+/// The three that remain are margins in two scenarios where automatons and
+/// curative perimeters interact. They are narrowing rather than mysterious —
+/// one moved -302 → +103 → +379 against an expected +414.58 as the curative
+/// stage and then the tap table were corrected — but the last of the gap is not
+/// yet explained. Notably one of the three has this side *better* than the
+/// reference (-273 against -543), so it is not a case of simply achieving less.
 ///
 /// It is still a recorded number rather than an assertion of perfection. These
 /// are two heuristic search trees and §8.3 says up front that a different set of
 /// actions reaching the same margin is not a defect. Raising this is progress, a
 /// drop is a regression, and the printed report says which assertion moved.
-const BASELINE_MATCHED: usize = 120;
+const BASELINE_MATCHED: usize = 121;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
