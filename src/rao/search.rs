@@ -270,16 +270,19 @@ pub fn search(
         }
         None => available,
     };
-    let (root_margin, root_setpoints, root_transformers, root_buses) =
-        leaf(crac, network, resolution, perimeter, solver, &options.linear,
-             Applied { open: &base_open, taps: &[] });
+    let root = leaf(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        solver,
+        &options.linear,
+        Applied { open: &base_open, taps: &[] },
+    );
     let initial = margin_of(crac, network, resolution, perimeter, &base_open);
 
     let mut chosen: Vec<usize> = Vec::new();
-    let mut best_margin = root_margin;
-    let mut best_setpoints = root_setpoints;
-    let mut best_transformers = root_transformers;
-    let mut best_buses = root_buses;
+    let mut best = root;
     let mut leaves = 0usize;
     let mut depth = 0usize;
 
@@ -294,8 +297,7 @@ pub fn search(
             }
         }
 
-        type Leaf = (usize, f64, Vec<Setpoint>, Vec<crate::types::Transformer>, Vec<crate::types::Bus>);
-    let mut winner: Option<Leaf> = None;
+        let mut winner: Option<(usize, Evaluated)> = None;
         // A fixed order, so the search reproduces itself.
         for (index, effect) in &available {
             if chosen.contains(index) {
@@ -312,7 +314,7 @@ pub fn search(
             let mut taps = taps_here.clone();
             taps.extend(&effect.taps);
 
-            let (margin, setpoints, transformers, buses) = leaf(
+            let candidate = leaf(
                 crac,
                 network,
                 resolution,
@@ -323,28 +325,28 @@ pub fn search(
             );
             leaves += 1;
 
+            // Ranked on the objective, not on the reported margin: in an
+            // ampere objective those can order two candidates differently.
             let better = match &winner {
                 None => true,
-                Some((best, previous, _, _, _)) => {
-                    margin > *previous + 1e-12
-                        || ((margin - *previous).abs() <= 1e-12
-                            && crac.network_actions[*index].id < crac.network_actions[*best].id)
+                Some((previous_index, previous)) => {
+                    candidate.objective > previous.objective + 1e-12
+                        || ((candidate.objective - previous.objective).abs() <= 1e-12
+                            && crac.network_actions[*index].id
+                                < crac.network_actions[*previous_index].id)
                 }
             };
             if better {
-                winner = Some((*index, margin, setpoints, transformers, buses));
+                winner = Some((*index, candidate));
             }
         }
 
-        let Some((index, margin, setpoints, transformers, buses)) = winner else { break };
-        if !improved_enough(best_margin, margin, options) {
+        let Some((index, candidate)) = winner else { break };
+        if !improved_enough(best.objective, candidate.objective, options) {
             break;
         }
         chosen.push(index);
-        best_margin = margin;
-        best_setpoints = setpoints;
-        best_transformers = transformers;
-        best_buses = buses;
+        best = candidate;
         depth += 1;
     }
 
@@ -360,14 +362,16 @@ pub fn search(
 
     SearchResult {
         network_actions: chosen,
-        setpoints: best_setpoints,
+        setpoints: best.setpoints,
         initial_margin_mw: initial,
-        final_margin_mw: best_margin,
+        // Megawatts, whatever the objective was maximized in — the search
+        // reports a margin, it does not report its own scoring function.
+        final_margin_mw: best.margin_mw,
         leaves,
         depth,
         open_branches,
-        transformers: best_transformers,
-        buses: best_buses,
+        transformers: best.transformers,
+        buses: best.buses,
     }
 }
 
@@ -399,7 +403,7 @@ fn leaf(
     solver: &mut dyn Solver,
     options: &LinearOptions,
     applied: Applied<'_>,
-) -> (f64, Vec<Setpoint>, Vec<crate::types::Transformer>, Vec<crate::types::Bus>) {
+) -> Evaluated {
     let mut transformers = network.transformers.to_vec();
     // A phase-shifter set-point is part of the candidate, so it has to be in
     // force before the leaf is optimized *and* before it is scored. Leaving it
@@ -422,9 +426,22 @@ fn leaf(
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
-    let result =
+    let (objective, margin_mw, setpoints) =
         optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, applied.open);
-    (result.0, result.1, transformers, buses)
+    Evaluated { objective, margin_mw, setpoints, transformers, buses }
+}
+
+/// One leaf's outcome.
+///
+/// `objective` is what candidates are ranked by and what a minimum-impact
+/// threshold is compared against; `margin_mw` is what gets reported. They are
+/// the same number only when the objective is already in megawatts.
+struct Evaluated {
+    objective: f64,
+    margin_mw: f64,
+    setpoints: Vec<Setpoint>,
+    transformers: Vec<crate::types::Transformer>,
+    buses: Vec<crate::types::Bus>,
 }
 
 /// The network state one candidate puts in force: which branches are open, and
@@ -478,10 +495,10 @@ fn optimize_with_open(
     solver: &mut dyn Solver,
     options: &LinearOptions,
     open: &[usize],
-) -> (f64, Vec<Setpoint>) {
+) -> (f64, f64, Vec<Setpoint>) {
     if open.is_empty() {
         let result = optimize(crac, network, resolution, perimeter, solver, options);
-        return (result.final_margin_mw, result.setpoints);
+        return (result.final_objective, result.final_margin_mw, result.setpoints);
     }
     // Opening a branch is expressed by removing it from the working copy's
     // line list — a line with no admittance carries no flow and contributes
@@ -522,7 +539,7 @@ fn optimize_with_open(
     for (a, b) in network.transformers.iter_mut().zip(transformers.iter()) {
         a.tap = b.tap;
     }
-    (result.final_margin_mw, result.setpoints)
+    (result.final_objective, result.final_margin_mw, result.setpoints)
 }
 
 /// The perimeter's minimum margin with `open` applied and no range action

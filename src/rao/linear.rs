@@ -79,6 +79,26 @@ use crate::types::Transformer;
 use super::crac::{Crac, RangeActionKind, State};
 use super::evaluate::{evaluate, Network, Resolution};
 
+/// The unit the objective — the minimum margin being maximized — is measured
+/// in.
+///
+/// Not cosmetic. Each CNEC converts between MW and amperes at its own voltage,
+/// so the *ordering* of two candidate networks can differ between the two
+/// units: a 400 kV CNEC and a 225 kV one with equal MW margins do not have
+/// equal ampere margins, and the optimizer will trade one against the other
+/// differently depending on which it is told to maximize.
+///
+/// The reference does not make this a setting. `RaoUtil.getFlowUnit` returns
+/// megawatts for a DC load flow and **amperes for an AC one**, so the objective
+/// follows the flow model, and every threshold expressed "in the objective's
+/// unit" — the minimum-impact thresholds among them — follows with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ObjectiveUnit {
+    #[default]
+    Megawatt,
+    Ampere,
+}
+
 /// How the optimizer should treat a phase shifter's taps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TapModel {
@@ -105,6 +125,8 @@ pub struct LinearOptions {
     /// sparse. In MW per degree.
     pub sensitivity_threshold: f64,
     pub tap_model: TapModel,
+    /// What the minimum margin being maximized is measured in.
+    pub objective_unit: ObjectiveUnit,
 }
 
 impl Default for LinearOptions {
@@ -115,6 +137,7 @@ impl Default for LinearOptions {
             injection_penalty: 0.001,
             sensitivity_threshold: 1e-6,
             tap_model: TapModel::Continuous,
+            objective_unit: ObjectiveUnit::Megawatt,
         }
     }
 }
@@ -153,10 +176,20 @@ pub enum LinearStatus {
 pub struct LinearResult {
     pub status: LinearStatus,
     pub setpoints: Vec<Setpoint>,
-    /// Minimum margin over the perimeter's optimized CNECs, MW, before and
-    /// after.
+    /// Minimum margin over the perimeter's optimized CNECs, **MW**, before and
+    /// after — whatever unit the objective was maximized in.
     pub initial_margin_mw: f64,
     pub final_margin_mw: f64,
+    /// The same two in [`LinearOptions::objective_unit`], which is what the
+    /// optimizer actually compared and what a minimum-impact threshold is
+    /// measured against.
+    ///
+    /// Equal to the pair above when that unit is megawatts. Kept separate
+    /// rather than overloading the `_mw` fields, because a caller reporting a
+    /// margin and a caller ranking two candidates want different numbers and
+    /// silently giving them the same one mislabels whichever is wrong.
+    pub initial_objective: f64,
+    pub final_objective: f64,
     /// Outer iterations actually run.
     pub iterations: usize,
 }
@@ -362,8 +395,9 @@ pub fn optimize(
         .map(|(i, _)| i)
         .collect();
 
-    let mut best = measure(crac, network, resolution, perimeter);
-    let initial_margin = best;
+    let mut best = measure(crac, network, resolution, perimeter, options.objective_unit);
+    let initial_objective = best;
+    let initial_margin = measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt);
     let mut setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
 
@@ -372,7 +406,9 @@ pub fn optimize(
             status: LinearStatus::NoImprovement,
             setpoints,
             initial_margin_mw: initial_margin,
-            final_margin_mw: best,
+            final_margin_mw: initial_margin,
+            initial_objective,
+            final_objective: best,
             iterations,
         };
     }
@@ -386,7 +422,9 @@ pub fn optimize(
                 status: LinearStatus::NoImprovement,
                 setpoints,
                 initial_margin_mw: initial_margin,
-                final_margin_mw: best,
+                final_margin_mw: initial_margin,
+                initial_objective,
+                final_objective: best,
                 iterations,
             }
         }
@@ -435,7 +473,7 @@ pub fn optimize(
         // iteration settling on the wrong side of a kink — see
         // `PstControl::bracketing_taps`.
         apply(crac, network, &mut controls, &proposed);
-        let mut best_here = measure(crac, network, resolution, perimeter);
+        let mut best_here = measure(crac, network, resolution, perimeter, options.objective_unit);
         for k in 0..controls.len() {
             let Some(pst) = controls[k].pst.as_ref() else { continue };
             let target = solution.primal[setpoint_column(k)];
@@ -451,7 +489,7 @@ pub fn optimize(
                 let mut trial = proposed.clone();
                 trial[k] = (angle, Some(tap));
                 apply(crac, network, &mut controls, &trial);
-                let margin = measure(crac, network, resolution, perimeter);
+                let margin = measure(crac, network, resolution, perimeter, options.objective_unit);
                 if margin > best_here + 1e-9 {
                     best_here = margin;
                     proposed = trial;
@@ -471,7 +509,7 @@ pub fn optimize(
         }
         apply(crac, network, &mut controls, &proposed);
 
-        let margin = measure(crac, network, resolution, perimeter);
+        let margin = measure(crac, network, resolution, perimeter, options.objective_unit);
         if margin > best + 1e-9 {
             best = margin;
             setpoints = controls
@@ -520,7 +558,12 @@ pub fn optimize(
         },
         setpoints,
         initial_margin_mw: initial_margin,
-        final_margin_mw: best,
+        // Re-measured in megawatts rather than converted from `best`: the two
+        // are minima over the *same* CNECs but not necessarily over the same
+        // one, so converting the ampere answer would name a margin no CNEC has.
+        final_margin_mw: measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt),
+        initial_objective,
+        final_objective: best,
         iterations,
     }
 }
@@ -577,7 +620,7 @@ fn margin_column(n_controls: usize) -> usize {
 fn build_program(
     cnecs: &[usize],
     flows: &[f64],
-    limits: &[(f64, f64)],
+    limits: &[(f64, f64, f64)],
     controls: &[Control],
     options: &LinearOptions,
 ) -> LinearProgram {
@@ -637,7 +680,19 @@ fn build_program(
 
     for position in 0..cnecs.len() {
         let reference = flows[position];
-        let (lower, upper) = limits[position];
+        let (lower, upper, amperes_per_mw) = limits[position];
+        // Scaling the row is what makes the objective's unit mean something.
+        // `MM ≤ (upper − F)` in MW becomes `MM ≤ (upper − F)·k` in amperes, and
+        // `k` is this CNEC's own — two CNECs at different voltages convert
+        // differently, which is precisely why the two units can rank the same
+        // pair of candidate networks in opposite orders.
+        let scale = match options.objective_unit {
+            ObjectiveUnit::Megawatt => 1.0,
+            ObjectiveUnit::Ampere => amperes_per_mw,
+        };
+        if scale == 0.0 {
+            continue;
+        }
         // The flow is substituted directly rather than given a variable of its
         // own: `F(c)` appears only in the two margin rows, so eliminating it
         // halves the problem for no loss.
@@ -681,9 +736,9 @@ fn build_program(
             coefficients.push((mm, 1.0));
             let sign = if is_upper { 1.0 } else { -1.0 };
             for &(column, s) in &terms {
-                coefficients.push((column, sign * s));
+                coefficients.push((column, sign * s * scale));
             }
-            let bound = if is_upper { limit - constant } else { constant - limit };
+            let bound = scale * if is_upper { limit - constant } else { constant - limit };
             lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
         }
     }
@@ -957,6 +1012,7 @@ fn measure(
     network: &NetworkMut<'_>,
     resolution: &Resolution,
     perimeter: &[State],
+    unit: ObjectiveUnit,
 ) -> f64 {
     let view = network.view();
     let result = evaluate(crac, &view, resolution);
@@ -964,7 +1020,11 @@ fn measure(
         .perimeters
         .iter()
         .filter(|p| perimeter.contains(&p.state))
-        .filter_map(|p| p.min_margin())
+        .flat_map(|p| p.cnecs.iter())
+        .map(|c| match unit {
+            ObjectiveUnit::Megawatt => c.margin_mw,
+            ObjectiveUnit::Ampere => c.margin_a,
+        })
         .fold(f64::INFINITY, f64::min)
 }
 
@@ -975,7 +1035,7 @@ fn perimeter_flows(
     resolution: &Resolution,
     perimeter: &[State],
     cnecs: &[usize],
-) -> (Vec<f64>, Vec<(f64, f64)>) {
+) -> (Vec<f64>, Vec<(f64, f64, f64)>) {
     let view = network.view();
     let result = evaluate(crac, &view, resolution);
     cnecs
@@ -986,8 +1046,8 @@ fn perimeter_flows(
                 .iter()
                 .filter(|p| perimeter.contains(&p.state))
                 .find_map(|p| p.cnecs.iter().find(|c| c.cnec == i))
-                .map(|c| (c.flow_mw, (c.lower_mw, c.upper_mw)))
-                .unwrap_or((0.0, (f64::NEG_INFINITY, f64::INFINITY)))
+                .map(|c| (c.flow_mw, (c.lower_mw, c.upper_mw, c.amperes_per_mw())))
+                .unwrap_or((0.0, (f64::NEG_INFINITY, f64::INFINITY, 0.0)))
         })
         .unzip()
 }

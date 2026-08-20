@@ -22,7 +22,10 @@ pub use crac_json::{CracError, CracReport};
 pub use automaton::{simulate, AutomatonResult};
 pub use castor::{run, PerimeterPlan, Plan, ScenarioPlan};
 pub use search::{search, SearchOptions, SearchResult};
-pub use linear::{optimize, LinearOptions, LinearResult, LinearStatus, NetworkMut, Setpoint, TapModel};
+pub use linear::{
+    optimize, LinearOptions, LinearResult, LinearStatus, NetworkMut, ObjectiveUnit, Setpoint,
+    TapModel,
+};
 pub use evaluate::{
     evaluate, evaluate_ac, evaluate_model, evaluate_with, AcOptions, CnecResult, FlowModel,
     Network, PerimeterResult, Resolution, SecurityResult,

@@ -494,3 +494,105 @@ fn usage_rules_decide_which_perimeter_an_action_reaches() {
         "only the preventive perimeter has an available range action"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The objective's unit
+// ---------------------------------------------------------------------------
+
+fn features_fixture(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/rao/features")
+        .join(name)
+}
+
+#[test]
+fn the_objective_unit_changes_what_the_optimizer_maximizes() {
+    // `RaoUtil.getFlowUnit`: megawatts for a DC load flow, amperes for an AC
+    // one. It is not cosmetic. Each CNEC converts at its own voltage, so on a
+    // network with two voltage levels the same set of margins does not have the
+    // same minimum in the two units — and the optimizer trades one CNEC against
+    // another differently as a result.
+    let net = ucte::read(ucte_fixture("TestCase12Nodes_with_2_voltage_levels_1.uct"))
+        .expect("network");
+    // This CRAC states 225 kV on some CNECs and 400 kV on others, which is what
+    // makes the two units disagree; a CRAC that says 400 everywhere would make
+    // the ampere objective a constant rescaling of the megawatt one.
+    let (crac, _) =
+        crac_json::read(features_fixture("SL_ep15us3case1.json")).expect("crac");
+    let resolution = Resolution::new(&crac, &net.branch_ids);
+
+    let view = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &[],
+        initially_open: &[],
+        bus_countries: &[],
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let result = evaluate(&crac, &view, &resolution);
+    let cnecs: Vec<_> = result.perimeters.iter().flat_map(|p| p.cnecs.iter()).collect();
+    assert!(cnecs.len() > 1, "need several CNECs to have an ordering at all");
+
+    let voltages: std::collections::BTreeSet<i64> =
+        cnecs.iter().map(|c| c.conversion_v as i64).collect();
+    assert!(voltages.len() > 1, "fixture should span two voltage levels: {voltages:?}");
+
+    // The property that matters is not that the *minimum* differs — the same
+    // CNEC can be worst in both units, and here it is — but that the ordering
+    // is not preserved. Once two CNECs rank differently, a candidate network
+    // that helps one at the other's expense is an improvement in one unit and a
+    // regression in the other, which is exactly what the optimizer decides on.
+    let inverted = cnecs.iter().enumerate().any(|(i, a)| {
+        cnecs.iter().skip(i + 1).any(|b| {
+            (a.margin_mw < b.margin_mw && a.margin_a > b.margin_a)
+                || (a.margin_mw > b.margin_mw && a.margin_a < b.margin_a)
+        })
+    });
+    assert!(
+        inverted,
+        "no pair of CNECs ranks differently in the two units, so this fixture \
+         cannot distinguish them and the test proves nothing"
+    );
+}
+
+#[test]
+fn an_ampere_objective_is_reported_in_megawatts_all_the_same() {
+    // The optimizer may rank in amperes, but `final_margin_mw` is a margin in
+    // megawatts and has to stay one. Reporting the scoring function under a
+    // `_mw` name would be wrong by a factor of the conversion voltage.
+    let c = case();
+    let mut buses = c.net.buses.clone();
+    let mut transformers = c.net.transformers.clone();
+    let mut network = NetworkMut {
+        buses: &mut buses,
+        lines: &c.net.lines,
+        transformers: &mut transformers,
+        branch_ids: &c.net.branch_ids,
+        bus_ids: &[],
+        initially_open: &[],
+        bus_countries: &[],
+        tap_changers: &c.net.tap_changers,
+        base_mva: c.net.base_mva,
+    };
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let perimeter: Vec<State> = c.crac.states();
+    let mut solver = IpmSolver::new();
+    let options = LinearOptions {
+        objective_unit: gridoxide::rao::linear::ObjectiveUnit::Ampere,
+        ..Default::default()
+    };
+    let result =
+        optimize(&c.crac, &mut network, &resolution, &perimeter, &mut solver, &options);
+
+    // Amperes are the larger number at these voltages, so the two must not be
+    // equal and the MW one must be the smaller.
+    assert!(
+        result.final_objective.abs() > result.final_margin_mw.abs(),
+        "objective {} should be an ampere figure, margin {} a megawatt one",
+        result.final_objective,
+        result.final_margin_mw
+    );
+}
