@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "type": "opf_input",
+  "base_mva": 100.0,
+  "generator": [
+    {"index": 0, "node": 1, "p_min": 0.0, "p_max": 200.0, "q_min": -100.0, "q_max": 100.0,
+     "cost": {"model": "polynomial", "coefficients": [0.0, 10.0, 0.0]}},
+    {"index": 1, "node": 2, "p_min": 0.0, "p_max": 200.0, "q_min": -100.0, "q_max": 100.0,
+     "cost": {"model": "polynomial", "coefficients": [0.0, 30.0, 0.0]}}
+  ],
+  "bus_voltage": [
+    {"node": 1, "v_min": 0.9, "v_max": 1.1},
+    {"node": 2, "v_min": 0.9, "v_max": 1.1}
+  ],
+  "branch_limit": [
+    {"id": 10, "rate_a": 60.0, "unlimited": false}
+  ],
+  "load": [
+    {"id": 30, "node": 2}
+  ]
+}

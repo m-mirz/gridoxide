@@ -15,18 +15,18 @@ Two things determine state, and the analysis has to count both.
 
 **Constraints determine state too.** A zero injection is not a measurement, but it is information —
 `se::constraints` puts its rows into the very system the estimator solves, so a state those rows
-determine really is estimated. `analyze` used to look only at \(H\), and would call such a state
+determine really is estimated. `analyze` used to look only at \\(H\\), and would call such a state
 unobservable: a diagnosis that sends the user hunting for a sensor they do not need. It now takes the
 constraint set and folds those rows into the rank computation at unit weight — the magnitude is
-irrelevant, since \(\operatorname{rank}(H^{T}WH) = \operatorname{rank}(H)\) for any positive
-\(W\), and a hard equality is a measurement of unbounded weight.
+irrelevant, since \\(\operatorname{rank}(H^{T}WH) = \operatorname{rank}(H)\\) for any positive
+\\(W\\), and a hard equality is a measurement of unbounded weight.
 
 That was already wrong on ordinary data. It becomes acute on node-breaker models, where a merged
 group's internal structure is entirely constraint-determined. Measured on MiniGrid's node-breaker
 view: 37 of its 45 buses are constrained rather than sensed, and dropping the constraint rows takes
 the same sensor set from observable to not.
 
-**A de-energized bus is not an unobservable one.** Its unknowns are zero columns of \(H\) — nothing
+**A de-energized bus is not an unobservable one.** Its unknowns are zero columns of \\(H\\) — nothing
 measures a node that carries no voltage, and no sensor plan would change that. But it is not
 undetermined: every estimator path here reports it at exactly zero, which is power-grid-model's own
 `energized: 0` convention. `analyze` reports those unknowns separately, in `de_energized`, and leaves

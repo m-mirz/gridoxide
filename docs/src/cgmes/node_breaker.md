@@ -141,7 +141,7 @@ model.set_switch(switch_id, True)
 ### `Constrain`: the exact alternative
 
 `SwitchTreatment::Constrain` puts no admittance in the matrix at all. A closed switch's flow becomes
-an unknown and the physics becomes two exact equations, \(θ_i = θ_j\) and \(V_i = V_j\) — approach
+an unknown and the physics becomes two exact equations, \\(θ_i = θ_j\\) and \\(V_i = V_j\\) — approach
 3 of [Ideal Switches and Zero-Impedance Branches](../powerflow/zero_impedance_branches.md). The
 network it produces carries **no switch branches**, so it is solved by `constrained::solve_constrained`
 rather than by the ordinary Newton loop:

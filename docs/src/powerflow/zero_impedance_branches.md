@@ -79,7 +79,7 @@ against approach 2 on networks the two must agree on. Four things the sketch abo
   one that bites — SmallGrid's full node-breaker view contains it, and it produces a duplicate row and
   a singular matrix. Looking at each switch's own two ends does not find it.
 - **The redundant edges are not "inactive"** — they keep their rows and columns and constrain
-  \(P_s = Q_s = 0\) instead. That is what keeps the sparsity pattern identical across switching
+  \\(P_s = Q_s = 0\\) instead. That is what keeps the sparsity pattern identical across switching
   states, which is the same trick an open switch uses.
 - **A flat start does not work on real data.** The guess has to see the switches, which means one
   linear solve against a Y-bus that *does* stamp them stiffly. The conditioning argument survives
