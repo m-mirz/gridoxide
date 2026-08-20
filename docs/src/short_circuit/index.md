@@ -85,6 +85,11 @@ Results are then *reported* in both bases: phase quantities, and symmetrical com
 inverse Fortescue transform. The sequence view is where a fault type's signature is legible at a
 glance, which is most of why it is worth having — see [Fault Types](./faults.md).
 
+Both formulations are written out in
+[Symmetrical Components and the Fault Equations](./sequence.md), and
+[A Fault Current, by Hand](./worked_example.md) computes three of them on a one-node system where
+every step is a calculator away.
+
 ### The cost of that choice
 
 The phase domain needs the network to have a path to ground. An ungrounded network has a singular

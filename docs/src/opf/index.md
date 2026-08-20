@@ -44,6 +44,10 @@ plus the generation box \\(P^{min}_g \le P_g \le P^{max}_g\\), the shedding box
 and the reference angle \\(\theta_{ref} = 0\\). Here \\(c_i\\) collects the constant
 contribution of any fixed phase shift \\(\alpha\\).
 
+[Two Buses, One Congested Line](./worked_example.md) writes that program out on the smallest network
+that has a price spread at all, and derives the locational marginal prices and the branch limit's
+shadow price from its optimality conditions.
+
 With quadratic costs this is a convex QP; with piecewise-linear costs it is an LP. Both go to
 the same solver through the same interface.
 
