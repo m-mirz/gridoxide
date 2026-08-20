@@ -69,7 +69,8 @@ use std::path::{Path, PathBuf};
 
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
-use gridoxide::rao::{crac_json, evaluate_with, run, Network, Resolution, SearchOptions};
+use gridoxide::rao::evaluate::{evaluate_model, AcOptions, FlowModel};
+use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
 
 fn features_dir() -> PathBuf {
@@ -77,7 +78,7 @@ fn features_dir() -> PathBuf {
 }
 
 /// The reference's own tolerance, from `RaoSteps.flowMegawattTolerance`.
-fn megawatt_tolerance(expected: f64) -> f64 {
+fn flow_tolerance(expected: f64) -> f64 {
     f64::max(5.0, 0.015 * expected.abs())
 }
 
@@ -85,17 +86,47 @@ fn megawatt_tolerance(expected: f64) -> f64 {
 // Parsing the feature file
 // ---------------------------------------------------------------------------
 
+/// The unit a margin expectation is written in.
+///
+/// The reference writes most of its expectations in amperes — 194 of the 202
+/// worst-margin steps across the `@ac` corpus — and the two are not
+/// interchangeable: converting one to the other needs the voltage the *binding*
+/// threshold names, which is a property of the CNEC rather than of the step.
+/// So the unit is carried through to the comparison and the evaluator reports
+/// both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MarginUnit {
+    Megawatt,
+    Ampere,
+}
+
+/// A margin in both units, as the evaluator reported it.
+#[derive(Debug, Clone, Copy)]
+struct Margin {
+    mw: f64,
+    a: f64,
+}
+
+impl Margin {
+    fn in_unit(&self, unit: MarginUnit) -> f64 {
+        match unit {
+            MarginUnit::Megawatt => self.mw,
+            MarginUnit::Ampere => self.a,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Expect {
     Secured(bool),
-    WorstMargin { value: f64, cnec: Option<String>, stage: Stage },
-    CnecMargin { cnec: String, value: f64, stage: Stage },
+    WorstMargin { value: f64, cnec: Option<String>, stage: Stage, unit: MarginUnit },
+    CnecMargin { cnec: String, value: f64, stage: Stage, unit: MarginUnit },
     /// `the initial margin on cnec "X" should be N MW` — the *untouched*
     /// network, before any remedial action. Distinct from the after-PRA one,
     /// and a scenario routinely asserts both for the same CNEC: reading them
     /// as the same step compares the optimized answer against the starting
     /// point and fails on every scenario that improves anything.
-    InitialCnecMargin { cnec: String, value: f64 },
+    InitialCnecMargin { cnec: String, value: f64, unit: MarginUnit },
     PstTap { action: String, tap: i32, at: Where },
     ActionUsed { action: String, at: Where },
     ActionCount { count: usize, at: Where },
@@ -161,17 +192,7 @@ fn quoted(line: &str) -> Option<String> {
 /// The first number in a line, after any quoted text has been removed so an id
 /// containing digits cannot be mistaken for one.
 fn number_after_quotes(line: &str) -> Option<f64> {
-    let mut stripped = String::new();
-    let mut inside = false;
-    for c in line.chars() {
-        if c == '"' {
-            inside = !inside;
-            continue;
-        }
-        if !inside {
-            stripped.push(c);
-        }
-    }
+    let stripped = unquoted(line);
     let mut token = String::new();
     for c in stripped.chars() {
         if c.is_ascii_digit() || c == '.' || (c == '-' && token.is_empty()) {
@@ -243,6 +264,47 @@ fn where_of(line: &str) -> Where {
     }
 }
 
+/// The unit a margin step is written in, or `None` if it names neither.
+///
+/// Matched as a standalone token **outside quotes**, which is the only rule
+/// that works for both shapes the reference uses. The unit is not reliably the
+/// last token — `the worst margin is -773.0 MW on cnec "…- curative"` ends with
+/// the id — and it cannot be found with `contains`, because a quoted CNEC id
+/// routinely contains a bare `A` between spaces. Stripping the quoted spans
+/// first removes every id from consideration, and what remains is prose the
+/// reference wrote.
+fn margin_unit(line: &str) -> Option<MarginUnit> {
+    let mut unit = None;
+    for token in unquoted(line).split_whitespace() {
+        match token {
+            "MW" => unit = Some(MarginUnit::Megawatt),
+            "A" => unit = Some(MarginUnit::Ampere),
+            _ => {}
+        }
+    }
+    unit
+}
+
+/// `line` with every double-quoted span removed, so ids cannot be mistaken for
+/// prose.
+fn unquoted(line: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for c in line.chars() {
+        if c == '"' {
+            inside = !inside;
+            // A space in place of the id keeps neighbouring words apart, so
+            // `is "X"MW` cannot fuse into one token.
+            out.push(' ');
+            continue;
+        }
+        if !inside {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn expectation(line: &str) -> Expect {
     if line.contains("security status should be") {
         return match quoted(line).as_deref() {
@@ -251,19 +313,23 @@ fn expectation(line: &str) -> Expect {
             _ => Expect::Unsupported(line.to_string()),
         };
     }
-    if line.contains("the worst margin is") && line.contains(" MW") {
+    if line.contains("the worst margin is") {
+        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
         let cnec = line.contains("on cnec").then(|| quoted(line)).flatten();
         return match number_after_quotes(line) {
-            Some(value) => Expect::WorstMargin { value, cnec, stage: stage_of(line) },
+            Some(value) => Expect::WorstMargin { value, cnec, stage: stage_of(line), unit },
             None => Expect::Unsupported(line.to_string()),
         };
     }
-    if line.contains("margin on cnec") && line.contains(" MW") {
+    if line.contains("margin on cnec") {
+        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
         let initial = line.contains("initial margin on cnec");
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(cnec), Some(value)) if initial => Expect::InitialCnecMargin { cnec, value },
+            (Some(cnec), Some(value)) if initial => {
+                Expect::InitialCnecMargin { cnec, value, unit }
+            }
             (Some(cnec), Some(value)) => {
-                Expect::CnecMargin { cnec, value, stage: stage_of(line) }
+                Expect::CnecMargin { cnec, value, stage: stage_of(line), unit }
             }
             _ => Expect::Unsupported(line.to_string()),
         };
@@ -314,6 +380,30 @@ fn resolve(reference: &str) -> PathBuf {
 /// understand is ignored *silently on purpose*: the alternative is to fail on
 /// the dozens of AC, loop-flow and solver settings these files carry, none of
 /// which apply to a DC run.
+/// Which flow model the scenario's configuration asks for.
+///
+/// The reference states it outright — `load-flow-parameters.dc` — so this reads
+/// the file rather than the `@ac`/`@dc` tag. The tag is a label on the scenario;
+/// the field is the setting the run actually used, and when a scenario is
+/// retagged the field is the one that stays true.
+fn flow_model_from(config: &Path) -> FlowModel {
+    let Ok(text) = std::fs::read_to_string(config) else { return FlowModel::Dc };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return FlowModel::Dc };
+    let dc = doc
+        .pointer(
+            "/extensions/open-rao-search-tree-parameters/load-flow-and-sensitivity-computation\
+             /sensitivity-parameters/load-flow-parameters/dc",
+        )
+        .and_then(|v| v.as_bool());
+    match dc {
+        Some(false) => FlowModel::Ac,
+        // Absent means the reference's own default, which is DC for these
+        // files — and a config this cannot read is treated as DC rather than
+        // silently upgraded to a slower model that changes every number.
+        _ => FlowModel::Dc,
+    }
+}
+
 fn options_from(config: &Path) -> SearchOptions {
     let mut options = SearchOptions::default();
     let Ok(text) = std::fs::read_to_string(config) else { return options };
@@ -364,16 +454,40 @@ fn options_from(config: &Path) -> SearchOptions {
 fn pick(
     stage: Stage,
     cnec: &str,
-    pra: &HashMap<&str, f64>,
-    ara: &HashMap<String, f64>,
-    cra: &HashMap<String, f64>,
-) -> Option<f64> {
+    pra: &HashMap<&str, Margin>,
+    ara: &HashMap<String, Margin>,
+    cra: &HashMap<String, Margin>,
+) -> Option<Margin> {
     let staged = match stage {
         Stage::Pra => None,
         Stage::Ara => ara.get(cnec).copied(),
         Stage::Cra => cra.get(cnec).copied(),
     };
     staged.or_else(|| pra.get(cnec).copied())
+}
+
+/// The worst margin across every CNEC, each measured at its own stage.
+///
+/// An `auto` CNEC is read after the automatons and a `curative` one after the
+/// curative decisions, because those are the networks those CNECs exist in.
+fn worst_at_own_stage(
+    crac: &Crac,
+    unit: MarginUnit,
+    pra: &HashMap<&str, Margin>,
+    ara: &HashMap<String, Margin>,
+    cra: &HashMap<String, Margin>,
+) -> Option<f64> {
+    crac.flow_cnecs
+        .iter()
+        .filter_map(|c| {
+            let stage = match crac.instants[c.state.instant].kind {
+                InstantKind::Auto => Stage::Ara,
+                InstantKind::Curative => Stage::Cra,
+                _ => Stage::Pra,
+            };
+            pick(stage, &c.id, pra, ara, cra).map(|m| m.in_unit(unit))
+        })
+        .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))
 }
 
 struct Outcome {
@@ -394,6 +508,12 @@ fn check(scenario: &Scenario) -> Outcome {
     let net = ucte::read_with(resolve(&scenario.network), &options).expect("network");
     let (crac, _) = crac_json::read(resolve(&scenario.crac)).expect("crac");
     let search_options = options_from(&resolve(&scenario.config));
+    // The search stays on DC whatever the model: it is what makes the tree
+    // finish, and phase 11's whole argument is that AC is where the answer gets
+    // *checked*. What the model changes here is every margin the scenario
+    // asserts on.
+    let model = flow_model_from(&resolve(&scenario.config));
+    let ac_options = AcOptions { shunts: &net.shunts, ..Default::default() };
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let view = Network {
         buses: &net.buses,
@@ -412,7 +532,7 @@ fn check(scenario: &Scenario) -> Outcome {
     // reference calls "after PRA".
     // One margin map per stage. A CNEC is looked up in the map its step names,
     // because the three describe genuinely different networks.
-    let margins_at = |stage: Stage| -> HashMap<String, f64> {
+    let margins_at = |stage: Stage| -> HashMap<String, Margin> {
         let mut out = HashMap::new();
         for scenario in &plan.scenarios {
             let contingency = Some(scenario.contingency);
@@ -442,12 +562,17 @@ fn check(scenario: &Scenario) -> Outcome {
                 tap_changers: &net.tap_changers,
                 base_mva: net.base_mva,
             };
-            for perimeter in evaluate_with(&crac, &view, &resolution, open).perimeters {
+            for perimeter in
+                evaluate_model(&crac, &view, &resolution, open, model, &ac_options).perimeters
+            {
                 if perimeter.state.contingency != contingency {
                     continue;
                 }
                 for c in &perimeter.cnecs {
-                    out.insert(crac.flow_cnecs[c.cnec].id.clone(), c.margin_mw);
+                    out.insert(
+                        crac.flow_cnecs[c.cnec].id.clone(),
+                        Margin { mw: c.margin_mw, a: c.margin_a },
+                    );
                 }
             }
         }
@@ -470,20 +595,31 @@ fn check(scenario: &Scenario) -> Outcome {
         base_mva: net.base_mva,
     };
     let evaluated =
-        evaluate_with(&crac, &after_pra, &resolution, &plan.preventive.open_branches);
-    let margins: HashMap<&str, f64> = evaluated
+        evaluate_model(
+            &crac,
+            &after_pra,
+            &resolution,
+            &plan.preventive.open_branches,
+            model,
+            &ac_options,
+        );
+    let margins: HashMap<&str, Margin> = evaluated
         .perimeters
         .iter()
         .flat_map(|p| p.cnecs.iter())
-        .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), c.margin_mw))
+        .map(|c| {
+            (crac.flow_cnecs[c.cnec].id.as_str(), Margin { mw: c.margin_mw, a: c.margin_a })
+        })
         .collect();
 
-    let untouched = evaluate_with(&crac, &view, &resolution, &[]);
-    let initial_margins: HashMap<&str, f64> = untouched
+    let untouched = evaluate_model(&crac, &view, &resolution, &[], model, &ac_options);
+    let initial_margins: HashMap<&str, Margin> = untouched
         .perimeters
         .iter()
         .flat_map(|p| p.cnecs.iter())
-        .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), c.margin_mw))
+        .map(|c| {
+            (crac.flow_cnecs[c.cnec].id.as_str(), Margin { mw: c.margin_mw, a: c.margin_a })
+        })
         .collect();
 
     // What each perimeter decided, keyed the way the steps address it.
@@ -590,14 +726,29 @@ fn check(scenario: &Scenario) -> Outcome {
                 let got = plan.is_secure();
                 record(got == *want, format!("security {got} (expected {want})"));
             }
-            Expect::WorstMargin { value, cnec: None, .. } => {
-                let got = plan.final_margin_mw;
+            Expect::WorstMargin { value, cnec: None, unit, .. } => {
+                // In MW the plan's own objective is the answer. In amperes it
+                // is not the same quantity: the worst margin in amperes can
+                // fall on a different CNEC, because the conversion voltage
+                // differs per CNEC. So it is re-derived from the per-CNEC
+                // margins, each measured at its own stage — the same rule the
+                // named form already uses.
+                let got = match unit {
+                    MarginUnit::Megawatt => Some(plan.final_margin_mw),
+                    MarginUnit::Ampere => worst_at_own_stage(
+                        &crac,
+                        *unit,
+                        &margins,
+                        &ara_margins,
+                        &cra_margins,
+                    ),
+                };
                 record(
-                    (got - value).abs() <= megawatt_tolerance(*value),
-                    format!("worst margin {got:.2} MW (expected {value})"),
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!("worst margin {got:?} {unit:?} (expected {value})"),
                 );
             }
-            Expect::WorstMargin { value, cnec: Some(id), .. } => {
+            Expect::WorstMargin { value, cnec: Some(id), unit, .. } => {
                 // A worst-margin step names the CNEC that *ends up* carrying the
                 // worst margin, so it is measured at that CNEC's own stage —
                 // an `auto` CNEC after the automatons, a `curative` one after
@@ -614,23 +765,25 @@ fn check(scenario: &Scenario) -> Outcome {
                         _ => Stage::Pra,
                     })
                     .unwrap_or(Stage::Pra);
-                let got = pick(stage, id, &margins, &ara_margins, &cra_margins);
+                let got = pick(stage, id, &margins, &ara_margins, &cra_margins)
+                    .map(|m| m.in_unit(*unit));
                 record(
-                    got.is_some_and(|g| (g - value).abs() <= megawatt_tolerance(*value)),
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
                     format!("worst margin on `{id}` {got:?} (expected {value})"),
                 );
             }
-            Expect::InitialCnecMargin { cnec, value } => {
-                let got = initial_margins.get(cnec.as_str()).copied();
+            Expect::InitialCnecMargin { cnec, value, unit } => {
+                let got = initial_margins.get(cnec.as_str()).map(|m| m.in_unit(*unit));
                 record(
-                    got.is_some_and(|g| (g - value).abs() <= megawatt_tolerance(*value)),
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
                     format!("initial margin on `{cnec}` {got:?} (expected {value})"),
                 );
             }
-            Expect::CnecMargin { cnec, value, stage } => {
-                let got = pick(*stage, cnec, &margins, &ara_margins, &cra_margins);
+            Expect::CnecMargin { cnec, value, stage, unit } => {
+                let got = pick(*stage, cnec, &margins, &ara_margins, &cra_margins)
+                    .map(|m| m.in_unit(*unit));
                 record(
-                    got.is_some_and(|g| (g - value).abs() <= megawatt_tolerance(*value)),
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
                     format!("margin on `{cnec}` {got:?} (expected {value})"),
                 );
             }
@@ -667,10 +820,23 @@ fn check(scenario: &Scenario) -> Outcome {
 /// which assertion moved.
 #[test]
 fn the_reference_implementations_own_expectations() {
-    let text = std::fs::read_to_string(features_dir().join("dc_scenarios.feature"))
-        .expect("feature file");
+    for (file, expected, baseline) in [
+        ("dc_scenarios.feature", 22, BASELINE_MATCHED_DC),
+        ("ac_scenarios.feature", 35, BASELINE_MATCHED_AC),
+    ] {
+        run_gate(file, expected, baseline);
+    }
+}
+
+/// Run one vendored feature file and assert on its aggregate.
+///
+/// The two files are scored separately on purpose. They exercise different flow
+/// models, and a single total would let a gain in one hide a regression in the
+/// other.
+fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
+    let text = std::fs::read_to_string(features_dir().join(file)).expect("feature file");
     let scenarios = parse(&text);
-    assert_eq!(scenarios.len(), 22, "expected 22 vendored scenarios");
+    assert_eq!(scenarios.len(), expected_scenarios, "in {file}");
 
     let (mut matched, mut mismatched, mut unsupported) = (0usize, 0usize, 0usize);
     let mut report = String::new();
@@ -698,13 +864,13 @@ fn the_reference_implementations_own_expectations() {
     }
     let total = matched + mismatched;
     println!(
-        "{report}\n{matched}/{total} checkable assertions match the reference \
+        "{report}\n{file}: {matched}/{total} checkable assertions match the reference \
          ({unsupported} steps unsupported)"
     );
 
     assert!(
-        matched >= BASELINE_MATCHED,
-        "{matched}/{total} matched, baseline is {BASELINE_MATCHED} — a drop is a regression:\n{report}"
+        matched >= baseline,
+        "{file}: {matched}/{total} matched, baseline is {baseline} — a drop is a regression:\n{report}"
     );
 }
 
@@ -719,7 +885,17 @@ fn the_reference_implementations_own_expectations() {
 /// actions reaching the same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
-const BASELINE_MATCHED: usize = 124;
+const BASELINE_MATCHED_DC: usize = 124;
+
+/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **135 of 186**.
+///
+/// Lower than the DC file's perfect score, and expected to be. These scenarios
+/// are judged on margins the reference measured with an AC load flow that also
+/// distributes slack and enforces reactive limits, while gridoxide's search
+/// still chooses its actions on DC sensitivities. Where the two models rank two
+/// candidates differently, the search takes the other one and every assertion
+/// downstream of that choice moves together.
+const BASELINE_MATCHED_AC: usize = 135;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
