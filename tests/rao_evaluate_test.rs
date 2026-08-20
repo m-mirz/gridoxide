@@ -373,3 +373,186 @@ fn a_severing_contingency_is_flagged_rather_than_silently_wrong() {
         "an unsimulatable contingency must be flagged"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The AC flow model
+// ---------------------------------------------------------------------------
+
+/// `(p1, q1, p2, q2)` per branch id, from the vendored pypowsybl solution.
+fn reference_flows(name: &str) -> std::collections::HashMap<String, [f64; 4]> {
+    let text = std::fs::read_to_string(ucte_fixture(name)).expect("reference");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
+    doc["branches"]
+        .as_object()
+        .expect("branches")
+        .iter()
+        .map(|(id, v)| {
+            let get = |k: &str| v[k].as_f64().unwrap_or(0.0);
+            (id.clone(), [get("p1"), get("q1"), get("p2"), get("q2")])
+        })
+        .collect()
+}
+
+/// Solved voltage magnitude, per unit, per node code.
+fn reference_voltages(name: &str) -> std::collections::HashMap<String, f64> {
+    let text = std::fs::read_to_string(ucte_fixture(name)).expect("reference");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
+    doc["buses"]
+        .as_object()
+        .expect("buses")
+        .iter()
+        .map(|(id, v)| (id.trim().to_string(), v["v_pu"].as_f64().unwrap_or(1.0)))
+        .collect()
+}
+
+#[test]
+fn ac_currents_match_the_reference_load_flow() {
+    // The gate for the AC path. `flow_mw` and `current_a` are recomputed here
+    // from pypowsybl's own `(p, q)` rather than from anything gridoxide
+    // produced, so a sign convention or a per-unit slip in the evaluator shows
+    // up as a mismatch rather than as two implementations agreeing on a shared
+    // mistake.
+    let c = case();
+    let reference = reference_flows("TestCase12Nodes.pypowsybl.json");
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let result =
+        evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
+
+    let base = result
+        .perimeters
+        .iter()
+        .find(|p| p.state.contingency.is_none())
+        .expect("a preventive perimeter");
+    assert!(!base.severed, "the intact network should solve");
+    assert!(!base.cnecs.is_empty(), "the CRAC should monitor something");
+
+    let reference_voltages = reference_voltages("TestCase12Nodes.pypowsybl.json");
+    let mut checked = 0;
+    for cnec in &base.cnecs {
+        let id = &c.net.branch_ids[cnec.branch];
+        let Some([p1, q1, ..]) = reference.get(id.trim()).or_else(|| reference.get(id)) else {
+            continue;
+        };
+        assert!(
+            (cnec.flow_mw - p1).abs() < 0.5,
+            "{id}: flow {} MW against the reference's {p1} MW",
+            cnec.flow_mw
+        );
+
+        // The evaluator reports current at the *actual* bus voltage, so the
+        // expectation has to be built the same way — using nominal here would
+        // disagree by however far the solution sits from 1.0 pu, which on this
+        // fixture is 5.3%. Both the power and the voltage come from
+        // pypowsybl's own solution, so nothing gridoxide computed appears on
+        // the expected side.
+        let bus = c.net.lines.get(cnec.branch).map(|l| l.from);
+        if let Some(bus) = bus {
+            let code = c.net.node_codes[bus].trim().to_string();
+            let Some(v_pu) = reference_voltages.get(&code) else { continue };
+            let u = c.net.buses[bus].u_rated * v_pu;
+            let expected = p1.hypot(*q1) * 1e6 / (3f64.sqrt() * u);
+            assert!(
+                (cnec.current_a - expected).abs() < 2.0,
+                "{id}: {} A against {expected} A",
+                cnec.current_a
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 3, "expected several comparable branches, got {checked}");
+
+    // Converting at nominal instead of at the solved voltage would still pass a
+    // loose tolerance on a flat network, so assert the fixture is not flat: the
+    // rule under test only has teeth where the voltages actually move.
+    let spread = reference_voltages.values().map(|v| (v - 1.0).abs()).fold(0.0f64, f64::max);
+    assert!(spread > 0.01, "flat voltages would make this test vacuous (spread {spread})");
+}
+
+#[test]
+fn dc_and_ac_disagree_by_the_reactive_flow() {
+    // Not a tolerance check — a check that the two models are genuinely
+    // different. If AC evaluation silently fell back to the DC path, every
+    // margin would match to the last decimal and this would fail.
+    let c = case();
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let dc = evaluate::evaluate(&c.crac, &c.network(), &resolution);
+    let acr = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
+
+    let worst = |r: &evaluate::SecurityResult| {
+        r.perimeters
+            .iter()
+            .flat_map(|p| p.cnecs.iter())
+            .map(|c| c.margin_mw)
+            .fold(f64::INFINITY, f64::min)
+    };
+    let (a, b) = (worst(&dc), worst(&acr));
+    assert!(a.is_finite() && b.is_finite(), "both models should measure something");
+    assert!((a - b).abs() > 1e-6, "AC and DC gave identical margins ({a} vs {b})");
+
+    // The reactive charge only ever consumes headroom, so no AC limit can
+    // exceed its DC counterpart on the same CNEC.
+    for (p, q) in dc.perimeters.iter().zip(&acr.perimeters) {
+        for (x, y) in p.cnecs.iter().zip(&q.cnecs) {
+            assert_eq!(x.cnec, y.cnec);
+            assert!(
+                y.limit_mw <= x.limit_mw + 1e-6,
+                "cnec {}: AC limit {} above the DC limit {}",
+                x.cnec,
+                y.limit_mw,
+                x.limit_mw
+            );
+        }
+    }
+}
+
+#[test]
+fn an_outaged_branch_carries_nothing_in_ac() {
+    // `solve_contingencies` removes the branch from the Y-bus, but the branch
+    // parameters it was built from are still in the list. Evaluating them
+    // would report the current that *would* flow across a branch that is not
+    // there — a violation on an element that is out of service.
+    let c = case();
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+
+    let monitored: Vec<usize> = c.crac.flow_cnecs
+        .iter()
+        .filter_map(|cnec| resolution.branch(&cnec.network_element))
+        .collect();
+    let target = *monitored.first().expect("a monitored branch");
+
+    let result =
+        evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[target], &ac);
+    for p in &result.perimeters {
+        for cnec in p.cnecs.iter().filter(|c| c.branch == target) {
+            assert_eq!(cnec.flow_mw, 0.0, "an open branch should carry no power");
+            assert_eq!(cnec.current_a, 0.0, "an open branch should carry no current");
+        }
+    }
+}
+
+#[test]
+fn the_model_selector_dispatches_to_the_two_paths() {
+    // `evaluate_model` is the public entry point for "measure this, with that
+    // model". If it ever routed both arms to the same place, every AC caller
+    // would silently get DC answers.
+    let c = case();
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+
+    let via_dc = evaluate::evaluate_model(
+        &c.crac, &c.network(), &resolution, &[], evaluate::FlowModel::Dc, &ac,
+    );
+    let via_ac = evaluate::evaluate_model(
+        &c.crac, &c.network(), &resolution, &[], evaluate::FlowModel::Ac, &ac,
+    );
+    let direct_dc = evaluate::evaluate_with(&c.crac, &c.network(), &resolution, &[]);
+    let direct_ac = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
+
+    assert_eq!(via_dc.perimeters, direct_dc.perimeters, "the DC arm must be the DC path");
+    assert_eq!(via_ac.perimeters, direct_ac.perimeters, "the AC arm must be the AC path");
+    assert_ne!(via_dc.perimeters, via_ac.perimeters, "the two arms must differ");
+    assert_eq!(evaluate::FlowModel::default(), evaluate::FlowModel::Dc);
+}

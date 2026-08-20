@@ -36,7 +36,11 @@ use crate::linear::btheta::{dc_branches, dc_power_flow};
 use crate::linear::DcOptions;
 use crate::linear::sensitivity::DcSensitivity;
 use crate::ratings::current_to_power_pu;
+use crate::batch::{BatchSolver, Scenario};
+use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use crate::solver::{IslandStatus, JacobianBackend};
 use crate::types::{Bus, Line, Transformer};
+use crate::network::ShuntAdm;
 
 use super::crac::{Crac, FlowCnec, Side, State, Threshold, Unit};
 
@@ -139,6 +143,30 @@ impl Resolution {
     }
 }
 
+/// Which power-flow model the margins are measured with.
+///
+/// The optimizer is guided by DC sensitivities either way — they are cheap,
+/// exact for the linear model, and the outer loop re-measures the truth after
+/// every move, so an approximate gradient steers the search without deciding
+/// the answer. What this chooses is what "the truth" means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlowModel {
+    /// Linear, lossless, and the whole post-contingency sweep from one
+    /// factorization — 0.40 ms per outage against 13.4 ms for a re-solve on
+    /// `case9241pegase`. A search tree evaluates thousands of candidates, so
+    /// this is what makes one finish.
+    #[default]
+    Dc,
+    /// A full Newton-Raphson per contingency, through
+    /// [`BatchSolver::solve_contingencies`](crate::batch::BatchSolver), which
+    /// holds its symbolic factorization across the sweep.
+    ///
+    /// Slower by orders of magnitude and the only model that sees reactive
+    /// power, losses, and voltage. A plan chosen on DC margins can be rejected
+    /// here, which is the entire point of re-checking it.
+    Ac,
+}
+
 /// How one CNEC fared.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CnecResult {
@@ -154,6 +182,13 @@ pub struct CnecResult {
     pub margin_mw: f64,
     /// The threshold that bound, MW, as an absolute limit on |flow|.
     pub limit_mw: f64,
+    /// Current at the monitored terminal, amperes.
+    ///
+    /// Under [`FlowModel::Ac`] this is the real thing, `|S| / (√3·U)`. Under
+    /// DC there is no reactive power and no voltage deviation, so it is
+    /// `|P| / (√3·U_nominal)` — which is what a DC study means by a current and
+    /// what the reference computes in its own DC mode.
+    pub current_a: f64,
 }
 
 impl CnecResult {
@@ -167,8 +202,15 @@ impl CnecResult {
 pub struct PerimeterResult {
     pub state: State,
     pub cnecs: Vec<CnecResult>,
-    /// True when the contingency severed the network, so the flows below are a
-    /// re-solve rather than a Woodbury update, or could not be computed at all.
+    /// The flows below are not a clean screening result.
+    ///
+    /// The two flow models mean slightly different things by it, and both are
+    /// "treat these numbers with suspicion" rather than "these numbers are
+    /// wrong". Under [`FlowModel::Dc`] the contingency defeated the Woodbury
+    /// update — typically by severing the network — so the flows come from a
+    /// full re-solve, which is slower but still correct. Under
+    /// [`FlowModel::Ac`] at least one island failed to converge, and there the
+    /// flows genuinely are not to be trusted.
     pub severed: bool,
 }
 
@@ -323,6 +365,21 @@ pub fn evaluate(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> 
     evaluate_with(crac, network, resolution, network.initially_open)
 }
 
+/// Evaluate with a chosen flow model.
+pub fn evaluate_model(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+    model: FlowModel,
+    ac: &AcOptions<'_>,
+) -> SecurityResult {
+    match model {
+        FlowModel::Dc => evaluate_with(crac, network, resolution, open),
+        FlowModel::Ac => evaluate_ac(crac, network, resolution, open, ac),
+    }
+}
+
 /// Evaluate with a set of branches already opened.
 ///
 /// `open` is how an applied *remedial action* reaches the evaluator: a
@@ -436,12 +493,18 @@ pub fn evaluate_with(
             if !limit_mw.is_finite() {
                 continue;
             }
+            let u_written = cnec
+                .thresholds
+                .first()
+                .map(|t| threshold_voltage(cnec, t, u_rated))
+                .unwrap_or(u_rated);
             cnecs.push(CnecResult {
                 cnec: i,
                 branch,
                 flow_mw,
                 margin_mw: limit_mw - flow_mw.abs(),
                 limit_mw,
+                current_a: flow_mw.abs() * 1e6 / (3f64.sqrt() * u_written),
             });
         }
         perimeters.push(PerimeterResult { state, cnecs, severed });
@@ -473,4 +536,239 @@ fn outaged_flows(network: &Network<'_>, outages: &[usize], options: DcOptions) -
     }
     let mut buses = network.buses.to_vec();
     dc_power_flow(&mut buses, &lines, &transformers, options).branch_p
+}
+
+/// Knobs the AC flow model needs and the DC one has no use for.
+///
+/// Kept separate from [`Network`] deliberately: shunts, a convergence
+/// tolerance, and an iteration cap are meaningless to a linear solve, and
+/// hanging them on the shared struct would make every DC caller state values
+/// that are never read.
+#[derive(Clone, Copy, Debug)]
+pub struct AcOptions<'a> {
+    /// Shunt admittances, applied to every scenario.
+    pub shunts: &'a [ShuntAdm],
+    /// Newton-Raphson convergence tolerance, per-unit power mismatch.
+    pub tol: f64,
+    pub max_iter: usize,
+    /// Jacobian backend for the contingency sweep.
+    pub backend: JacobianBackend,
+}
+
+impl Default for AcOptions<'_> {
+    fn default() -> Self {
+        Self { shunts: &[], tol: 1e-8, max_iter: 30, backend: JacobianBackend::Scalar }
+    }
+}
+
+/// Measure every CNEC with a full AC power flow per state.
+///
+/// The contingency sweep goes through [`BatchSolver::solve_contingencies`], so
+/// the whole set of states shares one symbolic factorization rather than
+/// re-analysing the sparsity pattern per outage.
+///
+/// Two things differ from the DC path beyond the obvious, and both are physics
+/// the linear model cannot see:
+///
+/// * **Current is measured at the actual voltage.** A bus running at 1.05 pu
+///   carries a given MW at 5% less current than nominal, so a DC study reading
+///   its ampere thresholds at nominal voltage is conservative there and
+///   optimistic wherever voltage has sagged.
+/// * **Reactive flow consumes thermal headroom.** An ampere threshold binds
+///   `|S|`, not `|P|`. Rather than change what a margin means, the reactive
+///   part is charged against the limit, so `margin = limit − |P|` still holds
+///   and the remaining limit is the headroom a real-power move can use.
+///
+/// MW thresholds are left alone by both rules: they bind active power, which is
+/// exactly what `flow_mw` reports.
+pub fn evaluate_ac(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+    ac: &AcOptions<'_>,
+) -> SecurityResult {
+    let s_base_va = network.base_mva * 1e6;
+    let dc = dc_branches(network.lines, network.transformers, DcOptions::default());
+
+    let mut applied: Vec<usize> = open.to_vec();
+    applied.sort_unstable();
+    applied.dedup();
+
+    // Which CNECs belong to each state, and which had to be skipped.
+    let mut skipped = Vec::new();
+    let mut by_state: HashMap<State, Vec<usize>> = HashMap::new();
+    for (i, cnec) in crac.flow_cnecs.iter().enumerate() {
+        match resolution.branch(&cnec.network_element) {
+            Some(_) => by_state.entry(cnec.state.clone()).or_default().push(i),
+            None => skipped.push(i),
+        }
+    }
+
+    // One scenario per state that has CNECs, in `crac.states()` order so the
+    // reports come back aligned with the perimeters below.
+    let states: Vec<State> = crac.states().into_iter().filter(|s| by_state.contains_key(s)).collect();
+    let scenarios: Vec<Scenario> = states
+        .iter()
+        .map(|state| {
+            let mut outages = applied.clone();
+            if let Some(c) = state.contingency {
+                outages.extend(
+                    crac.contingencies[c].elements.iter().filter_map(|e| resolution.branch(e)),
+                );
+            }
+            outages.sort_unstable();
+            outages.dedup();
+            Scenario { bus_overrides: Vec::new(), branch_outages: outages }
+        })
+        .collect();
+
+    let solver = BatchSolver::new(ac.backend);
+    let reports = solver.solve_contingencies(
+        network.buses,
+        network.lines,
+        network.transformers,
+        ac.shunts,
+        &scenarios,
+        ac.tol,
+        ac.max_iter,
+    );
+    // A batch that cannot run at all is reported as every state severed rather
+    // than as a panic or a silently empty result: the caller asked what the
+    // margins are, and "unknown" is an answer it can act on.
+    let Ok(reports) = reports else {
+        return SecurityResult {
+            perimeters: states
+                .into_iter()
+                .map(|state| PerimeterResult { state, cnecs: Vec::new(), severed: true })
+                .collect(),
+            skipped,
+        };
+    };
+
+    let params = branch_params(network.lines, network.transformers);
+    let mut perimeters = Vec::new();
+    for ((state, scenario), report) in states.into_iter().zip(&scenarios).zip(&reports) {
+        let v = bus_voltages(&report.buses);
+        let severed = report.islands.iter().any(|i| i.status != IslandStatus::Converged);
+        let out: Vec<bool> = {
+            let mut out = vec![false; params.len()];
+            for &b in &scenario.branch_outages {
+                if let Some(slot) = out.get_mut(b) {
+                    *slot = true;
+                }
+            }
+            out
+        };
+
+        let mut cnecs = Vec::new();
+        for &i in by_state.get(&state).into_iter().flatten() {
+            let cnec = &crac.flow_cnecs[i];
+            let Some(branch) = resolution.branch(&cnec.network_element) else { continue };
+            let Some(u_rated) = network.branch_voltage(branch, &dc) else { continue };
+            let Some(param) = params.get(branch) else { continue };
+
+            // An outaged branch carries nothing. `solve_contingencies` removes
+            // it from the Y-bus, but `params` still describes it, so evaluating
+            // `terminal_flow` here would report the current that *would* flow
+            // across a branch that is not there.
+            let outaged = out.get(branch).copied().unwrap_or(false);
+
+            // Both terminals, so a threshold can be measured on the side it
+            // names. They differ by the branch's own losses, which is precisely
+            // the information a DC study does not have.
+            let ends = [Terminal::From, Terminal::To].map(|t| {
+                if outaged {
+                    (0.0, 0.0, u_rated)
+                } else {
+                    let (p, q) = terminal_flow(param, t, &v);
+                    let bus = match t {
+                        Terminal::From => param.from,
+                        Terminal::To => param.to,
+                    };
+                    let u_actual = network
+                        .buses
+                        .get(bus)
+                        .map(|b| b.u_rated * v.get(bus).map_or(1.0, |x| x.norm()))
+                        .filter(|u| *u > 0.0)
+                        .unwrap_or(u_rated);
+                    (p * network.base_mva, q * network.base_mva, u_actual)
+                }
+            });
+
+            // `flow_mw` keeps the DC path's meaning: active power at side one,
+            // signed, so the two models' outputs are directly comparable.
+            let flow_mw = ends[0].0;
+
+            let mut limit_mw = f64::INFINITY;
+            for t in &cnec.thresholds {
+                let Some(raw) = threshold_mw(t, cnec, u_rated, s_base_va) else { continue };
+                let end = match t.side {
+                    Side::Two => &ends[1],
+                    _ => &ends[0],
+                };
+                let (p_mw, q_mvar, u_actual) = *end;
+                let charge = match t.unit {
+                    // An ampere limit binds apparent power, and at the voltage
+                    // the bus is actually running at rather than the one the
+                    // threshold was written against.
+                    Unit::Ampere | Unit::PercentImax => {
+                        let u_written = threshold_voltage(cnec, t, u_rated);
+                        let s_equiv = p_mw.hypot(q_mvar) * u_written / u_actual;
+                        (s_equiv - p_mw.abs()).max(0.0)
+                    }
+                    // Voltage and angle units never reach here: `threshold_mw`
+                    // returns `None` for them rather than inventing a flow
+                    // limit, so the `continue` above has already fired.
+                    Unit::Megawatt | Unit::Degree | Unit::Kilovolt => 0.0,
+                };
+                let effective = (raw - cnec.reliability_margin - charge).max(0.0);
+                limit_mw = limit_mw.min(effective);
+            }
+            if !limit_mw.is_finite() {
+                continue;
+            }
+
+            // Report the current on whichever side the CNEC's thresholds
+            // name, so an ampere assertion is checked where it was written.
+            let (p_mw, q_mvar, u_actual) =
+                match cnec.thresholds.first().map(|t| t.side) {
+                    Some(Side::Two) => ends[1],
+                    _ => ends[0],
+                };
+            let current_a = if u_actual > 0.0 {
+                p_mw.hypot(q_mvar) * 1e6 / (3f64.sqrt() * u_actual)
+            } else {
+                0.0
+            };
+
+            cnecs.push(CnecResult {
+                cnec: i,
+                branch,
+                flow_mw,
+                margin_mw: limit_mw - flow_mw.abs(),
+                limit_mw,
+                current_a,
+            });
+        }
+        perimeters.push(PerimeterResult { state, cnecs, severed });
+    }
+
+    SecurityResult { perimeters, skipped }
+}
+
+/// The voltage a current threshold was written against — the CRAC's stated
+/// `nominalV` where it has one, the branch's rated voltage otherwise. Shared
+/// with [`threshold_mw`] so the AC path undoes exactly the conversion the DC
+/// path applied.
+fn threshold_voltage(cnec: &FlowCnec, threshold: &Threshold, u_rated_v: f64) -> f64 {
+    let side = match threshold.side {
+        Side::Two => 1,
+        _ => 0,
+    };
+    cnec.nominal_v
+        .and_then(|v| v[side].or(v[0]))
+        .map(|kv| kv * 1000.0)
+        .filter(|v| *v > 0.0)
+        .unwrap_or(u_rated_v)
 }

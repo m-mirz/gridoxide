@@ -264,3 +264,75 @@ fn the_rao_depth_flag_is_honoured_and_validated() {
     ]);
     assert_eq!(out.status.code(), Some(2), "a bad --depth should exit 2");
 }
+
+// ---------------------------------------------------------------------------
+// `--validate-ac`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ac_validation_is_absent_unless_asked_for() {
+    // A consumer that never asked should not have to distinguish "AC said
+    // nothing" from "AC was never run", so the key is missing rather than null.
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&[
+        "rao",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--json",
+    ]);
+    let text = stdout(&out);
+    assert!(!text.contains("ac_validation"), "{text}");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+    assert!(doc.get("ac_validation").is_none());
+}
+
+#[test]
+fn ac_validation_reports_both_models_per_perimeter() {
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&[
+        "rao",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--validate-ac",
+        "--json",
+    ]);
+    let text = stdout(&out);
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+    let ac = doc.get("ac_validation").expect("ac_validation present");
+
+    let perimeters = ac["perimeters"].as_array().expect("perimeters");
+    assert_eq!(perimeters.len(), doc["perimeters"].as_array().unwrap().len());
+    for p in perimeters {
+        // Both figures, so the disagreement is visible rather than inferred.
+        assert!(p["dc_margin_mw"].is_number(), "{p}");
+        assert!(p["ac_margin_mw"].is_number(), "{p}");
+        assert!(
+            ["accepted", "diverged", "insecure", "regressed"]
+                .contains(&p["verdict"].as_str().unwrap_or("")),
+            "unexpected verdict in {p}"
+        );
+    }
+}
+
+#[test]
+fn a_rejected_plan_exits_one_even_when_the_search_called_it_secure() {
+    // The exit code is what a script acts on. A plan the DC search liked and
+    // the AC check rejected has to be reported as a failure, or the second
+    // stage is decoration.
+    let network = data("ucte", "TestCase12Nodes.uct");
+    let crac = data("rao", "crac-for-12nodes.json");
+    let out = run(&[
+        "rao",
+        network.to_str().unwrap(),
+        "--crac",
+        crac.to_str().unwrap(),
+        "--validate-ac",
+    ]);
+    let text = stdout(&out);
+    assert!(text.contains("AC re-validation"), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
+}
