@@ -6,10 +6,11 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > are met — see §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and
 > the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
-> drops the rest). Phases 4 through 9 and phase 12 are done, and §8.3's external Cucumber gate is
-> wired up and passing at **124 of 124** assertions. Phases 10 and 11 are done. What is left of the
-> plan is phase 2's other half (CGMES tap tables) and two optimizer features nothing currently
-> exercises — MNEC soft constraints and RA usage limits, both parsed and both unmodelled.
+> drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
+> external Cucumber gate now runs **two** flow models: **124 of 124** DC assertions and **155 of 186**
+> AC ones, across 57 scenarios. What is left of the plan is phase 2's other half (CGMES tap tables),
+> MNEC soft constraints and RA usage limits (both parsed, both unmodelled), and closing the AC
+> residual — see §8.3.
 >
 > The strongest result so far was not planned for. §6.2 justified building two importers as the only
 > route to the external gate; what it did not anticipate is that the two would gate *each other*.
@@ -482,12 +483,19 @@ phase 1.
 
 ### 8.3 OpenRAO's Cucumber expectations
 
-**Wired up, and it earned its keep immediately.** `tests/rao_cucumber_test.rs` runs eight scenarios
-copied verbatim from the reference's suite — every one that is `@dc` and `@rao`, uses a JSON CRAC and
-and needs none of the features §11 puts out of scope. That is **22 scenarios across ten networks**,
-and **all 124 of their checkable assertions match** at the reference's own tolerance rather than one
-invented here — every margin, every tap, every named action, every action count and every security
-status.
+**Wired up, and it earned its keep immediately.** `tests/rao_cucumber_test.rs` runs scenarios copied
+verbatim from the reference's suite — every one that is `@rao`, uses a JSON CRAC and needs none of the
+features §11 puts out of scope. Two files, scored separately so a gain in one cannot hide a
+regression in the other:
+
+| File | Scenarios | Assertions | Matching |
+|---|---|---|---|
+| `dc_scenarios.feature` | 22, across ten networks | 124 | **124** |
+| `ac_scenarios.feature` | 35, on TestCase12Nodes | 186 | **155** |
+
+The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
+than one invented here. Every margin, every tap, every named action, every action count and every
+security status.
 
 It found **eight** real defects, none of which any internal check could have, and all of the same
 shape — internally consistent, externally wrong:
@@ -537,6 +545,46 @@ which no test had exercised at all:
    invents generation and reports a margin no network could achieve. Two vendored scenarios exist
    precisely to test this: one whose keys sum to 0.3 and must therefore go unused, and one with two
    actions whose sums cancel and which may only be used together. Both now match.
+
+Adding the AC file — 186 assertions, 126 matching on the first run — found three more, and one
+capability that had simply never been built:
+
+9. **A PST set-point network action was never applied.** `Effect::taps` was assembled, carried
+   through the search, and then dropped: only `open` and `close` were ever put into force. The action
+   did not fail, it evaluated as a change that does nothing, so the search could never prefer it and
+   would have misreported the network if it ever had. Exactly the shape of defect 7, found the same
+   way. A second bug sat in front of it — such an action was rejected outright unless some *range*
+   action described the same shifter, making the one thing five scenarios are about inexpressible on
+   a CRAC that declares no PST range action. Worth 9 assertions.
+10. **Thresholds were read as symmetric.** A CRAC threshold has an optional min and an optional max
+    and they are routinely not both present: `min: -1500, max: null` means "no more than 1500 A in
+    the reverse direction, and nothing at all in the forward one". Collapsing that to
+    `|flow| ≤ 1500` invents a constraint nobody wrote, in the direction the flow is most likely to
+    go — and the LP, emitting both margin rows from one magnitude, then refused set-points the CRAC
+    permits. The reference's `computeMargin` is `min(value − lower.orElse(−∞), upper.orElse(+∞) −
+    value)`, which is now what the evaluator computes. Worth 7, and it corrected two of gridoxide's
+    own recorded expectations that had encoded the symmetric reading.
+11. **Actions far from the most limiting element were never filtered.** Not a bug so much as a
+    missing rule: the reference will not offer an operator in one control area as the remedy for an
+    overload in another, and `skip-actions-far-from-most-limiting-element` says how far is too far in
+    country borders. Without it the search takes actions the reference never puts on the table and
+    reports a better margin than the problem allows — scenario 5.5.1.5 has the reference using no
+    action and ending at −12 A where gridoxide used two and claimed +90. A gate checking only margins
+    would have called that an improvement. Needed teaching the UCTE importer to keep the `##Z<cc>`
+    country sub-headers it had been discarding. Worth 13.
+12. **The objective was maximized in the wrong unit.** `RaoUtil.getFlowUnit` returns megawatts for a
+    DC load flow and **amperes for an AC one** — the objective follows the flow model rather than
+    being configured — and every threshold stated "in the objective's unit" follows it. Since each
+    CNEC converts at its own voltage this is not a rescaling: two CNECs at different voltages order
+    differently in the two units. Worth no assertions on this corpus, and included anyway because it
+    is the reference's contract and because the search now reproduces its intermediate numbers.
+
+**The 31 that still differ** are dominated by one cause: gridoxide's search measures candidates with
+DC flows while the reference measures them with AC — with distributed slack and reactive limits on
+top. The signature is a tap one step from the reference's, or a minimum-impact threshold missed by a
+hair: on 3.2.1.4.a the improvement needs to clear 275 A and gridoxide computes 274.9. Closing it
+means an AC solve per leaf per outer iteration, which is a real cost and a real design decision
+rather than a fix.
 
 Worth recording what the sequence looked like from the inside: after the first three fixes the
 residual was confidently diagnosed as a missing `onNonRegulatedSide` threshold rule. It was not —
