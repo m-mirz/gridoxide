@@ -153,6 +153,7 @@ fn validate_perimeter(
         // started open, and re-deriving would silently re-open it.
         initially_open: &[],
         bus_countries: network.bus_countries,
+        shunts: network.shunts,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };

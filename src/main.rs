@@ -1288,6 +1288,7 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
         bus_ids: &network.bus_ids,
         initially_open: &network.initially_open,
         bus_countries: &network.bus_countries,
+        shunts: &network.shunts,
         tap_changers: &network.tap_changers,
         base_mva: network.base_mva,
     };
@@ -1513,6 +1514,7 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         bus_ids: &network.bus_ids,
         initially_open: &network.initially_open,
         bus_countries: &network.bus_countries,
+        shunts: &network.shunts,
         tap_changers: &network.tap_changers,
         base_mva: network.base_mva,
     };

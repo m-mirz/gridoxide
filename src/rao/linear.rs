@@ -77,7 +77,7 @@ use crate::opf::{LinearProgram, OptStatus, Solver};
 use crate::types::Transformer;
 
 use super::crac::{Crac, RangeActionKind, State};
-use super::evaluate::{evaluate, Network, Resolution};
+use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution};
 
 /// The unit the objective — the minimum margin being maximized — is measured
 /// in.
@@ -127,6 +127,14 @@ pub struct LinearOptions {
     pub tap_model: TapModel,
     /// What the minimum margin being maximized is measured in.
     pub objective_unit: ObjectiveUnit,
+    /// Which flow model the optimizer *measures* with.
+    ///
+    /// Sensitivities stay DC either way — they are cheap, exact for the linear
+    /// model, and only steer the search. This is what "the truth" means when a
+    /// candidate is scored and when the iteration decides whether a move
+    /// helped. Choosing AC costs a Newton-Raphson solve per outer iteration and
+    /// buys agreement with a reference that does the same.
+    pub flow_model: FlowModel,
 }
 
 impl Default for LinearOptions {
@@ -138,6 +146,7 @@ impl Default for LinearOptions {
             sensitivity_threshold: 1e-6,
             tap_model: TapModel::Continuous,
             objective_unit: ObjectiveUnit::Megawatt,
+            flow_model: FlowModel::Dc,
         }
     }
 }
@@ -198,6 +207,22 @@ impl LinearResult {
     pub fn improvement(&self) -> f64 {
         self.final_margin_mw - self.initial_margin_mw
     }
+}
+
+/// Measure a network with the requested flow model.
+///
+/// The shunts the AC path needs travel on the network itself, so this needs no
+/// options of its own — which is why they were put there rather than on
+/// [`LinearOptions`], where every DC caller would have had to state a value
+/// nothing reads.
+fn evaluate_in(
+    crac: &Crac,
+    view: &Network<'_>,
+    resolution: &Resolution,
+    model: FlowModel,
+) -> super::evaluate::SecurityResult {
+    let ac = AcOptions { shunts: view.shunts, ..Default::default() };
+    evaluate_model(crac, view, resolution, view.initially_open, model, &ac)
 }
 
 /// A phase shifter's tap-to-angle table, in the **CRAC's** sign convention.
@@ -395,9 +420,9 @@ pub fn optimize(
         .map(|(i, _)| i)
         .collect();
 
-    let mut best = measure(crac, network, resolution, perimeter, options.objective_unit);
+    let mut best = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
     let initial_objective = best;
-    let initial_margin = measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt);
+    let initial_margin = measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model);
     let mut setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
 
@@ -436,7 +461,7 @@ pub fn optimize(
     for _ in 0..options.max_iterations {
         iterations += 1;
         let (flows, limits) =
-            perimeter_flows(crac, network, resolution, perimeter, &cnec_indices);
+            perimeter_flows(crac, network, resolution, perimeter, &cnec_indices, options.flow_model);
         let program = build_program(&cnec_indices, &flows, &limits, &controls, options);
         let Ok(solution) = solver.solve(&program) else {
             break;
@@ -473,7 +498,7 @@ pub fn optimize(
         // iteration settling on the wrong side of a kink — see
         // `PstControl::bracketing_taps`.
         apply(crac, network, &mut controls, &proposed);
-        let mut best_here = measure(crac, network, resolution, perimeter, options.objective_unit);
+        let mut best_here = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
         for k in 0..controls.len() {
             let Some(pst) = controls[k].pst.as_ref() else { continue };
             let target = solution.primal[setpoint_column(k)];
@@ -489,7 +514,7 @@ pub fn optimize(
                 let mut trial = proposed.clone();
                 trial[k] = (angle, Some(tap));
                 apply(crac, network, &mut controls, &trial);
-                let margin = measure(crac, network, resolution, perimeter, options.objective_unit);
+                let margin = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
                 if margin > best_here + 1e-9 {
                     best_here = margin;
                     proposed = trial;
@@ -509,7 +534,7 @@ pub fn optimize(
         }
         apply(crac, network, &mut controls, &proposed);
 
-        let margin = measure(crac, network, resolution, perimeter, options.objective_unit);
+        let margin = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
         if margin > best + 1e-9 {
             best = margin;
             setpoints = controls
@@ -561,7 +586,7 @@ pub fn optimize(
         // Re-measured in megawatts rather than converted from `best`: the two
         // are minima over the *same* CNECs but not necessarily over the same
         // one, so converting the ampere answer would name a margin no CNEC has.
-        final_margin_mw: measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt),
+        final_margin_mw: measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model),
         initial_objective,
         final_objective: best,
         iterations,
@@ -582,6 +607,8 @@ pub struct NetworkMut<'a> {
     pub initially_open: &'a [usize],
     /// ISO country code per bus; see [`Network::bus_countries`].
     pub bus_countries: &'a [Option<String>],
+    /// Shunt admittances; see [`Network::shunts`].
+    pub shunts: &'a [crate::network::ShuntAdm],
     pub tap_changers: &'a [Option<crate::types::TapChanger>],
     pub base_mva: f64,
 }
@@ -596,6 +623,7 @@ impl NetworkMut<'_> {
             bus_ids: self.bus_ids,
             initially_open: self.initially_open,
             bus_countries: self.bus_countries,
+            shunts: self.shunts,
             tap_changers: self.tap_changers,
             base_mva: self.base_mva,
         }
@@ -1013,9 +1041,10 @@ fn measure(
     resolution: &Resolution,
     perimeter: &[State],
     unit: ObjectiveUnit,
+    model: FlowModel,
 ) -> f64 {
     let view = network.view();
-    let result = evaluate(crac, &view, resolution);
+    let result = evaluate_in(crac, &view, resolution, model);
     result
         .perimeters
         .iter()
@@ -1035,9 +1064,10 @@ fn perimeter_flows(
     resolution: &Resolution,
     perimeter: &[State],
     cnecs: &[usize],
+    model: FlowModel,
 ) -> (Vec<f64>, Vec<(f64, f64, f64)>) {
     let view = network.view();
-    let result = evaluate(crac, &view, resolution);
+    let result = evaluate_in(crac, &view, resolution, model);
     cnecs
         .iter()
         .map(|&i| {

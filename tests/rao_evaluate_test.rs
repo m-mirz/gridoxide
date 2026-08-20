@@ -46,6 +46,7 @@ impl Case {
             bus_ids: &[],
             initially_open: &[],
             bus_countries: &[],
+            shunts: &[],
             tap_changers: &[],
             base_mva: self.net.base_mva,
         }
