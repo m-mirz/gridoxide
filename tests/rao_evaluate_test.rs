@@ -575,3 +575,38 @@ fn the_model_selector_dispatches_to_the_two_paths() {
     assert_ne!(via_dc.perimeters, via_ac.perimeters, "the two arms must differ");
     assert_eq!(evaluate::FlowModel::default(), evaluate::FlowModel::Dc);
 }
+
+
+#[test]
+fn distributing_the_slack_solves_and_agrees_where_losses_are_negligible() {
+    // The reference's configurations all set `distributedSlack: true` with
+    // `PROPORTIONAL_TO_GENERATION_P`. What it changes is where the loss
+    // balance lands, so on a network whose losses are near zero — which the
+    // vendored UCTE fixtures are — it should agree with a single slack to
+    // well inside any threshold, and that agreement is the check: a
+    // distribution that quietly failed to converge would not land here.
+    let c = case();
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let single = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let spread = evaluate::AcOptions { distribute_slack: true, ..single };
+
+    let a = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &single);
+    let b = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &spread);
+
+    assert_eq!(a.perimeters.len(), b.perimeters.len());
+    let mut compared = 0;
+    for (p, q) in a.perimeters.iter().zip(&b.perimeters) {
+        assert_eq!(p.severed, q.severed, "convergence should not differ on {:?}", p.state);
+        for (x, y) in p.cnecs.iter().zip(&q.cnecs) {
+            assert!(
+                (x.margin_mw - y.margin_mw).abs() < 1.0,
+                "cnec {}: {} MW against {} MW",
+                x.cnec,
+                x.margin_mw,
+                y.margin_mw
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared > 0, "nothing was compared");
+}

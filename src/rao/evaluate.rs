@@ -38,7 +38,10 @@ use crate::linear::sensitivity::DcSensitivity;
 use crate::ratings::current_to_power_pu;
 use crate::batch::{BatchSolver, Scenario};
 use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
-use crate::solver::{IslandStatus, JacobianBackend};
+use crate::network::{build_ybus_with_outages, stamp_shunts};
+use crate::solver::{
+    newton_raphson_distributing_slack, IslandStatus, JacobianBackend, SlackDistribution,
+};
 use crate::types::{Bus, Line, Transformer};
 use crate::network::ShuntAdm;
 
@@ -674,11 +677,29 @@ pub struct AcOptions<'a> {
     pub max_iter: usize,
     /// Jacobian backend for the contingency sweep.
     pub backend: JacobianBackend,
+    /// Spread the slack across generators rather than leaving it all on one
+    /// bus.
+    ///
+    /// The reference's configurations set `distributedSlack: true` with
+    /// `PROPORTIONAL_TO_GENERATION_P`, and every study these CRACs come from
+    /// runs that way: a single slack puts the whole loss change at one bus,
+    /// which redistributes flows differently from a share taken across the
+    /// machines that would actually respond.
+    ///
+    /// Costs the shared factorization — each scenario is solved on its own
+    /// Y-bus — so it is off unless asked for.
+    pub distribute_slack: bool,
 }
 
 impl Default for AcOptions<'_> {
     fn default() -> Self {
-        Self { shunts: &[], tol: 1e-8, max_iter: 30, backend: JacobianBackend::Scalar }
+        Self {
+            shunts: &[],
+            tol: 1e-8,
+            max_iter: 30,
+            backend: JacobianBackend::Scalar,
+            distribute_slack: false,
+        }
     }
 }
 
@@ -744,16 +765,20 @@ pub fn evaluate_ac(
         })
         .collect();
 
-    let solver = BatchSolver::new(ac.backend);
-    let reports = solver.solve_contingencies(
-        network.buses,
-        network.lines,
-        network.transformers,
-        ac.shunts,
-        &scenarios,
-        ac.tol,
-        ac.max_iter,
-    );
+    let reports = if ac.distribute_slack {
+        Ok(solve_distributing_slack(network, &scenarios, ac))
+    } else {
+        let solver = BatchSolver::new(ac.backend);
+        solver.solve_contingencies(
+            network.buses,
+            network.lines,
+            network.transformers,
+            ac.shunts,
+            &scenarios,
+            ac.tol,
+            ac.max_iter,
+        )
+    };
     // A batch that cannot run at all is reported as every state severed rather
     // than as a panic or a silently empty result: the caller asked what the
     // margins are, and "unknown" is an answer it can act on.
@@ -883,6 +908,81 @@ pub fn evaluate_ac(
     }
 
     SecurityResult { perimeters, skipped }
+}
+
+/// Solve each scenario on its own Y-bus, spreading the slack across generators
+/// in proportion to their scheduled active power.
+///
+/// `BatchSolver::solve_contingencies` shares one symbolic factorization but
+/// leaves the slack on a single bus, so distributing it means giving that up.
+/// The weights follow the reference's `PROPORTIONAL_TO_GENERATION_P`: each
+/// generator bus's own schedule, falling back to an equal share when nothing
+/// generates, which keeps a network of pure loads solvable rather than dividing
+/// by a zero total.
+fn solve_distributing_slack(
+    network: &Network<'_>,
+    scenarios: &[Scenario],
+    ac: &AcOptions<'_>,
+) -> Vec<crate::PowerFlowReport> {
+    let n = network.buses.len();
+    let n_branches = network.n_branches();
+    let weights: Vec<f64> = network
+        .buses
+        .iter()
+        .map(|b| match b.bus_type {
+            crate::types::BusType::Slack | crate::types::BusType::PV => b.p_spec.max(0.0),
+            crate::types::BusType::PQ => 0.0,
+        })
+        .collect();
+    let distribution = if weights.iter().sum::<f64>() > 0.0 {
+        SlackDistribution::from_weights(weights)
+    } else {
+        SlackDistribution::uniform(network.buses)
+    };
+
+    scenarios
+        .iter()
+        .map(|scenario| {
+            let mut outaged = vec![false; n_branches];
+            for &b in &scenario.branch_outages {
+                if let Some(slot) = outaged.get_mut(b) {
+                    *slot = true;
+                }
+            }
+            let mut ybus =
+                build_ybus_with_outages(n, network.lines, network.transformers, &outaged);
+            stamp_shunts(&mut ybus, ac.shunts);
+            let mut buses = network.buses.to_vec();
+            let (islands, _) = newton_raphson_distributing_slack(
+                &mut buses,
+                &ybus.finish(),
+                ac.tol,
+                ac.max_iter,
+                ac.backend,
+                &distribution,
+            );
+            // Only `buses` and `islands` are read here. The per-island
+            // statuses carry the convergence verdict; `stats` describes a
+            // single inner solve, of which this path runs several.
+            let converged = islands.iter().all(|i| i.status == IslandStatus::Converged);
+            crate::PowerFlowReport {
+                buses,
+                islands,
+                stats: crate::solver::SolveStats {
+                    status: if converged {
+                        crate::solver::SolveStatus::Converged
+                    } else {
+                        crate::solver::SolveStatus::MaxIterationsReached
+                    },
+                    mismatch_history: Vec::new(),
+                    q_limit_switches: Vec::new(),
+                    q_limit_stabilized: true,
+                },
+                dc: None,
+                linear: None,
+            }
+        })
+        .collect()
 }
 
 /// Convert a three-phase power in MW to a current in amperes at `voltage_v`.
