@@ -859,12 +859,20 @@ pub fn evaluate_ac(
                 let charge = match t.unit {
                     // An ampere limit binds apparent power, and at the voltage
                     // the bus is actually running at rather than the one the
-                    // threshold was written against. The headroom the reactive
-                    // part consumes is taken off *both* bounds, since it is
-                    // unavailable in either direction.
+                    // threshold was written against. Both corrections are taken
+                    // off both bounds, since neither is available in either
+                    // direction.
+                    //
+                    // **Signed, not clamped.** The reactive part only ever eats
+                    // headroom, but the voltage ratio goes either way: a bus
+                    // running above the voltage its threshold was written for
+                    // draws *less* current for the same megawatts, which is
+                    // headroom gained. Clamping this at zero conflates the two
+                    // and silently discards the gain — worth 74 A on a 1300 A
+                    // threshold written at 380 kV for a node operating at 400.
                     Unit::Ampere | Unit::PercentImax => {
                         let s_equiv = p_mw.hypot(q_mvar) * u_written / u_actual;
-                        (s_equiv - p_mw.abs()).max(0.0)
+                        s_equiv - p_mw.abs()
                     }
                     // Voltage and angle units never reach here: `threshold_bounds`
                     // returns `None` for them rather than inventing a flow
