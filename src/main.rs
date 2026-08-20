@@ -50,7 +50,7 @@ usage:
                                 gridoxide's own <network>.rao.json companion.
                                 Exits 0 when every margin is non-negative and 1
                                 when any is not, so it can gate a pipeline.
-  gridoxide rao <network> --crac <crac.json> [--depth N] [--json]
+  gridoxide rao <network> --crac <crac.json> [--depth N] [--validate-ac] [--json]
                                 optimize remedial actions: search over the
                                 network actions the CRAC permits, re-optimizing
                                 the range actions at every candidate, and report
@@ -1324,6 +1324,9 @@ struct SecurityNetwork {
     initially_open: Vec<usize>,
     /// Tap changers, so a CRAC that omits its own tap table still works.
     tap_changers: Vec<Option<gridoxide::types::TapChanger>>,
+    /// Shunt admittances. Only the AC re-validation stage reads them; the DC
+    /// search has no use for them.
+    shunts: Vec<gridoxide::network::ShuntAdm>,
     base_mva: f64,
     notes: Vec<String>,
 }
@@ -1344,6 +1347,7 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             // them openable, so there is nothing to seed here yet.
             initially_open: Vec::new(),
             tap_changers: n.tap_changers,
+            shunts: n.shunts,
             base_mva: n.base_mva,
             notes: n.notes,
         });
@@ -1359,6 +1363,7 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             bus_ids: n.node_codes,
             initially_open: n.initially_open,
             tap_changers: n.tap_changers,
+            shunts: n.shunts,
             base_mva: n.base_mva,
             notes: n.notes,
         });
@@ -1433,6 +1438,7 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         None => 2,
     };
     let as_json = flags.iter().any(|f| f == "--json");
+    let validate_ac = flags.iter().any(|f| f == "--validate-ac");
 
     let network = load_network_for_security(path)?;
     let text = std::fs::read_to_string(&crac_path)
@@ -1459,9 +1465,21 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     let mut solver = IpmSolver::new();
     let plan = gridoxide::rao::run(&crac, &view, &resolution, &mut solver, &options);
 
+    // The search ran on DC. Asking AC whether it agrees is a separate stage
+    // that never changes the plan — it only decides whether to believe it.
+    let validation = validate_ac.then(|| {
+        use gridoxide::rao::evaluate::AcOptions;
+        use gridoxide::rao::validate::{validate, ValidationOptions};
+        let options = ValidationOptions {
+            ac: AcOptions { shunts: &network.shunts, ..Default::default() },
+            ..Default::default()
+        };
+        validate(&crac, &view, &resolution, &plan, &options)
+    });
+
     if as_json {
-        println!("{}", rao_json(&crac, &plan));
-        return Ok(plan.is_secure());
+        println!("{}", rao_json(&crac, &plan, validation.as_ref()));
+        return Ok(plan.is_secure() && validation.as_ref().is_none_or(|v| v.is_accepted()));
     }
 
     if !resolution.is_complete() {
@@ -1516,7 +1534,32 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         plan.final_margin_mw,
         plan.initial_margin_mw
     );
-    Ok(plan.is_secure())
+
+    let Some(validation) = validation else { return Ok(plan.is_secure()) };
+
+    use gridoxide::rao::validate::Verdict;
+    println!("\nAC re-validation: worst margin {:.1} MW", validation.ac_margin_mw);
+    for p in &validation.perimeters {
+        let instant = p
+            .states
+            .first()
+            .map(|s| crac.instants[s.instant].id.as_str())
+            .unwrap_or("?");
+        let verdict = match &p.verdict {
+            Verdict::Accepted => "ok".to_string(),
+            Verdict::Diverged => "DIVERGED".to_string(),
+            Verdict::Insecure { margin_mw } => format!("INSECURE ({margin_mw:.1} MW)"),
+            Verdict::Regressed { by_mw } => format!("REGRESSED ({by_mw:.1} MW)"),
+        };
+        println!(
+            "  {instant:<12} dc {:>8.1} MW   ac {:>8.1} MW   {verdict}",
+            p.dc_margin_mw, p.ac_margin_mw
+        );
+    }
+    if !validation.is_accepted() {
+        println!("\nREJECTED: the AC check does not support the plan");
+    }
+    Ok(plan.is_secure() && validation.is_accepted())
 }
 
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
@@ -1542,7 +1585,11 @@ fn print_actions(crac: &gridoxide::rao::Crac, perimeter: &gridoxide::rao::Perime
 }
 
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
-fn rao_json(crac: &gridoxide::rao::Crac, plan: &gridoxide::rao::Plan) -> String {
+fn rao_json(
+    crac: &gridoxide::rao::Crac,
+    plan: &gridoxide::rao::Plan,
+    validation: Option<&gridoxide::rao::validate::Validation>,
+) -> String {
     let one = |perimeter: &gridoxide::rao::PerimeterPlan, contingency: Option<usize>| -> String {
         let actions: Vec<String> = perimeter
             .network_actions
@@ -1588,13 +1635,53 @@ fn rao_json(crac: &gridoxide::rao::Crac, plan: &gridoxide::rao::Plan) -> String 
             body.push(format!("\n  {}", one(perimeter, Some(scenario.contingency))));
         }
     }
+    // Absent unless asked for, rather than present and null: a consumer that
+    // never passed `--validate-ac` should not have to distinguish "AC said
+    // nothing" from "AC was never run".
+    let ac = match validation {
+        None => String::new(),
+        Some(v) => {
+            use gridoxide::rao::validate::Verdict;
+            let rows: Vec<String> = v
+                .perimeters
+                .iter()
+                .map(|p| {
+                    let verdict = match &p.verdict {
+                        Verdict::Accepted => "accepted".to_string(),
+                        Verdict::Diverged => "diverged".to_string(),
+                        Verdict::Insecure { .. } => "insecure".to_string(),
+                        Verdict::Regressed { .. } => "regressed".to_string(),
+                    };
+                    format!(
+                        "\n   {{\"instants\": [{}], \"dc_margin_mw\": {}, \"ac_margin_mw\": {}, \"verdict\": {:?}}}",
+                        p.states
+                            .iter()
+                            .map(|s| format!("{:?}", crac.instants[s.instant].id))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        p.dc_margin_mw,
+                        p.ac_margin_mw,
+                        verdict
+                    )
+                })
+                .collect();
+            format!(
+                ",\n \"ac_validation\": {{\"accepted\": {}, \"ac_margin_mw\": {}, \"perimeters\": [{}\n  ]}}",
+                v.is_accepted(),
+                v.ac_margin_mw,
+                rows.join(",")
+            )
+        }
+    };
+
     format!(
-        "{{\n \"secure\": {},\n \"initial_margin_mw\": {},\n \"final_margin_mw\": {},\n          \"pulled_forward\": {},\n \"perimeters\": [{}\n ]\n}}",
+        "{{\n \"secure\": {},\n \"initial_margin_mw\": {},\n \"final_margin_mw\": {},\n          \"pulled_forward\": {},\n \"perimeters\": [{}\n ]{}\n}}",
         plan.is_secure(),
         plan.initial_margin_mw,
         plan.final_margin_mw,
         plan.pulled_forward.len(),
-        body.join(",")
+        body.join(","),
+        ac
     )
 }
 

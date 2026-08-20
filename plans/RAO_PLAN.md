@@ -7,7 +7,9 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and §8.3's external Cucumber gate is
-> wired up and passing at **124 of 124** assertions. Phase 10 is done; phase 11 is unstarted.
+> wired up and passing at **124 of 124** assertions. Phases 10 and 11 are done. What is left of the
+> plan is phase 2's other half (CGMES tap tables) and two optimizer features nothing currently
+> exercises — MNEC soft constraints and RA usage limits, both parsed and both unmodelled.
 >
 > The strongest result so far was not planned for. §6.2 justified building two importers as the only
 > route to the external gate; what it did not anticipate is that the two would gate *each other*.
@@ -371,6 +373,23 @@ error in its *evaluation*, only in its LP. Phase 1 is therefore DC throughout, a
 enters as ToOp's second stage: re-validate the survivors, with explicit rejection thresholds, rather
 than optimizing in AC.
 
+**This is now built** (`evaluate::evaluate_ac`, `rao::validate`). Two pieces of physics the linear
+model cannot see turned out to matter enough to name:
+
+* **Current is measured at the solved voltage, not the nominal one.** A bus at 1.05 pu carries a
+  given MW at 5% less current, and on the vendored twelve-node case that is exactly the error — 506.7 A
+  against a true 481.3 A — so an ampere threshold read at nominal is wrong by more than most
+  reliability margins.
+* **Reactive flow consumes thermal headroom.** An ampere threshold binds \(|S|\), not \(|P|\).
+  Rather than give "margin" a second meaning, the reactive part is charged against the limit, so
+  `margin = limit − |P|` still holds and what remains is the headroom a real-power move can actually
+  use. That keeps the LP's view of a limit and the evaluator's the same quantity — the structural fix
+  that phase 7 already had to make once.
+
+The stage never rewrites the plan. A perimeter that fails is reported as failed, with both models'
+figures, because the useful output of a validation stage is the disagreement itself; silently
+re-running the search under different parameters would hide precisely what is worth seeing.
+
 ### 7.3 The linear problem
 
 Built with `opf::LinearProgram`, solved through the existing `Solver` boundary. The formulation
@@ -556,7 +575,7 @@ Assert on the objective and on feasibility, never on the argmin.
 | 8 | ✅ **Done** (single perimeter, sequential). **Search tree** (`src/rao/search.rs`) + `gridoxide rao` | Finds an action that takes a vendored case from −512.7 MW to +500.0, i.e. insecure to secure; **declines** both actions on a case where each would make the margin worse, having evaluated them; reproduces itself run to run; refuses an action whose elementary parts it cannot all express, rather than applying half. The reported margin is checked against an independent Woodbury evaluation of the winning network. **Not yet:** parallel leaves, the richer candidate filters, action combinations beyond the greedy chain |
 | 9 | ✅ **Done** (Rust + CLI; no Python yet). **Perimeters in order** (`src/rao/castor.rs`) — the preventive perimeter spans the base case *and* every outage state, curative perimeters run per contingency in chronological order carrying the preventive decisions forward, and the pull-forward rule moves an unactionable curative CNEC into the preventive perimeter and reports it | The decomposition changes the answer, which is the point: over the wider perimeter the twelve-node case now takes a line opening **and** a tap that help only together (−241.7 → −157.9, where the action alone gives −257.6 and the shifter alone nothing). A curative perimeter is asserted to start from the preventive result rather than the untouched network |
 | 10 | ✅ **Done.** **`opf::bnb::BranchAndBound`** over `IpmSolver` — depth-first with a dive, most-fractional branching, a node budget rather than a time limit | §8.4 met: agrees with HiGHS's branch-and-cut on 60 randomised MILPs, on objective and feasibility rather than on the argmin (the optimal objective is unique; the optimal solution need not be). Distinguishes a proven optimum from a budgeted one, and returns exact integers. **Not yet used by `src/rao/`** — the optimizer matches the reference at 124/124 with the continuous tap model, which is the reference's own default, so `TapModel::Discrete` remains declared and unbuilt with no gate to validate it against |
-| 11 | **AC re-validation stage** — ToOp's second stage: re-check survivors in AC with explicit rejection thresholds | Rejection rate and reasons reported per case, not just a pass/fail |
+| 11 | ✅ **Done.** **AC flow model** (`evaluate::evaluate_ac`, `FlowModel`) and the **re-validation stage** (`src/rao/validate.rs`, `gridoxide rao --validate-ac`) — every perimeter re-measured under a full AC power flow on the network its own decisions left behind, with three separate rejection reasons: insecure, diverged, or too far from the DC figure to trust | The AC currents are gated against the vendored pypowsybl solutions rather than against gridoxide: expected `flow_mw` and `current_a` are rebuilt from the reference's own `(p, q, v_pu)`, and converting at nominal instead of the solved voltage fails the test by 5.3% (506.7 A against 481.3 A). On the twelve-node case the two models disagree by 10.1 MW on the preventive perimeter and the curative one diverges outright — a topology both models independently flag as severed |
 | 12 | ✅ **Done.** **Automaton simulation** (`src/rao/automaton.rs`) — speed-ordered batches, conditions re-evaluated between them, network actions applied and range actions sized by formula | The reference's own five-automaton scenario passes 10/10: four operate, the fifth correctly does not because an earlier one already relieved its constraint, and both phase shifters land on the taps it names (2 and −3). Required keeping out-of-service circuits at import so a *closing* automaton is expressible at all |
 
 Phases 1–3 are independently useful and ship without any RAO. Phase 5 is a genuine deliverable on its

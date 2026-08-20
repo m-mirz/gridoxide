@@ -11,6 +11,7 @@ pub mod linear;
 pub mod automaton;
 pub mod castor;
 pub mod search;
+pub mod validate;
 
 pub use crac::{
     RaoDocument, DOCUMENT_TYPE, DOCUMENT_VERSION,
@@ -22,4 +23,8 @@ pub use automaton::{simulate, AutomatonResult};
 pub use castor::{run, PerimeterPlan, Plan, ScenarioPlan};
 pub use search::{search, SearchOptions, SearchResult};
 pub use linear::{optimize, LinearOptions, LinearResult, LinearStatus, NetworkMut, Setpoint, TapModel};
-pub use evaluate::{evaluate, evaluate_with, CnecResult, Network, PerimeterResult, Resolution, SecurityResult};
+pub use evaluate::{
+    evaluate, evaluate_ac, evaluate_model, evaluate_with, AcOptions, CnecResult, FlowModel,
+    Network, PerimeterResult, Resolution, SecurityResult,
+};
+pub use validate::{validate, Validation, ValidationOptions, Verdict};

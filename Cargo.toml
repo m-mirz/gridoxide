@@ -218,6 +218,11 @@ path = "tests/rao_cucumber_test.rs"
 required-features = ["rao", "ucte"]
 
 [[test]]
+name = "rao_validate_test"
+path = "tests/rao_validate_test.rs"
+required-features = ["rao", "ucte", "opf"]
+
+[[test]]
 name = "rao_castor_test"
 path = "tests/rao_castor_test.rs"
 required-features = ["rao", "ucte"]
