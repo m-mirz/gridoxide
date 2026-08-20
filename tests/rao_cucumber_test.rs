@@ -652,7 +652,14 @@ fn check(scenario: &Scenario) -> Outcome {
         })
         .collect();
 
-    let untouched = evaluate_model(&crac, &view, &resolution, &[], model, &ac_options);
+    // The network's *own* open set, not an empty one. "Untouched" means before
+    // any remedial action, not with every branch closed — and a UCTE file
+    // routinely ships couplers out of service (TestCase16Nodes has two). Passing
+    // `&[]` here measures a network that does not exist, and does it silently:
+    // every margin stays self-consistent and the whole initial situation is
+    // simply a different one.
+    let untouched =
+        evaluate_model(&crac, &view, &resolution, view.initially_open, model, &ac_options);
     let initial_margins: HashMap<&str, Margin> = untouched
         .perimeters
         .iter()
@@ -849,6 +856,7 @@ fn the_reference_implementations_own_expectations() {
     for (file, expected, baseline) in [
         ("dc_scenarios.feature", 22, BASELINE_MATCHED_DC),
         ("ac_scenarios.feature", 35, BASELINE_MATCHED_AC),
+        ("ac_scenarios_16nodes.feature", 89, BASELINE_MATCHED_AC16),
     ] {
         run_gate(file, expected, baseline);
     }
@@ -922,6 +930,12 @@ const BASELINE_MATCHED_DC: usize = 124;
 /// candidates differently, the search takes the other one and every assertion
 /// downstream of that choice moves together.
 const BASELINE_MATCHED_AC: usize = 177;
+
+/// The same, for the 89 AC scenarios on `TestCase16Nodes`: **519 of 802**.
+///
+/// The largest of the three files and the newest, so the furthest from
+/// settled. It is here to find defects, and it does.
+const BASELINE_MATCHED_AC16: usize = 519;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

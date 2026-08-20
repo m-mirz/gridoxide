@@ -195,6 +195,19 @@ fn a_case_with_a_busbar_coupler_matches_pypowsybl() {
     assert!(df < 0.5, "worst branch flow deviation {df} MW/MVar");
 }
 
+#[test]
+fn the_sixteen_node_case_matches_pypowsybl() {
+    // The network 92 of the reference's AC scenarios are written against, and
+    // the largest of the vendored UCTE cases: 16 buses, 27 branches, four
+    // countries. Gated here before any of those scenarios rely on it, so a
+    // disagreement over margins can never be blamed on the import.
+    let net = ucte::read(fixture("TestCase16Nodes.uct")).expect("import");
+    let (dv, da, df) = worst_deviation(&net, "TestCase16Nodes.pypowsybl.json");
+    assert!(dv < 1e-9, "worst |V| deviation {dv}");
+    assert!(da < 1e-3, "worst angle deviation {da} deg");
+    assert!(df < 0.5, "worst branch flow deviation {df} MW/MVar");
+}
+
 // ---------------------------------------------------------------------------
 // The conventions, pinned individually so a failure says which one broke
 // ---------------------------------------------------------------------------

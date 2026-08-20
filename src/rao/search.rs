@@ -34,7 +34,7 @@
 use crate::opf::Solver;
 
 use super::crac::{Crac, ElementaryAction, NetworkAction, State};
-use super::evaluate::{evaluate_with, Network, Resolution};
+use super::evaluate::{Network, Resolution};
 use super::linear::{optimize, LinearOptions, NetworkMut, Setpoint};
 
 #[derive(Clone, Debug)]
