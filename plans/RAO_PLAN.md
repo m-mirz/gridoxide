@@ -7,7 +7,7 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
-> external Cucumber gate now runs **two** flow models: **124 of 124** DC assertions and **155 of 186**
+> external Cucumber gate now runs **two** flow models: **124 of 124** DC assertions and **177 of 186**
 > AC ones, across 57 scenarios. What is left of the plan is phase 2's other half (CGMES tap tables),
 > MNEC soft constraints and RA usage limits (both parsed, both unmodelled), and closing the AC
 > residual — see §8.3.
