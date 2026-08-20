@@ -42,6 +42,7 @@
 #[cfg(feature = "opf-highs")]
 pub mod highs;
 pub mod ac;
+pub mod bnb;
 pub mod dc;
 pub mod ipm;
 #[cfg(feature = "opf-ipopt")]
