@@ -500,6 +500,29 @@ fn pick(
     staged.or_else(|| pra.get(cnec).copied())
 }
 
+/// The tap a phase shifter sits on when nothing has moved it — its position in
+/// the network as imported.
+///
+/// Falls back to the CRAC's declared `initialTap` when the network has no tap
+/// changer for the element, which is the same precedence `linear::tap_table`
+/// uses and for the same reason: the equipment is the authority, the CRAC is a
+/// description of it.
+fn resting_tap(
+    crac: &Crac,
+    resolution: &Resolution,
+    net: &ucte::UcteImport,
+    action: &str,
+) -> Option<i32> {
+    let range = crac.range_actions.iter().find(|r| r.id == action)?;
+    let RangeActionKind::Pst { element, initial_tap, .. } = &range.kind else { return None };
+    let branch = resolution.branch(element)?;
+    let changer = branch
+        .checked_sub(net.lines.len())
+        .and_then(|i| net.tap_changers.get(i))
+        .and_then(|c| c.as_ref());
+    Some(changer.map_or(*initial_tap, |c| c.position))
+}
+
 /// The worst margin across every CNEC, each measured at its own stage.
 ///
 /// An `auto` CNEC is read after the automatons and a `curative` one after the
@@ -821,7 +844,18 @@ fn check(scenario: &Scenario) -> Outcome {
                 );
             }
             Expect::PstTap { action, tap, at } => {
-                let got = decisions(at).1.get(action).copied();
+                // A shifter with no set-point in this perimeter still has a
+                // tap: the one it is sitting on. The reference's
+                // `getOptimizedTapOnState` answers for every state, activated
+                // or not, and a CRAC routinely makes a PST available only at
+                // `auto` while a scenario asks where it stood in preventive.
+                // Reporting `None` there fails an assertion that is simply
+                // asking "unchanged?".
+                let got = decisions(at)
+                    .1
+                    .get(action)
+                    .copied()
+                    .or_else(|| resting_tap(&crac, &resolution, &net, action));
                 record(
                     got == Some(*tap),
                     format!("tap of `{action}` {got:?} (expected {tap}) {at:?}"),
@@ -931,11 +965,11 @@ const BASELINE_MATCHED_DC: usize = 124;
 /// downstream of that choice moves together.
 const BASELINE_MATCHED_AC: usize = 177;
 
-/// The same, for the 89 AC scenarios on `TestCase16Nodes`: **519 of 802**.
+/// The same, for the 89 AC scenarios on `TestCase16Nodes`: **533 of 802**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
-const BASELINE_MATCHED_AC16: usize = 519;
+const BASELINE_MATCHED_AC16: usize = 533;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
