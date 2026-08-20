@@ -410,7 +410,8 @@ fn options_from(config: &Path) -> SearchOptions {
     // `RaoUtil.getFlowUnit`: megawatts for a DC load flow, amperes for an AC
     // one. Not a setting of its own — the objective follows the flow model, and
     // the minimum-impact thresholds below are stated in whichever unit results.
-    options.linear.objective_unit = match flow_model_from(config) {
+    options.linear.flow_model = flow_model_from(config);
+    options.linear.objective_unit = match options.linear.flow_model {
         FlowModel::Ac => ObjectiveUnit::Ampere,
         FlowModel::Dc => ObjectiveUnit::Megawatt,
     };
@@ -549,6 +550,7 @@ fn check(scenario: &Scenario) -> Outcome {
         bus_ids: &net.node_codes,
         initially_open: &net.initially_open,
         bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
@@ -587,6 +589,7 @@ fn check(scenario: &Scenario) -> Outcome {
                 bus_ids: &net.node_codes,
                 initially_open: &net.initially_open,
                 bus_countries: &net.bus_countries,
+                shunts: &net.shunts,
                 tap_changers: &net.tap_changers,
                 base_mva: net.base_mva,
             };
@@ -620,6 +623,7 @@ fn check(scenario: &Scenario) -> Outcome {
         bus_ids: &net.node_codes,
         initially_open: &net.initially_open,
         bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
@@ -902,7 +906,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 /// the printed report says which assertion moved.
 const BASELINE_MATCHED_DC: usize = 124;
 
-/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **155 of 186**.
+/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **171 of 186**.
 ///
 /// Lower than the DC file's perfect score, and expected to be. These scenarios
 /// are judged on margins the reference measured with an AC load flow that also
@@ -910,7 +914,7 @@ const BASELINE_MATCHED_DC: usize = 124;
 /// still chooses its actions on DC sensitivities. Where the two models rank two
 /// candidates differently, the search takes the other one and every assertion
 /// downstream of that choice moves together.
-const BASELINE_MATCHED_AC: usize = 155;
+const BASELINE_MATCHED_AC: usize = 171;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

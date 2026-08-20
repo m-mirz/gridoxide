@@ -59,6 +59,7 @@ impl Case {
             bus_ids: &[],
             initially_open: &[],
             bus_countries: &[],
+            shunts: &[],
             tap_changers: &[],
             base_mva: self.net.base_mva,
         }
@@ -170,6 +171,7 @@ fn the_reported_margin_matches_an_independent_evaluation_of_the_winning_network(
         bus_ids: &[],
         initially_open: &[],
         bus_countries: &[],
+        shunts: &[],
         tap_changers: &[],
         base_mva: c.net.base_mva,
     };

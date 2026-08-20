@@ -321,6 +321,8 @@ pub struct Network<'a> {
     /// Only `ucte` fills this in today (from the file's `##Z<cc>` sub-headers).
     /// IIDM states countries on substations, which `iidm.rs` skips.
     pub bus_countries: &'a [Option<String>],
+    /// Shunt admittances. Read only by the AC flow model; DC ignores them.
+    pub shunts: &'a [ShuntAdm],
     /// Tap changers, parallel to `transformers`.
     ///
     /// A CRAC's PST range action *may* carry its own tap-to-angle table and

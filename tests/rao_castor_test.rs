@@ -52,6 +52,7 @@ impl Case {
             bus_ids: &[],
             initially_open: &[],
             bus_countries: &[],
+            shunts: &[],
             tap_changers: &[],
             base_mva: self.net.base_mva,
         }
@@ -402,6 +403,7 @@ fn automatons_are_simulated_rather_than_chosen() {
         bus_ids: &net.node_codes,
         initially_open: &net.initially_open,
         bus_countries: &[],
+        shunts: &[],
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
@@ -480,6 +482,7 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
         bus_ids: &net.node_codes,
         initially_open: &net.initially_open,
         bus_countries: &[],
+        shunts: &[],
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };

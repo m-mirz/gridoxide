@@ -212,6 +212,7 @@ pub fn run(
                 bus_ids: network.bus_ids,
                 initially_open: network.initially_open,
                 bus_countries: network.bus_countries,
+                shunts: network.shunts,
                 tap_changers: network.tap_changers,
                 base_mva: network.base_mva,
             };
@@ -235,6 +236,7 @@ pub fn run(
                 bus_ids: network.bus_ids,
                 initially_open: network.initially_open,
                 bus_countries: network.bus_countries,
+                shunts: network.shunts,
                 tap_changers: network.tap_changers,
                 base_mva: network.base_mva,
             };
@@ -345,6 +347,7 @@ fn curative_search(
         // simply measures a network in which the automaton never acted.
         initially_open: &[],
         bus_countries: network.bus_countries,
+        shunts: network.shunts,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };

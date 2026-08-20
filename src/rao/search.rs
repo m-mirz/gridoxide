@@ -266,7 +266,16 @@ pub fn search(
     let base_open: Vec<usize> = network.initially_open.to_vec();
     let available = match options.skip_far_actions {
         Some(max) => {
-            near_most_limiting(crac, network, resolution, perimeter, &base_open, available, max)
+            near_most_limiting(
+                crac,
+                network,
+                resolution,
+                perimeter,
+                &base_open,
+                available,
+                max,
+                options.linear.flow_model,
+            )
         }
         None => available,
     };
@@ -279,7 +288,8 @@ pub fn search(
         &options.linear,
         Applied { open: &base_open, taps: &[] },
     );
-    let initial = margin_of(crac, network, resolution, perimeter, &base_open);
+    let initial =
+        margin_of(crac, network, resolution, perimeter, &base_open, options.linear.flow_model);
 
     let mut chosen: Vec<usize> = Vec::new();
     let mut best = root;
@@ -423,6 +433,7 @@ fn leaf(
         bus_ids: network.bus_ids,
         initially_open: network.initially_open,
         bus_countries: network.bus_countries,
+        shunts: network.shunts,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
@@ -523,14 +534,25 @@ fn optimize_with_open(
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
-        // Empty, deliberately: the open state is already baked into
-        // `lines`/`transformers` above. Leaving the file's own list here
-        // would re-open branches a *closing* remedial action has just shut,
-        // because `evaluate` derives its open set from this field. That is
-        // silent — every margin stays self-consistent and the optimizer
-        // simply measures a network in which the automaton never acted.
-        initially_open: &[],
+        // The *effective* open set, not the file's. Two reasons, and they pull
+        // in the same direction.
+        //
+        // The file's own list would re-open branches a *closing* remedial
+        // action has just shut, silently measuring a network in which the
+        // automaton never acted. And an empty list is not equivalent to this
+        // one either: the zeroing above is what makes a branch non-conducting
+        // for the *linear* model, where `OPEN_BRANCH_Z` is genuinely open, but
+        // in AC it leaves the bus coupled through a ~1e-9 admittance rather
+        // than not at all. That is a nearly singular Jacobian, and the answer
+        // it converges to is wrong rather than absent — the FR1-FR2 plus
+        // FR1-FR3 combination came out at 234 A against a direct evaluation's
+        // 1204. Stating the outages lets the AC path remove them from the
+        // Y-bus properly; re-removing an already-zeroed branch costs the DC
+        // path nothing, because a branch with no admittance carries no flow to
+        // redistribute.
+        initially_open: open,
         bus_countries: network.bus_countries,
+        shunts: network.shunts,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
@@ -542,6 +564,18 @@ fn optimize_with_open(
     (result.final_objective, result.final_margin_mw, result.setpoints)
 }
 
+/// Evaluate with the given flow model, taking the AC options from the network.
+fn measure_with(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+    model: super::evaluate::FlowModel,
+) -> super::evaluate::SecurityResult {
+    let ac = super::evaluate::AcOptions { shunts: network.shunts, ..Default::default() };
+    super::evaluate::evaluate_model(crac, network, resolution, open, model, &ac)
+}
+
 /// The perimeter's minimum margin with `open` applied and no range action
 /// moved — the "do nothing" baseline the search improves on.
 fn margin_of(
@@ -550,8 +584,9 @@ fn margin_of(
     resolution: &Resolution,
     perimeter: &[State],
     open: &[usize],
+    model: super::evaluate::FlowModel,
 ) -> f64 {
-    evaluate_with(crac, network, resolution, open)
+    measure_with(crac, network, resolution, open, model)
         .perimeters
         .iter()
         .filter(|p| perimeter.contains(&p.state))
@@ -662,6 +697,7 @@ fn near_most_limiting(
     open: &[usize],
     available: Vec<(usize, Effect)>,
     max_boundaries: usize,
+    model: super::evaluate::FlowModel,
 ) -> Vec<(usize, Effect)> {
     if network.bus_countries.is_empty() {
         return available;
@@ -672,8 +708,10 @@ fn near_most_limiting(
         crate::linear::DcOptions::default(),
     );
 
-    // The most limiting element, measured on the network as it stands.
-    let evaluated = super::evaluate::evaluate_with(crac, network, resolution, open);
+    // The most limiting element, measured on the network as it stands and with
+    // the same flow model the optimizer scores by — the reference locates it
+    // from its own optimization result, not from a second opinion.
+    let evaluated = measure_with(crac, network, resolution, open, model);
     let worst = evaluated
         .perimeters
         .iter()
