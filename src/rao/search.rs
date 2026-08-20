@@ -64,6 +64,23 @@ pub struct SearchOptions {
     /// Needs [`Network::bus_countries`]; with no countries there is no notion
     /// of far, and the filter passes everything.
     pub skip_far_actions: Option<usize>,
+    /// Stop as soon as the objective reaches this value instead of maximizing.
+    /// `None` maximizes.
+    ///
+    /// The reference's `SECURE_FLOW` objective, which
+    /// `TreeParameters.buildForPreventivePerimeter` turns into
+    /// `AT_TARGET_OBJECTIVE_VALUE` with a target of zero: **secure is enough**.
+    /// A network that already has a positive margin gets no remedial action at
+    /// all, and a candidate that reaches security is taken whether or not it
+    /// clears the minimum-impact thresholds.
+    ///
+    /// This is not a weaker version of maximizing. Twelve of the reference's
+    /// own AC scenarios use it, and one of them asserts that **zero** actions
+    /// are used on a network gridoxide would happily have improved — spending
+    /// remedial actions to gain margin nobody asked for is a different answer,
+    /// not a better one. Zero is expressed in the objective's unit, where it
+    /// means the same thing either way.
+    pub stop_at_target: Option<f64>,
 }
 
 impl Default for SearchOptions {
@@ -74,6 +91,7 @@ impl Default for SearchOptions {
             relative_min_impact: 0.0,
             linear: LinearOptions::default(),
             skip_far_actions: None,
+            stop_at_target: None,
         }
     }
 }
@@ -291,12 +309,20 @@ pub fn search(
     let initial =
         margin_of(crac, network, resolution, perimeter, &base_open, options.linear.flow_model);
 
+    let reached = |objective: f64| options.stop_at_target.is_some_and(|t| objective >= t);
+
     let mut chosen: Vec<usize> = Vec::new();
     let mut best = root;
     let mut leaves = 0usize;
     let mut depth = 0usize;
 
     for _ in 0..options.max_depth {
+        // Already good enough. Checked before the first depth as well as
+        // between them, so an untouched network that is already secure is left
+        // untouched rather than improved.
+        if reached(best.objective) {
+            break;
+        }
         let mut open_here: Vec<usize> = base_open.clone();
         let mut taps_here: Vec<(usize, i32, f64)> = Vec::new();
         for &index in &chosen {
@@ -352,7 +378,13 @@ pub fn search(
         }
 
         let Some((index, candidate)) = winner else { break };
-        if !improved_enough(best.objective, candidate.objective, options) {
+        // A candidate that reaches the target is taken even if it falls short
+        // of the minimum-impact thresholds: those exist to stop the search
+        // spending an action for nothing, and securing the network is not
+        // nothing.
+        let enough = improved_enough(best.objective, candidate.objective, options)
+            || (candidate.objective > best.objective && reached(candidate.objective));
+        if !enough {
             break;
         }
         chosen.push(index);
