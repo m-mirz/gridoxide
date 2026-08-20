@@ -182,6 +182,15 @@ pub struct CnecResult {
     pub margin_mw: f64,
     /// The threshold that bound, MW, as an absolute limit on |flow|.
     pub limit_mw: f64,
+    /// Distance to the nearest binding threshold in **amperes**, the unit most
+    /// of the reference's own expectations are written in.
+    ///
+    /// This is not a unit conversion of [`margin_mw`](Self::margin_mw) at some
+    /// convenient voltage — it is the same margin expressed in the units the
+    /// binding threshold was written in, converted at the voltage *that*
+    /// threshold names. When a CNEC's thresholds disagree about voltage or
+    /// side, the one that actually bound is the one that governs here.
+    pub margin_a: f64,
     /// Current at the monitored terminal, amperes.
     ///
     /// Under [`FlowModel::Ac`] this is the real thing, `|S| / (√3·U)`. Under
@@ -484,27 +493,34 @@ pub fn evaluate_with(
             // The tightest expressible threshold binds. A CNEC whose thresholds
             // are all inexpressible contributes no constraint at all, which is
             // better than contributing a made-up one.
-            let limit_mw = cnec
-                .thresholds
-                .iter()
-                .filter_map(|t| threshold_mw(t, cnec, u_rated, s_base_va))
-                .map(|l| (l - cnec.reliability_margin).max(0.0))
-                .fold(f64::INFINITY, f64::min);
+            //
+            // The *binding* threshold's own conversion voltage is carried out
+            // of the loop, not just the limit: reporting an ampere margin means
+            // undoing the conversion that produced the limit, and on a CNEC
+            // whose thresholds name different voltages any other choice is a
+            // different number.
+            let mut limit_mw = f64::INFINITY;
+            let mut u_bind = u_rated;
+            for t in &cnec.thresholds {
+                let Some(raw) = threshold_mw(t, cnec, u_rated, s_base_va) else { continue };
+                let effective = (raw - cnec.reliability_margin).max(0.0);
+                if effective < limit_mw {
+                    limit_mw = effective;
+                    u_bind = threshold_voltage(cnec, t, u_rated);
+                }
+            }
             if !limit_mw.is_finite() {
                 continue;
             }
-            let u_written = cnec
-                .thresholds
-                .first()
-                .map(|t| threshold_voltage(cnec, t, u_rated))
-                .unwrap_or(u_rated);
+            let margin_mw = limit_mw - flow_mw.abs();
             cnecs.push(CnecResult {
                 cnec: i,
                 branch,
                 flow_mw,
-                margin_mw: limit_mw - flow_mw.abs(),
+                margin_mw,
                 limit_mw,
-                current_a: flow_mw.abs() * 1e6 / (3f64.sqrt() * u_written),
+                margin_a: to_amperes(margin_mw, u_bind),
+                current_a: to_amperes(flow_mw.abs(), u_bind),
             });
         }
         perimeters.push(PerimeterResult { state, cnecs, severed });
@@ -701,6 +717,7 @@ pub fn evaluate_ac(
             let flow_mw = ends[0].0;
 
             let mut limit_mw = f64::INFINITY;
+            let mut u_bind = u_rated;
             for t in &cnec.thresholds {
                 let Some(raw) = threshold_mw(t, cnec, u_rated, s_base_va) else { continue };
                 let end = match t.side {
@@ -723,7 +740,10 @@ pub fn evaluate_ac(
                     Unit::Megawatt | Unit::Degree | Unit::Kilovolt => 0.0,
                 };
                 let effective = (raw - cnec.reliability_margin - charge).max(0.0);
-                limit_mw = limit_mw.min(effective);
+                if effective < limit_mw {
+                    limit_mw = effective;
+                    u_bind = threshold_voltage(cnec, t, u_rated);
+                }
             }
             if !limit_mw.is_finite() {
                 continue;
@@ -742,12 +762,14 @@ pub fn evaluate_ac(
                 0.0
             };
 
+            let margin_mw = limit_mw - flow_mw.abs();
             cnecs.push(CnecResult {
                 cnec: i,
                 branch,
                 flow_mw,
-                margin_mw: limit_mw - flow_mw.abs(),
+                margin_mw,
                 limit_mw,
+                margin_a: to_amperes(margin_mw, u_bind),
                 current_a,
             });
         }
@@ -755,6 +777,14 @@ pub fn evaluate_ac(
     }
 
     SecurityResult { perimeters, skipped }
+}
+
+/// Convert a three-phase power in MW to a current in amperes at `voltage_v`.
+///
+/// Sign-preserving, because a margin can be negative and an overload of −40 A
+/// is not an overload of 40 A.
+fn to_amperes(power_mw: f64, voltage_v: f64) -> f64 {
+    if voltage_v > 0.0 { power_mw * 1e6 / (3f64.sqrt() * voltage_v) } else { 0.0 }
 }
 
 /// The voltage a current threshold was written against — the CRAC's stated

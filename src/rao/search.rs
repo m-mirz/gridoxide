@@ -121,8 +121,16 @@ struct Effect {
     /// network file marks out of service is closable precisely because the
     /// importer keeps it.
     close: Vec<usize>,
-    /// `(branch, angle in degrees)` for a phase-shifter tap position.
-    taps: Vec<(usize, f64)>,
+    /// `(branch, tap position, angle in degrees)` for a phase-shifter
+    /// set-point.
+    ///
+    /// Both the position and the angle are kept because applying one is not the
+    /// same as applying the other: the network's own tap changer is the
+    /// authority where it has the step, and the angle is the fallback for a
+    /// shifter only the CRAC describes. That is the precedence
+    /// [`linear::apply`](super::linear) already uses, and splitting it would
+    /// let the search evaluate a tap the plan then reports differently.
+    taps: Vec<(usize, i32, f64)>,
 }
 
 /// Reduce a network action, or refuse it.
@@ -130,6 +138,7 @@ fn effect_of(
     action: &NetworkAction,
     crac: &Crac,
     resolution: &Resolution,
+    tap_changers: &[Option<crate::types::TapChanger>],
     lines: usize,
 ) -> Option<Effect> {
     let mut effect = Effect { open: Vec::new(), close: Vec::new(), taps: Vec::new() };
@@ -156,17 +165,36 @@ fn effect_of(
                 if branch < lines {
                     return None;
                 }
-                // The angle comes from whichever range action describes this
-                // phase shifter, since that is where the tap table lives. An
-                // action naming a tap on a shifter no range action describes
-                // cannot be applied.
-                let angle = crac.range_actions.iter().find_map(|r| match &r.kind {
-                    super::crac::RangeActionKind::Pst { element: e, .. } if e == element => {
-                        r.kind.angle_at(*tap)
-                    }
-                    _ => None,
-                })?;
-                effect.taps.push((branch, angle));
+                // The tap table comes from the network where it has one, and
+                // from a range action describing the same shifter otherwise —
+                // the precedence `linear::tap_table` already establishes, and
+                // for the same reason: the network's `##R` record is the
+                // machine, a CRAC's table is a description of it, and where
+                // they disagree the machine wins.
+                //
+                // Consulting only the range actions is not a smaller version of
+                // this rule, it is a different one. A CRAC may declare a PST
+                // *set-point network action* and no PST *range action* at all —
+                // 5 of the reference's own AC scenarios do — and there the
+                // range-action lookup finds nothing and the whole action
+                // becomes inexpressible, so the search silently never offers
+                // the one thing the scenario is about.
+                let declared: Vec<(i32, f64)> = crac
+                    .range_actions
+                    .iter()
+                    .find_map(|r| match &r.kind {
+                        super::crac::RangeActionKind::Pst { element: e, tap_to_angle, .. }
+                            if e == element =>
+                        {
+                            Some(tap_to_angle.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let table =
+                    super::linear::tap_table(&declared, tap_changers, branch, lines);
+                let angle = table.iter().find(|(t, _)| t == tap).map(|(_, a)| *a)?;
+                effect.taps.push((branch, *tap, angle));
             }
             // Injection and shunt changes need a mutable bus vector, which this
             // layer does not carry; a switch pair needs a closable switch.
@@ -213,7 +241,8 @@ pub fn search(
         })
         .filter_map(|action| {
             let index = crac.network_actions.iter().position(|a| a.id == action.id)?;
-            let effect = effect_of(action, crac, resolution, network.lines.len())?;
+            let effect =
+                effect_of(action, crac, resolution, network.tap_changers, network.lines.len())?;
             Some((index, effect))
         })
         .collect();
@@ -221,7 +250,7 @@ pub fn search(
     // The root: no network action, range actions optimized.
     let base_open: Vec<usize> = network.initially_open.to_vec();
     let (root_margin, root_setpoints, root_transformers, root_buses) =
-        leaf(crac, network, resolution, perimeter, solver, &options.linear, &base_open);
+        leaf(crac, network, resolution, perimeter, solver, &options.linear, &base_open, &[]);
     let initial = margin_of(crac, network, resolution, perimeter, &base_open);
 
     let mut chosen: Vec<usize> = Vec::new();
@@ -234,10 +263,12 @@ pub fn search(
 
     for _ in 0..options.max_depth {
         let mut open_here: Vec<usize> = base_open.clone();
+        let mut taps_here: Vec<(usize, i32, f64)> = Vec::new();
         for &index in &chosen {
             if let Some((_, effect)) = available.iter().find(|(i, _)| *i == index) {
                 open_here.extend(&effect.open);
                 open_here.retain(|b| !effect.close.contains(b));
+                taps_here.extend(&effect.taps);
             }
         }
 
@@ -256,9 +287,12 @@ pub fn search(
             let mut open = open_here.clone();
             open.extend(&effect.open);
             open.retain(|b| !effect.close.contains(b));
+            let mut taps = taps_here.clone();
+            taps.extend(&effect.taps);
 
-            let (margin, setpoints, transformers, buses) =
-                leaf(crac, network, resolution, perimeter, solver, &options.linear, &open);
+            let (margin, setpoints, transformers, buses) = leaf(
+                crac, network, resolution, perimeter, solver, &options.linear, &open, &taps,
+            );
             leaves += 1;
 
             let better = match &winner {
@@ -337,8 +371,15 @@ fn leaf(
     solver: &mut dyn Solver,
     options: &LinearOptions,
     open: &[usize],
+    taps: &[(usize, i32, f64)],
 ) -> (f64, Vec<Setpoint>, Vec<crate::types::Transformer>, Vec<crate::types::Bus>) {
     let mut transformers = network.transformers.to_vec();
+    // A phase-shifter set-point is part of the candidate, so it has to be in
+    // force before the leaf is optimized *and* before it is scored. Leaving it
+    // out does not make the action fail loudly — it makes it evaluate as a
+    // change that does nothing, so the search can never prefer it and would
+    // misreport the network if it ever did.
+    apply_taps(&mut transformers, network.tap_changers, network.lines.len(), taps);
     // The leaf gets its own copy of the buses as well as the transformers: a
     // redispatch moves injections, and a candidate that is evaluated and
     // discarded must not leave them moved.
@@ -355,6 +396,33 @@ fn leaf(
     };
     let result = optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, open);
     (result.0, result.1, transformers, buses)
+}
+
+/// Put phase shifters on the tap positions a candidate names.
+///
+/// The network's own tap changer is the authority where it has the step —
+/// `linear::apply`'s rule, and powsybl's: a `PstRangeAction` converts a
+/// set-point to a position and lets the equipment decide the angle. The CRAC's
+/// angle is the fallback for a shifter the network does not describe.
+fn apply_taps(
+    transformers: &mut [crate::types::Transformer],
+    tap_changers: &[Option<crate::types::TapChanger>],
+    lines: usize,
+    taps: &[(usize, i32, f64)],
+) {
+    for &(branch, tap, angle_deg) in taps {
+        let Some(i) = branch.checked_sub(lines) else { continue };
+        let from_network = tap_changers.get(i).and_then(|c| c.as_ref()).and_then(|c| c.at(tap));
+        if let Some(transformer) = transformers.get_mut(i) {
+            // The magnitude is the transformer's own ratio and is not the
+            // shifter's to change; only the angle moves.
+            let ratio = transformer.tap.norm();
+            transformer.tap = match from_network {
+                Some(step) => num_complex::Complex::from_polar(ratio, step.arg()),
+                None => num_complex::Complex::from_polar(ratio, angle_deg.to_radians()),
+            };
+        }
+    }
 }
 
 /// [`optimize`] against a network with branches already open.
