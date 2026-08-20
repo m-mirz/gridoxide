@@ -211,6 +211,7 @@ pub fn run(
                 branch_ids: network.branch_ids,
                 bus_ids: network.bus_ids,
                 initially_open: network.initially_open,
+                bus_countries: network.bus_countries,
                 tap_changers: network.tap_changers,
                 base_mva: network.base_mva,
             };
@@ -233,6 +234,7 @@ pub fn run(
                 branch_ids: network.branch_ids,
                 bus_ids: network.bus_ids,
                 initially_open: network.initially_open,
+                bus_countries: network.bus_countries,
                 tap_changers: network.tap_changers,
                 base_mva: network.base_mva,
             };
@@ -342,6 +344,7 @@ fn curative_search(
         // silent — every margin stays self-consistent and the optimizer
         // simply measures a network in which the automaton never acted.
         initially_open: &[],
+        bus_countries: network.bus_countries,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };

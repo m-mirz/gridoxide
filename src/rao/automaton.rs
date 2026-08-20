@@ -345,6 +345,7 @@ fn shift_to_relieve(
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
         initially_open: network.initially_open,
+        bus_countries: network.bus_countries,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
@@ -455,6 +456,7 @@ fn violated(
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
         initially_open: network.initially_open,
+        bus_countries: network.bus_countries,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
@@ -482,6 +484,7 @@ fn margin(
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
         initially_open: network.initially_open,
+        bus_countries: network.bus_countries,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };

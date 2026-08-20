@@ -409,6 +409,24 @@ fn options_from(config: &Path) -> SearchOptions {
     let Ok(text) = std::fs::read_to_string(config) else { return options };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return options };
 
+    // The two knobs live under the search-tree extension, not beside the
+    // thresholds above.
+    if let Some(topology) = doc.pointer(
+        "/extensions/open-rao-search-tree-parameters/topological-actions-optimization",
+    ) {
+        let skip = topology
+            .get("skip-actions-far-from-most-limiting-element")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if skip {
+            options.skip_far_actions = Some(
+                topology
+                    .get("max-number-of-boundaries-for-skipping-actions")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize,
+            );
+        }
+    }
     if let Some(topology) = doc.get("topological-actions-optimization") {
         if let Some(v) = topology.get("absolute-minimum-impact-threshold").and_then(|v| v.as_f64()) {
             options.absolute_min_impact = v;
@@ -522,6 +540,7 @@ fn check(scenario: &Scenario) -> Outcome {
         branch_ids: &net.branch_ids,
         bus_ids: &net.node_codes,
         initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
@@ -559,6 +578,7 @@ fn check(scenario: &Scenario) -> Outcome {
                 branch_ids: &net.branch_ids,
                 bus_ids: &net.node_codes,
                 initially_open: &net.initially_open,
+                bus_countries: &net.bus_countries,
                 tap_changers: &net.tap_changers,
                 base_mva: net.base_mva,
             };
@@ -591,6 +611,7 @@ fn check(scenario: &Scenario) -> Outcome {
         branch_ids: &net.branch_ids,
         bus_ids: &net.node_codes,
         initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
@@ -887,7 +908,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 /// the printed report says which assertion moved.
 const BASELINE_MATCHED_DC: usize = 124;
 
-/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **135 of 186**.
+/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **148 of 186**.
 ///
 /// Lower than the DC file's perfect score, and expected to be. These scenarios
 /// are judged on margins the reference measured with an AC load flow that also
@@ -895,7 +916,7 @@ const BASELINE_MATCHED_DC: usize = 124;
 /// still chooses its actions on DC sensitivities. Where the two models rank two
 /// candidates differently, the search takes the other one and every assertion
 /// downstream of that choice moves together.
-const BASELINE_MATCHED_AC: usize = 135;
+const BASELINE_MATCHED_AC: usize = 148;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

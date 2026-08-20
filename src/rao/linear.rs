@@ -537,6 +537,8 @@ pub struct NetworkMut<'a> {
     pub branch_ids: &'a [String],
     pub bus_ids: &'a [String],
     pub initially_open: &'a [usize],
+    /// ISO country code per bus; see [`Network::bus_countries`].
+    pub bus_countries: &'a [Option<String>],
     pub tap_changers: &'a [Option<crate::types::TapChanger>],
     pub base_mva: f64,
 }
@@ -550,6 +552,7 @@ impl NetworkMut<'_> {
             branch_ids: self.branch_ids,
             bus_ids: self.bus_ids,
             initially_open: self.initially_open,
+            bus_countries: self.bus_countries,
             tap_changers: self.tap_changers,
             base_mva: self.base_mva,
         }
