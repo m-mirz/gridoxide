@@ -132,9 +132,30 @@ actions. These are constraints on the *plan*, not on any one CNEC, and they are 
 optimizer from proposing a coordinated fourteen-action manoeuvre across five countries because it
 gained 20 MW.
 
-They are **parsed and not yet enforced** — the one place the search still answers a different
-question from the reference's. The 22 vendored scenarios that exercise them are in the gate and
-score 73 of 134.
+### One budget, spent by both halves
+
+The limits count *remedial actions*, and a phase shifter that moves is one exactly as much as an
+opened line is. So the two halves of the search spend a single allowance between them and neither can
+be limited on its own. On scenario 2.6.1.3 the whole curative allowance is one action and the
+reference spends it on the shifter, while gridoxide — counting nothing — opened a line *and* moved
+the shifter, then reported a margin for a plan the CRAC forbids.
+
+Enforcement is split to match. Growing the tree, a candidate is rejected before it is ever evaluated
+if the set it would make exceeds `max_ra`, `max_topo_per_tso`, `max_ra_per_tso` or
+`max_elementary_per_tso` — a plan the CRAC forbids is not a worse answer, it is not an answer. What
+those network actions leave over becomes the leaf's **budget** for range actions, and the subtraction
+is asymmetric on purpose: `max_ra` and `max_ra_per_tso` count everything, so topology eats into them,
+while `max_pst_per_tso` counts only shifters and is untouched by topology.
+
+The budget is a cardinality constraint on which range actions may move, which the reference expresses
+with a binary per range action and a MIP. gridoxide does not need one: the largest vendored CRAC has
+four range actions in a perimeter and every one that declares a limit has two, so **enumerating the
+admissible subsets answers the same question exactly** on the LP solver already in hand. It runs only
+when the unconstrained answer turns out inadmissible, so the ordinary case pays one comparison.
+
+`max-tso` is deliberately absent. A CRAC may declare it and the reference ignores it outright — "a
+max-tso limit can no longer be defined and will be ignored" — so honouring it would apply a
+constraint the reference does not.
 
 ## An action is applied whole, or refused
 

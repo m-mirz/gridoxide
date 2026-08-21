@@ -467,6 +467,90 @@ fn monitored_cnecs_hold_the_optimizer_back_to_the_floor_they_are_owed() {
     );
 }
 
+/// A usage limit binds the *plan*, and both halves of the search spend it.
+///
+/// This CRAC lets `be` use one topological action, one shifter, and two
+/// remedial actions in total, in the curative instant — and every action in it
+/// is operated by `be`. So "two actions" and "one of each" are the same
+/// sentence here, which is what makes it a clean test: a search that counted
+/// only network actions would happily open a line and move both shifters, and
+/// every margin it then reported would be for a plan the CRAC forbids.
+///
+/// Asserted as a property of the answer rather than against a fixed action
+/// list, because which two actions are best is exactly the kind of thing two
+/// heuristic searches may legitimately disagree about. What they may not
+/// disagree about is how many.
+#[test]
+fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
+    use gridoxide::rao::crac::RangeActionKind;
+
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep19us3case1.json"),
+    )
+    .expect("crac");
+
+    let curative = crac
+        .usage_limits
+        .iter()
+        .find(|l| crac.instants[l.instant].kind == InstantKind::Curative)
+        .expect("this fixture declares curative usage limits");
+    assert_eq!(curative.max_topo_per_tso.get("be"), Some(&1));
+    assert_eq!(curative.max_pst_per_tso.get("be"), Some(&1));
+    assert_eq!(curative.max_ra_per_tso.get("be"), Some(&2));
+
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &[],
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+
+    let mut checked = 0;
+    let mut most = 0;
+    for scenario in &plan.scenarios {
+        for perimeter in &scenario.perimeters {
+            if !perimeter.states.iter().any(|s| s.instant == curative.instant) {
+                continue;
+            }
+            checked += 1;
+            let topo = perimeter
+                .network_actions
+                .iter()
+                .filter(|&&i| crac.network_actions[i].operator.as_deref() == Some("be"))
+                .count();
+            let moved: Vec<&gridoxide::rao::RangeAction> = perimeter
+                .setpoints
+                .iter()
+                .filter(|s| s.moved())
+                .map(|s| &crac.range_actions[s.action])
+                .filter(|a| a.operator.as_deref() == Some("be"))
+                .collect();
+            let psts =
+                moved.iter().filter(|a| matches!(a.kind, RangeActionKind::Pst { .. })).count();
+            assert!(topo <= 1, "{topo} BE topological actions, the cap is 1");
+            assert!(psts <= 1, "{psts} BE shifters moved, the cap is 1");
+            assert!(topo + moved.len() <= 2, "{} BE actions, the cap is 2", topo + moved.len());
+            most = most.max(topo + moved.len());
+        }
+    }
+    assert!(checked > 0, "no curative perimeter was examined, so nothing was tested");
+    // …and the caps are not being satisfied by a search that simply does
+    // nothing. Some perimeter spends the whole allowance, so the assertions
+    // above are on a plan that is actually pressing against them.
+    assert_eq!(most, 2, "no perimeter used its full allowance, so nothing was constrained");
+}
+
 // ---------------------------------------------------------------------------
 // Automatons
 // ---------------------------------------------------------------------------

@@ -7,7 +7,8 @@
 //! and in what order, [`mod@search`] chooses the network actions of one
 //! perimeter, and [`linear`] chooses the continuous set-points of one
 //! candidate. [`mod@evaluate`] is what all three measure with, [`usage`]
-//! decides which actions are on the table at all, [`mnec`] is the one
+//! decides which actions are on the table at all, [`limits`] caps how many may
+//! be used, [`mnec`] is the one
 //! constraint that is neither maximized nor hard, and [`mod@validate`]
 //! re-measures the answer under a full AC power flow. [`crac`] and
 //! [`crac_json`] are the data layer underneath.
@@ -20,6 +21,7 @@ pub mod automaton;
 pub mod castor;
 pub mod search;
 pub mod mnec;
+pub mod limits;
 pub mod usage;
 pub mod validate;
 
@@ -41,5 +43,6 @@ pub use evaluate::{
     Network, PerimeterResult, Resolution, SecurityResult,
 };
 pub use mnec::{Baseline, Mnec, MnecOptions};
+pub use limits::{Budget, Limits};
 pub use usage::Constrained;
 pub use validate::{validate, Validation, ValidationOptions, Verdict};

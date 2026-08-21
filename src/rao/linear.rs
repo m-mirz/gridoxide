@@ -81,6 +81,7 @@ use crate::types::Transformer;
 
 use super::crac::{Crac, RangeActionKind, State};
 use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution};
+use super::limits::Budget;
 use super::mnec::{Mnec, NO_CNEC_MARGIN};
 use super::usage::Constrained;
 
@@ -154,6 +155,15 @@ pub struct LinearOptions {
     /// [`castor::run`](super::castor::run) fills in the MNEC baseline. Left
     /// unmeasured a conditional rule falls back to its topological half.
     pub available: Constrained,
+    /// How many range actions this leaf may still move. See [`super::limits`].
+    ///
+    /// The third and last of the per-context fields here, and the narrowest:
+    /// [`mnec`](Self::mnec) is per run, [`available`](Self::available) is per
+    /// perimeter, and this is per **leaf** — two candidates at the same depth
+    /// that spend different TSOs' allowances leave different budgets behind.
+    /// [`search`](super::search::search) fills all three in; a caller
+    /// optimizing a lone perimeter gets the unconstrained default for each.
+    pub limits: Budget,
 }
 
 impl Default for LinearOptions {
@@ -168,6 +178,7 @@ impl Default for LinearOptions {
             flow_model: FlowModel::Dc,
             mnec: Mnec::default(),
             available: Constrained::unmeasured(),
+            limits: Budget::default(),
         }
     }
 }
@@ -429,6 +440,125 @@ pub fn optimize(
     solver: &mut dyn Solver,
     options: &LinearOptions,
 ) -> LinearResult {
+    // Snapshotted *before* the first attempt, because that attempt leaves the
+    // network wherever its answer says — and the whole point of the retry below
+    // is to start each subset from the same place.
+    let before = (network.buses.clone(), network.transformers.clone());
+    let unconstrained = optimize_within(crac, network, resolution, perimeter, solver, options, None);
+    let moved = moved_actions(&unconstrained);
+    if options.limits.is_unlimited() || options.limits.admits(crac, &moved) {
+        return unconstrained;
+    }
+    // The answer spends more of the plan's allowance than the CRAC permits, so
+    // the question becomes *which* range actions to spend it on. That is a
+    // cardinality constraint, which the reference expresses with a binary per
+    // range action and a MIP; here the candidate sets are small enough —
+    // **four** range actions in the largest vendored CRAC, two in every one
+    // that declares a limit — that enumerating the admissible subsets answers
+    // the same question exactly, on the LP solver already in hand.
+    //
+    // Reached only when the free answer is inadmissible, so the ordinary case
+    // pays one comparison. A CRAC large enough for this to matter would need
+    // the MIP, and `TapModel::Discrete` is where that belongs.
+    let usable = usable_range_actions(crac, perimeter, options);
+    let mut best: Option<(LinearResult, Vec<crate::types::Bus>, Vec<Transformer>)> = None;
+    for subset in admissible_subsets(crac, &usable, &options.limits) {
+        network.buses.clone_from(&before.0);
+        network.transformers.clone_from(&before.1);
+        let result =
+            optimize_within(crac, network, resolution, perimeter, solver, options, Some(&subset));
+        // The network each attempt leaves behind travels with its result, so
+        // the winner can be restored without optimizing it a second time.
+        if best.as_ref().is_none_or(|(b, ..)| result.final_objective > b.final_objective) {
+            best = Some((result, network.buses.clone(), network.transformers.clone()));
+        }
+    }
+    // The empty subset is admissible under every budget, so it is either
+    // maximal itself or contained in one that is: there is always a winner.
+    let (result, buses, transformers) = best.expect("doing nothing fits every budget");
+    *network.buses = buses;
+    *network.transformers = transformers;
+    result
+}
+
+/// Which range actions a result actually moved, by index into
+/// [`Crac::range_actions`].
+fn moved_actions(result: &LinearResult) -> Vec<usize> {
+    result.setpoints.iter().filter(|s| s.moved()).map(|s| s.action).collect()
+}
+
+/// The **maximal** subsets of `usable` the budget admits.
+///
+/// Maximal, not every subset, and the saving is not the point — the equivalence
+/// is. Every one of these caps is a *count*, so admissibility is monotone: any
+/// subset of an admissible set is admissible too. Offering the optimizer a
+/// maximal set therefore loses nothing, because whatever it chooses to move is
+/// a subset of one it was already allowed, and it dominates every smaller set
+/// it contains. With one shifter allowed out of two this is two attempts rather
+/// than four; with two of four, six rather than sixteen.
+///
+/// Ordered smallest first so that among equally good answers the one that moves
+/// least wins, which is the same tie-break the movement penalty applies inside
+/// a single solve.
+fn admissible_subsets(crac: &Crac, usable: &[usize], budget: &Budget) -> Vec<Vec<usize>> {
+    // Enumeration is exponential and only ever runs on a handful. A CRAC with
+    // more range actions than this in one perimeter *and* a usage limit needs
+    // the reference's MIP; doing nothing is the conservative answer until
+    // `TapModel::Discrete` can give a better one.
+    const CEILING: usize = 8;
+    if usable.len() > CEILING {
+        return vec![Vec::new()];
+    }
+    let admissible: Vec<Vec<usize>> = (0u32..(1 << usable.len()))
+        .map(|mask| {
+            usable
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| mask >> k & 1 == 1)
+                .map(|(_, &i)| i)
+                .collect::<Vec<usize>>()
+        })
+        .filter(|subset| budget.admits(crac, subset))
+        .collect();
+    let mut out: Vec<Vec<usize>> = admissible
+        .iter()
+        .filter(|subset| {
+            !usable.iter().any(|extra| {
+                if subset.contains(extra) {
+                    return false;
+                }
+                let mut bigger = (*subset).clone();
+                bigger.push(*extra);
+                budget.admits(crac, &bigger)
+            })
+        })
+        .cloned()
+        .collect();
+    out.sort_by_key(|s| s.len());
+    out
+}
+
+/// The range actions this perimeter could move, before any budget is applied.
+fn usable_range_actions(crac: &Crac, perimeter: &[State], options: &LinearOptions) -> Vec<usize> {
+    crac.range_actions
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| options.available.allows(&a.usage_rules, perimeter, crac))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The optimization proper, optionally restricted to a subset of the range
+/// actions.
+fn optimize_within(
+    crac: &Crac,
+    network: &mut NetworkMut<'_>,
+    resolution: &Resolution,
+    perimeter: &[State],
+    solver: &mut dyn Solver,
+    options: &LinearOptions,
+    allowed: Option<&[usize]>,
+) -> LinearResult {
     let dc_options = DcOptions::default();
 
     // The CNECs this perimeter optimizes, and the ones it merely monitors.
@@ -473,7 +603,7 @@ pub fn optimize(
 
     // Where every control started, so `Setpoint::initial` is the pre-optimization
     // value rather than the previous iteration's.
-    let mut controls = match build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options) {
+    let mut controls = match build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options, allowed) {
         Some(c) if !c.is_empty() => c,
         _ => {
             return LinearResult {
@@ -589,7 +719,7 @@ pub fn optimize(
                 .collect();
             // Relinearize around the new point.
             if let Some(rebuilt) =
-                build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options)
+                build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options, allowed)
             {
                 if rebuilt.len() == controls.len() {
                     controls = rebuilt;
@@ -916,6 +1046,7 @@ fn perimeter_cnecs(
 /// Build one control per usable range action, with its sensitivity to each of
 /// `cnecs` — which is the LP's row set, optimized and monitored alike, in the
 /// order the rows will be written.
+#[allow(clippy::too_many_arguments)]
 fn build_controls(
     crac: &Crac,
     network: &NetworkMut<'_>,
@@ -924,6 +1055,7 @@ fn build_controls(
     cnecs: &[usize],
     dc_options: DcOptions,
     options: &LinearOptions,
+    allowed: Option<&[usize]>,
 ) -> Option<Vec<Control>> {
     let cnec_branches: Vec<usize> = cnecs
         .iter()
@@ -937,6 +1069,11 @@ fn build_controls(
     let mut controls = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
         if !options.available.allows(&action.usage_rules, perimeter, crac) {
+            continue;
+        }
+        // A usage limit already spent on network actions leaves room for only
+        // some of these; `allowed` is the subset being tried.
+        if allowed.is_some_and(|a| !a.contains(&index)) {
             continue;
         }
         match &action.kind {
