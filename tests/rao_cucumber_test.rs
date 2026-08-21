@@ -419,6 +419,24 @@ fn options_from(config: &Path) -> SearchOptions {
     let Ok(text) = std::fs::read_to_string(config) else { return options };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return options };
 
+    // A curative perimeter always stops at a target, and the target is stated
+    // relative to the preventive perimeter's own objective:
+    // `TreeParameters.buildForCurativePerimeter`. Both halves of that live in
+    // different places in the file — the improvement under the search-tree
+    // extension, the security flag beside the objective's type.
+    if let Some(v) = doc
+        .pointer("/extensions/open-rao-search-tree-parameters/objective-function\
+                  /curative-min-obj-improvement")
+        .and_then(Value::as_f64)
+    {
+        options.curative_min_obj_improvement = v;
+    }
+    if let Some(v) =
+        doc.pointer("/objective-function/enforce-curative-security").and_then(Value::as_bool)
+    {
+        options.enforce_curative_security = v;
+    }
+
     // `SECURE_FLOW` means "stop once secure" rather than "maximize" —
     // `TreeParameters.buildForPreventivePerimeter` turns it into
     // `AT_TARGET_OBJECTIVE_VALUE` with a target of zero.
@@ -1019,7 +1037,7 @@ const BASELINE_MATCHED_DC: usize = 132;
 /// cost of a worse answer. They are left as recorded disagreements.
 const BASELINE_MATCHED_AC: usize = 190;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **664 of 844**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **700 of 844**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1034,13 +1052,17 @@ const BASELINE_MATCHED_AC: usize = 190;
 /// rather than assumed true. Enforcing the CRAC's **usage limits** then took
 /// 2.6 from 73 of 134 to 103, and 2.2 from 39 of 63 to 54.
 ///
-/// What is still open, by size: 1.3 curative (85 of 420 wrong), 1.2 automatons
-/// (50 of 119), 2.6 (31 of 134). The 2.6 remainder has changed character
-/// completely — it was "gridoxide spends actions the CRAC forbids" and is now
-/// "gridoxide stops before the reference does", the same greedy-chain limit
-/// that shows up wherever three actions are needed and each is worth little on
-/// its own.
-const BASELINE_MATCHED_AC16: usize = 664;
+/// Then the **curative stop criterion** — a curative perimeter searches until
+/// it beats the preventive one and no further — took 1.2 from 69 of 119 to 94
+/// and 1.3 from 335 of 420 to 346.
+///
+/// What is still open, by size: 1.3 curative (74 of 420 wrong), 2.6 usage
+/// limits (31 of 134), 1.2 automatons (25 of 119), 2.2 range actions (9 of 63).
+/// The 2.6 remainder has changed character completely — it was "gridoxide
+/// spends actions the CRAC forbids" and is now "gridoxide stops before the
+/// reference does", the greedy chain that shows up wherever three actions are
+/// needed and each is worth little on its own.
+const BASELINE_MATCHED_AC16: usize = 700;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

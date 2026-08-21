@@ -8,7 +8,7 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **132 of 136** DC assertions, **190 of 201** AC ones on TestCase12Nodes, and **664 of 844** on
+> **132 of 136** DC assertions, **190 of 201** AC ones on TestCase12Nodes, and **700 of 844** on
 > TestCase16Nodes. What is left of the plan is phase 2's other half (CGMES tap tables) and closing
 > the AC residual — see §8.3.
 >
@@ -492,7 +492,7 @@ regression in another:
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 136 | **132** |
 | `ac_scenarios.feature` | 38, on TestCase12Nodes | 201 | **190** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 844 | **664** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 844 | **700** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -651,6 +651,20 @@ aggregate — pointed straight at the next one:
     vendored CRAC, two in every one that declares a limit — that enumerating them answers the same
     question exactly, on the LP already in hand, and only when the free answer turns out
     inadmissible. Worth **45** assertions: 2.6 from 73 of 134 to 103, and 2.2 from 39 of 63 to 54.
+
+19. **A curative perimeter was searching for the best answer instead of a good enough one.**
+    `TreeParameters` gives **every** curative perimeter `AT_TARGET_OBJECTIVE_VALUE`, where the
+    preventive one gets it only under `SECURE_FLOW`, and the target is stated relative to the
+    preventive perimeter's own objective: beat it by `curative-min-obj-improvement` and stop. The
+    reasoning is operational rather than mathematical — curative actions are carried out under time
+    pressure by people who did not plan them, so an extra 40 A bought by a third switching operation
+    is not worth having. Two details carry most of the assertions. The reference's **default
+    improvement is zero**, so "better than preventive at all" is the ordinary rule and the 10000 in
+    its own configurations is what turns the rule *off*. And the criterion is tested on the root leaf
+    **before** that leaf's range actions are optimized, so a perimeter that already qualifies is left
+    entirely alone rather than merely spared its network actions — the difference between two
+    curative remedial actions and none on 1.3.9.1. Worth **36** assertions: 1.2 from 69 of 119 to 94,
+    1.3 from 335 of 420 to 346, with nothing regressed.
 
 **The 9 that differ for a reason nobody has found** are all one CRAC, `epic5/SL_ep5us1.json`, whose
 two CNECs sit on a single line. gridoxide's best single action scores 998.9 A where the reference reports 1149, and the two
