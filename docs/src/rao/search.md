@@ -91,6 +91,39 @@ itself. This matters more than it sounds: a search tree that returns a different
 cannot be regression-tested, and an operator cannot be told why yesterday's study disagreed with
 today's.
 
+## Which actions are on the table
+
+Not every action a CRAC contains is available in every state. Its **usage rules** say when, and they
+come in two kinds.
+
+`onInstant` and `onContingencyState` are topological — a state alone answers them. `onFlowConstraint`
+and `onFlowConstraintInCountry` are not: they say the action is available *only if some CNEC is
+actually constrained*, which takes flows. A TSO writes those to mean "I will open this line, but only
+if that line is overloaded" — an action nobody would take otherwise, and one no operator would be
+offered otherwise.
+
+Three details decide the answer, and each of them is a way to get it wrong:
+
+**Any rule, not every rule.** An action is available when *one* of its rules is activated. So a
+conditional rule is another way in, never a restriction: an action carrying both `onInstant:
+preventive` and `onFlowConstraint` is available in every preventive state whatever the flows say.
+
+**Constrained means margin ≤ 0**, in the objective's unit. Not `< 0` — a CNEC sitting exactly on its
+threshold authorizes its action — and the unit matters for the same reason it matters to the
+objective, since a margin that is negative in amperes can be positive in megawatts.
+
+**Measured once, at the perimeter's starting point, and never re-derived.** This is the one that
+looks like a bug and is not. An action authorized by an overload keeps its authority even after some
+other action relieves that overload. Re-deriving availability inside each leaf would let the
+candidate set change underneath the search — a different problem at every depth, whose answer depends
+on the order the actions happened to be tried. The reference names a scenario after it: 2.4.1.2,
+"onConstraint RAs with a constraint triggered by another preventive RA, **no reevaluation**".
+
+Getting this wrong is expensive and flattering. Before the flow half existed, gridoxide offered every
+conditional action unconditionally, and on that scenario used three actions for +97 A where the
+reference uses one and reports −45. A gate reading only margins would have called that an
+improvement.
+
 ## Usage limits
 
 A CRAC may cap how much may be done at all, per instant: a total `max_ra`, a number of TSOs allowed to
@@ -98,6 +131,10 @@ act at all (`max_tso`), and per-TSO caps on topological actions, PSTs, remedial 
 actions. These are constraints on the *plan*, not on any one CNEC, and they are what keeps an
 optimizer from proposing a coordinated fourteen-action manoeuvre across five countries because it
 gained 20 MW.
+
+They are **parsed and not yet enforced** — the one place the search still answers a different
+question from the reference's. The 22 vendored scenarios that exercise them are in the gate and
+score 73 of 134.
 
 ## An action is applied whole, or refused
 

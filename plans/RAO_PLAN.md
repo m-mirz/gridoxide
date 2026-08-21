@@ -8,7 +8,7 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **132 of 136** DC assertions, **190 of 201** AC ones on TestCase12Nodes, and **572 of 844** on
+> **132 of 136** DC assertions, **190 of 201** AC ones on TestCase12Nodes, and **619 of 844** on
 > TestCase16Nodes. What is left of the plan is phase 2's other half (CGMES tap tables), RA usage
 > limits (parsed, unmodelled), and closing the AC residual — see §8.3.
 >
@@ -492,7 +492,7 @@ regression in another:
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 136 | **132** |
 | `ac_scenarios.feature` | 38, on TestCase12Nodes | 201 | **190** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 844 | **572** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 844 | **619** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -623,6 +623,21 @@ warns about exactly this. These CRACs put the optimum *on* the MNEC bound, 89% o
 tap, so it never looks. Matching them would mean reproducing that rounding at the cost of a worse
 answer, so they are left as recorded disagreements. The other three are 1.3.6.6's curative perimeter
 on `co1_fr2_fr3_1`, which is where most of the sixteen-node file's disagreements already sit.
+
+Then measuring *where* the sixteen-node file loses assertions — by scenario family rather than in
+aggregate — pointed straight at the next one:
+
+17. **Conditional usage rules were read as unconditional.** `onFlowConstraint` and
+    `onFlowConstraintInCountry` say an action is available *only if some CNEC is actually
+    constrained*. `UsageRule::covers` answers the topological half and says so; `automaton.rs`
+    supplied the other half and `search.rs` did not, so every conditional action was on the table
+    always. On scenario 2.4.1.2 gridoxide used three actions and reported +97 A where the reference
+    uses one and reports −45 — an error in the flattering direction, which a gate reading only
+    margins would have called an improvement. Availability is now measured **once** from the flows
+    the perimeter starts with and never re-derived, which is the reference's own rule and what its
+    scenario title means by "no reevaluation": an action authorized by an overload keeps its
+    authority after another action relieves it, or the candidate set changes underneath the search.
+    Worth **47** assertions — the entire 2.4 family, now 147 of 147.
 
 **The 9 that differ for a reason nobody has found** are all one CRAC, `epic5/SL_ep5us1.json`, whose
 two CNECs sit on a single line. gridoxide's best single action scores 998.9 A where the reference reports 1149, and the two

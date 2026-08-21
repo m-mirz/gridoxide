@@ -82,6 +82,7 @@ use crate::types::Transformer;
 use super::crac::{Crac, RangeActionKind, State};
 use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution};
 use super::mnec::{Mnec, NO_CNEC_MARGIN};
+use super::usage::Constrained;
 
 /// The unit the objective — the minimum margin being maximized — is measured
 /// in.
@@ -144,6 +145,15 @@ pub struct LinearOptions {
     /// Inert until its baseline has been measured, which
     /// [`castor::run`](super::castor::run) does once on the untouched network.
     pub mnec: Mnec,
+    /// Which of the perimeter's CNECs are constrained, so a conditional usage
+    /// rule can be answered. See [`super::usage`].
+    ///
+    /// Per *perimeter* rather than per run, and the second field here that is:
+    /// [`search`](super::search::search) fills it in on a copy of these options
+    /// before it evaluates any leaf, the same way
+    /// [`castor::run`](super::castor::run) fills in the MNEC baseline. Left
+    /// unmeasured a conditional rule falls back to its topological half.
+    pub available: Constrained,
 }
 
 impl Default for LinearOptions {
@@ -157,6 +167,7 @@ impl Default for LinearOptions {
             objective_unit: ObjectiveUnit::Megawatt,
             flow_model: FlowModel::Dc,
             mnec: Mnec::default(),
+            available: Constrained::unmeasured(),
         }
     }
 }
@@ -925,7 +936,7 @@ fn build_controls(
 
     let mut controls = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
-        if !perimeter.iter().any(|s| action.usage_rules.iter().any(|r| r.covers(s))) {
+        if !options.available.allows(&action.usage_rules, perimeter, crac) {
             continue;
         }
         match &action.kind {

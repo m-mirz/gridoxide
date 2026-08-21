@@ -1019,16 +1019,22 @@ const BASELINE_MATCHED_DC: usize = 132;
 /// cost of a worse answer. They are left as recorded disagreements.
 const BASELINE_MATCHED_AC: usize = 190;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **572 of 844**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **619 of 844**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
 ///
 /// Its four MNEC scenarios (1.3.6.1, 1.3.6.5 to 1.3.6.7) contribute 39 of 42:
 /// three of them match outright, and the three misses are all in 1.3.6.6's
-/// curative perimeter on `co1_fr2_fr3_1` — which is where the bulk of this
-/// file's pre-existing disagreements already sit, MNECs or no MNECs.
-const BASELINE_MATCHED_AC16: usize = 572;
+/// curative perimeter on `co1_fr2_fr3_1` — which is where a good part of this
+/// file's remaining disagreements sit, MNECs or no MNECs.
+///
+/// The **2.4 usage-rule family matches in full** — 147 of 147, up from 100 —
+/// since conditional usage rules are answered against the perimeter's flows
+/// rather than assumed true. What is still open, by size: 1.3 curative (85 of
+/// 420 wrong), 2.6 RA usage limits (61 of 134, and unmodelled), 1.2 automatons
+/// (50 of 119), 2.2 range actions (24 of 63).
+const BASELINE_MATCHED_AC16: usize = 619;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

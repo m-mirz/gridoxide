@@ -4,12 +4,13 @@
 //! and `docs/src/rao/` for the mathematics.
 //!
 //! The layers, outermost first: [`castor`] decides which perimeters there are
-//! and in what order, [`mod@search`] chooses the network actions of one perimeter,
-//! and [`linear`] chooses the continuous set-points of one candidate.
-//! [`mod@evaluate`] is what all three measure with, [`mnec`] is the one constraint
-//! that is neither maximized nor hard, and [`mod@validate`] re-measures the answer
-//! under a full AC power flow. [`crac`] and [`crac_json`] are the data layer
-//! underneath.
+//! and in what order, [`mod@search`] chooses the network actions of one
+//! perimeter, and [`linear`] chooses the continuous set-points of one
+//! candidate. [`mod@evaluate`] is what all three measure with, [`usage`]
+//! decides which actions are on the table at all, [`mnec`] is the one
+//! constraint that is neither maximized nor hard, and [`mod@validate`]
+//! re-measures the answer under a full AC power flow. [`crac`] and
+//! [`crac_json`] are the data layer underneath.
 
 pub mod crac;
 pub mod crac_json;
@@ -19,6 +20,7 @@ pub mod automaton;
 pub mod castor;
 pub mod search;
 pub mod mnec;
+pub mod usage;
 pub mod validate;
 
 pub use crac::{
@@ -39,4 +41,5 @@ pub use evaluate::{
     Network, PerimeterResult, Resolution, SecurityResult,
 };
 pub use mnec::{Baseline, Mnec, MnecOptions};
+pub use usage::Constrained;
 pub use validate::{validate, Validation, ValidationOptions, Verdict};
