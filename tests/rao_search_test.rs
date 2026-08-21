@@ -475,3 +475,107 @@ fn each_leaf_reoptimizes_the_range_actions_around_its_topology() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Conditional usage rules
+// ---------------------------------------------------------------------------
+
+/// An `onFlowConstraint` action is on the table only if its CNEC is overloaded.
+///
+/// The reference's own scenario 2.4.1.2 is built on this fixture, and gridoxide
+/// used to fail it in the flattering direction: three actions and +97 A against
+/// a reference that uses one and reports −45 A. A margin assertion alone cannot
+/// tell "chose well" from "was offered too much and chose well among it", which
+/// is what let the defect live, so this checks the *decision* and then the
+/// answer.
+///
+/// The fixture separates the two cases cleanly. `open_fr1_fr3` is conditional on
+/// a CNEC that starts at −42.8 MW, so it is available and the reference does use
+/// it elsewhere (2.4.1.1). `open_be1_be4` is conditional on two that start at
+/// +548 and +553 MW, so nothing authorizes it and it must never be offered.
+#[test]
+fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
+    use gridoxide::rao::linear::ObjectiveUnit;
+    use gridoxide::rao::usage::{branch_countries, Constrained};
+
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep16us3case2.json"),
+    )
+    .expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &[],
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+
+    // The margins the decision rests on, read rather than assumed.
+    let start = evaluate_with(&crac, &network, &resolution, &[]);
+    let margin = |id: &str| -> f64 {
+        let i = crac.flow_cnecs.iter().position(|c| c.id == id).expect("cnec");
+        start
+            .perimeters
+            .iter()
+            .flat_map(|p| p.cnecs.iter())
+            .find(|c| c.cnec == i)
+            .expect("evaluated")
+            .margin_mw
+    };
+    assert!(margin("FFR1AA1  FFR4AA1  1 - co1_fr2_fr3_1 - curative") < 0.0);
+    assert!(margin("FFR4AA1  DDE1AA1  1 - preventive") > 0.0);
+    assert!(margin("FFR4AA1  DDE1AA1  1 - co1_fr2_fr3_1 - curative") > 0.0);
+
+    let branches = gridoxide::linear::btheta::dc_branches(
+        &net.lines,
+        &net.transformers,
+        Default::default(),
+    );
+    let constrained = Constrained::from_result(
+        &start,
+        ObjectiveUnit::Megawatt,
+        &branch_countries(&crac, &network, &resolution, &branches),
+    );
+    let preventive = State::preventive(crac.preventive_instant().expect("preventive"));
+    let rules = |id: &str| {
+        crac.network_actions.iter().find(|a| a.id == id).expect("action").usage_rules.clone()
+    };
+
+    assert!(
+        constrained.allows(&rules("open_fr1_fr3"), std::slice::from_ref(&preventive), &crac),
+        "an overloaded CNEC should authorize its action"
+    );
+    assert!(
+        !constrained.allows(&rules("open_be1_be4"), std::slice::from_ref(&preventive), &crac),
+        "nothing authorizes open_be1_be4 and it must not be offered"
+    );
+    assert!(
+        constrained.allows(&rules("close_fr1_fr5"), std::slice::from_ref(&preventive), &crac),
+        "a free-to-use action is unaffected by any of this"
+    );
+
+    // And the search honours it, at a depth that would otherwise reach for it.
+    let mut solver = IpmSolver::new();
+    let result = search(
+        &crac,
+        &network,
+        &resolution,
+        std::slice::from_ref(&preventive),
+        &mut solver,
+        &SearchOptions { max_depth: 3, ..Default::default() },
+    );
+    let taken: Vec<&str> =
+        result.network_actions.iter().map(|&i| crac.network_actions[i].id.as_str()).collect();
+    assert!(
+        !taken.contains(&"open_be1_be4"),
+        "an action nothing authorized was taken: {taken:?}"
+    );
+}

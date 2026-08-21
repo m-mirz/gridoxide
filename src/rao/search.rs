@@ -36,6 +36,7 @@ use crate::opf::Solver;
 use super::crac::{Crac, ElementaryAction, NetworkAction, State};
 use super::evaluate::{Network, Resolution};
 use super::linear::{optimize, LinearOptions, NetworkMut, Setpoint};
+use super::usage::Constrained;
 
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
@@ -266,12 +267,35 @@ pub fn search(
     solver: &mut dyn Solver,
     options: &SearchOptions,
 ) -> SearchResult {
+    // The root: no network action, range actions untouched.
+    let base_open: Vec<usize> = network.initially_open.to_vec();
+
+    // Which CNECs are constrained *here*, before this perimeter acts. A usage
+    // rule conditional on a CNEC is answered against this and never
+    // re-answered, so an action authorized by an overload keeps its authority
+    // even once another action has relieved it — the reference's own scenario
+    // 2.4.1.2 is named for that ("no reevaluation"). See `super::usage`.
+    let starting = measure_with(crac, network, resolution, &base_open, options.linear.flow_model);
+    let branches = crate::linear::btheta::dc_branches(
+        network.lines,
+        network.transformers,
+        crate::linear::DcOptions::default(),
+    );
+    let constrained = Constrained::from_result(
+        &starting,
+        options.linear.objective_unit,
+        &super::usage::branch_countries(crac, network, resolution, &branches),
+    );
+    // Every leaf is optimized against the same candidate set, so the filter
+    // travels with the options rather than being re-derived per leaf.
+    let mut linear = options.linear.clone();
+    linear.available = constrained.clone();
+    let options = &SearchOptions { linear, ..options.clone() };
+
     let available: Vec<(usize, Effect)> = crac
         .network_actions
         .iter()
-        .filter(|action| {
-            perimeter.iter().any(|s| action.usage_rules.iter().any(|r| r.covers(s)))
-        })
+        .filter(|action| constrained.allows(&action.usage_rules, perimeter, crac))
         .filter_map(|action| {
             let index = crac.network_actions.iter().position(|a| a.id == action.id)?;
             let effect =
@@ -279,9 +303,6 @@ pub fn search(
             Some((index, effect))
         })
         .collect();
-
-    // The root: no network action, range actions optimized.
-    let base_open: Vec<usize> = network.initially_open.to_vec();
     let available = match options.skip_far_actions {
         Some(max) => {
             near_most_limiting(
@@ -306,8 +327,10 @@ pub fn search(
         &options.linear,
         Applied { open: &base_open, taps: &[] },
     );
-    let initial =
-        margin_of(crac, network, resolution, perimeter, &base_open, options.linear.flow_model);
+    // From the same assessment the availability filter used, rather than a
+    // second one of the network it already measured — under an AC flow model
+    // that is a Newton-Raphson solve per state.
+    let initial = worst_of(crac, &starting, perimeter);
 
     let reached = |objective: f64| options.stop_at_target.is_some_and(|t| objective >= t);
 
@@ -608,17 +631,14 @@ fn measure_with(
     super::evaluate::evaluate_model(crac, network, resolution, open, model, &ac)
 }
 
-/// The perimeter's minimum margin with `open` applied and no range action
-/// moved — the "do nothing" baseline the search improves on.
-fn margin_of(
+/// The worst optimized margin over `perimeter` in an assessment already made —
+/// the "do nothing" baseline the search improves on.
+fn worst_of(
     crac: &Crac,
-    network: &Network<'_>,
-    resolution: &Resolution,
+    result: &super::evaluate::SecurityResult,
     perimeter: &[State],
-    open: &[usize],
-    model: super::evaluate::FlowModel,
 ) -> f64 {
-    measure_with(crac, network, resolution, open, model)
+    result
         .perimeters
         .iter()
         .filter(|p| perimeter.contains(&p.state))
