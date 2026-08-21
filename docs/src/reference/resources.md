@@ -138,6 +138,101 @@ are worth a look for the current state of GPU-accelerated OPF.
 
 ---
 
+# Books and normative references
+
+Unlike the rest of this file, **this section is not verified against a local checkout** — it is
+compiled from general knowledge of the literature, so editions and years may have moved. Titles and
+authors are the load-bearing part; treat the year as a hint. Entries are grouped by the chapter of
+this book they support, and each says *why it is the one to reach for* rather than simply existing.
+
+## Power flow and general analysis
+
+| Work | Why |
+|---|---|
+| Kundur, **Power System Stability and Control** (McGraw-Hill, 1994; 2nd ed. with Malik, 2022) | The single most-cited text in the field. Bought for the dynamics half, kept for its modelling chapters — the machine, exciter, governor and load models every other topic assumes |
+| Milano, **Power System Modelling and Scripting** (Springer, 2010) | The closest published thing to what `src/` actually is: how to *implement* power flow, continuation, and the DAE formulation, with the Jacobian structure written out rather than waved at. The PSAT author. If one book on this list is worth reading cover to cover for gridoxide's purposes, it is this one |
+| Grainger & Stevenson, **Power System Analysis** (McGraw-Hill, 1994) | The standard undergraduate treatment; per-unit, symmetrical components and the classical fault analysis, clearly |
+| Expósito, Conejo & Cañizares (eds.), **Electric Energy Systems: Analysis and Operation** (CRC, 2nd ed. 2018) | The best modern single-volume survey — a chapter each by people who work on that chapter's subject |
+| Stott, Jardim & Alsaç, *DC Power Flow Revisited*, IEEE Trans. Power Systems 24(3), 2009 | Not a book, but the reference for `linear::btheta` and the reason the summary table distinguishes two DC approximation variants |
+| Zimmerman, Murillo-Sánchez & Thomas, *MATPOWER*, IEEE Trans. Power Systems 26(1), 2011, plus the **MATPOWER User's Manual** | The manual is an unusually honest specification of the algorithms, not just a usage guide — worth reading as a spec when a convention is ambiguous |
+
+## Optimal power flow and optimization
+
+| Work | Why |
+|---|---|
+| Wood, Wollenberg & Sheblé, **Power Generation, Operation, and Control** (Wiley, 3rd ed. 2013) | The classic for economic dispatch, OPF, unit commitment and state estimation in one volume. The reference for the two OPF extensions `plans/OPF_PLAN.md` §10 puts out of scope |
+| Nocedal & Wright, **Numerical Optimization** (Springer, 2nd ed. 2006) | The method book behind `opf::nlp` — interior point, line search, filters, and the trust-region alternatives. Where to go when the barrier update or the regularization misbehaves rather than the model |
+| Boyd & Vandenberghe, **Convex Optimization** (Cambridge, 2004; free PDF) | For the DC-OPF side: why the QP is convex, what the KKT certificate means, and duality as the source of locational marginal prices |
+| Kirschen & Strbac, **Fundamentals of Power System Economics** (Wiley, 2nd ed. 2018) | What the prices the OPF reports actually *are*, and why a congested network produces different ones per bus |
+| Conejo & Baringo, **Power System Operations** (Springer, 2018) | Security-constrained dispatch and the operational framing RAO sits inside |
+
+## State estimation
+
+| Work | Why |
+|---|---|
+| Abur & Expósito, **Power System State Estimation: Theory and Implementation** (CRC, 2004) | The reference, without competition. WLS, observability, bad-data detection by normalized residual, and the constrained formulation for zero injections — which is `src/se/` chapter by chapter |
+| Monticelli, **State Estimation in Electric Power Systems: A Generalized Approach** (Kluwer, 1999) | The generalized/Hachtel formulation, and the deeper treatment of network observability |
+| Kersting, **Distribution System Modeling and Analysis** (CRC, 4th ed. 2017) | The prerequisite for the unbalanced distribution SE the summary table flags as the binding gap — untransposed lines, phasing, and why the symmetric reduction stops being valid |
+
+## Short circuit and protection
+
+| Work | Why |
+|---|---|
+| **IEC 60909-0** (Short-circuit currents in three-phase a.c. systems) | The normative document `src/shortcircuit/` implements. There is no substitute: the \\(c\\)-factors, the equivalent voltage source and the impedance corrections are definitions, not derivations |
+| Anderson, **Analysis of Faulted Power Systems** (IEEE Press, 1995) | The classical treatment of symmetrical components and fault boundary conditions — the derivation IEC 60909 assumes you already know |
+| Das, **Power System Analysis: Short-Circuit Load Flow and Harmonics** (CRC, 3rd ed. 2018) | Covers two of the rows in the summary table at once, and is unusually practical about what the standards leave to judgement |
+| Blackburn & Domin, **Protective Relaying: Principles and Applications** (CRC, 4th ed. 2014) | The starting point for the protection-coordination row, which currently has no foundation in `src/` at all |
+
+## Dynamics: RMS, EMT and small-signal
+
+| Work | Why |
+|---|---|
+| Sauer, Pai & Chow, **Power System Dynamics and Stability** (Wiley-IEEE, 2nd ed. 2017) | The cleanest development of the DAE model and the time-scale separation that makes RMS simulation legitimate. The right first book for the RMS row |
+| Machowski, Lubosny, Bialek & Bumby, **Power System Dynamics: Stability and Control** (Wiley, 3rd ed. 2020) | Broader and more modern than Kundur on control and renewables, and better on *why* a phenomenon happens before the equations arrive |
+| Milano, Dassios, Liu & Tzounas, **Eigenvalue Problems in Power Systems** (CRC, 2020) | The small-signal/modal row: linearizing the DAE, the generalized eigenproblem, participation factors, and the numerics of doing it at scale |
+| Watson & Arrillaga, **Power Systems Electromagnetic Transients Simulation** (IET, 2003) | The EMT row: Dommel's trapezoidal companion-circuit method, travelling-wave lines, and switching |
+| Dommel, **EMTP Theory Book** (BPA, 1986) | The foundational EMT document. Every EMT tool is a descendant of it, and it is written as a specification |
+
+## Voltage stability
+
+| Work | Why |
+|---|---|
+| Van Cutsem & Vournas, **Voltage Stability of Electric Power Systems** (Kluwer, 1998) | The definitive treatment, and careful about the distinction between the static loadability limit and the dynamic collapse mechanism |
+| Ajjarapu, **Computational Techniques for Voltage Stability Assessment and Control** (Springer, 2006) | Continuation power flow specifically — predictor, corrector, parametrization and the behaviour at the nose. The method book for the cheapest of the missing analysis types |
+| Taylor, **Power System Voltage Stability** (McGraw-Hill, 1994) | The operational view: what actually collapses, and what operators do about it |
+
+## Harmonics and power quality
+
+| Work | Why |
+|---|---|
+| Arrillaga & Watson, **Power System Harmonics** (Wiley, 2nd ed. 2003) | The harmonics row: per-frequency network models, source characterization and penetration studies |
+
+## Reliability and adequacy
+
+| Work | Why |
+|---|---|
+| Billinton & Allan, **Reliability Evaluation of Power Systems** (Plenum, 2nd ed. 1996) | Where LOLE, EENS and the rest are defined, and the Monte Carlo and analytical machinery for computing them |
+
+## Sparse numerics
+
+| Work | Why |
+|---|---|
+| Davis, **Direct Methods for Sparse Linear Systems** (SIAM, 2006) | By KLU's own author, and the book `src/klu_native/` is a translation of the ideas from. AMD ordering, BTF, the symbolic/numeric split, and why factorization reuse is the whole game for repeated solves |
+| Davis & Palamadai Natarajan, *Algorithm 907: KLU, a Direct Sparse Solver for Circuit Simulation Problems*, ACM TOMS 37(3), 2010 | The paper for the specific solver; short, and the closest thing to a specification |
+| Duff, Erisman & Reid, **Direct Methods for Sparse Matrices** (Oxford, 2nd ed. 2017) | The broader reference — pivoting strategies, fill-reducing orderings and the block methods |
+| Tinney & Walker, *Direct Solutions of Sparse Network Equations by Optimally Ordered Triangular Factorization*, Proc. IEEE 55(11), 1967 | The paper that made large-scale power flow possible, and still the clearest statement of why ordering matters more than arithmetic |
+
+## Remedial actions, security and capacity calculation
+
+There is **no textbook** for this one, which is worth knowing before looking for it. The subject is
+defined by regulation and by implementation rather than by a literature: the ENTSO-E **CACM**
+Regulation and its capacity-calculation methodologies, the CORE and Nordic CCR methodology documents,
+and [OpenRAO's own documentation](https://powsybl.readthedocs.io/projects/openrao/) — which is the
+reference `plans/RAO_PLAN.md` §8.3 is gated against. Kirschen & Strbac and Conejo & Baringo above
+give the economic and operational framing; the mechanics come from the methodologies.
+
+---
+
 ## Practical recommendations
 
 - **DSSE/MV work** → simbench (primary), VeraGrid's StateEstimation folder (reference cases), IEEE/EPRI distribution feeders (unbalanced 3-phase)
@@ -147,3 +242,7 @@ are worth a look for the current state of GPU-accelerated OPF.
 - **RMS/DAE dynamics validation** → Dynawo example cases + dynawo-large-scale-validation methodology
 - **Interior-point / OPF solver validation** → MadNLP.jl and ExaModelsPower.jl as the reference implementation to diff against; COPSBenchmark.jl for generic NLP robustness; ExaModelsPower-benchmarking-archive for published timings
 - **Handing gridoxide models to external solvers** → implement the `cnlp-abi` C ABI from a Rust `cdylib`, then consume via CNLPModels.jl (Julia) or cnlpmodels-py (Python/cyipopt)
+- **Reading, if only one book per topic** → Milano (implementation and DAEs), Abur & Expósito (state
+  estimation), Nocedal & Wright (the OPF's interior point), Davis (the sparse solve), Sauer/Pai/Chow
+  (RMS dynamics), Ajjarapu (continuation power flow), IEC 60909-0 (short circuit, normative). See
+  [Books and normative references](#books-and-normative-references) for why each
