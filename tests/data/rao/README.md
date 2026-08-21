@@ -39,7 +39,7 @@ The selection is every scenario in that suite that is `@dc` and `@rao` (and not
 optimization, HVDC, second-preventive or MARMOT — the features `src/rao/` does
 not implement. That is 25 of roughly 500, across eleven networks.
 
-**132 of 136 checkable assertions match**, at the reference's own tolerance
+**138 of 142 checkable assertions match**, at the reference's own tolerance
 (`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`). The four that do
 not are two phase-shifter taps in the MNEC scenarios 5.2.1.3 and 5.2.1.4, and
 the two margins that follow from them: the reference's own tap rounding declines
@@ -57,3 +57,10 @@ answer against the starting point.
 
 Steps are unmodified, including the file paths — the harness resolves them by
 basename, so the text stays as its authors wrote it.
+
+Not every step is checkable. Those that are not are **printed as skipped**
+rather than dropped, so the list can be shrunk deliberately: what remains is
+second-preventive bookkeeping (`the execution details should be`), per-side
+flows the result does not carry, and assertions against a written-out network
+file. Skipped steps are excluded from both halves of the ratio — counting them
+as passes would flatter it and counting them as failures would be a lie.

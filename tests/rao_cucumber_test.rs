@@ -129,6 +129,11 @@ enum Expect {
     /// as the same step compares the optimized answer against the starting
     /// point and fails on every scenario that improves anything.
     InitialCnecMargin { cnec: String, value: f64, unit: MarginUnit },
+    /// `the value of the objective function after CRA should be N` — the
+    /// reference's **cost**, which is the negated worst margin plus whatever
+    /// the monitored CNECs are violating. `None` means "initially", before any
+    /// remedial action.
+    ObjectiveValue { value: f64, stage: Option<Stage> },
     PstTap { action: String, tap: i32, at: Where },
     ActionUsed { action: String, at: Where },
     ActionCount { count: usize, at: Where },
@@ -334,6 +339,19 @@ fn expectation(line: &str) -> Expect {
                 Expect::CnecMargin { cnec, value, stage: stage_of(line), unit }
             }
             _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("the value of the objective function") {
+        // "before optimisation" is the reference's own synonym for
+        // "initially" — both call `getCost(null)`.
+        let stage = if line.contains("initially") || line.contains("before optimisation") {
+            None
+        } else {
+            Some(stage_of(line))
+        };
+        return match number_after_quotes(line) {
+            Some(value) => Expect::ObjectiveValue { value, stage },
+            None => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("the tap of PstRangeAction") {
@@ -737,6 +755,60 @@ fn check(scenario: &Scenario) -> Outcome {
         })
         .collect();
 
+    // The reference's "value of the objective function" is its **cost**: the
+    // negated worst margin over the optimized CNECs, plus whatever the
+    // monitored ones are violating. In the objective's unit, which follows the
+    // flow model rather than being stated by the step.
+    //
+    // Which network each CNEC is read in depends on the instant asked about.
+    // "After PRA" reads *every* CNEC, curative ones included, in the post-PRA
+    // network — that is `prePerimeterResultForAllFollowingStates`. "After CRA"
+    // takes the worst across perimeters, each measured in the network its own
+    // decisions produced, which is `Math::max` over the per-state results.
+    let objective_unit = match search_options.linear.objective_unit {
+        ObjectiveUnit::Ampere => MarginUnit::Ampere,
+        ObjectiveUnit::Megawatt => MarginUnit::Megawatt,
+    };
+    let cost_at = |stage: Option<Stage>| -> Option<f64> {
+        let read = |cnec: &FlowCnec| -> Option<f64> {
+            let margin = match stage {
+                None => initial_margins.get(cnec.id.as_str()).copied(),
+                Some(Stage::Cra) => {
+                    let own = match crac.instants[cnec.state.instant].kind {
+                        InstantKind::Auto => Stage::Ara,
+                        InstantKind::Curative => Stage::Cra,
+                        _ => Stage::Pra,
+                    };
+                    pick(own, &cnec.id, &margins, &ara_margins, &cra_margins)
+                }
+                Some(s) => pick(s, &cnec.id, &margins, &ara_margins, &cra_margins),
+            };
+            margin.map(|m| m.in_unit(objective_unit))
+        };
+        let worst = crac
+            .flow_cnecs
+            .iter()
+            .filter(|c| c.optimized)
+            .filter_map(read)
+            .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))?;
+        let mnec = search_options.linear.mnec.options;
+        let violated: f64 = if mnec.enabled {
+            crac.flow_cnecs
+                .iter()
+                .filter(|c| c.monitored)
+                .filter_map(|c| {
+                    let initial =
+                        initial_margins.get(c.id.as_str())?.in_unit(objective_unit);
+                    let floor = f64::min(0.0, initial - mnec.acceptable_margin_decrease);
+                    Some(mnec.violation_cost * (floor - read(c)?).max(0.0))
+                })
+                .sum()
+        } else {
+            0.0
+        };
+        Some(violated - worst)
+    };
+
     // What each perimeter decided, keyed the way the steps address it.
     let decisions = |at: &Where| -> (Vec<String>, HashMap<String, i32>) {
         let mut used = Vec::new();
@@ -888,6 +960,13 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("margin on `{cnec}` {got:?} (expected {value})"),
                 );
             }
+            Expect::ObjectiveValue { value, stage } => {
+                let got = cost_at(*stage);
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!("objective function {got:?} (expected {value})"),
+                );
+            }
             Expect::PstTap { action, tap, at } => {
                 // A shifter with no set-point in this perimeter still has a
                 // tap: the one it is sitting on. The reference's
@@ -987,7 +1066,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
     );
 }
 
-/// How many of the reference's assertions currently hold: **132 of 136**,
+/// How many of the reference's assertions currently hold: **138 of 142**,
 /// across all 25 scenarios.
 ///
 /// It was 124 of 124 before the three MNEC scenarios (5.2.1.2 to 5.2.1.4)
@@ -1000,9 +1079,9 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 /// actions reaching the same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
-const BASELINE_MATCHED_DC: usize = 132;
+const BASELINE_MATCHED_DC: usize = 138;
 
-/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **190 of 201**.
+/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **192 of 203**.
 ///
 /// Lower than the DC file's score, and expected to be. These scenarios are
 /// judged on margins the reference measured with an AC load flow that also
@@ -1035,9 +1114,9 @@ const BASELINE_MATCHED_DC: usize = 132;
 ///
 /// Matching these four assertions would mean reproducing that rounding, at the
 /// cost of a worse answer. They are left as recorded disagreements.
-const BASELINE_MATCHED_AC: usize = 190;
+const BASELINE_MATCHED_AC: usize = 192;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **700 of 844**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **727 of 883**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1046,6 +1125,12 @@ const BASELINE_MATCHED_AC: usize = 190;
 /// three of them match outright, and the three misses are all in 1.3.6.6's
 /// curative perimeter on `co1_fr2_fr3_1` — which is where a good part of this
 /// file's remaining disagreements sit, MNECs or no MNECs.
+///
+/// The `value of the objective function` steps are checked here too — 39 of
+/// them, of which 27 hold. Every one of the twelve that does not sits in a
+/// scenario whose margins already disagree, so they add no new *kind* of
+/// failure; they make the existing ones visible in one more place, which is
+/// what a gate is for.
 ///
 /// The **2.4 usage-rule family matches in full** — 147 of 147, up from 100 —
 /// since conditional usage rules are answered against the perimeter's flows
@@ -1056,13 +1141,13 @@ const BASELINE_MATCHED_AC: usize = 190;
 /// it beats the preventive one and no further — took 1.2 from 69 of 119 to 94
 /// and 1.3 from 335 of 420 to 346.
 ///
-/// What is still open, by size: 1.3 curative (74 of 420 wrong), 2.6 usage
+/// What is still open, by size: 1.3 curative (86 of 459 wrong), 2.6 usage
 /// limits (31 of 134), 1.2 automatons (25 of 119), 2.2 range actions (9 of 63).
 /// The 2.6 remainder has changed character completely — it was "gridoxide
 /// spends actions the CRAC forbids" and is now "gridoxide stops before the
 /// reference does", the greedy chain that shows up wherever three actions are
 /// needed and each is worth little on its own.
-const BASELINE_MATCHED_AC16: usize = 700;
+const BASELINE_MATCHED_AC16: usize = 727;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
