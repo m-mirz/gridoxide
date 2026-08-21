@@ -1,6 +1,7 @@
 # Remedial action optimization in gridoxide
 
-Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 landed 2026-08-18.
+Status: **paused at a working state**, 2026-08-21. Written 2026-08-17 against `0549f7e`; phases 1
+and 2 landed 2026-08-18.
 
 > **Implementation status.** Phases 1 and 3 (the UCTE and IIDM importers) are done and both gates
 > are met — see §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and
@@ -9,8 +10,24 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
 > **138 of 142** DC assertions, **192 of 203** AC ones on TestCase12Nodes, and **727 of 883** on
-> TestCase16Nodes. What is left of the plan is phase 2's other half (CGMES tap tables) and closing
-> the AC residual — see §8.3.
+> TestCase16Nodes, with **108 of those 156 scenarios matching completely**.
+>
+> **What is left**, in the order it is worth doing:
+>
+> 1. **Action combinations beyond the greedy chain.** The structural one. The reference blooms
+>    *combinations* at each depth; this search extends a single best chain, so a plan needing three
+>    actions each worth little on its own is out of reach. It is the dominant cause of the remaining
+>    disagreements in families 1.3 and 2.6 — not a missing rule but a different search, and therefore
+>    a different size of job from anything in §8.3's list of nineteen.
+> 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
+>    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
+> 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
+> 4. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`,
+>    multi-perimeter chaining (`relativeToPreviousInstant`), HVDC range actions, costly optimization.
+> 5. **The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json` that three refuted hypotheses
+>    have not explained. See §8.3.
+>
+> Loop flows and relative margins stay out of scope for the reasons in §11.
 >
 > The strongest result so far was not planned for. §6.2 justified building two importers as the only
 > route to the external gate; what it did not anticipate is that the two would gate *each other*.
