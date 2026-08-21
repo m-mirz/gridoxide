@@ -423,6 +423,11 @@ path = "tests/cgmes_microgrid_type3_test.rs"
 required-features = ["cgmes"]
 
 [[example]]
+name = "doc_numbers"
+path = "examples/doc_numbers.rs"
+required-features = ["rao", "ucte"]
+
+[[example]]
 name = "bench_node_breaker"
 path = "examples/bench_node_breaker.rs"
 required-features = ["cgmes"]

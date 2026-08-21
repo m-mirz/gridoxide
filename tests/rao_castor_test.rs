@@ -309,15 +309,23 @@ fn depth_zero_still_decomposes_even_when_it_finds_nothing() {
 /// |---|---|---|
 /// | do nothing | −182.3 MW | |
 /// | open NL1-NL2, shifter untouched | −182.6 MW | **−0.3 — worse** |
-/// | optimize the shifter, topology untouched | −179.8 MW | +2.5 |
-/// | both, the shifter re-optimized under the new topology | **−82.9 MW** | **+99.4** |
+/// | optimize the shifter, topology untouched | −179.2 MW | +3.1 |
+/// | both, the shifter re-optimized under the new topology | **−132.7 MW** | **+49.6** |
 ///
-/// The combination is worth forty times what either half manages alone, and the
-/// action *on its own is harmful*. A design that chose the topology first and
-/// the set-points afterwards would evaluate the line opening at −182.6, reject
-/// it, and stop with the shifter's 2.5 MW. Only re-running the linear
-/// optimization inside each leaf finds the 99.4, which is why that is where all
+/// The combination is worth sixteen times what either half manages alone, and
+/// the action *on its own is harmful*. A design that chose the topology first
+/// and the set-points afterwards would evaluate the line opening at −182.6,
+/// reject it, and stop with the shifter's 3.1 MW. Only re-running the linear
+/// optimization inside each leaf finds the 49.6, which is why that is where all
 /// the time goes.
+///
+/// The 49.6 is itself capped by this CRAC's five **MNECs** on `NL2-BE3`, which
+/// the shifter loads as it unloads everything else. Told to ignore them
+/// (`mnec.options.enabled = false`) the same search takes the shifter all the
+/// way to tap −16 and reports −82.9 MW, a gain of +99.4 — and leaves two
+/// monitored branches below the floor they are owed. Half the achievable margin
+/// is what this constraint costs on this fixture, which is a fair statement of
+/// why it is a *soft* constraint and not a hard one.
 #[test]
 fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
     let c = case("crac-for-12nodes.json");
@@ -330,7 +338,7 @@ fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
         "no range action moved"
     );
     assert!(
-        plan.preventive.improvement() > 50.0,
+        plan.preventive.improvement() > 25.0,
         "the combination should improve substantially, got {:+.1}",
         plan.preventive.improvement()
     );
@@ -366,12 +374,96 @@ fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
         .perimeters
         .iter()
         .filter(|p| plan.preventive.states.contains(&p.state))
-        .filter_map(|p| p.min_margin())
+        .filter_map(|p| p.min_optimized_margin(&c.crac))
         .fold(f64::INFINITY, f64::min);
     assert!(
         topology_only < plan.initial_margin_mw,
         "the action alone should make things worse, got {topology_only} from {}",
         plan.initial_margin_mw
+    );
+}
+
+/// The soft constraint binds, and it binds *softly*.
+///
+/// The same search, on the same fixture, told to honour the CRAC's five MNECs
+/// and told to ignore them. Ignoring them is worth another 43 MW of margin and
+/// costs two monitored branches their floor, which is the trade the rule
+/// exists to refuse.
+///
+/// The floor is `min(0, m₀ − 50)`, not zero: these MNECs start at 42.4 and
+/// 28.6 MW, inside the acceptable decrease, so they are allowed to go slightly
+/// negative — and do, to −4.1 and −18.0 MW. A test that asserted "no MNEC ends
+/// up negative" would pass for the wrong reason on a fixture where they start
+/// comfortable, and fail here. See [`gridoxide::rao::mnec`].
+#[test]
+fn monitored_cnecs_hold_the_optimizer_back_to_the_floor_they_are_owed() {
+    let c = case("crac-for-12nodes.json");
+    let monitored: Vec<usize> = c
+        .crac
+        .flow_cnecs
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x.monitored)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!monitored.is_empty(), "this fixture is supposed to declare MNECs");
+
+    let mut unconstrained = SearchOptions::default();
+    unconstrained.linear.mnec.options.enabled = false;
+    let mut solver = IpmSolver::new();
+    let loose = run(&c.crac, &c.network(), &c.resolution(), &mut solver, &unconstrained);
+    let held = c.plan();
+
+    assert!(
+        held.preventive.improvement() < loose.preventive.improvement() - 10.0,
+        "the constraint should cost real margin, held {:+.1} vs loose {:+.1}",
+        held.preventive.improvement(),
+        loose.preventive.improvement()
+    );
+
+    // Every MNEC's floor, measured against the untouched network, and where
+    // each of the two answers left it.
+    let before = evaluate_with(&c.crac, &c.network(), &c.resolution(), &[]);
+    let floor = |cnec: usize| {
+        let initial = before
+            .perimeters
+            .iter()
+            .flat_map(|p| p.cnecs.iter())
+            .find(|x| x.cnec == cnec)
+            .expect("every MNEC is evaluated initially")
+            .margin_mw;
+        f64::min(0.0, initial - 50.0)
+    };
+    let worst_shortfall = |plan: &gridoxide::rao::Plan| {
+        let after_network = Network {
+            buses: &plan.preventive.buses,
+            transformers: &plan.preventive.transformers,
+            ..c.network()
+        };
+        let after = evaluate_with(
+            &c.crac,
+            &after_network,
+            &c.resolution(),
+            &plan.preventive.open_branches,
+        );
+        after
+            .perimeters
+            .iter()
+            .flat_map(|p| p.cnecs.iter())
+            .filter(|x| c.crac.flow_cnecs[x.cnec].monitored)
+            .map(|x| x.margin_mw - floor(x.cnec))
+            .fold(f64::INFINITY, f64::min)
+    };
+
+    assert!(
+        worst_shortfall(&held) >= -1e-6,
+        "an MNEC was pushed below its floor by {:.2} MW",
+        -worst_shortfall(&held)
+    );
+    assert!(
+        worst_shortfall(&loose) < -1.0,
+        "with the rule off the search should breach a floor, worst was {:+.2} MW",
+        worst_shortfall(&loose)
     );
 }
 

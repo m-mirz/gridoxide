@@ -73,6 +73,7 @@ use gridoxide::rao::evaluate::{evaluate_model, AcOptions, FlowModel};
 use gridoxide::rao::linear::ObjectiveUnit;
 use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
+use serde_json::Value;
 
 fn features_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao/features")
@@ -470,6 +471,25 @@ fn options_from(config: &Path) -> SearchOptions {
             options.linear.sensitivity_threshold = v;
         }
     }
+    // MNEC handling is gated on the configuration mentioning it at all, exactly
+    // as `ObjectiveFunctionCreator` gates its virtual cost evaluator on both
+    // `mnec-parameters` blocks being present. A file that never mentions MNECs
+    // leaves them unconstrained however the CRAC labels them.
+    let base_mnec = doc.get("mnec-parameters");
+    let extension_mnec = extension.and_then(|e| e.get("mnec-parameters"));
+    options.linear.mnec.options.enabled = base_mnec.is_some() && extension_mnec.is_some();
+    if let Some(v) = base_mnec.and_then(|m| m.get("acceptable-margin-decrease")).and_then(Value::as_f64)
+    {
+        options.linear.mnec.options.acceptable_margin_decrease = v;
+    }
+    if let Some(m) = extension_mnec {
+        if let Some(v) = m.get("violation-cost").and_then(Value::as_f64) {
+            options.linear.mnec.options.violation_cost = v;
+        }
+        if let Some(v) = m.get("constraint-adjustment-coefficient").and_then(Value::as_f64) {
+            options.linear.mnec.options.constraint_adjustment_coefficient = v;
+        }
+    }
     if let Some(topology) = extension.and_then(|e| e.get("topological-actions-optimization")) {
         if let Some(v) = topology.get("max-preventive-search-tree-depth").and_then(|v| v.as_u64()) {
             // The reference's default is i32::MAX; anything that large is a
@@ -523,10 +543,16 @@ fn resting_tap(
     Some(changer.map_or(*initial_tap, |c| c.position))
 }
 
-/// The worst margin across every CNEC, each measured at its own stage.
+/// The worst margin across every **optimized** CNEC, each measured at its own
+/// stage.
 ///
 /// An `auto` CNEC is read after the automatons and a `curative` one after the
 /// curative decisions, because those are the networks those CNECs exist in.
+///
+/// Monitored CNECs are left out because the reference leaves them out: its
+/// functional cost filters on `isOptimized` before taking the minimum, and an
+/// MNEC that starts overloaded would otherwise be reported as the worst margin
+/// of a run that was never asked to repair it.
 fn worst_at_own_stage(
     crac: &Crac,
     unit: MarginUnit,
@@ -536,6 +562,7 @@ fn worst_at_own_stage(
 ) -> Option<f64> {
     crac.flow_cnecs
         .iter()
+        .filter(|c| c.optimized)
         .filter_map(|c| {
             let stage = match crac.instants[c.state.instant].kind {
                 InstantKind::Auto => Stage::Ara,
@@ -888,9 +915,9 @@ fn check(scenario: &Scenario) -> Outcome {
 #[test]
 fn the_reference_implementations_own_expectations() {
     for (file, expected, baseline) in [
-        ("dc_scenarios.feature", 22, BASELINE_MATCHED_DC),
-        ("ac_scenarios.feature", 35, BASELINE_MATCHED_AC),
-        ("ac_scenarios_16nodes.feature", 89, BASELINE_MATCHED_AC16),
+        ("dc_scenarios.feature", 25, BASELINE_MATCHED_DC),
+        ("ac_scenarios.feature", 38, BASELINE_MATCHED_AC),
+        ("ac_scenarios_16nodes.feature", 93, BASELINE_MATCHED_AC16),
     ] {
         run_gate(file, expected, baseline);
     }
@@ -942,34 +969,66 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
     );
 }
 
-/// How many of the reference's assertions currently hold: **124 of 124**,
-/// across all 22 scenarios.
+/// How many of the reference's assertions currently hold: **132 of 136**,
+/// across all 25 scenarios.
 ///
-/// Every margin, every tap, every named action, every action count and every
-/// security status, at the reference's own tolerance.
+/// It was 124 of 124 before the three MNEC scenarios (5.2.1.2 to 5.2.1.4)
+/// joined it. Eight of their twelve assertions hold; the four that do not are
+/// two taps and the two margins that follow from them, and they are the
+/// `BestTapFinder` divergence described on [`BASELINE_MATCHED_AC`].
 ///
-/// It is still a recorded number rather than an assertion of perfection. These
-/// are two heuristic search trees and §8.3 says up front that a different set of
+/// It is a recorded number rather than an assertion of perfection. These are
+/// two heuristic search trees and §8.3 says up front that a different set of
 /// actions reaching the same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
-const BASELINE_MATCHED_DC: usize = 124;
+const BASELINE_MATCHED_DC: usize = 132;
 
-/// The same, for the 35 AC scenarios in `ac_scenarios.feature`: **177 of 186**.
+/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **190 of 201**.
 ///
-/// Lower than the DC file's perfect score, and expected to be. These scenarios
-/// are judged on margins the reference measured with an AC load flow that also
+/// Lower than the DC file's score, and expected to be. These scenarios are
+/// judged on margins the reference measured with an AC load flow that also
 /// distributes slack and enforces reactive limits, while gridoxide's search
 /// still chooses its actions on DC sensitivities. Where the two models rank two
 /// candidates differently, the search takes the other one and every assertion
 /// downstream of that choice moves together.
-const BASELINE_MATCHED_AC: usize = 177;
+///
+/// # The one divergence that is not a coin toss
+///
+/// Three of the MNEC scenarios — 5.2.1.3, 5.2.1.4 here and 5.2.3.3 above —
+/// disagree by exactly **one tap**, always in the direction of the reference
+/// paying an MNEC violation gridoxide declines to pay. On 5.2.1.3 the
+/// reference's tap −7 scores 192.05 MW of margin against a 7.67 MW violation
+/// penalty — 184.38 — while gridoxide's tap −6 scores 188.42 with no violation
+/// at all. On 5.2.3.3 it is −198.52 A against −183.10 A. gridoxide wins both on
+/// the reference's own objective.
+///
+/// That is not luck. The reference rounds a continuous set-point with
+/// `BestTapFinder`, which reconsiders the second-nearest tap only when the
+/// angle lands within 15% of the midpoint between them, and which compares the
+/// two on **minimum margin alone** — its javadoc says so, and warns that
+/// "if virtual costs are an important part of the optimization, it is highly
+/// recommended to use APPROXIMATED_INTEGERS taps … rather than relying on the
+/// best tap finder to round the taps". These CRACs put the LP's optimum
+/// *exactly on the MNEC bound*, which is 89% of the way to the next tap: outside
+/// the band, so the reference never looks, and blind to the penalty if it did.
+/// `PstControl::bracketing_taps` always looks, and scores with the penalty
+/// included.
+///
+/// Matching these four assertions would mean reproducing that rounding, at the
+/// cost of a worse answer. They are left as recorded disagreements.
+const BASELINE_MATCHED_AC: usize = 190;
 
-/// The same, for the 89 AC scenarios on `TestCase16Nodes`: **533 of 802**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **572 of 844**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
-const BASELINE_MATCHED_AC16: usize = 533;
+///
+/// Its four MNEC scenarios (1.3.6.1, 1.3.6.5 to 1.3.6.7) contribute 39 of 42:
+/// three of them match outright, and the three misses are all in 1.3.6.6's
+/// curative perimeter on `co1_fr2_fr3_1` — which is where the bulk of this
+/// file's pre-existing disagreements already sit, MNECs or no MNECs.
+const BASELINE_MATCHED_AC16: usize = 572;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

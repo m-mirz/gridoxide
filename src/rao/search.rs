@@ -622,7 +622,7 @@ fn margin_of(
         .perimeters
         .iter()
         .filter(|p| perimeter.contains(&p.state))
-        .filter_map(|p| p.min_margin())
+        .filter_map(|p| p.min_optimized_margin(crac))
         .fold(f64::INFINITY, f64::min)
 }
 

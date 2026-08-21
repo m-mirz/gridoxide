@@ -12,9 +12,9 @@
 # check in this repository is one gridoxide wrote for itself.
 #
 # The selection is every scenario in that suite that is `@ac` and `@rao`, uses a
-# JSON CRAC and the TestCase12Nodes network, and needs none of loop flows, MNECs,
+# JSON CRAC and the TestCase12Nodes network, and needs none of loop flows,
 # relative margins, costly optimization, HVDC, second-preventive or MARMOT — the
-# features `src/rao/` does not implement. That is 35.
+# features `src/rao/` does not implement. That is 38.
 #
 # These run the AC flow model (`evaluate::evaluate_ac`): every one of their
 # configurations sets `"dc": false`, and most of their expectations are written
@@ -344,6 +344,21 @@ Feature: gridoxide against powsybl-open-rao's own AC expectations
     Then the worst margin is -207.7 A on cnec "FFR2AA1  DDE3AA1  1 - preventive"
     Then the flow on cnec "NNL2AA1  BBE3AA1  1 - preventive" after PRA should be -2684.7 A on side 1
 
+  @fast @rao @ac @preventive-only @mnec @max-min-margin
+  Scenario: 5.2.2.2: margin on MNEC should stay positive (initial margin > 180MW)
+    Given network file is "common/TestCase12Nodes.uct" for CORE CC
+    Given crac file is "epic11/ls_mnec_networkAction_3_2.json"
+    Given configuration file is "epic11/RaoParameters_maxMargin_ampere_ac_mnecDimin260.json"
+    When I launch rao
+    Then the execution details should be "The RAO only went through first preventive"
+    Then its security status should be "UNSECURED"
+    Then the remedial action "Open line FR1- FR2" is used in preventive
+    Then line "FFR1AA1  FFR2AA1  1" in network file with PRA has connection status to "false"
+    Then 1 remedial actions are used in preventive
+    Then the worst margin is -446.1 A on cnec "FFR2AA1  DDE3AA1  1 - preventive"
+    Then the margin on cnec "NNL2AA1  BBE3AA1  1 - preventive" after PRA should be 152.4 A
+    Then the flow on cnec "NNL2AA1  BBE3AA1  1 - preventive" after PRA should be -2445.7 A on side 1
+
   @fast @rao @ac @preventive-only @max-min-margin
   Scenario: 5.2.3.1: reference run, no MNEC
     Given network file is "common/TestCase12Nodes.uct" for CORE CC
@@ -361,6 +376,39 @@ Feature: gridoxide against powsybl-open-rao's own AC expectations
     Then the flow on cnec "NNL2AA1  NNL3AA1  1 - preventive" after PRA should be 1648.7 A on side 1
     Then the flow on cnec "DDE1AA1  DDE2AA1  1 - Contingency FR1 FR3 - curative" after CRA should be -568.2 A on side 1
     Then the flow on cnec "NNL2AA1  BBE3AA1  1 - preventive" after PRA should be -2372.5 A on side 1
+
+  @fast @rao @ac @preventive-only @mnec @max-min-margin
+  Scenario: 5.2.3.2: margin on MNEC should stay positive
+    Given network file is "common/TestCase12Nodes.uct" for CORE CC
+    Given crac file is "epic11/ls_mixed_4_2.json"
+    Given configuration file is "epic11/RaoParameters_maxMargin_ampere_ac_mnecDimin30.json"
+    When I launch rao
+    Then the execution details should be "The RAO only went through first preventive"
+    Then its security status should be "UNSECURED"
+    Then the remedial action "Open line NL1-NL2" is used in preventive
+    Then line "NNL1AA1  NNL2AA1  1" in network file with PRA has connection status to "false"
+    Then the tap of PstRangeAction "PRA_PST_BE" should be -12 in preventive
+    Then PST "BBE2AA1  BBE3AA1  1" in network file with PRA is on tap -12
+    Then 2 remedial actions are used in preventive
+    Then the worst margin is -146.3 A on cnec "FFR2AA1  FFR3AA1  1 - preventive"
+    Then the flow on cnec "NNL2AA1  NNL3AA1  1 - preventive" after PRA should be 1589.1 A on side 1
+
+  @fast @rao @ac @preventive-only @mnec @max-min-margin
+  Scenario: 5.2.3.3: Search Tree RAO - 2 MNECs with one curative
+    Given network file is "common/TestCase12Nodes.uct" for CORE CC
+    Given crac file is "epic11/ls_mixed_4_3.json"
+    Given configuration file is "epic11/RaoParameters_maxMargin_ampere_ac_mnecDimin30.json"
+    When I launch rao
+    Then the execution details should be "The RAO only went through first preventive"
+    Then its security status should be "UNSECURED"
+    Then the remedial action "Open line NL1-NL2" is used in preventive
+    Then line "NNL1AA1  NNL2AA1  1" in network file with PRA has connection status to "false"
+    Then the tap of PstRangeAction "PRA_PST_BE" should be -9 in preventive
+    Then PST "BBE2AA1  BBE3AA1  1" in network file with PRA is on tap -9
+    Then 2 remedial actions are used in preventive
+    Then the worst margin is -176.0 A on cnec "FFR2AA1  FFR3AA1  1 - preventive"
+    Then the flow on cnec "NNL2AA1  NNL3AA1  1 - preventive" after PRA should be 1544.0 A on side 1
+    Then the flow on cnec "DDE1AA1  DDE2AA1  1 - Contingency FR1 FR3 - curative" after PRA should be -535.0 A on side 1
 
   @fast @rao @ac @preventive-only @max-min-margin
   Scenario: 5.3.1.2.1: topological RA, direct CNEC unsecure initially

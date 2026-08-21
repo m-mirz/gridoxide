@@ -25,8 +25,8 @@ and reading all of it.
 
 ## `features/` — the external gate
 
-Eight scenarios copied verbatim from powsybl-open-rao's own Cucumber suite,
-together with the CRACs and `RaoParameters` files they name. Also MPL-2.0.
+Scenarios copied verbatim from powsybl-open-rao's own Cucumber suite, together
+with the CRACs and `RaoParameters` files they name. Also MPL-2.0.
 
 They are the only check in this repository that gridoxide did not write for
 itself. A finite-differenced derivative proves a derivative; a
@@ -35,14 +35,17 @@ These state margins to the decimal and name which remedial actions should be
 used, and their authors wrote them to judge a different implementation.
 
 The selection is every scenario in that suite that is `@dc` and `@rao` (and not
-`@ac`), uses a JSON CRAC, and needs none of loop flows, MNECs, relative margins,
-costly optimization, HVDC, second-preventive or MARMOT — the features `src/rao/`
-does not implement. That is 22 of roughly 500, across ten networks.
+`@ac`), uses a JSON CRAC, and needs none of loop flows, relative margins, costly
+optimization, HVDC, second-preventive or MARMOT — the features `src/rao/` does
+not implement. That is 25 of roughly 500, across eleven networks.
 
-**All 124 checkable assertions match**, at the reference's own tolerance
-(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`) — every margin,
-every tap, every named action, every action count and every security status,
-across all 22 scenarios.
+**132 of 136 checkable assertions match**, at the reference's own tolerance
+(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`). The four that do
+not are two phase-shifter taps in the MNEC scenarios 5.2.1.3 and 5.2.1.4, and
+the two margins that follow from them: the reference's own tap rounding declines
+to reconsider a tap that pays an MNEC penalty, and gridoxide's answer scores
+better on the reference's objective than the reference's does. See
+`BASELINE_MATCHED_AC` in `tests/rao_cucumber_test.rs` for the arithmetic.
 
 Getting there took thirteen fixes, listed in `tests/rao_cucumber_test.rs`. Two
 worth knowing about when adding scenarios: `Given network file is "..." for

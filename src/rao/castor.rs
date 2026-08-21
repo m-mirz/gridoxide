@@ -38,6 +38,7 @@ use super::crac::{Crac, InstantKind, State};
 use super::evaluate::{evaluate_with, Network, Resolution};
 use super::linear::Setpoint;
 use super::automaton::{simulate, AutomatonResult};
+use super::mnec::Baseline;
 use super::search::{search, SearchOptions, SearchResult};
 
 /// What one perimeter was told to do.
@@ -169,6 +170,14 @@ pub fn run(
     }
 
     let initial = worst_margin(crac, network, resolution, network.initially_open, &states);
+
+    // Monitored CNECs are judged against the margins they had before *any*
+    // remedial action, preventive ones included, so the baseline is measured
+    // here — once, on the untouched network — and carried into every perimeter.
+    // Measuring it per perimeter would judge a curative MNEC against whatever
+    // the preventive stage left it at, which is precisely the degradation the
+    // constraint exists to forbid.
+    let options = &with_mnec_baseline(crac, network, resolution, options);
 
     let preventive = search(crac, network, resolution, &preventive_states, solver, options);
     let mut plan_preventive = PerimeterPlan {
@@ -365,6 +374,29 @@ fn worst_margin(
         .perimeters
         .iter()
         .filter(|p| states.contains(&p.state))
-        .filter_map(|p| p.min_margin())
+        .filter_map(|p| p.min_optimized_margin(crac))
         .fold(f64::INFINITY, f64::min)
+}
+
+/// `options` with the MNEC baseline filled in from the untouched network.
+///
+/// A no-op when the CRAC declares no monitored CNEC or the configuration
+/// disabled the rule — measuring a baseline nothing reads would cost an AC
+/// solve per state for nothing.
+fn with_mnec_baseline(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    options: &SearchOptions,
+) -> SearchOptions {
+    let mut options = options.clone();
+    if !options.linear.mnec.options.enabled
+        || !crac.flow_cnecs.iter().any(|c| c.monitored)
+        || !options.linear.mnec.baseline.is_empty()
+    {
+        return options;
+    }
+    options.linear.mnec.baseline =
+        Baseline::measure(crac, network, resolution, options.linear.flow_model);
+    options
 }

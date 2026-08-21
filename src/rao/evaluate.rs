@@ -266,6 +266,26 @@ impl PerimeterResult {
         })
     }
 
+    /// The worst margin over the CNECs a max-min-margin objective actually
+    /// optimizes.
+    ///
+    /// Different from [`min_margin`](Self::min_margin), and the difference is
+    /// the point: a monitored CNEC is held to a soft floor, not maximized, so
+    /// letting one set the minimum reports as "the margin the RAO achieved" a
+    /// number no remedial action was ever asked to move.
+    pub fn min_optimized_margin(&self, crac: &Crac) -> Option<f64> {
+        self.cnecs
+            .iter()
+            .filter(|c| crac.flow_cnecs[c.cnec].optimized)
+            .map(|c| c.margin_mw)
+            .fold(None, |acc, m| {
+                Some(match acc {
+                    Some(a) => f64::min(a, m),
+                    None => m,
+                })
+            })
+    }
+
     pub fn violations(&self) -> impl Iterator<Item = &CnecResult> {
         self.cnecs.iter().filter(|c| c.is_violated())
     }

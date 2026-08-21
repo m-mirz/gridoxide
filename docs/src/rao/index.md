@@ -166,13 +166,14 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-All 124 checkable assertions match, at the reference's own tolerance of `max(5 MW, 1.5%)` — every
-margin, every tap, every named action, every action count and every security status.
+132 of 136 checkable assertions match, at the reference's own tolerance of `max(5 MW, 1.5%)` —
+margins, taps, named actions, action counts and security statuses. The four that do not are two
+phase-shifter taps and the margins that follow from them, in scenarios where the reference's own tap
+rounding takes a step that pays an MNEC penalty its rounding does not look at.
 
 ## What is not here
 
-- **Loop flows, MNECs and relative margins.** MNECs are read and excluded from the objective, which
-  is correct, but nothing yet stops an action from degrading one.
+- **Loop flows and relative margins.**
 - **Costly optimization** — minimizing the price of the actions rather than maximizing margin.
 - **HVDC range actions**, recognised and skipped: gridoxide models a DC network but nothing connects
   it to a range action yet.

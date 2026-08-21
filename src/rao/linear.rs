@@ -38,6 +38,14 @@
 //! while the evaluator scored it correctly. Every margin stayed self-consistent
 //! and the answer was simply wrong.
 //!
+//! # Monitored CNECs
+//!
+//! An MNEC earns a violation column \(V(c) \ge 0\) and the pair of soft
+//! bounds in [`super::mnec`], priced into the objective at the configured
+//! violation cost. It contributes no \(MM\) row: it is not something to
+//! improve. See that module for what "not worse" is defined to mean, and why
+//! the rule needs the margins of the *untouched* network to state at all.
+//!
 //! # Why it iterates
 //!
 //! The linearization is exact in DC for a *redispatch*, because DC flow is
@@ -60,11 +68,6 @@
 //! the shifters are optimized against, so optimizing them separately gives a
 //! worse answer than optimizing them together.
 //!
-//! **MNECs are not constrained.** A monitored CNEC's margin must not get worse,
-//! which is a penalized soft constraint rather than something to maximize. This
-//! layer currently ignores them entirely: they are excluded from the objective,
-//! correctly, but nothing stops an action from degrading one.
-//!
 //! **HVDC range actions are recognised and skipped**: gridoxide models a DC
 //! network (`src/dc.rs`) but nothing connects it to a range action yet. A
 //! counter trade has no network sensitivity at all, which is why the reference
@@ -78,6 +81,7 @@ use crate::types::Transformer;
 
 use super::crac::{Crac, RangeActionKind, State};
 use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution};
+use super::mnec::{Mnec, NO_CNEC_MARGIN};
 
 /// The unit the objective — the minimum margin being maximized — is measured
 /// in.
@@ -135,6 +139,11 @@ pub struct LinearOptions {
     /// helped. Choosing AC costs a Newton-Raphson solve per outer iteration and
     /// buys agreement with a reference that does the same.
     pub flow_model: FlowModel,
+    /// How monitored CNECs are held. See [`super::mnec`].
+    ///
+    /// Inert until its baseline has been measured, which
+    /// [`castor::run`](super::castor::run) does once on the untouched network.
+    pub mnec: Mnec,
 }
 
 impl Default for LinearOptions {
@@ -147,6 +156,7 @@ impl Default for LinearOptions {
             tap_model: TapModel::Continuous,
             objective_unit: ObjectiveUnit::Megawatt,
             flow_model: FlowModel::Dc,
+            mnec: Mnec::default(),
         }
     }
 }
@@ -410,23 +420,35 @@ pub fn optimize(
 ) -> LinearResult {
     let dc_options = DcOptions::default();
 
-    // The CNECs this perimeter optimizes, and the flows they start from.
-    let cnec_indices: Vec<usize> = crac
-        .flow_cnecs
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| perimeter.contains(&c.state) && c.optimized)
-        .filter(|(_, c)| resolution.branch(&c.network_element).is_some())
-        .map(|(i, _)| i)
-        .collect();
+    // The CNECs this perimeter optimizes, and the ones it merely monitors.
+    //
+    // They are kept apart because they earn different rows: an optimized CNEC
+    // constrains the minimum margin, a monitored one gets a penalized violation
+    // column. A CNEC that is both appears in both lists and gets both, which is
+    // what the reference's two fillers between them produce.
+    let cnec_indices = perimeter_cnecs(crac, resolution, perimeter, |c| c.optimized);
+    let mnec_indices = if options.mnec.active() {
+        perimeter_cnecs(crac, resolution, perimeter, |c| c.monitored)
+    } else {
+        Vec::new()
+    };
+    // One list for everything that needs a flow and a sensitivity row. The
+    // optimized ones come first, so a position below `cnec_indices.len()` is an
+    // optimized CNEC and anything after it is a monitored one.
+    let lp_indices: Vec<usize> =
+        cnec_indices.iter().chain(mnec_indices.iter()).copied().collect();
 
-    let mut best = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
+    let mut best = objective(crac, network, resolution, perimeter, options);
     let initial_objective = best;
-    let initial_margin = measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model);
+    let initial_margin = margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model);
     let mut setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
 
-    if cnec_indices.is_empty() {
+    // Nothing to constrain in either direction. A perimeter with *only*
+    // monitored CNECs is not one of these: there the LP has no minimum margin
+    // to raise but a violation to remove, and stopping here would leave it
+    // unremoved.
+    if lp_indices.is_empty() {
         return LinearResult {
             status: LinearStatus::NoImprovement,
             setpoints,
@@ -440,7 +462,7 @@ pub fn optimize(
 
     // Where every control started, so `Setpoint::initial` is the pre-optimization
     // value rather than the previous iteration's.
-    let mut controls = match build_controls(crac, network, resolution, perimeter, dc_options, options) {
+    let mut controls = match build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options) {
         Some(c) if !c.is_empty() => c,
         _ => {
             return LinearResult {
@@ -461,8 +483,15 @@ pub fn optimize(
     for _ in 0..options.max_iterations {
         iterations += 1;
         let (flows, limits) =
-            perimeter_flows(crac, network, resolution, perimeter, &cnec_indices, options.flow_model);
-        let program = build_program(&cnec_indices, &flows, &limits, &controls, options);
+            perimeter_flows(crac, network, resolution, perimeter, &lp_indices, options.flow_model);
+        let program = build_program(
+            cnec_indices.len(),
+            &mnec_indices,
+            &flows,
+            &limits,
+            &controls,
+            options,
+        );
         let Ok(solution) = solver.solve(&program) else {
             break;
         };
@@ -498,7 +527,7 @@ pub fn optimize(
         // iteration settling on the wrong side of a kink — see
         // `PstControl::bracketing_taps`.
         apply(crac, network, &mut controls, &proposed);
-        let mut best_here = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
+        let mut best_here = objective(crac, network, resolution, perimeter, options);
         for k in 0..controls.len() {
             let Some(pst) = controls[k].pst.as_ref() else { continue };
             let target = solution.primal[setpoint_column(k)];
@@ -514,9 +543,9 @@ pub fn optimize(
                 let mut trial = proposed.clone();
                 trial[k] = (angle, Some(tap));
                 apply(crac, network, &mut controls, &trial);
-                let margin = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
-                if margin > best_here + 1e-9 {
-                    best_here = margin;
+                let score = objective(crac, network, resolution, perimeter, options);
+                if score > best_here + 1e-9 {
+                    best_here = score;
                     proposed = trial;
                 } else {
                     apply(crac, network, &mut controls, &proposed);
@@ -534,9 +563,9 @@ pub fn optimize(
         }
         apply(crac, network, &mut controls, &proposed);
 
-        let margin = measure(crac, network, resolution, perimeter, options.objective_unit, options.flow_model);
-        if margin > best + 1e-9 {
-            best = margin;
+        let score = objective(crac, network, resolution, perimeter, options);
+        if score > best + 1e-9 {
+            best = score;
             setpoints = controls
                 .iter()
                 .enumerate()
@@ -549,7 +578,7 @@ pub fn optimize(
                 .collect();
             // Relinearize around the new point.
             if let Some(rebuilt) =
-                build_controls(crac, network, resolution, perimeter, dc_options, options)
+                build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options)
             {
                 if rebuilt.len() == controls.len() {
                     controls = rebuilt;
@@ -586,7 +615,7 @@ pub fn optimize(
         // Re-measured in megawatts rather than converted from `best`: the two
         // are minima over the *same* CNECs but not necessarily over the same
         // one, so converting the ampere answer would name a margin no CNEC has.
-        final_margin_mw: measure(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model),
+        final_margin_mw: margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model),
         initial_objective,
         final_objective: best,
         iterations,
@@ -645,8 +674,21 @@ fn margin_column(n_controls: usize) -> usize {
     3 * n_controls
 }
 
+/// The violation column of the `slot`-th monitored CNEC.
+fn violation_column(n_controls: usize, slot: usize) -> usize {
+    3 * n_controls + 1 + slot
+}
+
+/// The LP.
+///
+/// Columns are `3·n` control columns (set-point, up, down), then the minimum
+/// margin, then one violation column per monitored CNEC.
+///
+/// `flows` and `limits` cover the optimized CNECs first — `optimized` of them —
+/// and the monitored ones after, aligned with `mnecs`.
 fn build_program(
-    cnecs: &[usize],
+    optimized: usize,
+    mnecs: &[usize],
     flows: &[f64],
     limits: &[(f64, f64, f64)],
     controls: &[Control],
@@ -654,7 +696,7 @@ fn build_program(
 ) -> LinearProgram {
     let n = controls.len();
     let mm = margin_column(n);
-    let mut lp = LinearProgram::new(3 * n + 1);
+    let mut lp = LinearProgram::new(3 * n + 1 + mnecs.len());
 
     for (k, control) in controls.iter().enumerate() {
         lp.col_lower[setpoint_column(k)] = control.lower;
@@ -706,7 +748,7 @@ fn build_program(
     lp.col_upper[mm] = f64::INFINITY;
     lp.col_cost[mm] = -1.0;
 
-    for position in 0..cnecs.len() {
+    for position in 0..optimized {
         let reference = flows[position];
         let (lower, upper, amperes_per_mw) = limits[position];
         // Scaling the row is what makes the objective's unit mean something.
@@ -770,25 +812,108 @@ fn build_program(
             lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
         }
     }
+
+    // Monitored CNECs: a bound the flow may cross only by paying for it.
+    //
+    //     F(c) − V(c) ≤ max(f⁺(c), f₀(c) + d) − a
+    //     F(c) + V(c) ≥ min(f⁻(c), f₀(c) − d) + a
+    //
+    // The `max`/`min` against the initial flow is what makes this a "do not
+    // make it worse" rule rather than a second threshold: an MNEC already past
+    // its limit is held to where it was, plus the acceptable decrease `d`, and
+    // one comfortably inside its limit is held to the limit. Both are relaxed
+    // by `V(c) ≥ 0`, priced into the objective — so the constraint yields when
+    // the alternative is worse, which is the whole reason it is soft.
+    //
+    // `d` and the adjustment `a` are stated in the objective's unit and the LP
+    // works in megawatts, so they are divided by this CNEC's own amperes-per-MW
+    // on the way in — the same factor, and the same per-CNEC voltage, that
+    // scales the margin rows above.
+    // Every violation column is non-negative whether or not it ends up in a
+    // row. A column left at the default free bounds would be one the solver may
+    // move for no reason.
+    for slot in 0..mnecs.len() {
+        lp.col_lower[violation_column(n, slot)] = 0.0;
+        lp.col_upper[violation_column(n, slot)] = f64::INFINITY;
+    }
+    for (slot, &cnec) in mnecs.iter().enumerate() {
+        let position = optimized + slot;
+        let violation = violation_column(n, slot);
+        let (lower, upper, amperes_per_mw) = limits[position];
+        let Some(initial) = options.mnec.baseline.get(cnec) else { continue };
+        let to_mw = match options.objective_unit {
+            ObjectiveUnit::Megawatt => 1.0,
+            // No voltage means no conversion, and a bound converted at a made-up
+            // voltage is worse than no bound at all.
+            ObjectiveUnit::Ampere if amperes_per_mw > 0.0 => 1.0 / amperes_per_mw,
+            ObjectiveUnit::Ampere => continue,
+        };
+        let decrease = options.mnec.options.acceptable_margin_decrease * to_mw;
+        let adjustment = options.mnec.options.constraint_adjustment_coefficient * to_mw;
+        // The column is in megawatts and the price is per unit of the
+        // objective, so the two are reconciled here rather than by scaling the
+        // rows — which would price a violation differently depending on which
+        // bound it crossed.
+        lp.col_cost[violation] = options.mnec.options.violation_cost / to_mw;
+
+        let terms: Vec<(usize, f64)> = controls
+            .iter()
+            .enumerate()
+            .filter_map(|(k, c)| {
+                let s = c.sensitivity.get(position).copied().unwrap_or(0.0);
+                (s.abs() >= options.sensitivity_threshold).then_some((k, s))
+            })
+            .collect();
+        let constant: f64 =
+            flows[position] - terms.iter().map(|&(k, s)| s * controls[k].current).sum::<f64>();
+
+        if upper.is_finite() {
+            let bound = f64::max(upper, initial.flow_mw + decrease) - adjustment;
+            let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
+            coefficients.extend(terms.iter().map(|&(k, s)| (setpoint_column(k), s)));
+            coefficients.push((violation, -1.0));
+            lp.add_row(&coefficients, f64::NEG_INFINITY, bound - constant);
+        }
+        if lower.is_finite() {
+            let bound = f64::min(lower, initial.flow_mw - decrease) + adjustment;
+            let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
+            coefficients.extend(terms.iter().map(|&(k, s)| (setpoint_column(k), -s)));
+            coefficients.push((violation, -1.0));
+            lp.add_row(&coefficients, f64::NEG_INFINITY, constant - bound);
+        }
+    }
     lp
 }
 
+/// The CNECs of `perimeter` that `wanted` selects, in CRAC order, skipping any
+/// whose network element does not resolve.
+fn perimeter_cnecs(
+    crac: &Crac,
+    resolution: &Resolution,
+    perimeter: &[State],
+    wanted: impl Fn(&super::crac::FlowCnec) -> bool,
+) -> Vec<usize> {
+    crac.flow_cnecs
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| perimeter.contains(&c.state) && wanted(c))
+        .filter(|(_, c)| resolution.branch(&c.network_element).is_some())
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Build one control per usable range action, with its sensitivity to each of
+/// `cnecs` — which is the LP's row set, optimized and monitored alike, in the
+/// order the rows will be written.
 fn build_controls(
     crac: &Crac,
     network: &NetworkMut<'_>,
     resolution: &Resolution,
     perimeter: &[State],
+    cnecs: &[usize],
     dc_options: DcOptions,
     options: &LinearOptions,
 ) -> Option<Vec<Control>> {
-    let cnecs: Vec<usize> = crac
-        .flow_cnecs
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| perimeter.contains(&c.state) && c.optimized)
-        .filter(|(_, c)| resolution.branch(&c.network_element).is_some())
-        .map(|(i, _)| i)
-        .collect();
     let cnec_branches: Vec<usize> = cnecs
         .iter()
         .map(|&i| resolution.branch(&crac.flow_cnecs[i].network_element).unwrap())
@@ -1034,8 +1159,19 @@ fn apply(
     }
 }
 
-/// The minimum margin over the perimeter's optimized CNECs, MW.
-fn measure(
+/// The minimum margin over the perimeter's **optimized** CNECs, in `unit`.
+///
+/// The filter is the whole point. A monitored CNEC is not something the
+/// optimizer improves — it is something it must not ruin — so letting its
+/// margin set the minimum makes the optimizer spend actions on a branch nobody
+/// asked it to improve, and, worse, makes an MNEC that starts overloaded look
+/// like the binding constraint for the entire perimeter. The reference filters
+/// the same way and in the same place, in
+/// `SumMaxPerTimestampCostEvaluatorResult.getCost`.
+///
+/// `INFINITY` when the perimeter optimizes nothing at all — see
+/// [`objective`] for what that turns into when it has to be a number.
+fn margin(
     crac: &Crac,
     network: &NetworkMut<'_>,
     resolution: &Resolution,
@@ -1045,16 +1181,53 @@ fn measure(
 ) -> f64 {
     let view = network.view();
     let result = evaluate_in(crac, &view, resolution, model);
+    margin_of(crac, &result, perimeter, unit)
+}
+
+/// The minimum margin over the perimeter's optimized CNECs of an assessment
+/// already made.
+fn margin_of(
+    crac: &Crac,
+    result: &super::evaluate::SecurityResult,
+    perimeter: &[State],
+    unit: ObjectiveUnit,
+) -> f64 {
     result
         .perimeters
         .iter()
         .filter(|p| perimeter.contains(&p.state))
         .flat_map(|p| p.cnecs.iter())
+        .filter(|c| crac.flow_cnecs[c.cnec].optimized)
         .map(|c| match unit {
             ObjectiveUnit::Megawatt => c.margin_mw,
             ObjectiveUnit::Ampere => c.margin_a,
         })
         .fold(f64::INFINITY, f64::min)
+}
+
+/// What the optimizer actually maximizes: the minimum margin, less what the
+/// monitored CNECs are costing.
+///
+/// One evaluation serves both halves, which matters under an AC flow model
+/// where an evaluation is a Newton-Raphson solve per state.
+///
+/// A perimeter with nothing optimized has no minimum margin, and the honest
+/// infinity is unusable here: adding a finite penalty to it would lose the
+/// penalty and leave a pure-MNEC perimeter unable to tell its candidates apart.
+/// [`NO_CNEC_MARGIN`] is the reference's own finite stand-in.
+fn objective(
+    crac: &Crac,
+    network: &NetworkMut<'_>,
+    resolution: &Resolution,
+    perimeter: &[State],
+    options: &LinearOptions,
+) -> f64 {
+    let view = network.view();
+    let result = evaluate_in(crac, &view, resolution, options.flow_model);
+    let unit = options.objective_unit;
+    let margin = margin_of(crac, &result, perimeter, unit);
+    let margin = if margin.is_finite() { margin } else { NO_CNEC_MARGIN };
+    margin - options.mnec.cost(crac, &result, perimeter, unit)
 }
 
 /// Flows on the perimeter's CNEC branches, MW, at the current operating point.

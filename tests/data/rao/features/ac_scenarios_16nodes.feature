@@ -13,7 +13,7 @@
 # The selection is every scenario in that suite that is `@ac` and `@rao`, uses a
 # JSON CRAC and this network, and needs none of loop flows, relative margins,
 # costly optimization, HVDC, second-preventive or MARMOT — the features
-# `src/rao/` does not implement. That is 89.
+# `src/rao/` does not implement. That is 93.
 #
 # Each scenario's `Scenario:` line names the file it came from. Steps are
 # unmodified, including the file paths: the harness resolves them by basename
@@ -768,6 +768,98 @@ Feature: gridoxide against powsybl-open-rao's sixteen-node AC expectations
     Then the tap of PstRangeAction "pst_be" should be 0 in preventive
     Then the tap of PstRangeAction "pst_be" should be -16 after "co1_fr2_fr3_1" at "curative"
     Then the value of the objective function after CRA should be 47
+
+  @fast @rao @ac @contingency-scenarios @mnec @max-min-margin
+  Scenario: 1.3.6.1: Simple case with a mix of preventive and curative remedial actions and a MNEC in preventive limited by threshold
+    Given network file is "common/TestCase16Nodes.uct" for CORE CC
+    Given crac file is "epic13/SL_ep13us2case5_with_mnec.json"
+    Given configuration file is "common/RaoParameters_maxMargin_ampere.json"
+    When I launch rao
+    Then the execution details should be "The RAO only went through first preventive"
+    Then its security status should be "SECURED"
+    Then 2 remedial actions are used in preventive
+    Then the remedial action "open_be1_be4" is used in preventive
+    # Without MNEC pst_fr is set to -5
+    Then the tap of PstRangeAction "pst_fr" should be 2 in preventive
+    # Margin of the limiting CNEC is slightly lower than in the original test case without MNEC
+    Then the margin on cnec "BBE1AA1  FFR5AA1  1 - preventive" after PRA should be 1483 A
+    Then the initial flow on cnec "FFR1AA1  FFR2AA1  1 - preventive" should be 430 MW on side 1
+    Then the initial margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" should be 70 MW
+    Then the margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" after PRA should be 5 MW
+    Then 2 remedial actions are used after "co1_fr2_fr3_1" at "curative"
+    Then the remedial action "open_fr1_fr3" is used after "co1_fr2_fr3_1" at "curative"
+    Then the tap of PstRangeAction "pst_be" should be 14 after "co1_fr2_fr3_1" at "curative"
+    Then the value of the objective function after CRA should be -999
+
+  @fast @rao @ac @contingency-scenarios @mnec @max-min-margin
+  Scenario: 1.3.6.5: Simple case with a mix of preventive and curative remedial actions and a MNEC in preventive limited by threshold
+    Given network file is "common/TestCase16Nodes.uct" for CORE CC
+    Given crac file is "epic13/SL_ep13us2case5_with_mnec.json"
+    Given configuration file is "common/RaoParameters_maxMargin_ampere.json"
+    When I launch rao
+    Then the execution details should be "The RAO only went through first preventive"
+    Then its security status should be "SECURED"
+    Then 2 remedial actions are used in preventive
+    Then the remedial action "open_be1_be4" is used in preventive
+    # Without MNEC pst_fr is set to -5
+    Then the tap of PstRangeAction "pst_fr" should be 2 in preventive
+    # Margin of the limiting CNEC is slightly lower than in the original test case without MNEC
+    Then the margin on cnec "BBE1AA1  FFR5AA1  1 - preventive" after PRA should be 1483 A
+    Then the initial margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" should be 70 MW
+    Then the margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" after PRA should be 5 MW
+    Then 2 remedial actions are used after "co1_fr2_fr3_1" at "curative"
+    Then the remedial action "open_fr1_fr3" is used after "co1_fr2_fr3_1" at "curative"
+    Then the tap of PstRangeAction "pst_be" should be 14 after "co1_fr2_fr3_1" at "curative"
+    Then the value of the objective function after CRA should be -999
+
+  @fast @rao @ac @contingency-scenarios @mnec @max-min-margin
+  Scenario: 1.3.6.6: Simple case with a mix of preventive and curative remedial actions and MNECs in preventive and curative limited by threshold
+    Given network file is "common/TestCase16Nodes.uct" for CORE CC
+    Given crac file is "epic13/SL_ep13us2case6_with_mnec_curative.json"
+    Given configuration file is "common/RaoParameters_maxMargin_ampere.json"
+    When I launch rao
+    Then the execution details should be "The RAO only went through first preventive"
+    Then its security status should be "SECURED"
+    Then 2 remedial actions are used in preventive
+    Then the remedial action "open_be1_be4" is used in preventive
+    Then the tap of PstRangeAction "pst_fr" should be 2 in preventive
+    Then the initial margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" should be 70 MW
+    Then the margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" after PRA should be 5 MW
+    # Flow is -572 MW without RA, and threshold -700 MW.
+    Then the initial margin on cnec "BBE1AA1  BBE2AA1  1 - co1_fr2_fr3_1 - curative" should be 127 MW
+    # Here the margin should not be negative because the branch is a MNEC and initial margin was positive.
+    # Flow is -643 MW with PRA and CRA (actually no CRA were activated in this test case), and threshold -700 MW. Margin is positive.
+    Then the margin on cnec "BBE1AA1  BBE2AA1  1 - co1_fr2_fr3_1 - curative" after CRA should be 57 MW
+    # 2 Remedial actions would have been used if the MNEC was not limiting
+    Then 0 remedial actions are used after "co1_fr2_fr3_1" at "curative"
+    Then the worst margin is 612 A on cnec "FFR3AA1  FFR5AA1  1 - co1_fr2_fr3_1 - curative"
+    Then the value of the objective function after CRA should be -612
+
+  @fast @rao @ac @contingency-scenarios @mnec @max-min-margin
+  Scenario: 1.3.6.7: Simple case with a mix of preventive and curative remedial actions and MNECs in preventive and curative limited by initial value
+    Given network file is "common/TestCase16Nodes.uct" for CORE CC
+    Given crac file is "epic13/SL_ep13us2case7_with_mnec_curative_initial.json"
+    Given configuration file is "common/RaoParameters_maxMargin_ampere_mip.json"
+    When I launch rao
+    Then the execution details should be "The RAO only went through first preventive"
+    Then its security status should be "SECURED"
+    Then 2 remedial actions are used in preventive
+    Then the remedial action "open_be1_be4" is used in preventive
+    Then the tap of PstRangeAction "pst_fr" should be 2 in preventive
+    Then the initial margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" should be 70 MW
+    Then the margin on cnec "FFR1AA1  FFR2AA1  1 - preventive" after PRA should be 5 MW
+    # Flow is -572 MW without RA, and threshold -500 MW.
+    Then the initial margin on cnec "BBE1AA1  BBE2AA1  1 - co1_fr2_fr3_1 - curative" should be -72 MW
+    # Here the margin should not be below -122 MW because the initial margin is -72 MW (taking acceptable diminution parameter into account).
+    # Flow is -643 MW with PRA and CRA, and threshold -700 MW. Margin is positive.
+    Then the margin on cnec "BBE1AA1  BBE2AA1  1 - co1_fr2_fr3_1 - curative" after CRA should be -105 MW
+    # Curative RA need to be used in order to respect the MNEC constraint (the MNEC is violated by 30 MW in the root leaf of the curative perimeter)
+    Then 2 remedial actions are used after "co1_fr2_fr3_1" at "curative"
+    Then the remedial action "open_fr1_fr3" is used after "co1_fr2_fr3_1" at "curative"
+    Then the tap of PstRangeAction "pst_be" should be -2 after "co1_fr2_fr3_1" at "curative"
+    # The min margin is lower than in the previous case as the MNEC threshold has been tightened
+    Then the worst margin is 705 A on cnec "FFR3AA1  FFR5AA1  1 - co1_fr2_fr3_1 - curative"
+    Then the value of the objective function after CRA should be -705
 
   @fast @rao @ac @contingency-scenarios @max-min-margin
   Scenario: 1.3.8.2: Full optimization in absolute margin with positive margin in curative
