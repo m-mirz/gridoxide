@@ -12,13 +12,26 @@ by reading their installed packages' own source directly (`pip install VeraGridE
 see each package's own directory structure for the file paths cited below). This file is a snapshot,
 not a living document, and will drift as gridoxide and all five tools evolve.
 
-**Scope of the most recent revision.** gridoxide's own column was re-verified against current source
-(every cell claiming support names the function or type implementing it), and the new
-"CGMES / CIM import" row was checked across all five comparison tools by counting CGMES/CIM-named
-files in their installed trees. The other five tools' cells in every *pre-existing* row were **not**
-re-surveyed and are carried over from the previous revision — treat them as the older snapshot. The
-new "Multi-island" row marks the four tools not checked as `not surveyed` rather than `❌`, since
-absence of a survey is not evidence of absence of the feature.
+**Scope of the most recent revision.** Six rows were **added** for analysis types the table had no
+row for at all — remedial action optimization, voltage stability, harmonics, reliability, protection
+coordination, and input-format coverage — and the single "dynamic simulation" row was **split into
+three**, because RMS, EMT and small-signal analysis are three different machineries and one
+checkbox understated the gap. Absence of a row is how a gap goes untracked; that was the point of
+the exercise.
+
+For the added rows, the three tools checked out under `references/` (lightsim2grid,
+power-grid-model, powsybl-open-loadflow) were searched directly, and each `❌` below names what was
+searched for. **VeraGrid and pandapower could not be re-surveyed** — the previous revision read
+their installed packages and neither is installed here any more — so they are marked `not surveyed`
+rather than `❌`, per the convention the "Multi-island" row introduced: absence of a survey is not
+evidence of absence of a feature. Their cells in the three *split* dynamics rows carry forward the
+directory names the previous survey recorded, which is evidence rather than inference.
+
+**Earlier revisions.** gridoxide's own column was re-verified against current source (every cell
+claiming support names the function or type implementing it), and the "CGMES / CIM import" row was
+checked across all five comparison tools by counting CGMES/CIM-named files in their installed trees.
+The other five tools' cells in every row predating this revision were **not** re-surveyed — treat
+them as the older snapshot.
 
 ## Summary table
 
@@ -42,13 +55,21 @@ absence of a survey is not evidence of absence of the feature.
 | **CGMES / CIM import** | ❌ (0 CGMES/CIM-named files in its tree) | ❌ (0 CGMES/CIM-named files in its tree) | ✅ native, the reference implementation here | ✅ (48 CGMES/CIM-named files) | ✅ `converter/cim` (54 CGMES/CIM-named files) | ✅ EQ/EQBD/SSH/TP/SV profile merge by mRID, node-breaker reduction, ratio + all four phase-tap-changer flavors, 3-winding star resolution, HVDC, SVC, `ExternalNetworkInjection`, `EquivalentInjection`/`EquivalentBranch`, conform/non-conform loads, linear + nonlinear shunts, `AsynchronousMachine`, `PowerElectronicsConnection`. 14 fixture test files; benchmarked against pypowsybl on 8 conformance configurations (`scripts/bench/README.md` §6) |
 | **Multi-island / disconnected components** | not surveyed | not surveyed | ⚠️ `connected_component_mode=MAIN` solves the largest component, drops the rest (verified directly — it is why pypowsybl's bus counts run below gridoxide's on every CGMES fixture) | not surveyed | not surveyed | ✅ every connected component solved in one call with a per-island `IslandReport`/`IslandStatus` (`Converged`/`MaxIterationsReached`/`Singular`/`NoReferenceBus`/`AmbiguousReferenceBus`); sourceless islands get a zero-voltage placeholder rather than an error |
 | **Contingency / N-1 batch analysis** | ✅ `ContingencyAnalysis`, reuses factorization, ~20x speedup claimed | ❌ | ✅ + Woodbury fast-DC path | ✅ linear *and* nonlinear (full AC) contingency analysis, a HELM-based variant, SRAP support, and a time-series variant | ✅ `contingency` module, with a `run_contingency_ls2g` variant that offloads the actual solves to lightsim2grid for speed | ✅ **DC**: `linear::sensitivity::DcSensitivity::outage_flows` gives post-outage flows from one triangular solve with no refactorization, and `multi_outage_flows` generalizes it to N-k via Woodbury (0.40 ms per pair on `case9241pegase` against a 13.4 ms re-solve), including `is_breaking_set` for outage sets that disconnect the network. ✅ **AC**: `batch::BatchSolver::solve_contingencies`, 2.0x (`case118`) to 2.7x (`case9241pegase`) against independent solves single-threaded — `network::build_ybus_with_outages` takes a branch out while *keeping its structural entries*, so the symbolic factorization carries across a whole N-1 sweep. Contingencies that genuinely sever the network fall back to a full rebuild, which is what lets an islanded contingency report `NoReferenceBus` honestly. Note the plain injection-batch path (`BatchSolver::solve`) still refuses `Scenario::branch_outages` with `BatchError::OutagesUnsupported`; contingencies go through the dedicated method above. See gap 2 below |
-| Time-series / batch injections | ✅ `TimeSerie`, ~13x speedup claimed | ✅ batch datasets, parallel via `threading` param | — | ✅ time-series variants of power flow, OPF, linear analysis, *and* contingency analysis | ✅ `timeseries` module (`run_time_series`, pluggable `DataSource`/`OutputWriter`) | ⚠️ `batch::BatchSolver` (`src/batch.rs`): many scenarios over one shared topology, parallel across cores via rayon, each worker amortizing one symbolic factorization over its share — 3.5x on 8 physical cores at 256 scenarios (`scripts/bench/README.md` §4b), results identical to a sequential loop and returned in scenario order. Injection overrides only (`BusOverride` deliberately cannot change `bus_type`, since that changes `n_unknowns` and invalidates the shared pattern), and no time-series driver layered on top — no `DataSource`/`OutputWriter` equivalent, no result writer |
+| Time-series / batch injections | ✅ `TimeSerie`, ~13x speedup claimed | ✅ batch datasets, parallel via `threading` param | — | ✅ time-series variants of power flow, OPF, linear analysis, *and* contingency analysis | ✅ `timeseries` module (`run_time_series`, pluggable `DataSource`/`OutputWriter`) | ⚠️ `batch::BatchSolver` (`src/batch.rs`): many scenarios over one shared topology, parallel across cores via rayon, each worker amortizing one symbolic factorization over its share — 3.5x on 8 physical cores at 256 scenarios (`scripts/bench/README.md` §4b), results identical to a sequential loop and returned in scenario order. Injection overrides only (`BusOverride` deliberately cannot change `bus_type`, since that changes `n_unknowns` and invalidates the shared pattern), and no time-series driver layered on top — no `DataSource`/`OutputWriter` equivalent, no result writer. The deeper gap is **chronology**: scenarios are independent, so nothing carries state from one step to the next — storage state of charge, tap positions, controller memory — which is what separates a batch from a genuine quasi-static time series. simbench ships the profiles such a driver would be validated against |
 | Input validation | ❌ | ✅ `validate_input_data`/`validate_batch_data` | — | ❌ no generic equivalent found (only format-specific CIM/FMU import validation) | ✅ `diagnostic()` (disconnected elements, implausible values, wrong reference system, ...) | ❌ |
 | Short-circuit calculation | ❌ | ✅ (IEC 60909) | ❌ | ✅ (3-phase, LG, LL, LLG fault types — `Simulations/ShortCircuitStudies/`) | ✅ (IEC 60909-style, `shortcircuit` module) | ✅ IEC 60909, phase-domain (`src/shortcircuit/`): all four fault types (3-phase, LG, LL, LLG), `c_max`/`c_min` voltage scaling, bolted and impedance faults, multiple simultaneous faults, de-energized-island handling. Results in both bases — phase quantities *and* symmetrical components (the Fortescue view powsybl's API models, which PGM does not offer). Cross-validated against all 15 of power-grid-model's own short-circuit fixtures (`tests/pgm_short_circuit_test.rs`); CLI (`gridoxide short-circuit`) and Python (`gridoxide.short_circuit`). No study types/machine reactances, no derived \\(i_p\\)/\\(I_b\\)/\\(I_{th}\\) — see [The Short-Circuit Problem](../short_circuit/index.md) |
-| State estimation | ❌ | ✅ (WLS, **sym + asym**, iterative-linear + Newton-Raphson, voltage/power/**current** sensors, **batched** with topology caching and thread-parallelism; no bad-data detection) | ❌ | ✅ (WLS + observability analysis + pseudo-measurement augmentation) | ✅ (WLS, `estimation` module) | ⚠️ **symmetric only** (WLS + observability + bad-data detection + zero-injection constraints, both PGM calculation methods, **batched** with thread-parallelism and a shared factorization, voltage/power/**current** sensors in both angle frames; reads asymmetric sensors but reduces them to the symmetric problem) — see the note below |
+| State estimation | ❌ | ✅ (WLS, **sym + asym**, iterative-linear + Newton-Raphson, voltage/power/**current** sensors, **batched** with topology caching and thread-parallelism; no bad-data detection) | ❌ | ✅ (WLS + observability analysis + pseudo-measurement augmentation) | ✅ (WLS, `estimation` module) | ⚠️ **symmetric only** (WLS + observability + bad-data detection + zero-injection constraints, both PGM calculation methods, **batched** with thread-parallelism and a shared factorization, voltage/power/**current** sensors in both angle frames; reads asymmetric sensors but reduces them to the symmetric problem) — see the note below. The reduction is the binding limit for distribution-level SE, where unbalance is the problem rather than a refinement; [Resources](./resources.md) names simbench, VeraGrid's SE cases and the IEEE/EPRI feeders as the corpus for it |
 | Sensitivity analysis / OPF | ❌ / ❌ | ❌ / ❌ | ✅ / ❌ | ✅ (PTDF/LODF, `Simulations/LinearFactors/`) / ✅ (linear *and* nonlinear AC OPF, `Simulations/OPF/`) | ✅ (PTDF, `pypower/makePTDF.py`) / ✅ native PDIPM AC+DC OPF (`runopp`/`rundcopp`) *plus* an optional external Julia PandaModels.jl bridge (`runpm.py`) for more advanced formulations | ✅ **DC**: PTDF/LODF plus N-k outage factors (`linear::sensitivity::DcSensitivity`, exact because DC is linear) — see [DC power flow](../powerflow/dc.md#sensitivity-factors-ptdf-and-lodf). ✅ **AC**: `ac_sensitivity::AcSensitivity` differentiates a converged operating point against active/reactive injection, transformer ratio and phase-shifter angle, for branch P/Q and bus voltage — both forward (one solve per variable) and adjoint (one solve per monitored quantity), against a single Jacobian factorization. Validated by central-difference re-solve (`tests/ac_sensitivity_test.rs`); CLI (`gridoxide sensitivity`) and Python (`AcSensitivityModel`). No AC contingency sensitivities and no differentiation through the outer loops — see [AC Sensitivity Analysis](../sensitivity/ac.md). / ⚠️ **DC-OPF** (`opf::dc`): least-cost dispatch as a convex QP over generator active power and load shedding, subject to generator boxes, branch ratings and the DC balance, reporting dispatch, locational marginal prices and binding limits with shadow prices. Solved through a solver-independent `LinearProgram`/`Solution` boundary with **two backends**: gridoxide's own primal-dual interior-point QP solver (`opf` feature — pure Rust, no system libraries, so it is the default and *is* covered by CI) and HiGHS via gridoxide's own bindgen FFI (`opf-highs`, the reference the two are cross-checked against on the fixtures and on 300 randomized convex QPs). Validated by analytic cases, KKT optimality certificates and pglib-opf's published DC objectives (all five cases inside 0.03%). CLI (`gridoxide opf`) and Python (`dc_opf`). ✅ **AC-OPF** (`opf::ac`): the full nonconvex problem — generator P and Q, voltage magnitudes and angles, apparent-power branch limits — via gridoxide's own nonlinear interior-point method on the injection Hessians of `injection_hessian`. All five pglib cases match the published AC objectives to 0.001%. Locally optimal, as every AC-OPF is; cross-checked against **IPOPT** (opt-in `opf-ipopt`, own bindgen bindings against a system install) to 5e-9 relative on every fixture. CLI and Python. No taps/phase shifters as variables, no unit commitment, no security constraints — see [Optimal Power Flow](../opf/index.md). |
 | Pluggable "outer loop" architecture | ❌ | ⚠️ ad hoc (tap optimizer only) | ✅ extensively (14+ outer loops) | ⚠️ ad hoc (boolean control flags in `PowerFlowOptions`, not a modular/registry-based architecture like powsybl's) | ✅ genuine `Controller`/`BasicCtrl` base classes (`control/basic_controller.py`) registered on `net.controller` and driven by `run_control` — third-party code can subclass `Controller` directly, closer in spirit to powsybl's extensibility than to VeraGrid's/PGM's fixed flag sets, though not the same formal outer-loop-convergence architecture | ❌ |
-| Dynamic / time-domain simulation (EMT, RMS, small-signal stability) | ❌ | ❌ | ❌ | ✅ (`Simulations/EMT/`, `Simulations/Rms/`, `Simulations/SmallSignalStabilityEmt/`+`SmallSignalStabilityRms/` — the only one of the six with this at all) | ❌ | ❌ |
+| **RMS / transient stability** (phasor-domain dynamics) | ❌ | ❌ | ❌ | ✅ `Simulations/Rms/` | ❌ | ❌ — needs a DAE integrator and a machine/exciter/governor/PSS model library. The *validation* side is better provisioned than the table suggests: [Dynawo](https://github.com/dynawo/dynawo) is MPL-2.0, RTE-maintained, ships validated DynaFlow/DynaWaltz/DynaSwing cases, and **reads IIDM**, which `src/iidm.rs` already imports. See [Resources](./resources.md) |
+| **EMT** (electromagnetic transients) | ❌ | ❌ | ❌ | ✅ `Simulations/EMT/` | ❌ | ❌ — sub-cycle three-phase time stepping, switching devices, travelling-wave lines. The furthest of the three |
+| **Small-signal / modal** (eigenvalue) analysis | ❌ | ❌ | ❌ | ✅ `Simulations/SmallSignalStabilityRms/` + `SmallSignalStabilityEmt/` | ❌ | ❌ — linearize the DAE, eigen-decompose, participation factors. Presupposes the RMS row |
+| **Remedial action optimization** (CRAC / CNEC, preventive + curative) | ❌ | ❌ | ❌ — this is [powsybl-open-rao](https://github.com/powsybl/powsybl-open-rao)'s job, a separate project, and it is the reference gridoxide is gated against | not surveyed (its contingency row mentions SRAP support, which is adjacent) | not surveyed | ✅ `src/rao/`: CRAC model and readers (all 428 vendored CRACs import, 24 format versions), evaluation kernel with Woodbury outage screening, LP over range actions, search tree over network actions, CASTOR perimeter decomposition, automaton simulation, MNEC soft constraints, conditional usage rules, RA usage limits, curative stop criterion, AC re-validation. Gated against the reference's **own** Cucumber suite — 156 scenarios, 138/142 DC and 192/203 + 727/883 AC assertions, 108 scenarios matching completely. Not yet: action combinations beyond the greedy chain, second-preventive, loop flows, relative margins. See [The Remedial Action Problem](../rao/index.md) |
+| **Voltage stability / continuation power flow** (P-V and Q-V curves, loadability limit) | ❌ no match for continuation/CPF/loadability in its tree (its `cpf` hits are `dcpf`) | ❌ same | ❌ same | not surveyed | not surveyed | ❌ — the cheapest of the missing types: a predictor–corrector loop around a Newton solver that already handles Q-limits, distributed slack and multi-island. `dynawo-algorithms` offers voltage margin and load-increase-to-collapse as a reference to diff against |
+| **Harmonic analysis / frequency scan** | ❌ no match for harmonic/frequency-scan in its tree | ❌ same | ❌ same | not surveyed | not surveyed | ❌ — needs a per-frequency Y-bus, harmonic source models and frequency-dependent branch data |
+| **Reliability / adequacy** (Monte Carlo, LOLE/EENS) | ❌ no match for reliability/monte-carlo/LOLE/EENS in its tree | ❌ same | ❌ same | not surveyed | not surveyed | ❌ — the contingency kernel exists; the outage-rate data, sampling driver and indices do not |
+| **Protection coordination** (relay curves, selectivity) | ❌ explicitly not simulated — "ignore the protection, that are NOT simulated" in its own examples | ❌ no match in its tree | ❌ same | not surveyed | not surveyed | ❌ — would sit on the short-circuit engine that does exist |
+| **Input formats** beyond CGMES | ⚠️ ingests from pandapower and pypowsybl/IIDM rather than reading files itself | ⚠️ own PGM format only | ✅ IIDM native | ✅ Matpower, PSS/E RAW | ✅ Matpower / PYPOWER | ⚠️ PGM-JSON, own native JSON, **UCTE-DEF** (`src/ucte.rs`), **IIDM** (`src/iidm.rs`), CGMES. MATPOWER `.m` is read only by a *Python* conversion script (`python/gridoxide/matpower.py`) that emits PGM-JSON, not by the Rust core. No PSS/E RAW |
 | Sparse solver | KLU/Eigen/NICSLU/CKTSO, pluggable at runtime | hand-rolled 2×2-block LU, pivot perturbation off by default | KLU via JNI (primary path) | SciPy's SuperLU (`scipy.sparse.linalg._dsolve._superlu`), wrapped in a numba-JIT'd custom CSC type (`Utils/Sparse/csc2.py`) — not pluggable | SciPy's `spsolve` (`pypower/newtonpf.py`), with an optional `use_umfpack` flag — UMFPACK is a SuiteSparse sibling of KLU, when `scikit-umfpack` is installed | faer (`Scalar`) / hand-rolled 2×2-block LU (`Block`, matches PGM's own block granularity) / KLU (`Klu`) / from-scratch Rust KLU port (`KluNative`) / Intel oneMKL PARDISO (`Pardiso`) |
 
 ## Per-tool notes
@@ -169,6 +190,7 @@ absence of a survey is not evidence of absence of the feature.
 - **Sparse-solver breadth**: five backends (`Scalar`/`Block`/`Klu`/`KluNative`/`Pardiso` — the count previously read "four" while listing five) already exceeds VeraGrid's and pandapower's single fixed-solver paths, though it's still short of lightsim2grid's runtime-pluggable KLU/Eigen/NICSLU/CKTSO selection.
 - **CGMES import depth**: one of four tools here with any CGMES/CIM import at all, and the only one of those four that is otherwise a focused AC power-flow library rather than a general-purpose framework. On the 8 conformance configurations benchmarked in `scripts/bench/README.md` §6 it is faster than pypowsybl on every fixture where both actually solve, and solves `MicroGrid-Type2-HVDC-MAS`, which pypowsybl declines to attempt (`iteration_count=0`, "Network has no generator with voltage control enabled").
 - **Multi-island solving**: solves every connected component with per-island status rather than only the main one.
+- **Remedial action optimization**: the one row where *none* of the five comparison tools competes — the reference is powsybl-open-rao, a separate project. And it is the most externally-validated thing here: the reference publishes its expectations as a Cucumber suite, so 156 of its own scenarios are vendored verbatim and scored assertion by assertion (`tests/rao_cucumber_test.rs`), rather than gridoxide checking its own arithmetic against itself.
 - **Solution verification tooling**: `scripts/bench/check_matpower_residual.py` checks a solved case against the MATPOWER file's *own* power-flow equations, and `check_cgmes_sv_consistency.py` checks a CGMES fixture's published `SvVoltage` against its own EQ/SSH data. Neither needs a second tool as a reference. This is a benchmark-harness capability, **not** an input-validation feature — it does not close the "Input validation" row above, which is about validating input before a solve (PGM's `validate_input_data`, pandapower's `diagnostic()`).
 
 ## Identified gaps, ranked by how often reference tools flag them as important
@@ -206,7 +228,58 @@ absence of a survey is not evidence of absence of the feature.
 
    Still absent: taps and phase shifters as decision variables, unit commitment, and security-constrained OPF.
 
-9. Everything else in the table (TCSC/SSC and the wider FACTS set, outer-loop/controller architecture as a general extensibility mechanism, VeraGrid's unique EMT/RMS dynamic simulation, pandapower's protection-device modeling) — real capabilities elsewhere, but either a materially larger undertaking or outside gridoxide's current scope as a focused AC power-flow library.
+9. **Remedial action optimization** — **Done**, and it is not a row any of the five comparison tools
+   fills: the reference here is powsybl-**open-rao**, a separate project from open-loadflow.
+   `src/rao/` carries the CRAC model and readers, the evaluation kernel, an LP over range actions, a
+   search tree over network actions, the CASTOR perimeter decomposition, automaton simulation, MNEC
+   soft constraints, conditional usage rules, RA usage limits and the curative stop criterion, with
+   an AC re-validation stage on top.
+
+   What makes it unusual among the items here is the gate: the reference ships its expectations as a
+   Cucumber suite, so 156 of its own scenarios are vendored verbatim and scored — 138/142 DC and
+   192/203 plus 727/883 AC assertions, with 108 scenarios matching completely. Nineteen real defects
+   were found by it, every one internally consistent and externally wrong. See
+   `plans/RAO_PLAN.md` §8.3 for the list and [The Remedial Action Problem](../rao/index.md) for the
+   mathematics.
+
+   Still absent: action combinations beyond the greedy chain (the structural one — the reference
+   blooms *combinations* at each depth where this search extends a single best chain),
+   second-preventive optimization, loop flows and relative margins.
+
+10. **The analysis types with no row until this revision** — voltage stability, harmonics,
+    reliability, protection coordination, and the three dynamics rows. None of them is a refinement
+    of something already built; each is a different question asked of the network, and they are worth
+    ranking rather than lumping together:
+
+    - **Voltage stability / continuation power flow** is the cheapest by a distance. It is a
+      predictor–corrector loop around a Newton solver that already handles Q-limits, distributed
+      slack and multi-island, and it answers a question nothing in the current set answers: *how much
+      further can this be loaded?* `dynawo-algorithms` offers voltage margin and
+      load-increase-to-collapse to diff against.
+    - **Quasi-static time series** is next, and half-built: `BatchSolver` already runs many scenarios
+      over one topology in parallel. What is missing is chronology — carrying storage state of
+      charge, tap positions and controller memory from one step to the next — plus a driver and a
+      result writer. simbench ships the profiles.
+    - **RMS dynamics** is the largest, but with a clearer path than "write a dynamic simulator"
+      suggests. Dynawo is MPL-2.0, RTE-maintained, ships validated cases, and reads IIDM — which
+      `src/iidm.rs` already imports — so the corpus and the methodology
+      (`dynawo-large-scale-validation`) come close to free, in the same way pglib and the OpenRAO
+      Cucumber suite did. The cost is the DAE integrator and the model library, not the validation.
+      It deserves its own plan before any code, and the first step is checking Dynawo out alongside
+      the six references already under `references/`.
+    - **EMT, harmonics, reliability and protection coordination** stay genuinely far off. Each needs
+      modelling gridoxide has no foundation for — sub-cycle three-phase stepping, per-frequency
+      Y-buses, outage-rate data, relay curves — and none is currently pointed at by any plan.
+
+    See [Resources](./resources.md) for the datasets and reference implementations each would be
+    validated against.
+
+11. Everything else in the table — TCSC/SSC and the wider FACTS set, transformer tap auto-control,
+    and an outer-loop/controller architecture as a general extensibility mechanism — real
+    capabilities elsewhere, but either a materially larger undertaking or outside gridoxide's current
+    scope. The tap-control one is worth singling out: every steady-state result above is computed
+    with **static taps**, which is a modelling assumption four of the five comparison tools do not
+    make.
 
 ## Note on state estimation
 
