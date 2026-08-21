@@ -36,6 +36,7 @@ use crate::opf::Solver;
 use super::crac::{Crac, ElementaryAction, NetworkAction, State};
 use super::evaluate::{Network, Resolution};
 use super::linear::{optimize, LinearOptions, NetworkMut, Setpoint};
+use super::limits::Limits;
 use super::usage::Constrained;
 
 #[derive(Clone, Debug)]
@@ -318,13 +319,30 @@ pub fn search(
         }
         None => available,
     };
+    // What the CRAC allows in this perimeter's own instant. A perimeter spans
+    // one optimization instant — castor gives the preventive perimeter the
+    // preventive state and every curative perimeter a single curative one — so
+    // the earliest instant present is that instant, and an outage or
+    // pulled-forward state riding along does not bring its own allowance.
+    let limits = perimeter
+        .iter()
+        .map(|s| s.instant)
+        .min()
+        .map_or_else(Limits::unlimited, |i| Limits::of_instant(crac, i));
+    // Each leaf is optimized against what its own network actions leave over,
+    // so the budget is rebuilt per candidate rather than shared.
+    let budgeted = |chosen: &[usize]| LinearOptions {
+        limits: limits.remaining(crac, chosen),
+        ..options.linear.clone()
+    };
+
     let root = leaf(
         crac,
         network,
         resolution,
         perimeter,
         solver,
-        &options.linear,
+        &budgeted(&[]),
         Applied { open: &base_open, taps: &[] },
     );
     // From the same assessment the availability filter used, rather than a
@@ -367,6 +385,14 @@ pub fn search(
             }) {
                 continue;
             }
+            // More than the plan's allowance permits. Checked before the leaf
+            // is evaluated rather than after: a candidate the CRAC forbids is
+            // not a worse answer, it is not an answer.
+            let mut with_candidate = chosen.clone();
+            with_candidate.push(*index);
+            if !limits.admits(crac, &with_candidate) {
+                continue;
+            }
             let mut open = open_here.clone();
             open.extend(&effect.open);
             open.retain(|b| !effect.close.contains(b));
@@ -379,7 +405,7 @@ pub fn search(
                 resolution,
                 perimeter,
                 solver,
-                &options.linear,
+                &budgeted(&with_candidate),
                 Applied { open: &open, taps: &taps },
             );
             leaves += 1;

@@ -1019,7 +1019,7 @@ const BASELINE_MATCHED_DC: usize = 132;
 /// cost of a worse answer. They are left as recorded disagreements.
 const BASELINE_MATCHED_AC: usize = 190;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **619 of 844**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **664 of 844**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1031,10 +1031,16 @@ const BASELINE_MATCHED_AC: usize = 190;
 ///
 /// The **2.4 usage-rule family matches in full** — 147 of 147, up from 100 —
 /// since conditional usage rules are answered against the perimeter's flows
-/// rather than assumed true. What is still open, by size: 1.3 curative (85 of
-/// 420 wrong), 2.6 RA usage limits (61 of 134, and unmodelled), 1.2 automatons
-/// (50 of 119), 2.2 range actions (24 of 63).
-const BASELINE_MATCHED_AC16: usize = 619;
+/// rather than assumed true. Enforcing the CRAC's **usage limits** then took
+/// 2.6 from 73 of 134 to 103, and 2.2 from 39 of 63 to 54.
+///
+/// What is still open, by size: 1.3 curative (85 of 420 wrong), 1.2 automatons
+/// (50 of 119), 2.6 (31 of 134). The 2.6 remainder has changed character
+/// completely — it was "gridoxide spends actions the CRAC forbids" and is now
+/// "gridoxide stops before the reference does", the same greedy-chain limit
+/// that shows up wherever three actions are needed and each is worth little on
+/// its own.
+const BASELINE_MATCHED_AC16: usize = 664;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
