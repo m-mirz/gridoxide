@@ -1,8 +1,15 @@
 //! Remedial action optimization.
 //!
-//! See `plans/RAO_PLAN.md` for what this is and how it is meant to be built.
-//! At present this module carries the **data layer**: the CRAC domain model and
-//! the readers that populate it. The optimizer itself is not here yet.
+//! See `plans/RAO_PLAN.md` for what this is and how it is meant to be built,
+//! and `docs/src/rao/` for the mathematics.
+//!
+//! The layers, outermost first: [`castor`] decides which perimeters there are
+//! and in what order, [`mod@search`] chooses the network actions of one perimeter,
+//! and [`linear`] chooses the continuous set-points of one candidate.
+//! [`mod@evaluate`] is what all three measure with, [`mnec`] is the one constraint
+//! that is neither maximized nor hard, and [`mod@validate`] re-measures the answer
+//! under a full AC power flow. [`crac`] and [`crac_json`] are the data layer
+//! underneath.
 
 pub mod crac;
 pub mod crac_json;
@@ -11,6 +18,7 @@ pub mod linear;
 pub mod automaton;
 pub mod castor;
 pub mod search;
+pub mod mnec;
 pub mod validate;
 
 pub use crac::{
@@ -30,4 +38,5 @@ pub use evaluate::{
     evaluate, evaluate_ac, evaluate_model, evaluate_with, AcOptions, CnecResult, FlowModel,
     Network, PerimeterResult, Resolution, SecurityResult,
 };
+pub use mnec::{Baseline, Mnec, MnecOptions};
 pub use validate::{validate, Validation, ValidationOptions, Verdict};

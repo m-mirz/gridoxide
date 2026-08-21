@@ -141,6 +141,67 @@ measures. It did, briefly — the LP read an ampere threshold as MW and so optim
 some 40% adrift of the real one, while the evaluator scored it correctly. Every margin stayed
 self-consistent and the answer was simply wrong.
 
+## Monitored elements, the other kind of constraint
+
+A CRAC labels each CNEC with two independent flags. `optimized` puts it in the objective: make this
+better. `monitored` says something else entirely: whatever you do elsewhere, **do not ruin this**. A
+CNEC can carry either, both, or neither, and the second is an *MNEC*.
+
+The two cannot both be maximized. Unloading one branch loads another, so a program told to maximize
+every margin at once would have no answer. The reference makes the second a **penalized soft
+constraint**: an MNEC may be pushed past its limit, and the objective pays for every megawatt (or
+ampere) of it.
+
+### "Not worse" is not "not negative"
+
+The rule is
+
+\\[
+v(c) \;=\; \max\bigl(0,\; \min(0,\; m_0(c) - d) \;-\; m(c)\bigr)
+\\]
+
+with \\(m_0\\) the margin the **untouched** network had, \\(m\\) the margin now, and \\(d\\) the
+*acceptable decrease* — 50 by default, in the objective's unit.
+
+The inner \\(\min(0, \cdot)\\) is the part to read twice. The floor an MNEC is held to is zero, or
+its own initial margin less \\(d\\), whichever is **lower**:
+
+| where it started | floor | reading |
+|---|---|---|
+| \\(m_0 \ge d\\) | \\(0\\) | all of its margin is available, not just \\(d\\) of it |
+| \\(0 \le m_0 < d\\) | \\(m_0 - d\\) | it may be pushed *through* its threshold, by the part of \\(d\\) it had not used |
+| \\(m_0 < 0\\) | \\(m_0 - d\\) | already overloaded: \\(d\\) worse and no worse, and no obligation to repair it |
+
+Reading it as a flat "no more than \\(d\\) worse" gets the first row wrong by the entire initial
+margin. Reading it as "never negative" gets the other two wrong by \\(d\\). The reference wrote one
+scenario per row — 5.2.1.2, 5.2.1.4 and 5.2.1.3 — and all three are in the vendored gate.
+
+### In the program
+
+Each monitored CNEC earns a column \\(V(c) \ge 0\\) and, for each bound the CRAC states, one row:
+
+\\[
+F(c) - V(c) \;\le\; \max\bigl(f^{+}(c),\; f_0(c) + d\bigr) - a
+\qquad
+F(c) + V(c) \;\ge\; \min\bigl(f^{-}(c),\; f_0(c) - d\bigr) + a
+\\]
+
+with \\(f_0\\) the initial flow and \\(a\\) the constraint-adjustment coefficient, zero by default.
+The objective gains \\(\sum_c \pi\, V(c)\\) at the configured violation cost \\(\pi\\), 10 by
+default. An MNEC gets **no** \\(MM\\) row: it is not something to improve.
+
+The same penalty enters the objective the *search tree* ranks leaves by, and both are needed. The LP
+rows stop a set-point degrading an MNEC; the objective term stops a topological action doing it,
+because nothing else in the tree looks at MNECs at all.
+
+### The baseline is the run's starting point, not the perimeter's
+
+\\(m_0\\) and \\(f_0\\) come from the network before **any** remedial action, preventive ones
+included. A curative MNEC is judged against the margin it had with nothing applied, so the baseline is
+measured once by `castor::run` on the untouched network and carried into every perimeter. Measuring it
+per perimeter would judge a curative MNEC against whatever the preventive stage left it at — which is
+exactly the degradation the constraint exists to forbid.
+
 ## Why it iterates
 
 The linearization is exact in DC for a redispatch, because DC flow is linear in injection. It is
@@ -266,10 +327,6 @@ needs only an LP, so it runs on gridoxide's own interior-point solver.
 
 **Network actions.** This layer moves continuous set-points; choosing which discrete actions to take
 is [the search tree's](./search.md) job, and the two interleave rather than run in sequence.
-
-**MNECs.** A monitored CNEC's margin must not get worse, which is a penalized soft constraint rather
-than something to maximize. They are correctly excluded from the objective, but nothing yet stops an
-action from degrading one.
 
 **Cross-perimeter range actions.** One perimeter at a time. Chaining a curative action to the
 preventive one before it — the `relativeToPreviousInstant` range kind — needs several states in one
