@@ -72,5 +72,6 @@
 # Reference
 
 - [Feature Comparison](./reference/feature_comparison.md)
+- [Datasets, Tools and Books](./reference/resources.md)
 - [Benchmarking and Profiling](./reference/benchmarking.md)
 - [Provenance and Licensing](./reference/provenance.md)
