@@ -8,7 +8,7 @@ Status: **in progress.** Written 2026-08-17 against `0549f7e`; phases 1 and 2 la
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **132 of 136** DC assertions, **190 of 201** AC ones on TestCase12Nodes, and **700 of 844** on
+> **138 of 142** DC assertions, **192 of 203** AC ones on TestCase12Nodes, and **727 of 883** on
 > TestCase16Nodes. What is left of the plan is phase 2's other half (CGMES tap tables) and closing
 > the AC residual — see §8.3.
 >
@@ -490,9 +490,9 @@ regression in another:
 
 | File | Scenarios | Assertions | Matching |
 |---|---|---|---|
-| `dc_scenarios.feature` | 25, across eleven networks | 136 | **132** |
-| `ac_scenarios.feature` | 38, on TestCase12Nodes | 201 | **190** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 844 | **700** |
+| `dc_scenarios.feature` | 25, across eleven networks | 142 | **138** |
+| `ac_scenarios.feature` | 38, on TestCase12Nodes | 203 | **192** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 883 | **727** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -666,6 +666,14 @@ aggregate — pointed straight at the next one:
     curative remedial actions and none on 1.3.9.1. Worth **36** assertions: 1.2 from 69 of 119 to 94,
     1.3 from 335 of 420 to 346, with nothing regressed.
 
+Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
+objective function` were being skipped, and the quantity they name — the negated worst margin plus
+what the monitored CNECs are violating — is exactly what §7's objective now computes. Wiring them up
+adds 47 checkable assertions, 35 of which hold. **All 12 that do not sit in scenarios whose margins
+already disagree**, so they add no new kind of failure: they make the existing disagreements visible
+in one more place, which is the point of a gate. Worth doing before quoting a ratio, because a
+skipped assertion flatters the denominator.
+
 **The 9 that differ for a reason nobody has found** are all one CRAC, `epic5/SL_ep5us1.json`, whose
 two CNECs sit on a single line. gridoxide's best single action scores 998.9 A where the reference reports 1149, and the two
 disagree about which combination is best. It is *not* slack distribution: that was built specifically
@@ -711,7 +719,7 @@ Assert on the objective and on feasibility, never on the argmin.
 | 7 | ✅ **Done** for one perimeter. **Linear optimizer** (`src/rao/linear.rs`) — flow linearization, max-min-margin, movement penalty, tap rounding, iterate-and-relinearize. Phase-shifter and redispatch controls | The phase-shift sensitivity is finite-differenced against a DC re-solve to <1e-6 pu/rad, including the direct term on the shifter's own branch. On the vendored case the preventive margin improves −241.7 → −137.1 MW by moving one PST to tap 16, and the network is left exactly where the result says. **Not yet:** discrete-tap MILP mode, multi-perimeter chaining |
 | 8 | ✅ **Done** (single perimeter, sequential). **Search tree** (`src/rao/search.rs`) + `gridoxide rao` | Finds an action that takes a vendored case from −512.7 MW to +500.0, i.e. insecure to secure; **declines** both actions on a case where each would make the margin worse, having evaluated them; reproduces itself run to run; refuses an action whose elementary parts it cannot all express, rather than applying half. The reported margin is checked against an independent Woodbury evaluation of the winning network. **Not yet:** parallel leaves, the richer candidate filters, action combinations beyond the greedy chain |
 | 9 | ✅ **Done** (Rust + CLI; no Python yet). **Perimeters in order** (`src/rao/castor.rs`) — the preventive perimeter spans the base case *and* every outage state, curative perimeters run per contingency in chronological order carrying the preventive decisions forward, and the pull-forward rule moves an unactionable curative CNEC into the preventive perimeter and reports it | The decomposition changes the answer, which is the point: over the wider perimeter the twelve-node case now takes a line opening **and** a tap that help only together (−241.7 → −157.9, where the action alone gives −257.6 and the shifter alone nothing). A curative perimeter is asserted to start from the preventive result rather than the untouched network |
-| 10 | ✅ **Done.** **`opf::bnb::BranchAndBound`** over `IpmSolver` — depth-first with a dive, most-fractional branching, a node budget rather than a time limit | §8.4 met: agrees with HiGHS's branch-and-cut on 60 randomised MILPs, on objective and feasibility rather than on the argmin (the optimal objective is unique; the optimal solution need not be). Distinguishes a proven optimum from a budgeted one, and returns exact integers. **Not yet used by `src/rao/`** — the optimizer matches the reference at 132/136 with the continuous tap model, which is the reference's own default, so `TapModel::Discrete` remains declared and unbuilt with no gate to validate it against |
+| 10 | ✅ **Done.** **`opf::bnb::BranchAndBound`** over `IpmSolver` — depth-first with a dive, most-fractional branching, a node budget rather than a time limit | §8.4 met: agrees with HiGHS's branch-and-cut on 60 randomised MILPs, on objective and feasibility rather than on the argmin (the optimal objective is unique; the optimal solution need not be). Distinguishes a proven optimum from a budgeted one, and returns exact integers. **Not yet used by `src/rao/`** — the optimizer matches the reference at 138/142 with the continuous tap model, which is the reference's own default, so `TapModel::Discrete` remains declared and unbuilt with no gate to validate it against |
 | 11 | ✅ **Done.** **AC flow model** (`evaluate::evaluate_ac`, `FlowModel`) and the **re-validation stage** (`src/rao/validate.rs`, `gridoxide rao --validate-ac`) — every perimeter re-measured under a full AC power flow on the network its own decisions left behind, with three separate rejection reasons: insecure, diverged, or too far from the DC figure to trust | The AC currents are gated against the vendored pypowsybl solutions rather than against gridoxide: expected `flow_mw` and `current_a` are rebuilt from the reference's own `(p, q, v_pu)`, and converting at nominal instead of the solved voltage fails the test by 5.3% (506.7 A against 481.3 A). On the twelve-node case the two models disagree by 10.1 MW on the preventive perimeter and the curative one diverges outright — a topology both models independently flag as severed |
 | 12 | ✅ **Done.** **Automaton simulation** (`src/rao/automaton.rs`) — speed-ordered batches, conditions re-evaluated between them, network actions applied and range actions sized by formula | The reference's own five-automaton scenario passes 10/10: four operate, the fifth correctly does not because an earlier one already relieved its constraint, and both phase shifters land on the taps it names (2 and −3). Required keeping out-of-service circuits at import so a *closing* automaton is expressible at all |
 

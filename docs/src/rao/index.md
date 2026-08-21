@@ -166,7 +166,7 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-132 of 136 checkable assertions match, at the reference's own tolerance of `max(5 MW, 1.5%)` —
+138 of 142 checkable assertions match, at the reference's own tolerance of `max(5 MW, 1.5%)` —
 margins, taps, named actions, action counts and security statuses. The four that do not are two
 phase-shifter taps and the margins that follow from them, in scenarios where the reference's own tap
 rounding takes a step that pays an MNEC penalty its rounding does not look at.
