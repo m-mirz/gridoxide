@@ -551,6 +551,85 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
     assert_eq!(most, 2, "no perimeter used its full allowance, so nothing was constrained");
 }
 
+/// A curative perimeter stops once it beats the preventive one, and stopping
+/// means stopping — not even its range actions move.
+///
+/// This is the reference's rule and it is not an optimization: a curative
+/// perimeter is given `AT_TARGET_OBJECTIVE_VALUE` unconditionally, where the
+/// preventive one gets it only under `SECURE_FLOW`. Curative actions are taken
+/// under time pressure by people who did not plan them, so the question is not
+/// "what is the best post-contingency state" but "is it at least as good as the
+/// one preventive already accepted".
+///
+/// `curative_min_obj_improvement` moves that line, and the two ends of it are
+/// what this checks: at zero the search stops as early as it is allowed to, and
+/// at a target nothing can reach it runs to full depth on the same fixture.
+#[test]
+fn a_curative_perimeter_stops_once_it_is_better_than_preventive() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep13us11case1.json"),
+    )
+    .expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &[],
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let plan_with = |improvement: f64| {
+        let mut solver = IpmSolver::new();
+        run(
+            &crac,
+            &network,
+            &resolution,
+            &mut solver,
+            &SearchOptions {
+                curative_min_obj_improvement: improvement,
+                ..Default::default()
+            },
+        )
+    };
+    let curative_actions = |plan: &gridoxide::rao::Plan| -> usize {
+        plan.scenarios
+            .iter()
+            .flat_map(|s| s.perimeters.iter())
+            .map(|p| {
+                p.network_actions.len() + p.setpoints.iter().filter(|s| s.moved()).count()
+            })
+            .sum()
+    };
+
+    // Beat preventive at all and stop. The reference's own default.
+    let eager = plan_with(0.0);
+    // A target no curative perimeter can reach, so the search runs out its
+    // depth instead. The reference's `RaoParameters_maxMargin_ampere.json` uses
+    // exactly this value for exactly this reason.
+    let thorough = plan_with(10_000.0);
+
+    assert_eq!(
+        curative_actions(&eager),
+        0,
+        "this fixture's curative perimeters already beat preventive, so nothing should be done"
+    );
+    assert!(
+        curative_actions(&thorough) > 0,
+        "with an unreachable target the same perimeters should act"
+    );
+    assert!(
+        thorough.final_margin_mw >= eager.final_margin_mw - 1e-9,
+        "stopping early cannot beat searching on"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Automatons
 // ---------------------------------------------------------------------------

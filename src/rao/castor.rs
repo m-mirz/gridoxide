@@ -196,6 +196,30 @@ pub fn run(
     let carried_open = preventive.open_branches.clone();
     let carried_transformers = preventive.transformers.clone();
 
+    // A curative perimeter does not search for the best answer it can find. It
+    // searches until it is **better than preventive**, by a stated margin, and
+    // then stops — `TreeParameters.buildForCurativePerimeter` gives every
+    // curative perimeter `AT_TARGET_OBJECTIVE_VALUE`, unconditionally, where the
+    // preventive one gets it only under `SECURE_FLOW`.
+    //
+    // The reasoning is operational rather than mathematical. Curative actions
+    // are taken under time pressure by people who did not plan them, so an
+    // extra 40 A bought by a third switching operation is not worth having;
+    // what matters is that the post-contingency state is no worse than the one
+    // the preventive stage already accepted. `curative-min-obj-improvement`
+    // says how much better than that is enough, and the reference's default is
+    // **zero** — beat preventive at all and stop.
+    //
+    // Under `SECURE_FLOW` the target is 0 for every perimeter, so whatever the
+    // caller set stands.
+    let curative_target = options.stop_at_target.unwrap_or_else(|| {
+        let target = preventive.final_objective + options.curative_min_obj_improvement;
+        // `enforce-curative-security` additionally demands a secure perimeter,
+        // which can only make the target harder to reach.
+        if options.enforce_curative_security { target.max(0.0) } else { target }
+    });
+    let options = &SearchOptions { stop_at_target: Some(curative_target), ..options.clone() };
+
     let mut scenarios = Vec::new();
     for (contingency, _) in crac.contingencies.iter().enumerate() {
         let mut curative_instants: Vec<usize> = states

@@ -52,6 +52,20 @@ pub struct SearchOptions {
     pub relative_min_impact: f64,
     /// Options handed to the per-leaf linear optimization.
     pub linear: LinearOptions,
+    /// How far a **curative** perimeter must beat the preventive one before it
+    /// stops looking.
+    ///
+    /// Read by [`castor::run`](super::castor::run), not here: this layer only
+    /// ever sees the resulting [`stop_at_target`](Self::stop_at_target). The
+    /// reference's default is **zero** — a curative perimeter stops the moment
+    /// it is better than preventive — and its own test configurations set 500,
+    /// 628 or 10000 to move that line.
+    pub curative_min_obj_improvement: f64,
+    /// Whether a curative perimeter must also end secure before it may stop.
+    ///
+    /// `objective-function.enforce-curative-security`. Tightens the target to
+    /// at least zero, so "better than preventive" alone is not enough.
+    pub enforce_curative_security: bool,
     /// Discard candidate actions that are too far, in country boundaries, from
     /// the most limiting element. `None` disables the filter; `Some(0)` keeps
     /// only actions in the same country as the worst CNEC.
@@ -92,6 +106,8 @@ impl Default for SearchOptions {
             absolute_min_impact: 0.0,
             relative_min_impact: 0.0,
             linear: LinearOptions::default(),
+            curative_min_obj_improvement: 0.0,
+            enforce_curative_security: false,
             skip_far_actions: None,
             stop_at_target: None,
         }
@@ -107,6 +123,17 @@ pub struct SearchResult {
     pub setpoints: Vec<Setpoint>,
     pub initial_margin_mw: f64,
     pub final_margin_mw: f64,
+    /// The winning leaf's objective — the minimum margin in
+    /// [`ObjectiveUnit`](super::linear::ObjectiveUnit), less what the monitored
+    /// CNECs cost.
+    ///
+    /// Different from [`final_margin_mw`](Self::final_margin_mw) and reported
+    /// separately for the same reason the leaf keeps both: a margin is what a
+    /// plan is read as, and this is what one perimeter's answer is *compared*
+    /// against. [`castor`](super::castor) needs exactly this to set a curative
+    /// perimeter's stop criterion, which the reference states relative to the
+    /// preventive perimeter's own objective.
+    pub final_objective: f64,
     /// Leaves evaluated, root excluded. The cost of the search, and the number
     /// to watch when a case gets big.
     pub leaves: usize,
@@ -336,6 +363,37 @@ pub fn search(
         ..options.linear.clone()
     };
 
+    // Both from the same assessment the availability filter used, rather than
+    // from a second one of a network it has already measured — under an AC flow
+    // model that is a Newton-Raphson solve per state.
+    let initial = worst_of(crac, &starting, perimeter);
+    let untouched = objective_of(crac, &starting, perimeter, &options.linear);
+
+    let reached = |objective: f64| options.stop_at_target.is_some_and(|t| objective >= t);
+
+    // The target may be met before anything at all is done, and then the
+    // perimeter is left completely alone — not even its range actions are
+    // optimized. The reference is explicit about this: `SearchTree.run` tests
+    // the stop criterion on the *evaluated* root leaf and returns there,
+    // *before* `optimizeLeaf` is called on it. It is the difference between "no
+    // network action was worth taking" and "nothing at all was needed", and on
+    // scenario 1.3.9.1 it is the difference between two curative remedial
+    // actions and none.
+    if reached(untouched) {
+        return SearchResult {
+            network_actions: Vec::new(),
+            setpoints: Vec::new(),
+            initial_margin_mw: initial,
+            final_margin_mw: initial,
+            final_objective: untouched,
+            leaves: 0,
+            depth: 0,
+            open_branches: base_open,
+            buses: network.buses.to_vec(),
+            transformers: network.transformers.to_vec(),
+        };
+    }
+
     let root = leaf(
         crac,
         network,
@@ -345,12 +403,6 @@ pub fn search(
         &budgeted(&[]),
         Applied { open: &base_open, taps: &[] },
     );
-    // From the same assessment the availability filter used, rather than a
-    // second one of the network it already measured — under an AC flow model
-    // that is a Newton-Raphson solve per state.
-    let initial = worst_of(crac, &starting, perimeter);
-
-    let reached = |objective: f64| options.stop_at_target.is_some_and(|t| objective >= t);
 
     let mut chosen: Vec<usize> = Vec::new();
     let mut best = root;
@@ -458,6 +510,7 @@ pub fn search(
         // Megawatts, whatever the objective was maximized in — the search
         // reports a margin, it does not report its own scoring function.
         final_margin_mw: best.margin_mw,
+        final_objective: best.objective,
         leaves,
         depth,
         open_branches,
@@ -655,6 +708,32 @@ fn measure_with(
 ) -> super::evaluate::SecurityResult {
     let ac = super::evaluate::AcOptions { shunts: network.shunts, ..Default::default() };
     super::evaluate::evaluate_model(crac, network, resolution, open, model, &ac)
+}
+
+/// What the search maximizes, read off an assessment already made: the worst
+/// optimized margin in the objective's unit, less what the monitored CNECs
+/// cost. Mirrors `linear::objective`, which computes the same thing from a
+/// network rather than from a result.
+fn objective_of(
+    crac: &Crac,
+    result: &super::evaluate::SecurityResult,
+    perimeter: &[State],
+    options: &LinearOptions,
+) -> f64 {
+    let unit = options.objective_unit;
+    let margin = result
+        .perimeters
+        .iter()
+        .filter(|p| perimeter.contains(&p.state))
+        .flat_map(|p| p.cnecs.iter())
+        .filter(|c| crac.flow_cnecs[c.cnec].optimized)
+        .map(|c| match unit {
+            super::linear::ObjectiveUnit::Megawatt => c.margin_mw,
+            super::linear::ObjectiveUnit::Ampere => c.margin_a,
+        })
+        .fold(f64::INFINITY, f64::min);
+    let margin = if margin.is_finite() { margin } else { super::mnec::NO_CNEC_MARGIN };
+    margin - options.mnec.cost(crac, result, perimeter, unit)
 }
 
 /// The worst optimized margin over `perimeter` in an assessment already made —

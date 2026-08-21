@@ -157,6 +157,30 @@ when the unconstrained answer turns out inadmissible, so the ordinary case pays 
 max-tso limit can no longer be defined and will be ignored" — so honouring it would apply a
 constraint the reference does not.
 
+## When a curative perimeter stops
+
+A curative perimeter is not asked for the best answer it can find. It is asked whether the
+post-contingency state is at least as good as the one the preventive stage already accepted, and it
+stops as soon as it is.
+
+That is the reference's rule, and it is unconditional: `TreeParameters` gives every curative perimeter
+`AT_TARGET_OBJECTIVE_VALUE`, where the preventive perimeter gets it only under `SECURE_FLOW`. The
+target is
+
+\\[ \text{objective} \;\ge\; \text{preventive objective} \;+\; \delta \\]
+
+with \\(\delta\\) the `curative-min-obj-improvement`, and \\(\max(\cdot, 0)\\) applied on top when
+`enforce-curative-security` is set. The reasoning is operational rather than mathematical: curative
+actions are carried out under time pressure by people who did not plan them, so an extra 40 A bought
+by a third switching operation is not worth having.
+
+Two details decide how much of the answer this moves. The reference's **default \\(\delta\\) is
+zero** — "better than preventive at all" is the ordinary rule, and the 10000 in its own test
+configurations is what turns the rule *off*. And the criterion is tested on the root leaf **before**
+that leaf's range actions are optimized, so a perimeter that already qualifies is left entirely
+alone: no network action and no tap movement either. That is the difference between two curative
+remedial actions and none.
+
 ## An action is applied whole, or refused
 
 A network action is a set of elementary actions taken **together** — "split this busbar" is one
