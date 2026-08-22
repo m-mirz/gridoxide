@@ -271,8 +271,10 @@ fn newton_with_loops(
 
     let mut slack = opts.distribute_slack.clone().map(outerloop::DistributedSlack::new);
     let mut qlim = opts.enforce_q_limits.then(outerloop::ReactiveLimits::new);
-    let mut phase = wants_taps.then(outerloop::PhaseControl::new);
-    let mut voltage = wants_taps.then(outerloop::TransformerVoltageControl::new);
+    let mut phase =
+        wants_taps.then(|| outerloop::PhaseControl::new().max_tap_shift(opts.tap_max_shift));
+    let mut voltage = wants_taps
+        .then(|| outerloop::TransformerVoltageControl::new().max_tap_shift(opts.tap_max_shift));
 
     let (islands, report) = {
         let mut ctx = outerloop::SolveContext::new(&mut buses, &mut ybus)
