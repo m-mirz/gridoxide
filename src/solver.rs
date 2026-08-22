@@ -171,11 +171,11 @@ pub enum PowerFlowInit {
 ///
 /// The pre-existing entry points — [`newton_raphson`],
 /// [`newton_raphson_with_backend`], [`PersistentSolver::solve`],
-/// [`newton_raphson_enforcing_q_limits`] — keep their positional parameters
+/// the outer-loop driver — keep their positional parameters
 /// and are unaffected by this type. It exists so that adding a fifth or sixth
 /// knob does not mean a fifth or sixth positional argument, following
 /// `se::nr::SeOptions`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PowerFlowOptions {
     /// Convergence tolerance on the maximum P/Q mismatch. Newton only.
     pub tol: f64,
@@ -186,9 +186,17 @@ pub struct PowerFlowOptions {
     pub backend: JacobianBackend,
     pub method: PowerFlowMethod,
     pub init: PowerFlowInit,
-    /// Routes Newton through [`newton_raphson_enforcing_q_limits_with_stats`].
+    /// Adds [`crate::outerloop::ReactiveLimits`] to the outer-loop list.
     pub enforce_q_limits: bool,
-    /// Outer-loop cap for `enforce_q_limits`; ignored when it is false.
+    /// Adds [`crate::outerloop::DistributedSlack`] to the outer-loop list,
+    /// innermost, with these participation weights.
+    pub distribute_slack: Option<crate::outerloop::SlackDistribution>,
+    /// Adds [`crate::outerloop::PhaseControl`] and
+    /// [`crate::outerloop::TransformerVoltageControl`], outermost. Needs an
+    /// importer that retained tap tables and regulating controls; with none,
+    /// both loops are stable on their first check and cost one call each.
+    pub control_taps: bool,
+    /// Cap on total outer-loop re-solves across every configured loop.
     pub max_outer_iter: usize,
     /// Susceptance choice and transformer-ratio handling for
     /// [`PowerFlowMethod::Dc`] and for [`PowerFlowInit::Dc`].
@@ -207,6 +215,8 @@ impl Default for PowerFlowOptions {
             method: PowerFlowMethod::default(),
             init: PowerFlowInit::default(),
             enforce_q_limits: false,
+            distribute_slack: None,
+            control_taps: false,
             max_outer_iter: 10,
             dc: crate::linear::DcOptions::default(),
         }
@@ -229,25 +239,11 @@ pub struct SolveStats {
     /// `Converged`) or rejected. Length is the iteration count — see
     /// [`iterations`](Self::iterations).
     pub mismatch_history: Vec<f64>,
-    /// Buses switched `PV`→`PQ`, in switch order. Always empty unless the
-    /// caller used [`newton_raphson_enforcing_q_limits`].
-    pub q_limit_switches: Vec<usize>,
-    /// `false` only when [`newton_raphson_enforcing_q_limits`] exhausted
-    /// `max_outer_iter` while still finding new limit violations — the
-    /// returned buses are a converged power flow, but not one where every
-    /// `PV` bus is inside its `q_min`/`q_max`. Always `true` for every other
-    /// entry point, which never switches bus types at all.
-    pub q_limit_stabilized: bool,
 }
 
 impl SolveStats {
     pub(crate) fn from_loop(status: SolveStatus, mismatch_history: Vec<f64>) -> Self {
-        Self {
-            status,
-            mismatch_history,
-            q_limit_switches: Vec::new(),
-            q_limit_stabilized: true,
-        }
+        Self { status, mismatch_history }
     }
 
     /// Iterations actually run. Derived from `mismatch_history` rather than
@@ -428,7 +424,7 @@ pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: 
 /// component in one shared Newton-Raphson call and returns each one's own
 /// outcome. This
 /// is gridoxide's one canonical way to run a solve — [`PersistentSolver::solve`]
-/// and [`newton_raphson_enforcing_q_limits`] below share this exact same
+/// and [`crate::outerloop::solve_with_loops`] share this exact same
 /// partitioning step, so behavior is identical regardless of which entry
 /// point a caller uses.
 pub fn newton_raphson_with_backend(
@@ -630,129 +626,6 @@ impl PersistentSolver {
     }
 }
 
-/// Runs Newton-Raphson to convergence like [`newton_raphson_with_backend`],
-/// but additionally enforces each `PV` bus's `q_min`/`q_max` — the one gap
-/// every reference power-flow tool this project benchmarks against either
-/// has, half-has, or explicitly disclaims not having (see
-/// `docs/src/reference/feature_comparison.md`). Plain `newton_raphson`/
-/// `PersistentSolver::solve` ignore `q_min`/`q_max` entirely, matching every
-/// existing test/benchmark's behavior unchanged; this is a separate, opt-in
-/// entry point.
-///
-/// Implements the standard "PV→PQ switching" heuristic (the same algorithm
-/// MATPOWER's `runpf` uses under `enforce_q_lims`): solve with every `PV`
-/// bus free, then check each one's actual computed Q against its limits. A
-/// bus that violates one is switched to `PQ` with `q_spec` pinned at the
-/// violated limit (so it now targets exactly that Q, letting its voltage
-/// float instead of holding `u_ref`) and the whole system is re-solved —
-/// repeated until an outer pass finds no new violations, or `max_outer_iter`
-/// is exhausted. Switching is one-directional (a bus switched to `PQ` here
-/// never switches back to `PV` within the same call) — deliberately simple,
-/// avoiding the oscillation a bidirectional scheme would need real
-/// anti-oscillation logic to prevent, matching MATPOWER's own default
-/// behavior.
-///
-/// Bus voltages are *not* reset between outer passes — each re-solve starts
-/// from the previous pass's converged state, which is normally very close
-/// to the next equilibrium (only one bus's type changed), so this typically
-/// converges in very few extra Newton iterations per outer pass.
-///
-/// Every outer pass invalidates and rebuilds the cached factorization
-/// (`PersistentSolver::reset`), since switching a bus from `PV` to `PQ`
-/// changes `n_unknowns` itself for the `Scalar`/`Klu` backends (the `Block`
-/// backend's per-bus block count doesn't change, only that bus's block
-/// values, but it's reset here too for simplicity and to stay
-/// backend-agnostic).
-///
-/// **Scope note**: a `PV` bus's `q_min`/`q_max` bound its *net* reactive
-/// injection, matching how `Bus.q_spec` is itself already a net value
-/// aggregated from every load/gen at that node (see `PgmVoltageRegulator`'s
-/// doc comment) — pinning `q_spec` to the violated limit exactly achieves
-/// that limit only if the bus carries no voltage-dependent `zip_terms` (no
-/// co-located ZIP-model load); the common case for a PV/generator bus.
-///
-/// Like [`newton_raphson_with_backend`]/[`PersistentSolver::solve`], returns
-/// each connected component's own [`IslandReport`] rather than one flat
-/// status — every `solver.solve()` call inside the outer loop already does
-/// the same island partitioning, so behavior is identical whichever entry
-/// point a caller uses. If any island is still `Singular`/`MaxIterationsReached`
-/// after an inner solve, this stops immediately and returns that pass's
-/// reports as-is — there's nothing further Q-limit switching can usefully
-/// do with a system that hasn't actually settled yet.
-pub fn newton_raphson_enforcing_q_limits(
-    buses: &mut [Bus],
-    ybus: &YBusSparse,
-    tol: f64,
-    max_iter: usize,
-    backend: JacobianBackend,
-    max_outer_iter: usize,
-) -> Vec<IslandReport> {
-    newton_raphson_enforcing_q_limits_with_stats(buses, ybus, tol, max_iter, backend, max_outer_iter).0
-}
-
-/// Exactly [`newton_raphson_enforcing_q_limits`], additionally returning the
-/// [`SolveStats`] of the *final* inner solve, with
-/// [`q_limit_switches`](SolveStats::q_limit_switches) accumulated across
-/// every outer pass and
-/// [`q_limit_stabilized`](SolveStats::q_limit_stabilized) recording whether
-/// the outer loop actually settled. This is where the `bus N: Q=... switching
-/// PV -> PQ` and `did not stabilize` messages went — they are data now, not
-/// stdout.
-pub fn newton_raphson_enforcing_q_limits_with_stats(
-    buses: &mut [Bus],
-    ybus: &YBusSparse,
-    tol: f64,
-    max_iter: usize,
-    backend: JacobianBackend,
-    max_outer_iter: usize,
-) -> (Vec<IslandReport>, SolveStats) {
-    let mut solver = PersistentSolver::new(backend);
-    let mut reports = Vec::new();
-    let mut stats = SolveStats::from_loop(SolveStatus::MaxIterationsReached, Vec::new());
-    let mut switches: Vec<usize> = Vec::new();
-
-    for _ in 0..max_outer_iter {
-        let (r, s) = solver.solve_with_stats(buses, ybus, tol, max_iter);
-        reports = r;
-        stats = s;
-        let all_settled = reports
-            .iter()
-            .all(|r| !matches!(r.status, IslandStatus::Singular | IslandStatus::MaxIterationsReached));
-        if !all_settled {
-            stats.q_limit_switches = switches;
-            return (reports, stats);
-        }
-
-        let (_, q_calc) = power_injections(buses, ybus);
-        let mut switched = false;
-        for b in buses.iter_mut() {
-            if b.bus_type != BusType::PV {
-                continue;
-            }
-            let q = q_calc[b.idx];
-            if q < b.q_min {
-                b.bus_type = BusType::PQ;
-                b.q_spec = b.q_min;
-                switches.push(b.idx);
-                switched = true;
-            } else if q > b.q_max {
-                b.bus_type = BusType::PQ;
-                b.q_spec = b.q_max;
-                switches.push(b.idx);
-                switched = true;
-            }
-        }
-        if !switched {
-            stats.q_limit_switches = switches;
-            return (reports, stats);
-        }
-        solver.reset();
-    }
-
-    stats.q_limit_switches = switches;
-    stats.q_limit_stabilized = false;
-    (reports, stats)
-}
 
 /// The one Newton-Raphson loop, generic over the sparse-LU backend via
 /// [`LinearSolver`]. Until this became generic there were four separate
@@ -1153,265 +1026,3 @@ fn build_jacobian_blocks(
     blocks
 }
 
-
-/// How a system's active-power imbalance is shared among generators.
-///
-/// # Why this exists
-///
-/// An ordinary power flow puts the *entire* system imbalance — every megawatt
-/// of load not matched by scheduled generation, plus all transmission losses,
-/// which are not known until the solve finishes — onto one slack bus. That is
-/// what makes the equations solvable, but it is not what a real system does:
-/// losses and imbalance are picked up by whichever machines are on governor
-/// control, in proportion to their droop settings.
-///
-/// The distortion is local and can be large. A single slack absorbing several
-/// hundred megawatts it was never scheduled for changes the flows on every
-/// branch around it, so the buses nearest the slack are exactly where a
-/// single-slack answer is least trustworthy.
-///
-/// # Factors
-///
-/// [`factors`](Self::factors) is one weight per bus; zero means the bus does
-/// not participate. Weights are **normalized within each island**, so only
-/// their relative magnitudes matter and a caller can pass raw megawatt
-/// headroom, droop constants, or `1.0` for an equal share.
-///
-/// Normalizing per island rather than globally is the only reading that works
-/// on a disconnected network: each island has its own slack and its own
-/// imbalance, and a global normalization would size one island's correction by
-/// another island's generators.
-#[derive(Clone, Debug)]
-pub struct SlackDistribution {
-    /// Participation weight per bus, indexed by [`Bus::idx`].
-    pub factors: Vec<f64>,
-    /// Convergence tolerance on the slack's remaining deviation from its
-    /// schedule, per-unit.
-    pub tolerance: f64,
-    /// Cap on outer passes. Around seven is typical at the default tolerance
-    /// — see the convergence note on [`newton_raphson_distributing_slack`].
-    pub max_outer_iter: usize,
-}
-
-impl SlackDistribution {
-    /// Every generator bus — `Slack` and `PV` — takes an equal share.
-    ///
-    /// `PQ` buses are excluded even when they carry positive `p_spec`. A
-    /// positive injection at a `PQ` bus is a fixed schedule, not a machine
-    /// under governor control, and the distinction is exactly what
-    /// participation means.
-    pub fn uniform(buses: &[Bus]) -> Self {
-        let factors = buses
-            .iter()
-            .map(|b| match b.bus_type {
-                BusType::Slack | BusType::PV => 1.0,
-                BusType::PQ => 0.0,
-            })
-            .collect();
-        Self { factors, tolerance: 1e-8, max_outer_iter: 20 }
-    }
-
-    /// Explicit per-bus weights.
-    pub fn from_weights(factors: Vec<f64>) -> Self {
-        Self { factors, tolerance: 1e-8, max_outer_iter: 20 }
-    }
-}
-
-/// What [`newton_raphson_distributing_slack`] did.
-#[derive(Clone, Debug)]
-pub struct SlackDistributionReport {
-    /// Per bus, how much its active schedule moved, per-unit. Summing this
-    /// over an island gives that island's total losses-plus-imbalance.
-    pub shift: Vec<f64>,
-    /// Each island's remaining slack deviation at exit, in the order the
-    /// island reports come back. Islands that could not be distributed over
-    /// carry their untouched deviation here rather than a zero.
-    pub residual: Vec<f64>,
-    /// Outer passes taken.
-    pub outer_iterations: usize,
-    /// False if the loop hit `max_outer_iter` with a deviation still above
-    /// tolerance, or if the inner solve stopped converging.
-    pub converged: bool,
-    /// Islands that were left on a single slack, and why — no reference bus,
-    /// an ambiguous one, or no participating generator in that island.
-    pub undistributed: Vec<(usize, &'static str)>,
-}
-
-/// Newton-Raphson with the imbalance shared across generators instead of
-/// dumped on one slack.
-///
-/// # How
-///
-/// An outer loop, in the same shape as
-/// [`newton_raphson_enforcing_q_limits`]: solve, look at what the slack
-/// actually produced against what it was scheduled for, move the difference
-/// onto the participating generators, solve again.
-///
-/// **The slack's schedule is its own `p_spec`.** Ordinary power flow ignores
-/// that field for a slack bus — the slack's output is an *answer*, not an
-/// input — so it is free to carry the schedule here. Worth knowing that a
-/// document which never needed it may well leave it at zero, in which case the
-/// slack is treated as scheduled for nothing and its entire output is
-/// redistributed.
-///
-/// # Why it converges
-///
-/// The first-order term cancels in a single pass, which is what makes this
-/// affordable as an outer loop. Write the slack's excess over its schedule as
-/// \\(\Delta\\), and let \\(\alpha_s\\) be the slack's own share.
-/// Distributing adds \\((1 - \alpha_s)\Delta\\) to the *other* participants'
-/// schedules, so the next solve asks the slack for that much less while its
-/// own schedule has risen by \\(\alpha_s\Delta\\). Those cancel exactly.
-///
-/// What is left over is the change in transmission losses caused by the
-/// redistributed flows — and that does **not** vanish, it merely shrinks. So
-/// convergence is linear at roughly the fractional loss sensitivity, a few
-/// per cent per pass, rather than the one-and-done the cancellation alone
-/// suggests. Measured on pglib at `tolerance = 1e-8`: `case14_ieee`,
-/// `case30_ieee` and `case118_ieee` each take **seven** passes, moving 2.3,
-/// 2.4 and 16.5 per-unit off their slacks respectively.
-///
-/// Each pass is one Newton solve against a cached factorization (below), so
-/// seven passes is not seven full solves' worth of work. `max_outer_iter`
-/// defaults to 20 as a guard rather than a budget.
-///
-/// # Why the factorization survives
-///
-/// Only `p_spec` changes between passes. Bus types do not, so `n_unknowns` and
-/// the Jacobian's sparsity pattern do not either, and the [`PersistentSolver`]
-/// keeps its symbolic factorization across the whole loop. That is the
-/// opposite of the Q-limit loop, which switches `PV → PQ` and must
-/// [`reset`](PersistentSolver::reset) each time it does.
-///
-/// # What it mutates
-///
-/// `buses[i].p_spec` ends up holding the **dispatched** value rather than the
-/// schedule it went in with, for every participating bus. That is the answer —
-/// who ended up producing what — and
-/// [`shift`](SlackDistributionReport::shift) records how far each moved, so
-/// the original is recoverable.
-pub fn newton_raphson_distributing_slack(
-    buses: &mut [Bus],
-    ybus: &YBusSparse,
-    tol: f64,
-    max_iter: usize,
-    backend: JacobianBackend,
-    distribution: &SlackDistribution,
-) -> (Vec<IslandReport>, SlackDistributionReport) {
-    let n = buses.len();
-    assert_eq!(
-        distribution.factors.len(),
-        n,
-        "participation factors must carry one weight per bus"
-    );
-
-    let mut solver = PersistentSolver::new(backend);
-    let mut shift = vec![0.0; n];
-    let mut reports;
-    let mut residual = Vec::new();
-    let mut undistributed = Vec::new();
-    let mut converged = false;
-    let mut outer_iterations = 0;
-
-    for pass in 0..distribution.max_outer_iter.max(1) {
-        outer_iterations = pass + 1;
-        reports = solver.solve(buses, ybus, tol, max_iter);
-
-        let settled = reports.iter().all(|r| {
-            !matches!(r.status, IslandStatus::Singular | IslandStatus::MaxIterationsReached)
-        });
-        if !settled {
-            return (
-                reports,
-                SlackDistributionReport {
-                    shift,
-                    residual,
-                    outer_iterations,
-                    converged: false,
-                    undistributed,
-                },
-            );
-        }
-
-        let (p_calc, _) = power_injections(buses, ybus);
-        residual = Vec::with_capacity(reports.len());
-        undistributed = Vec::new();
-        let mut worst = 0.0f64;
-        // Collected first, applied after, so the deviation every island is
-        // measured against comes from one consistent solved state.
-        let mut updates: Vec<(usize, f64)> = Vec::new();
-
-        for (island, report) in reports.iter().enumerate() {
-            let slack = match report.slack_indices.as_slice() {
-                [only] => *only,
-                [] => {
-                    residual.push(0.0);
-                    undistributed.push((island, "no reference bus"));
-                    continue;
-                }
-                _ => {
-                    residual.push(0.0);
-                    undistributed.push((island, "ambiguous reference bus"));
-                    continue;
-                }
-            };
-
-            let scheduled = effective_injection(&buses[slack]).0;
-            let delta = p_calc[slack] - scheduled;
-
-            let total: f64 = report
-                .bus_indices
-                .iter()
-                .map(|&i| distribution.factors[i].max(0.0))
-                .sum();
-            if total <= 0.0 {
-                residual.push(delta);
-                undistributed.push((island, "no participating generator in this island"));
-                continue;
-            }
-
-            residual.push(delta);
-            worst = worst.max(delta.abs());
-            for &i in &report.bus_indices {
-                let weight = distribution.factors[i].max(0.0);
-                if weight > 0.0 {
-                    updates.push((i, weight / total * delta));
-                }
-            }
-        }
-
-        if worst <= distribution.tolerance {
-            converged = true;
-            return (
-                reports,
-                SlackDistributionReport {
-                    shift,
-                    residual,
-                    outer_iterations,
-                    converged,
-                    undistributed,
-                },
-            );
-        }
-
-        for (i, amount) in updates {
-            buses[i].p_spec += amount;
-            shift[i] += amount;
-        }
-    }
-
-    // The cap was reached with a deviation still above tolerance. Re-solve so
-    // the returned state matches the final schedules rather than the ones from
-    // before the last redistribution.
-    let reports = solver.solve(buses, ybus, tol, max_iter);
-    (
-        reports,
-        SlackDistributionReport {
-            shift,
-            residual,
-            outer_iterations,
-            converged,
-            undistributed,
-        },
-    )
-}

@@ -69,7 +69,7 @@ impl Case {
             b.q_spec += dq[i];
         }
         let opts = PowerFlowOptions { tol: SOLVE_TOL, max_iter: 50, ..Default::default() };
-        let report = run_power_flow(buses, &self.lines, &self.transformers, &[], opts);
+        let report = run_power_flow(buses, &self.lines, &self.transformers, &[], gridoxide::TapData::none(), opts);
         assert_eq!(
             report.stats.status,
             SolveStatus::Converged,
@@ -384,7 +384,7 @@ fn flows_with_tap(
 
     let mut buses = case.buses.clone();
     let opts = PowerFlowOptions { tol: SOLVE_TOL, max_iter: 50, ..Default::default() };
-    let report = run_power_flow(std::mem::take(&mut buses), &case.lines, &transformers, &[], opts);
+    let report = run_power_flow(std::mem::take(&mut buses), &case.lines, &transformers, &[], gridoxide::TapData::none(), opts);
     assert_eq!(report.stats.status, SolveStatus::Converged);
 
     let v = bus_voltages(&report.buses);

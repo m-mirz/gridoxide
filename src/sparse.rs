@@ -26,6 +26,7 @@ use faer::prelude::{Reborrow, Solve};
 /// `power_injections` needs one every Newton-Raphson iteration, but the
 /// Y-bus itself never changes across iterations, so the conversion from
 /// triplets happens once at construction, not on every call.
+#[derive(Clone)]
 pub struct SparseMatrix {
     n: usize,
     mat: SparseColMat<usize, Complex<f64>>,

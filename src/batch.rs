@@ -315,6 +315,7 @@ impl BatchSolver {
                                 stats,
                                 dc: None,
                                 linear: None,
+                                outer: None,
                             }));
                         }
                     });
@@ -505,6 +506,7 @@ impl BatchSolver {
                                     stats,
                                     dc: None,
                                     linear: None,
+                                    outer: None,
                                 }));
                         }
                     });
