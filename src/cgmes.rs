@@ -492,6 +492,48 @@ struct TapEffect {
     x_override: Option<f64>,
 }
 
+/// Every position of one tap changer, before the owning transformer folds in
+/// its structural ratio and its side convention.
+///
+/// Raw because a CGMES tap changer's own ratio is not what
+/// [`crate::types::TapChanger::steps`] holds: the builder divides by the
+/// nameplate-vs-bus structural ratio and, when the changer sits on the side
+/// that ends up as `to`, inverts. Composing here would need the bus voltages,
+/// which this index does not have.
+struct RawTapTable {
+    low: i32,
+    position: i32,
+    neutral: i32,
+    /// One per position, from `low` upwards.
+    effects: Vec<TapEffect>,
+}
+
+impl RawTapTable {
+    /// Folds this table into the [`crate::types::TapChanger`] the owning
+    /// transformer needs: `compose` applies the side convention and the
+    /// structural ratio, `series` turns a per-step reactance override into the
+    /// per-step series admittance.
+    fn compose(
+        &self,
+        compose: impl Fn(Complex<f64>) -> Complex<f64>,
+        series: impl Fn(Option<f64>) -> Complex<f64>,
+    ) -> crate::types::TapChanger {
+        let admittances: Vec<Complex<f64>> =
+            self.effects.iter().map(|e| series(e.x_override)).collect();
+        // Only carried when it actually varies: a constant vector would make
+        // every `set_position` write a value the branch already has, and would
+        // hide the distinction the field exists to record.
+        let varies = admittances.windows(2).any(|w| w[0] != w[1]);
+        crate::types::TapChanger {
+            low: self.low,
+            position: self.position,
+            neutral: self.neutral,
+            steps: self.effects.iter().map(|e| compose(e.tap)).collect(),
+            series: varies.then_some(admittances),
+        }
+    }
+}
+
 /// `end_mrid -> tap-changer mrid`, one map per tap changer subtype, built
 /// once up front rather than scanned per transformer end.
 struct TapChangerIndex {
@@ -570,20 +612,115 @@ impl TapChangerIndex {
             let theta_deg = ptc.winding_connection_angle.ok_or_else(|| {
                 missing("PhaseTapChangerAsymmetrical", mrid, "windingConnectionAngle")
             })?;
-            return Ok(Some(phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx)?));
+            return Ok(Some(phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx, None)?));
         }
         if let Some(mrid) = self.phase_sym.get(end_mrid) {
             let ptc: &PhaseTapChangerSymmetrical = require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
-            return Ok(Some(phase_tap_symmetrical(&ptc.base, mrid, xtx)?));
+            return Ok(Some(phase_tap_symmetrical(&ptc.base, mrid, xtx, None)?));
         }
         if let Some(mrid) = self.phase_linear.get(end_mrid) {
             let ptc: &cimstructs::PhaseTapChangerLinear = require(ds, mrid, "PhaseTapChangerLinear", mrid, "(self)")?;
-            return Ok(Some(phase_tap_linear(ptc, mrid, xtx)?));
+            return Ok(Some(phase_tap_linear(ptc, mrid, xtx, None)?));
         }
         if let Some((ptc_mrid, table_mrid)) = self.phase_tabular.get(end_mrid) {
             let ptc: &cimstructs::PhaseTapChangerTabular = require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
             let step = ptc.base.base.step.ok_or_else(|| missing("PhaseTapChangerTabular", ptc_mrid, "step"))?;
             return Ok(Some(phase_tap_tabular(ds, ptc_mrid, table_mrid, step.round() as i64, xtx)?));
+        }
+        Ok(None)
+    }
+
+    /// Every position of the tap changer on `end_mrid`, not just the one the
+    /// SSH profile currently names.
+    ///
+    /// [`effect_for_end`](Self::effect_for_end) evaluates one step and throws
+    /// the rest away, which is all a fixed-tap power flow ever wanted. Anything
+    /// that *moves* a tap needs the discarded half back: the map from position
+    /// to ratio and angle is nonlinear, and for a table-driven changer it is
+    /// not even regular, so it cannot be reconstructed from the current value
+    /// plus a step size. The other two importers (`src/ucte.rs`, `src/iidm.rs`)
+    /// already retain it; this closes the asymmetry.
+    ///
+    /// Shares every formula with `effect_for_end` rather than reimplementing
+    /// them — the helpers take the step to evaluate at, and this loops
+    /// `lowStep..=highStep`. The current step therefore reads back from the
+    /// table bit-for-bit identical to what the single-step path returns, which
+    /// is the property `tests/cgmes_tap_table_test.rs` asserts.
+    ///
+    /// A `PhaseTapChangerTabular` or table-driven `RatioTapChanger` whose table
+    /// has no row for some position in range yields no changer at all rather
+    /// than a table with holes: a position that cannot be evaluated is one a
+    /// control must never select.
+    fn steps_for_end(
+        &self,
+        ds: &CimDataset,
+        end_mrid: &str,
+        xtx: f64,
+    ) -> Result<Option<RawTapTable>, CgmesError> {
+        // `(low, high, neutral, current)` plus a per-step evaluator, chosen by
+        // whichever subtype owns this end.
+        let build = |tc: &cimstructs::TapChanger,
+                     eval: &dyn Fn(f64) -> Option<TapEffect>|
+         -> Option<RawTapTable> {
+            let low = tc.low_step? as i32;
+            let high = tc.high_step? as i32;
+            let neutral = tc.neutral_step.unwrap_or(0) as i32;
+            let position = tc.step.map(|s| s.round() as i32).unwrap_or(neutral);
+            if high < low {
+                return None;
+            }
+            let mut effects = Vec::with_capacity((high - low + 1) as usize);
+            for s in low..=high {
+                effects.push(eval(s as f64)?);
+            }
+            Some(RawTapTable { low, position, neutral, effects })
+        };
+
+        if let Some(mrid) = self.ratio.get(end_mrid) {
+            let rtc: &RatioTapChanger = require(ds, mrid, "RatioTapChanger", mrid, "(self)")?;
+            let tc = &rtc.base;
+            let table = rtc.ratio_tap_changer_table.as_ref().map(|t| t.mrid.clone());
+            let neutral = tc.neutral_step.unwrap_or(0) as f64;
+            let inc = rtc.step_voltage_increment.unwrap_or(0.0);
+            let eval = |s: f64| -> Option<TapEffect> {
+                if let Some(t) = table.as_deref() {
+                    if let Some(effect) = ratio_tap_table(ds, t, s.round() as i64, xtx) {
+                        return Some(effect);
+                    }
+                }
+                Some(TapEffect {
+                    tap: Complex::new(1.0 + (s - neutral) * inc / 100.0, 0.0),
+                    x_override: None,
+                })
+            };
+            return Ok(build(tc, &eval));
+        }
+        if let Some(mrid) = self.phase_asym.get(end_mrid) {
+            let ptc: &PhaseTapChangerAsymmetrical =
+                require(ds, mrid, "PhaseTapChangerAsymmetrical", mrid, "(self)")?;
+            let Some(theta_deg) = ptc.winding_connection_angle else { return Ok(None) };
+            let eval =
+                |s: f64| phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx, Some(s)).ok();
+            return Ok(build(&ptc.base.base.base, &eval));
+        }
+        if let Some(mrid) = self.phase_sym.get(end_mrid) {
+            let ptc: &PhaseTapChangerSymmetrical =
+                require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
+            let eval = |s: f64| phase_tap_symmetrical(&ptc.base, mrid, xtx, Some(s)).ok();
+            return Ok(build(&ptc.base.base.base, &eval));
+        }
+        if let Some(mrid) = self.phase_linear.get(end_mrid) {
+            let ptc: &cimstructs::PhaseTapChangerLinear =
+                require(ds, mrid, "PhaseTapChangerLinear", mrid, "(self)")?;
+            let eval = |s: f64| phase_tap_linear(ptc, mrid, xtx, Some(s)).ok();
+            return Ok(build(&ptc.base.base, &eval));
+        }
+        if let Some((ptc_mrid, table_mrid)) = self.phase_tabular.get(end_mrid) {
+            let ptc: &cimstructs::PhaseTapChangerTabular =
+                require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
+            let eval =
+                |s: f64| phase_tap_tabular(ds, ptc_mrid, table_mrid, s.round() as i64, xtx).ok();
+            return Ok(build(&ptc.base.base, &eval));
         }
         Ok(None)
     }
@@ -685,9 +822,13 @@ fn x_min_max(x_min: Option<f64>, x_max: Option<f64>, xtx: f64) -> Option<(f64, f
 /// once `windingConnectionAngle` is taken into account).
 fn phase_tap_asymmetrical(
     base: &PhaseTapChangerNonLinear, mrid: &str, winding_connection_angle_deg: f64, xtx: f64,
+    at: Option<f64>,
 ) -> Result<TapEffect, CgmesError> {
     let tc = &base.base.base;
-    let step = tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?;
+    let step = match at {
+        Some(s) => s,
+        None => tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
+    };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
     let high = tc.high_step.unwrap_or(0);
@@ -735,9 +876,14 @@ fn phase_tap_asymmetrical(
 /// `PhaseTapChangerLinear`, a different, unrelated CGMES class — confirmed
 /// absent from `PhaseTapChangerNonLinear`/`Symmetrical`'s own generated
 /// fields, so it's not handled here).
-fn phase_tap_symmetrical(base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64) -> Result<TapEffect, CgmesError> {
+fn phase_tap_symmetrical(
+    base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64, at: Option<f64>,
+) -> Result<TapEffect, CgmesError> {
     let tc = &base.base.base;
-    let step = tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?;
+    let step = match at {
+        Some(s) => s,
+        None => tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
+    };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
     let high = tc.high_step.unwrap_or(0);
@@ -775,9 +921,14 @@ fn phase_tap_symmetrical(base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64) 
 /// Symmetrical's `2·atan(du/2)` curve. Reactance follows the identical
 /// `sin(alpha/2)²` interpolation Symmetrical uses — the Java reference
 /// shares one `getStepXforLinearAndSymmetrical` helper between both types.
-fn phase_tap_linear(ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f64) -> Result<TapEffect, CgmesError> {
+fn phase_tap_linear(
+    ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f64, at: Option<f64>,
+) -> Result<TapEffect, CgmesError> {
     let tc = &ptc.base.base;
-    let step = tc.step.ok_or_else(|| missing("PhaseTapChangerLinear", mrid, "step"))?;
+    let step = match at {
+        Some(s) => s,
+        None => tc.step.ok_or_else(|| missing("PhaseTapChangerLinear", mrid, "step"))?,
+    };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
     let high = tc.high_step.unwrap_or(0);
@@ -884,6 +1035,37 @@ pub fn cgmes_topological_node_bus_index(ds: &CimDataset) -> Result<HashMap<Strin
 pub fn cgmes_to_buses_and_branches(
     ds: &CimDataset, s_base_va: f64,
 ) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
+    let net = cgmes_to_network(ds, s_base_va)?;
+    Ok((net.buses, net.lines, net.transformers, net.shunts))
+}
+
+/// A converted CGMES network, tap tables included.
+///
+/// [`cgmes_to_buses_and_branches`] is this minus
+/// [`tap_changers`](Self::tap_changers) — the four things a fixed-tap power
+/// flow needs, and the shape most of this crate's tests want. Anything that
+/// *moves* a tap wants the fifth, and a five-element tuple is past the point
+/// where positional returns help anyone.
+#[derive(Clone, Debug)]
+pub struct CgmesNetwork {
+    pub buses: Vec<Bus>,
+    pub lines: Vec<Line>,
+    pub transformers: Vec<Transformer>,
+    pub shunts: Vec<ShuntAdm>,
+    /// Parallel to [`transformers`](Self::transformers): every position of the
+    /// tap changer on that transformer, or `None` where it has none.
+    ///
+    /// Composed exactly as the current position was, so reading
+    /// [`TapChanger::position`](crate::types::TapChanger::position) back out
+    /// reproduces [`Transformer::tap`](crate::types::Transformer::tap) bit for
+    /// bit — the property `tests/cgmes_tap_table_test.rs` asserts, and the one
+    /// that makes the table trustworthy as a *replacement* for the single-step
+    /// path rather than a second opinion about it.
+    pub tap_changers: Vec<Option<crate::types::TapChanger>>,
+}
+
+/// [`cgmes_to_buses_and_branches`], keeping the tap tables.
+pub fn cgmes_to_network(ds: &CimDataset, s_base_va: f64) -> Result<CgmesNetwork, CgmesError> {
     let skeleton = build_ac_bus_skeleton(ds)?;
     convert_equipment(ds, s_base_va, skeleton)
 }
@@ -899,7 +1081,7 @@ fn convert_equipment(
     ds: &CimDataset,
     s_base_va: f64,
     skeleton: (Vec<Bus>, HashMap<String, usize>, TerminalIndex),
-) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
+) -> Result<CgmesNetwork, CgmesError> {
     let (mut buses, idx_of, terms) = skeleton;
 
     // --- Step 3: loads/injections (EnergyConsumer + subtypes + EquivalentInjection) ---
@@ -1100,10 +1282,15 @@ fn convert_equipment(
     }
 
     let mut transformers: Vec<Transformer> = Vec::new();
+    let mut tap_changers: Vec<Option<crate::types::TapChanger>> = Vec::new();
     for (pt_mrid, mut ends) in ends_by_pt {
         ends.sort_by_key(|e| e.base.end_number.unwrap_or(0));
         match ends.len() {
-            2 => transformers.push(build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?),
+            2 => {
+                let (t, c) = build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?;
+                transformers.push(t);
+                tap_changers.push(c);
+            }
             3 => {
                 // `buses.len()` alone is the next free index — it already
                 // reflects every star bus pushed by a *previous* iteration
@@ -1122,7 +1309,9 @@ fn convert_equipment(
                     u_rated: ends[0].rated_u.unwrap_or(1e-3) * 1e3, zip_terms: Vec::new(),
                 });
                 for end in &ends {
-                    transformers.push(build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?);
+                    let (t, c) = build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?;
+                    transformers.push(t);
+                    tap_changers.push(c);
                 }
             }
             n => return Err(CgmesError::UnsupportedTransformer {
@@ -1448,7 +1637,7 @@ fn convert_equipment(
         }
     }
 
-    Ok((buses, lines, transformers, shunts))
+    Ok(CgmesNetwork { buses, lines, transformers, shunts, tap_changers })
 }
 
 /// Builds a 2-winding `Transformer`. Per CGMES convention (confirmed against
@@ -1465,7 +1654,7 @@ fn convert_equipment(
 fn build_two_winding(
     ds: &CimDataset, tap_index: &TapChangerIndex, terms: &TerminalIndex, buses: &[Bus],
     pt_mrid: &str, end1: &PowerTransformerEnd, end2: &PowerTransformerEnd, s_base_va: f64,
-) -> Result<Transformer, CgmesError> {
+) -> Result<(Transformer, Option<crate::types::TapChanger>), CgmesError> {
     let term1 = end1.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end1.mrid_str(), "Terminal"))?;
     let term2 = end2.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end2.mrid_str(), "Terminal"))?;
     let bus1 = terms.bus_via_terminal_mrid(&term1.mrid)
@@ -1475,6 +1664,10 @@ fn build_two_winding(
 
     let tap1 = tap_index.effect_for_end(ds, end1.mrid_str(), end1.x.unwrap_or(0.0))?;
     let tap2 = tap_index.effect_for_end(ds, end2.mrid_str(), end2.x.unwrap_or(0.0))?;
+    // Which end holds the changer decides how a position composes into
+    // `Transformer::tap`, so it is recorded here alongside the current step's
+    // effect rather than re-derived below.
+    let on_end1 = tap1.is_some();
     let (tap, x_override) = match (tap1, tap2) {
         (Some(_), Some(_)) => {
             return Err(CgmesError::UnsupportedTransformer {
@@ -1536,15 +1729,35 @@ fn build_two_winding(
     let structural = structural_1 / structural_2;
     let tap = tap / structural;
 
-    Ok(Transformer {
-        from: bus2,
-        to: bus1,
-        from_status: terms.connected_via_terminal_mrid(&term2.mrid) as u8,
-        to_status: terms.connected_via_terminal_mrid(&term1.mrid) as u8,
-        y_series: Complex::new(z_base, 0.0) / Complex::new(r1, x1),
-        y_shunt: Complex::new(g1, b1) * z_base,
-        tap,
-    })
+    // The whole table, composed exactly as the current step above was, so that
+    // reading position `step` back out of it reproduces `tap` bit for bit.
+    let end_mrid = if on_end1 { end1.mrid_str() } else { end2.mrid_str() };
+    let xtx = if on_end1 { end1.x.unwrap_or(0.0) } else { end2.x.unwrap_or(0.0) };
+    let changer = tap_index.steps_for_end(ds, end_mrid, xtx)?.map(|raw| {
+        raw.compose(
+            |t| if on_end1 { Complex::new(1.0, 0.0) / t / structural } else { t / structural },
+            |x| {
+                // An override on end 2 is dropped by the match above, which is
+                // this branch's own convention: only end 1 carries series
+                // impedance, so only a changer there can move it.
+                let x = if on_end1 { x.unwrap_or_else(|| end1.x.unwrap_or(0.0)) } else { x1 };
+                Complex::new(z_base, 0.0) / Complex::new(r1, x)
+            },
+        )
+    });
+
+    Ok((
+        Transformer {
+            from: bus2,
+            to: bus1,
+            from_status: terms.connected_via_terminal_mrid(&term2.mrid) as u8,
+            to_status: terms.connected_via_terminal_mrid(&term1.mrid) as u8,
+            y_series: Complex::new(z_base, 0.0) / Complex::new(r1, x1),
+            y_shunt: Complex::new(g1, b1) * z_base,
+            tap,
+        },
+        changer,
+    ))
 }
 
 /// Builds one leg of a 3-winding transformer's star equivalent: `to` = this
@@ -1557,7 +1770,7 @@ fn build_two_winding(
 fn build_star_leg(
     ds: &CimDataset, tap_index: &TapChangerIndex, terms: &TerminalIndex, buses: &[Bus],
     end: &PowerTransformerEnd, star_idx: usize, s_base_va: f64,
-) -> Result<Transformer, CgmesError> {
+) -> Result<(Transformer, Option<crate::types::TapChanger>), CgmesError> {
     let term = end.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end.mrid_str(), "Terminal"))?;
     let bus = terms.bus_via_terminal_mrid(&term.mrid)
         .ok_or_else(|| CgmesError::UnresolvedReference { from_type: "PowerTransformerEnd", from_mrid: end.mrid_str().to_string(), field: "Terminal.TopologicalNode" })?;
@@ -1580,15 +1793,28 @@ fn build_star_leg(
     let structural = u / buses[bus].u_rated;
     let tap = tap / structural;
 
-    Ok(Transformer {
-        from: star_idx,
-        to: bus,
-        from_status: 1, // the synthesized star bus itself is never "disconnected"
-        to_status: terms.connected_via_terminal_mrid(&term.mrid) as u8,
-        y_series: Complex::new(z_base, 0.0) / Complex::new(r, x),
-        y_shunt: Complex::new(g, b) * z_base,
-        tap,
-    })
+    let changer = tap_index.steps_for_end(ds, end.mrid_str(), end.x.unwrap_or(0.0))?.map(|raw| {
+        raw.compose(
+            |t| Complex::new(1.0, 0.0) / t / structural,
+            |xo| {
+                let x = xo.unwrap_or_else(|| end.x.unwrap_or(0.0));
+                Complex::new(z_base, 0.0) / Complex::new(r, x)
+            },
+        )
+    });
+
+    Ok((
+        Transformer {
+            from: star_idx,
+            to: bus,
+            from_status: 1, // the synthesized star bus itself is never "disconnected"
+            to_status: terms.connected_via_terminal_mrid(&term.mrid) as u8,
+            y_series: Complex::new(z_base, 0.0) / Complex::new(r, x),
+            y_shunt: Complex::new(g, b) * z_base,
+            tap,
+        },
+        changer,
+    ))
 }
 
 /// Small helper trait so `build_two_winding`/`build_star_leg` can get an
@@ -2385,8 +2611,12 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
 ) -> Result<crate::switches::NodeBreakerNetwork, CgmesError> {
     let (buses, idx_of, terms, nb, view) = build_node_breaker_skeleton(ds, policy)?;
     let mut zero_injection = zero_injection_flags(ds, &terms, buses.len());
-    let (buses, lines, transformers, shunts) =
-        convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
+    let converted = convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
+    // The node-breaker path appends one branch per retained switch after the
+    // model's own transformers, so the tap tables — which are parallel to the
+    // model's transformers only — are dropped here rather than handed on
+    // misaligned. Tap control over a node-breaker view is not wired up.
+    let CgmesNetwork { buses, lines, transformers, shunts, tap_changers: _ } = converted;
     // Conversion appends buses of its own — a three-winding transformer's star
     // point, chiefly. Nothing terminates on those by construction, which is
     // what `true` says: they are the textbook zero-injection bus.
