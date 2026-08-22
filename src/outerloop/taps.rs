@@ -489,10 +489,26 @@ impl OuterLoop for PhaseControl {
         if self.inner.states.is_empty() {
             return OuterLoopStatus::Stable;
         }
-        let active: Vec<usize> = (0..self.inner.states.len())
-            .filter(|&s| !self.inner.states[s].frozen)
-            .collect();
-        if active.is_empty() {
+
+        // Grouped by the flow they regulate, for the same reason the voltage
+        // loop groups by controlled bus: two shifters holding one branch's
+        // power must be sized against each other, not each against the whole
+        // deviation. FullGrid has exactly that — two phase shifters on one
+        // -65 MW target — and sizing them independently doubles the correction
+        // and sets both oscillating.
+        let mut groups: Vec<((usize, Terminal), Vec<usize>)> = Vec::new();
+        for s in 0..self.inner.states.len() {
+            if self.inner.states[s].frozen {
+                continue;
+            }
+            let reg = &ctx.net.regulation[self.inner.states[s].regulation_index];
+            let RegulationMode::ActivePower { branch, terminal } = reg.mode else { continue };
+            match groups.iter_mut().find(|(k, _)| *k == (branch, terminal)) {
+                Some((_, v)) => v.push(s),
+                None => groups.push(((branch, terminal), vec![s])),
+            }
+        }
+        if groups.is_empty() {
             return OuterLoopStatus::Stable;
         }
 
@@ -511,41 +527,61 @@ impl OuterLoop for PhaseControl {
         let v = crate::branch_flow::bus_voltages(ctx.net.buses);
 
         let mut moved = false;
-        for s in active {
-            let reg = &ctx.net.regulation[self.inner.states[s].regulation_index];
-            let RegulationMode::ActivePower { branch, terminal } = reg.mode else {
-                continue;
-            };
-            let t = reg.transformer;
-            let target = reg.target;
-            let half_deadband = reg.deadband.abs() / 2.0;
-
+        for ((branch, terminal), controllers) in groups {
             let Some(bp) = params.get(branch) else { continue };
             let (p, _) = crate::branch_flow::terminal_flow(bp, terminal, &v);
-            let diff = target - p;
-            if diff.abs() <= half_deadband {
-                self.inner.states[s].outcome = ControllerOutcome::InDeadband;
+
+            let reg0 = &ctx.net.regulation[self.inner.states[controllers[0]].regulation_index];
+            let target = reg0.target;
+            let half_deadband = reg0.deadband.abs() / 2.0;
+
+            let mut remaining = target - p;
+            if remaining.abs() <= half_deadband {
+                for &s in &controllers {
+                    self.inner.states[s].outcome = ControllerOutcome::InDeadband;
+                }
                 continue;
             }
 
-            let sens = sensi
-                .branch_response(Variable::PhaseShift(n_lines + t), terminal)
-                .and_then(|r| r.get(branch).map(|(dp, _)| *dp))
-                .unwrap_or(0.0);
-            if sens.abs() < MIN_SENSITIVITY {
-                self.inner.states[s].outcome = ControllerOutcome::Insensitive;
-                self.inner.states[s].frozen = true;
-                continue;
+            let mut ranked: Vec<(usize, f64)> = Vec::new();
+            for &s in &controllers {
+                let t = ctx.net.regulation[self.inner.states[s].regulation_index].transformer;
+                let sens = sensi
+                    .branch_response(Variable::PhaseShift(n_lines + t), terminal)
+                    .and_then(|r| r.get(branch).map(|(dp, _)| *dp))
+                    .unwrap_or(0.0);
+                if sens.abs() < MIN_SENSITIVITY {
+                    self.inner.states[s].outcome = ControllerOutcome::Insensitive;
+                    self.inner.states[s].frozen = true;
+                    continue;
+                }
+                ranked.push((s, sens));
             }
+            // Most authority first, so the shifter that can actually reach the
+            // target does the work and the others are left where they are.
+            ranked.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
 
-            let Some(Some(tc)) = ctx.net.tap_changers.get(t) else { continue };
-            let Some(current_angle) = tc.angle_deg(tc.position) else { continue };
-            // The sensitivity is per radian; the tap table is in degrees.
-            let wanted_angle = current_angle + (diff / sens).to_degrees();
-            let Some(wanted) = tc.nearest_to_angle(wanted_angle) else { continue };
+            for (s, sens) in ranked {
+                if remaining.abs() <= half_deadband {
+                    self.inner.states[s].outcome = ControllerOutcome::InDeadband;
+                    continue;
+                }
+                let t = ctx.net.regulation[self.inner.states[s].regulation_index].transformer;
+                let Some(Some(tc)) = ctx.net.tap_changers.get(t) else { continue };
+                let Some(current_angle) = tc.angle_deg(tc.position) else { continue };
+                // The sensitivity is per radian; the tap table is in degrees.
+                let wanted_angle = current_angle + (remaining / sens).to_degrees();
+                let Some(wanted) = tc.nearest_to_angle(wanted_angle) else { continue };
 
-            if self.inner.move_to(s, wanted, ctx) {
-                moved = true;
+                if self.inner.move_to(s, wanted, ctx) {
+                    moved = true;
+                    let tc = ctx.net.tap_changers[t].as_ref().expect("moved it");
+                    let achieved =
+                        (tc.angle_deg(tc.position).unwrap_or(current_angle) - current_angle)
+                            .to_radians()
+                            * sens;
+                    remaining -= achieved;
+                }
             }
         }
 
