@@ -94,8 +94,19 @@ pub struct TapRegulation {
 pub enum ControllerOutcome {
     /// The controlled quantity is inside the deadband. The success case.
     InDeadband,
-    /// The tap reached `low` or `high` with the target still out of reach.
+    /// The controller asked for a ratio or angle outside what this changer can
+    /// produce at all, and is sitting at whichever end is nearest.
     AtLimit,
+    /// The best position the table offers, with the target still outside the
+    /// deadband — the discrete grid has nothing closer.
+    ///
+    /// Common rather than exceptional: a tap moves in finite steps, so a
+    /// deadband narrower than one step's worth of effect can be unreachable
+    /// from every position. ENTSO-E's own `PST_PhaseTapChangerLinear_Type2`
+    /// asks for zero flow within 5e-4 pu on a shifter whose closest position
+    /// leaves 0.11 pu, and calling that `InDeadband` — as an earlier draft
+    /// did — reports success at a flow 200 times the tolerance.
+    Closest,
     /// `|∂target/∂tap|` is below [`MIN_SENSITIVITY`]; this controller cannot
     /// move its own controlled quantity.
     Insensitive,
@@ -217,11 +228,19 @@ impl TapLoop {
 
     /// Applies one decided position move, maintaining the direction budget.
     ///
+    /// `saturated` says the controller asked for a ratio or angle *outside*
+    /// what this changer can produce at all. It has to be passed in rather than
+    /// inferred: `nearest_to_ratio`/`nearest_to_angle` round into the table by
+    /// construction, so by the time a position arrives here the two very
+    /// different situations — "the table has nothing that far" and "the grid is
+    /// too coarse to do better" — look identical.
+    ///
     /// Returns true if the tap actually moved.
     fn move_to(
         &mut self,
         state_idx: usize,
         wanted: i32,
+        saturated: bool,
         ctx: &mut OuterLoopContext<'_, '_>,
     ) -> bool {
         let reg_idx = self.states[state_idx].regulation_index;
@@ -239,11 +258,12 @@ impl TapLoop {
         let capped = wanted.clamp(current - self.max_tap_shift, current + self.max_tap_shift);
         let target = capped.clamp(low, high);
         if target == current {
-            if wanted != current {
-                // It wanted to move and could not: it is against a limit.
-                self.states[state_idx].outcome = ControllerOutcome::AtLimit;
-                self.states[state_idx].frozen = true;
-            }
+            self.states[state_idx].outcome = if saturated {
+                ControllerOutcome::AtLimit
+            } else {
+                ControllerOutcome::Closest
+            };
+            self.states[state_idx].frozen = true;
             return false;
         }
 
@@ -406,9 +426,15 @@ impl OuterLoop for TransformerVoltageControl {
                 let Some(current_ratio) = tc.ratio(tc.position) else { continue };
                 let wanted_ratio = current_ratio + remaining / sens;
                 let Some(wanted) = tc.nearest_to_ratio(wanted_ratio) else { continue };
+                let (lo, hi) = tc
+                    .steps
+                    .iter()
+                    .map(|t| t.norm())
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), r| (a.min(r), b.max(r)));
+                let saturated = wanted_ratio < lo || wanted_ratio > hi;
 
                 let before = tc.position;
-                if self.inner.move_to(s, wanted, ctx) {
+                if self.inner.move_to(s, wanted, saturated, ctx) {
                     moved = true;
                     let tc = ctx.net.tap_changers[t].as_ref().expect("moved it");
                     let achieved = (tc.ratio(tc.position).unwrap_or(current_ratio) - current_ratio) * sens;
@@ -421,11 +447,11 @@ impl OuterLoop for TransformerVoltageControl {
         if moved {
             OuterLoopStatus::Unstable
         } else {
-            for state in self.inner.states.iter_mut() {
-                if state.outcome == ControllerOutcome::Unfinished {
-                    state.outcome = ControllerOutcome::InDeadband;
-                }
-            }
+            // No blanket relabelling here. `InDeadband` is set where the
+            // deviation was actually measured to be inside, and the three
+            // give-up outcomes where they were actually reached; anything
+            // still `Unfinished` genuinely was not finished, and saying so is
+            // the point of having the field.
             OuterLoopStatus::Stable
         }
     }
@@ -572,8 +598,14 @@ impl OuterLoop for PhaseControl {
                 // The sensitivity is per radian; the tap table is in degrees.
                 let wanted_angle = current_angle + (remaining / sens).to_degrees();
                 let Some(wanted) = tc.nearest_to_angle(wanted_angle) else { continue };
+                let (lo, hi) = tc
+                    .steps
+                    .iter()
+                    .map(|t| t.arg().to_degrees())
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), r| (a.min(r), b.max(r)));
+                let saturated = wanted_angle < lo || wanted_angle > hi;
 
-                if self.inner.move_to(s, wanted, ctx) {
+                if self.inner.move_to(s, wanted, saturated, ctx) {
                     moved = true;
                     let tc = ctx.net.tap_changers[t].as_ref().expect("moved it");
                     let achieved =
@@ -588,11 +620,11 @@ impl OuterLoop for PhaseControl {
         if moved {
             OuterLoopStatus::Unstable
         } else {
-            for state in self.inner.states.iter_mut() {
-                if state.outcome == ControllerOutcome::Unfinished {
-                    state.outcome = ControllerOutcome::InDeadband;
-                }
-            }
+            // No blanket relabelling here. `InDeadband` is set where the
+            // deviation was actually measured to be inside, and the three
+            // give-up outcomes where they were actually reached; anything
+            // still `Unfinished` genuinely was not finished, and saying so is
+            // the point of having the field.
             OuterLoopStatus::Stable
         }
     }
