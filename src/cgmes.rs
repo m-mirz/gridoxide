@@ -630,6 +630,39 @@ impl TapChangerIndex {
         Ok(None)
     }
 
+    /// Whether any tap-changer subtype sits on this end.
+    fn has_changer(&self, end_mrid: &str) -> bool {
+        self.ratio.contains_key(end_mrid)
+            || self.phase_asym.contains_key(end_mrid)
+            || self.phase_sym.contains_key(end_mrid)
+            || self.phase_linear.contains_key(end_mrid)
+            || self.phase_tabular.contains_key(end_mrid)
+    }
+
+    /// The `TapChanger` base of whichever subtype sits on this end — where
+    /// `TapChangerControl` and `controlEnabled` live, regardless of subtype.
+    fn control_of(&self, ds: &CimDataset, end_mrid: &str) -> Option<(Option<String>, bool)> {
+        let read = |tc: &cimstructs::TapChanger| {
+            (tc.tap_changer_control.as_ref().map(|r| r.mrid.clone()), tc.control_enabled == Some(true))
+        };
+        if let Some(m) = self.ratio.get(end_mrid) {
+            return get::<RatioTapChanger>(ds, m).map(|t| read(&t.base));
+        }
+        if let Some(m) = self.phase_asym.get(end_mrid) {
+            return get::<PhaseTapChangerAsymmetrical>(ds, m).map(|t| read(&t.base.base.base));
+        }
+        if let Some(m) = self.phase_sym.get(end_mrid) {
+            return get::<PhaseTapChangerSymmetrical>(ds, m).map(|t| read(&t.base.base.base));
+        }
+        if let Some(m) = self.phase_linear.get(end_mrid) {
+            return get::<cimstructs::PhaseTapChangerLinear>(ds, m).map(|t| read(&t.base.base));
+        }
+        if let Some((m, _)) = self.phase_tabular.get(end_mrid) {
+            return get::<cimstructs::PhaseTapChangerTabular>(ds, m).map(|t| read(&t.base.base));
+        }
+        None
+    }
+
     /// Every position of the tap changer on `end_mrid`, not just the one the
     /// SSH profile currently names.
     ///
@@ -1062,6 +1095,12 @@ pub struct CgmesNetwork {
     /// that makes the table trustworthy as a *replacement* for the single-step
     /// path rather than a second opinion about it.
     pub tap_changers: Vec<Option<crate::types::TapChanger>>,
+    /// The regulating controls acting on those changers, resolved onto
+    /// gridoxide's own bus and branch indices. Only enabled, modelled controls
+    /// appear; [`tap_report`](Self::tap_report) accounts for the rest.
+    pub regulation: Vec<crate::outerloop::TapRegulation>,
+    /// What the regulation import could not use.
+    pub tap_report: TapRegulationReport,
 }
 
 /// [`cgmes_to_buses_and_branches`], keeping the tap tables.
@@ -1283,6 +1322,22 @@ fn convert_equipment(
 
     let mut transformers: Vec<Transformer> = Vec::new();
     let mut tap_changers: Vec<Option<crate::types::TapChanger>> = Vec::new();
+    // Parallel to `transformers`: the `PowerTransformerEnd` whose tap changer
+    // produced the table, and each end's terminal with the side it became.
+    // Both are needed to resolve a `TapChangerControl` — one to find the
+    // transformer, the other to find the branch flow an `activePower` control
+    // regulates — and both are known here rather than inside the builders.
+    let mut changer_end: Vec<Option<String>> = Vec::new();
+    let mut terminal_sides: Vec<Vec<(String, crate::branch_flow::Terminal)>> = Vec::new();
+    // Sorted by mRID before conversion. `HashMap` iteration order is
+    // randomized per process, so without this the transformer list — and every
+    // flat branch index derived from it — comes out in a different order on
+    // every run of the same program against the same file. Nothing asserted on
+    // a transformer index, so it never surfaced as a failure; it would have
+    // surfaced as an irreproducible `TapRegulation.branch`, and as a RAO
+    // decision that names a different element each run.
+    let mut ends_by_pt: Vec<(String, Vec<&PowerTransformerEnd>)> = ends_by_pt.into_iter().collect();
+    ends_by_pt.sort_by(|a, b| a.0.cmp(&b.0));
     for (pt_mrid, mut ends) in ends_by_pt {
         ends.sort_by_key(|e| e.base.end_number.unwrap_or(0));
         match ends.len() {
@@ -1290,6 +1345,22 @@ fn convert_equipment(
                 let (t, c) = build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?;
                 transformers.push(t);
                 tap_changers.push(c);
+                changer_end.push(
+                    [ends[0], ends[1]]
+                        .iter()
+                        .find(|e| tap_index.has_changer(e.mrid_str()))
+                        .map(|e| e.mrid_str().to_string()),
+                );
+                // `build_two_winding` fixes `to` to end 1's bus and `from` to
+                // end 2's, whichever end the changer is physically on.
+                terminal_sides.push(
+                    [(ends[0], crate::branch_flow::Terminal::To), (ends[1], crate::branch_flow::Terminal::From)]
+                        .iter()
+                        .filter_map(|(e, side)| {
+                            e.base.terminal.as_ref().map(|t| (t.mrid.clone(), *side))
+                        })
+                        .collect(),
+                );
             }
             3 => {
                 // `buses.len()` alone is the next free index — it already
@@ -1312,6 +1383,18 @@ fn convert_equipment(
                     let (t, c) = build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?;
                     transformers.push(t);
                     tap_changers.push(c);
+                    changer_end.push(
+                        tap_index.has_changer(end.mrid_str()).then(|| end.mrid_str().to_string()),
+                    );
+                    // A star leg's `to` is this end's own bus; `from` is the
+                    // synthesized star point, which no terminal names.
+                    terminal_sides.push(
+                        end.base
+                            .terminal
+                            .as_ref()
+                            .map(|t| vec![(t.mrid.clone(), crate::branch_flow::Terminal::To)])
+                            .unwrap_or_default(),
+                    );
                 }
             }
             n => return Err(CgmesError::UnsupportedTransformer {
@@ -1637,7 +1720,176 @@ fn convert_equipment(
         }
     }
 
-    Ok(CgmesNetwork { buses, lines, transformers, shunts, tap_changers })
+    let (regulation, tap_report) = read_tap_regulation(
+        ds,
+        &tap_index,
+        &terms,
+        &buses,
+        &lines,
+        &tap_changers,
+        &changer_end,
+        &terminal_sides,
+        s_base_va,
+    );
+
+    Ok(CgmesNetwork {
+        buses,
+        lines,
+        transformers,
+        shunts,
+        tap_changers,
+        regulation,
+        tap_report,
+    })
+}
+
+/// What a tap-regulation import could not use, counted rather than dropped.
+///
+/// Follows [`LimitImportReport`]'s precedent, and for the same reason: a
+/// silently dropped control is how an importer produces a plausible wrong
+/// answer. A network solved with a control gridoxide never read looks exactly
+/// like one solved correctly, only at the wrong voltage.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TapRegulationReport {
+    /// Controls converted.
+    pub converted: usize,
+    /// Present but switched off, on the control or on the tap changer. Data,
+    /// not an error — `PowerFlow`'s single control is one.
+    pub disabled: usize,
+    /// `RegulatingControl.Terminal` named no bus this dataset defines, or the
+    /// changer sat on an end no converted transformer owns.
+    pub unattached: usize,
+    /// No `targetValue`, so there is nothing to regulate towards.
+    pub without_target: usize,
+    /// A mode gridoxide does not model — `reactivePower`, `currentFlow`,
+    /// `admittance`, `temperature`, `powerFactor`. Recognised and counted, in
+    /// the same spirit as [`LimitImportReport::skipped`].
+    pub unsupported_mode: usize,
+    /// An `activePower` control whose regulated terminal resolves to no branch
+    /// this converter produced. Distinguished from `unattached` because the
+    /// control itself is well-formed; it is the flow that cannot be located.
+    pub unresolved_flow: usize,
+}
+
+/// Reads every `TapChangerControl` in the dataset onto gridoxide's own indices.
+///
+/// A separate pass over the dataset returning a side table plus a report, which
+/// is [`cgmes_operational_limits`]'s shape and for the same reasons: the
+/// conversion tuple is already at its limit, and what could not be resolved
+/// deserves counting.
+///
+/// # Units
+///
+/// [`TapRegulation`](crate::outerloop::TapRegulation) is per-unit throughout,
+/// so the conversion happens here where the bases are known: a `voltage`
+/// target divides by the controlled bus's own `u_rated`, an `activePower`
+/// target by `s_base_va`. `targetDeadband` follows its target's unit, and CGMES
+/// states it as a **full width** — the controller is satisfied within half of
+/// it either side, which is what the outer loop assumes.
+#[allow(clippy::too_many_arguments)]
+fn read_tap_regulation(
+    ds: &CimDataset,
+    tap_index: &TapChangerIndex,
+    terms: &TerminalIndex,
+    buses: &[Bus],
+    lines: &[Line],
+    tap_changers: &[Option<crate::types::TapChanger>],
+    changer_end: &[Option<String>],
+    terminal_sides: &[Vec<(String, crate::branch_flow::Terminal)>],
+    s_base_va: f64,
+) -> (Vec<crate::outerloop::TapRegulation>, TapRegulationReport) {
+    use crate::outerloop::{RegulationMode, TapRegulation};
+
+    let mut out = Vec::new();
+    let mut report = TapRegulationReport::default();
+
+    // Terminal mRID -> (flat branch index, side), for the `activePower` case.
+    // Lines first, then transformers, matching `branch_flow::branch_params`.
+    let mut flow_of: HashMap<&str, (usize, crate::branch_flow::Terminal)> = HashMap::new();
+    for (i, sides) in terminal_sides.iter().enumerate() {
+        for (terminal, side) in sides {
+            flow_of.insert(terminal.as_str(), (lines.len() + i, *side));
+        }
+    }
+
+    for (i, changer) in tap_changers.iter().enumerate() {
+        if changer.is_none() {
+            continue;
+        }
+        let Some(end_mrid) = changer_end[i].as_deref() else { continue };
+        let Some((control_mrid, control_enabled)) = tap_index.control_of(ds, end_mrid) else {
+            continue;
+        };
+        // A changer with no `TapChangerControl` at all has a fixed position by
+        // construction. FullGrid's `BE_TR2_HVDC2` is one, and it is why the
+        // published SV moves a tap this importer must not.
+        let Some(control_mrid) = control_mrid else { continue };
+        let Some(rc) = get::<cimstructs::TapChangerControl>(ds, &control_mrid) else {
+            report.unattached += 1;
+            continue;
+        };
+        let rc = &rc.base;
+
+        // Both switches must be on: the control itself, and the changer's own
+        // `controlEnabled`. Either off means the position is an input.
+        let enabled = control_enabled && rc.enabled == Some(true);
+        if !enabled {
+            report.disabled += 1;
+            continue;
+        }
+
+        let Some(term_ref) = &rc.terminal else {
+            report.unattached += 1;
+            continue;
+        };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else {
+            report.unattached += 1;
+            continue;
+        };
+        let Some(target) = rc.target_value else {
+            report.without_target += 1;
+            continue;
+        };
+        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+        let deadband = rc.target_deadband.unwrap_or(0.0);
+
+        let uri = rc.mode.as_ref().map(|m| m.uri.as_str()).unwrap_or("");
+        let (mode, target, deadband) = if uri.ends_with(".voltage") {
+            let base = buses[controlled_bus].u_rated;
+            (RegulationMode::Voltage, target * mult / base, deadband * mult / base)
+        } else if uri.ends_with(".activePower") {
+            let Some(&(branch, terminal)) = flow_of.get(term_ref.mrid.as_str()) else {
+                report.unresolved_flow += 1;
+                continue;
+            };
+            // `mult` already carries MW → W, exactly as it carries kV → V for
+            // a voltage target: powsybl's own SSH export writes "M" here and
+            // "k" there, one multiplier covering both `targetValue` and
+            // `targetDeadband`. Multiplying by 1e6 again on top — which an
+            // earlier draft did — put FullGrid's -65 MW target at -650000 pu.
+            (
+                RegulationMode::ActivePower { branch, terminal },
+                target * mult / s_base_va,
+                deadband * mult / s_base_va,
+            )
+        } else {
+            report.unsupported_mode += 1;
+            continue;
+        };
+
+        report.converted += 1;
+        out.push(TapRegulation {
+            transformer: i,
+            controlled_bus,
+            mode,
+            target,
+            deadband,
+            enabled: true,
+            id: control_mrid,
+        });
+    }
+
+    (out, report)
 }
 
 /// Builds a 2-winding `Transformer`. Per CGMES convention (confirmed against
@@ -2616,7 +2868,7 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
     // model's own transformers, so the tap tables — which are parallel to the
     // model's transformers only — are dropped here rather than handed on
     // misaligned. Tap control over a node-breaker view is not wired up.
-    let CgmesNetwork { buses, lines, transformers, shunts, tap_changers: _ } = converted;
+    let CgmesNetwork { buses, lines, transformers, shunts, .. } = converted;
     // Conversion appends buses of its own — a three-winding transformer's star
     // point, chiefly. Nothing terminates on those by construction, which is
     // what `true` says: they are the textbook zero-injection bus.
