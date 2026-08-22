@@ -143,6 +143,19 @@ pub struct TapChanger {
     pub neutral: i32,
     /// One entry per position, from `low` upwards.
     pub steps: Vec<Complex<f64>>,
+    /// The series admittance to assign at each position, when it varies with
+    /// the tap. `None` — the common case — means the branch's own `y_series`
+    /// holds at every position.
+    ///
+    /// A CGMES `PhaseTapChangerLinear`/`Symmetrical`/`Asymmetrical` carrying
+    /// `xMin`/`xMax` genuinely changes reactance as it moves: the reactance
+    /// follows its own trig curve in the tap angle, and IEC's own model says
+    /// so. Writing only the complex ratio for such a changer would move the
+    /// phase shift while leaving the impedance at whatever position the
+    /// document happened to be exported at — a wrong answer that looks
+    /// entirely plausible, since the flow still changes in the right
+    /// direction.
+    pub series: Option<Vec<Complex<f64>>>,
 }
 
 impl TapChanger {
@@ -195,12 +208,25 @@ impl TapChanger {
     /// `NodeBreakerNetwork::set_switch_open`, which reports the same way for
     /// the same reason.
     ///
+    /// Writes [`series`](Self::series) too where the changer has one, so a
+    /// phase changer whose reactance varies with position stays consistent —
+    /// moving the ratio and leaving the impedance behind is a wrong answer
+    /// that still moves the flow in the right direction, which is the worst
+    /// kind.
+    ///
     /// Note what this does *not* do: the Y-bus is not rebuilt. A tap change
     /// alters admittance values but not the sparsity pattern, so a
     /// `PersistentSolver` keeps its symbolic factorization and needs only
     /// `invalidate_admittances` — the same position a switch flip is in.
+    /// `outerloop::SolveContext::restamp_ybus` is what does the rebuilding.
     pub fn set_position(&mut self, transformer: &mut Transformer, position: i32) -> bool {
         let Some(tap) = self.at(position) else { return false };
+        if let Some(series) = &self.series {
+            // Checked before either write, so a malformed changer leaves both
+            // halves untouched rather than one.
+            let Some(y) = series.get((position - self.low) as usize) else { return false };
+            transformer.y_series = *y;
+        }
         self.position = position;
         transformer.tap = tap;
         true

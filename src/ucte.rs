@@ -1008,7 +1008,7 @@ fn build_tap(nominal: f64, regulation: Option<&RawRegulation>) -> (Complex<f64>,
         .collect();
 
     let position = position.clamp(-n, n);
-    let changer = TapChanger { low: -n, position, neutral: 0, steps };
+    let changer = TapChanger { low: -n, position, neutral: 0, steps, series: None };
     let tap = changer.current().unwrap_or(base);
     (tap, Some(changer))
 }

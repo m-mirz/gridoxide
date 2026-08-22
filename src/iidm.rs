@@ -1078,6 +1078,11 @@ fn build_tap(
         position: source.position.clamp(source.low, source.low + steps.len() as i32 - 1),
         neutral: source.low + steps.len() as i32 / 2,
         steps,
+        // IIDM states per-step `rho`/`alpha` alongside `r`/`x`/`g`/`b` ratios;
+        // only the first two are read today, so the reactance is treated as
+        // constant across the range. Correct for every vendored fixture, which
+        // leave the impedance ratios at their defaults.
+        series: None,
     };
     let tap = changer.current().unwrap_or(base);
     (tap, Some(changer))
