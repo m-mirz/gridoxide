@@ -1630,7 +1630,7 @@ impl AcSensitivityModel {
             crate::pgm::pgm_to_buses_and_branches(input, s_base_va, freq_hz);
 
         let opts = crate::solver::PowerFlowOptions { tol, max_iter, ..Default::default() };
-        let report = crate::run_power_flow(buses, &lines, &transformers, &[], opts);
+        let report = crate::run_power_flow(buses, &lines, &transformers, &[], crate::TapData::none(), opts);
         if report.stats.status != SolveStatus::Converged {
             return Err(PyRuntimeError::new_err(format!(
                 "the power flow did not converge ({:?}); there is no operating point to \

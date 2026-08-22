@@ -752,7 +752,7 @@ fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
     // The linearization is only as meaningful as the point it is taken at, so
     // this refuses to differentiate a solve that did not converge rather than
     // printing derivatives of nothing.
-    let report = run_power_flow(buses, &lines, &transformers, &[], PowerFlowOptions::default());
+    let report = run_power_flow(buses, &lines, &transformers, &[], gridoxide::TapData::none(), PowerFlowOptions::default());
     if report.stats.status != SolveStatus::Converged {
         return Err(format!(
             "the power flow did not converge ({:?}), so there is no operating point to \

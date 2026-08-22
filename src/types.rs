@@ -206,6 +206,24 @@ impl TapChanger {
         true
     }
 
+    /// The position whose voltage-magnitude ratio is closest to `ratio`.
+    ///
+    /// The sibling of [`nearest_to_angle`](Self::nearest_to_angle), and what a
+    /// voltage-regulating tap changer needs to turn a continuous
+    /// \\(\\rho + \\Delta\\rho\\) into a position it can actually take.
+    /// Searches the step table rather than dividing by a step size, for the
+    /// same reason: the map is not linear, and for a `RatioTapChangerTable` it
+    /// is not even regular.
+    pub fn nearest_to_ratio(&self, ratio: f64) -> Option<i32> {
+        (0..self.steps.len())
+            .min_by(|&a, &b| {
+                let da = (self.steps[a].norm() - ratio).abs();
+                let db = (self.steps[b].norm() - ratio).abs();
+                da.total_cmp(&db)
+            })
+            .map(|i| self.low + i as i32)
+    }
+
     /// The position whose phase shift is closest to `angle_deg`.
     ///
     /// The rounding step every continuous-relaxation answer needs before

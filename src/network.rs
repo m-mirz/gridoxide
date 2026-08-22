@@ -93,6 +93,7 @@ impl YBus {
 /// sparse-aware assembly of the linear initial guess and the Jacobian) plus
 /// a ready-to-use sparse matrix (for `power_injections`'s mat-vec, needed
 /// every Newton-Raphson iteration). Built once via `YBus::finish`.
+#[derive(Clone)]
 pub struct YBusSparse {
     n: usize,
     adjacency: Vec<Vec<(usize, Complex<f64>)>>,

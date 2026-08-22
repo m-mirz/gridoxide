@@ -43,7 +43,7 @@ fn solve(
     base_mva: f64,
 ) -> (Solved, SolveStatus) {
     let opts = PowerFlowOptions { method: PowerFlowMethod::NewtonRaphson, ..Default::default() };
-    let report = gridoxide::run_power_flow(buses, lines, transformers, shunts, opts);
+    let report = gridoxide::run_power_flow(buses, lines, transformers, shunts, gridoxide::TapData::none(), opts);
     let v = bus_voltages(&report.buses);
     let params = branch_params(lines, transformers);
     let voltages = labels

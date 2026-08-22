@@ -311,8 +311,6 @@ pub fn solve_batch_block_diagonal<S: LinearSolver>(
             stats: SolveStats {
                 status,
                 mismatch_history,
-                q_limit_switches: Vec::new(),
-                q_limit_stabilized: true,
             },
         })
         .collect()

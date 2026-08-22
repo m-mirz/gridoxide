@@ -9,6 +9,7 @@ pub mod capi;
 pub mod measurement;
 pub mod se;
 pub mod solver;
+pub mod outerloop;
 pub mod constrained;
 pub mod jacobian;
 pub mod batch;
@@ -82,6 +83,55 @@ pub struct PowerFlowReport {
     pub dc: Option<DcSolution>,
     /// Populated only by [`PowerFlowMethod::LinearImpedance`].
     pub linear: Option<LinearReport>,
+    /// What the outer loops did, when any were configured. `None` for a plain
+    /// Newton solve and for the two direct methods.
+    pub outer: Option<OuterLoopOutcome>,
+}
+
+/// The tap tables and regulating controls a solve may act on.
+///
+/// Network data, so it travels in the signature rather than in
+/// [`solver::PowerFlowOptions`]. A caller with no tap control passes
+/// [`TapData::none`], which is what makes
+/// [`solver::PowerFlowOptions::control_taps`] a no-op rather than a lie.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TapData<'a> {
+    /// Parallel to the `transformers` slice.
+    pub changers: &'a [Option<types::TapChanger>],
+    pub regulation: &'a [outerloop::TapRegulation],
+}
+
+impl TapData<'_> {
+    /// No tap tables and no controls: what every importer that does not retain
+    /// them supplies, and what a caller uninterested in tap control passes.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changers.is_empty() || self.regulation.is_empty()
+    }
+}
+
+/// The outer loops' side of a solve, gathered so a caller need not downcast
+/// [`outerloop::OuterLoop`] trait objects to read their reports.
+#[derive(Clone, Debug, Default)]
+pub struct OuterLoopOutcome {
+    /// Per-loop iteration counts and final statuses.
+    pub report: Option<outerloop::OuterLoopReport>,
+    /// Buses switched `PV → PQ`, in switch order. Empty unless
+    /// [`solver::PowerFlowOptions::enforce_q_limits`].
+    pub q_limit_switches: Vec<usize>,
+    /// Populated when [`solver::PowerFlowOptions::distribute_slack`] was set.
+    pub slack: Option<outerloop::SlackDistributionReport>,
+    /// Populated when [`solver::PowerFlowOptions::control_taps`] was set:
+    /// the voltage controllers, then the phase controllers.
+    pub taps: Vec<outerloop::ControllerReport>,
+    /// The transformers as the loops left them — tap positions moved. Empty
+    /// unless a tap loop ran, since nothing else changes a transformer.
+    pub transformers: Vec<Transformer>,
+    /// The tap changers as the loops left them, parallel to `transformers`.
+    pub changers: Vec<Option<types::TapChanger>>,
 }
 
 impl PowerFlowReport {
@@ -90,14 +140,10 @@ impl PowerFlowReport {
         Self {
             buses,
             islands: Vec::new(),
-            stats: SolveStats {
-                status,
-                mismatch_history: Vec::new(),
-                q_limit_switches: Vec::new(),
-                q_limit_stabilized: true,
-            },
+            stats: SolveStats { status, mismatch_history: Vec::new() },
             dc: None,
             linear: None,
+            outer: None,
         }
     }
 }
@@ -123,6 +169,7 @@ pub fn run_power_flow(
     lines: &[Line],
     transformers: &[Transformer],
     shunts: &[ShuntAdm],
+    taps: TapData<'_>,
     opts: PowerFlowOptions,
 ) -> PowerFlowReport {
     match opts.method {
@@ -187,21 +234,115 @@ pub fn run_power_flow(
                 }
             }
 
-            let mut solver = PersistentSolver::new(opts.backend);
-            let (islands, stats) = if opts.enforce_q_limits {
-                solver::newton_raphson_enforcing_q_limits_with_stats(
-                    &mut buses,
-                    &ybus,
-                    opts.tol,
-                    opts.max_iter,
-                    opts.backend,
-                    opts.max_outer_iter,
-                )
-            } else {
-                solver.solve_with_stats(&mut buses, &ybus, opts.tol, opts.max_iter)
-            };
-            PowerFlowReport { buses, islands, stats, dc: None, linear: None }
+            newton_with_loops(buses, lines, transformers, shunts, taps, ybus, opts)
         }
+    }
+}
+
+/// The Newton branch of [`run_power_flow`]: assemble the configured outer
+/// loops, run them to a fixed point, and gather their reports.
+///
+/// With no loop configured this is one ordinary
+/// [`PersistentSolver::solve_with_stats`] call and the report's `outer` field
+/// stays `None` — the path every existing caller takes, unchanged in what it
+/// computes.
+#[allow(clippy::too_many_arguments)]
+fn newton_with_loops(
+    mut buses: Vec<Bus>,
+    lines: &[Line],
+    transformers: &[Transformer],
+    shunts: &[ShuntAdm],
+    taps: TapData<'_>,
+    mut ybus: network::YBusSparse,
+    opts: PowerFlowOptions,
+) -> PowerFlowReport {
+    let wants_taps = opts.control_taps && !taps.is_empty();
+    if !opts.enforce_q_limits && opts.distribute_slack.is_none() && !wants_taps {
+        let mut solver = PersistentSolver::new(opts.backend);
+        let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, opts.tol, opts.max_iter);
+        return PowerFlowReport { buses, islands, stats, dc: None, linear: None, outer: None };
+    }
+
+    // Owned copies, because a tap loop mutates them and the caller handed over
+    // shared slices. Returned on the report so the moved positions are not
+    // lost — a tap position is an answer here, not an input.
+    let mut transformers = transformers.to_vec();
+    let mut changers = taps.changers.to_vec();
+
+    let mut slack = opts.distribute_slack.clone().map(outerloop::DistributedSlack::new);
+    let mut qlim = opts.enforce_q_limits.then(outerloop::ReactiveLimits::new);
+    let mut phase = wants_taps.then(outerloop::PhaseControl::new);
+    let mut voltage = wants_taps.then(outerloop::TransformerVoltageControl::new);
+
+    let (islands, report) = {
+        let mut ctx = outerloop::SolveContext::new(&mut buses, &mut ybus)
+            .with_branches(lines, &mut transformers, shunts)
+            .with_taps(&mut changers, taps.regulation);
+
+        // Innermost first: slack, then reactive limits, then the tap controls.
+        let mut list: Vec<&mut dyn outerloop::OuterLoop> = Vec::new();
+        if let Some(l) = slack.as_mut() {
+            list.push(l);
+        }
+        if let Some(l) = qlim.as_mut() {
+            list.push(l);
+        }
+        if let Some(l) = phase.as_mut() {
+            list.push(l);
+        }
+        if let Some(l) = voltage.as_mut() {
+            list.push(l);
+        }
+        outerloop::solve_with_loops(
+            &mut ctx,
+            opts.tol,
+            opts.max_iter,
+            opts.backend,
+            &mut list,
+            opts.max_outer_iter,
+        )
+    };
+
+    let mut outcome = OuterLoopOutcome {
+        report: Some(report),
+        q_limit_switches: qlim.as_ref().map(|l| l.switches().to_vec()).unwrap_or_default(),
+        slack: slack.map(outerloop::DistributedSlack::into_report),
+        taps: Vec::new(),
+        transformers: Vec::new(),
+        changers: Vec::new(),
+    };
+    if let Some(l) = voltage.as_ref() {
+        outcome.taps.extend(l.report(taps.regulation, &changers).controllers);
+    }
+    if let Some(l) = phase.as_ref() {
+        outcome.taps.extend(l.report(taps.regulation, &changers).controllers);
+    }
+    if wants_taps {
+        outcome.transformers = transformers;
+        outcome.changers = changers;
+    }
+
+    // The outer loops re-solve through `PersistentSolver::solve`, which does
+    // not hand back `SolveStats`; the status is reconstructed from the island
+    // reports, which is the same verdict by a different route.
+    let status = if islands
+        .iter()
+        .all(|i| !matches!(i.status, solver::IslandStatus::Singular | solver::IslandStatus::MaxIterationsReached))
+    {
+        SolveStatus::Converged
+    } else if islands.iter().any(|i| i.status == solver::IslandStatus::Singular) {
+        SolveStatus::Singular
+    } else {
+        SolveStatus::MaxIterationsReached
+    };
+
+    PowerFlowReport {
+        buses,
+        islands,
+        stats: SolveStats { status, mismatch_history: Vec::new() },
+        dc: None,
+        linear: None,
+        outer: Some(outcome),
     }
 }
 
@@ -240,5 +381,5 @@ pub fn run_power_flow_analysis_from_ybus(
     linear_initial_guess(&mut buses, &ybus);
     let mut solver = PersistentSolver::new(JacobianBackend::Scalar);
     let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, 1e-6, 20);
-    PowerFlowReport { buses, islands, stats, dc: None, linear: None }
+    PowerFlowReport { buses, islands, stats, dc: None, linear: None, outer: None }
 }

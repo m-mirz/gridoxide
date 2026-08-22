@@ -51,6 +51,7 @@ fn default_options_reproduce_the_original_entry_point() {
             &lines,
             &transformers,
             &shunts,
+            gridoxide::TapData::none(),
             PowerFlowOptions::default(),
         );
 
@@ -75,7 +76,7 @@ fn each_method_reports_through_its_own_channel() {
     let path = fixture("symmetric/transmission-case");
 
     let (buses, lines, transformers, shunts) = load(&path);
-    let newton = run_power_flow(buses, &lines, &transformers, &shunts, PowerFlowOptions::default());
+    let newton = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), PowerFlowOptions::default());
     assert!(!newton.islands.is_empty());
     assert!(newton.stats.iterations() > 0);
     assert!(newton.dc.is_none() && newton.linear.is_none());
@@ -86,6 +87,7 @@ fn each_method_reports_through_its_own_channel() {
         &lines,
         &transformers,
         &shunts,
+        gridoxide::TapData::none(),
         PowerFlowOptions { method: PowerFlowMethod::Dc, ..Default::default() },
     );
     let solution = dc.dc.as_ref().expect("DC must report a DcSolution");
@@ -101,6 +103,7 @@ fn each_method_reports_through_its_own_channel() {
         &lines,
         &transformers,
         &shunts,
+        gridoxide::TapData::none(),
         PowerFlowOptions { method: PowerFlowMethod::LinearImpedance, ..Default::default() },
     );
     let solution = linear.linear.as_ref().expect("linear must report a LinearReport");
@@ -116,7 +119,7 @@ fn dc_options_reach_the_solver() {
     let solve = |dc: DcOptions| {
         let (buses, lines, transformers, shunts) = load(&path);
         let opts = PowerFlowOptions { method: PowerFlowMethod::Dc, dc, ..Default::default() };
-        let report = run_power_flow(buses, &lines, &transformers, &shunts, opts);
+        let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
         report.buses.iter().map(|b| b.voltage_ang).collect::<Vec<_>>()
     };
 
@@ -152,7 +155,7 @@ fn every_converging_initializer_reaches_the_same_solution() {
         for init in [PowerFlowInit::Flat, PowerFlowInit::LinearImpedance, PowerFlowInit::Dc] {
             let (buses, lines, transformers, shunts) = load(&path);
             let opts = PowerFlowOptions { init, ..Default::default() };
-            let report = run_power_flow(buses, &lines, &transformers, &shunts, opts);
+            let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
             if report.stats.status != SolveStatus::Converged {
                 continue;
             }
@@ -195,7 +198,7 @@ fn both_warm_starts_rescue_a_case_flat_start_cannot_solve() {
     let solve = |init| {
         let (buses, lines, transformers, shunts) = load(&path);
         let opts = PowerFlowOptions { init, ..Default::default() };
-        run_power_flow(buses, &lines, &transformers, &shunts, opts).stats
+        run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts).stats
     };
 
     let flat = solve(PowerFlowInit::Flat);
@@ -222,7 +225,7 @@ fn dc_init_starts_somewhere_other_than_flat() {
     let start = |init| {
         let (buses, lines, transformers, shunts) = load(&path);
         let opts = PowerFlowOptions { init, max_iter: 0, ..Default::default() };
-        let report = run_power_flow(buses, &lines, &transformers, &shunts, opts);
+        let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
         report.buses.iter().map(|b| b.voltage_ang).collect::<Vec<_>>()
     };
 
@@ -283,7 +286,7 @@ fn the_dc_initializer_changes_nothing_but_the_starting_angles() {
     let solve = |init| {
         let (buses, lines) = network();
         let opts = PowerFlowOptions { init, ..Default::default() };
-        run_power_flow(buses, &lines, &[], &[], opts)
+        run_power_flow(buses, &lines, &[], &[], gridoxide::TapData::none(), opts)
     };
 
     let reference = solve(PowerFlowInit::LinearImpedance);
@@ -324,10 +327,17 @@ fn enforce_q_limits_reaches_the_outer_loop() {
     let path = fixture("symmetric/transmission-case");
     let (buses, lines, transformers, shunts) = load(&path);
     let opts = PowerFlowOptions { enforce_q_limits: true, ..Default::default() };
-    let report = run_power_flow(buses, &lines, &transformers, &shunts, opts);
+    let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
 
     assert_eq!(report.stats.status, SolveStatus::Converged);
-    // This fixture has no PV buses to switch, so the outer loop stabilizes
-    // immediately — the point is that it ran at all and reported doing so.
-    assert!(report.stats.q_limit_stabilized);
+    // This fixture has no PV buses to switch, so the loop is stable on its
+    // first check — the point is that it ran at all and reported doing so.
+    let outer = report.outer.as_ref().expect("a configured loop must report");
+    assert!(outer.q_limit_switches.is_empty());
+    let loop_report = outer.report.as_ref().expect("the driver reports per loop");
+    assert!(loop_report.converged, "{loop_report:?}");
+    assert!(
+        loop_report.loop_named("ReactiveLimits").is_some(),
+        "the reactive-limits loop should be in the list: {loop_report:?}"
+    );
 }

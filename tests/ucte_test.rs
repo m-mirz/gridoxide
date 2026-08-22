@@ -66,6 +66,7 @@ fn solve(
         &lines,
         &transformers,
         &net.shunts,
+        gridoxide::TapData::none(),
         opts,
     );
     let v = bus_voltages(&report.buses);
