@@ -194,6 +194,16 @@ pub struct UcteImport {
     pub limits: Vec<BranchLimits>,
     /// Parallel to `transformers`: the tap changer, where the file gave one.
     pub tap_changers: Vec<Option<TapChanger>>,
+    /// The regulating controls `##R` declares, resolved onto this import's own
+    /// indices.
+    ///
+    /// **Empty for every vendored fixture.** UCTE states a ratio regulation's
+    /// held voltage in `##R` columns 33–38 and an angle regulation's held
+    /// power in 58–63, and none of the 207 `##R` records in the corpus
+    /// populates either. The columns are read regardless — an importer that
+    /// skips one is how a plausible wrong answer gets made — but nothing here
+    /// can be gated on the result.
+    pub regulation: Vec<crate::outerloop::TapRegulation>,
     /// Bus index of the slack, and how it was chosen.
     pub slack: usize,
     /// Per-node active generation limits in per-unit, `(p_min, p_max)`, from
@@ -418,6 +428,14 @@ struct RatioRegulation {
     du_percent: f64,
     n: i32,
     position: i32,
+    /// `##R` columns 33–38: the voltage this regulation holds, in kV.
+    ///
+    /// Read but unexercised: across all 207 `##R` records in the vendored
+    /// `.uct` corpus, **none** populates it. Reading it anyway is the point —
+    /// an importer that silently skips a column is how a plausible wrong answer
+    /// gets made, and the field being empty everywhere available is a fact
+    /// about the corpus rather than about the format.
+    target_kv: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -427,6 +445,10 @@ struct AngleRegulation {
     n: i32,
     position: i32,
     symmetrical: bool,
+    /// `##R` columns 58–63: the active power this regulation holds, in MW.
+    /// Same caveat as [`RatioRegulation::target_kv`] — no vendored record has
+    /// one.
+    target_mw: Option<f64>,
 }
 
 /// A branch is in service unless the file says otherwise. 7 is an open busbar
@@ -638,11 +660,15 @@ fn parse_regulation(record: &Record<'_>, line: usize) -> Result<(String, RawRegu
     let du = record.number(20, 25);
     let n = record.integer(26, 28);
     let np = record.integer(29, 32);
-    if du.is_some() || n.is_some() || np.is_some() {
+    // Columns 33–38, between the tap fields and the angle group. Skipped
+    // entirely until now: `parse_regulation` read up to 32 and resumed at 39.
+    let target_kv = record.number(33, 38);
+    if du.is_some() || n.is_some() || np.is_some() || target_kv.is_some() {
         reg.ratio = Some(RatioRegulation {
             du_percent: du.unwrap_or(0.0),
             n: n.unwrap_or(0),
             position: np.unwrap_or(0),
+            target_kv,
         });
     }
 
@@ -650,13 +676,22 @@ fn parse_regulation(record: &Record<'_>, line: usize) -> Result<(String, RawRegu
     let theta = record.number(45, 50);
     let an = record.integer(51, 53);
     let anp = record.integer(54, 57);
+    // Columns 58–63, between the angle tap fields and the kind. Same gap.
+    let target_mw = record.number(58, 63);
     let kind = record.trimmed(64, 68);
-    if adu.is_some() || theta.is_some() || an.is_some() || anp.is_some() || !kind.is_empty() {
+    if adu.is_some()
+        || theta.is_some()
+        || an.is_some()
+        || anp.is_some()
+        || target_mw.is_some()
+        || !kind.is_empty()
+    {
         reg.angle = Some(AngleRegulation {
             du_percent: adu.unwrap_or(0.0),
             theta_deg: theta.unwrap_or(0.0),
             n: an.unwrap_or(0),
             position: anp.unwrap_or(0),
+            target_mw,
             // ASYM is the other spelling; anything unrecognised is treated as
             // symmetrical, which is what every vendored fixture but one uses.
             symmetrical: !kind.eq_ignore_ascii_case("ASYM"),
@@ -808,6 +843,10 @@ fn convert(
     let mut transformer_ids = Vec::new();
     let mut transformer_limits = Vec::new();
     let mut tap_changers = Vec::new();
+    let mut tap_regulation: Vec<crate::outerloop::TapRegulation> = Vec::new();
+    // An angle regulation's branch index is flat — lines first — and the line
+    // count is not final inside this loop, so these are resolved afterwards.
+    let mut pending_power_regulation: Vec<(usize, usize, f64, String)> = Vec::new();
     let mut out_of_service = Vec::new();
     let mut initially_open: Vec<usize> = Vec::new();
     let mut initially_open_transformers: Vec<usize> = Vec::new();
@@ -894,6 +933,30 @@ fn convert(
 
                 let regulation = regulations.get(&branch.id);
                 let (tap, changer) = build_tap(nominal, regulation);
+                // A held voltage names this transformer's own regulated side.
+                // UCTE's `##R` acts on side 1, which `build_transformer` has
+                // made the `to` bus, so that is the bus whose voltage a ratio
+                // regulation holds.
+                if let Some(reg) = regulation {
+                    if let Some(kv) = reg.ratio.and_then(|r| r.target_kv) {
+                        tap_regulation.push(crate::outerloop::TapRegulation {
+                            transformer: transformers.len(),
+                            controlled_bus: to,
+                            mode: crate::outerloop::RegulationMode::Voltage,
+                            target: kv * 1000.0 / buses[to].u_rated,
+                            deadband: 0.0,
+                            enabled: true,
+                            id: branch.id.clone(),
+                        });
+                    } else if let Some(mw) = reg.angle.and_then(|a| a.target_mw) {
+                        pending_power_regulation.push((
+                            transformers.len(),
+                            to,
+                            mw,
+                            branch.id.clone(),
+                        ));
+                    }
+                }
                 transformers.push(Transformer {
                     from,
                     to,
@@ -931,6 +994,24 @@ fn convert(
             out_of_service.len()
         ));
     }
+    // Now that `lines` is final, an angle regulation's regulated branch is the
+    // flat index of its own transformer: a UCTE phase shifter holds the power
+    // on the branch it sits in, which is the only flow the `##R` record names.
+    for (transformer, to, mw, id) in pending_power_regulation {
+        tap_regulation.push(crate::outerloop::TapRegulation {
+            transformer,
+            controlled_bus: to,
+            mode: crate::outerloop::RegulationMode::ActivePower {
+                branch: lines.len() + transformer,
+                terminal: crate::branch_flow::Terminal::To,
+            },
+            target: mw * 1e6 / (options.base_mva * 1e6),
+            deadband: 0.0,
+            enabled: true,
+            id,
+        });
+    }
+
     let unmatched = regulations.len().saturating_sub(
         transformer_ids.iter().filter(|id| regulations.contains_key(*id)).count(),
     );
@@ -957,6 +1038,7 @@ fn convert(
         branch_ids,
         limits,
         tap_changers,
+        regulation: tap_regulation,
         slack,
         p_limits,
         base_mva: options.base_mva,

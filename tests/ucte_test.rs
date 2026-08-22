@@ -505,3 +505,87 @@ fn latin_one_names_do_not_shift_the_columns() {
         net.buses[0].p_spec
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tap regulation
+// ---------------------------------------------------------------------------
+
+/// A `##N`/`##T`/`##R` document with the regulation's *target* columns filled
+/// in — 33–38 for a ratio regulation's held voltage, 58–63 for an angle
+/// regulation's held power.
+///
+/// Synthesized rather than taken from a fixture, and that is the point: across
+/// all 207 `##R` records in the vendored `.uct` corpus, **not one** populates
+/// either column. `parse_regulation` used to read up to byte 32 and resume at
+/// 39, skipping both, and no fixture could have caught it.
+fn regulated(r_record: &str) -> Vec<u8> {
+    let mut doc = String::new();
+    doc.push_str("##N\n##ZBE\n");
+    doc.push_str("BBE1AA1  BE1          0 2 400.00   0.00   0.00   0.00   0.00\n");
+    doc.push_str("BBE2AA1  BE2          0 0 225.00  50.00  10.00\n");
+    doc.push_str("##T\n");
+    doc.push_str(
+        "BBE1AA1  BBE2AA1  1 0 400.00 225.00 1000.00 0.5000 10.000 0.0000 0.0000   5000\n",
+    );
+    doc.push_str("##R\n");
+    doc.push_str(r_record);
+    doc.push('\n');
+    doc.into_bytes()
+}
+
+#[test]
+fn a_ratio_regulations_held_voltage_is_read() {
+    // Columns 33-38 carry 225.00 kV, on a node whose class-7 character makes
+    // its own nominal 225 kV — so exactly 1.0 per unit.
+    let doc = regulated("BBE1AA1  BBE2AA1  1  1.50  10   2225.00");
+    let net = ucte::parse(&doc).expect("import");
+    assert_eq!(net.regulation.len(), 1, "notes: {:?}", net.notes);
+    let r = &net.regulation[0];
+    assert_eq!(r.mode, gridoxide::outerloop::RegulationMode::Voltage);
+    assert!(r.enabled);
+    assert!(
+        (r.target - 225_000.0 / net.buses[r.controlled_bus].u_rated).abs() < 1e-12,
+        "target {} against a {} V bus",
+        r.target,
+        net.buses[r.controlled_bus].u_rated
+    );
+}
+
+#[test]
+fn an_angle_regulations_held_power_is_read() {
+    // Columns 58-63 carry -65.00 MW, against the importer's own 100 MVA base.
+    let doc = regulated("BBE1AA1  BBE2AA1  1                    -0.68 90.00  16   0-65.00SYMM");
+    let net = ucte::parse(&doc).expect("import");
+    assert_eq!(net.regulation.len(), 1, "notes: {:?}", net.notes);
+    let r = &net.regulation[0];
+    match r.mode {
+        gridoxide::outerloop::RegulationMode::ActivePower { branch, .. } => {
+            assert_eq!(branch, net.lines.len(), "a UCTE shifter holds its own branch's flow");
+        }
+        m => panic!("expected an active-power control, got {m:?}"),
+    }
+    assert!((r.target - -0.65).abs() < 1e-12, "{}", r.target);
+}
+
+/// The corpus itself: every vendored `.uct` file parses, and none declares a
+/// regulation target. Recorded as an assertion so that if a fixture ever gains
+/// one, this says so rather than the feature quietly going unexercised.
+#[test]
+fn no_vendored_file_declares_a_regulation_target() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("ucte fixture dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_none_or(|e| e != "uct") {
+            continue;
+        }
+        let Ok(net) = ucte::read(&path) else { continue };
+        assert!(
+            net.regulation.is_empty(),
+            "{} now declares a regulation target — the note in src/ucte.rs is out of date",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no .uct fixtures found");
+}

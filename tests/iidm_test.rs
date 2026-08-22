@@ -409,3 +409,139 @@ fn a_boundary_node_takes_the_voltage_of_what_it_attaches_to() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tap regulation
+// ---------------------------------------------------------------------------
+
+/// A two-winding transformer with both kinds of changer, so one document
+/// covers the voltage case, the active-power case and the two phase modes that
+/// are deliberately not modelled.
+fn regulating_transformer(ratio: &str, phase: &str) -> String {
+    format!(
+        r#"<?xml version='1.0'?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_14" id="n">
+  <iidm:substation id="S">
+    <iidm:voltageLevel id="VL1" nominalV="400.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B1"/></iidm:busBreakerTopology>
+      <iidm:generator id="G" energySource="OTHER" minP="0" maxP="100" voltageRegulatorOn="true"
+                      targetP="10" targetV="400" targetQ="0" bus="B1" connectableBus="B1">
+        <iidm:minMaxReactiveLimits minQ="-100" maxQ="100"/>
+      </iidm:generator>
+    </iidm:voltageLevel>
+    <iidm:voltageLevel id="VL2" nominalV="225.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B2"/></iidm:busBreakerTopology>
+      <iidm:load id="L" p0="10.0" q0="1.0" bus="B2" connectableBus="B2"/>
+    </iidm:voltageLevel>
+    <iidm:twoWindingsTransformer id="T" r="0.5" x="10.0" g="0.0" b="0.0"
+        ratedU1="400.0" ratedU2="225.0" bus1="B1" connectableBus1="B1"
+        voltageLevelId1="VL1" bus2="B2" connectableBus2="B2" voltageLevelId2="VL2">
+{ratio}
+{phase}
+    </iidm:twoWindingsTransformer>
+  </iidm:substation>
+</iidm:network>"#
+    )
+}
+
+const RATIO_STEPS: &str = r#"      <iidm:step rho="0.98" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.00" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.02" r="0" x="0" g="0" b="0"/>"#;
+
+const PHASE_STEPS: &str = r#"      <iidm:step rho="1.0" alpha="-5.0" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.0" alpha="0.0" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.0" alpha="5.0" r="0" x="0" g="0" b="0"/>"#;
+
+/// A regulating `ratioTapChanger` becomes a voltage control, per-unit against
+/// the bus it holds. Until this was read, IIDM supplied the tap table and no
+/// statement of what it was for.
+#[test]
+fn a_regulating_ratio_tap_changer_becomes_a_voltage_control() {
+    let doc = regulating_transformer(
+        &format!(
+            r#"    <iidm:ratioTapChanger lowTapPosition="0" tapPosition="1" regulating="true"
+        loadTapChangingCapabilities="true" targetV="220.5" targetDeadband="2.25">
+{RATIO_STEPS}
+    </iidm:ratioTapChanger>"#
+        ),
+        "",
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert_eq!(net.regulation.len(), 1, "{:?}", net.notes);
+    let r = &net.regulation[0];
+    assert_eq!(r.id, "T");
+    assert_eq!(r.mode, gridoxide::outerloop::RegulationMode::Voltage);
+    // 220.5 kV against a 225 kV bus, and the deadband in the same unit.
+    assert!((r.target - 220.5 / 225.0).abs() < 1e-12, "{}", r.target);
+    assert!((r.deadband - 2.25 / 225.0).abs() < 1e-12, "{}", r.deadband);
+    assert!(r.enabled);
+    assert!(net.tap_changers[0].is_some(), "the table is still there too");
+}
+
+/// `regulating="false"` means the position is an input, whatever `targetV`
+/// says. Every phase tap changer in the committed fixture set is like this.
+#[test]
+fn a_non_regulating_changer_yields_no_control() {
+    let doc = regulating_transformer(
+        &format!(
+            r#"    <iidm:ratioTapChanger lowTapPosition="0" tapPosition="1" regulating="false"
+        loadTapChangingCapabilities="true" targetV="220.5">
+{RATIO_STEPS}
+    </iidm:ratioTapChanger>"#
+        ),
+        "",
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert!(net.regulation.is_empty());
+    assert!(net.tap_changers[0].is_some());
+}
+
+/// A phase tap changer in `ACTIVE_POWER_CONTROL` becomes a flow control on its
+/// own branch, per-unit against the system base.
+#[test]
+fn a_phase_tap_changer_in_active_power_mode_becomes_a_flow_control() {
+    let doc = regulating_transformer(
+        "",
+        &format!(
+            r#"    <iidm:phaseTapChanger lowTapPosition="0" tapPosition="1" regulating="true"
+        regulationMode="ACTIVE_POWER_CONTROL" regulationValue="-65.0" targetDeadband="35.0">
+{PHASE_STEPS}
+    </iidm:phaseTapChanger>"#
+        ),
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert_eq!(net.regulation.len(), 1, "{:?}", net.notes);
+    let r = &net.regulation[0];
+    match r.mode {
+        gridoxide::outerloop::RegulationMode::ActivePower { branch, .. } => {
+            assert_eq!(branch, net.lines.len(), "the shifter's own branch");
+        }
+        m => panic!("expected an active-power control, got {m:?}"),
+    }
+    // -65 MW on the importer's own 100 MVA base.
+    assert!((r.target - -0.65).abs() < 1e-12, "{}", r.target);
+    assert!((r.deadband - 0.35).abs() < 1e-12, "{}", r.deadband);
+}
+
+/// `CURRENT_LIMITER` holds a current, which no outer loop here models. Dropped
+/// — and said so, rather than silently treated as a power target, which would
+/// hold the flow at whatever number the ampere field happened to contain.
+#[test]
+fn a_current_limiting_phase_changer_is_dropped_and_named() {
+    let doc = regulating_transformer(
+        "",
+        &format!(
+            r#"    <iidm:phaseTapChanger lowTapPosition="0" tapPosition="1" regulating="true"
+        regulationMode="CURRENT_LIMITER" regulationValue="500.0">
+{PHASE_STEPS}
+    </iidm:phaseTapChanger>"#
+        ),
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert!(net.regulation.is_empty());
+    assert!(
+        net.notes.iter().any(|n| n.contains("hold a current")),
+        "a dropped control must be named: {:?}",
+        net.notes
+    );
+}

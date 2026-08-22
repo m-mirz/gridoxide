@@ -146,6 +146,14 @@ pub struct IidmImport {
     pub limits: Vec<[BranchLimits; 2]>,
     /// Parallel to `transformers`.
     pub tap_changers: Vec<Option<TapChanger>>,
+    /// The regulating controls the file's `regulating`/`targetV`/
+    /// `regulationValue` attributes declare, resolved onto this import's own
+    /// indices.
+    ///
+    /// A `phaseTapChanger` in `CURRENT_LIMITER` mode is skipped: it holds a
+    /// current rather than a power, which no outer loop here models. A
+    /// `FIXED_TAP` one is skipped because that is what it means.
+    pub regulation: Vec<crate::outerloop::TapRegulation>,
     /// The switch graph, retained. This is what makes a topological remedial
     /// action expressible on an IIDM network.
     pub topology: NodeBreakerTopology,
@@ -238,6 +246,17 @@ struct RawTapChanger {
     position: i32,
     /// `(rho, alpha_deg)` per step, from `low` upwards.
     steps: Vec<(f64, f64)>,
+    /// `regulating`: whether this changer is holding anything at all.
+    regulating: bool,
+    /// `regulationMode`, for a phase tap changer: `CURRENT_LIMITER`,
+    /// `ACTIVE_POWER_CONTROL` or `FIXED_TAP`. A ratio tap changer has no such
+    /// attribute and holds a voltage by construction.
+    mode: Option<String>,
+    /// `targetV` (kV) for a ratio changer, `regulationValue` (MW) for a phase
+    /// one.
+    target: Option<f64>,
+    /// `targetDeadband`, in the target's own unit.
+    deadband: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -691,6 +710,13 @@ fn open(
                         low: attrs.integer("lowTapPosition").unwrap_or(0),
                         position: attrs.integer("tapPosition").unwrap_or(0),
                         steps: Vec::new(),
+                        regulating: attrs.flag("regulating").unwrap_or(false),
+                        mode: attrs.text("regulationMode").map(str::to_string),
+                        // A ratio changer states `targetV`; a phase one states
+                        // `regulationValue`. Neither file uses the other's
+                        // name, so reading both here needs no branch.
+                        target: attrs.number("targetV").or(attrs.number("regulationValue")),
+                        deadband: attrs.number("targetDeadband"),
                     };
                     if phase {
                         t.phase = Some(changer);
@@ -896,6 +922,11 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     let mut transformer_ids = Vec::new();
     let mut transformer_limits = Vec::new();
     let mut tap_changers = Vec::new();
+    let mut tap_regulation: Vec<crate::outerloop::TapRegulation> = Vec::new();
+    let mut pending_power_regulation: Vec<(usize, usize, f64, f64, String)> = Vec::new();
+    // Phase changers regulating a current rather than a power. Counted so the
+    // absence is visible in `notes` rather than assumed.
+    let mut unsupported_phase_mode = 0usize;
     let mut disconnected = Vec::new();
     let mut asymmetric = 0usize;
 
@@ -946,6 +977,37 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
                 let y_series = Complex::new(1.0, 0.0) / Complex::new(r, x);
                 let y_shunt = Complex::new(raw.g2 * z_base, raw.b2 * z_base);
                 let (tap, changer) = build_tap(t, buses[from].u_rated, buses[to].u_rated);
+                // A ratio changer holds the voltage at the side it regulates —
+                // taken as the `to` bus, matching `build_tap`'s own convention
+                // that `rho` acts on side 1. `regulationTerminal` can name a
+                // different one, which this does not follow yet.
+                if let Some(reg) = t.ratio.as_ref().filter(|r| r.regulating) {
+                    if let Some(kv) = reg.target {
+                        tap_regulation.push(crate::outerloop::TapRegulation {
+                            transformer: transformers.len(),
+                            controlled_bus: to,
+                            mode: crate::outerloop::RegulationMode::Voltage,
+                            target: kv * 1000.0 / buses[to].u_rated,
+                            deadband: reg.deadband.unwrap_or(0.0) * 1000.0 / buses[to].u_rated,
+                            enabled: true,
+                            id: raw.id.clone(),
+                        });
+                    }
+                }
+                if let Some(reg) = t.phase.as_ref().filter(|r| r.regulating) {
+                    let active = reg.mode.as_deref() == Some("ACTIVE_POWER_CONTROL");
+                    if let (true, Some(mw)) = (active, reg.target) {
+                        pending_power_regulation.push((
+                            transformers.len(),
+                            to,
+                            mw,
+                            reg.deadband.unwrap_or(0.0),
+                            raw.id.clone(),
+                        ));
+                    } else if !active {
+                        unsupported_phase_mode += 1;
+                    }
+                }
                 transformers.push(Transformer {
                     from,
                     to,
@@ -962,6 +1024,22 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         }
     }
 
+    // `lines` is final now, so an angle regulation's flat branch index is.
+    for (transformer, to, mw, deadband, id) in pending_power_regulation {
+        tap_regulation.push(crate::outerloop::TapRegulation {
+            transformer,
+            controlled_bus: to,
+            mode: crate::outerloop::RegulationMode::ActivePower {
+                branch: lines.len() + transformer,
+                terminal: crate::branch_flow::Terminal::To,
+            },
+            target: mw / options.base_mva,
+            deadband: deadband / options.base_mva,
+            enabled: true,
+            id,
+        });
+    }
+
     let mut branch_ids = line_ids;
     branch_ids.extend(transformer_ids);
     let mut limits = line_limits;
@@ -971,6 +1049,12 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     let mut notes = Vec::new();
     if !disconnected.is_empty() {
         notes.push(format!("{} branch(es) omitted as disconnected", disconnected.len()));
+    }
+    if unsupported_phase_mode > 0 {
+        notes.push(format!(
+            "{unsupported_phase_mode} regulating phase tap changer(s) hold a current rather than \
+             an active power; no outer loop models that, so their controls are dropped"
+        ));
     }
     if asymmetric > 0 {
         notes.push(format!(
@@ -995,6 +1079,7 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         branch_ids,
         limits,
         tap_changers,
+        regulation: tap_regulation,
         topology,
         view,
         switch_ids,
