@@ -111,7 +111,7 @@ scope elsewhere:
 - **No standby/monitoring mode.** A non-regulating SVC falls back to its fixed `q` injection permanently;
   there's no outer loop that would later switch it back into regulation if voltage left some dead-band,
   since gridoxide's plain `newton_raphson` doesn't run any outer loop for SVCs at all (only for PV→PQ
-  switching, and only when `newton_raphson_enforcing_q_limits` is used instead of the default solver).
+  switching, and only when the `outerloop::ReactiveLimits` loop is configured, which the default solve does not do).
 
 ## Tool reference
 
