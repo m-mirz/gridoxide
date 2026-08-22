@@ -13,8 +13,10 @@
 - [The Power Flow Problem](./powerflow/index.md)
 - [DC (Bθ) Power Flow](./powerflow/dc.md)
 - [The Constant-Admittance Linearization](./powerflow/linear_impedance.md)
+- [Outer Loops](./powerflow/outer_loops.md)
 - [Reactive Power Limits (PV → PQ Switching)](./powerflow/q_limits.md)
 - [Distributed Slack](./powerflow/distributed_slack.md)
+- [Transformer Tap Control](./powerflow/tap_control.md)
 - [Ideal Switches and Zero-Impedance Branches](./powerflow/zero_impedance_branches.md)
 - [Multi-Island Power Flow](./powerflow/multi_island.md)
 
