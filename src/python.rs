@@ -181,6 +181,15 @@ struct PowerFlowModel {
     /// repeated `solve_batch` calls at one thread count reuse a single rayon
     /// pool instead of respawning workers per call.
     batch: Option<(usize, BatchSolver)>,
+    /// Parallel to `transformers`: every position of that transformer's tap
+    /// changer, where the importer retained one. Empty for every format but
+    /// CGMES's bus-branch view, which is the only one this class loads from.
+    tap_changers: Vec<Option<crate::types::TapChanger>>,
+    /// The regulating controls acting on those changers.
+    regulation: Vec<crate::outerloop::TapRegulation>,
+    /// What the last `solve()` with outer loops did. Cleared by any solve that
+    /// configured none, so the accessors cannot serve a stale answer.
+    outer: Option<crate::OuterLoopOutcome>,
     tol: f64,
     max_iter: usize,
     /// The node-breaker network, when the model was built with
@@ -274,6 +283,9 @@ impl PowerFlowModel {
             #[cfg(feature = "cgmes")]
             node_breaker: None,
             batch: None,
+            tap_changers: Vec::new(),
+            regulation: Vec::new(),
+            outer: None,
             tol,
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
@@ -322,6 +334,13 @@ impl PowerFlowModel {
         let ds = load_profiles(&path_refs)
             .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))?;
 
+        // Populated by the bus-branch path only. The node-breaker view appends
+        // a branch per retained switch after the model's own transformers, so
+        // the tables — parallel to those transformers alone — would be
+        // misaligned there; `cgmes_node_breaker_to_buses_and_branches` drops
+        // them for the same reason.
+        let mut taps: (Vec<Option<crate::types::TapChanger>>, Vec<crate::outerloop::TapRegulation>) =
+            (Vec::new(), Vec::new());
         let (buses_template, lines, transformers, shunts, tn_bus_index, node_breaker) =
             match topology {
                 "bus_branch" => {
@@ -331,10 +350,12 @@ impl PowerFlowModel {
                              view has already merged every switch away",
                         ));
                     }
+                    let net = crate::cgmes::cgmes_to_network(&ds, s_base_va).map_err(|e| {
+                        PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
+                    })?;
                     let (mut buses, lines, transformers, shunts) =
-                        cgmes_to_buses_and_branches(&ds, s_base_va).map_err(|e| {
-                            PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
-                        })?;
+                        (net.buses, net.lines, net.transformers, net.shunts);
+                    taps = (net.tap_changers, net.regulation);
                     cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va).map_err(|e| {
                         PyRuntimeError::new_err(format!(
                             "resolving CGMES HVDC converters: {e}"
@@ -398,6 +419,9 @@ impl PowerFlowModel {
             sensitivity: None,
             node_breaker,
             batch: None,
+            tap_changers: taps.0,
+            regulation: taps.1,
+            outer: None,
             tol,
             max_iter,
             tn_bus_index,
@@ -440,16 +464,86 @@ impl PowerFlowModel {
     /// Raises `RuntimeError` only if some component's own Newton-Raphson
     /// genuinely failed — didn't converge within `max_iter` iterations, or
     /// hit a singular Jacobian.
-    fn solve(&mut self) -> PyResult<()> {
+    ///
+    /// # Outer loops
+    ///
+    /// The three keyword arguments turn on controls that decide one of the
+    /// solve's own inputs from its result: `control_taps` moves on-load tap
+    /// changers until their controlled bus or branch is inside its deadband,
+    /// `enforce_q_limits` takes a generator off voltage control when it
+    /// saturates its reactive limit, and `distribute_slack` shares the system
+    /// imbalance across generators instead of leaving it on one bus. They
+    /// compose — before the outer-loop layer existed a caller could have at
+    /// most one — and with none of them this is an ordinary Newton solve, which
+    /// is the default.
+    ///
+    /// `control_taps` needs an importer that retained tap tables and
+    /// regulating controls, which today means `from_cgmes(topology=
+    /// "bus_branch")`. With none present it is a no-op rather than an error.
+    ///
+    /// Read what they did with `tap_positions()`, `tap_controllers()`,
+    /// `q_limit_switches()` and `slack_shift()`.
+    #[pyo3(signature = (
+        control_taps = false,
+        enforce_q_limits = false,
+        distribute_slack = false,
+        max_outer = 40,
+        max_tap_shift = 3,
+    ))]
+    fn solve(
+        &mut self,
+        control_taps: bool,
+        enforce_q_limits: bool,
+        distribute_slack: bool,
+        max_outer: usize,
+        max_tap_shift: i32,
+    ) -> PyResult<()> {
         match self.method {
             PowerFlowMethod::Dc => return self.solve_dc(),
             PowerFlowMethod::LinearImpedance => return self.solve_linear_impedance(),
             PowerFlowMethod::NewtonRaphson => {}
         }
         self.dc_solution = None;
+        self.outer = None;
         self.buses = self.buses_template.clone();
         linear_initial_guess(&mut self.buses, &self.ybus);
-        let islands = self.solver.solve(&mut self.buses, &self.ybus, self.tol, self.max_iter);
+
+        let wants_taps = control_taps && !self.regulation.is_empty();
+        let islands = if enforce_q_limits || distribute_slack || wants_taps {
+            let distribution = distribute_slack
+                .then(|| crate::outerloop::SlackDistribution::uniform(&self.buses));
+            let report = crate::run_power_flow(
+                std::mem::take(&mut self.buses),
+                &self.lines,
+                &self.transformers,
+                &self.shunts,
+                crate::TapData {
+                    changers: &self.tap_changers,
+                    regulation: &self.regulation,
+                },
+                crate::solver::PowerFlowOptions {
+                    control_taps,
+                    tap_max_shift: max_tap_shift,
+                    enforce_q_limits,
+                    distribute_slack: distribution,
+                    max_outer_iter: max_outer,
+                    tol: self.tol,
+                    max_iter: self.max_iter,
+                    backend: self.backend,
+                    ..Default::default()
+                },
+            );
+            self.buses = report.buses;
+            self.outer = report.outer;
+            // The loops ran their own `PersistentSolver`, so this model's
+            // cached factorization describes a network that may no longer
+            // exist — a `PV → PQ` switch changes the pattern outright.
+            self.solver.reset();
+            self.sensitivity = None;
+            report.islands
+        } else {
+            self.solver.solve(&mut self.buses, &self.ybus, self.tol, self.max_iter)
+        };
         for island in &islands {
             match island.status {
                 IslandStatus::Converged | IslandStatus::NoReferenceBus | IslandStatus::AmbiguousReferenceBus => {}
@@ -463,6 +557,107 @@ impl PowerFlowModel {
             }
         }
         Ok(())
+    }
+
+    /// Every transformer's tap position after the last solve, `None` where it
+    /// has no tap changer. Parallel to the branch order transformers appear in
+    /// — lines first, then transformers, so transformer `i` is flat branch
+    /// `n_lines + i`.
+    fn tap_positions(&self) -> Vec<Option<i32>> {
+        let moved = self.outer.as_ref().map(|o| &o.changers).filter(|c| !c.is_empty());
+        moved
+            .unwrap_or(&self.tap_changers)
+            .iter()
+            .map(|c| c.as_ref().map(|c| c.position))
+            .collect()
+    }
+
+    /// One entry per tap controller the last solve ran: the element id, the
+    /// transformer it acts on, the bus it holds, where it started, where it
+    /// finished, and how it finished.
+    ///
+    /// The outcome is a string: `"in_deadband"`, `"closest"` (the best position
+    /// the table offers, with the target still out of reach — common, since a
+    /// tap moves in finite steps), `"at_limit"` (it asked for a ratio or angle
+    /// the changer cannot produce), `"insensitive"` (it cannot move its own
+    /// controlled quantity), `"hunting"` (it reversed direction too often to be
+    /// converging), or `"unfinished"`.
+    fn tap_controllers<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<pyo3::Bound<'py, pyo3::types::PyDict>>> {
+        use crate::outerloop::ControllerOutcome;
+        let Some(outer) = self.outer.as_ref() else { return Ok(Vec::new()) };
+        outer
+            .taps
+            .iter()
+            .map(|c| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("id", c.id.clone())?;
+                d.set_item("transformer", c.transformer)?;
+                d.set_item("controlled_bus", c.controlled_bus)?;
+                d.set_item("initial_position", c.initial_position)?;
+                d.set_item("final_position", c.final_position)?;
+                d.set_item("steps_moved", c.steps_moved)?;
+                d.set_item("direction_changes", c.direction_changes)?;
+                d.set_item(
+                    "outcome",
+                    match c.outcome {
+                        ControllerOutcome::InDeadband => "in_deadband",
+                        ControllerOutcome::Closest => "closest",
+                        ControllerOutcome::AtLimit => "at_limit",
+                        ControllerOutcome::Insensitive => "insensitive",
+                        ControllerOutcome::Hunting => "hunting",
+                        ControllerOutcome::Unfinished => "unfinished",
+                    },
+                )?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Buses switched `PV → PQ` on their reactive limit by the last solve, in
+    /// switch order. Empty unless `solve(enforce_q_limits=True)`.
+    fn q_limit_switches(&self) -> Vec<usize> {
+        self.outer.as_ref().map(|o| o.q_limit_switches.clone()).unwrap_or_default()
+    }
+
+    /// Per bus, how much its active schedule moved, per-unit. Empty unless
+    /// `solve(distribute_slack=True)`.
+    fn slack_shift(&self) -> Vec<f64> {
+        self.outer
+            .as_ref()
+            .and_then(|o| o.slack.as_ref())
+            .map(|s| s.shift.clone())
+            .unwrap_or_default()
+    }
+
+    /// Per outer loop, `(name, iterations, converged)` for the last solve.
+    /// Empty when no loop was configured.
+    fn outer_loops(&self) -> Vec<(String, usize, bool)> {
+        self.outer
+            .as_ref()
+            .and_then(|o| o.report.as_ref())
+            .map(|r| {
+                r.loops
+                    .iter()
+                    .map(|l| {
+                        (
+                            l.name.to_string(),
+                            l.iterations,
+                            l.status == crate::outerloop::OuterLoopStatus::Stable,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// How many regulating tap controls the importer resolved. Zero for every
+    /// format but CGMES's bus-branch view.
+    #[getter]
+    fn tap_control_count(&self) -> usize {
+        self.regulation.len()
     }
 
     /// Discards cached symbolic factorization — call before the next

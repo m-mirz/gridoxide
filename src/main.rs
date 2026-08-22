@@ -37,6 +37,20 @@ use gridoxide::solver::{PowerFlowOptions, SolveStatus};
 const USAGE: &str = "\
 usage:
   gridoxide                     run the bundled power-flow demo
+  gridoxide solve <network> [--control-taps] [--enforce-q-limits]
+                  [--distribute-slack] [--max-outer <n>] [--max-tap-shift <n>]
+                  [--tol <t>] [--max-iter <n>]
+                                run an AC power flow, optionally with the outer
+                                loops that make a control a control rather than
+                                a constant: on-load tap changers holding a
+                                voltage or a flow, generators respecting their
+                                reactive limits, and the system imbalance shared
+                                across generators instead of dumped on one
+                                slack. All three compose; without any of them
+                                this is an ordinary Newton solve.
+                                The network may be CGMES (a directory, or the
+                                profile .xml files), UCTE-DEF (.uct) or IIDM
+                                (.xiidm). Needs the matching importer feature.
   gridoxide estimate <path> [--iterative-linear]
                                 run state estimation over a PGM JSON document
                                 containing sym_voltage_sensor/sym_power_sensor.
@@ -123,6 +137,18 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => power_flow_demo(),
+        Some("solve") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_solve(path, &args[2..]) {
+                    eprintln!("error: {message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("error: solve needs a network path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
         Some("estimate") => match args.get(1) {
             Some(path) => {
                 let method = if args.iter().any(|a| a == "--iterative-linear") {
@@ -1716,5 +1742,276 @@ fn rao_json(
 fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
     Err("rao needs the `rao` feature and an importer (`ucte` or `iidm`); \
          rebuild with `--features rao,ucte`"
+        .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// `gridoxide solve`
+// ---------------------------------------------------------------------------
+
+/// A network loaded for a solve, whichever importer produced it.
+///
+/// Deliberately not `SecurityNetwork`: that one is gated behind the `rao`
+/// feature and carries CRAC-shaped fields (countries, initially-open branches)
+/// a power flow has no use for, and it cannot load CGMES — which is the only
+/// format whose fixtures declare tap controls.
+#[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
+struct SolveNetwork {
+    buses: Vec<gridoxide::types::Bus>,
+    lines: Vec<gridoxide::types::Line>,
+    transformers: Vec<gridoxide::types::Transformer>,
+    shunts: Vec<gridoxide::network::ShuntAdm>,
+    tap_changers: Vec<Option<gridoxide::types::TapChanger>>,
+    regulation: Vec<gridoxide::outerloop::TapRegulation>,
+    labels: Vec<String>,
+    notes: Vec<String>,
+    s_base_va: f64,
+}
+
+#[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
+fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
+    let lower = path.to_ascii_lowercase();
+
+    #[cfg(feature = "ucte")]
+    if lower.ends_with(".uct") || lower.ends_with(".ucte") {
+        let n = gridoxide::ucte::read(path).map_err(|e| e.to_string())?;
+        return Ok(SolveNetwork {
+            buses: n.buses,
+            lines: n.lines,
+            transformers: n.transformers,
+            shunts: n.shunts,
+            tap_changers: n.tap_changers,
+            regulation: n.regulation,
+            labels: n.node_codes,
+            notes: n.notes,
+            s_base_va: n.base_mva * 1e6,
+        });
+    }
+
+    #[cfg(feature = "iidm")]
+    if lower.ends_with(".xiidm") {
+        let n = gridoxide::iidm::read(path).map_err(|e| e.to_string())?;
+        return Ok(SolveNetwork {
+            buses: n.buses,
+            lines: n.lines,
+            transformers: n.transformers,
+            shunts: n.shunts,
+            tap_changers: n.tap_changers,
+            regulation: n.regulation,
+            labels: n.bus_labels,
+            notes: n.notes,
+            s_base_va: n.base_mva * 1e6,
+        });
+    }
+
+    #[cfg(feature = "cgmes")]
+    {
+        // A directory of profiles, or one profile file whose siblings are the
+        // rest of the set — which is how every conformity configuration is
+        // laid out, and how a user actually has them on disk.
+        let dir = std::path::Path::new(path);
+        let dir = if dir.is_dir() { dir.to_path_buf() } else { dir.parent().unwrap_or(dir).to_path_buf() };
+        let mut profiles: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .map_err(|e| format!("reading {}: {e}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "xml"))
+            .collect();
+        profiles.sort();
+        if profiles.is_empty() {
+            return Err(format!("no CGMES profile .xml files in {}", dir.display()));
+        }
+        let refs: Vec<&std::path::Path> = profiles.iter().map(|p| p.as_path()).collect();
+        let ds = gridoxide::cgmes::load_profiles(&refs).map_err(|e| e.to_string())?;
+        let s_base_va = 100e6;
+        let net = gridoxide::cgmes::cgmes_to_network(&ds, s_base_va).map_err(|e| e.to_string())?;
+        let mut notes = Vec::new();
+        let r = &net.tap_report;
+        notes.push(format!(
+            "{} CGMES profile file(s); tap controls: {} read, {} disabled, {} unattached, \
+             {} without a target, {} in an unmodelled mode, {} with an unresolvable flow",
+            profiles.len(),
+            r.converted,
+            r.disabled,
+            r.unattached,
+            r.without_target,
+            r.unsupported_mode,
+            r.unresolved_flow
+        ));
+        let labels = (0..net.buses.len()).map(|i| format!("bus {i}")).collect();
+        return Ok(SolveNetwork {
+            buses: net.buses,
+            lines: net.lines,
+            transformers: net.transformers,
+            shunts: net.shunts,
+            tap_changers: net.tap_changers,
+            regulation: net.regulation,
+            labels,
+            notes,
+            s_base_va,
+        });
+    }
+
+    #[allow(unreachable_code)]
+    Err(format!(
+        "cannot tell what `{path}` is; expected a .uct, .xiidm, or a directory of CGMES profiles"
+    ))
+}
+
+#[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
+fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::outerloop::ControllerOutcome;
+    use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+
+    let number = |flag: &str, default: f64| -> Result<f64, String> {
+        match flag_value(flags, flag)? {
+            None => Ok(default),
+            Some(raw) => raw.parse().map_err(|_| format!("{flag}: {raw:?} is not a number")),
+        }
+    };
+    let count = |flag: &str, default: usize| -> Result<usize, String> {
+        match flag_value(flags, flag)? {
+            None => Ok(default),
+            Some(raw) => raw.parse().map_err(|_| format!("{flag}: {raw:?} is not an integer")),
+        }
+    };
+
+    let control_taps = flags.iter().any(|f| f == "--control-taps");
+    let enforce_q_limits = flags.iter().any(|f| f == "--enforce-q-limits");
+    let distribute = flags.iter().any(|f| f == "--distribute-slack");
+    let tol = number("--tol", 1e-8)?;
+    let max_iter = count("--max-iter", 30)?;
+    let max_outer = count("--max-outer", 40)?;
+    let max_tap_shift = count("--max-tap-shift", 3)? as i32;
+
+    let net = load_network_for_solve(path)?;
+    for note in &net.notes {
+        println!("note: {note}");
+    }
+
+    let distribution = distribute
+        .then(|| gridoxide::outerloop::SlackDistribution::uniform(&net.buses));
+    let report = gridoxide::run_power_flow(
+        net.buses.clone(),
+        &net.lines,
+        &net.transformers,
+        &net.shunts,
+        gridoxide::TapData { changers: &net.tap_changers, regulation: &net.regulation },
+        PowerFlowOptions {
+            control_taps,
+            enforce_q_limits,
+            distribute_slack: distribution,
+            tap_max_shift: max_tap_shift,
+            max_outer_iter: max_outer,
+            tol,
+            max_iter,
+            ..Default::default()
+        },
+    );
+
+    println!(
+        "\n{} bus(es), {} line(s), {} transformer(s); {} tap table(s), {} regulating control(s)",
+        net.buses.len(),
+        net.lines.len(),
+        net.transformers.len(),
+        net.tap_changers.iter().filter(|c| c.is_some()).count(),
+        net.regulation.len()
+    );
+
+    // Real networks come with a long tail of de-energized one-bus islands —
+    // Svedala alone has 78 — so the interesting ones are listed and the rest
+    // counted. A `NoReferenceBus` island is a reported verdict, not a failure.
+    use gridoxide::solver::IslandStatus;
+    let mut trivial = 0usize;
+    let mut trivial_buses = 0usize;
+    for (i, island) in report.islands.iter().enumerate() {
+        if island.status == IslandStatus::NoReferenceBus && island.bus_indices.len() <= 2 {
+            trivial += 1;
+            trivial_buses += island.bus_indices.len();
+            continue;
+        }
+        println!("  island {i}: {} bus(es), {:?}", island.bus_indices.len(), island.status);
+    }
+    if trivial > 0 {
+        println!("  ... and {trivial} de-energized island(s) covering {trivial_buses} bus(es)");
+    }
+
+    if let Some(outer) = report.outer.as_ref() {
+        if let Some(r) = outer.report.as_ref() {
+            println!(
+                "\nouter loops: {} re-solve(s) over {} inner solve(s), converged = {}{}",
+                r.total_iterations,
+                r.solves,
+                r.converged,
+                if r.budget_exhausted { " (budget exhausted)" } else { "" }
+            );
+            for l in &r.loops {
+                println!("  {:<26} {:>3} iteration(s)  {:?}", l.name, l.iterations, l.status);
+            }
+        }
+        if !outer.q_limit_switches.is_empty() {
+            println!(
+                "\n{} bus(es) switched PV -> PQ on their reactive limit: {:?}",
+                outer.q_limit_switches.len(),
+                outer.q_limit_switches
+            );
+        }
+        if let Some(s) = outer.slack.as_ref() {
+            let total: f64 = s.shift.iter().sum();
+            println!(
+                "\nslack distribution: {:.3} MW moved over {} pass(es), converged = {}",
+                total * net.s_base_va / 1e6,
+                s.outer_iterations,
+                s.converged
+            );
+            for (island, why) in &s.undistributed {
+                println!("  island {island} left on a single slack: {why}");
+            }
+        }
+        if !outer.taps.is_empty() {
+            println!("\ntap controllers:");
+            for c in &outer.taps {
+                let moved = c.final_position - c.initial_position;
+                println!(
+                    "  {:<40} {:>4} -> {:>4} ({moved:+})  {:?}",
+                    c.id, c.initial_position, c.final_position, c.outcome
+                );
+            }
+            let settled = outer
+                .taps
+                .iter()
+                .filter(|c| c.outcome == ControllerOutcome::InDeadband)
+                .count();
+            println!("  {settled} of {} inside their deadbands", outer.taps.len());
+        }
+    }
+
+    // The five buses furthest from nominal, which is where a reader looks
+    // first and what the labels were loaded for.
+    let mut extremes: Vec<(usize, f64)> = report
+        .buses
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (i, b.voltage_mag))
+        .filter(|(_, v)| *v > 0.0)
+        .collect();
+    extremes.sort_by(|a, b| (b.1 - 1.0).abs().total_cmp(&(a.1 - 1.0).abs()));
+    if !extremes.is_empty() {
+        println!("\nfurthest from nominal:");
+        for (i, v) in extremes.iter().take(5) {
+            let label = net.labels.get(*i).map(String::as_str).unwrap_or("");
+            println!("  {label:<24} {v:.5} pu");
+        }
+    }
+
+    match report.stats.status {
+        SolveStatus::Converged => Ok(()),
+        other => Err(format!("power flow did not converge: {other:?}")),
+    }
+}
+
+#[cfg(not(any(feature = "ucte", feature = "iidm", feature = "cgmes")))]
+fn run_solve(_path: &str, _flags: &[String]) -> Result<(), String> {
+    Err("solve needs an importer feature (`cgmes`, `ucte` or `iidm`); \
+         rebuild with `--features cgmes`"
         .to_string())
 }

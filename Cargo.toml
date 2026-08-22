@@ -333,6 +333,26 @@ path = "tests/cgmes_node_breaker_se_test.rs"
 required-features = ["cgmes"]
 
 [[test]]
+name = "cgmes_tap_table_test"
+path = "tests/cgmes_tap_table_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_tap_regulation_test"
+path = "tests/cgmes_tap_regulation_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "tap_control_test"
+path = "tests/tap_control_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cli_solve_test"
+path = "tests/cli_solve_test.rs"
+required-features = ["cgmes", "ucte"]
+
+[[test]]
 name = "cli_switches_test"
 path = "tests/cli_switches_test.rs"
 required-features = ["cgmes"]
@@ -426,6 +446,26 @@ required-features = ["cgmes"]
 name = "doc_numbers"
 path = "examples/doc_numbers.rs"
 required-features = ["rao", "ucte"]
+
+[[example]]
+name = "tap_regulation_probe"
+path = "examples/tap_regulation_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "tap_control_probe"
+path = "examples/tap_control_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "tap_deadband_probe"
+path = "examples/tap_deadband_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "iidm_regulation_probe"
+path = "examples/iidm_regulation_probe.rs"
+required-features = ["iidm"]
 
 [[example]]
 name = "bench_node_breaker"

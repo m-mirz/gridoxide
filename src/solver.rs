@@ -196,6 +196,10 @@ pub struct PowerFlowOptions {
     /// importer that retained tap tables and regulating controls; with none,
     /// both loops are stable on their first check and cost one call each.
     pub control_taps: bool,
+    /// Positions a tap controller may move in one outer pass. The sensitivity
+    /// is exact only at the converged state, so a large step overshoots;
+    /// capping trades passes for stability.
+    pub tap_max_shift: i32,
     /// Cap on total outer-loop re-solves across every configured loop.
     pub max_outer_iter: usize,
     /// Susceptance choice and transformer-ratio handling for
@@ -217,6 +221,7 @@ impl Default for PowerFlowOptions {
             enforce_q_limits: false,
             distribute_slack: None,
             control_taps: false,
+            tap_max_shift: 3,
             max_outer_iter: 10,
             dc: crate::linear::DcOptions::default(),
         }
