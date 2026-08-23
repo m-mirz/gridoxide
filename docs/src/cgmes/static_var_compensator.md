@@ -37,6 +37,54 @@ believe the doc text instead.)
 An absent or zero rating conventionally means *unlimited* rather than *zero* — mapped to \\(\pm\infty\\)
 (or `±Double.MAX_VALUE`), the same "no rating means no limit" convention tap-changer `xMin`/`xMax` uses.
 
+### 1a. The sign convention, which the code relies on and does not check
+
+The reactance argument above settles the *unit*. It leaves the **sign** open, and gridoxide's
+conversion depends on it:
+
+```rust
+q_min = z_base / inductiveRating      // wants a negative result: absorbing
+q_max = z_base / capacitiveRating     // wants a positive result: generating
+```
+
+That is only right if `inductiveRating` is itself negative. Surveyed across every
+`StaticVarCompensator` in the conformity set, it always is:
+
+| Fixture | `inductiveRating` | `capacitiveRating` |
+|---|---|---|
+| MicroGrid (BaseCase, Type1, Type2) | −5062.5 | 5062.5 |
+| Svedala (×2) | −800 | 800 |
+| RealGrid | −506.25, −675, −337.5 | 202.5, 675, 337.5 |
+| FullGrid | −0.99 | 0.99 |
+
+So the convention is real and consistent — inductive negative, capacitive positive — and the
+division reproduces it rather than assuming it. But **nothing checks it**. The CIM documentation
+text describes both as ratings "at maximum … reactive power" without a stated sign, and an exporter
+that wrote `inductiveRating` positive would give that bus `q_min > 0`, quite possibly
+`q_min > q_max`, and [`ReactiveLimits`](../powerflow/q_limits.md) would then clamp against an
+inverted band. That failure is silent: the solve still converges, at the wrong reactive dispatch.
+
+`tests/cgmes_voltage_control_test.rs`'s `no_summed_band_is_inverted_or_empty` catches it for the
+fixtures in the tree, which is coverage rather than a guard — the importer itself would still
+accept such a file.
+
+### 1b. FullGrid's ratings are filler, and it is worth knowing which fixtures are
+
+Converted, those ratings give sensible devices everywhere but one. MicroGrid's 5062.5 Ω at 225 kV is
+\\(506.25 / 5062.5 = 0.1\\) pu, about 10 MVAr. Svedala's 800 Ω at 400 kV is 2.0 pu, about 200
+MVAr. RealGrid's are the same order.
+
+FullGrid's 0.99 Ω is \\(506.25 / 0.99 = 511\\) pu — **51 GVAr from one substation SVC**, on a
+network whose entire scheduled generation is 485 MW. That is the same `0.99` that appears as
+`BE_SHUNT_1`'s susceptance *and* conductance and as this SVC's own `slope`: filler exercising a
+profile's classes rather than a modelled device. See [Reading CGMES Input](./index.md) for why
+FullGrid is an import fixture and not a solve fixture.
+
+The lesson generalises past this class. A conversion can be dimensionally right and still produce an
+absurd number, and the absurdity is the fixture's. Checking the *magnitude* of a converted quantity
+against what the device plausibly is — not just the algebra of the conversion — is what separates
+the two, and is how both of FullGrid's filler values were found.
+
 ### 2. Three regulation behaviors, in increasing fidelity
 
 **Hard voltage pin.** An SVC that is actively regulating in voltage mode is treated exactly like a PV
