@@ -1,7 +1,7 @@
 """gridoxide: AC power flow analysis (Newton-Raphson) — Python bindings.
 
-`PowerFlowModel`, `StateEstimationModel`, `AcSensitivityModel` and
-`short_circuit` are implemented in Rust
+`PowerFlowModel`, `StateEstimationModel`, `AcSensitivityModel`,
+`short_circuit` and `continuation` are implemented in Rust
 (`src/python.rs`) and built as the
 private `_gridoxide` compiled extension alongside this package (see
 `pyproject.toml`'s `python-source`/`module-name`), re-exported here so
@@ -14,15 +14,21 @@ core bindings never require numpy/scipy.
 """
 from ._gridoxide import (
     AcSensitivityModel,
+    ContinuationCurve,
+    ContinuationEvent,
     PowerFlowModel,
     StateEstimationModel,
+    continuation,
     short_circuit,
 )
 
 __all__ = [
     "AcSensitivityModel",
+    "ContinuationCurve",
+    "ContinuationEvent",
     "PowerFlowModel",
     "StateEstimationModel",
+    "continuation",
     "short_circuit",
 ]
 

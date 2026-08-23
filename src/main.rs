@@ -89,6 +89,28 @@ usage:
                                 before solving; --solve runs a power flow and
                                 reports each switch's own flow.
                                 Needs the `cgmes` feature.
+  gridoxide continuation <path> [--target-lambda <l> | --lower-branch]
+                     [--step <s>] [--max-steps <n>] [--enforce-q-limits]
+                     [--parametrization local|natural|arclength]
+                     [--pickup <i,j,k>] [--buses <i,j,k>]
+                     [--base-mva <m>] [--tol <t>] [--max-iter <n>] [--curve]
+                                trace the P-V curve to the point of voltage
+                                collapse: how much further this network can be
+                                loaded, which bus gives way first, and where
+                                each generator runs out of reactive capability
+                                on the way. Reports the loadability limit as a
+                                multiple of the base load (lambda) and as MW.
+                                The answer is a property of the *direction*
+                                loading grows in, not of the network alone;
+                                the default grows every net consumer at constant
+                                power factor and leaves the slack to pick it up.
+                                --pickup shares that pickup over the named buses
+                                instead; --buses stresses only the named ones.
+                                --enforce-q-limits is worth having: reactive
+                                limits usually decide where the nose is, and
+                                the exact lambda each machine saturates at is
+                                located rather than rounded to a step.
+                                Reads a PGM JSON document.
   gridoxide short-circuit <path> [--scaling max|min]
                                 run an IEC 60909 short-circuit calculation over
                                 a PGM JSON document containing `fault` entries,
@@ -243,6 +265,18 @@ fn main() {
             _ => {
                 eprintln!("error: sensitivity needs a path\n\n{USAGE}");
                 std::process::exit(2);
+            }
+        },
+        Some("continuation") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_continuation_cli(path, &args[2..]) {
+                    eprintln!("{message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("usage: gridoxide continuation <path> [options]");
+                std::process::exit(1);
             }
         },
         Some("short-circuit") => match args.get(1) {
@@ -771,6 +805,198 @@ fn run_opf(_path: &str, _flags: &[String]) -> Result<(), String> {
 /// Offers both directions the library does, because they answer different
 /// questions: `--dp` and friends ask "this moves — what responds?", `--watch`
 /// asks "this is overloaded — what would relieve it?".
+/// Parses a comma-separated bus-index list, e.g. `--pickup 3,7,12`.
+fn parse_index_list(raw: &str, flag: &str, limit: usize) -> Result<Vec<usize>, String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_index(s, flag, limit))
+        .collect()
+}
+
+fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
+    match flag_value(flags, flag)? {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| format!("{flag}: expected a number, got {raw:?}")),
+    }
+}
+
+/// `gridoxide continuation` — trace the P-V curve to the point of collapse.
+fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::continuation::augmented::Parametrization;
+    use gridoxide::continuation::{
+        run_continuation, ContinuationOptions, ContinuationStatus, CriticalPointKind,
+        CurveBranch, LoadingDirection, QLimitKind, StopCriterion,
+    };
+
+    let base_mva = parse_f64_flag(flags, "--base-mva")?.unwrap_or(100.0);
+    let s_base_va = base_mva * 1e6;
+    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let input: PgmInput =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+    let n = buses.len();
+
+    let direction = match flag_value(flags, "--buses")? {
+        Some(list) => LoadingDirection::scale_buses(&buses, &parse_index_list(&list, "--buses", n)?),
+        None => LoadingDirection::scale_loads(&buses),
+    };
+    let direction = match flag_value(flags, "--pickup")? {
+        None => direction,
+        Some(list) => {
+            let mut weights = vec![0.0; n];
+            for i in parse_index_list(&list, "--pickup", n)? {
+                weights[i] = 1.0;
+            }
+            LoadingDirection::scale_loads_with_pickup(&buses, &weights)
+        }
+    };
+
+    let parametrization = match flag_value(flags, "--parametrization")?.as_deref() {
+        // Deliberately `default()` rather than a name repeated here: the choice
+        // is a performance cliff (pseudo-arclength's bordering row is dense, and
+        // costs ~90x a sparse one at a few thousand buses), so the CLI must not
+        // be able to drift away from the library's default.
+        None => Parametrization::default(),
+        Some("local") => Parametrization::Local,
+        Some("natural") => Parametrization::Natural,
+        Some("arclength") => Parametrization::PseudoArcLength,
+        Some(other) => {
+            return Err(format!(
+                "--parametrization: expected arclength, local or natural, got {other:?}"
+            ))
+        }
+    };
+    let target_lambda = parse_f64_flag(flags, "--target-lambda")?;
+    let lower_branch = flags.iter().any(|f| f == "--lower-branch");
+    if target_lambda.is_some() && lower_branch {
+        return Err("--target-lambda and --lower-branch ask for different walks".into());
+    }
+    let enforce_q_limits = flags.iter().any(|f| f == "--enforce-q-limits");
+
+    let opts = ContinuationOptions {
+        direction: direction.clone(),
+        parametrization,
+        stop: StopCriterion { target_lambda, trace_lower_branch: lower_branch },
+        step: parse_f64_flag(flags, "--step")?.unwrap_or(0.1),
+        max_steps: match flag_value(flags, "--max-steps")? {
+            None => 200,
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| format!("--max-steps: expected a count, got {raw:?}"))?,
+        },
+        power_flow: PowerFlowOptions {
+            enforce_q_limits,
+            tol: parse_f64_flag(flags, "--tol")?.unwrap_or(1e-8),
+            max_iter: match flag_value(flags, "--max-iter")? {
+                None => 30,
+                Some(raw) => raw
+                    .parse()
+                    .map_err(|_| format!("--max-iter: expected a count, got {raw:?}"))?,
+            },
+            ..Default::default()
+        },
+        base_mva,
+        ..Default::default()
+    };
+
+    let curve = run_continuation(buses, &lines, &transformers, &[], opts);
+    if let ContinuationStatus::Rejected(why) = &curve.status {
+        return Err(format!("continuation was not attempted: {why:?}"));
+    }
+    if let ContinuationStatus::BaseCaseFailed(status) = &curve.status {
+        return Err(format!(
+            "the base case did not converge ({status:?}), so there is no curve to trace from"
+        ));
+    }
+    for warning in &curve.warnings {
+        println!("warning: {warning:?}");
+    }
+
+    println!(
+        "{} point(s) over {} segment(s), {} bordered solve(s); stopped: {:?}",
+        curve.points.len(),
+        curve.segments,
+        curve.solves,
+        curve.status
+    );
+    println!(
+        "loading grows along a fixed direction ({:.1} MW per unit lambda) — the limit below \
+         is a property of that direction, not of the network alone",
+        direction.total_active_load_increase() * base_mva
+    );
+
+    if flags.iter().any(|f| f == "--curve") {
+        println!("\n  lambda   arclength   min |V|  at bus   dlambda/dsigma   its  branch");
+        for p in &curve.points {
+            let (bus, vmin) = p
+                .voltage_mag
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v > 0.0)
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, v)| (i, *v))
+                .unwrap_or((0, 0.0));
+            println!(
+                "  {:+7.4}   {:9.4}   {:7.4}  {:6}   {:+14.6}   {:3}  {}",
+                p.lambda,
+                p.arclength,
+                vmin,
+                bus,
+                p.tangent_lambda,
+                p.corrector_iterations,
+                if p.branch == CurveBranch::Upper { "upper" } else { "lower" }
+            );
+        }
+    }
+
+    let events = curve.q_limit_events();
+    if !events.is_empty() {
+        println!("\nreactive limits reached, in order:");
+        for (bus, limit, lambda) in &events {
+            println!(
+                "  lambda {lambda:.6}: bus {bus} reached q_{} and stopped holding its voltage",
+                if *limit == QLimitKind::Max { "max" } else { "min" }
+            );
+        }
+    }
+
+    match &curve.critical {
+        None => {
+            println!(
+                "\nno collapse point was found — the walk stopped at lambda {:.4} for another \
+                 reason (see the status above), so this is a lower bound on the limit, not the \
+                 limit",
+                curve.points.last().map(|p| p.lambda).unwrap_or(0.0)
+            );
+        }
+        Some(c) => {
+            println!("\nloadability limit");
+            match c.kind {
+                CriticalPointKind::SaddleNode => println!(
+                    "  a saddle-node bifurcation: the power-flow Jacobian is singular there"
+                ),
+                CriticalPointKind::LimitInduced { bus } => println!(
+                    "  limit-induced by bus {bus}: the limit is the point that machine \
+                     saturates, not a fold"
+                ),
+            }
+            println!("  lambda_max      {:.6}  ({:.4}x the base load)", c.lambda_max, 1.0 + c.lambda_max);
+            println!("  margin          {:.1} MW  ({:.4} p.u.)", c.margin_mw, c.margin_pu);
+            println!("  load at limit   {:.1} MW (from {:.1} MW)",
+                c.p_load_nose_pu * base_mva, c.p_load_base_pu * base_mva);
+            println!("  weakest buses (share of the collapse mode):");
+            for w in c.weakest.iter().take(5) {
+                println!("    bus {:5}  {:.3}   |V| = {:.4}", w.bus, w.participation, w.voltage_mag);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
