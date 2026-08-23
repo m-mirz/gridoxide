@@ -1770,6 +1770,9 @@ struct SolveNetwork {
 
 #[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
 fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
+    // Only the two extension-dispatched importers look at it; a cgmes-only
+    // build reaches the directory branch without ever asking.
+    #[cfg(any(feature = "ucte", feature = "iidm"))]
     let lower = path.to_ascii_lowercase();
 
     #[cfg(feature = "ucte")]

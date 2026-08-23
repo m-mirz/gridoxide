@@ -1101,6 +1101,10 @@ pub struct CgmesNetwork {
     pub regulation: Vec<crate::outerloop::TapRegulation>,
     /// What the regulation import could not use.
     pub tap_report: TapRegulationReport,
+    /// What generator-side voltage control did: how many buses are held, how
+    /// many by more than one machine, and any target two controllers disagreed
+    /// on.
+    pub voltage_control: VoltageControlReport,
 }
 
 /// [`cgmes_to_buses_and_branches`], keeping the tap tables.
@@ -1122,6 +1126,13 @@ fn convert_equipment(
     skeleton: (Vec<Bus>, HashMap<String, usize>, TerminalIndex),
 ) -> Result<CgmesNetwork, CgmesError> {
     let (mut buses, idx_of, terms) = skeleton;
+
+    // Shared by all four regulating-machine loops below, which run in two
+    // separate steps: `PowerElectronicsConnection` in step 3, then
+    // `SynchronousMachine`, `StaticVarCompensator` and
+    // `ExternalNetworkInjection` in step 8. A bus can be held by machines of
+    // different kinds, so the accumulation has to span them.
+    let mut voltage_control = VoltageControl::new(buses.len());
 
     // --- Step 3: loads/injections (EnergyConsumer + subtypes + EquivalentInjection) ---
     // Both P and Q use CGMES's uniform SSH "load sign convention" (positive =
@@ -1218,14 +1229,17 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = pec.min_q.unwrap_or(-f64::INFINITY);
         let q_max = pec.max_q.unwrap_or(f64::INFINITY);
-        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
-        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            mrid,
+        );
     }
 
     // --- Step 4: lines from ACLineSegment ---
@@ -1531,14 +1545,17 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = sm.min_q.unwrap_or(-f64::INFINITY);
         let q_max = sm.max_q.unwrap_or(f64::INFINITY);
-        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
-        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            mrid,
+        );
     }
 
     // StaticVarCompensator: same RegulatingCondEq/RegulatingControl pattern as
@@ -1578,11 +1595,6 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
-
         // capacitiveRating/inductiveRating are REACTANCE ratings in ohms,
         // not MVAr — despite the doc text reading "at maximum ... reactive
         // power", cross-checked directly against references/powsybl-core's
@@ -1601,14 +1613,23 @@ fn convert_equipment(
         // unlike SynchronousMachine's/StaticVarCompensator's own P/Q
         // injection above, no further `* 1e6 / s_base_va` MVAr-to-pu
         // conversion applies here.
-        buses[controlled_bus].q_min = match (sc.inductive_rating, z_base) {
+        let q_min = match (sc.inductive_rating, z_base) {
             (Some(x), Some(zb)) if x != 0.0 => zb / x,
             _ => -f64::INFINITY,
         };
-        buses[controlled_bus].q_max = match (sc.capacitive_rating, z_base) {
+        let q_max = match (sc.capacitive_rating, z_base) {
             (Some(x), Some(zb)) if x != 0.0 => zb / x,
             _ => f64::INFINITY,
         };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            q_min,
+            q_max,
+            mrid,
+        );
     }
 
     // ExternalNetworkInjection: CIM describes it as "used for IEC 60909
@@ -1647,14 +1668,17 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = eni.min_q.unwrap_or(-f64::INFINITY);
         let q_max = eni.max_q.unwrap_or(f64::INFINITY);
-        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
-        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            mrid,
+        );
     }
 
     // Slack: each TopologicalIsland's own angle reference, applied last so it
@@ -1740,7 +1764,134 @@ fn convert_equipment(
         tap_changers,
         regulation,
         tap_report,
+        voltage_control: voltage_control.finish(),
     })
+}
+
+/// Two regulating machines asked one bus to hold different voltages.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetConflict {
+    pub bus: usize,
+    /// The target already written at that bus, per-unit.
+    pub existing: f64,
+    /// What this controller asked for, per-unit.
+    pub proposed: f64,
+    /// The mRID of the controller that disagreed.
+    pub id: String,
+}
+
+/// What generator-side voltage control did to the bus list.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VoltageControlReport {
+    /// Buses held by at least one regulating machine.
+    pub regulated_buses: usize,
+    /// Of those, how many are held by more than one — the case whose reactive
+    /// capability has to be summed rather than overwritten.
+    pub shared_buses: usize,
+    /// Controllers whose target disagreed with one already written at the same
+    /// bus. Empty on every vendored fixture; reported rather than resolved,
+    /// because neither answer is right — see
+    /// [`VoltageControl::regulate`].
+    pub target_conflicts: Vec<TargetConflict>,
+}
+
+/// Accumulates what the regulating machines at each bus jointly hold.
+///
+/// # Why this exists
+///
+/// `SynchronousMachine`, `StaticVarCompensator`, `PowerElectronicsConnection`
+/// and `ExternalNetworkInjection` each carry a `RegulatingControl`, and each
+/// used to write the controlled bus's reactive limits with `=` while writing
+/// its injections with `+=` — the same loop body, opposite conventions. Two
+/// machines on one bus therefore contributed both their reactive power to the
+/// injection but only the **last one's capability** to the limits, so the bus
+/// ran with understated headroom and
+/// [`ReactiveLimits`](crate::outerloop::ReactiveLimits) clamped it early.
+///
+/// Not rare: 62 of RealGrid's 417 voltage-regulated nodes are held by more
+/// than one machine, 2 of FullGrid's 3, and 1 of MicroGrid-Type1's 5. It went
+/// unnoticed because Q-limit enforcement was opt-in and library-only until the
+/// outer-loop layer exposed it.
+struct VoltageControl {
+    /// Whether a bus has had any contribution yet. The first assigns (the
+    /// bus starts at ±∞, which is "no limit" rather than "zero capability"),
+    /// every later one adds.
+    seen: Vec<bool>,
+    /// The target already written at each bus, and by whom.
+    target: Vec<Option<(f64, String)>>,
+    controllers: Vec<usize>,
+    conflicts: Vec<TargetConflict>,
+}
+
+impl VoltageControl {
+    fn new(n: usize) -> Self {
+        Self {
+            seen: vec![false; n],
+            target: vec![None; n],
+            controllers: vec![0; n],
+            conflicts: Vec::new(),
+        }
+    }
+
+    /// One machine holding `bus` at `target_pu` with reactive capability
+    /// `(q_min, q_max)`, already in per-unit.
+    ///
+    /// Limits **sum** across machines. Infinity propagates, which is the right
+    /// reading: one machine with no stated limit makes the bus's joint
+    /// capability unlimited.
+    ///
+    /// The target does **not** sum, and the last writer still wins. That is
+    /// deliberately unchanged: no vendored fixture has two controllers
+    /// disagreeing about a target — checked across MicroGrid, SmallGrid,
+    /// Svedala, FullGrid and RealGrid — so any resolution rule would be
+    /// untested, and picking one here would make this a behaviour change
+    /// rather than the limits-only fix it is. A disagreement is recorded in
+    /// [`VoltageControlReport::target_conflicts`] instead. Doing it properly
+    /// means reactive dispatch inside the Newton system, which is a different
+    /// job.
+    fn regulate(
+        &mut self,
+        buses: &mut [Bus],
+        bus: usize,
+        target_pu: f64,
+        q_min: f64,
+        q_max: f64,
+        id: &str,
+    ) {
+        if buses[bus].bus_type == BusType::PQ {
+            buses[bus].bus_type = BusType::PV;
+        }
+        if let Some((existing, _)) = &self.target[bus] {
+            if (*existing - target_pu).abs() > 1e-9 {
+                self.conflicts.push(TargetConflict {
+                    bus,
+                    existing: *existing,
+                    proposed: target_pu,
+                    id: id.to_string(),
+                });
+            }
+        }
+        self.target[bus] = Some((target_pu, id.to_string()));
+        buses[bus].voltage_mag = target_pu;
+
+        if self.seen[bus] {
+            buses[bus].q_min += q_min;
+            buses[bus].q_max += q_max;
+        } else {
+            buses[bus].q_min = q_min;
+            buses[bus].q_max = q_max;
+            self.seen[bus] = true;
+        }
+        self.controllers[bus] += 1;
+    }
+
+    fn finish(self) -> VoltageControlReport {
+        VoltageControlReport {
+            regulated_buses: self.controllers.iter().filter(|c| **c > 0).count(),
+            shared_buses: self.controllers.iter().filter(|c| **c > 1).count(),
+            target_conflicts: self.conflicts,
+        }
+    }
 }
 
 /// What a tap-regulation import could not use, counted rather than dropped.
@@ -3087,4 +3238,108 @@ pub struct LimitImportReport {
     pub without_value: usize,
     /// Power and voltage limits, recognised but not expressible in amperes.
     pub skipped: usize,
+}
+
+#[cfg(test)]
+mod voltage_control_tests {
+    use super::*;
+
+    fn bus(idx: usize) -> Bus {
+        Bus {
+            idx,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            // What `build_ac_bus_skeleton` starts every bus at: no limit, as
+            // opposed to no capability. It is why the first contribution has
+            // to assign rather than add.
+            q_min: -f64::INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 400e3,
+            zip_terms: Vec::new(),
+        }
+    }
+
+    /// Two machines on one bus contribute both their capabilities, which is
+    /// what the injections beside them have always done. Before this, the
+    /// second `=` threw the first machine's limits away.
+    #[test]
+    fn two_machines_on_one_bus_sum_their_capability() {
+        let mut buses = vec![bus(0), bus(1)];
+        let mut vc = VoltageControl::new(2);
+        vc.regulate(&mut buses, 1, 1.02, -2.0, 3.0, "a");
+        assert_eq!(buses[1].bus_type, BusType::PV);
+        assert_eq!((buses[1].q_min, buses[1].q_max), (-2.0, 3.0), "the first assigns");
+
+        vc.regulate(&mut buses, 1, 1.02, -1.5, 4.0, "b");
+        assert_eq!((buses[1].q_min, buses[1].q_max), (-3.5, 7.0), "the second adds");
+
+        let report = vc.finish();
+        assert_eq!(report.regulated_buses, 1);
+        assert_eq!(report.shared_buses, 1);
+        assert!(report.target_conflicts.is_empty());
+    }
+
+    /// One machine with no stated limit makes the bus's joint capability
+    /// unlimited, which is the right reading of an absent `minQ`/`maxQ` — and
+    /// the reason the accumulation must not treat ±∞ as a number to be
+    /// replaced.
+    #[test]
+    fn an_unlimited_machine_makes_the_joint_capability_unlimited() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.0, -2.0, 3.0, "a");
+        vc.regulate(&mut buses, 0, 1.0, -f64::INFINITY, f64::INFINITY, "b");
+        assert!(buses[0].q_min.is_infinite() && buses[0].q_min < 0.0);
+        assert!(buses[0].q_max.is_infinite() && buses[0].q_max > 0.0);
+        assert!(!buses[0].q_min.is_nan() && !buses[0].q_max.is_nan());
+    }
+
+    /// A single machine is unaffected: it assigns, exactly as it always did.
+    /// This is the case every existing fixture test depends on.
+    #[test]
+    fn one_machine_is_left_exactly_as_it_was() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.05, -1.0, 1.0, "only");
+        assert_eq!((buses[0].q_min, buses[0].q_max), (-1.0, 1.0));
+        assert_eq!(buses[0].voltage_mag, 1.05);
+        let report = vc.finish();
+        assert_eq!(report.shared_buses, 0);
+    }
+
+    /// A target two controllers disagree on is **reported, not resolved**. The
+    /// last writer still wins, which is what it always did — no vendored
+    /// fixture has a disagreement, so any resolution rule would be untested,
+    /// and choosing one here would make this a behaviour change rather than
+    /// the limits-only fix it is.
+    #[test]
+    fn a_disagreeing_target_is_reported_and_the_last_still_wins() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.02, -1.0, 1.0, "first");
+        vc.regulate(&mut buses, 0, 1.06, -1.0, 1.0, "second");
+
+        assert_eq!(buses[0].voltage_mag, 1.06, "last writer still wins");
+        let report = vc.finish();
+        assert_eq!(report.target_conflicts.len(), 1);
+        let c = &report.target_conflicts[0];
+        assert_eq!((c.bus, c.existing, c.proposed, c.id.as_str()), (0, 1.02, 1.06, "second"));
+        // And the limits summed regardless — a disagreement about the target
+        // says nothing about the machines' capability.
+        assert_eq!((buses[0].q_min, buses[0].q_max), (-2.0, 2.0));
+    }
+
+    /// Agreement within floating-point noise is agreement. Two exports of one
+    /// set-point routinely differ in the last digit.
+    #[test]
+    fn a_negligible_difference_is_not_a_conflict() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.02, -1.0, 1.0, "first");
+        vc.regulate(&mut buses, 0, 1.02 + 1e-12, -1.0, 1.0, "second");
+        assert!(vc.finish().target_conflicts.is_empty());
+    }
 }
