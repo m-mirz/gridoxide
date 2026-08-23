@@ -1646,6 +1646,249 @@ struct ShortCircuitResult {
     sources: Vec<Py<ShortCircuitSource>>,
 }
 
+/// One machine running out of reactive capability, as
+/// [`continuation`] found it.
+#[pyclass]
+struct ContinuationEvent {
+    #[pyo3(get)]
+    bus: usize,
+    /// `"max"` or `"min"`.
+    #[pyo3(get)]
+    limit: String,
+    /// The λ at which it saturated — located, not rounded to a step.
+    ///
+    /// Trailing underscore because `lambda` is a Python keyword and
+    /// `event.lambda` will not parse. The rest of the binding spells λ out
+    /// (`lambdas`, `lambda_max`), which collides with nothing.
+    #[pyo3(name = "lambda_", get)]
+    lambda: f64,
+}
+
+/// The P-V curve and the loadability limit at the end of it.
+#[pyclass]
+struct ContinuationCurve {
+    /// λ at every point, in walk order. λ = 0 is the base case.
+    #[pyo3(get)]
+    lambdas: Vec<f64>,
+    /// Cumulative arclength — the parameter the walk advances in, and the one
+    /// that stays meaningful through the nose where λ does not.
+    #[pyo3(get)]
+    arclengths: Vec<f64>,
+    /// `voltage_mag[point][bus]`, per-unit.
+    #[pyo3(get)]
+    voltage_mag: Vec<Vec<f64>>,
+    /// `"upper"` or `"lower"` per point.
+    #[pyo3(get)]
+    branch: Vec<String>,
+    #[pyo3(get)]
+    events: Vec<Py<ContinuationEvent>>,
+    /// `None` when the walk stopped for some other reason — in which case the
+    /// last λ is a lower bound on the limit, not the limit.
+    #[pyo3(get)]
+    lambda_max: Option<f64>,
+    /// `"saddle_node"` or `"limit_induced"`. They are different answers: at a
+    /// limit-induced maximum the Jacobian is *not* singular, and the limit is
+    /// the point a machine saturated.
+    #[pyo3(get)]
+    critical_kind: Option<String>,
+    /// The bus whose voltage collapses.
+    #[pyo3(get)]
+    critical_bus: Option<usize>,
+    /// `(bus, share)` sorted by share of the collapse mode, largest first.
+    #[pyo3(get)]
+    weakest: Vec<(usize, f64)>,
+    /// Additional load carried at the limit, MW on `base_mva`.
+    #[pyo3(get)]
+    margin_mw: Option<f64>,
+    #[pyo3(get)]
+    margin_pu: Option<f64>,
+    #[pyo3(get)]
+    status: String,
+    #[pyo3(get)]
+    warnings: Vec<String>,
+}
+
+/// Traces the P-V curve of a PGM-format JSON network to the point of voltage
+/// collapse.
+///
+/// Answers the question an ordinary power flow cannot: *how much further can
+/// this be loaded?* At the collapse point the Jacobian is singular, so Newton
+/// simply fails — indistinguishable from a bad initial guess. Continuation
+/// reformulates the problem so that point is regular and walks through it.
+///
+/// **The answer is a property of the loading direction, not of the network
+/// alone.** By default every net consumer grows at constant power factor and
+/// the slack picks it up; `pickup` shares that pickup over the named buses
+/// instead, and `buses` restricts which loads grow.
+///
+/// `enforce_q_limits` is worth setting: reactive limits usually decide where
+/// the nose is, and the λ at which each machine saturates is located exactly
+/// rather than rounded to whichever step noticed it.
+///
+/// The physics is gated in `tests/continuation_test.rs` (against a closed-form
+/// two-bus nose) and `tests/continuation_events_test.rs` (against a brute-force
+/// bisection); this binding only has to reach it.
+#[pyfunction]
+#[pyo3(signature = (
+    path, enforce_q_limits = false, target_lambda = None, lower_branch = false,
+    step = 0.1, max_steps = 200, parametrization = None,
+    buses = None, pickup = None, base_mva = 100.0, s_base_va = None, freq_hz = 50.0,
+))]
+#[allow(clippy::too_many_arguments)]
+fn continuation(
+    py: Python<'_>,
+    path: &str,
+    enforce_q_limits: bool,
+    target_lambda: Option<f64>,
+    lower_branch: bool,
+    step: f64,
+    max_steps: usize,
+    parametrization: Option<&str>,
+    buses: Option<Vec<usize>>,
+    pickup: Option<Vec<usize>>,
+    base_mva: f64,
+    s_base_va: Option<f64>,
+    freq_hz: f64,
+) -> PyResult<ContinuationCurve> {
+    use crate::continuation::augmented::Parametrization;
+    use crate::pgm::pgm_to_buses_and_branches;
+    use crate::solver::PowerFlowOptions;
+    use crate::continuation::{
+        run_continuation, ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch,
+        LoadingDirection, QLimitKind, StopCriterion,
+    };
+
+    // `None` takes the library default rather than naming it here: the choice
+    // is a performance cliff (pseudo-arclength's bordering row is dense, and
+    // costs ~90x a sparse one at a few thousand buses), so the binding must not
+    // be able to drift away from it.
+    let parametrization = match parametrization {
+        None => Parametrization::default(),
+        Some("local") => Parametrization::Local,
+        Some("natural") => Parametrization::Natural,
+        Some("arclength") => Parametrization::PseudoArcLength,
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "parametrization must be \"local\", \"natural\" or \"arclength\", got {other:?}"
+            )))
+        }
+    };
+    if target_lambda.is_some() && lower_branch {
+        return Err(PyValueError::new_err(
+            "target_lambda and lower_branch ask for different walks",
+        ));
+    }
+
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+    let input: PgmInput = serde_json::from_str(&raw)
+        .map_err(|e| PyValueError::new_err(format!("parsing {path}: {e}")))?;
+    let (net_buses, lines, transformers) =
+        pgm_to_buses_and_branches(input, s_base_va.unwrap_or(base_mva * 1e6), freq_hz);
+    let n = net_buses.len();
+
+    let check = |list: &[usize], what: &str| -> PyResult<()> {
+        match list.iter().find(|i| **i >= n) {
+            Some(i) => Err(PyValueError::new_err(format!(
+                "{what}: bus {i} is out of range for a {n}-bus network"
+            ))),
+            None => Ok(()),
+        }
+    };
+
+    let direction = match &buses {
+        Some(list) => {
+            check(list, "buses")?;
+            LoadingDirection::scale_buses(&net_buses, list)
+        }
+        None => LoadingDirection::scale_loads(&net_buses),
+    };
+    let direction = match &pickup {
+        None => direction,
+        Some(list) => {
+            check(list, "pickup")?;
+            let mut weights = vec![0.0; n];
+            for &i in list {
+                weights[i] = 1.0;
+            }
+            LoadingDirection::scale_loads_with_pickup(&net_buses, &weights)
+        }
+    };
+
+    let curve = run_continuation(
+        net_buses,
+        &lines,
+        &transformers,
+        &[],
+        ContinuationOptions {
+            direction,
+            parametrization,
+            stop: StopCriterion { target_lambda, trace_lower_branch: lower_branch },
+            step,
+            max_steps,
+            power_flow: PowerFlowOptions { enforce_q_limits, ..Default::default() },
+            base_mva,
+            ..Default::default()
+        },
+    );
+
+    if let ContinuationStatus::Rejected(why) = &curve.status {
+        return Err(PyValueError::new_err(format!("continuation was not attempted: {why:?}")));
+    }
+    if let ContinuationStatus::BaseCaseFailed(status) = &curve.status {
+        return Err(PyRuntimeError::new_err(format!(
+            "the base case did not converge ({status:?}), so there is no curve to trace from"
+        )));
+    }
+
+    let events = curve
+        .q_limit_events()
+        .into_iter()
+        .map(|(bus, limit, lambda)| {
+            Py::new(
+                py,
+                ContinuationEvent {
+                    bus,
+                    limit: match limit {
+                        QLimitKind::Max => "max".to_string(),
+                        QLimitKind::Min => "min".to_string(),
+                    },
+                    lambda,
+                },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let critical = curve.critical.as_ref();
+    Ok(ContinuationCurve {
+        lambdas: curve.lambdas(),
+        arclengths: curve.points.iter().map(|p| p.arclength).collect(),
+        voltage_mag: curve.points.iter().map(|p| p.voltage_mag.clone()).collect(),
+        branch: curve
+            .points
+            .iter()
+            .map(|p| match p.branch {
+                CurveBranch::Upper => "upper".to_string(),
+                CurveBranch::Lower => "lower".to_string(),
+            })
+            .collect(),
+        events,
+        lambda_max: critical.map(|c| c.lambda_max),
+        critical_kind: critical.map(|c| match c.kind {
+            CriticalPointKind::SaddleNode => "saddle_node".to_string(),
+            CriticalPointKind::LimitInduced { .. } => "limit_induced".to_string(),
+        }),
+        critical_bus: critical.and_then(|c| c.critical_bus()),
+        weakest: critical
+            .map(|c| c.weakest.iter().map(|w| (w.bus, w.participation)).collect())
+            .unwrap_or_default(),
+        margin_mw: critical.map(|c| c.margin_mw),
+        margin_pu: critical.map(|c| c.margin_pu),
+        status: format!("{:?}", curve.status),
+        warnings: curve.warnings.iter().map(|w| format!("{w:?}")).collect(),
+    })
+}
+
 /// Runs an IEC 60909 short-circuit calculation over a PGM-format JSON file.
 ///
 /// Unlike `PowerFlowModel`, this is a plain function rather than a
@@ -2288,6 +2531,9 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShortCircuitFault>()?;
     m.add_class::<ShortCircuitSource>()?;
     m.add_function(wrap_pyfunction!(short_circuit, m)?)?;
+    m.add_class::<ContinuationCurve>()?;
+    m.add_class::<ContinuationEvent>()?;
+    m.add_function(wrap_pyfunction!(continuation, m)?)?;
     m.add_class::<AcSensitivityModel>()?;
     m.add_class::<SensitivityColumn>()?;
     m.add_class::<SensitivityRow>()?;
