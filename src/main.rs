@@ -1814,17 +1814,36 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
     #[cfg(feature = "iidm")]
     if lower.ends_with(".xiidm") {
         let n = gridoxide::iidm::read(path).map_err(|e| e.to_string())?;
+        let mut notes = n.notes.clone();
+        if n.areas.report.areas > 0 || n.areas.report.other_types > 0 {
+            let r = &n.areas.report;
+            notes.push(format!(
+                "{} control area(s): {} of another areaType, {} without a schedule, \
+                 {} unknown voltage level(s), {} contested bus(es), {} bus(es) in no area",
+                r.areas,
+                r.other_types,
+                r.without_target.len(),
+                r.unknown_voltage_levels,
+                r.contested_buses,
+                r.unassigned_buses
+            ));
+        }
         return Ok(SolveNetwork {
             buses: n.buses,
             lines: n.lines,
             transformers: n.transformers,
             shunts: n.shunts,
+            areas: (
+                n.areas.of_bus.clone(),
+                n.areas.ids.iter().map(|(id, name)| {
+                    if name.trim().is_empty() { id.clone() } else { name.trim().to_string() }
+                }).collect(),
+            ),
+            area_targets: n.areas.targets.clone(),
             tap_changers: n.tap_changers,
             regulation: n.regulation,
-            areas: (Vec::new(), Vec::new()),
-            area_targets: Vec::new(),
             labels: n.bus_labels,
-            notes: n.notes,
+            notes,
             s_base_va: n.base_mva * 1e6,
         });
     }
@@ -1947,7 +1966,12 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
                  supplies one through ControlArea/TieFlow and UCTE through its ##Z country codes"
             ));
         }
-        let mut d = gridoxide::outerloop::AreaDefinition::uniform(
+        // Weighted by generation rather than by bus type: a net position is met
+        // by redispatch, and a generator held at a fixed active set-point — a
+        // `PQ` bus here — is exactly the machine an operator redispatches. The
+        // `uniform` policy distributed slack uses would leave such an area with
+        // no participant at all.
+        let mut d = gridoxide::outerloop::AreaDefinition::by_generation(
             &net.buses,
             of_bus,
             area_names.len(),

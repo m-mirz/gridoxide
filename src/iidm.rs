@@ -128,6 +128,54 @@ impl Default for IidmOptions {
 }
 
 /// A parsed IIDM document, in gridoxide's own types.
+/// The `<iidm:area>` elements a file declares, resolved onto bus indices.
+///
+/// IIDM is the only one of the three importers that states area **membership**
+/// directly: `<voltageLevelRef>` lists what is inside, where CGMES states only
+/// the boundary and leaves membership to be derived, and UCTE states a country
+/// code per node and no schedule at all.
+#[derive(Clone, Debug, Default)]
+pub struct IidmAreas {
+    /// Area index per bus, indexed by [`Bus::idx`]; `None` for a bus no area
+    /// claims. Feeds
+    /// [`AreaDefinition::of_bus`](crate::outerloop::AreaDefinition::of_bus).
+    pub of_bus: Vec<Option<usize>>,
+    /// Scheduled net **export** per area, per-unit.
+    ///
+    /// IIDM states `interchangeTarget` in load sign convention — "negative is
+    /// export, positive is import", per `Area.java`'s own javadoc — and
+    /// [`AreaDefinition::targets`](crate::outerloop::AreaDefinition::targets)
+    /// is an export, so this is its negation. The same flip CGMES's
+    /// `netInterchange` needs, for the same reason.
+    pub targets: Vec<f64>,
+    /// `(id, name)` per area, in declaration order.
+    pub ids: Vec<(String, String)>,
+    pub report: IidmAreaReport,
+}
+
+/// What an area import could not use, counted rather than dropped.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IidmAreaReport {
+    /// `ControlArea`s converted.
+    pub areas: usize,
+    /// Areas of some other `areaType` — a `BiddingZone`, say. Recognised and
+    /// skipped: they partition the network for a different purpose.
+    pub other_types: usize,
+    /// Areas stating no `interchangeTarget`; their target is left at zero,
+    /// which asks the area to serve its own load rather than being a schedule
+    /// read from the file.
+    pub without_target: Vec<usize>,
+    /// `<voltageLevelRef>`s naming a voltage level this file does not define.
+    pub unknown_voltage_levels: usize,
+    /// `<areaBoundary>` elements seen and not read — gridoxide derives the
+    /// boundary from membership, so a stated one is redundant.
+    pub boundaries_ignored: usize,
+    /// Buses whose nodes are claimed by more than one area. First wins.
+    pub contested_buses: usize,
+    /// Buses no area claims.
+    pub unassigned_buses: usize,
+}
+
 #[derive(Debug)]
 pub struct IidmImport {
     pub buses: Vec<Bus>,
@@ -146,6 +194,8 @@ pub struct IidmImport {
     pub limits: Vec<[BranchLimits; 2]>,
     /// Parallel to `transformers`.
     pub tap_changers: Vec<Option<TapChanger>>,
+    /// The control areas the file declares, if any.
+    pub areas: IidmAreas,
     /// The regulating controls the file's `regulating`/`targetV`/
     /// `regulationValue` attributes declare, resolved onto this import's own
     /// indices.
@@ -398,10 +448,34 @@ pub fn parse(text: &str) -> Result<IidmImport, IidmError> {
 }
 
 /// Everything the streaming pass collects, before indices exist.
+/// An `<iidm:area>`, as the file states it.
+#[derive(Clone, Debug, Default)]
+struct RawArea {
+    id: String,
+    name: String,
+    /// `ControlArea`, `BiddingZone`, or anything else a file cares to define.
+    /// Only `ControlArea` becomes a control area here.
+    area_type: String,
+    /// `interchangeTarget`, MW, in IIDM's **load** sign convention: negative is
+    /// export, positive is import.
+    target_mw: Option<f64>,
+    /// The voltage levels this area contains. IIDM states membership
+    /// *directly*, unlike CGMES, which states only the boundary.
+    voltage_levels: Vec<String>,
+    /// `<areaBoundary>` children, counted rather than read: gridoxide derives
+    /// the boundary from membership instead, so a stated one is redundant here.
+    boundaries: usize,
+}
+
 #[derive(Default)]
 struct Collected {
     version: Option<String>,
     levels: Vec<RawVoltageLevel>,
+    areas: Vec<RawArea>,
+    /// The `<area>` currently open, so its nested refs attach. Kept here rather
+    /// than threaded through `open`/`close`, which already carry five pieces of
+    /// parser state.
+    open_area: Option<RawArea>,
     /// Declared nodes, in declaration order, so bus labels are stable.
     nodes: Vec<NodeKey>,
     switches: Vec<RawSwitch>,
@@ -511,6 +585,25 @@ fn open(
                 .collect();
             versions.sort();
             c.version = versions.into_iter().next();
+        }
+        "area" => {
+            c.open_area = Some(RawArea {
+                id: attrs.string("id").unwrap_or_default(),
+                name: attrs.string("name").unwrap_or_default(),
+                area_type: attrs.string("areaType").unwrap_or_default(),
+                target_mw: attrs.number("interchangeTarget"),
+                ..RawArea::default()
+            });
+        }
+        "voltageLevelRef" => {
+            if let (Some(a), Some(id)) = (c.open_area.as_mut(), attrs.string("id")) {
+                a.voltage_levels.push(id);
+            }
+        }
+        "areaBoundary" => {
+            if let Some(a) = c.open_area.as_mut() {
+                a.boundaries += 1;
+            }
         }
         "voltageLevel" => {
             let id = attrs.string("id").unwrap_or_default();
@@ -767,7 +860,7 @@ fn open(
         // Structural or presentational elements with nothing to contribute.
         "substation" | "busBreakerTopology" | "nodeBreakerTopology"
         | "minMaxReactiveLimits" | "reactiveCapabilityCurve" | "point" | "property"
-        | "extension" | "voltageLevelRef" | "terminalRef" | "area" | "areaBoundary" => {}
+        | "extension" | "terminalRef" => {}
         other => {
             *c.unknown.entry(other.to_string()).or_insert(0) += 1;
         }
@@ -783,6 +876,11 @@ fn close(
     c: &mut Collected,
 ) {
     match name {
+        "area" => {
+            if let Some(a) = c.open_area.take() {
+                c.areas.push(a);
+            }
+        }
         "voltageLevel" => *level = None,
         "line" | "twoWindingsTransformer" | "danglingLine" | "boundaryLine" => {
             if let Some(b) = branch.take() {
@@ -843,6 +941,41 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         }
     }
 
+    // Areas. IIDM lists the voltage levels inside each, so membership needs no
+    // derivation — unlike CGMES, which states only the boundary. A bus can
+    // merge nodes from more than one voltage level through a switch, so the
+    // claim is per node and the first area to claim any of a bus's nodes wins.
+    let mut areas = IidmAreas::default();
+    let mut area_of_level: HashMap<&str, usize> = HashMap::new();
+    let known_levels: std::collections::HashSet<&str> =
+        c.levels.iter().map(|l| l.id.as_str()).collect();
+    for raw in &c.areas {
+        areas.report.boundaries_ignored += raw.boundaries;
+        if raw.area_type != "ControlArea" {
+            areas.report.other_types += 1;
+            continue;
+        }
+        let a = areas.ids.len();
+        areas.ids.push((raw.id.clone(), raw.name.clone()));
+        match raw.target_mw {
+            // Negated: IIDM states an import, `AreaDefinition` wants an export.
+            Some(mw) => areas.targets.push(-mw * 1e6 / s_base_va),
+            None => {
+                areas.report.without_target.push(a);
+                areas.targets.push(0.0);
+            }
+        }
+        for vl in &raw.voltage_levels {
+            if !known_levels.contains(vl.as_str()) {
+                areas.report.unknown_voltage_levels += 1;
+                continue;
+            }
+            area_of_level.entry(vl.as_str()).or_insert(a);
+        }
+    }
+    areas.report.areas = areas.ids.len();
+    // Filled per bus below, then counted once the loop has run.
+
     // One gridoxide bus per bus-view bus.
     let n_buses = view.n_buses();
     let mut buses: Vec<Bus> = Vec::with_capacity(n_buses);
@@ -865,6 +998,20 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
             Some(k) => format!("{}#{}", k.voltage_level, b),
             None => format!("bus{b}"),
         };
+        // Which area, if any, claims this bus. A bus merging nodes from two
+        // areas is a contradiction in the file's own membership; first wins,
+        // and it is counted.
+        let mut claim: Option<usize> = None;
+        for n in nodes {
+            let Some(&a) = area_of_level.get(c.nodes[n.0].voltage_level.as_str()) else { continue };
+            match claim {
+                None => claim = Some(a),
+                Some(existing) if existing != a => areas.report.contested_buses += 1,
+                Some(_) => {}
+            }
+        }
+        areas.of_bus.push(claim);
+
         buses.push(Bus {
             idx: b,
             bus_type: BusType::PQ,
@@ -1040,6 +1187,8 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         });
     }
 
+    areas.report.unassigned_buses = areas.of_bus.iter().filter(|a| a.is_none()).count();
+
     let mut branch_ids = line_ids;
     branch_ids.extend(transformer_ids);
     let mut limits = line_limits;
@@ -1079,6 +1228,7 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         branch_ids,
         limits,
         tap_changers,
+        areas,
         regulation: tap_regulation,
         topology,
         view,

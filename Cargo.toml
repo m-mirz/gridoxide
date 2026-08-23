@@ -497,6 +497,11 @@ path = "examples/ucte_area_probe.rs"
 required-features = ["ucte"]
 
 [[example]]
+name = "iidm_area_probe"
+path = "examples/iidm_area_probe.rs"
+required-features = ["iidm"]
+
+[[example]]
 name = "iidm_regulation_probe"
 path = "examples/iidm_regulation_probe.rs"
 required-features = ["iidm"]
