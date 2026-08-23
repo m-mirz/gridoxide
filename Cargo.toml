@@ -337,6 +337,14 @@ name = "area_interchange_test"
 path = "tests/area_interchange_test.rs"
 
 [[test]]
+name = "continuation_test"
+path = "tests/continuation_test.rs"
+
+[[test]]
+name = "continuation_events_test"
+path = "tests/continuation_events_test.rs"
+
+[[test]]
 name = "cgmes_area_test"
 path = "tests/cgmes_area_test.rs"
 required-features = ["cgmes"]

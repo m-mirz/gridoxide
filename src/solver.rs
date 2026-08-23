@@ -327,7 +327,7 @@ pub enum IslandStatus {
 }
 
 /// One connected component's power-flow outcome — see `IslandStatus`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IslandReport {
     pub bus_indices: Vec<usize>,
     /// The `Slack` bus(es) originally found in this component: empty for
