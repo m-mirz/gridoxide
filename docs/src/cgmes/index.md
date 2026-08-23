@@ -75,6 +75,35 @@ to solving a boundary-truncated area file with fixed-injection equivalents, not 
 One known, documented limitation contributes: `types::Line` has no tap ratio, so it can't absorb the
 small nominal-voltage mismatch CGMES explicitly allows at boundary tie points.
 
+### FullGrid is an import fixture, not a solve fixture
+
+FullGrid is the richest conformity model in the tree — both `TapChangerControl` modes, two phase
+shifters sharing one target, a three-winding transformer, HVDC, a bus held by nine machines — and
+`tests/cgmes_tap_table_test.rs`, `cgmes_tap_regulation_test.rs`, `cgmes_voltage_control_test.rs`
+and `cgmes_node_breaker_test.rs` all use it for exactly those.
+
+**It does not converge, and it cannot.** Its
+`NonlinearShuntCompensatorPoint._7df4778f` declares `b = 0.99 S` *and* `g = 0.99 S` for
+`BE_SHUNT_1` at `nomU = 225 kV`. On a 100 MVA base, \\(z_{base} = 506.25\,\Omega\\), so
+\\(g = 501.19\\) per-unit — a shunt compensator dissipating **50 GW** on a network whose entire
+scheduled generation is 485 MW. The first Newton iteration reports a mismatch of 503 pu, which is
+that conductance and almost nothing else.
+
+The conversion is arithmetically right; the input is not physical. `0.99` turns up across FullGrid
+as filler for several unrelated quantities — it is also the SVC's `inductiveRating`/
+`capacitiveRating`, giving that device a ±511 pu reactive band. These are placeholders exercising a
+profile's classes, not a modelled network.
+
+Worth separating from a different failure mode: FullGrid's published `SvVoltage` *is* consistent
+with its own `EQ`/`SSH` transformer data — `scripts/bench/check_cgmes_sv_consistency.py` flags zero
+of its ten two-winding transformers above 5%, where Svedala has one and RealGrid has many. The
+inconsistency here is between the fixture and physics, not between two of its own profiles.
+
+`tests/cgmes_fullgrid_test.rs` pins all of this, including the non-convergence itself, so a
+corrected fixture announces itself. This has cost effort before: `scripts/bench/README.md` records
+that `network::dc_angle_guess` was added specifically to make FullGrid converge, did not, and was
+removed after it broke `case3120sp`.
+
 **Not built or tested in CI** — the same local/manual-verification posture as `klu` and `pardiso`.
 
 ## The per-class pages
