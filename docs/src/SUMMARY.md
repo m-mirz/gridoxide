@@ -20,6 +20,7 @@
 - [Transformer Tap Control](./powerflow/tap_control.md)
 - [Ideal Switches and Zero-Impedance Branches](./powerflow/zero_impedance_branches.md)
 - [Multi-Island Power Flow](./powerflow/multi_island.md)
+- [Continuation Power Flow](./powerflow/continuation.md)
 
 # Sensitivity Analysis
 

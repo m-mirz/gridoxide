@@ -65,7 +65,7 @@ them as the older snapshot.
 | **EMT** (electromagnetic transients) | ❌ | ❌ | ❌ | ✅ `Simulations/EMT/` | ❌ | ❌ — sub-cycle three-phase time stepping, switching devices, travelling-wave lines. The furthest of the three |
 | **Small-signal / modal** (eigenvalue) analysis | ❌ | ❌ | ❌ | ✅ `Simulations/SmallSignalStabilityRms/` + `SmallSignalStabilityEmt/` | ❌ | ❌ — linearize the DAE, eigen-decompose, participation factors. Presupposes the RMS row |
 | **Remedial action optimization** (CRAC / CNEC, preventive + curative) | ❌ | ❌ | ❌ — this is [powsybl-open-rao](https://github.com/powsybl/powsybl-open-rao)'s job, a separate project, and it is the reference gridoxide is gated against | not surveyed (its contingency row mentions SRAP support, which is adjacent) | not surveyed | ✅ `src/rao/`: CRAC model and readers (all 428 vendored CRACs import, 24 format versions), evaluation kernel with Woodbury outage screening, LP over range actions, search tree over network actions, CASTOR perimeter decomposition, automaton simulation, MNEC soft constraints, conditional usage rules, RA usage limits, curative stop criterion, AC re-validation. Gated against the reference's **own** Cucumber suite — 156 scenarios, 138/142 DC and 192/203 + 727/883 AC assertions, 108 scenarios matching completely. Not yet: action combinations beyond the greedy chain, second-preventive, loop flows, relative margins. See [The Remedial Action Problem](../rao/index.md) |
-| **Voltage stability / continuation power flow** (P-V and Q-V curves, loadability limit) | ❌ no match for continuation/CPF/loadability in its tree (its `cpf` hits are `dcpf`) | ❌ same | ❌ same | not surveyed | not surveyed | ❌ — the cheapest of the missing types: a predictor–corrector loop around a Newton solver that already handles Q-limits, distributed slack and multi-island. `dynawo-algorithms` offers voltage margin and load-increase-to-collapse as a reference to diff against |
+| **Voltage stability / continuation power flow** (P-V and Q-V curves, loadability limit) | ❌ no match for continuation/CPF/loadability in its tree (its `cpf` hits are `dcpf`) | ❌ same | ❌ same | not surveyed | not surveyed | ⚠️ `src/continuation/`: **P-V curves and the loadability limit** — tangent predictor, extended-Newton corrector over the bordered `(n+1)` system, three parametrizations (local by default — pseudo-arclength's dense bordering row measures 92x a sparse one at n = 2449), adaptive step, lower-branch tracing. `case9241pegase` traces to its nose in 10 s. Saddle-node *and* limit-induced bifurcations are distinguished; reactive-limit crossings are located exactly (bisection on arclength, matching a brute-force oracle to `1e-6` in λ against `1e-2`–`1e-1` for step-granularity switching); the weakest-bus ranking is the tangent at the nose. Gated against a **closed-form two-bus nose valid including resistance**, since no vendored reference implements continuation at all. Not yet: Q-V curves, tap control during a trace, bidirectional PV↔PQ switching, ZIP-load derivatives (refused rather than approximated). See [Continuation Power Flow](../powerflow/continuation.md) |
 | **Harmonic analysis / frequency scan** | ❌ no match for harmonic/frequency-scan in its tree | ❌ same | ❌ same | not surveyed | not surveyed | ❌ — needs a per-frequency Y-bus, harmonic source models and frequency-dependent branch data |
 | **Reliability / adequacy** (Monte Carlo, LOLE/EENS) | ❌ no match for reliability/monte-carlo/LOLE/EENS in its tree | ❌ same | ❌ same | not surveyed | not surveyed | ❌ — the contingency kernel exists; the outage-rate data, sampling driver and indices do not |
 | **Protection coordination** (relay curves, selectivity) | ❌ explicitly not simulated — "ignore the protection, that are NOT simulated" in its own examples | ❌ no match in its tree | ❌ same | not surveyed | not surveyed | ❌ — would sit on the short-circuit engine that does exist |
@@ -265,11 +265,16 @@ them as the older snapshot.
     of something already built; each is a different question asked of the network, and they are worth
     ranking rather than lumping together:
 
-    - **Voltage stability / continuation power flow** is the cheapest by a distance. It is a
-      predictor–corrector loop around a Newton solver that already handles Q-limits, distributed
-      slack and multi-island, and it answers a question nothing in the current set answers: *how much
-      further can this be loaded?* `dynawo-algorithms` offers voltage margin and
-      load-increase-to-collapse to diff against.
+    - **Voltage stability / continuation power flow** was the cheapest by a distance, and is now
+      built (`src/continuation/`) — a predictor–corrector loop around the Newton solver that already
+      handled Q-limits, distributed slack and multi-island, answering the question nothing else in
+      the set answers: *how much further can this be loaded?* What remains of the row is Q-V curves.
+      The estimate held: the reusable parts were the Jacobian pattern, the reactive-limit outer loop
+      and the sparse backends, and the genuinely new numerics are small. What the estimate missed is
+      that two of the three outer loops must **not** be run inside the corrector — they move
+      `p_spec` as a function of the solved state, which corrupts the tangent — and are folded into
+      the loading direction analytically instead. `dynawo-algorithms` offers voltage margin and
+      load-increase-to-collapse as an external cross-check.
     - **Quasi-static time series** is next, and half-built: `BatchSolver` already runs many scenarios
       over one topology in parallel. What is missing is chronology — carrying storage state of
       charge, tap positions and controller memory from one step to the next — plus a driver and a
