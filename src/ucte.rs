@@ -268,6 +268,35 @@ impl UcteImport {
         self.base_mva * 1e6
     }
 
+    /// Country codes as control areas, for
+    /// [`outerloop::AreaInterchange`](crate::outerloop::AreaInterchange).
+    ///
+    /// Returns the per-bus area assignment and the country code each index
+    /// stands for, ordered so the mapping is stable across runs rather than
+    /// depending on which bus happened to be visited first.
+    ///
+    /// UCTE states no scheduled net position anywhere — the `##Z<cc>`
+    /// sub-headers give the *membership* and nothing else — so the caller
+    /// supplies [`AreaDefinition::targets`](crate::outerloop::AreaDefinition).
+    /// That is the honest split: a country is a fact about the file, a net
+    /// position is an agreement about the hour.
+    ///
+    /// A bus whose country the file never stated is left in no area. Its
+    /// injections are then nobody's to dispatch, and any branch it shares with
+    /// an area counts as that area's boundary — see
+    /// [`AreaInterchange`](crate::outerloop::AreaInterchange).
+    pub fn country_areas(&self) -> (Vec<Option<usize>>, Vec<String>) {
+        let mut names: Vec<String> = self.bus_countries.iter().flatten().cloned().collect();
+        names.sort();
+        names.dedup();
+        let of_bus = self
+            .bus_countries
+            .iter()
+            .map(|c| c.as_ref().and_then(|c| names.iter().position(|n| n == c)))
+            .collect();
+        (of_bus, names)
+    }
+
     /// Number of branches, lines and transformers together.
     pub fn n_branches(&self) -> usize {
         self.lines.len() + self.transformers.len()

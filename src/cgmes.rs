@@ -1105,6 +1105,15 @@ pub struct CgmesNetwork {
     /// many by more than one machine, and any target two controllers disagreed
     /// on.
     pub voltage_control: VoltageControlReport,
+    /// `Terminal` mRID → the flat branch index it became and which side of it,
+    /// for every two-terminal branch this conversion produced.
+    ///
+    /// Flat means lines first, then transformers — the crate-wide convention
+    /// `branch_flow::branch_params` defines. Only the conversion knows which
+    /// branches survived and in what order, which is why this is returned
+    /// rather than reconstructed; [`cgmes_control_areas`] turns a `TieFlow`'s
+    /// terminal into a boundary branch through it.
+    pub terminal_branch: HashMap<String, (usize, crate::branch_flow::Terminal)>,
 }
 
 /// [`cgmes_to_buses_and_branches`], keeping the tap tables.
@@ -1262,7 +1271,10 @@ fn convert_equipment(
     // — mirroring pgm.rs's own from_status/to_status handling for `Line`,
     // needed here because RealGrid genuinely has `Terminal.connected=false`
     // entries (a real de-energized/switched-out snapshot, not a decode gap).
-    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) {
+    /// Returns the index of the pushed line, or `None` when both ends are
+    /// disconnected and nothing was pushed. The index is what lets a caller
+    /// map a `Terminal` onto a branch — see `terminal_branch` below.
+    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) -> Option<usize> {
         match (from_conn, to_conn) {
             (true, true) => {
                 // A jumper exported as a very short `ACLineSegment` would put an
@@ -1272,26 +1284,57 @@ fn convert_equipment(
                 // above the threshold, so this changes nothing modelled today
                 // and exists for exports that are less well behaved.
                 let (r, x) = crate::topology::clamp_branch_impedance(r, x);
-                lines.push(Line { from, to, r, x, b_shunt, g_shunt })
+                lines.push(Line { from, to, r, x, b_shunt, g_shunt });
+                Some(lines.len() - 1)
             }
-            (true, false) => lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt }),
-            (false, true) => lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt }),
-            (false, false) => {}
+            // A half-open line becomes a shunt-only self-loop at the connected
+            // end. It carries no through flow, so it can never be an area
+            // boundary and is deliberately not mapped.
+            (true, false) => {
+                lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt });
+                None
+            }
+            (false, true) => {
+                lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt });
+                None
+            }
+            (false, false) => None,
         }
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    // Terminal mRID -> (branch index within `lines`, which side it became).
+    // Built here because only the conversion knows which branches survived and
+    // in what order; `cgmes_control_areas` needs it to turn a `TieFlow`'s
+    // terminal into a boundary branch.
+    let mut line_terminal: HashMap<String, (usize, crate::branch_flow::Terminal)> = HashMap::new();
+    let record_line = |terms: &TerminalIndex,
+                           line_terminal: &mut HashMap<String, (usize, crate::branch_flow::Terminal)>,
+                           mrid: &str,
+                           pushed: Option<usize>| {
+        let Some(idx) = pushed else { return };
+        let Some(ts) = terms.by_equipment.get(mrid) else { return };
+        for (which, side) in
+            [(0, crate::branch_flow::Terminal::From), (1, crate::branch_flow::Terminal::To)]
+        {
+            if let Some(t) = ts.get(which) {
+                line_terminal.insert(t.clone(), (idx, side));
+            }
+        }
+    };
+
     for mrid in by_type(ds, "ACLineSegment") {
         let ln: &ACLineSegment = require(ds, mrid, "ACLineSegment", mrid, "(self)")?;
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
         let y_base = 1.0 / z_base;
-        push_status_aware_line(
+        let pushed = push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             ln.r.unwrap_or(0.0) / z_base, ln.x.unwrap_or(0.0) / z_base,
             ln.bch.unwrap_or(0.0) / y_base, ln.gch.unwrap_or(0.0) / y_base,
         );
+        record_line(&terms, &mut line_terminal, mrid, pushed);
     }
     // SeriesCompensator: a distinct 2-terminal CIM class from ACLineSegment
     // ("a series capacitor or reactor... without charging susceptance" per
@@ -1302,10 +1345,11 @@ fn convert_equipment(
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
-        push_status_aware_line(
+        let pushed = push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
+        record_line(&terms, &mut line_terminal, mrid, pushed);
     }
     // EquivalentBranch: a simplified series-impedance stand-in for a
     // reduced/boundary part of the network (an `EquivalentNetwork`
@@ -1317,10 +1361,11 @@ fn convert_equipment(
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
-        push_status_aware_line(
+        let pushed = push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             eb.r.unwrap_or(0.0) / z_base, eb.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
+        record_line(&terms, &mut line_terminal, mrid, pushed);
     }
 
     // --- Steps 5+6: transformers (2- and 3-winding) ---
@@ -1744,6 +1789,19 @@ fn convert_equipment(
         }
     }
 
+    // Built before the struct takes ownership of `lines`.
+    let terminal_branch = {
+        // Transformer terminals are offset onto the flat index; line ones
+        // already are, being first.
+        let mut map = line_terminal;
+        for (i, sides) in terminal_sides.iter().enumerate() {
+            for (terminal, side) in sides {
+                map.insert(terminal.clone(), (lines.len() + i, *side));
+            }
+        }
+        map
+    };
+
     let (regulation, tap_report) = read_tap_regulation(
         ds,
         &tap_index,
@@ -1765,7 +1823,190 @@ fn convert_equipment(
         regulation,
         tap_report,
         voltage_control: voltage_control.finish(),
+        terminal_branch,
     })
+}
+
+/// A CGMES `ControlArea` set, resolved onto gridoxide's own indices.
+#[derive(Clone, Debug)]
+pub struct ControlAreaImport {
+    /// Area index per bus, indexed by [`Bus::idx`]; `None` for a bus no area
+    /// claims. Feeds [`AreaDefinition::of_bus`](crate::outerloop::AreaDefinition::of_bus).
+    pub of_bus: Vec<Option<usize>>,
+    /// Scheduled net **export** per area, per-unit.
+    ///
+    /// CGMES states `ControlArea.netInterchange` as an *import* — "positive
+    /// sign means flow in to the area" — and
+    /// [`AreaDefinition::targets`](crate::outerloop::AreaDefinition::targets)
+    /// is an export, so this is its negation. Getting that backwards would
+    /// dispatch every area exactly the wrong way while converging perfectly
+    /// happily, which is why it is stated here rather than left to a reader.
+    pub targets: Vec<f64>,
+    /// `pTolerance`, per-unit, per area. `None` where the file gave none.
+    pub tolerances: Vec<Option<f64>>,
+    /// `(mRID, name)` per area, in the order the indices above use.
+    pub ids: Vec<(String, String)>,
+    pub report: ControlAreaReport,
+}
+
+/// What a `ControlArea` import could not use, counted rather than dropped.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ControlAreaReport {
+    /// Areas converted.
+    pub areas: usize,
+    /// `TieFlow` objects read.
+    pub tie_flows: usize,
+    /// Tie flows whose terminal named no branch this conversion produced —
+    /// an open line, or equipment the converter skipped.
+    pub unresolved_tie_flows: usize,
+    /// Areas with no usable tie flow, so no measurable boundary. Their
+    /// position cannot be measured *or* controlled.
+    pub without_boundary: Vec<usize>,
+    /// Areas whose SSH stated no `netInterchange`; their target is left at
+    /// zero, which is a guess rather than a schedule.
+    pub without_target: Vec<usize>,
+    /// Buses reached from more than one area's seeds once the tie branches are
+    /// cut. A contradiction in the file's own boundary; first area wins.
+    pub contested_buses: usize,
+    /// Buses no area claims.
+    pub unassigned_buses: usize,
+}
+
+/// Reads every `ControlArea` in the dataset onto gridoxide's own bus indices.
+///
+/// # How membership is derived, since CGMES does not state it
+///
+/// CGMES defines an area by its **boundary**, not its contents: a `TieFlow`
+/// names one `Terminal` per boundary point, and `ControlArea` has no list of
+/// the buses inside. [`AreaInterchange`](crate::outerloop::AreaInterchange)
+/// needs both — the boundary to measure the position, and the membership to
+/// know whose generators to dispatch.
+///
+/// So membership is derived, exactly rather than heuristically: take the
+/// branches the tie flows name, **cut them**, and compute the connected
+/// components of what remains. Each tie flow's own terminal sits on a bus
+/// inside its area, so the component holding that bus *is* that area. A
+/// component reached from two areas' seeds is a contradiction in the file's own
+/// boundary and is reported through
+/// [`contested_buses`](ControlAreaReport::contested_buses) rather than
+/// arbitrated silently.
+///
+/// The alternative — flooding outward from the seeds and letting areas claim
+/// buses by proximity — was rejected: it happens to work on a network whose
+/// areas are far apart and fails quietly on one where they are not, which is
+/// the worst combination.
+pub fn cgmes_control_areas(
+    ds: &CimDataset,
+    net: &CgmesNetwork,
+    s_base_va: f64,
+) -> Result<ControlAreaImport, CgmesError> {
+    let n = net.buses.len();
+    let mut report = ControlAreaReport::default();
+
+    // Areas, in mRID order so the indices are stable across runs — the same
+    // reason the transformer list is sorted.
+    let mut area_mrids: Vec<String> = by_type(ds, "ControlArea").to_vec();
+    area_mrids.sort();
+    let mut ids = Vec::new();
+    let mut targets = Vec::new();
+    let mut tolerances = Vec::new();
+    for mrid in &area_mrids {
+        let ca: &cimstructs::ControlArea = require(ds, mrid, "ControlArea", mrid, "(self)")?;
+        ids.push((mrid.clone(), ca.base.base.name.clone()));
+        match ca.net_interchange {
+            // Negated: CGMES states an import, `AreaDefinition` wants an export.
+            Some(mw) => targets.push(-mw * 1e6 / s_base_va),
+            None => {
+                report.without_target.push(targets.len());
+                targets.push(0.0);
+            }
+        }
+        tolerances.push(ca.p_tolerance.map(|mw| mw * 1e6 / s_base_va));
+    }
+    report.areas = ids.len();
+    let index_of = |mrid: &str| area_mrids.iter().position(|m| m == mrid);
+
+    // Tie flows: the boundary branches, and the seed buses inside each area.
+    let params = crate::branch_flow::branch_params(&net.lines, &net.transformers);
+    let mut cut = vec![false; params.len()];
+    let mut seeds: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
+    for mrid in by_type(ds, "TieFlow") {
+        let tf: &cimstructs::TieFlow = require(ds, mrid, "TieFlow", mrid, "(self)")?;
+        report.tie_flows += 1;
+        let (Some(area_ref), Some(term_ref)) = (&tf.control_area, &tf.terminal) else {
+            report.unresolved_tie_flows += 1;
+            continue;
+        };
+        let Some(a) = index_of(&area_ref.mrid) else {
+            report.unresolved_tie_flows += 1;
+            continue;
+        };
+        let Some(&(branch, side)) = net.terminal_branch.get(&term_ref.mrid) else {
+            report.unresolved_tie_flows += 1;
+            continue;
+        };
+        cut[branch] = true;
+        // **The far end, not this one.** A `TieFlow` names the terminal at the
+        // *boundary*, which in a merged model is the X-node the two areas'
+        // lines meet at — `TN_Border_AL11` carries both `NL-Line_1`'s and
+        // `BE-Line_3`'s tie flow. What belongs to the area is the *equipment*;
+        // the node is shared. Seeding from the named end put every area's seed
+        // on the same border node, which showed up as five contested buses and
+        // one area owning nothing at all.
+        seeds[a].push(match side {
+            crate::branch_flow::Terminal::From => params[branch].to,
+            crate::branch_flow::Terminal::To => params[branch].from,
+        });
+    }
+
+    // Components of the network with the tie branches removed.
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, bp) in params.iter().enumerate() {
+        if cut[i] || bp.from == bp.to {
+            continue;
+        }
+        adjacency[bp.from].push(bp.to);
+        adjacency[bp.to].push(bp.from);
+    }
+    let mut component = vec![usize::MAX; n];
+    let mut n_components = 0;
+    for start in 0..n {
+        if component[start] != usize::MAX {
+            continue;
+        }
+        let mut stack = vec![start];
+        component[start] = n_components;
+        while let Some(b) = stack.pop() {
+            for &next in &adjacency[b] {
+                if component[next] == usize::MAX {
+                    component[next] = n_components;
+                    stack.push(next);
+                }
+            }
+        }
+        n_components += 1;
+    }
+
+    // Each component takes the area of whichever seed it holds.
+    let mut area_of_component: Vec<Option<usize>> = vec![None; n_components];
+    for (a, buses) in seeds.iter().enumerate() {
+        if buses.is_empty() {
+            report.without_boundary.push(a);
+            continue;
+        }
+        for &b in buses {
+            let c = component[b];
+            match area_of_component[c] {
+                None => area_of_component[c] = Some(a),
+                Some(existing) if existing != a => report.contested_buses += 1,
+                Some(_) => {}
+            }
+        }
+    }
+    let of_bus: Vec<Option<usize>> = (0..n).map(|b| area_of_component[component[b]]).collect();
+    report.unassigned_buses = of_bus.iter().filter(|a| a.is_none()).count();
+
+    Ok(ControlAreaImport { of_bus, targets, tolerances, ids, report })
 }
 
 /// Two regulating machines asked one bus to hold different voltages.
