@@ -45,10 +45,12 @@ use crate::solver::{IslandReport, IslandStatus, JacobianBackend, PersistentSolve
 use crate::network::ShuntAdm;
 use crate::types::{Bus, Line, TapChanger, Transformer};
 
+pub mod area;
 pub mod qlimits;
 pub mod slack;
 pub mod taps;
 
+pub use area::{AreaDefinition, AreaInterchange, AreaInterchangeReport};
 pub use qlimits::{QLimitReport, ReactiveLimits};
 pub use slack::{DistributedSlack, SlackDistribution, SlackDistributionReport};
 pub use taps::{

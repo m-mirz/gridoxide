@@ -190,7 +190,14 @@ pub struct PowerFlowOptions {
     pub enforce_q_limits: bool,
     /// Adds [`crate::outerloop::DistributedSlack`] to the outer-loop list,
     /// innermost, with these participation weights.
+    ///
+    /// Mutually exclusive with [`area_interchange`](Self::area_interchange),
+    /// which subsumes it — configuring both would move the same schedules
+    /// twice, and `run_power_flow` refuses rather than doing so.
     pub distribute_slack: Option<crate::outerloop::SlackDistribution>,
+    /// Adds [`crate::outerloop::AreaInterchange`] in distributed slack's place,
+    /// holding each control area's net export at its scheduled value.
+    pub area_interchange: Option<crate::outerloop::AreaDefinition>,
     /// Adds [`crate::outerloop::PhaseControl`] and
     /// [`crate::outerloop::TransformerVoltageControl`], outermost. Needs an
     /// importer that retained tap tables and regulating controls; with none,
@@ -220,6 +227,7 @@ impl Default for PowerFlowOptions {
             init: PowerFlowInit::default(),
             enforce_q_limits: false,
             distribute_slack: None,
+            area_interchange: None,
             control_taps: false,
             tap_max_shift: 3,
             max_outer_iter: 10,

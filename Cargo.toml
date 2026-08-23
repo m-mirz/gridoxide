@@ -333,6 +333,10 @@ path = "tests/cgmes_node_breaker_se_test.rs"
 required-features = ["cgmes"]
 
 [[test]]
+name = "area_interchange_test"
+path = "tests/area_interchange_test.rs"
+
+[[test]]
 name = "cgmes_fullgrid_test"
 path = "tests/cgmes_fullgrid_test.rs"
 required-features = ["cgmes"]
