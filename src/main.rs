@@ -38,7 +38,8 @@ const USAGE: &str = "\
 usage:
   gridoxide                     run the bundled power-flow demo
   gridoxide solve <network> [--control-taps] [--enforce-q-limits]
-                  [--distribute-slack] [--max-outer <n>] [--max-tap-shift <n>]
+                  [--distribute-slack | --area-interchange]
+                  [--max-outer <n>] [--max-tap-shift <n>]
                   [--tol <t>] [--max-iter <n>]
                                 run an AC power flow, optionally with the outer
                                 loops that make a control a control rather than
@@ -48,6 +49,14 @@ usage:
                                 across generators instead of dumped on one
                                 slack. All three compose; without any of them
                                 this is an ordinary Newton solve.
+                                --area-interchange stands in distributed
+                                slack's place — it generalizes it — and holds
+                                each control area's net export at what the file
+                                says it agreed to. CGMES supplies both the areas
+                                (ControlArea/TieFlow) and the schedule
+                                (netInterchange); UCTE supplies areas from its
+                                ##Z country codes and states no schedule, so
+                                every target is zero there.
                                 The network may be CGMES (a directory, or the
                                 profile .xml files), UCTE-DEF (.uct) or IIDM
                                 (.xiidm). Needs the matching importer feature.
@@ -1763,6 +1772,12 @@ struct SolveNetwork {
     shunts: Vec<gridoxide::network::ShuntAdm>,
     tap_changers: Vec<Option<gridoxide::types::TapChanger>>,
     regulation: Vec<gridoxide::outerloop::TapRegulation>,
+    /// Area index per bus, and what each area is called. Empty when the format
+    /// says nothing about areas.
+    areas: (Vec<Option<usize>>, Vec<String>),
+    /// Scheduled net export per area, per-unit. Empty unless the format states
+    /// one — only CGMES does.
+    area_targets: Vec<f64>,
     labels: Vec<String>,
     notes: Vec<String>,
     s_base_va: f64,
@@ -1778,6 +1793,7 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
     #[cfg(feature = "ucte")]
     if lower.ends_with(".uct") || lower.ends_with(".ucte") {
         let n = gridoxide::ucte::read(path).map_err(|e| e.to_string())?;
+        let areas = n.country_areas();
         return Ok(SolveNetwork {
             buses: n.buses,
             lines: n.lines,
@@ -1785,6 +1801,10 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             shunts: n.shunts,
             tap_changers: n.tap_changers,
             regulation: n.regulation,
+            areas,
+            // UCTE states no scheduled net position anywhere; `##Z<cc>` gives
+            // the membership and nothing else.
+            area_targets: Vec::new(),
             labels: n.node_codes,
             notes: n.notes,
             s_base_va: n.base_mva * 1e6,
@@ -1801,6 +1821,8 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             shunts: n.shunts,
             tap_changers: n.tap_changers,
             regulation: n.regulation,
+            areas: (Vec::new(), Vec::new()),
+            area_targets: Vec::new(),
             labels: n.bus_labels,
             notes: n.notes,
             s_base_va: n.base_mva * 1e6,
@@ -1840,8 +1862,25 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             r.unsupported_mode,
             r.unresolved_flow
         ));
+        let areas = gridoxide::cgmes::cgmes_control_areas(&ds, &net, s_base_va)
+            .map_err(|e| e.to_string())?;
+        if areas.report.areas > 0 {
+            notes.push(format!(
+                "{} control area(s), {} tie flow(s): {} unresolved, {} without a boundary, \
+                 {} without a schedule, {} contested bus(es), {} bus(es) in no area",
+                areas.report.areas,
+                areas.report.tie_flows,
+                areas.report.unresolved_tie_flows,
+                areas.report.without_boundary.len(),
+                areas.report.without_target.len(),
+                areas.report.contested_buses,
+                areas.report.unassigned_buses
+            ));
+        }
         let labels = (0..net.buses.len()).map(|i| format!("bus {i}")).collect();
         return Ok(SolveNetwork {
+            areas: (areas.of_bus, areas.ids.into_iter().map(|(_, n)| n).collect()),
+            area_targets: areas.targets,
             buses: net.buses,
             lines: net.lines,
             transformers: net.transformers,
@@ -1881,6 +1920,13 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     let control_taps = flags.iter().any(|f| f == "--control-taps");
     let enforce_q_limits = flags.iter().any(|f| f == "--enforce-q-limits");
     let distribute = flags.iter().any(|f| f == "--distribute-slack");
+    let area_control = flags.iter().any(|f| f == "--area-interchange");
+    if distribute && area_control {
+        return Err("--distribute-slack and --area-interchange cannot both be given: area \
+                    interchange subsumes distributed slack (one area with a zero target *is* \
+                    distributed slack)"
+            .to_string());
+    }
     let tol = number("--tol", 1e-8)?;
     let max_iter = count("--max-iter", 30)?;
     let max_outer = count("--max-outer", 40)?;
@@ -1893,6 +1939,27 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
 
     let distribution = distribute
         .then(|| gridoxide::outerloop::SlackDistribution::uniform(&net.buses));
+    let (of_bus, area_names) = net.areas.clone();
+    let area_definition = if area_control {
+        if area_names.is_empty() {
+            return Err(format!(
+                "--area-interchange needs an area assignment, and `{path}` states none. CGMES \
+                 supplies one through ControlArea/TieFlow and UCTE through its ##Z country codes"
+            ));
+        }
+        let mut d = gridoxide::outerloop::AreaDefinition::uniform(
+            &net.buses,
+            of_bus,
+            area_names.len(),
+        );
+        if !net.area_targets.is_empty() {
+            d.targets = net.area_targets.clone();
+        }
+        d.max_outer_iter = max_outer;
+        Some(d)
+    } else {
+        None
+    };
     let report = gridoxide::run_power_flow(
         net.buses.clone(),
         &net.lines,
@@ -1903,6 +1970,7 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
             control_taps,
             enforce_q_limits,
             distribute_slack: distribution,
+            area_interchange: area_definition,
             tap_max_shift: max_tap_shift,
             max_outer_iter: max_outer,
             tol,
@@ -1968,6 +2036,28 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
             );
             for (island, why) in &s.undistributed {
                 println!("  island {island} left on a single slack: {why}");
+            }
+        }
+        if let Some(a) = outer.area.as_ref() {
+            println!(
+                "\narea interchange over {} pass(es), converged = {}:",
+                a.outer_iterations, a.converged
+            );
+            for (i, name) in area_names.iter().enumerate() {
+                let dependent = a.dependent == Some(i);
+                println!(
+                    "  {:<20} {:>10.3} MW exported, {:>8.3} MW off schedule{}",
+                    name,
+                    a.interchange.get(i).copied().unwrap_or(0.0) * net.s_base_va / 1e6,
+                    a.residual.get(i).copied().unwrap_or(0.0) * net.s_base_va / 1e6,
+                    if dependent { "  (dependent: takes the residual)" } else { "" }
+                );
+            }
+            for (area, why) in &a.unbalanced {
+                match area_names.get(*area) {
+                    Some(name) => println!("  {name}: {why}"),
+                    None => println!("  {why}"),
+                }
             }
         }
         if !outer.taps.is_empty() {

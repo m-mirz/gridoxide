@@ -40,7 +40,15 @@ The consequence is structural. A set of agreed net positions sums to zero, but t
 
 Over-determined by one, always. So **the area holding the slack is the dependent one**: its own
 target is not enforced, and its condition is that the slack produces its schedule instead. Every
-other area's position is met exactly, and the slack's area absorbs the tie losses.
+other area's position is met exactly, and the slack's area takes the residual.
+
+That residual is the tie losses when the areas partition the network — but only then. A bus in *no*
+area is on the boundary of whichever areas it touches, so anything it injects lands in the residual
+too. CGMES makes this the normal case rather than an edge one: a `TieFlow` names the boundary node,
+which in a merged model is the X-node two areas' lines meet at, and that node belongs to neither.
+On MicroGrid the five X-nodes inject nothing, so the whole 53 MW residual is the boundary lines'
+own losses — which are large because it is a truncated-boundary model, not because anything is
+wrong.
 
 That is what a real interconnection does — one area's position ends up a residual rather than an
 agreement — and gridoxide reports it as such rather than implying it. `AreaInterchangeReport::dependent`
@@ -70,14 +78,53 @@ and its `filterInconsistentOuterLoops` removes the latter when the former is pre
 
 ## Where the areas come from
 
-**Nowhere yet, and that is the gap.** `AreaDefinition` takes a bus-to-area assignment and a target
-per area, and no importer supplies either. The pieces exist on the input side — CGMES has
-`ControlArea`, and `ucte::UcteImport::bus_countries` is already read and is exactly an area
-assignment — but nothing wires them up, and no format in the tree carries a scheduled net position
-at all. So this is a Rust-API control today: the caller states the areas and the schedule.
+Two importers supply them, and they supply different amounts.
 
-`AreaInterchange::measure` is public for the same reason, and is useful without the loop: "what is
-this area actually exchanging" is worth asking of a solved network without controlling it.
+**CGMES states both halves.** `ControlArea` carries the schedule as
+`netInterchange`, and a `TieFlow` per boundary terminal states the boundary.
+`cgmes::cgmes_control_areas` turns that into an assignment and a target.
+
+CGMES defines an area by its boundary and never lists what is inside, so
+membership is **derived**: take the branches the tie flows name, cut them, and
+compute the connected components of what remains. Each component containing an
+area's seed is that area. A component reached from two areas' seeds is a
+contradiction in the file's own boundary, reported rather than arbitrated.
+
+One detail is worth stating because getting it wrong is quiet. A `TieFlow` names
+the terminal at the **boundary**, not inside the area — in a merged model that
+is the X-node where two areas' lines meet, and `TN_Border_AL11` carries both
+`NL-Line_1`'s and `BE-Line_3`'s tie flow. What belongs to the area is the
+*equipment*; the node is shared. So the seed is the cut branch's **far** end.
+Seeding from the named end put every area's seed on the same border node, which
+showed up as five contested buses and one area owning nothing at all.
+
+The sign matters as much. CGMES states `netInterchange` as an *import* —
+"positive sign means flow in to the area" — and `AreaDefinition::targets` is an
+export, so the importer negates. Checked against the fixture's own data rather
+than against the specification alone: SmallGrid declares a 210 MW position and
+its published state already sits at 210.271 MW measured, which it could not with
+the sign flipped.
+
+**UCTE states membership only.** `##Z<cc>` sub-headers are a bus-to-area
+assignment and nothing more, exposed as `UcteImport::country_areas`. No UCTE
+file anywhere states a scheduled net position, so the caller supplies the
+targets — and the default of zero asks each country to serve its own load, which
+is the honest reading of "no interchange agreed". The twelve-node case is a real
+four-country interconnection whose own state has BE exporting 2000 MW and DE
+importing 2500.
+
+Both are reachable from the command line:
+
+```
+gridoxide solve <network> --area-interchange
+```
+
+**IIDM supplies nothing yet.** It has an `Area` element in recent schema
+versions; `src/iidm.rs` does not read it.
+
+`AreaInterchange::measure` is public for a related reason, and is useful without
+the loop: "what is this area actually exchanging" is worth asking of a solved
+network without controlling it.
 
 ## Deliberately out of scope
 

@@ -589,3 +589,78 @@ fn no_vendored_file_declares_a_regulation_target() {
     }
     assert!(checked > 0, "no .uct fixtures found");
 }
+
+// ---------------------------------------------------------------------------
+// Country areas
+// ---------------------------------------------------------------------------
+
+/// UCTE's `##Z<cc>` sub-headers are a bus-to-area assignment, and the twelve-
+/// node case is a genuine four-country interconnection — the one OpenRAO's own
+/// cross-border scenarios are built on.
+#[test]
+fn country_codes_become_control_areas() {
+    let net = ucte::read(fixture("TestCase12Nodes.uct")).expect("import");
+    let (of_bus, names) = net.country_areas();
+
+    assert_eq!(names, ["BE", "DE", "FR", "NL"], "sorted, so the indices are stable across runs");
+    assert_eq!(of_bus.len(), net.buses.len());
+    assert!(of_bus.iter().all(|a| a.is_some()), "every node in this file states its country");
+    for (i, name) in names.iter().enumerate() {
+        assert_eq!(
+            of_bus.iter().filter(|a| **a == Some(i)).count(),
+            3,
+            "{name} should hold three nodes"
+        );
+    }
+}
+
+/// The positions the file's own state implies, measured over those areas.
+///
+/// The interesting property is that they sum to the tie losses rather than to
+/// zero — both ends of a tie are measured into the branch, so an export and the
+/// matching import do not cancel. On this fixture the ties are lossless and the
+/// sum is exactly zero, which is the degenerate case of that rule rather than a
+/// contradiction of it.
+#[test]
+fn the_measured_positions_sum_to_the_tie_losses() {
+    let net = ucte::read(fixture("TestCase12Nodes.uct")).expect("import");
+    let (of_bus, names) = net.country_areas();
+    let (lines, transformers) = net.as_switched();
+
+    let report = gridoxide::run_power_flow(
+        net.buses.clone(),
+        &lines,
+        &transformers,
+        &net.shunts,
+        gridoxide::TapData::none(),
+        gridoxide::solver::PowerFlowOptions { tol: 1e-10, max_iter: 40, ..Default::default() },
+    );
+    assert_eq!(report.stats.status, gridoxide::solver::SolveStatus::Converged);
+
+    let x = gridoxide::outerloop::AreaInterchange::measure(
+        &report.buses,
+        &lines,
+        &transformers,
+        &of_bus,
+        names.len(),
+    );
+    let mw: Vec<f64> = x.iter().map(|v| v * net.base_mva).collect();
+    let losses: f64 = mw.iter().sum();
+    assert!(losses.abs() < 1e-6, "lossless ties here, so the positions cancel: {mw:?}");
+    // Two exporters and two importers, at the scale the file's schedules set.
+    assert!(mw.iter().any(|v| *v > 500.0), "{mw:?}");
+    assert!(mw.iter().any(|v| *v < -500.0), "{mw:?}");
+}
+
+/// UCTE states no schedule anywhere, which is why `country_areas` returns only
+/// the assignment and the caller supplies the targets.
+#[test]
+fn ucte_supplies_membership_but_never_a_schedule() {
+    let net = ucte::read(fixture("TestCase12Nodes.uct")).expect("import");
+    let (of_bus, names) = net.country_areas();
+    // `AreaDefinition::uniform` defaults every target to zero — asking each
+    // area to serve its own load, which is the reading of "no interchange
+    // agreed" rather than a schedule read from the file.
+    let areas = gridoxide::outerloop::AreaDefinition::uniform(&net.buses, of_bus, names.len());
+    assert_eq!(areas.targets, vec![0.0; 4]);
+}

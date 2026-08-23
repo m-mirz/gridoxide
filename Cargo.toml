@@ -337,6 +337,11 @@ name = "area_interchange_test"
 path = "tests/area_interchange_test.rs"
 
 [[test]]
+name = "cgmes_area_test"
+path = "tests/cgmes_area_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_fullgrid_test"
 path = "tests/cgmes_fullgrid_test.rs"
 required-features = ["cgmes"]
@@ -480,6 +485,16 @@ required-features = ["cgmes"]
 name = "tap_deadband_probe"
 path = "examples/tap_deadband_probe.rs"
 required-features = ["cgmes"]
+
+[[example]]
+name = "cgmes_area_probe"
+path = "examples/cgmes_area_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "ucte_area_probe"
+path = "examples/ucte_area_probe.rs"
+required-features = ["ucte"]
 
 [[example]]
 name = "iidm_regulation_probe"
