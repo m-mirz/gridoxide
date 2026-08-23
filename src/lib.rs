@@ -124,6 +124,8 @@ pub struct OuterLoopOutcome {
     pub q_limit_switches: Vec<usize>,
     /// Populated when [`solver::PowerFlowOptions::distribute_slack`] was set.
     pub slack: Option<outerloop::SlackDistributionReport>,
+    /// Populated when [`solver::PowerFlowOptions::area_interchange`] was set.
+    pub area: Option<outerloop::AreaInterchangeReport>,
     /// Populated when [`solver::PowerFlowOptions::control_taps`] was set:
     /// the voltage controllers, then the phase controllers.
     pub taps: Vec<outerloop::ControllerReport>,
@@ -257,11 +259,24 @@ fn newton_with_loops(
     opts: PowerFlowOptions,
 ) -> PowerFlowReport {
     let wants_taps = opts.control_taps && !taps.is_empty();
-    if !opts.enforce_q_limits && opts.distribute_slack.is_none() && !wants_taps {
+    if !opts.enforce_q_limits
+        && opts.distribute_slack.is_none()
+        && opts.area_interchange.is_none()
+        && !wants_taps
+    {
         let mut solver = PersistentSolver::new(opts.backend);
         let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, opts.tol, opts.max_iter);
         return PowerFlowReport { buses, islands, stats, dc: None, linear: None, outer: None };
     }
+
+    // Both would move the same schedules, so this is a caller mistake rather
+    // than a combination to resolve. Refusing beats picking one silently.
+    assert!(
+        !(opts.distribute_slack.is_some() && opts.area_interchange.is_some()),
+        "distribute_slack and area_interchange cannot both be set: area interchange subsumes \
+         distributed slack (one area with a zero target *is* distributed slack), so running both \
+         would dispatch the same generators twice"
+    );
 
     // Owned copies, because a tap loop mutates them and the caller handed over
     // shared slices. Returned on the report so the moved positions are not
@@ -270,6 +285,7 @@ fn newton_with_loops(
     let mut changers = taps.changers.to_vec();
 
     let mut slack = opts.distribute_slack.clone().map(outerloop::DistributedSlack::new);
+    let mut area = opts.area_interchange.clone().map(outerloop::AreaInterchange::new);
     let mut qlim = opts.enforce_q_limits.then(outerloop::ReactiveLimits::new);
     let mut phase =
         wants_taps.then(|| outerloop::PhaseControl::new().max_tap_shift(opts.tap_max_shift));
@@ -281,8 +297,14 @@ fn newton_with_loops(
             .with_branches(lines, &mut transformers, shunts)
             .with_taps(&mut changers, taps.regulation);
 
-        // Innermost first: slack, then reactive limits, then the tap controls.
+        // Innermost first: the active-power balance, then reactive limits,
+        // then the tap controls. Area interchange stands in distributed
+        // slack's place rather than beside it — it generalizes it, and running
+        // both would move the same schedules twice.
         let mut list: Vec<&mut dyn outerloop::OuterLoop> = Vec::new();
+        if let Some(l) = area.as_mut() {
+            list.push(l);
+        }
         if let Some(l) = slack.as_mut() {
             list.push(l);
         }
@@ -309,6 +331,7 @@ fn newton_with_loops(
         report: Some(report),
         q_limit_switches: qlim.as_ref().map(|l| l.switches().to_vec()).unwrap_or_default(),
         slack: slack.map(outerloop::DistributedSlack::into_report),
+        area: area.map(outerloop::AreaInterchange::into_report),
         taps: Vec::new(),
         transformers: Vec::new(),
         changers: Vec::new(),
