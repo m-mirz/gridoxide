@@ -115,6 +115,33 @@ impl AreaDefinition {
         }
     }
 
+    /// Weighted by each bus's own scheduled generation, whatever its bus type.
+    ///
+    /// # Why this differs from [`uniform`](Self::uniform), and from distributed slack
+    ///
+    /// [`SlackDistribution::uniform`](super::SlackDistribution::uniform)
+    /// participates `Slack` and `PV` buses only, on the grounds that a positive
+    /// injection at a `PQ` bus is a fixed schedule rather than a machine under
+    /// governor control. That reasoning is about **frequency** response, and it
+    /// is right: a machine not on governor control does not pick up imbalance.
+    ///
+    /// A net position is not frequency response. It is met by **redispatch** —
+    /// a scheduling action over the hour — and a generator held at a fixed
+    /// active set-point is precisely the machine an operator redispatches.
+    /// Excluding it makes whole areas uncontrollable: in
+    /// `two_area_case.xiidm`, both of AREA2's generators are
+    /// `voltageRegulatorOn="false"` and so arrive as `PQ` buses, leaving that
+    /// area with no participant at all under `uniform` and its −400 MW
+    /// schedule unreachable.
+    ///
+    /// So this weights by `p_spec.max(0.0)` at every bus. An area whose
+    /// generation is all at fixed set-points is dispatchable; a load bus, with
+    /// no positive injection, still is not.
+    pub fn by_generation(buses: &[Bus], of_bus: Vec<Option<usize>>, n_areas: usize) -> Self {
+        let factors = buses.iter().map(|b| b.p_spec.max(0.0)).collect();
+        Self { of_bus, targets: vec![0.0; n_areas], factors, tolerance: 1e-8, max_outer_iter: 30 }
+    }
+
     fn n_areas(&self) -> usize {
         self.targets.len()
     }

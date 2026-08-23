@@ -194,8 +194,28 @@ fn the_two_active_power_controls_are_refused_together() {
     assert!(err.contains("subsumes"), "{err}");
 }
 
+/// IIDM states membership directly, as `<voltageLevelRef>`, so the twelve-node
+/// case's four areas come straight out of the file.
+#[test]
+fn iidm_supplies_areas_from_its_own_elements() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/iidm/TestCase12Nodes.xiidm");
+    if !path.exists() {
+        eprintln!("skipping: no IIDM fixture");
+        return;
+    }
+    let out = run(&["solve", path.to_str().unwrap(), "--area-interchange"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("4 control area(s)"), "{text}");
+    assert!(text.contains("0 contested bus(es), 0 bus(es) in no area"), "{text}");
+    for country in ["BE", "DE", "FR", "NL"] {
+        assert!(text.contains(country), "missing {country} in:\n{text}");
+    }
+    assert!(text.contains("converged = true"), "{text}");
+}
+
 /// Asking for area control on a format that states no areas is a usage error,
-/// not a silent no-op.
+/// not a silent no-op. PGM JSON carries no area concept at all.
 #[test]
 fn area_interchange_without_areas_is_refused() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/iidm/nordic32.xiidm");

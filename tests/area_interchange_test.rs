@@ -299,3 +299,73 @@ fn a_context_without_branches_fails_loudly() {
         "{status:?}"
     );
 }
+
+/// `by_generation` participates a bus that holds generation whatever its bus
+/// type, where `uniform` participates `Slack` and `PV` only.
+///
+/// The distinction is physical rather than a knob. `uniform`'s policy is right
+/// for distributed slack, which is frequency response: a machine not under
+/// governor control does not pick up imbalance. A net position is met by
+/// **redispatch** instead, and a generator held at a fixed active set-point is
+/// exactly the machine an operator redispatches. `two_area_case.xiidm` shows
+/// what the wrong policy costs — both of AREA2's generators are
+/// `voltageRegulatorOn="false"`, arrive as `PQ`, and leave that area with no
+/// participant at all and its −400 MW schedule unreachable.
+#[test]
+fn by_generation_participates_a_pq_bus_that_generates() {
+    let buses = vec![
+        bus(0, BusType::Slack, 0.40, 0.0),
+        bus(1, BusType::PV, 0.60, 0.0),
+        // A generator on fixed active output: positive injection, PQ bus.
+        bus(2, BusType::PQ, 0.90, 0.0),
+        bus(3, BusType::PQ, -1.50, -0.20),
+    ];
+    let of_bus = vec![Some(0); 4];
+
+    let uniform = AreaDefinition::uniform(&buses, of_bus.clone(), 1);
+    assert_eq!(uniform.factors, vec![1.0, 1.0, 0.0, 0.0], "PQ excluded, whatever it injects");
+
+    let by_gen = AreaDefinition::by_generation(&buses, of_bus, 1);
+    assert_eq!(
+        by_gen.factors,
+        vec![0.40, 0.60, 0.90, 0.0],
+        "weighted by what each bus generates; the load bus still does not participate"
+    );
+}
+
+/// And it changes the answer where it matters: an area whose generation is all
+/// at fixed set-points is dispatchable under `by_generation` and inert under
+/// `uniform`.
+#[test]
+fn an_area_of_fixed_output_machines_is_only_dispatchable_by_generation() {
+    let (buses, lines, ybus, of_bus) = two_areas();
+    // Turn area 1's generators into fixed-output machines.
+    let mut fixed = buses.clone();
+    for i in [3, 5] {
+        fixed[i].bus_type = BusType::PQ;
+    }
+
+    let with_uniform = AreaDefinition {
+        targets: vec![0.15, -0.15],
+        tolerance: 1e-10,
+        ..AreaDefinition::uniform(&fixed, of_bus.clone(), 2)
+    };
+    let (_, report) = run_area(&mut fixed.clone(), &lines, &ybus, with_uniform);
+    assert!(
+        report.unbalanced.iter().any(|(a, why)| *a == 1 && why.contains("no participating")),
+        "uniform should find nothing to dispatch in area 1: {:?}",
+        report.unbalanced
+    );
+
+    let mut by_gen_buses = fixed.clone();
+    let with_generation = AreaDefinition {
+        targets: vec![0.15, -0.15],
+        tolerance: 1e-10,
+        ..AreaDefinition::by_generation(&by_gen_buses, of_bus.clone(), 2)
+    };
+    let (_, report) = run_area(&mut by_gen_buses, &lines, &ybus, with_generation);
+    assert!(report.unbalanced.is_empty(), "{:?}", report.unbalanced);
+    assert!(report.converged, "{report:?}");
+    let measured = interchange(&by_gen_buses, &lines, &of_bus);
+    assert!((measured[1] - -0.15).abs() < 1e-8, "area 1 reaches its target: {}", measured[1]);
+}

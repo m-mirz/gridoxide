@@ -78,7 +78,7 @@ and its `filterInconsistentOuterLoops` removes the latter when the former is pre
 
 ## Where the areas come from
 
-Two importers supply them, and they supply different amounts.
+All three importers supply them, and they supply different amounts.
 
 **CGMES states both halves.** `ControlArea` carries the schedule as
 `netInterchange`, and a `TieFlow` per boundary terminal states the boundary.
@@ -105,6 +105,19 @@ than against the specification alone: SmallGrid declares a 210 MW position and
 its published state already sits at 210.271 MW measured, which it could not with
 the sign flipped.
 
+**IIDM states membership directly, and it is the only one that does.**
+`<iidm:area>` lists the voltage levels inside it as `<voltageLevelRef>`, so
+nothing is derived — a bus belongs to whichever area claims any of its nodes'
+voltage levels, and a bus merging nodes from two areas is a contradiction the
+report counts. `interchangeTarget` gives the schedule where a file states one,
+in the same load sign convention CGMES uses ("negative is export, positive is
+import", per `Area.java`'s own javadoc), so the same negation applies.
+
+`<areaBoundary>` elements are counted and not read: gridoxide derives the
+boundary from membership, so a stated one is redundant here. An `areaType` other
+than `ControlArea` — a `BiddingZone`, say — partitions the network for a
+different purpose and is skipped, counted so its absence is visible.
+
 **UCTE states membership only.** `##Z<cc>` sub-headers are a bus-to-area
 assignment and nothing more, exposed as `UcteImport::country_areas`. No UCTE
 file anywhere states a scheduled net position, so the caller supplies the
@@ -119,8 +132,30 @@ Both are reachable from the command line:
 gridoxide solve <network> --area-interchange
 ```
 
-**IIDM supplies nothing yet.** It has an `Area` element in recent schema
-versions; `src/iidm.rs` does not read it.
+### A cross-format check worth having
+
+The twelve-node case exists as both `.uct` and `.xiidm`, and
+`ucte_and_iidm_agree_exactly_on_the_twelve_node_case` already establishes they
+are the same network. So the areas must agree too — derived from `##Z` country
+codes on one side and stated as `<voltageLevelRef>` on the other, by entirely
+separate code. They do: BE +2000 MW, DE −2500, FR +1000, NL −500, to 1e-6.
+
+### Which participants, and why it differs from distributed slack
+
+`AreaDefinition::uniform` participates `Slack` and `PV` buses only, matching
+`SlackDistribution::uniform`. That policy is right for distributed slack, which
+is **frequency response**: a machine not under governor control does not pick up
+imbalance.
+
+A net position is not frequency response. It is met by **redispatch**, and a
+generator held at a fixed active set-point is precisely the machine an operator
+redispatches. `AreaDefinition::by_generation` weights by `p_spec` at every bus
+instead, and the command line uses it.
+
+What the wrong policy costs is visible in powsybl's own `two_area_case.xiidm`:
+both of AREA2's generators are `voltageRegulatorOn="false"` and so arrive as
+`PQ` buses, leaving that area with no participant at all under `uniform` and its
+−400 MW schedule unreachable. Under `by_generation` it reaches −400.000 exactly.
 
 `AreaInterchange::measure` is public for a related reason, and is useful without
 the loop: "what is this area actually exchanging" is worth asking of a solved
