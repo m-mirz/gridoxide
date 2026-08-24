@@ -203,6 +203,16 @@ pub struct PowerFlowOptions {
     /// importer that retained tap tables and regulating controls; with none,
     /// both loops are stable on their first check and cost one call each.
     pub control_taps: bool,
+    /// Adds [`crate::outerloop::RemoteVoltageControl`] to the loop list, for
+    /// machines that regulate a bus other than their own.
+    ///
+    /// Off by default, and the default is *wrong* rather than merely
+    /// conservative: without it a remote machine's reactive power appears at the
+    /// bus it holds instead of at the machine, so the reactive flow between them
+    /// is missing. It is opt-in because turning it on changes answers, and
+    /// because it needs network data only CGMES supplies — see
+    /// [`crate::RemoteControlData`].
+    pub control_remote_voltage: bool,
     /// Positions a tap controller may move in one outer pass. The sensitivity
     /// is exact only at the converged state, so a large step overshoots;
     /// capping trades passes for stability.
@@ -229,6 +239,7 @@ impl Default for PowerFlowOptions {
             distribute_slack: None,
             area_interchange: None,
             control_taps: false,
+            control_remote_voltage: false,
             tap_max_shift: 3,
             max_outer_iter: 10,
             dc: crate::linear::DcOptions::default(),
