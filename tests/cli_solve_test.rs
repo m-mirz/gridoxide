@@ -228,3 +228,44 @@ fn area_interchange_without_areas_is_refused() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("states none"), "{err}");
 }
+
+/// `--dispatch` attributes each voltage-controlled bus's reactive power to the
+/// individual machines holding it.
+///
+/// The physics is gated in `cgmes_dispatch_test.rs` against RealGrid's own
+/// published per-terminal solution; what is checked here is that the flag
+/// reaches it and that the shares it prints are self-consistent.
+#[test]
+fn dispatch_attributes_reactive_power_to_individual_machines() {
+    let Some(dir) = config("RealGrid/RealGrid-Merged") else { return };
+    let text = stdout(&run(&["solve", dir.to_str().unwrap(), "--enforce-q-limits", "--dispatch"]));
+
+    assert!(text.contains("reactive dispatch:"), "{}", &text[..text.len().min(2000)]);
+    assert!(text.contains("held by more than one"), "shared buses should be called out");
+    assert!(text.contains("split by Capability"), "RealGrid's machines state a usable range");
+    assert!(text.contains("% of the bus)"), "each machine's share should be shown");
+
+    // The diagnostic that only exists because the split exposed it: a machine
+    // saturating while the bus it holds is still inside its own summed bound.
+    assert!(
+        text.contains("their own machines cannot produce"),
+        "RealGrid has buses where a co-located load pushes the machine past its limit"
+    );
+}
+
+/// Formats that state no per-machine capability say so, rather than printing an
+/// empty table or pretending every bus has one machine.
+#[test]
+fn dispatch_says_so_when_the_format_carries_no_machines() {
+    let uct = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte/2Nodes.uct");
+    if !uct.exists() {
+        eprintln!("skipping: {} not found", uct.display());
+        return;
+    }
+    let text = stdout(&run(&["solve", uct.to_str().unwrap(), "--dispatch"]));
+    assert!(
+        text.contains("no per-machine reactive capability"),
+        "{}",
+        &text[..text.len().min(1200)]
+    );
+}
