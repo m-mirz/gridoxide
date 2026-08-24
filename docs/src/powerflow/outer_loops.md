@@ -99,6 +99,57 @@ factorization, so the fill-reducing ordering and elimination tree survive — me
 solve time on a 9,241-bus case. This is the third caller of the same contract, alongside
 [switching](../cgmes/node_breaker.md) and [batch](../solvers/backends.md) solving.
 
+## Remote voltage control, and why it is a loop
+
+A generator regulating the far side of its own step-up transformer is ordinary, and gridoxide has
+always imported it: `RegulatingControl.Terminal` resolves to the controlled bus, which is pinned to
+`PV` at the target. That gets the target right and puts the reactive power **in the wrong place** —
+it appears at the bus being held rather than at the machine, so the reactive flow on the path
+between them is missing, and the machine's own bus sits at whatever the network makes it rather
+than at whatever holding the far bus requires.
+
+Stated exactly, this is a small generalization of the `PV` bus. A `PV` bus means two things at once
+— *this bus's magnitude is fixed* and *this bus's reactive injection is free* — and remote control
+separates them: fix \(|V|\) at the controlled bus, free \(Q\) at the controller. The unknown
+count still balances, one magnitude removed against one reactive equation removed:
+
+| | unknown removed | equation removed |
+|---|---|---|
+| local control (the ordinary `PV` bus) | \(|V|\) at the bus | \(Q\) at the bus |
+| remote control, one machine | \(|V|\) at the **controlled** bus | \(Q\) at the **controller** |
+| remote control, \(m\) machines | \(|V|\) at the controlled bus | \(Q\) at each of \(m\) controllers |
+
+The third row is short by \(m-1\) equations, which is what powsybl's `DISTR_Q` supplies. No
+vendored fixture has that configuration, so gridoxide does not implement it — see
+`plans/REACTIVE_DISPATCH_PLAN.md`.
+
+Implementing the second row *exactly* means the unknown layout stops being derivable from
+`BusType`, which is the assumption the Jacobian assembly, the Newton loop, the sensitivities, the
+batched solve and the continuation all share. That is a large change to the most load-bearing code
+in the crate, for a configuration two vendored fixtures have and one can exercise.
+
+`RemoteVoltageControl` reaches the **same fixed point** without touching any of it. Make the
+*controller* bus `PV` — which is what frees its reactive power, and frees it at the right bus — and
+drive its own setpoint until the controlled bus reaches the target. At convergence \(|V|\) at the
+controlled bus is the target and \(Q\) at the controller is whatever holding it takes, which is
+exactly what the exact formulation asserts. The difference is iteration, not answer, and the test
+suite checks precisely that: pinning the controller by hand at the setpoint the loop landed on, with
+no loop running, reproduces the same state.
+
+It also inherits the reactive limits properly. The controller bus is a `PV` bus carrying the
+machine's own capability, so [reactive limits](./q_limits.md) clamp the machine rather than a bus it
+is not connected to — the more correct bound as well as the easier one.
+
+The step is `Δ|V|_controller = gain · (target − |V|_controlled)`, with `gain` starting at 1.0 and
+refined by secant from the response observed. The 1.0 is not arbitrary: a machine holding the far
+side of its own transformer moves that bus nearly one-for-one in per-unit, so the first step lands
+close. A derived sensitivity would be the better answer once a second fixture asks for one;
+deriving it now would be building the general thing on a sample of one.
+
+**It is opt-in** (`--control-remote-voltage`,
+`solve(control_remote_voltage=True)`) because turning it on changes answers. The default is wrong
+rather than merely conservative, and that is stated here rather than left to be discovered.
+
 ## What this is not
 
 Deliberately **not** an extensibility mechanism. powsybl's `OuterLoop` is ServiceLoader-discovered
@@ -108,6 +159,6 @@ trait exists to make the loops *compose* — which was the actual defect.
 
 ## See also
 
-- [Reactive Power Limits (PV → PQ Switching)](./q_limits.md)
+- [Reactive Power Limits (PV → PQ Switching)](./q_limits.md) — including per-machine attribution
 - [Distributed Slack](./distributed_slack.md)
 - [Transformer Tap Control](./tap_control.md)
