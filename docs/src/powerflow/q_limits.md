@@ -142,3 +142,45 @@ limit — from 4 violations on the smallest case up to 166 simultaneous violatio
 | pandapower | 1 — one-directional outer loop, pypower/MATPOWER-derived | `enforce_q_lims` (NR algorithm only, per its own docstring) |
 | powsybl-open-loadflow | 2 — bidirectional, capped switch count per bus | `ReactiveLimitsOuterLoop` (handles capability curves too, not just fixed limits) |
 | VeraGrid | 3 — mid-iteration, per Zhao's switching logic (cited in its own source) | `PowerFlowOptions.control_q` |
+
+## Which machine, not just which bus
+
+A `PV` bus has one reactive injection and the solver decides it. The limits above are the *summed*
+capability of everything holding that bus — which is the right bound to enforce, and is what the
+importer accumulates. But it leaves a question unanswered: when six machines hold one bus, which of
+them is carrying the reactive power?
+
+`gridoxide solve --dispatch` (and `PowerFlowModel.machine_dispatch()`) answers it, by attributing
+the solved injection after the fact:
+
+- by an explicit per-machine key where the source document states one;
+- else in proportion to each machine's own reactive range;
+- else evenly.
+
+The fallback is **wholesale**: one implausible or missing value discards the whole basis rather than
+leaving a split half-derived from capability and half from nothing. Shares are then clamped to each
+machine's own range and the excess re-split, so no machine is handed more than it can produce while
+another sits idle.
+
+**This changes no answer.** It is arithmetic on a solved state, not a constraint inside the solve.
+Every shared-control case in the vendored CGMES corpus is machines sitting at the bus they regulate,
+so that bus is an ordinary `PV` bus with a single injection. The genuinely different problem —
+several machines at *different* buses holding one remote bus — needs extra equations inside the
+Newton system, and is not built, because no fixture exercises it. See
+`plans/REACTIVE_DISPATCH_PLAN.md`.
+
+### What the attribution exposed
+
+It is worth reading `unattributed` on the result. A non-zero value means the machines at that bus
+are all at their limits and *still* cannot account for the reactive power the solve put there.
+
+That is not an arithmetic failure. It happens because the clamp above compares `q_min`/`q_max`
+against the bus's **net** injection, while the CGMES importer fills those fields from the machines'
+**own** capability. Where a reactive load shares the bus, the machine must cover it too — so the
+machine saturates before the net injection reaches the bound, and the clamp fires late. On RealGrid,
+50 of 416 regulated buses share their bus with another reactive injection and 6 come out
+unattributable, 4.4 MVAr in total.
+
+The simplification was already documented (`pgm::PgmVoltageRegulator`'s doc comment names it);
+nothing had measured it before. Correcting it means bounding the machine part rather than the net,
+which changes power-flow answers and so is deliberately not folded into an attribution pass.
