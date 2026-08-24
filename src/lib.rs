@@ -115,6 +115,29 @@ impl TapData<'_> {
     }
 }
 
+/// The regulating machines a solve may act on.
+///
+/// Network data, so it travels in the signature rather than in
+/// [`solver::PowerFlowOptions`] — the same place and for the same reason as
+/// [`TapData`]. A caller with none passes [`RemoteControlData::none`], which is
+/// what makes [`solver::PowerFlowOptions::control_remote_voltage`] a no-op
+/// rather than a lie.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RemoteControlData<'a> {
+    pub machines: &'a [types::RegulatingMachine],
+}
+
+impl RemoteControlData<'_> {
+    /// No machines: what every importer but CGMES supplies.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.machines.iter().all(|m| m.at_bus == m.controls_bus)
+    }
+}
+
 /// The outer loops' side of a solve, gathered so a caller need not downcast
 /// [`outerloop::OuterLoop`] trait objects to read their reports.
 #[derive(Clone, Debug, Default)]
@@ -131,6 +154,13 @@ pub struct OuterLoopOutcome {
     /// Populated when [`solver::PowerFlowOptions::control_taps`] was set:
     /// the voltage controllers, then the phase controllers.
     pub taps: Vec<outerloop::ControllerReport>,
+    /// Populated when [`solver::PowerFlowOptions::control_remote_voltage`] was
+    /// set: what each remotely-regulating machine reached, and how.
+    pub remote: Vec<outerloop::RemoteControlReport>,
+    /// Buses this run re-typed to move a control onto the machine holding it,
+    /// as `(bus, from, to)`. Worth reporting: the network solved is not quite
+    /// the one handed over.
+    pub retyped: Vec<(usize, types::BusType, types::BusType)>,
     /// The transformers as the loops left them — tap positions moved. Empty
     /// unless a tap loop ran, since nothing else changes a transformer.
     pub transformers: Vec<Transformer>,
@@ -169,11 +199,26 @@ pub fn run_power_flow_analysis(network_data: NetworkData) -> PowerFlowReport {
 /// unchanged and remain the shortest path to an ordinary Newton solve;
 /// `PowerFlowOptions::default()` here reproduces exactly what they do.
 pub fn run_power_flow(
+    buses: Vec<Bus>,
+    lines: &[Line],
+    transformers: &[Transformer],
+    shunts: &[ShuntAdm],
+    taps: TapData<'_>,
+    opts: PowerFlowOptions,
+) -> PowerFlowReport {
+    run_power_flow_with_remote(buses, lines, transformers, shunts, taps, RemoteControlData::none(), opts)
+}
+
+/// [`run_power_flow`] with the regulating machines a remote-voltage control
+/// needs. The two-argument form is the shorter path for every caller that has
+/// none, which is every importer but CGMES.
+pub fn run_power_flow_with_remote(
     mut buses: Vec<Bus>,
     lines: &[Line],
     transformers: &[Transformer],
     shunts: &[ShuntAdm],
     taps: TapData<'_>,
+    remote: RemoteControlData<'_>,
     opts: PowerFlowOptions,
 ) -> PowerFlowReport {
     match opts.method {
@@ -238,7 +283,7 @@ pub fn run_power_flow(
                 }
             }
 
-            newton_with_loops(buses, lines, transformers, shunts, taps, ybus, opts)
+            newton_with_loops(buses, lines, transformers, shunts, taps, remote, ybus, opts)
         }
     }
 }
@@ -251,20 +296,24 @@ pub fn run_power_flow(
 /// stays `None` — the path every existing caller takes, unchanged in what it
 /// computes.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn newton_with_loops(
     mut buses: Vec<Bus>,
     lines: &[Line],
     transformers: &[Transformer],
     shunts: &[ShuntAdm],
     taps: TapData<'_>,
+    remote: RemoteControlData<'_>,
     mut ybus: network::YBusSparse,
     opts: PowerFlowOptions,
 ) -> PowerFlowReport {
     let wants_taps = opts.control_taps && !taps.is_empty();
+    let wants_remote = opts.control_remote_voltage && !remote.is_empty();
     if !opts.enforce_q_limits
         && opts.distribute_slack.is_none()
         && opts.area_interchange.is_none()
         && !wants_taps
+        && !wants_remote
     {
         let mut solver = PersistentSolver::new(opts.backend);
         let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, opts.tol, opts.max_iter);
@@ -289,6 +338,8 @@ fn newton_with_loops(
     let mut slack = opts.distribute_slack.clone().map(outerloop::DistributedSlack::new);
     let mut area = opts.area_interchange.clone().map(outerloop::AreaInterchange::new);
     let mut qlim = opts.enforce_q_limits.then(outerloop::ReactiveLimits::new);
+    let mut remote_loop =
+        wants_remote.then(|| outerloop::RemoteVoltageControl::new(remote.machines));
     let mut phase =
         wants_taps.then(|| outerloop::PhaseControl::new().max_tap_shift(opts.tap_max_shift));
     let mut voltage = wants_taps
@@ -304,6 +355,14 @@ fn newton_with_loops(
         // slack's place rather than beside it — it generalizes it, and running
         // both would move the same schedules twice.
         let mut list: Vec<&mut dyn outerloop::OuterLoop> = Vec::new();
+        // Innermost of all: a remote controller decides *where* the reactive
+        // power is produced, which every loop after it reads. Running it inside
+        // reactive limits also means a machine that saturates is seen by
+        // `ReactiveLimits` as the `PV` bus it now is, rather than as a bus it
+        // was never connected to.
+        if let Some(l) = remote_loop.as_mut() {
+            list.push(l);
+        }
         if let Some(l) = area.as_mut() {
             list.push(l);
         }
@@ -335,6 +394,8 @@ fn newton_with_loops(
         slack: slack.map(outerloop::DistributedSlack::into_report),
         area: area.map(outerloop::AreaInterchange::into_report),
         taps: Vec::new(),
+        remote: remote_loop.as_ref().map(|l| l.report_against(&buses)).unwrap_or_default(),
+        retyped: remote_loop.as_ref().map(|l| l.retyped().to_vec()).unwrap_or_default(),
         transformers: Vec::new(),
         changers: Vec::new(),
     };

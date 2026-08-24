@@ -139,6 +139,8 @@ pub struct RegulatingMachine {
     pub at_bus: usize,
     /// The bus whose voltage it holds. Equal to `at_bus` for local control.
     pub controls_bus: usize,
+    /// The voltage it holds at `controls_bus`, per-unit on that bus's base.
+    pub target_pu: f64,
     /// This machine's own reactive capability, per-unit — not the bus's sum.
     pub q_min: f64,
     pub q_max: f64,

@@ -2175,6 +2175,7 @@ impl VoltageControl {
                 id: id.to_string(),
                 at_bus: at,
                 controls_bus: bus,
+                target_pu,
                 q_min,
                 q_max,
                 q_scheduled,

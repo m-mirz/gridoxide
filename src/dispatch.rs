@@ -290,6 +290,7 @@ mod tests {
             id: id.to_string(),
             at_bus: 0,
             controls_bus: 0,
+            target_pu: 1.0,
             q_min,
             q_max,
             q_scheduled: 0.0,

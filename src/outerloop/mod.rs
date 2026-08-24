@@ -47,11 +47,13 @@ use crate::types::{Bus, Line, TapChanger, Transformer};
 
 pub mod area;
 pub mod qlimits;
+pub mod remote;
 pub mod slack;
 pub mod taps;
 
 pub use area::{AreaDefinition, AreaInterchange, AreaInterchangeReport};
 pub use qlimits::{QLimitReport, ReactiveLimits};
+pub use remote::{RemoteControlReport, RemoteOutcome, RemoteVoltageControl};
 pub use slack::{DistributedSlack, SlackDistribution, SlackDistributionReport};
 pub use taps::{
     ControllerOutcome, ControllerReport, PhaseControl, RegulationMode, TapControlReport,

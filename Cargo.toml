@@ -337,6 +337,10 @@ name = "area_interchange_test"
 path = "tests/area_interchange_test.rs"
 
 [[test]]
+name = "remote_voltage_test"
+path = "tests/remote_voltage_test.rs"
+
+[[test]]
 name = "continuation_test"
 path = "tests/continuation_test.rs"
 
@@ -347,6 +351,11 @@ path = "tests/continuation_events_test.rs"
 [[test]]
 name = "cli_continuation_test"
 path = "tests/cli_continuation_test.rs"
+
+[[test]]
+name = "cgmes_remote_test"
+path = "tests/cgmes_remote_test.rs"
+required-features = ["cgmes"]
 
 [[test]]
 name = "cgmes_dispatch_test"
@@ -501,6 +510,11 @@ required-features = ["cgmes"]
 [[example]]
 name = "tap_deadband_probe"
 path = "examples/tap_deadband_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "remote_probe"
+path = "examples/remote_probe.rs"
 required-features = ["cgmes"]
 
 [[example]]
