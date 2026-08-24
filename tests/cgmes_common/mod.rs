@@ -1,3 +1,10 @@
+//! Helpers shared by the CGMES integration tests.
+//!
+//! Each test binary compiles this module separately and uses a different subset
+//! of it, so anything not used by *that* binary reads as dead code. The allow is
+//! for that, not for genuinely unused helpers.
+#![allow(dead_code)]
+
 use std::path::Path;
 
 use gridoxide::cgmes::CimDataset;
@@ -106,4 +113,60 @@ pub fn assert_matches_sv_percentile(
 pub fn fixture_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/CGMES-Test-Configurations/v3.0/MicroGrid/MicroGid-BaseCase/MicroGrid-BE-MAS")
+}
+
+/// The reactive power a fixture's own published solution attributes to one
+/// piece of equipment, per-unit and in **injection** sign.
+///
+/// `SvPowerFlow` uses the load convention — "positive sign means flow out from
+/// a TopologicalNode into the conducting equipment" — so a machine producing
+/// reactive power carries a negative `q` there. Negated here, so this is
+/// directly comparable to `dispatch::MachineDispatch::q`, which is an
+/// injection like everything else in the crate.
+pub struct ExpectedInjection {
+    /// The `ConductingEquipment` mRID — a machine's own id.
+    pub equipment_mrid: String,
+    pub p: f64,
+    pub q: f64,
+}
+
+/// Reads every `SvPowerFlow` and resolves it back to the equipment whose
+/// terminal it belongs to.
+///
+/// The crate reads no `SvPowerFlow` outside tests: it is a *reference answer*,
+/// not an input, and the only thing that should ever consult it is something
+/// checking gridoxide against the fixture's own published solution.
+pub fn expected_injections(ds: &CimDataset, s_base_mva: f64) -> Vec<ExpectedInjection> {
+    // Terminal mRID → the equipment it belongs to.
+    let mut equipment_of: std::collections::HashMap<&str, &str> = Default::default();
+    if let Some(mrids) = ds.by_type.get("Terminal") {
+        for mrid in mrids {
+            let t: &cimstructs::Terminal = ds.entries[mrid]
+                .element
+                .as_any()
+                .downcast_ref()
+                .expect("Terminal downcast");
+            if let Some(eq) = &t.conducting_equipment {
+                equipment_of.insert(mrid.as_str(), eq.mrid.as_str());
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let Some(mrids) = ds.by_type.get("SvPowerFlow") else { return out };
+    for mrid in mrids {
+        let sv: &cimstructs::SvPowerFlow = ds.entries[mrid]
+            .element
+            .as_any()
+            .downcast_ref()
+            .expect("SvPowerFlow downcast");
+        let (Some(term), Some(p), Some(q)) = (&sv.terminal, sv.p, sv.q) else { continue };
+        let Some(eq) = equipment_of.get(term.mrid.as_str()) else { continue };
+        out.push(ExpectedInjection {
+            equipment_mrid: (*eq).to_string(),
+            p: -p / s_base_mva,
+            q: -q / s_base_mva,
+        });
+    }
+    out
 }

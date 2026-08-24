@@ -349,6 +349,11 @@ name = "cli_continuation_test"
 path = "tests/cli_continuation_test.rs"
 
 [[test]]
+name = "cgmes_dispatch_test"
+path = "tests/cgmes_dispatch_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_area_test"
 path = "tests/cgmes_area_test.rs"
 required-features = ["cgmes"]
@@ -496,6 +501,11 @@ required-features = ["cgmes"]
 [[example]]
 name = "tap_deadband_probe"
 path = "examples/tap_deadband_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "dispatch_probe"
+path = "examples/dispatch_probe.rs"
 required-features = ["cgmes"]
 
 [[example]]

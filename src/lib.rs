@@ -13,6 +13,7 @@ pub mod outerloop;
 pub mod constrained;
 pub mod jacobian;
 pub mod continuation;
+pub mod dispatch;
 pub mod batch;
 pub mod bde;
 pub mod ac_sensitivity;

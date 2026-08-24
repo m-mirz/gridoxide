@@ -113,6 +113,46 @@ pub struct Line3Ph {
     pub g0: f64,
 }
 
+/// One machine that holds a voltage, retained.
+///
+/// [`Bus`] carries only what the Newton system needs: a `PV` bus's magnitude,
+/// and the *summed* reactive capability of everything holding it. That is the
+/// right input to a power flow and it is all any importer used to keep — a bus
+/// held by six machines arrives as one `PV` bus with one `q_min`/`q_max` pair,
+/// and which machine produces what is gone.
+///
+/// Anything that has to *attribute* reactive output needs the discarded half
+/// back, exactly as [`TapChanger`] does for tap positions. The bus-level clamp
+/// can say "this bus is out of reactive capability"; only the per-machine split
+/// can say which machine ran out while the others still had headroom.
+///
+/// Note that `at_bus` and `controls_bus` may differ — a machine regulating the
+/// far side of its own step-up transformer is ordinary. Where they differ the
+/// reactive power is produced at `at_bus`, which is *not* where gridoxide's
+/// solver currently puts it; see `plans/REACTIVE_DISPATCH_PLAN.md` §5.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegulatingMachine {
+    /// The source document's own identifier, so a caller can match this back to
+    /// the machine it came from rather than to a bus index.
+    pub id: String,
+    /// Where the machine injects.
+    pub at_bus: usize,
+    /// The bus whose voltage it holds. Equal to `at_bus` for local control.
+    pub controls_bus: usize,
+    /// This machine's own reactive capability, per-unit — not the bus's sum.
+    pub q_min: f64,
+    pub q_max: f64,
+    /// The reactive output the source document scheduled, per-unit. Not a
+    /// constraint: at a voltage-controlled bus the solver decides Q. Kept
+    /// because it is what has to be subtracted from the bus's solved injection
+    /// to leave the part the machines are responsible for.
+    pub q_scheduled: f64,
+    /// An explicit share, where the document states one. `None` falls back to
+    /// capability-proportional and then to uniform — see
+    /// `dispatch::reactive_keys`.
+    pub key: Option<f64>,
+}
+
 /// The discrete tap positions of a transformer, retained.
 ///
 /// [`Transformer::tap`] is one complex number — the ratio and phase shift the

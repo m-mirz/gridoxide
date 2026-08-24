@@ -28,7 +28,7 @@ use cimstructs::{
 
 use crate::dc::{injected_currents, solve_dc_network, DcBus, DcBusRole, DcLine, DcSolveStatus};
 use crate::network::ShuntAdm;
-use crate::types::{Bus, BusType, Line, Transformer};
+use crate::types::{Bus, BusType, Line, RegulatingMachine, Transformer};
 
 /// Loads and merges a set of CGMES profile files (e.g. EQ, SSH, TP, SV) into
 /// one `CimDataset`, keyed by MRID across all of them.
@@ -1241,14 +1241,16 @@ fn convert_equipment(
         let q_min = pec.min_q.unwrap_or(-f64::INFINITY);
         let q_max = pec.max_q.unwrap_or(f64::INFINITY);
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(
-            &mut buses,
+        voltage_control.regulate(&mut buses, Regulation {
             controlled_bus,
             target_pu,
-            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
-            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
-            mrid,
-        );
+            q_min: if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            q_max: if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            id: mrid,
+            at_bus: terms.bus(mrid, 0),
+            // Negated, matching the injection written above.
+            q_scheduled: -pec.q.unwrap_or(0.0) * 1e6 / s_base_va,
+        });
     }
 
     // --- Step 4: lines from ACLineSegment ---
@@ -1593,14 +1595,16 @@ fn convert_equipment(
         let q_min = sm.min_q.unwrap_or(-f64::INFINITY);
         let q_max = sm.max_q.unwrap_or(f64::INFINITY);
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(
-            &mut buses,
+        voltage_control.regulate(&mut buses, Regulation {
             controlled_bus,
             target_pu,
-            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
-            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
-            mrid,
-        );
+            q_min: if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            q_max: if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            id: mrid,
+            at_bus: terms.bus(mrid, 0),
+            // No negation — the same exception the injection above makes.
+            q_scheduled: sm.base.q.unwrap_or(0.0) * 1e6 / s_base_va,
+        });
     }
 
     // StaticVarCompensator: same RegulatingCondEq/RegulatingControl pattern as
@@ -1667,14 +1671,16 @@ fn convert_equipment(
             _ => f64::INFINITY,
         };
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(
-            &mut buses,
+        voltage_control.regulate(&mut buses, Regulation {
             controlled_bus,
             target_pu,
+            // Already per-unit — see the rating conversion above.
             q_min,
             q_max,
-            mrid,
-        );
+            id: mrid,
+            at_bus: own_bus,
+            q_scheduled: sc.q.unwrap_or(0.0) * 1e6 / s_base_va,
+        });
     }
 
     // ExternalNetworkInjection: CIM describes it as "used for IEC 60909
@@ -1716,14 +1722,16 @@ fn convert_equipment(
         let q_min = eni.min_q.unwrap_or(-f64::INFINITY);
         let q_max = eni.max_q.unwrap_or(f64::INFINITY);
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(
-            &mut buses,
+        voltage_control.regulate(&mut buses, Regulation {
             controlled_bus,
             target_pu,
-            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
-            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
-            mrid,
-        );
+            q_min: if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            q_max: if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            id: mrid,
+            at_bus: terms.bus(mrid, 0),
+            // Negated, matching the injection written above.
+            q_scheduled: -eni.q.unwrap_or(0.0) * 1e6 / s_base_va,
+        });
     }
 
     // Slack: each TopologicalIsland's own angle reference, applied last so it
@@ -1814,6 +1822,7 @@ fn convert_equipment(
         s_base_va,
     );
 
+    let voltage_control = voltage_control.finish(&buses);
     Ok(CgmesNetwork {
         buses,
         lines,
@@ -1822,7 +1831,7 @@ fn convert_equipment(
         tap_changers,
         regulation,
         tap_report,
-        voltage_control: voltage_control.finish(),
+        voltage_control,
         terminal_branch,
     })
 }
@@ -2029,6 +2038,13 @@ pub struct VoltageControlReport {
     /// Of those, how many are held by more than one — the case whose reactive
     /// capability has to be summed rather than overwritten.
     pub shared_buses: usize,
+    /// Every regulating machine the document declared, with its own bus, its
+    /// own reactive capability and the bus it holds — the half the importer
+    /// used to discard. Consumed by [`dispatch`](crate::dispatch).
+    pub machines: Vec<RegulatingMachine>,
+    /// Per bus, the reactive injection that is *not* a regulating machine's:
+    /// loads, shunts written as injections, and machines holding no voltage.
+    pub nonregulating_q: Vec<f64>,
     /// Controllers whose target disagreed with one already written at the same
     /// bus. Empty on every vendored fixture; reported rather than resolved,
     /// because neither answer is right — see
@@ -2053,6 +2069,27 @@ pub struct VoltageControlReport {
 /// than one machine, 2 of FullGrid's 3, and 1 of MicroGrid-Type1's 5. It went
 /// unnoticed because Q-limit enforcement was opt-in and library-only until the
 /// outer-loop layer exposed it.
+/// One machine's claim on a bus's voltage, as the importer resolved it.
+///
+/// A bundle rather than eight positional arguments, following `TapData` and
+/// `SolveContext`: the last two fields were added when per-machine dispatch
+/// needed the half the importer used to discard, and adding them positionally
+/// to four call sites is how they get swapped.
+struct Regulation<'a> {
+    /// The bus whose voltage is held.
+    controlled_bus: usize,
+    target_pu: f64,
+    /// This machine's own capability, per-unit.
+    q_min: f64,
+    q_max: f64,
+    id: &'a str,
+    /// Where the machine injects — `None` when its terminal resolves to no bus,
+    /// which happens for a machine on a de-energized island.
+    at_bus: Option<usize>,
+    /// The reactive output the document scheduled for it, per-unit.
+    q_scheduled: f64,
+}
+
 struct VoltageControl {
     /// Whether a bus has had any contribution yet. The first assigns (the
     /// bus starts at ±∞, which is "no limit" rather than "zero capability"),
@@ -2062,6 +2099,13 @@ struct VoltageControl {
     target: Vec<Option<(f64, String)>>,
     controllers: Vec<usize>,
     conflicts: Vec<TargetConflict>,
+    /// Every regulating machine, in the order the document yielded them.
+    machines: Vec<RegulatingMachine>,
+    /// Per bus, the reactive injection the regulating machines *scheduled*
+    /// there. Subtracting it from the bus's total specified injection leaves
+    /// the part nothing is dispatching — loads, and machines that hold no
+    /// voltage — which is what the allocation has to exclude.
+    scheduled_q: Vec<f64>,
 }
 
 impl VoltageControl {
@@ -2071,6 +2115,8 @@ impl VoltageControl {
             target: vec![None; n],
             controllers: vec![0; n],
             conflicts: Vec::new(),
+            machines: Vec::new(),
+            scheduled_q: vec![0.0; n],
         }
     }
 
@@ -2090,15 +2136,9 @@ impl VoltageControl {
     /// [`VoltageControlReport::target_conflicts`] instead. Doing it properly
     /// means reactive dispatch inside the Newton system, which is a different
     /// job.
-    fn regulate(
-        &mut self,
-        buses: &mut [Bus],
-        bus: usize,
-        target_pu: f64,
-        q_min: f64,
-        q_max: f64,
-        id: &str,
-    ) {
+    fn regulate(&mut self, buses: &mut [Bus], reg: Regulation<'_>) {
+        let Regulation { controlled_bus: bus, target_pu, q_min, q_max, id, at_bus, q_scheduled } =
+            reg;
         if buses[bus].bus_type == BusType::PQ {
             buses[bus].bus_type = BusType::PV;
         }
@@ -2124,13 +2164,54 @@ impl VoltageControl {
             self.seen[bus] = true;
         }
         self.controllers[bus] += 1;
+
+        // The half that used to be dropped. `at_bus` is where the reactive
+        // power is actually produced; for every case in the vendored corpus it
+        // equals `bus`, but the two are different questions and the type says
+        // so.
+        if let Some(at) = at_bus {
+            self.scheduled_q[at] += q_scheduled;
+            self.machines.push(RegulatingMachine {
+                id: id.to_string(),
+                at_bus: at,
+                controls_bus: bus,
+                q_min,
+                q_max,
+                q_scheduled,
+                // CGMES has no per-machine reactive split key: `RegulatingControl`
+                // states a target and `SynchronousMachine` a capability, and
+                // nothing in the profile apportions between machines sharing a
+                // target. Left `None` so `dispatch::reactive_keys` falls back to
+                // capability rather than inventing a field no document has.
+                key: None,
+            });
+        }
     }
 
-    fn finish(self) -> VoltageControlReport {
+    fn finish(self, buses: &[Bus]) -> VoltageControlReport {
         VoltageControlReport {
             regulated_buses: self.controllers.iter().filter(|c| **c > 0).count(),
             shared_buses: self.controllers.iter().filter(|c| **c > 1).count(),
             target_conflicts: self.conflicts,
+            // What the regulating machines are *not* responsible for. The
+            // solved injection at a voltage-controlled bus is its machines plus
+            // whatever else sits there, and only the machines are being
+            // dispatched — so the rest has to be subtracted before the split.
+            // Captured here, at import, because `ReactiveLimits` overwrites
+            // `q_spec` when it clamps a bus and the difference would then be
+            // meaningless.
+            //
+            // Indexed defensively because `buses` grows *after* this
+            // accumulator is sized: a three-winding transformer's star point is
+            // pushed during branch conversion (see `star_idx`), so the final
+            // bus list is longer than the one that existed at `new`. Those buses
+            // are internal and carry no machine, hence no scheduled reactive
+            // power to subtract.
+            nonregulating_q: buses
+                .iter()
+                .map(|b| b.q_spec - self.scheduled_q.get(b.idx).copied().unwrap_or(0.0))
+                .collect(),
+            machines: self.machines,
         }
     }
 }
@@ -3485,6 +3566,21 @@ pub struct LimitImportReport {
 mod voltage_control_tests {
     use super::*;
 
+    /// A machine holding `bus` at `target`, sitting at that same bus — the
+    /// only arrangement any vendored fixture has. `q_scheduled` is what it was
+    /// dispatched to produce, which the split needs and the limits do not.
+    fn reg(bus: usize, target: f64, q_min: f64, q_max: f64, id: &str) -> Regulation<'_> {
+        Regulation {
+            controlled_bus: bus,
+            target_pu: target,
+            q_min,
+            q_max,
+            id,
+            at_bus: Some(bus),
+            q_scheduled: 0.0,
+        }
+    }
+
     fn bus(idx: usize) -> Bus {
         Bus {
             idx,
@@ -3510,14 +3606,14 @@ mod voltage_control_tests {
     fn two_machines_on_one_bus_sum_their_capability() {
         let mut buses = vec![bus(0), bus(1)];
         let mut vc = VoltageControl::new(2);
-        vc.regulate(&mut buses, 1, 1.02, -2.0, 3.0, "a");
+        vc.regulate(&mut buses, reg(1, 1.02, -2.0, 3.0, "a"));
         assert_eq!(buses[1].bus_type, BusType::PV);
         assert_eq!((buses[1].q_min, buses[1].q_max), (-2.0, 3.0), "the first assigns");
 
-        vc.regulate(&mut buses, 1, 1.02, -1.5, 4.0, "b");
+        vc.regulate(&mut buses, reg(1, 1.02, -1.5, 4.0, "b"));
         assert_eq!((buses[1].q_min, buses[1].q_max), (-3.5, 7.0), "the second adds");
 
-        let report = vc.finish();
+        let report = vc.finish(&buses);
         assert_eq!(report.regulated_buses, 1);
         assert_eq!(report.shared_buses, 1);
         assert!(report.target_conflicts.is_empty());
@@ -3531,8 +3627,8 @@ mod voltage_control_tests {
     fn an_unlimited_machine_makes_the_joint_capability_unlimited() {
         let mut buses = vec![bus(0)];
         let mut vc = VoltageControl::new(1);
-        vc.regulate(&mut buses, 0, 1.0, -2.0, 3.0, "a");
-        vc.regulate(&mut buses, 0, 1.0, -f64::INFINITY, f64::INFINITY, "b");
+        vc.regulate(&mut buses, reg(0, 1.0, -2.0, 3.0, "a"));
+        vc.regulate(&mut buses, reg(0, 1.0, -f64::INFINITY, f64::INFINITY, "b"));
         assert!(buses[0].q_min.is_infinite() && buses[0].q_min < 0.0);
         assert!(buses[0].q_max.is_infinite() && buses[0].q_max > 0.0);
         assert!(!buses[0].q_min.is_nan() && !buses[0].q_max.is_nan());
@@ -3544,10 +3640,10 @@ mod voltage_control_tests {
     fn one_machine_is_left_exactly_as_it_was() {
         let mut buses = vec![bus(0)];
         let mut vc = VoltageControl::new(1);
-        vc.regulate(&mut buses, 0, 1.05, -1.0, 1.0, "only");
+        vc.regulate(&mut buses, reg(0, 1.05, -1.0, 1.0, "only"));
         assert_eq!((buses[0].q_min, buses[0].q_max), (-1.0, 1.0));
         assert_eq!(buses[0].voltage_mag, 1.05);
-        let report = vc.finish();
+        let report = vc.finish(&buses);
         assert_eq!(report.shared_buses, 0);
     }
 
@@ -3560,11 +3656,11 @@ mod voltage_control_tests {
     fn a_disagreeing_target_is_reported_and_the_last_still_wins() {
         let mut buses = vec![bus(0)];
         let mut vc = VoltageControl::new(1);
-        vc.regulate(&mut buses, 0, 1.02, -1.0, 1.0, "first");
-        vc.regulate(&mut buses, 0, 1.06, -1.0, 1.0, "second");
+        vc.regulate(&mut buses, reg(0, 1.02, -1.0, 1.0, "first"));
+        vc.regulate(&mut buses, reg(0, 1.06, -1.0, 1.0, "second"));
 
         assert_eq!(buses[0].voltage_mag, 1.06, "last writer still wins");
-        let report = vc.finish();
+        let report = vc.finish(&buses);
         assert_eq!(report.target_conflicts.len(), 1);
         let c = &report.target_conflicts[0];
         assert_eq!((c.bus, c.existing, c.proposed, c.id.as_str()), (0, 1.02, 1.06, "second"));
@@ -3579,8 +3675,8 @@ mod voltage_control_tests {
     fn a_negligible_difference_is_not_a_conflict() {
         let mut buses = vec![bus(0)];
         let mut vc = VoltageControl::new(1);
-        vc.regulate(&mut buses, 0, 1.02, -1.0, 1.0, "first");
-        vc.regulate(&mut buses, 0, 1.02 + 1e-12, -1.0, 1.0, "second");
-        assert!(vc.finish().target_conflicts.is_empty());
+        vc.regulate(&mut buses, reg(0, 1.02, -1.0, 1.0, "first"));
+        vc.regulate(&mut buses, reg(0, 1.02 + 1e-12, -1.0, 1.0, "second"));
+        assert!(vc.finish(&buses).target_conflicts.is_empty());
     }
 }
