@@ -37,7 +37,7 @@ use gridoxide::solver::{PowerFlowOptions, SolveStatus};
 const USAGE: &str = "\
 usage:
   gridoxide                     run the bundled power-flow demo
-  gridoxide solve <network> [--control-taps] [--enforce-q-limits]
+  gridoxide solve <network> [--control-taps] [--enforce-q-limits] [--dispatch]
                   [--distribute-slack | --area-interchange]
                   [--max-outer <n>] [--max-tap-shift <n>]
                   [--tol <t>] [--max-iter <n>]
@@ -49,6 +49,12 @@ usage:
                                 across generators instead of dumped on one
                                 slack. All three compose; without any of them
                                 this is an ordinary Newton solve.
+                                --dispatch additionally attributes each
+                                voltage-controlled bus's reactive power to the
+                                individual machines holding it, and names any
+                                machine that is at its own limit while the bus
+                                as a whole is not. CGMES only — no other format
+                                states per-machine reactive capability.
                                 --area-interchange stands in distributed
                                 slack's place — it generalizes it — and holds
                                 each control area's net export at what the file
@@ -2007,6 +2013,12 @@ struct SolveNetwork {
     labels: Vec<String>,
     notes: Vec<String>,
     s_base_va: f64,
+    /// The regulating machines the document declared, where it declares any.
+    /// Only CGMES states per-machine reactive capability; the other importers
+    /// leave this empty and `--dispatch` then has nothing to attribute.
+    machines: Vec<gridoxide::types::RegulatingMachine>,
+    /// Per-bus reactive injection that is not a regulating machine's.
+    nonregulating_q: Vec<f64>,
 }
 
 #[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
@@ -2034,6 +2046,11 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             labels: n.node_codes,
             notes: n.notes,
             s_base_va: n.base_mva * 1e6,
+            // UCTE-DEF and IIDM state no per-machine reactive capability, so
+            // there is nothing to attribute and `--dispatch` says so rather
+            // than printing an empty table.
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
         });
     }
 
@@ -2071,6 +2088,9 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             labels: n.bus_labels,
             notes,
             s_base_va: n.base_mva * 1e6,
+            // See the UCTE branch above.
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
         });
     }
 
@@ -2123,6 +2143,8 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             ));
         }
         let labels = (0..net.buses.len()).map(|i| format!("bus {i}")).collect();
+        let machines = net.voltage_control.machines;
+        let nonregulating_q = net.voltage_control.nonregulating_q;
         return Ok(SolveNetwork {
             areas: (areas.of_bus, areas.ids.into_iter().map(|(_, n)| n).collect()),
             area_targets: areas.targets,
@@ -2135,6 +2157,8 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             labels,
             notes,
             s_base_va,
+            machines,
+            nonregulating_q,
         });
     }
 
@@ -2176,6 +2200,7 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     let max_iter = count("--max-iter", 30)?;
     let max_outer = count("--max-outer", 40)?;
     let max_tap_shift = count("--max-tap-shift", 3)? as i32;
+    let dispatch = flags.iter().any(|f| f == "--dispatch");
 
     let net = load_network_for_solve(path)?;
     for note in &net.notes {
@@ -2254,6 +2279,78 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     }
     if trivial > 0 {
         println!("  ... and {trivial} de-energized island(s) covering {trivial_buses} bus(es)");
+    }
+
+    if dispatch {
+        if net.machines.is_empty() {
+            println!(
+                "\n--dispatch: this format states no per-machine reactive capability, so there \
+                 is nothing to attribute (only CGMES does)"
+            );
+        } else {
+            let mut y = gridoxide::network::build_ybus(net.buses.len(), &net.lines, &net.transformers);
+            gridoxide::network::stamp_shunts(&mut y, &net.shunts);
+            let ybus = y.finish();
+            let split = gridoxide::dispatch::allocate(
+                &net.machines, &net.nonregulating_q, &report.buses, &ybus);
+
+            let base_mva = net.s_base_va / 1e6;
+            let shared: Vec<_> = split.iter().filter(|b| b.machines.len() > 1).collect();
+            let unattributed: Vec<_> =
+                split.iter().filter(|b| b.unattributed.abs() > 1e-6).collect();
+            println!(
+                "\nreactive dispatch: {} machine(s) over {} regulated bus(es), {} of them held \
+                 by more than one",
+                net.machines.len(),
+                split.len(),
+                shared.len()
+            );
+
+            for bd in shared.iter().take(12) {
+                println!(
+                    "  bus {:<6} {:>9.2} MVAr over {} machine(s), split by {:?}",
+                    bd.bus,
+                    bd.attributed * base_mva,
+                    bd.machines.len(),
+                    bd.basis
+                );
+                for m in &bd.machines {
+                    println!(
+                        "      {:<40} {:>9.2} MVAr  ({:.0}% of the bus){}",
+                        m.id,
+                        m.q * base_mva,
+                        m.share * 100.0,
+                        if m.at_limit { "  at its own limit" } else { "" }
+                    );
+                }
+            }
+            if shared.len() > 12 {
+                println!("  ... and {} more shared bus(es)", shared.len() - 12);
+            }
+
+            // Worth surfacing rather than hiding: it means the solve put the
+            // bus outside what its own machines can produce, which happens
+            // because the reactive-limit clamp bounds the bus's *net* injection
+            // while the limits describe the machines' own capability. See
+            // `dispatch::BusDispatch::unattributed`.
+            if !unattributed.is_empty() {
+                let total: f64 = unattributed.iter().map(|b| b.unattributed.abs()).sum();
+                println!(
+                    "\n  {} bus(es) need {:.2} MVAr their own machines cannot produce — a \
+                     reactive load shares the bus, so the machine saturates before the bus's \
+                     net injection reaches its bound",
+                    unattributed.len(),
+                    total * base_mva
+                );
+                for bd in unattributed.iter().take(5) {
+                    println!(
+                        "      bus {:<6} short by {:>8.2} MVAr",
+                        bd.bus,
+                        bd.unattributed * base_mva
+                    );
+                }
+            }
+        }
     }
 
     if let Some(outer) = report.outer.as_ref() {

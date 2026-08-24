@@ -187,6 +187,15 @@ struct PowerFlowModel {
     tap_changers: Vec<Option<crate::types::TapChanger>>,
     /// The regulating controls acting on those changers.
     regulation: Vec<crate::outerloop::TapRegulation>,
+    /// The regulating machines the document declared, and the per-bus reactive
+    /// injection that is not theirs — what `machine_dispatch()` attributes.
+    ///
+    /// Populated by CGMES's bus-branch view only: no other format states
+    /// per-machine reactive capability, and the node-breaker view has its own
+    /// bus numbering, so carrying indices from the other view would be worse
+    /// than carrying none.
+    machines: Vec<crate::types::RegulatingMachine>,
+    nonregulating_q: Vec<f64>,
     /// What the last `solve()` with outer loops did. Cleared by any solve that
     /// configured none, so the accessors cannot serve a stale answer.
     outer: Option<crate::OuterLoopOutcome>,
@@ -273,6 +282,8 @@ impl PowerFlowModel {
             shunts,
             solver: PersistentSolver::new(backend),
             backend,
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
             method: parse_method(method)?,
             dc_opts: DcOptions {
                 approximation: parse_dc_approximation(dc_approximation)?,
@@ -341,6 +352,11 @@ impl PowerFlowModel {
         // them for the same reason.
         let mut taps: (Vec<Option<crate::types::TapChanger>>, Vec<crate::outerloop::TapRegulation>) =
             (Vec::new(), Vec::new());
+        // Same reasoning as `taps`: the node-breaker view numbers buses its own
+        // way, so machine-to-bus indices from the bus-branch view would point at
+        // the wrong buses there. Left empty rather than mismapped.
+        let mut dispatch_data: (Vec<crate::types::RegulatingMachine>, Vec<f64>) =
+            (Vec::new(), Vec::new());
         let (buses_template, lines, transformers, shunts, tn_bus_index, node_breaker) =
             match topology {
                 "bus_branch" => {
@@ -356,6 +372,8 @@ impl PowerFlowModel {
                     let (mut buses, lines, transformers, shunts) =
                         (net.buses, net.lines, net.transformers, net.shunts);
                     taps = (net.tap_changers, net.regulation);
+                    dispatch_data =
+                        (net.voltage_control.machines, net.voltage_control.nonregulating_q);
                     cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va).map_err(|e| {
                         PyRuntimeError::new_err(format!(
                             "resolving CGMES HVDC converters: {e}"
@@ -408,6 +426,8 @@ impl PowerFlowModel {
             lines,
             transformers,
             shunts,
+            machines: dispatch_data.0,
+            nonregulating_q: dispatch_data.1,
             solver: PersistentSolver::new(backend),
             backend,
             method: parse_method(method)?,
@@ -612,6 +632,72 @@ impl PowerFlowModel {
                     },
                 )?;
                 Ok(d)
+            })
+            .collect()
+    }
+
+    /// Attributes each voltage-controlled bus's reactive power to the
+    /// individual machines holding it, at the last solved state.
+    ///
+    /// A `PV` bus has one reactive injection and the solver decides it; when
+    /// several machines hold that bus, nothing in the power flow says which one
+    /// is carrying it. This splits it — by explicit key where the document
+    /// states one, else in proportion to each machine's own reactive range,
+    /// else evenly — respecting each machine's own limits.
+    ///
+    /// **This changes no answer.** It is attribution after the fact. What it
+    /// adds is visibility: a bus can sit comfortably inside its *summed*
+    /// reactive limit while a machine at it is saturated and the others carry
+    /// it, which the bus-level clamp cannot show.
+    ///
+    /// Returns one dict per bus:
+    /// `{bus, required, attributed, unattributed, basis, machines: [...]}`,
+    /// each machine `{id, at_bus, q, q_min, q_max, at_limit, share}`, all
+    /// per-unit. `unattributed` is worth reading — see
+    /// `dispatch::BusDispatch::unattributed`.
+    ///
+    /// Empty for any model not loaded from CGMES's bus-branch view; no other
+    /// format states per-machine reactive capability.
+    fn machine_dispatch(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        let split = crate::dispatch::allocate(
+            &self.machines,
+            &self.nonregulating_q,
+            &self.buses,
+            &self.ybus,
+        );
+        split
+            .into_iter()
+            .map(|bd| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("bus", bd.bus)?;
+                d.set_item("required", bd.required)?;
+                d.set_item("attributed", bd.attributed)?;
+                d.set_item("unattributed", bd.unattributed)?;
+                d.set_item(
+                    "basis",
+                    match bd.basis {
+                        crate::dispatch::KeyBasis::Explicit => "explicit",
+                        crate::dispatch::KeyBasis::Capability => "capability",
+                        crate::dispatch::KeyBasis::Uniform => "uniform",
+                    },
+                )?;
+                let machines: Vec<Py<pyo3::types::PyDict>> = bd
+                    .machines
+                    .into_iter()
+                    .map(|m| {
+                        let e = pyo3::types::PyDict::new(py);
+                        e.set_item("id", m.id)?;
+                        e.set_item("at_bus", m.at_bus)?;
+                        e.set_item("q", m.q)?;
+                        e.set_item("q_min", m.q_min)?;
+                        e.set_item("q_max", m.q_max)?;
+                        e.set_item("at_limit", m.at_limit)?;
+                        e.set_item("share", m.share)?;
+                        Ok(e.unbind())
+                    })
+                    .collect::<PyResult<_>>()?;
+                d.set_item("machines", machines)?;
+                Ok(d.unbind())
             })
             .collect()
     }
