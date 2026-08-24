@@ -83,3 +83,34 @@ def test_a_model_without_machines_returns_nothing():
     model = gridoxide.PowerFlowModel.from_pgm_json(str(pgm), s_base_va=100e6)
     model.solve()
     assert model.machine_dispatch() == []
+
+
+REMOTE = ROOT / "tests/data/CGMES-Test-Configurations/v3.0/MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged"
+
+
+@pytest.fixture(scope="module")
+def microgrid():
+    if not REMOTE.exists():
+        pytest.skip(f"missing fixture: {REMOTE}")
+    return [str(p) for p in sorted(REMOTE.glob("*.xml"))]
+
+
+def test_remote_voltage_control_moves_the_control_onto_the_machine(microgrid):
+    """The physics is gated in tests/remote_voltage_test.rs and
+    tests/cgmes_remote_test.rs; this checks the binding reaches it."""
+    model = gridoxide.PowerFlowModel.from_cgmes(microgrid, s_base_va=100e6, max_iter=60)
+    model.solve(enforce_q_limits=True, control_remote_voltage=True, max_outer=60)
+
+    reports = model.remote_voltage_control()
+    assert len(reports) == 1
+    r = reports[0]
+    assert r["outcome"] == "held"
+    assert r["controller_bus"] != r["controlled_bus"]
+    assert r["reached"] == pytest.approx(r["target"], abs=2e-4)
+    assert r["moves"] >= 1
+
+
+def test_remote_voltage_control_is_off_by_default(microgrid):
+    model = gridoxide.PowerFlowModel.from_cgmes(microgrid, s_base_va=100e6, max_iter=60)
+    model.solve(enforce_q_limits=True, max_outer=60)
+    assert model.remote_voltage_control() == []

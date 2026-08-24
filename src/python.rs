@@ -506,6 +506,7 @@ impl PowerFlowModel {
     #[pyo3(signature = (
         control_taps = false,
         enforce_q_limits = false,
+        control_remote_voltage = false,
         distribute_slack = false,
         max_outer = 40,
         max_tap_shift = 3,
@@ -514,6 +515,7 @@ impl PowerFlowModel {
         &mut self,
         control_taps: bool,
         enforce_q_limits: bool,
+        control_remote_voltage: bool,
         distribute_slack: bool,
         max_outer: usize,
         max_tap_shift: i32,
@@ -529,10 +531,15 @@ impl PowerFlowModel {
         linear_initial_guess(&mut self.buses, &self.ybus);
 
         let wants_taps = control_taps && !self.regulation.is_empty();
-        let islands = if enforce_q_limits || distribute_slack || wants_taps {
+        // A machine regulating a bus other than its own. Without this the
+        // reactive power appears at the bus being held rather than at the
+        // machine; opt-in because turning it on changes answers.
+        let wants_remote = control_remote_voltage
+            && self.machines.iter().any(|m| m.at_bus != m.controls_bus);
+        let islands = if enforce_q_limits || distribute_slack || wants_taps || wants_remote {
             let distribution = distribute_slack
                 .then(|| crate::outerloop::SlackDistribution::uniform(&self.buses));
-            let report = crate::run_power_flow(
+            let report = crate::run_power_flow_with_remote(
                 std::mem::take(&mut self.buses),
                 &self.lines,
                 &self.transformers,
@@ -541,8 +548,10 @@ impl PowerFlowModel {
                     changers: &self.tap_changers,
                     regulation: &self.regulation,
                 },
+                crate::RemoteControlData { machines: &self.machines },
                 crate::solver::PowerFlowOptions {
                     control_taps,
+                    control_remote_voltage,
                     tap_max_shift: max_tap_shift,
                     enforce_q_limits,
                     distribute_slack: distribution,
@@ -632,6 +641,41 @@ impl PowerFlowModel {
                     },
                 )?;
                 Ok(d)
+            })
+            .collect()
+    }
+
+    /// What each remotely-regulating machine reached, after a
+    /// `solve(control_remote_voltage=True)`.
+    ///
+    /// One dict per machine: `{machine, controller_bus, controlled_bus, target,
+    /// reached, setpoint, moves, outcome}`, where `outcome` is `"held"`,
+    /// `"insensitive"`, `"unfinished"` or `"at_reactive_limit"`. Empty unless
+    /// that option was set and the network has such a machine.
+    fn remote_voltage_control(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        let Some(outer) = self.outer.as_ref() else { return Ok(Vec::new()) };
+        outer
+            .remote
+            .iter()
+            .map(|r| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("machine", r.machine.clone())?;
+                d.set_item("controller_bus", r.controller_bus)?;
+                d.set_item("controlled_bus", r.controlled_bus)?;
+                d.set_item("target", r.target)?;
+                d.set_item("reached", r.reached)?;
+                d.set_item("setpoint", r.setpoint)?;
+                d.set_item("moves", r.moves)?;
+                d.set_item(
+                    "outcome",
+                    match r.outcome {
+                        crate::outerloop::RemoteOutcome::Held => "held",
+                        crate::outerloop::RemoteOutcome::Insensitive => "insensitive",
+                        crate::outerloop::RemoteOutcome::Unfinished => "unfinished",
+                        crate::outerloop::RemoteOutcome::AtReactiveLimit => "at_reactive_limit",
+                    },
+                )?;
+                Ok(d.unbind())
             })
             .collect()
     }
