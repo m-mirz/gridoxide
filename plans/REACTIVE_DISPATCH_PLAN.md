@@ -1,7 +1,7 @@
 # Reactive dispatch between machines sharing a voltage target
 
-Status: **Phase 1 implemented**, 2026-08-24, against `bc16494`. Phases 2 and 3 remain
-proposals; §11 records what Phase 1 found.
+Status: **Phases 1 and 2 implemented**, 2026-08-24, against `bc16494`. Phase 3 remains a
+proposal; §11 and §12 record what each phase found.
 
 > **The scope changed once the fixtures were measured.** This was going to be powsybl's `DISTR_Q`
 > — n−1 reactive-distribution equations inside the Newton system, one per controller bus. Measuring
@@ -275,3 +275,78 @@ and therefore belongs with Phase 2, not here. Phase 1 changes no answer, as prom
 
 Phase 2 (remote control where the reactive power actually is) and Phase 3 (`DISTR_Q`), both
 unchanged from above — and the clamp fix that Phase 1's `unattributed` measurement now justifies.
+
+---
+
+## 12. What Phase 2 found
+
+### The exact formulation was not the cheapest way to its own answer
+
+§5 proposed implementing remote control as the layout change it exactly is — keep `|V|` at the
+controlled bus out of the unknowns, drop the `Q` equation at the controller. That is right, and it
+means the unknown layout stops being derivable from `BusType`, which is the assumption
+`jacobian::JacobianPattern`, `solver::newton_raphson_cached`, `ac_sensitivity`, `bde`,
+`block_sparse` and `continuation::augmented` all share. A large change to the most load-bearing code
+in the crate, for a configuration two fixtures have and one can exercise.
+
+`outerloop::RemoteVoltageControl` reaches the **same fixed point** without touching any of it: make
+the controller bus `PV` — which frees its reactive power, at the right bus — and drive its own
+setpoint until the controlled bus reaches target. The difference is iteration, not answer.
+
+That claim is not asserted, it is tested. `remote_voltage_test.rs` takes the setpoint the loop
+landed on, pins the controller there by hand as an ordinary `PV` bus with no loop running, and
+checks the controlled bus reproduces the same state — which is the whole content of the exact
+formulation, verified without implementing it.
+
+The reactive limits come along for free and land in a better place than the plan expected: the
+controller is a `PV` bus carrying the machine's own capability, so `ReactiveLimits` clamps the
+**machine** rather than a bus it is not connected to.
+
+### The fixture can referee the structure and not the numbers
+
+§5 asked how far apart the two buses are, expecting the answer to size the work. Both cases are the
+two ends of one step-up transformer, `x = 0.048` p.u. — MicroGrid-Type1 at 10.5 kV holding 110 kV,
+FullGrid the same, in the configuration with the 50 GW shunt that does not solve. So there is one
+usable case.
+
+And it cannot settle the numbers. gridoxide's solution of MicroGrid-Type1 already differs from the
+published one by **4.4% on its 400 kV buses** — before any of this, in both modes, and unchanged by
+it. That is why the fixture's own voltage assertion tolerates 5%. The reactive power remote control
+moves is smaller than that discrepancy, so "match the published machine output" was not available:
+the published machine absorbs 0.725 p.u. where gridoxide produces 0.470, and the difference is the
+network, not the control.
+
+What the fixture *can* settle is that the control ends up where the reference has it, and that is
+what `cgmes_remote_test.rs` checks — as a reversal, because the defect was a reversal:
+
+| | reactive power free at | machine |
+|---|---|---|
+| published solution | the machine | free |
+| gridoxide, before | the bus being held (1.5 p.u. of it) | pinned at its schedule |
+| gridoxide, after | the machine | free |
+
+The active power was right all along and stays right: +0.90 p.u., matching the published dispatch
+exactly.
+
+A third test pins the thing most likely to be confused later — that moving the control changes
+**only the machine's own bus**, and that the 4.4% belongs to something else entirely.
+
+### Smaller things
+
+- **A bug of mine, caught by deriving a test limit instead of guessing one.** The loop moved the
+  control to the machine's bus but not the machine's *capability*, so `ReactiveLimits` clamped it
+  against the infinite limits a plain `PQ` bus carries — the "bounded by its own limit" claim was
+  in the doc comment and not in the code. The test that caught it computes the binding limit from
+  what holding the target actually costs, rather than hard-coding a number that might not bind.
+- **The synthetic fixture has to be built the way the importer leaves it** — controlled bus already
+  pinned to `PV` at the target — or it tests nothing. Four tests failed on that before the fixture
+  was right.
+- **A slack controller is skipped.** A slack bus already fixes its own magnitude and already has a
+  free reactive injection, so there is nothing for the loop to move.
+
+### Still not done
+
+Phase 3 (`DISTR_Q`), unchanged. And the clamp fix Phase 1's `unattributed` measurement justifies:
+bounding the machine part rather than the bus's net injection. Phase 2 makes that easier where the
+control is remote — the controller bus now carries the machine's own capability and only the
+machine's — but the local case, which is all 64 of the shared buses, still bounds the net.
