@@ -38,6 +38,7 @@ const USAGE: &str = "\
 usage:
   gridoxide                     run the bundled power-flow demo
   gridoxide solve <network> [--control-taps] [--enforce-q-limits] [--dispatch]
+                  [--control-remote-voltage]
                   [--distribute-slack | --area-interchange]
                   [--max-outer <n>] [--max-tap-shift <n>]
                   [--tol <t>] [--max-iter <n>]
@@ -49,6 +50,13 @@ usage:
                                 across generators instead of dumped on one
                                 slack. All three compose; without any of them
                                 this is an ordinary Newton solve.
+                                --control-remote-voltage moves a machine that
+                                regulates a bus other than its own onto that
+                                machine: without it the reactive power appears
+                                at the bus being held instead of at the machine,
+                                so the reactive flow between them is missing. It
+                                changes answers, which is why it is opt-in.
+                                CGMES only.
                                 --dispatch additionally attributes each
                                 voltage-controlled bus's reactive power to the
                                 individual machines holding it, and names any
@@ -2201,6 +2209,7 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     let max_outer = count("--max-outer", 40)?;
     let max_tap_shift = count("--max-tap-shift", 3)? as i32;
     let dispatch = flags.iter().any(|f| f == "--dispatch");
+    let remote_voltage = flags.iter().any(|f| f == "--control-remote-voltage");
 
     let net = load_network_for_solve(path)?;
     for note in &net.notes {
@@ -2235,14 +2244,16 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     } else {
         None
     };
-    let report = gridoxide::run_power_flow(
+    let report = gridoxide::run_power_flow_with_remote(
         net.buses.clone(),
         &net.lines,
         &net.transformers,
         &net.shunts,
         gridoxide::TapData { changers: &net.tap_changers, regulation: &net.regulation },
+        gridoxide::RemoteControlData { machines: &net.machines },
         PowerFlowOptions {
             control_taps,
+            control_remote_voltage: remote_voltage,
             enforce_q_limits,
             distribute_slack: distribution,
             area_interchange: area_definition,
@@ -2364,6 +2375,21 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
             );
             for l in &r.loops {
                 println!("  {:<26} {:>3} iteration(s)  {:?}", l.name, l.iterations, l.status);
+            }
+        }
+        if !outer.remote.is_empty() {
+            println!("\nremote voltage control: {} machine(s)", outer.remote.len());
+            for r in &outer.remote {
+                println!(
+                    "  {:<40} bus {} holds bus {}: reached {:.5} against {:.5} in {} move(s), {:?}",
+                    r.machine, r.controller_bus, r.controlled_bus, r.reached, r.target, r.moves,
+                    r.outcome
+                );
+            }
+            // The network solved is not quite the one handed over, which is
+            // worth saying rather than leaving to be noticed.
+            for (bus, from, to) in &outer.retyped {
+                println!("  bus {bus} re-typed {from:?} -> {to:?} to put the control on the machine");
             }
         }
         if !outer.q_limit_switches.is_empty() {
