@@ -350,3 +350,51 @@ Phase 3 (`DISTR_Q`), unchanged. And the clamp fix Phase 1's `unattributed` measu
 bounding the machine part rather than the bus's net injection. Phase 2 makes that easier where the
 control is remote — the controller bus now carries the machine's own capability and only the
 machine's — but the local case, which is all 64 of the shared buses, still bounds the net.
+
+---
+
+## 13. A second defect, found by phase 2 failing to validate
+
+Phase 2 could not be checked against its one usable fixture, and §12 recorded
+why: MicroGrid-Type1 solved 4.4% above its own published solution, in both
+modes, which is more than the reactive power remote control moves. That was
+treated as backdrop. It was a bug.
+
+**Five of that fixture's thirteen lines join buses declaring different nominal
+voltages** — 380 kV in Belgium to 400 kV in the Netherlands, and 220 to 225.
+An `ACLineSegment` has no ratio, so its two ends are one conductor at one
+physical voltage; per-unitizing it on one end's base leaves the two ends in
+different per-unit systems, and a flat 1.0 profile then contains a 5% step
+across a wire with nothing in it to make one. FullGrid has the same 5 of 13.
+SmallGrid, MiniGrid, RealGrid and Svedala have none.
+
+`cgmes::harmonize_voltage_bases` gives every galvanically-connected group one
+base before any branch is converted. Safe because a base is a choice rather than
+a measurement, and because `network::transformer_tap` already takes the node
+ratings and folds them into the off-nominal ratio, so transformers self-correct.
+
+| MicroGrid-Type1, worst voltage error | |
+|---|---|
+| as it was | 4.4% |
+| + harmonized bases | 1.3% |
+| + remote voltage control | **0.09%** |
+
+The last row is the point. With the bases coherent, the machine's own reactive
+output comes out at −0.711 p.u. against a published −0.725, so the fixture
+*does* referee phase 2's numbers — `cgmes_remote_test.rs` now asserts exactly
+that, and §12's claim that it could not is superseded.
+
+### What this says about the method
+
+The two defects hid each other. Remote control looked like it made MicroGrid
+worse (1.3% → 5.5% on the machine's bus) purely because the base error was
+distorting everything around it, and the base error was invisible because the
+fixture's assertion tolerated 5%. Neither was findable by reading the code; both
+were found by putting the published solution into gridoxide's own equations and
+reading the residual per bus, then per branch.
+
+The tolerance is the part worth generalizing. A 5% bound on a 17-bus fixture was
+not a measurement of anything — it was large enough to admit a defect three
+times the size of the effect it was nominally guarding. It is 4e-2 now, and what
+still sits under it is stated: that test solves plainly, with neither reactive
+limits nor remote control, and this fixture needs both.
