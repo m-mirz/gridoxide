@@ -146,6 +146,48 @@ transformers self-correct, because
 so a moved node base is absorbed by the off-nominal ratio. That is why this runs
 *before* any branch is converted rather than after.
 
+### The one thing it is not invariant to
+
+That invariance holds wherever `u_rated` is used as a *base*. It fails in the
+one place the importer uses it as a stand-in for the **actual operating
+voltage**: the `StaticVarCompensator` rating, which turns an ohmic reactance
+into a reactive limit through \\(Q \approx V^2 / x\\) evaluated at
+\\(|V| = 1.0\\). Move the base and \\(1.0\\) p.u. denotes different volts,
+so the limit moves with it — by \\((400/380)^2 = 10.8\%\\), or
+\\((225/220)^2 = 4.6\%\\).
+
+The shunt compensators converted a few lines away look identical and are *not*
+affected, which is worth seeing clearly: they convert siemens to per-unit, and
+\\(Q_{pu} = |V|_{pu}^2 \cdot B_{pu}\\) recovers the same physical MVAr on
+any base. Only pinning \\(|V| = 1\\) makes the base stand for a voltage.
+
+No vendored fixture exercises it. MicroGrid-Type1's single SVC sits at 225 kV —
+the base that is *kept* — so its rating is ±0.1 p.u. either way. A document with
+an SVC on the other side of such a boundary would see its rating shift, and
+nothing would flag it.
+
+### It adjudicates, and the alternative does not
+
+Harmonizing has to **choose** which of two declarations to keep. That is a
+judgement about the document, not arithmetic, and it rests on an inference: an
+`ACLineSegment` has no ratio, therefore its two ends are one level, therefore a
+differing declaration is a naming convention rather than a fact.
+
+For 380/400 and 220/225 that inference is right, and the error figures below say
+so. Where it would be wrong is a document that is *itself* wrong — a line
+written where a transformer belongs. Then harmonizing forces the two ends onto
+one base and the level difference disappears into a model that looks entirely
+reasonable, where powsybl's branch-side treatment would carry both declarations
+through and let the discrepancy reach the answer. Neither is correct, because
+the input is not; the difference is whether to trust the declaration or the
+topology.
+
+What this does instead of choosing silently is report:
+`CgmesNetwork::base_harmonization` names every nominal it merged and how many
+buses moved, and `examples/base_mismatch_probe.rs` prints it. That is weaker
+than not having to choose — it needs someone to look — but it is what makes a
+mis-declared nominal noticeable rather than absorbed.
+
 ### What it was worth
 
 Measured against the fixtures' own published `SvVoltage`:
