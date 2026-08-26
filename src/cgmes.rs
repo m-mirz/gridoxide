@@ -1183,6 +1183,46 @@ pub struct BaseHarmonizationReport {
 ///   so a moved node base is absorbed by the off-nominal ratio. That is why
 ///   this runs *before* any branch is converted.
 ///
+/// # The one thing it is not invariant to
+///
+/// That holds wherever `u_rated` is a *base*. It fails in the one place this
+/// importer uses it as a stand-in for the **actual operating voltage**: the
+/// `StaticVarCompensator` rating below, which turns an ohmic reactance into a
+/// reactive limit through `Q ≈ V²/x` evaluated at `|V| = 1.0`. Move the base and
+/// `1.0` p.u. denotes different volts, so the limit moves with it — by
+/// `(400/380)² = 10.8%`, or `(225/220)² = 4.6%`.
+///
+/// The shunt compensators converted a few lines away look identical and are
+/// **not** affected: they convert siemens to per-unit, and
+/// `Q_pu = |V|_pu² · B_pu` recovers the same physical MVAr on any base. Only
+/// pinning `|V| = 1` makes a base stand for a voltage.
+///
+/// No vendored fixture exercises it — MicroGrid-Type1's single SVC sits at
+/// 225 kV, the base that is *kept*, so its rating is ±0.1 p.u. either way. An
+/// SVC on the other side of such a boundary would see its rating shift, and
+/// nothing would flag it.
+///
+/// # It adjudicates
+///
+/// Choosing which of two declarations to keep is a judgement about the
+/// document, not arithmetic, and it rests on an inference: an `ACLineSegment`
+/// has no ratio, therefore its two ends are one level, therefore a differing
+/// declaration is a naming convention rather than a fact.
+///
+/// For 380/400 and 220/225 that is right. Where it would be wrong is a document
+/// that is *itself* wrong — a line written where a transformer belongs. Then
+/// this forces the two ends onto one base and the level difference disappears
+/// into a model that looks entirely reasonable, where the branch-side treatment
+/// below would carry both declarations through and let the discrepancy reach
+/// the answer. Neither is correct, because the input is not; the difference is
+/// whether to trust the declaration or the topology.
+///
+/// So it reports rather than choosing silently:
+/// [`BaseHarmonizationReport`] names every nominal merged and how many buses
+/// moved, and `examples/base_mismatch_probe.rs` prints it. Weaker than not
+/// having to choose — it needs someone to look — but it is what makes a
+/// mis-declared nominal noticeable rather than absorbed.
+///
 /// # The choice of base
 ///
 /// The nominal the most buses in the group declare, ties going to the larger.
