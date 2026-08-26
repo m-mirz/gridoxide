@@ -107,5 +107,18 @@ fn test_cgmes_microgrid_type1_merged() {
     let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
-    cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 5e-2);
+    // Tightened from 5e-2 when `cgmes::harmonize_voltage_bases` landed: five of
+    // this fixture's thirteen lines join a Belgian 380 kV bus to a Dutch 400 kV
+    // one (and 220 to 225), and per-unitizing a line on one end's base left the
+    // two ends in different per-unit systems. That alone took the worst error
+    // from 0.045 to 0.034, and the worst angle from 0.0036 to 0.0021.
+    //
+    // What is left is not that. This test solves plainly —
+    // `run_power_flow_analysis_from_ybus` enforces no reactive limits and runs
+    // no remote-voltage control — and this fixture needs both: with them the
+    // same comparison lands inside 0.001, which
+    // `cgmes_voltage_base_test.rs` and `cgmes_remote_test.rs` check. Tightening
+    // this further means changing what *this* test solves, which is a different
+    // decision from fixing the per-unit system.
+    cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 4e-2);
 }

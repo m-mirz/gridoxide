@@ -1105,6 +1105,9 @@ pub struct CgmesNetwork {
     /// many by more than one machine, and any target two controllers disagreed
     /// on.
     pub voltage_control: VoltageControlReport,
+    /// What giving each galvanically-connected group one voltage base changed.
+    /// Empty for a document whose nominals already agree, which is most of them.
+    pub base_harmonization: BaseHarmonizationReport,
     /// `Terminal` mRID → the flat branch index it became and which side of it,
     /// for every two-terminal branch this conversion produced.
     ///
@@ -1129,12 +1132,162 @@ pub fn cgmes_to_network(ds: &CimDataset, s_base_va: f64) -> Result<CgmesNetwork,
 /// loop unchanged. Nothing below this point cares how a bus came to exist —
 /// it all resolves through `terms.bus(...)` — which is exactly why the two
 /// skeletons are interchangeable.
+/// What harmonizing the voltage bases changed, reported rather than done
+/// silently — a bus's `u_rated` is the per-unit base every voltage it reports
+/// is expressed in, so moving one is worth being able to see.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BaseHarmonizationReport {
+    /// Galvanically-connected groups whose members declared more than one
+    /// nominal voltage.
+    pub groups: usize,
+    /// Buses whose base was moved onto their group's.
+    pub buses: usize,
+    /// The nominals that were merged, in kV, as `(kept, replaced, buses)`.
+    pub merged: Vec<(f64, f64, usize)>,
+}
+
+/// Gives every galvanically-connected group of buses one voltage base.
+///
+/// # Why this is necessary
+///
+/// An `ACLineSegment` has no ratio: its two ends are the same conductor and
+/// therefore the same physical voltage level. Per-unit is only coherent if
+/// `|V| = 1.0` means the same volts at both ends of it — that is what a
+/// per-unit *base* is for.
+///
+/// CGMES does not guarantee that. The same physical level is declared 380 kV in
+/// Belgium and 400 kV in the Netherlands, 220 kV and 225 kV either side of
+/// another border, and a tie line between them is one wire with two different
+/// `BaseVoltage.nominalVoltage` values on its ends. Per-unitizing that line on
+/// one end's base — which is all a single base can do — leaves the two ends in
+/// different per-unit systems, so a flat `1.0` profile already contains a 5%
+/// step across a wire with nothing in it to make one. The solver then pushes
+/// reactive power to sustain the step and the whole area comes out high.
+///
+/// Measured before this existed: on MicroGrid-Type1, **5 of 13 lines** span two
+/// bases, and its solved voltages sat 4.4% above its own published solution
+/// with a 0.96% median. Harmonizing takes that to 1.3% worst and 0.06% median.
+/// FullGrid has the same 5 of 13. SmallGrid, MiniGrid, RealGrid and Svedala
+/// have none and are untouched, bit for bit.
+///
+/// # Why it is safe to move a base
+///
+/// A per-unit base is a choice, not a measurement. Moving one changes the
+/// per-unit numbers and leaves the volts alone, because everything that
+/// converts between them reads `u_rated`:
+///
+/// - reported voltages are `|V| · u_rated`, so the product is invariant;
+/// - a voltage setpoint is imported as `target / u_rated`, so it follows;
+/// - **transformers self-correct.** [`transformer_tap`](crate::network::transformer_tap)
+///   already takes the node ratings and computes `k = (u1/u2) / (u1_rated/u2_rated)`,
+///   so a moved node base is absorbed by the off-nominal ratio. That is why
+///   this runs *before* any branch is converted.
+///
+/// # The choice of base
+///
+/// The nominal the most buses in the group declare, ties going to the larger.
+/// Any choice is valid; this one moves the fewest buses.
+///
+/// # What powsybl does
+///
+/// The same problem, solved in the branch instead of the bus, and it is enough
+/// of a real modelling question there that it is a configuration option:
+/// `LinePerUnitMode` is either `IMPEDANCE` — per-unitize on the geometric mean
+/// `nV1·nV2/S_B` and fold correction terms into the two end shunts — or
+/// `RATIO`, an ideal transformer of `nV1/nV2` on an otherwise ordinary line
+/// (`LfBranchImpl.createLine`). Both need a branch model with per-terminal
+/// shunts or a ratio, which `types::Line` deliberately has neither of. Doing it
+/// in the bus base reaches the same coherent per-unit system without giving
+/// every line in the crate a field that ten lines in two fixtures would ever
+/// use.
+fn harmonize_voltage_bases(
+    ds: &CimDataset,
+    terms: &TerminalIndex,
+    buses: &mut [Bus],
+) -> BaseHarmonizationReport {
+    let n = buses.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut Vec<usize>, mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    // Every plain conductor, whatever its terminals' connection status: an open
+    // tie is still one wire, and its two ends are still one voltage level.
+    for kind in ["ACLineSegment", "SeriesCompensator"] {
+        for mrid in by_type(ds, kind) {
+            let (Some(a), Some(b)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
+            if a >= n || b >= n {
+                continue;
+            }
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            if ra != rb {
+                parent[ra] = rb;
+            }
+        }
+    }
+
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        members.entry(root).or_default().push(i);
+    }
+
+    let mut report = BaseHarmonizationReport::default();
+    let mut merged: HashMap<(u64, u64), usize> = HashMap::new();
+    for group in members.values() {
+        // Counted in millivolts so the key is exact; nominal voltages are whole
+        // numbers of volts in every document seen.
+        let mut tally: HashMap<u64, usize> = HashMap::new();
+        for &i in group {
+            if buses[i].u_rated > 0.0 {
+                *tally.entry((buses[i].u_rated * 1e3).round() as u64).or_default() += 1;
+            }
+        }
+        if tally.len() < 2 {
+            continue;
+        }
+        let &keep_key = tally
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(b.0)))
+            .map(|(k, _)| k)
+            .expect("a group with two nominals has at least one");
+        let keep = keep_key as f64 / 1e3;
+
+        report.groups += 1;
+        for &i in group {
+            if buses[i].u_rated > 0.0 && (buses[i].u_rated - keep).abs() > 1e-9 {
+                *merged
+                    .entry(((keep / 1e3).round() as u64, (buses[i].u_rated / 1e3).round() as u64))
+                    .or_default() += 1;
+                buses[i].u_rated = keep;
+                report.buses += 1;
+            }
+        }
+    }
+    report.merged = merged
+        .into_iter()
+        .map(|((k, r), c)| (k as f64, r as f64, c))
+        .collect();
+    report.merged.sort_by(|a, b| b.2.cmp(&a.2).then(b.0.total_cmp(&a.0)));
+    report
+}
+
 fn convert_equipment(
     ds: &CimDataset,
     s_base_va: f64,
     skeleton: (Vec<Bus>, HashMap<String, usize>, TerminalIndex),
 ) -> Result<CgmesNetwork, CgmesError> {
     let (mut buses, idx_of, terms) = skeleton;
+
+    // Before anything reads a base. Every conversion below — line impedance,
+    // transformer ratio, voltage setpoint, SVC rating — is expressed in one, and
+    // a line whose two ends disagree about theirs is not a per-unit system at
+    // all. See `harmonize_voltage_bases`.
+    let base_harmonization = harmonize_voltage_bases(ds, &terms, &mut buses);
 
     // Shared by all four regulating-machine loops below, which run in two
     // separate steps: `PowerElectronicsConnection` in step 3, then
@@ -1824,6 +1977,7 @@ fn convert_equipment(
 
     let voltage_control = voltage_control.finish(&buses);
     Ok(CgmesNetwork {
+        base_harmonization,
         buses,
         lines,
         transformers,

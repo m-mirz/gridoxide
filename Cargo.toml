@@ -353,6 +353,11 @@ name = "cli_continuation_test"
 path = "tests/cli_continuation_test.rs"
 
 [[test]]
+name = "cgmes_voltage_base_test"
+path = "tests/cgmes_voltage_base_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_remote_test"
 path = "tests/cgmes_remote_test.rs"
 required-features = ["cgmes"]
@@ -510,6 +515,11 @@ required-features = ["cgmes"]
 [[example]]
 name = "tap_deadband_probe"
 path = "examples/tap_deadband_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "base_mismatch_probe"
+path = "examples/base_mismatch_probe.rs"
 required-features = ["cgmes"]
 
 [[example]]

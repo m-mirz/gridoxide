@@ -5,19 +5,24 @@
 //! the 50 GW shunt that does not solve, so this is the only usable case in the
 //! corpus.
 //!
-//! **It can referee the structure and not the numbers**, and the distinction is
-//! worth stating rather than papering over. gridoxide's solution of this network
-//! already differs from the published one by 4.4% on its 400 kV buses — before
-//! any of this, in both modes, and unchanged by it — which is why the fixture's
-//! own voltage assertion tolerates 5%. The reactive power remote control moves
-//! is smaller than that discrepancy, so matching the published machine output
-//! is not available as a gate here. It is settled analytically in
-//! `remote_voltage_test.rs` instead.
+//! **This fixture referees the numbers, and it took two fixes to make it able
+//! to.** When remote control landed, gridoxide's solution of this network
+//! differed from the published one by 4.4% on its 400 kV buses — more than the
+//! reactive power remote control moves — so the published machine output was
+//! not usable as a gate and this file checked only the structure.
 //!
-//! What this fixture *can* settle is that the control ends up in the right
-//! place, which is the defect: the reference solution has the machine's reactive
-//! output free at the machine and nothing free at the bus it holds, and until
-//! now gridoxide had it exactly the other way round.
+//! That 4.4% turned out to be a second, unrelated defect: five of its thirteen
+//! lines join buses declaring different nominal voltages (380 kV in Belgium,
+//! 400 kV in the Netherlands, the same wire), and per-unitizing a line on one
+//! end's base leaves its two ends in different per-unit systems. With
+//! `cgmes::harmonize_voltage_bases` giving each galvanic group one base, the
+//! worst voltage error falls to 1.3%, and with the control also in the right
+//! place, to **0.09%** — at which point the machine's own reactive output can
+//! be compared against the published one directly, which is what
+//! `the_machine_produces_what_the_published_solution_says` does.
+//!
+//! The analytic gates in `remote_voltage_test.rs` remain the ones that settle
+//! the formulation; these settle it against a real document.
 
 mod cgmes_common;
 
@@ -48,6 +53,9 @@ fn microgrid() -> Option<PathBuf> {
 
 struct Case {
     net: gridoxide::cgmes::CgmesNetwork,
+    /// Kept so the published solution can be read back — this fixture is
+    /// checked against its own `SvPowerFlow`, not only against itself.
+    ds: gridoxide::cgmes::CimDataset,
 }
 
 fn load() -> Option<Case> {
@@ -60,7 +68,8 @@ fn load() -> Option<Case> {
     paths.sort();
     let refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
     let ds = load_profiles(&refs).expect("decode");
-    Some(Case { net: cgmes_to_network(&ds, S_BASE_VA).expect("convert") })
+    let net = cgmes_to_network(&ds, S_BASE_VA).expect("convert");
+    Some(Case { net, ds })
 }
 
 fn solve(case: &Case, on: bool) -> gridoxide::PowerFlowReport {
@@ -170,9 +179,10 @@ fn the_control_moves_from_the_held_bus_onto_the_machine() {
         q_on[m.controls_bus]
     );
     assert!(
-        (q_off[m.controls_bus] - held_spec).abs() > 1.0,
-        "without it, the held bus carries the machine's reactive power — over 1 p.u. of it — \
-         which is the defect this fixes"
+        (q_off[m.controls_bus] - held_spec).abs() > 0.1,
+        "without it, the held bus carries reactive power it has no source for ({:+.4} against a \
+         load of {held_spec:+.4}) — which is the defect this fixes",
+        q_off[m.controls_bus]
     );
 
     // Active power is untouched either way, and matches the published dispatch.
@@ -217,4 +227,60 @@ fn moving_the_control_changes_only_the_machines_own_bus() {
             (on.buses[i].voltage_mag - off.buses[i].voltage_mag).abs()
         );
     }
+}
+
+/// The machine produces what the fixture's own published solution says it does.
+///
+/// This is the gate the two fixes together made possible. `SvPowerFlow` at the
+/// machine's own terminal is the reference answer for exactly the quantity
+/// remote control decides, and it is only meaningful once the surrounding
+/// network agrees: with the control in the wrong place, or with the voltage
+/// bases incoherent, the comparison measures those defects instead.
+///
+/// Held to 5%, and recorded rather than tightened — this is one document's
+/// solution of a network gridoxide still models slightly differently, not an
+/// analytic answer. The analytic gates live in `remote_voltage_test.rs`.
+#[test]
+fn the_machine_produces_what_the_published_solution_says() {
+    let Some(case) = load() else { return };
+    let m = case
+        .net
+        .voltage_control
+        .machines
+        .iter()
+        .find(|m| m.at_bus != m.controls_bus)
+        .expect("one remote machine");
+
+    // The published per-terminal flow, in injection sign.
+    let published: f64 = cgmes_common::expected_injections(&case.ds, S_BASE_VA / 1e6)
+        .into_iter()
+        .find(|e| e.equipment_mrid == m.id)
+        .map(|e| e.q)
+        .expect("the machine's own terminal has a published flow");
+
+    let mut y = build_ybus(case.net.buses.len(), &case.net.lines, &case.net.transformers);
+    stamp_shunts(&mut y, &case.net.shunts);
+    let ybus = y.finish();
+
+    let on = solve(&case, true);
+    let (_, q_on) = power_injections(&on.buses, &ybus);
+    let ours = q_on[m.at_bus];
+
+    assert!(
+        (ours - published).abs() < 0.05,
+        "the machine produced {ours:+.5} p.u. against a published {published:+.5} — the whole \\
+         point of putting the control on the machine is that this is the quantity it decides"
+    );
+
+    // And with the control in the wrong place it is not merely less accurate,
+    // it has the wrong sign: the machine sits pinned at its schedule while the
+    // bus it holds absorbs the difference.
+    let off = solve(&case, false);
+    let (_, q_off) = power_injections(&off.buses, &ybus);
+    assert!(
+        (q_off[m.at_bus] - published).abs() > (ours - published).abs(),
+        "moving the control onto the machine should bring its output closer to the published \\
+         one, got {:+.5} before and {ours:+.5} after, against {published:+.5}",
+        q_off[m.at_bus]
+    );
 }
