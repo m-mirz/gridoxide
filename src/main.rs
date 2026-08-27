@@ -103,6 +103,22 @@ usage:
                                 before solving; --solve runs a power flow and
                                 reports each switch's own flow.
                                 Needs the `cgmes` feature.
+  gridoxide qv <path> [--bus <i> | --weakest <n>] [--v-max <v>] [--v-min <v>]
+               [--step <s>] [--no-refine] [--base-mva <m>] [--curve]
+                                trace a bus's Q-V curve: how much reactive
+                                support holding it at a given voltage takes, and
+                                how much margin there is before no setpoint is
+                                reachable. The minimum of the curve is the
+                                reactive margin, in MVAr.
+                                --weakest ranks every bus by that margin, which
+                                is the usual way to ask the question; --bus
+                                traces one and prints it.
+                                Complements `continuation`, which asks how much
+                                further the whole system can be loaded. The two
+                                measure related but different things and are
+                                known not to agree on which bus is weakest —
+                                that is why both exist.
+                                Reads a PGM JSON document.
   gridoxide continuation <path> [--target-lambda <l> | --lower-branch]
                      [--step <s>] [--max-steps <n>] [--enforce-q-limits]
                      [--parametrization local|natural|arclength]
@@ -279,6 +295,18 @@ fn main() {
             _ => {
                 eprintln!("error: sensitivity needs a path\n\n{USAGE}");
                 std::process::exit(2);
+            }
+        },
+        Some("qv") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_qv_cli(path, &args[2..]) {
+                    eprintln!("{message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("usage: gridoxide qv <path> [--bus <i> | --weakest <n>]");
+                std::process::exit(1);
             }
         },
         Some("continuation") => match args.get(1) {
@@ -836,6 +864,129 @@ fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
             .map(Some)
             .map_err(|_| format!("{flag}: expected a number, got {raw:?}")),
     }
+}
+
+/// `gridoxide qv` — a bus's reactive margin.
+fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::qv::{qv_curve, QvOptions, QvStatus};
+
+    let base_mva = parse_f64_flag(flags, "--base-mva")?.unwrap_or(100.0);
+    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let input: PgmInput =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, base_mva * 1e6, 50.0);
+    let n = buses.len();
+
+    let opts = QvOptions {
+        pf: PowerFlowOptions { max_iter: 60, ..Default::default() },
+        v_max: parse_f64_flag(flags, "--v-max")?.unwrap_or(1.10),
+        v_min: parse_f64_flag(flags, "--v-min")?.unwrap_or(0.40),
+        step: parse_f64_flag(flags, "--step")?.unwrap_or(0.01),
+        refine: !flags.iter().any(|f| f == "--no-refine"),
+    };
+
+    let one = match flag_value(flags, "--bus")? {
+        Some(raw) => Some(parse_index(&raw, "--bus", n)?),
+        None => None,
+    };
+    let weakest = match flag_value(flags, "--weakest")? {
+        Some(raw) => Some(
+            raw.parse::<usize>()
+                .map_err(|_| format!("--weakest: expected a count, got {raw:?}"))?,
+        ),
+        None => None,
+    };
+    if one.is_some() && weakest.is_some() {
+        return Err("--bus and --weakest ask for different things".into());
+    }
+
+    println!(
+        "{n} bus(es); sweeping |V| from {:.3} to {:.3} in steps of {:.3}{}",
+        opts.v_max,
+        opts.v_min,
+        opts.step,
+        if opts.refine { ", minimum interpolated" } else { "" }
+    );
+
+    if let Some(bus) = one {
+        let curve = qv_curve(&buses, &lines, &transformers, &[], bus, opts);
+        if let QvStatus::Rejected(why) = &curve.status {
+            return Err(format!("bus {bus}: {why:?}"));
+        }
+        println!(
+            "\nbus {bus}: solves at |V| {:.5} in the base case{}",
+            curve.base_voltage,
+            if curve.already_controlled {
+                " — already voltage-controlled, so this moves an existing machine's setpoint \
+                 rather than adding a condenser"
+            } else {
+                ""
+            }
+        );
+        if flags.iter().any(|f| f == "--curve") {
+            println!("\n     |V|      Q needed (MVAr)   iterations");
+            for p in &curve.points {
+                println!("  {:7.4}   {:15.2}   {:5}", p.voltage, p.q * base_mva, p.iterations);
+            }
+        }
+        if !curve.failed.is_empty() {
+            println!("\n  {} setpoint(s) did not converge: {:?}", curve.failed.len(), curve.failed);
+        }
+        match (&curve.nose, &curve.status) {
+            (Some(nose), QvStatus::NoseFound) => {
+                println!("\nreactive margin");
+                println!("  {:.2} MVAr, at |V| = {:.5}{}",
+                    nose.margin_mvar(base_mva), nose.voltage,
+                    if nose.refined { " (interpolated)" } else { "" });
+            }
+            (Some(bound), QvStatus::NoseNotReached) => {
+                println!(
+                    "\nthe curve was still falling at |V| = {:.4}, so {:.2} MVAr is a LOWER BOUND \
+                     on the margin, not the margin — lower --v-min to find it",
+                    bound.voltage,
+                    bound.margin_mvar(base_mva)
+                );
+            }
+            _ => println!("\nno curve: {:?}", curve.status),
+        }
+        return Ok(());
+    }
+
+    // The ranking.
+    let mut rows: Vec<(f64, usize, f64, bool)> = Vec::new();
+    let mut skipped = 0usize;
+    for bus in 0..n {
+        let curve = qv_curve(&buses, &lines, &transformers, &[], bus, opts.clone());
+        match (&curve.nose, &curve.status) {
+            (Some(nose), QvStatus::NoseFound) => {
+                rows.push((nose.margin_pu, bus, nose.voltage, true))
+            }
+            (Some(bound), QvStatus::NoseNotReached) => {
+                rows.push((bound.margin_pu, bus, bound.voltage, false))
+            }
+            _ => skipped += 1,
+        }
+    }
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let show = weakest.unwrap_or(10).min(rows.len());
+    println!("\nweakest {show} bus(es) by reactive margin:");
+    println!("     bus   margin (MVAr)   nose at |V|");
+    for (m, bus, v, found) in rows.iter().take(show) {
+        println!(
+            "  {bus:6}   {:13.2}   {v:11.5}{}",
+            m * base_mva,
+            if *found { "" } else { "   (lower bound — curve still falling)" }
+        );
+    }
+    if skipped > 0 {
+        println!("\n  {skipped} bus(es) yielded no curve (slack, or too few converged points)");
+    }
+    println!(
+        "\nthis is a per-bus measure at the base operating point. `gridoxide continuation` asks \
+         the system-wide question, and the two are known not to agree on which bus is weakest."
+    );
+    Ok(())
 }
 
 /// `gridoxide continuation` — trace the P-V curve to the point of collapse.
