@@ -251,6 +251,11 @@ impl DaePattern {
         self.nnz
     }
 
+    /// Whether this bus's two algebraic equations were replaced by `V = V₀`.
+    pub fn is_fixed(&self, bus: usize) -> bool {
+        self.fixed[bus]
+    }
+
     /// The triplet list for `LinearSolver::new`, pairing the pattern's fixed
     /// `(row, col)` arrays with values from an actual [`fill`](Self::fill).
     ///
