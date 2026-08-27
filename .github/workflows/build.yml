@@ -79,6 +79,21 @@ jobs:
       run: |
         cargo build --verbose --features iidm
         cargo test --verbose --features iidm,ucte
+    # `dynamics` is in CI for the same reason `opf` is: pure Rust on this
+    # crate's own sparse backends, no system library and nothing to install.
+    #
+    # Its strongest gates need no reference implementation at all. A run with no
+    # disturbance must be flat to machine precision, which catches essentially
+    # every initialization and per-unit mistake; the small-signal oscillation
+    # period must match the linearized swing equation's closed form; and halving
+    # the step must quarter the error, because the trapezoidal rule is
+    # second-order. External validation against ANDES and Dynawo is a later
+    # phase and will be committed as JSON, the way `ucte` and `iidm` already
+    # are, so this step will keep needing neither.
+    - name: Build and test the RMS dynamics layer
+      run: |
+        cargo build --verbose --features dynamics
+        cargo test --verbose --features dynamics
     # Feature *unification* is its own failure mode, and the steps above cannot
     # see it: each builds one feature at a time, while cargo builds whatever
     # combination a consumer asks for. `iidm` and `cgmes` share quick-xml, and
@@ -98,7 +113,7 @@ jobs:
     # is an ordinary test, and it is the only check here that gridoxide did not
     # write for itself.
     - name: Build the CI-covered features together
-      run: cargo build --verbose --features cgmes,ucte,iidm,opf,rao
+      run: cargo build --verbose --features cgmes,ucte,iidm,opf,rao,dynamics
     # `capi` is built here for the same reason `opf` is: no system dependency.
     # It is pure Rust plus cbindgen, which cargo fetches like any other crate —
     # unlike klu/pardiso/opf-highs/opf-ipopt, which each need a library the

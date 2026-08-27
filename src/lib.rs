@@ -13,6 +13,8 @@ pub mod outerloop;
 pub mod constrained;
 pub mod jacobian;
 pub mod continuation;
+#[cfg(feature = "dynamics")]
+pub mod dynamics;
 pub mod dispatch;
 pub mod qv;
 pub mod batch;

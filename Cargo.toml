@@ -148,6 +148,20 @@ rao = ["opf"]
 # This is what `gridoxide opf` and the Python `dc_opf` need. `opf-highs` below
 # is an optional second backend, not a requirement.
 opf = []
+# RMS (phasor-domain) dynamic simulation — src/dynamics/. The DAE, its
+# integrator, and the machine/exciter/governor model library; see
+# plans/RMS_PLAN.md.
+#
+# Like `opf`, this is **complete and self-contained**: pure Rust on this
+# crate's own sparse factorization and its existing `solver::LinearSolver`
+# backends, no system library, no C toolchain, nothing to install. So it is
+# built and tested in CI, unlike `klu`/`pardiso`/`opf-highs`.
+#
+# Feature-gated anyway, for the same reason `opf` is: it is a large module that
+# most users of a power-flow crate never call, and the gate is about build cost
+# rather than about dependencies. The Dynawo `.dyd`/`.par` reader additionally
+# needs `iidm` for `quick-xml`; everything else here needs nothing.
+dynamics = []
 # Builds the HiGHS backend for `opf` (src/opf/highs.rs). Like `pardiso`,
 # nothing is vendored or compiled from source: this links a *system* HiGHS
 # install and generates FFI bindings via `bindgen` against that install's own
@@ -347,6 +361,11 @@ path = "tests/qv_test.rs"
 [[test]]
 name = "remote_voltage_test"
 path = "tests/remote_voltage_test.rs"
+
+[[test]]
+name = "dynamics_test"
+path = "tests/dynamics_test.rs"
+required-features = ["dynamics"]
 
 [[test]]
 name = "continuation_test"
