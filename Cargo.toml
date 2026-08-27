@@ -337,6 +337,14 @@ name = "area_interchange_test"
 path = "tests/area_interchange_test.rs"
 
 [[test]]
+name = "cli_qv_test"
+path = "tests/cli_qv_test.rs"
+
+[[test]]
+name = "qv_test"
+path = "tests/qv_test.rs"
+
+[[test]]
 name = "remote_voltage_test"
 path = "tests/remote_voltage_test.rs"
 
@@ -516,6 +524,10 @@ required-features = ["cgmes"]
 name = "tap_deadband_probe"
 path = "examples/tap_deadband_probe.rs"
 required-features = ["cgmes"]
+
+[[example]]
+name = "qv_probe"
+path = "examples/qv_probe.rs"
 
 [[example]]
 name = "base_mismatch_probe"
