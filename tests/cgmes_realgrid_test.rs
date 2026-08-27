@@ -83,12 +83,49 @@ fn test_cgmes_realgrid() {
         assert!(b.voltage_mag.is_finite() && b.voltage_ang.is_finite(), "non-finite solved voltage at bus {i}");
     }
 
-    // Percentile-based check (see `cgmes_common::assert_matches_sv_percentile`'s
-    // own doc comment for why, at this scale): overwhelmingly precise
-    // (median/p90), with a small, bounded outlier allowance (p99 generously
-    // bounding the known StaticVarCompensator/Q-limit gaps plain
-    // `newton_raphson` doesn't enforce), rather than either a misleadingly
-    // loose uniform tolerance or an unrealistic zero-outlier requirement.
+    // Percentile-based (see `cgmes_common::assert_matches_sv_percentile`'s own
+    // doc comment for why, at this scale): overwhelmingly precise on the body of
+    // the distribution, with a bounded outlier allowance, rather than either a
+    // misleadingly loose uniform tolerance or an unrealistic zero-outlier
+    // requirement.
+    //
+    // **The outliers are not what this comment used to say they were.** It
+    // attributed them to "the known StaticVarCompensator/Q-limit gaps plain
+    // `newton_raphson` doesn't enforce". Measured: enforcing reactive limits
+    // improves the body threefold (p99 0.030 -> 0.011, median 1.8e-4 -> 7e-5)
+    // and leaves the tail untouched — five buses stay at ~0.5 p.u. either way.
+    // So that explanation is right about the body and wrong about exactly the
+    // cases it was written to excuse.
+    //
+    // What those five are, chased through the document rather than guessed at:
+    // 20 kV radial stubs behind a 63/20 kV transformer, published near 0.54 p.u.
+    // where gridoxide solves near 1.0. Every mundane explanation was checked and
+    // eliminated — all 3018 `PowerTransformerEnd`s have a `ratedU` within 5% of
+    // their node's nominal, so it is not a nameplate/base mismatch; the shunt on
+    // that node is `connected=false` with `sections=0`, so it is correctly
+    // ignored; and the five `SynchronousMachine`s there carry
+    // `controlEnabled=false` and no `RegulatingControl` element at all, so `PQ`
+    // at schedule is the right treatment and the injection matches 5x their
+    // scheduled P/Q exactly.
+    //
+    // The decisive measurement is that the *published* state is not a solution
+    // of the published document: substituting the reference voltages leaves
+    // `dQ ~ +0.30 p.u.` at each stub, so those buses would need ~30 MVAr more
+    // absorption than anything the file attaches to them. gridoxide's own answer
+    // is coherent by contrast (a 0.146 p.u. draw through a 0.945 p.u.
+    // transformer gives about the drop it computes). The reference encodes
+    // something the export does not — most plausibly distribution or
+    // compensation behind that transformer — which is the same class of
+    // fixture-side gap as FullGrid's 50 GW shunt.
+    //
+    // `p99` was `5e-1`, which permitted 46x the error actually present and would
+    // have absorbed a real regression silently — the failure mode that let a
+    // per-unit defect sit unnoticed behind MicroGrid-Type1's 5e-2 for as long as
+    // it did. It is `4e-2` now against a measured 0.0305: enough headroom that
+    // an ordinary numerical drift does not trip it, not so much that a defect
+    // can hide. Tightening further means changing what this test *solves* —
+    // enforcing reactive limits would take p99 to 0.011 — which is a separate
+    // decision from bounding what it does solve.
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
-    cgmes_common::assert_matches_sv_percentile(&result, &bus_index, &expected, 5e-3, 2e-2, 5e-1);
+    cgmes_common::assert_matches_sv_percentile(&result, &bus_index, &expected, 5e-3, 2e-2, 4e-2);
 }
