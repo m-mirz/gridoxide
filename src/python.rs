@@ -680,6 +680,102 @@ impl PowerFlowModel {
             .collect()
     }
 
+    /// Traces one bus's Q-V curve: how much reactive support holding it at a
+    /// given voltage would take, and how much margin there is before no
+    /// setpoint is reachable.
+    ///
+    /// The minimum of the curve is the reactive margin. Returns
+    /// `{bus, base_voltage, already_controlled, status, points: [...], nose,
+    /// failed}`, where each point is `{voltage, q, iterations}` and `nose` is
+    /// `{voltage, q, margin_pu, refined}` or `None`.
+    ///
+    /// `status` is `"nose_found"`, `"nose_not_reached"` — the sweep stopped
+    /// while the curve was still falling, so the margin is a *lower bound* —
+    /// `"failed"`, or `"rejected"`.
+    ///
+    /// Complements `continuation`, which asks how much further the whole system
+    /// can be loaded. The two measure related but different things and are known
+    /// not to agree on which bus is weakest; the physics is gated in
+    /// `tests/qv_test.rs`, against a closed-form two-bus curve.
+    #[pyo3(signature = (bus, v_max = 1.10, v_min = 0.40, step = 0.01, refine = true,
+                        enforce_q_limits = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn qv_curve(
+        &self,
+        py: Python<'_>,
+        bus: usize,
+        v_max: f64,
+        v_min: f64,
+        step: f64,
+        refine: bool,
+        enforce_q_limits: bool,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        use crate::qv::{qv_curve, QvOptions, QvStatus};
+
+        let curve = qv_curve(
+            &self.buses_template,
+            &self.lines,
+            &self.transformers,
+            &self.shunts,
+            bus,
+            QvOptions {
+                pf: crate::solver::PowerFlowOptions {
+                    enforce_q_limits,
+                    tol: self.tol,
+                    max_iter: self.max_iter.max(60),
+                    backend: self.backend,
+                    ..Default::default()
+                },
+                v_max,
+                v_min,
+                step,
+                refine,
+            },
+        );
+        if let QvStatus::Rejected(why) = &curve.status {
+            return Err(PyValueError::new_err(format!("bus {bus}: {why:?}")));
+        }
+
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("bus", curve.bus)?;
+        d.set_item("base_voltage", curve.base_voltage)?;
+        d.set_item("already_controlled", curve.already_controlled)?;
+        d.set_item(
+            "status",
+            match curve.status {
+                QvStatus::NoseFound => "nose_found",
+                QvStatus::NoseNotReached => "nose_not_reached",
+                QvStatus::Failed => "failed",
+                QvStatus::Rejected(_) => "rejected",
+            },
+        )?;
+        let points: Vec<Py<pyo3::types::PyDict>> = curve
+            .points
+            .iter()
+            .map(|p| {
+                let e = pyo3::types::PyDict::new(py);
+                e.set_item("voltage", p.voltage)?;
+                e.set_item("q", p.q)?;
+                e.set_item("iterations", p.iterations)?;
+                Ok(e.unbind())
+            })
+            .collect::<PyResult<_>>()?;
+        d.set_item("points", points)?;
+        d.set_item("failed", curve.failed.clone())?;
+        match &curve.nose {
+            None => d.set_item("nose", py.None())?,
+            Some(n) => {
+                let e = pyo3::types::PyDict::new(py);
+                e.set_item("voltage", n.voltage)?;
+                e.set_item("q", n.q)?;
+                e.set_item("margin_pu", n.margin_pu)?;
+                e.set_item("refined", n.refined)?;
+                d.set_item("nose", e)?;
+            }
+        }
+        Ok(d.unbind())
+    }
+
     /// Attributes each voltage-controlled bus's reactive power to the
     /// individual machines holding it, at the last solved state.
     ///
