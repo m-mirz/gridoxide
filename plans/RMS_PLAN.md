@@ -1,7 +1,7 @@
 # RMS simulation in gridoxide
 
-Status: **phase 1 implemented**, 2026-08-27, against `6f212eb`. Phases 2–6 outstanding.
-§11 records what phase 1 actually did, including the two places this plan was wrong.
+Status: **phases 1–2 implemented**, 2026-08-27, against `6f212eb`. Phases 3–6 outstanding.
+§11 and §12 record what was actually done, including the places this plan was wrong.
 
 ## Context
 
@@ -508,3 +508,120 @@ No events, so no fault, no trip, no `t_cc`. No model library beyond `GenCls`.
 No readers — a system is assembled from a Rust `SystemSpec`, which is why the
 mis-declared-split hazard is currently reachable at all. No CLI, no Python, no
 book chapter. Loads are constant impedance, converted at the solved voltage.
+
+
+---
+
+## 12. What happened: phase 2
+
+Landed: `src/dynamics/events.rs`, event-aware stepping in `integrator.rs`, and
+structure-preserving Y-bus reassembly on `DynamicSystem`. Seven more gates in
+`tests/dynamics_events_test.rs`; fourteen in total, all passing, and the rest of
+the suite is unaffected.
+
+### G2, the headline
+
+| | |
+|---|---|
+| Equal-area criterion | **0.309335 s** |
+| Simulated (bisected, `h` = 2 ms) | **0.309348 s** |
+| Difference | **12 µs** |
+
+against the 1 ms this plan asked for. The setup is the one the closed form is
+written for: `P_max` = 2.094, `P_m` = 0.800, `δ₀` = 0.3919 rad, a bolted fault
+at the machine terminal so `P_e` = 0 during it, and a post-fault network
+identical to the pre-fault one.
+
+### Nothing needed re-analysis
+
+§5's claim that every event in scope is value-only held exactly, and
+`network::build_ybus_with_outages` turned out to already provide the
+topology-superset property this needs — it re-stamps an out-of-service branch's
+positions at zero rather than dropping them, for reasons of its own. Combined
+with stamping every bus's diagonal unconditionally at build (so a fault can
+land anywhere), `LinearSolver` analyzes **once for the whole run**: a fault, a
+clearing and a trip are all numeric refactorizations against one symbolic
+factorization. The `reanalyses` counter this plan implied would be needed does
+not exist, because nothing increments it.
+
+### Where this plan was wrong again
+
+**§5 said the differential states are continuous across an event. The code did
+not make them so.** With `h·a = 0` the Jacobian is block lower triangular —
+`[I, 0; −∂I/∂x, Y − ∂I/∂V]` — so forward substitution gives `Δx = 0` and the
+plan reasoned no further. But no backend does forward substitution in that
+order: each applies its own fill-reducing permutation and partial pivoting, and
+roundoff leaks across the block boundary. Measured at ~7e-11 rad on a faulted
+network, whose conditioning the large fault admittance dominates.
+
+Small, but wrong in kind and cumulative over a run with many events. A rotor
+angle is *defined* to be continuous across a discontinuity, so `newton` now
+takes a `pin_states` flag and simply does not apply `Δx` during an algebraic
+re-solve. That makes the property exact rather than approximate, and the gate
+asserts bit-identity rather than a tolerance.
+
+### The test that had to be rewritten twice
+
+Checking that a terminal fault removes the electrical power looked trivial:
+with `P_e` gone the acceleration is constant, so the angle is exactly quadratic
+and the trapezoidal rule integrates it with **no error at all**. The observed
+departure was 2.5e-5 rad.
+
+Two explanations were offered and each was rejected by an experiment before the
+right answer appeared — which is that *both* were true, of different
+configurations:
+
+- with the damping steps **off**, the departure is the residual `P_e` that a
+  finite fault admittance still lets through. It scales as `1/y_fault`:
+  2.66e-5 rad at `1e6`, 2.66e-7 at `1e8`.
+- with the damping steps **on**, it is backward Euler's own overshoot. Each
+  damping step evaluates `δ̇` at the end of the step, so on a linearly growing
+  speed it overshoots by exactly `Ω_b·a·h²/2` with `a = P_m/2H`. Two steps
+  leave a permanent offset of `Ω_b·a·h²` = 2.513e-5 rad at `h` = 1 ms,
+  independent of the fault, and matching the closed form to better than 1%.
+
+At the default settings those are 2.7e-5 and 2.5e-5 with **opposite signs**.
+Measuring their combination says nothing; the first attribution attempt varied
+`y_fault` with the damping left on and saw no change at all, which looked like
+a refutation and was actually the other term dominating. The gate now measures
+each against its own closed form, and also checks that the damping offset falls
+as `h²` — which it does, despite backward Euler being first-order, because only
+a fixed number of steps ever use it.
+
+This is the most useful thing phase 2 produced. It is a complete, quantitative
+account of every departure from an exactly-known trajectory, which is a much
+stronger position than a passing tolerance.
+
+### The damping steps have nothing to damp
+
+`plans/RMS_PLAN.md` §5 justified backward-Euler damping by the trapezoidal
+rule's ringing after a discontinuity. That justification is sound and the
+mechanism is wired in, but **it cannot bite yet**: ringing needs a mode fast
+enough that `h·λ` is large, and the only differential mode in the present
+library is a classical machine's swing at about 1 Hz. A gate pins that turning
+the damping on and off does not move the critical clearing time, which is the
+honest claim to make about it today. The exciters and governors of phase 3 have
+time constants of 20–50 ms, which is where it starts to matter, and the offset
+quantified above is what it will cost.
+
+### Also landed
+
+Branch trip and close, load steps (as an admittance change, matching the load
+model `init` already chose), and a de-energized-island warning: a switching
+event that leaves a group of buses with no machine and no fixed bus is
+reported rather than presented as a trajectory. Events land bit-exactly on
+their own times — the step is truncated and the time snapped rather than
+accumulated — so an event time need not be a multiple of the step. An event
+naming a bus or branch that does not exist is skipped and named, not fatal.
+
+### Deferred from §5, deliberately
+
+`UnitTrip` is the one event kind in §5's table that is **not** value-only: a
+tripped unit's states leave the system, which changes the variable layout and
+so needs a genuine re-analysis. It is deferred to phase 3, where the model
+library gives it something worth tripping. `EventKind` does not name it, so
+nothing pretends to support it.
+
+State-triggered events — a relay on an under-voltage or over-frequency
+threshold — remain out of scope as §5 said, and
+`continuation::events`'s Illinois locator remains the piece to reuse.

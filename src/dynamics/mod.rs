@@ -47,6 +47,7 @@
 //! the readers and the external validation are phases 2 through 6.
 
 pub mod dae;
+pub mod events;
 pub mod init;
 pub mod integrator;
 pub mod models;
@@ -54,9 +55,10 @@ pub mod models;
 use num_complex::Complex;
 
 use crate::klu_native::KluNativeSystem;
-use crate::network::YBusSparse;
+use crate::network::{build_ybus_with_outages, connected_components, stamp_shunts, ShuntAdm, YBusSparse};
 use crate::solver::JacobianBackend;
 use crate::sparse::RealSparseSystem;
+use crate::types::{Line, Transformer};
 #[cfg(feature = "klu")]
 use crate::sparse_klu::KluRealSystem;
 #[cfg(feature = "pardiso")]
@@ -65,6 +67,7 @@ use crate::sparse_pardiso::PardisoRealSystem;
 use dae::DaePattern;
 use models::DynamicModel;
 
+pub use events::{DynamicsWarning, Event, EventError, EventKind};
 pub use init::{build, BuildError, DeviceSpec, SystemSpec};
 
 /// What a run needs to know.
@@ -83,6 +86,14 @@ pub struct DynamicsOptions {
     /// choice; zero disables the damping and makes the ringing visible, which
     /// is what the test for it does.
     pub damping_steps: usize,
+    /// The disturbance schedule. Sorted by time before the run, so the order
+    /// given does not matter; events sharing a time are applied in the order
+    /// listed, which is what lets a trip and a fault at the same instant be
+    /// expressed unambiguously.
+    ///
+    /// Steps are truncated to land exactly on each event time, so an event
+    /// need not fall on a multiple of [`step`](Self::step).
+    pub events: Vec<Event>,
     /// Which sparse-LU backend solves each step.
     ///
     /// [`JacobianBackend::Block`] is refused: it assumes a uniform 2×2 block
@@ -100,6 +111,7 @@ impl Default for DynamicsOptions {
             tol: 1e-9,
             max_newton: 20,
             damping_steps: 2,
+            events: Vec::new(),
             backend: JacobianBackend::Scalar,
         }
     }
@@ -173,6 +185,12 @@ pub struct DynamicsReport {
     /// Newton iterations summed over every step — the cost measure worth
     /// watching, since each one is a numeric refactorization.
     pub newton_iterations: usize,
+    /// Events actually applied. Fewer than were scheduled if the run stopped
+    /// early or an event named something that does not exist.
+    pub events_applied: usize,
+    /// Anything noticed that is not an error — a de-energized island, a
+    /// skipped event.
+    pub warnings: Vec<DynamicsWarning>,
 }
 
 /// An assembled, initialized system, ready to integrate.
@@ -186,8 +204,27 @@ pub struct DynamicSystem {
     pub(crate) ids: Vec<String>,
     pub(crate) ybus: YBusSparse,
     pub(crate) pattern: DaePattern,
-    /// Voltages held constant at the fixed buses; ignored elsewhere.
+    /// Every bus's voltage as the power flow solved it.
+    ///
+    /// Used as the held value at fixed buses, and as the reference magnitude
+    /// for [`EventKind::LoadStep`]'s power-to-admittance conversion. Both
+    /// readings want the same number, which is why there is one field.
     pub(crate) v_fixed: Vec<Complex<f64>>,
+    // --- what a topology event needs to reassemble the Y-bus ---
+    pub(crate) lines: Vec<Line>,
+    pub(crate) transformers: Vec<Transformer>,
+    pub(crate) shunts: Vec<ShuntAdm>,
+    /// Out-of-service flags, lines then transformers — the index space
+    /// `network::build_ybus_with_outages` and [`EventKind::BranchTrip`] share.
+    pub(crate) outaged: Vec<bool>,
+    /// Per bus: the constant admittance standing in for its load, derived at
+    /// the initial voltage and moved by [`EventKind::LoadStep`].
+    pub(crate) load_y: Vec<Complex<f64>>,
+    /// Per bus: the fault admittance currently applied, zero where none is.
+    pub(crate) fault_y: Vec<Complex<f64>>,
+    /// Per device: its constant Norton admittance, kept so a reassembly can
+    /// re-stamp it without going back to the model.
+    pub(crate) norton: Vec<Option<Complex<f64>>>,
     /// The current state. `build` leaves the initial equilibrium here, and
     /// each run advances it, so a run can be continued.
     pub(crate) x0: Vec<f64>,
@@ -262,6 +299,54 @@ impl DynamicSystem {
         }
     }
 
+    /// Rebuilds the Y-bus from the current switching state, fault
+    /// admittances and load admittances.
+    ///
+    /// Structure-preserving by construction: `build_ybus_with_outages`
+    /// re-stamps an out-of-service branch's positions at zero rather than
+    /// dropping them, and every bus's diagonal is stamped unconditionally, so
+    /// the result always has exactly the sparsity
+    /// [`DaePattern`](dae::DaePattern) was analyzed against. That is what makes
+    /// a trip a refill rather than a re-analysis, and it is the property to
+    /// preserve if anything is ever added here.
+    pub(crate) fn reassemble(&mut self) {
+        let n = self.v0.len();
+        let mut y = build_ybus_with_outages(n, &self.lines, &self.transformers, &self.outaged);
+        stamp_shunts(&mut y, &self.shunts);
+        for i in 0..n {
+            y.add(i, i, self.load_y[i] + self.fault_y[i]);
+        }
+        let layout = self.pattern.layout();
+        for (d, norton) in self.norton.iter().enumerate() {
+            if let Some(yn) = norton {
+                let bus = layout.dev_bus[d];
+                y.add(bus, bus, *yn);
+            }
+        }
+        self.ybus = y.finish();
+    }
+
+    /// Buses in components that hold neither a device nor a fixed-voltage bus.
+    ///
+    /// Such an island has no voltage reference. Its algebraic equations are
+    /// still solvable — the load admittances give every bus a path to ground —
+    /// but the answer is a de-energized island, not a dynamic one, and reading
+    /// it as a trajectory would be a mistake.
+    pub(crate) fn dead_islands(&self) -> Vec<Vec<usize>> {
+        let layout = self.pattern.layout();
+        let mut alive = vec![false; layout.n_bus];
+        for &bus in &layout.dev_bus {
+            alive[bus] = true;
+        }
+        for (i, alive) in alive.iter_mut().enumerate() {
+            *alive |= self.pattern.is_fixed(i);
+        }
+        connected_components(&self.ybus)
+            .into_iter()
+            .filter(|component| !component.iter().any(|&b| alive[b]))
+            .collect()
+    }
+
     /// The largest absolute derivative at the current state — the number gate
     /// G1 watches. At a correct equilibrium it is at machine zero.
     pub fn max_derivative(&self) -> f64 {
@@ -302,7 +387,7 @@ pub fn settle(system: &mut DynamicSystem, opts: &DynamicsOptions) -> integrator:
 /// The system is advanced in place, so a caller can run in segments — which is
 /// what event handling will do in phase 2.
 pub fn run_dynamics(system: &mut DynamicSystem, opts: &DynamicsOptions) -> DynamicsReport {
-    let (trajectory, status, steps, newton_iterations) = match opts.backend {
+    match opts.backend {
         JacobianBackend::Scalar | JacobianBackend::Block => {
             integrator::integrate::<RealSparseSystem>(system, opts)
         }
@@ -311,6 +396,5 @@ pub fn run_dynamics(system: &mut DynamicSystem, opts: &DynamicsOptions) -> Dynam
         JacobianBackend::Klu => integrator::integrate::<KluRealSystem>(system, opts),
         #[cfg(feature = "pardiso")]
         JacobianBackend::Pardiso => integrator::integrate::<PardisoRealSystem>(system, opts),
-    };
-    DynamicsReport { trajectory, status, steps, newton_iterations }
+    }
 }
