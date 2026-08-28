@@ -18,7 +18,9 @@ use num_complex::Complex;
 
 use gridoxide::dynamics::models::avr::{Sexs, SexsParams};
 use gridoxide::dynamics::models::gov::{Tgov1, Tgov1Params};
-use gridoxide::dynamics::models::machine::{GenTransient, GenTransientParams, Machine};
+use gridoxide::dynamics::models::machine::{
+    GenRound, GenRoundParams, GenTransient, GenTransientParams, Machine,
+};
 use gridoxide::dynamics::models::load::ZipLoad;
 use gridoxide::dynamics::models::pss::{Stab1, Stab1Params};
 use gridoxide::dynamics::models::{
@@ -220,7 +222,20 @@ fn islanded(
     gen_p: &[f64],
     load: (f64, f64),
 ) -> (DynamicSystem, Vec<String>) {
-    let n_gen = fits.len();
+    let models: Vec<Box<dyn DynamicModel>> = fits
+        .iter()
+        .map(|(fit, d, r)| Box::new(unit(*fit, *d, *r)) as Box<dyn DynamicModel>)
+        .collect();
+    islanded_with(models, gen_p, load)
+}
+
+/// As [`islanded`], with the devices supplied directly.
+fn islanded_with(
+    models: Vec<Box<dyn DynamicModel>>,
+    gen_p: &[f64],
+    load: (f64, f64),
+) -> (DynamicSystem, Vec<String>) {
+    let n_gen = models.len();
     let load_bus = n_gen;
     let mut buses = Vec::new();
     for (i, p) in gen_p.iter().enumerate() {
@@ -245,15 +260,10 @@ fn islanded(
 
     let mut devices = Vec::new();
     let mut ids = Vec::new();
-    for (i, (fit, damping, droop)) in fits.iter().enumerate() {
+    for (i, model) in models.into_iter().enumerate() {
         let id = format!("G{}", i + 1);
         ids.push(id.clone());
-        devices.push(DeviceSpec {
-            id,
-            bus: i,
-            s: Complex::new(p_calc[i], q_calc[i]),
-            model: Box::new(unit(*fit, *damping, *droop)),
-        });
+        devices.push(DeviceSpec { id, bus: i, s: Complex::new(p_calc[i], q_calc[i]), model });
     }
 
     let system = build(SystemSpec {
@@ -680,5 +690,303 @@ fn a_constant_power_load_deepens_a_sag() {
         power > impedance,
         "a constant-power load should sag further than a constant-impedance one: \
          {power:.5} against {impedance:.5}"
+    );
+}
+
+fn round_params(xdpp: f64, xqpp: f64) -> GenRoundParams {
+    GenRoundParams {
+        h: 5.0,
+        d: 2.0,
+        ra: 0.003,
+        xd: 1.8,
+        xq: 1.7,
+        xdp: 0.30,
+        xqp: 0.55,
+        xdpp,
+        xqpp,
+        xl: 0.15,
+        td0p: 8.0,
+        tq0p: 0.4,
+        td0pp: 0.03,
+        tq0pp: 0.05,
+        mbase: S_BASE,
+    }
+}
+
+/// A machine with no subtransient saliency presents **exactly** its own
+/// admittance to the network, so `∂I/∂V` comes out exactly zero.
+///
+/// This is the sharpest check available on the rotor-frame algebra, and it is
+/// exact rather than approximate. `injection` returns the machine's current
+/// plus the Norton stamp; when `x''_d = x''_q` the machine really is an
+/// impedance in the network frame, the stamp is that impedance, and the two
+/// cancel to the last bit. A transposed sine, a `q` axis defined the other way
+/// round, or a sign slip anywhere in the 2×2 stator solve all leave a residue.
+///
+/// It also confirms what the stamp is *for*: it is a conditioning device that
+/// changes no answer, and here that claim is visible as an identity.
+#[test]
+fn a_non_salient_machine_cancels_its_own_norton_stamp() {
+    let v = Complex::from_polar(1.02, 0.17);
+    let s = Complex::new(0.7, 0.25);
+
+    let mut transient = GenTransient::new(
+        GenTransientParams { xqp: 0.30, ..machine_params(0.0) },
+        S_BASE,
+        F_NOM,
+    )
+    .unwrap();
+    let init = transient.initialize(v, s).unwrap();
+    let mut jac = gridoxide::dynamics::models::MachineJacobian::zeros(4);
+    jac.clear();
+    transient.jacobian(&init.states, v, init.e_fd, init.p_m, &mut jac);
+    for (k, value) in jac.didv.iter().enumerate() {
+        assert!(value.abs() < 1e-12, "transient didv[{k}] = {value:e}, should be exactly zero");
+    }
+
+    let mut round = GenRound::new(round_params(0.22, 0.22), S_BASE, F_NOM).unwrap();
+    let init = round.initialize(v, s).unwrap();
+    let mut jac = gridoxide::dynamics::models::MachineJacobian::zeros(6);
+    jac.clear();
+    round.jacobian(&init.states, v, init.e_fd, init.p_m, &mut jac);
+    for (k, value) in jac.didv.iter().enumerate() {
+        assert!(value.abs() < 1e-12, "round didv[{k}] = {value:e}, should be exactly zero");
+    }
+}
+
+/// The sixth-order machine's initialization reproduces its terminal current,
+/// and its Jacobian matches the oracle.
+#[test]
+fn the_subtransient_machine_is_self_consistent() {
+    for (v, s) in [
+        (Complex::from_polar(1.0, 0.0), Complex::new(0.8, 0.3)),
+        (Complex::from_polar(1.05, 0.2), Complex::new(0.5, -0.15)),
+        (Complex::from_polar(0.95, -0.1), Complex::new(1.0, 0.6)),
+    ] {
+        let mut m = GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM).unwrap();
+        let init = m.initialize(v, s).unwrap();
+        let i_model = m.injection(&init.states, v) - m.norton_admittance() * v;
+        let i_expected = (s / v).conj();
+        assert!(
+            (i_model - i_expected).norm() < 1e-12,
+            "terminal current {i_model} should be {i_expected}"
+        );
+        let copper = i_expected.norm_sqr() * round_params(0.22, 0.25).ra;
+        assert!((init.p_m - (s.re + copper)).abs() < 1e-12);
+    }
+
+    let mut model = GeneratingUnit::new(
+        Box::new(GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM).unwrap()),
+        Some(Box::new(new_avr())),
+        Some(Box::new(new_gov(0.05))),
+        Some(Box::new(new_pss())),
+    );
+    model
+        .initialize(Complex::from_polar(1.02, 0.15), Complex::new(0.8, 0.3))
+        .unwrap();
+    let n = model.n_states();
+    for scale in [0.13, -0.21, 0.17] {
+        let x: Vec<f64> = (0..n).map(|k| 0.4 + scale * k as f64).collect();
+        let v = Complex::new(0.97, 0.11);
+        let mut analytic = ModelJacobian::zeros(n);
+        analytic.clear();
+        model.jacobian(&x, v, &mut analytic);
+        let numeric = finite_difference(&model, &x, v, 1e-6);
+        for (name, a, b) in [
+            ("dfdx", &analytic.dfdx, &numeric.dfdx),
+            ("dfdv", &analytic.dfdv, &numeric.dfdv),
+            ("didx", &analytic.didx, &numeric.didx),
+        ] {
+            for (k, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
+                let sc = av.abs().max(bv.abs()).max(1.0);
+                assert!(
+                    (av - bv).abs() / sc < 1e-6,
+                    "{name}[{k}]: analytic {av:e} vs numeric {bv:e}"
+                );
+            }
+        }
+    }
+}
+
+/// The sixth-order machine reduces to the fourth-order one when its damper
+/// windings are made ineffective.
+///
+/// This is the gate that pins the subtransient sign conventions, which
+/// published statements of the model disagree about. Take `x''` up to `x'` on
+/// both axes and the interpolation coefficients `b_d`, `b_q` go to zero: the
+/// subtransient EMFs collapse onto the transient ones, the damper-coupling
+/// corrections vanish, and the subtransient stator equations *become* the
+/// transient ones. The two machines must then trace the same trajectory
+/// through the same disturbance.
+///
+/// Because `GenTransient` is independently pinned — by the terminal-current
+/// identity and the Norton-cancellation identity above — this transfers that
+/// confidence to `GenRound`. What it cannot confirm is the *magnitude* of the
+/// damper coupling in the regime where it matters; that waits for the external
+/// comparison in phase 5.
+#[test]
+fn the_subtransient_machine_reduces_to_the_transient_one() {
+    let trajectory = |sixth: bool| {
+        let model: Box<dyn DynamicModel> = if sixth {
+            // As close to the transient reactances as the parameter ordering
+            // allows, so the dampers exist but contribute nothing.
+            Box::new(GeneratingUnit::machine_only(Box::new(
+                GenRound::new(round_params(0.30 - 1e-7, 0.55 - 1e-7), S_BASE, F_NOM).unwrap(),
+            )))
+        } else {
+            Box::new(GeneratingUnit::machine_only(Box::new(new_machine(2.0))))
+        };
+        let (mut system, _) = islanded_with(vec![model], &[0.8], (-0.8, -0.2));
+        let opts = options(
+            0.002,
+            8.0,
+            vec![
+                Event::bolted_fault(1.0, 1),
+                Event::new(1.08, EventKind::ClearFault { bus: 1 }),
+            ],
+        );
+        let report = run_dynamics(&mut system, &opts);
+        assert_eq!(report.status, DynamicsStatus::Completed);
+        (
+            report.trajectory.series("G1.delta").unwrap(),
+            report.trajectory.series("G1.omega").unwrap(),
+        )
+    };
+
+    let (d4, w4) = trajectory(false);
+    let (d6, w6) = trajectory(true);
+    assert_eq!(d4.len(), d6.len());
+
+    let worst_d = d4.iter().zip(d6.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    let worst_w = w4.iter().zip(w6.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    assert!(
+        worst_d < 1e-5,
+        "with the dampers made ineffective the two orders should agree; \
+         the rotor angles differ by {worst_d:e} rad"
+    );
+    assert!(worst_w < 1e-7, "the speeds differ by {worst_w:e} pu");
+}
+
+/// Damper windings make the machine stiffer against a sudden change, which is
+/// the whole reason to carry them.
+///
+/// At the instant a fault arrives, every differential state is frozen, so the
+/// machine's response is governed entirely by what it looks like *right then* —
+/// a subtransient EMF behind `x''`, not a transient one behind `x'`. A lower
+/// reactance means more current, so a sixth-order machine feeds a fault harder
+/// than an otherwise identical fourth-order one. Reading the current at the
+/// event's own instant is what isolates the effect from everything that
+/// happens afterwards.
+#[test]
+fn dampers_stiffen_the_instantaneous_response() {
+    let fault_current = |sixth: bool| {
+        let model: Box<dyn DynamicModel> = if sixth {
+            Box::new(GeneratingUnit::machine_only(Box::new(
+                GenRound::new(round_params(0.20, 0.22), S_BASE, F_NOM).unwrap(),
+            )))
+        } else {
+            Box::new(GeneratingUnit::machine_only(Box::new(new_machine(2.0))))
+        };
+        let (mut system, _) = islanded_with(vec![model], &[0.8], (-0.8, -0.2));
+        let opts = options(
+            0.002,
+            1.2,
+            vec![Event::new(1.0, EventKind::BusFault { bus: 1, y: Complex::new(4.0, 0.0) })],
+        );
+        let report = run_dynamics(&mut system, &opts);
+        assert_eq!(report.status, DynamicsStatus::Completed);
+        // The two rows recorded at the fault's own time: before, and after the
+        // algebraic re-solve.
+        let at: Vec<usize> = report
+            .trajectory
+            .time
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| (**t - 1.0).abs() < 1e-12)
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(at.len(), 2);
+        let col = report.trajectory.column("bus0.vmag").unwrap();
+        let (before, after) =
+            (report.trajectory.rows[at[0]][col], report.trajectory.rows[at[1]][col]);
+        (before, after)
+    };
+
+    let (v4_before, v4_after) = fault_current(false);
+    let (v6_before, v6_after) = fault_current(true);
+    assert!((v4_before - v6_before).abs() < 1e-6, "the two should start from the same point");
+    assert!(
+        v6_after > v4_after,
+        "a stiffer machine should hold its terminal voltage up better through the \
+         first instant: {v6_after:.6} against {v4_after:.6}"
+    );
+}
+
+/// Tripping a unit freezes it and leaves the rest of the system to cope.
+///
+/// The freeze is exact, not approximate: the tripped unit's rows become
+/// `x₁ − x₀ = 0` and its states hold bit-for-bit. That is what makes a unit
+/// trip a value-only event — the sparsity pattern is untouched, so the run's
+/// single symbolic factorization still serves and nothing re-analyzes.
+#[test]
+fn a_tripped_unit_freezes_and_the_rest_picks_up_the_load() {
+    let fit = Fit { avr: true, gov: true, pss: false };
+    let (mut system, _) =
+        islanded(&[(fit, 2.0, 0.05), (fit, 2.0, 0.05)], &[0.8, 0.8], (-1.6, -0.4));
+
+    let opts = options(
+        0.005,
+        40.0,
+        vec![Event::new(1.0, EventKind::UnitTrip { unit: 1 })],
+    );
+    let report = run_dynamics(&mut system, &opts);
+    assert_eq!(report.status, DynamicsStatus::Completed);
+    assert_eq!(report.events_applied, 1);
+
+    // Every state of the tripped unit is bit-identical from the trip onward.
+    let after_trip: Vec<usize> = report
+        .trajectory
+        .time
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| **t >= 1.0)
+        .map(|(k, _)| k)
+        .collect();
+    for name in report.trajectory.names.clone() {
+        if !name.starts_with("G2.") {
+            continue;
+        }
+        let col = report.trajectory.column(&name).unwrap();
+        let frozen = report.trajectory.rows[after_trip[1]][col];
+        for &k in &after_trip[1..] {
+            assert_eq!(
+                report.trajectory.rows[k][col].to_bits(),
+                frozen.to_bits(),
+                "{name} should be frozen after the trip"
+            );
+        }
+    }
+
+    // And the survivor takes the load: its governor opens up and the frequency
+    // settles low, since one machine's droop now carries what two shared.
+    let w = report.trajectory.series("G1.omega").unwrap();
+    let p = report.trajectory.series("G1.gov_turbine").unwrap();
+    assert!(
+        *w.last().unwrap() < w[0] - 1e-3,
+        "losing half the generation should depress the frequency, Δω = {:e}",
+        w.last().unwrap() - w[0]
+    );
+    assert!(
+        *p.last().unwrap() > p[0] + 0.1,
+        "the survivor should pick up load: {:.4} to {:.4}",
+        p[0],
+        p.last().unwrap()
+    );
+    // The droop relation still holds for the one machine left.
+    let predicted = -(w.last().unwrap() - w[0]) / 0.05;
+    let actual = p.last().unwrap() - p[0];
+    assert!(
+        (actual - predicted).abs() < 0.03 * predicted.abs(),
+        "the survivor should pick up −Δω/R = {predicted:.5}, picked up {actual:.5}"
     );
 }

@@ -84,6 +84,20 @@ pub enum EventKind {
     BranchTrip { branch: usize },
     /// Put it back.
     BranchClose { branch: usize },
+    /// Disconnect a device from the network. Indexed in `SystemSpec::devices`
+    /// order.
+    ///
+    /// Value-only, despite phase 2 of `plans/RMS_PLAN.md` predicting it would
+    /// be structural. Removing the unit's states from the DAE would indeed
+    /// change the variable layout; **freezing** them does not, and freezing is
+    /// also the more defensible model — nothing in the network can observe a
+    /// disconnected machine's rotor, so integrating it would be tracking a
+    /// quantity no result depends on.
+    UnitTrip { unit: usize },
+    /// Reconnect one. The unit resumes from the state it was frozen at, which
+    /// is only meaningful for a brief disconnection: a real resynchronization
+    /// is not modelled.
+    UnitClose { unit: usize },
     /// Change a bus's load by `ds` (an *injection*, so a load increase is
     /// negative).
     ///
@@ -111,7 +125,10 @@ impl EventKind {
             EventKind::BusFault { bus, .. }
             | EventKind::ClearFault { bus }
             | EventKind::LoadStep { bus, .. } => Some(bus),
-            EventKind::BranchTrip { .. } | EventKind::BranchClose { .. } => None,
+            EventKind::BranchTrip { .. }
+            | EventKind::BranchClose { .. }
+            | EventKind::UnitTrip { .. }
+            | EventKind::UnitClose { .. } => None,
         }
     }
 }
@@ -123,6 +140,7 @@ impl EventKind {
 pub enum EventError {
     BusOutOfRange { bus: usize, n_bus: usize },
     BranchOutOfRange { branch: usize, n_branch: usize },
+    UnitOutOfRange { unit: usize, n_unit: usize },
 }
 
 impl std::fmt::Display for EventError {
@@ -133,6 +151,9 @@ impl std::fmt::Display for EventError {
             }
             EventError::BranchOutOfRange { branch, n_branch } => {
                 write!(f, "event names branch {branch}, but the network has {n_branch} branches")
+            }
+            EventError::UnitOutOfRange { unit, n_unit } => {
+                write!(f, "event names unit {unit}, but the system has {n_unit} devices")
             }
         }
     }

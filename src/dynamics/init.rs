@@ -234,12 +234,12 @@ pub fn build(spec: SystemSpec<'_>) -> Result<DynamicSystem, BuildError> {
         ybus.add(i, i, load_y[i]);
     }
 
-    // Each device's Norton admittance, constant for the topology's lifetime.
-    let norton: Vec<Option<Complex<f64>>> =
-        spec.devices.iter().map(|d| d.model.norton_admittance()).collect();
-    for (dev, y) in spec.devices.iter().zip(norton.iter()) {
-        if let Some(y) = y {
-            ybus.add(dev.bus, dev.bus, *y);
+    // Each device's Norton admittance. Constant while the device is connected;
+    // a unit trip withdraws it, which `DynamicSystem::reassemble` handles by
+    // asking the model again rather than by caching here.
+    for dev in &spec.devices {
+        if let Some(y) = dev.model.norton_admittance() {
+            ybus.add(dev.bus, dev.bus, y);
         }
     }
     let ybus = ybus.finish();
@@ -281,7 +281,6 @@ pub fn build(spec: SystemSpec<'_>) -> Result<DynamicSystem, BuildError> {
         outaged: vec![false; spec.lines.len() + spec.transformers.len()],
         load_y,
         fault_y: vec![Complex::new(0.0, 0.0); n_bus],
-        norton,
         x0,
         v0: v,
     };

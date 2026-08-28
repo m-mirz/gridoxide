@@ -225,6 +225,14 @@ fn apply(system: &mut DynamicSystem, kind: EventKind) -> Result<(), EventError> 
             }
             system.outaged[branch] = matches!(kind, EventKind::BranchTrip { .. });
         }
+        EventKind::UnitTrip { unit } | EventKind::UnitClose { unit } => {
+            let n_unit = system.models.len();
+            if unit >= n_unit {
+                return Err(EventError::UnitOutOfRange { unit, n_unit });
+            }
+            system.models[unit]
+                .set_connected(matches!(kind, EventKind::UnitClose { .. }));
+        }
         EventKind::LoadStep { bus, ds } => {
             let v_sq = system.v_fixed[bus].norm_sqr();
             if v_sq != 0.0 {

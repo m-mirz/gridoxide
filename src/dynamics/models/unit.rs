@@ -73,6 +73,7 @@ pub struct GeneratingUnit {
     off_p: usize,
     n_states: usize,
     omega_col: usize,
+    connected: bool,
     scratch: std::cell::RefCell<Scratch>,
 }
 
@@ -142,6 +143,7 @@ impl GeneratingUnit {
             off_p: n_m + n_a + n_g,
             n_states: n_m + n_a + n_g + n_p,
             omega_col,
+            connected: true,
             scratch: std::cell::RefCell::new(Scratch {
                 machine: MachineJacobian::zeros(n_m),
                 avr_dfdx: vec![0.0; n_a * n_a],
@@ -195,10 +197,22 @@ impl DynamicModel for GeneratingUnit {
     }
 
     fn norton_admittance(&self) -> Option<Complex<f64>> {
-        Some(self.machine.norton_admittance())
+        self.connected.then(|| self.machine.norton_admittance())
+    }
+
+    fn set_connected(&mut self, connected: bool) {
+        self.connected = connected;
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected
     }
 
     fn derivatives(&self, x: &[f64], v: Complex<f64>, out: &mut [f64]) {
+        if !self.connected {
+            out.fill(0.0);
+            return;
+        }
         let sig = self.signals(x, v);
         self.machine.derivatives(&x[..self.n_m], v, sig.e_fd, sig.p_m, &mut out[..self.n_m]);
         if let Some(c) = &self.avr {
@@ -216,10 +230,19 @@ impl DynamicModel for GeneratingUnit {
     }
 
     fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64> {
+        if !self.connected {
+            return Complex::new(0.0, 0.0);
+        }
         self.machine.injection(&x[..self.n_m], v)
     }
 
     fn jacobian(&self, x: &[f64], v: Complex<f64>, out: &mut ModelJacobian) {
+        if !self.connected {
+            // Everything is zero, which the caller already cleared it to. The
+            // implicit rule then contributes the identity on the diagonal, so
+            // the frozen rows read `x₁ − x₀ = 0` and the states hold exactly.
+            return;
+        }
         let n = self.n_states;
         let sig = self.signals(x, v);
         let mut s = self.scratch.borrow_mut();

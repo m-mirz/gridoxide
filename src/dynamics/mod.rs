@@ -222,9 +222,6 @@ pub struct DynamicSystem {
     pub(crate) load_y: Vec<Complex<f64>>,
     /// Per bus: the fault admittance currently applied, zero where none is.
     pub(crate) fault_y: Vec<Complex<f64>>,
-    /// Per device: its constant Norton admittance, kept so a reassembly can
-    /// re-stamp it without going back to the model.
-    pub(crate) norton: Vec<Option<Complex<f64>>>,
     /// The current state. `build` leaves the initial equilibrium here, and
     /// each run advances it, so a run can be continued.
     pub(crate) x0: Vec<f64>,
@@ -317,13 +314,23 @@ impl DynamicSystem {
             y.add(i, i, self.load_y[i] + self.fault_y[i]);
         }
         let layout = self.pattern.layout();
-        for (d, norton) in self.norton.iter().enumerate() {
-            if let Some(yn) = norton {
+        for (d, model) in self.models.iter().enumerate() {
+            // Read from the model rather than from a cache: a disconnected unit
+            // withdraws its stamp, and a cache would have to be kept in step
+            // with that.
+            if let Some(yn) = model.norton_admittance() {
                 let bus = layout.dev_bus[d];
-                y.add(bus, bus, *yn);
+                y.add(bus, bus, yn);
             }
         }
         self.ybus = y.finish();
+    }
+
+    /// Whether every device is still connected — used only to decide whether a
+    /// dead-island report is warranted, since a disconnected unit does not
+    /// energize anything.
+    pub(crate) fn connected_devices(&self) -> Vec<bool> {
+        self.models.iter().map(|m| m.is_connected()).collect()
     }
 
     /// Buses in components that hold neither a device nor a fixed-voltage bus.
@@ -335,8 +342,9 @@ impl DynamicSystem {
     pub(crate) fn dead_islands(&self) -> Vec<Vec<usize>> {
         let layout = self.pattern.layout();
         let mut alive = vec![false; layout.n_bus];
-        for &bus in &layout.dev_bus {
-            alive[bus] = true;
+        let connected = self.connected_devices();
+        for (d, &bus) in layout.dev_bus.iter().enumerate() {
+            alive[bus] |= connected[d];
         }
         for (i, alive) in alive.iter_mut().enumerate() {
             *alive |= self.pattern.is_fixed(i);
