@@ -8,6 +8,8 @@
 //! Rate and position limits on the valve are absent for the same reason
 //! exciter limits are — see [`avr`](super::avr).
 
+use serde::{Deserialize, Serialize};
+
 use super::{Control, InitError};
 
 /// `TGOV1`: a steam turbine-governor, the simplest model in wide use.
@@ -45,7 +47,7 @@ pub struct Tgov1 {
 }
 
 /// [`Tgov1`]'s parameters.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tgov1Params {
     /// Droop, per unit. `0.05` is the usual setting.
     pub r: f64,

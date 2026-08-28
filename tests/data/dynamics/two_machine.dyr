@@ -1,0 +1,10 @@
+/ A hand-written PSS/E dynamic record file, small enough to read.
+/ Machine 1: round rotor with an exciter and a governor.
+    1 'GENROU' '1 '  8.0000  0.03000  0.40000  0.05000  5.0000  1.0000
+                     1.8000  1.70000  0.30000  0.55000  0.22000  0.15000
+                     0.1000  0.30000  /
+    1 'SEXS'   '1 '  0.10000  1.00000  200.000  0.05000  -5.0000  5.00000  /
+    1 'TGOV1'  '1 '  0.05000  0.50000  1.00000  0.00000  1.00000  5.00000  0.00000  /
+/ Machine 2: classical, no controls, and a relay this reader does not model.
+    2 'GENCLS' '1 '  4.0000  0.00000  /
+    2 'IEEEST' '1 '  1.0000  0.00000  0.00000  0.00000  0.00000  0.00000  0.00000  /

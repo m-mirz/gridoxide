@@ -50,6 +50,7 @@
 //! it can be.
 
 use num_complex::Complex;
+use serde::{Deserialize, Serialize};
 
 use super::{DynamicModel, InitError};
 
@@ -195,7 +196,7 @@ pub struct GenCls {
 
 /// [`GenCls`]'s parameters as a data file states them: on the machine's own MVA
 /// rating, which is not the network's.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GenClsParams {
     /// Inertia constant, seconds, on `mbase`.
     pub h: f64,
@@ -394,7 +395,7 @@ pub struct GenTransient {
 }
 
 /// [`GenTransient`]'s parameters, on the machine's own MVA rating.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GenTransientParams {
     pub h: f64,
     pub d: f64,
@@ -742,7 +743,7 @@ pub struct GenRound {
 }
 
 /// [`GenRound`]'s parameters, on the machine's own MVA rating.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GenRoundParams {
     pub h: f64,
     pub d: f64,

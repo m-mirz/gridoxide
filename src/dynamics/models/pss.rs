@@ -13,6 +13,8 @@
 //! Output limits are absent, as they are for the other controls — see
 //! [`avr`](super::avr).
 
+use serde::{Deserialize, Serialize};
+
 use super::{Control, InitError};
 
 /// A speed-input stabilizer: a washout followed by two lead-lag stages.
@@ -51,7 +53,7 @@ pub struct Stab1 {
 }
 
 /// [`Stab1`]'s parameters.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stab1Params {
     /// Stabilizer gain.
     pub k: f64,

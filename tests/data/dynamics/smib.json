@@ -1,0 +1,43 @@
+{
+  "buses": [
+    { "idx": 0, "bus_type": "PV",    "voltage_mag": 1.0,  "voltage_ang": 0.0,
+      "p_spec": 0.8, "q_spec": 0.0, "q_min": -1e9, "q_max": 1e9, "u_rated": 1.0 },
+    { "idx": 1, "bus_type": "PQ",    "voltage_mag": 1.0,  "voltage_ang": 0.0,
+      "p_spec": -1.0, "q_spec": -0.3, "q_min": -1e9, "q_max": 1e9, "u_rated": 1.0 },
+    { "idx": 2, "bus_type": "Slack", "voltage_mag": 1.0,  "voltage_ang": 0.0,
+      "p_spec": 0.0, "q_spec": 0.0, "q_min": -1e9, "q_max": 1e9, "u_rated": 1.0 }
+  ],
+  "lines": [
+    { "from": 0, "to": 1, "r": 0.005, "x": 0.10, "b_shunt": 0.0 },
+    { "from": 1, "to": 2, "r": 0.005, "x": 0.10, "b_shunt": 0.0 }
+  ],
+  "dynamics": {
+    "s_base": 100.0,
+    "f_nom": 50.0,
+    "fixed_buses": [2],
+    "units": [
+      {
+        "id": "G1",
+        "bus": 0,
+        "machine": { "model": "gen_round",
+                     "h": 5.0, "d": 1.0, "ra": 0.003,
+                     "xd": 1.8, "xq": 1.7, "xdp": 0.30, "xqp": 0.55,
+                     "xdpp": 0.22, "xqpp": 0.25, "xl": 0.15,
+                     "td0p": 8.0, "tq0p": 0.4, "td0pp": 0.03, "tq0pp": 0.05,
+                     "mbase": 100.0 },
+        "avr": { "model": "sexs", "k": 200.0, "ta": 0.1, "tb": 1.0, "te": 0.05 },
+        "gov": { "model": "tgov1", "r": 0.05, "t1": 0.5, "t2": 1.0, "t3": 5.0, "dt": 0.0 },
+        "pss": { "model": "stab1", "k": 5.0, "tw": 10.0,
+                 "t1": 0.15, "t2": 0.03, "t3": 0.15, "t4": 0.03 }
+      }
+    ],
+    "loads": [
+      { "id": "L1", "bus": 1, "zip": [0.3, 0.3, 0.4], "cutoff": 0.5 }
+    ],
+    "events": [
+      { "kind": "bus_fault",   "t": 1.0, "bus": 1 },
+      { "kind": "clear_fault", "t": 1.1, "bus": 1 },
+      { "kind": "load_step",   "t": 3.0, "bus": 1, "dp": -0.1 }
+    ]
+  }
+}

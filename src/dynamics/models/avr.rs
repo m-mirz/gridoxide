@@ -21,6 +21,8 @@
 //! present. A model with no limits is at least honestly unlimited, and its
 //! `E_fd` can be read to see whether a study would have hit one.
 
+use serde::{Deserialize, Serialize};
+
 use super::{Control, InitError};
 
 /// The IEEE simplified excitation system, `SEXS`.
@@ -58,7 +60,7 @@ pub struct Sexs {
 
 /// [`Sexs`]'s parameters. Per unit on the machine's own base, and
 /// dimensionless besides the time constants, so nothing here needs converting.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SexsParams {
     /// Regulator gain. Large — 100 to 400 is ordinary.
     pub k: f64,

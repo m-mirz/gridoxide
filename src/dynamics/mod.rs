@@ -47,8 +47,10 @@
 //! the readers and the external validation are phases 2 through 6.
 
 pub mod dae;
+pub mod dyr;
 pub mod events;
 pub mod init;
+pub mod json;
 pub mod integrator;
 pub mod models;
 
@@ -69,6 +71,7 @@ use models::DynamicModel;
 
 pub use events::{DynamicsWarning, Event, EventError, EventKind};
 pub use init::{build, BuildError, DeviceSpec, SystemSpec};
+pub use json::{DynamicsData, DynamicsDocument, DynamicsError};
 
 /// What a run needs to know.
 #[derive(Clone, Debug)]
