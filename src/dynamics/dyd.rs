@@ -119,8 +119,6 @@ pub enum DydError {
     MissingParameter { id: String, set: String, name: String },
     /// A `staticId` with no corresponding bus index.
     UnknownStaticId { id: String, static_id: String },
-    /// A model with no `staticId`, so there is nothing to attach it to.
-    NoStaticId { id: String },
 }
 
 impl std::fmt::Display for DydError {
@@ -137,7 +135,6 @@ impl std::fmt::Display for DydError {
             DydError::UnknownStaticId { id, static_id } => {
                 write!(f, "{id} attaches to static element `{static_id}`, which has no bus")
             }
-            DydError::NoStaticId { id } => write!(f, "{id} has no staticId to attach to"),
         }
     }
 }
@@ -326,8 +323,9 @@ fn need(
 
 /// Turns a `.dyd`/`.par` pair into [`UnitSpec`]s.
 ///
-/// `bus_of` maps a `staticId` to a bus index — the correspondence the IIDM
-/// half of the case carries, which this reader does not attempt to invent.
+/// `bus_of` maps a `staticId` — or, for a standalone case that has none, the
+/// model's own `id` — to a bus index. That correspondence is what the IIDM half
+/// of a coupled case carries, and this reader does not attempt to invent it.
 /// `s_base` is the network's own base, needed for the one inferred conversion
 /// the module doc describes.
 pub fn to_units(
@@ -360,10 +358,11 @@ pub fn to_units(
                 par_id: set,
             });
         }
-        let static_id = model
-            .static_id
-            .clone()
-            .ok_or_else(|| DydError::NoStaticId { id: model.id.clone() })?;
+        // A model attached to an IIDM network names the element it sits on; a
+        // standalone case — DynaSwing's own examples are all standalone — has
+        // no static half to attach to and is identified by its own id. Falling
+        // back rather than refusing is what lets one reader serve both.
+        let static_id = model.static_id.clone().unwrap_or_else(|| model.id.clone());
         let &bus = bus_of.get(&static_id).ok_or_else(|| DydError::UnknownStaticId {
             id: model.id.clone(),
             static_id: static_id.clone(),
