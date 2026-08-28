@@ -11,7 +11,7 @@
 
 use num_complex::Complex;
 
-use gridoxide::dynamics::models::machine::{GenCls, GenClsParams};
+use gridoxide::dynamics::models::machine::{self, GenCls, GenClsParams};
 use gridoxide::dynamics::{
     build, run_dynamics, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus,
     DynamicsWarning, Event, EventKind, SystemSpec,
@@ -83,7 +83,7 @@ fn smib() -> (DynamicSystem, Analytic) {
             id: "G1".to_string(),
             bus: 0,
             s: s_dev,
-            model: Box::new(model),
+            model: machine::bare(Box::new(model)),
         }],
         fixed_buses: vec![1],
     })
@@ -423,7 +423,7 @@ fn a_switched_off_island_is_reported() {
             id: "G1".to_string(),
             bus: 0,
             s: Complex::new(p_calc[0], q_calc[0]),
-            model: Box::new(model),
+            model: machine::bare(Box::new(model)),
         }],
         fixed_buses: vec![1],
     })
