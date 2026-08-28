@@ -59,8 +59,8 @@ use crate::types::Bus;
 
 use super::events::{Event, EventKind};
 use super::init::{build, BuildError, DeviceSpec, SystemSpec};
-use super::models::avr::{Sexs, SexsParams};
-use super::models::gov::{Tgov1, Tgov1Params};
+use super::models::avr::{Sexs, SexsParams, VrProportional};
+use super::models::gov::{GoverProportional, Tgov1, Tgov1Params};
 use super::models::load::ZipLoad;
 use super::models::machine::{
     GenCls, GenClsParams, GenRound, GenRoundParams, GenTransient, GenTransientParams, Machine,
@@ -163,12 +163,17 @@ pub enum MachineSpec {
 #[serde(tag = "model", rename_all = "snake_case")]
 pub enum AvrSpec {
     Sexs(SexsParams),
+    /// A pure gain, with no dynamics — what Dynawo's `VRProportional` is.
+    VrProportional { k: f64 },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(tag = "model", rename_all = "snake_case")]
 pub enum GovSpec {
     Tgov1(Tgov1Params),
+    /// A pure gain, `K = 1/R`, on the **network** base — what Dynawo's
+    /// `GoverProportional` is.
+    GoverProportional { k: f64 },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -333,6 +338,7 @@ impl AvrSpec {
     fn build(self) -> Result<Box<dyn Control>, InitError> {
         match self {
             AvrSpec::Sexs(p) => Ok(Box::new(Sexs::new(p)?)),
+            AvrSpec::VrProportional { k } => Ok(Box::new(VrProportional::new(k)?)),
         }
     }
 }
@@ -341,6 +347,7 @@ impl GovSpec {
     fn build(self) -> Result<Box<dyn Control>, InitError> {
         match self {
             GovSpec::Tgov1(p) => Ok(Box::new(Tgov1::new(p)?)),
+            GovSpec::GoverProportional { k } => Ok(Box::new(GoverProportional::new(k)?)),
         }
     }
 }

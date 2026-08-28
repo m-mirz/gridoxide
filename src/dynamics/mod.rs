@@ -47,6 +47,11 @@
 //! the readers and the external validation are phases 2 through 6.
 
 pub mod dae;
+/// Dynawo `.dyd`/`.par`/`.crv`. Needs `iidm` for its XML reader — the same
+/// `quick-xml` that feature already pulls in — and pairs with the IIDM
+/// importer that reads the other half of a Dynawo case.
+#[cfg(feature = "iidm")]
+pub mod dyd;
 pub mod dyr;
 pub mod events;
 pub mod init;
