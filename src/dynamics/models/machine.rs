@@ -26,6 +26,29 @@
 //! `E'∠δ`, which these send to `(e_d, e_q) = (0, E')` — purely `q`-axis, which
 //! is what "constant voltage behind transient reactance" means.
 //!
+//! # The `ω ≈ 1` approximation, and what it costs
+//!
+//! Every stator equation here omits the rotor speed. The full form carries it
+//! on the speed-voltage terms, and writes the swing equation in **torque**
+//! rather than power:
+//!
+//! ```text
+//! full:          v_d = −r_a·i_d − ω·λ_q      2H·ω̇ = c_m − c_e − D·Δω
+//! here:          v_d = −r_a·i_d − λ_q        2H·ω̇ = P_m − P_e − D·Δω
+//! ```
+//!
+//! The two differ by exactly a factor of `ω`, so they agree at synchronous
+//! speed and diverge in proportion to the speed deviation. Neglecting the
+//! speed voltages is the classical RMS assumption — Kundur §13.3 states it
+//! explicitly — and it is what makes the phasor-domain formulation coherent in
+//! the first place; keeping them, as Sauer & Pai and Dynawo do, is the other
+//! defensible choice.
+//!
+//! It is not free, and its size is known rather than guessed:
+//! `tests/dynamics_reference_test.rs` measures it against Dynawo on Kundur's
+//! Example 13.2 at **0.6% of terminal power for a 0.9% speed deviation**. That
+//! is the number to weigh if this is ever revisited.
+//!
 //! # The Norton stamp, and saliency
 //!
 //! Each model declares a constant [`norton_admittance`](Machine::norton_admittance)

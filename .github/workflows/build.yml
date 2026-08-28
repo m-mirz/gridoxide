@@ -95,6 +95,7 @@ jobs:
         cargo build --verbose --features dynamics
         cargo test --verbose --features dynamics
         cargo test --verbose --features dynamics,iidm --test dynamics_dyd_test
+        cargo test --verbose --features dynamics,iidm --test dynamics_reference_test
     # Feature *unification* is its own failure mode, and the steps above cannot
     # see it: each builds one feature at a time, while cargo builds whatever
     # combination a consumer asks for. `iidm` and `cgmes` share quick-xml, and

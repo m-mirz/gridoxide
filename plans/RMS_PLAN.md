@@ -1,7 +1,7 @@
 # RMS simulation in gridoxide
 
-Status: **phases 1–4 implemented**, 2026-08-28, against `6f212eb`. Phases 5–6 outstanding.
-§11–§14 record what was actually done, including the places this plan was wrong.
+Status: **phases 1–4 implemented, phase 5 half done**, 2026-08-28, against `6f212eb`.
+§11–§15 record what was actually done, including the places this plan was wrong.
 
 ## Context
 
@@ -862,3 +862,111 @@ without committing to a curve shape. Both readers parse it, neither uses it, and
 both report a nonzero value — which is exactly the divergence §7 predicted and
 exactly why §13 declined to pick a representation before a reference was
 running.
+
+
+---
+
+## 15. What happened: phase 5
+
+**G7 (Dynawo) is done. G6 (ANDES) is not.** Five gates in
+`tests/dynamics_reference_test.rs`; fifty-four dynamics gates in total.
+
+### The case, and why this one
+
+Kundur's Example 13.2 as Dynawo ships it (`examples/DynaSwing/Kundur_Example13`,
+the `SetPoint` variant): a sixth-order machine with **no regulators**, an
+infinite bus, two parallel lines, a fixed-ratio transformer, a bolted fault at
+the line junction, and a line trip on clearing.
+
+It was chosen because every element is something gridoxide models *exactly* —
+no tap changers, no limits, no saturation, no fifth-order machine. Nothing had
+to be excused before the comparison started, which is what makes a
+disagreement mean something. §14's finding held: Dynawo's committed
+`reference/outputs/curves/curves.csv` **is** the comparison data, so no Dynawo
+install was needed.
+
+### What agreed, and how well
+
+| | |
+|---|---|
+| Terminal angle from the power flow | matches the file's `UPhase0` to 1e-4 |
+| `δ₀` against Dynawo's `theta(0)` | **6e-5 rad**, from two independent derivations |
+| Air-gap power convention | `P_m` exceeds terminal power by exactly the copper loss, in both |
+| Rotor angle through the fault | **9.1e-4 rad** |
+| Rotor speed through the fault | **6.6e-5 pu** |
+| Terminal voltage during the fault | **9.0e-4 pu** |
+| Rotor angle over the first swing | 1.9e-2 rad |
+| The published 70 ms clearing time | survivable in both; 500 ms in neither |
+
+The `δ₀` agreement is the one worth dwelling on. Two implementations, deriving
+the same rotor angle from the same terminal condition by independent routes, is
+much stronger evidence for the dq conventions than any self-consistency check
+could be — and it is the thing §13 built two internal identities to protect.
+
+### The disagreement, chased down rather than absorbed
+
+After clearing the two separate steadily. Excluded, each by experiment:
+step size (gridoxide's answer is converged to 1e-4 rad from `h = 4 ms` to
+`h = 0.0625 ms`); the nominal frequency (at 60 Hz the machine loses synchronism
+outright); the tripped branch (tripping the other, or neither, gives a wholly
+different trajectory); and **the sign of the `q`-axis damper coupling §13 left
+open** — flipping it moves the answer by under 1e-3 rad, which also means *this
+case does not settle that question either way*.
+
+Localizing it took separating the power-angle relation from the accumulated
+angle: at matched rotor angle in the first tenth of a second after clearing,
+gridoxide's terminal power is **0.6% below** Dynawo's, and the voltage error
+*steps* at the clearing instant rather than growing smoothly. So it is
+algebraic, not numerical.
+
+**Reading Dynawo's own Modelica settled it.** From
+`Electrical/Machines/OmegaRef/BaseClasses/BaseGeneratorSynchronous.mo`:
+
+```text
+udPu = (Ra + RTfo)·idPu − omegaPu·lambdaqPu
+uqPu = (Ra + RTfo)·iqPu + omegaPu·lambdadPu
+2·H·der(omegaPu) = cmPu·PNomTurb/SNom − cePu − DPu·(omegaPu − omegaRefPu)
+PePu = cePu·omegaPu
+```
+
+Dynawo keeps `ω` on the speed-voltage terms and writes the swing equation in
+**torque**. gridoxide makes the classical RMS approximation in both places.
+The two differ by exactly a factor of `ω`, so they agree at synchronous speed
+and part in proportion to the speed deviation — which is exactly the observed
+pattern: nil at `t = 0`, `0.04%` early in the fault at `ω − 1 = 0.0015`, `0.6%`
+after clearing at `ω − 1 = 0.009`.
+
+Neither form is wrong. Kundur §13.3 states the approximation explicitly; Sauer
+& Pai keep the terms. What changed is that the cost is now **measured** —
+0.6% of terminal power per 0.9% of speed deviation — recorded in
+`models/machine.rs` where the equations are, and pinned by a gate so that
+adopting the full form would visibly drive it to zero rather than pass
+unnoticed.
+
+This is the most valuable thing phase 5 produced, and it is exactly what §7
+said an external gate was for: a difference that is invisible to every
+self-consistency check, because both formulations are internally perfect.
+
+### G6 (ANDES) — attempted, not achieved
+
+ANDES 2.0.0 is installed and its power flow reproduces the case correctly
+(bus-3 angle 0.494496 against Dynawo's 0.49445) once the lines are given
+matching `Vn1`/`Vn2` — ANDES defaults them to 110 kV, which silently rescales
+every impedance by `(110/400)²` and was worth an hour on its own.
+
+But ANDES's **own initialization fails** on the hand-built case, with residuals
+of 0.16 in the bus-3 angle equation and 0.065 in its voltage, and the machine
+then loses synchronism where both other tools keep it. Its `δ₀` comes out
+1.2208 against 1.2240 for the other two. That is a setup problem in how the case
+was declared to ANDES, not a finding about anything — and diagnosing it is ANDES
+work rather than gridoxide work.
+
+Recorded as outstanding rather than reported as a result. The one datum worth
+keeping: gridoxide and Dynawo agree with each other on `δ₀` roughly fifty times
+more closely than either agrees with the ANDES figure, and the ANDES figure
+comes from a failed initialization.
+
+### Still outstanding
+
+G6, and phase 6 entirely — the CLI, the Python bindings, the book chapters and
+the feature-comparison row.
