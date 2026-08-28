@@ -20,8 +20,8 @@
 
 use num_complex::Complex;
 
-use gridoxide::dynamics::models::machine::{GenCls, GenClsParams};
-use gridoxide::dynamics::models::{finite_difference, DynamicModel, ModelJacobian};
+use gridoxide::dynamics::models::machine::{self, GenCls, GenClsParams};
+use gridoxide::dynamics::models::{finite_difference, DynamicModel, GeneratingUnit, ModelJacobian};
 use gridoxide::dynamics::{
     build, run_dynamics, settle, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus,
     SystemSpec,
@@ -99,7 +99,7 @@ fn smib(damping: f64) -> (DynamicSystem, f64, f64) {
             id: "G1".to_string(),
             bus: 0,
             s: s_dev,
-            model: Box::new(model),
+            model: machine::bare(Box::new(model)),
         }],
         fixed_buses: vec![1],
     })
@@ -158,9 +158,16 @@ fn equilibrium_is_invariant() {
 /// G4. The analytic Jacobian is what runs; the finite difference is what
 /// proves it. Probed away from the equilibrium, where every term is nonzero —
 /// at the equilibrium a sign error in `∂P_e/∂δ` could hide.
+///
+/// Run through [`GeneratingUnit`], not the bare machine, so the composite's
+/// chain rule is under the oracle too. With no controls attached the chain
+/// rule degenerates to a copy, which is exactly the case worth pinning before
+/// anything is attached.
 #[test]
 fn analytic_jacobian_matches_finite_difference() {
-    let mut model = GenCls::new(params(2.0), S_BASE, F_NOM).unwrap();
+    let mut model = GeneratingUnit::machine_only(Box::new(
+        GenCls::new(params(2.0), S_BASE, F_NOM).unwrap(),
+    ));
     model
         .initialize(Complex::from_polar(1.02, 0.15), Complex::new(0.8, 0.3))
         .expect("initializes");
@@ -375,7 +382,7 @@ fn a_mis_declared_split_is_silent_and_changes_the_machine() {
                 id: "G1".to_string(),
                 bus: 0,
                 s: s_dev,
-                model: Box::new(model),
+                model: machine::bare(Box::new(model)),
             }],
             fixed_buses: vec![1],
         })

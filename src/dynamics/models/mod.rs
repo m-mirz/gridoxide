@@ -24,11 +24,25 @@
 //! cross-device Jacobian entries: real, dense-ish, and a second sparsity
 //! concern on top of the network's.
 //!
-//! `GeneratingUnit` (phase 3) instead composes them into **one** device with one
+//! [`GeneratingUnit`] instead composes them into **one** device with one
 //! contiguous state block, so every coupling is an ordinary partial derivative
-//! *inside* `dfdx` and the pattern sees one diagonal block per unit. The cost
-//! is that a combination is declared rather than assembled freely at runtime,
-//! which is what PSS/E does and is adequate here.
+//! *inside* `dfdx` and the pattern sees one diagonal block per unit.
+//!
+//! The couplings are not written out per combination — that would be
+//! combinatorial. Each part declares its own derivatives with respect to its
+//! own states and its own scalar input, and [`unit`] composes them by the
+//! chain rule over the signal graph, which is small and acyclic:
+//!
+//! ```text
+//!            |V|  ────────────────┐
+//!   ω ──► PSS ──► v_s ──► AVR ──► E_fd ──┐
+//!   ω ──► governor ─────────────► P_m ───┤──► machine ──► I, ω, δ
+//!                                 V  ────┘
+//! ```
+//!
+//! No block's output depends on its own input through another block, so one
+//! forward pass evaluates everything and one sweep of the chain rule
+//! differentiates it.
 //!
 //! # Why the Norton admittance is separate
 //!
@@ -45,11 +59,21 @@
 //! injection. That is expected: it is handled in the model's own analytic
 //! Jacobian, never by touching `Y`.
 
+pub mod avr;
+pub mod gov;
+pub mod load;
 pub mod machine;
+pub mod pss;
+pub mod unit;
 
 use num_complex::Complex;
 
-pub use machine::GenCls;
+pub use avr::Sexs;
+pub use gov::Tgov1;
+pub use load::ZipLoad;
+pub use machine::{GenCls, GenTransient, Machine, MachineInit, MachineJacobian};
+pub use pss::Stab1;
+pub use unit::GeneratingUnit;
 
 /// The four partial-derivative blocks a model contributes to the DAE Jacobian.
 ///
@@ -172,6 +196,50 @@ pub trait DynamicModel: std::fmt::Debug {
     /// its terminal, per unit on the network base, as the power flow solved
     /// it. `&mut self` because the latched references are the model's own.
     fn initialize(&mut self, v: Complex<f64>, s: Complex<f64>) -> Result<Vec<f64>, InitError>;
+}
+
+/// A scalar-input, scalar-output dynamic block inside a generating unit: an
+/// exciter, a governor, a stabilizer.
+///
+/// One input and one output is not a simplification of these devices, it is
+/// what they are — an exciter sees a voltage error and produces a field
+/// voltage, a governor sees a speed deviation and produces a mechanical power.
+/// Keeping the interface that narrow is what lets
+/// [`GeneratingUnit`](unit::GeneratingUnit) compose any combination of them by
+/// the chain rule instead of enumerating combinations.
+///
+/// The block's own **reference** — an exciter's `V_ref`, a governor's `P_ref` —
+/// is latched inside it by [`initialize`](Control::initialize) and never
+/// appears in the input. That is deliberate: a control should not have to know
+/// what it is regulating, and the reference is derived from the operating point
+/// rather than read from a file. See [`init`](crate::dynamics::init).
+pub trait Control: std::fmt::Debug {
+    fn n_states(&self) -> usize;
+    fn state_names(&self) -> &[&'static str];
+
+    /// `dx/dt`, written into `out`.
+    fn derivatives(&self, x: &[f64], u: f64, out: &mut [f64]);
+
+    /// `∂f/∂x` (`n × n` row-major) into `dfdx`, `∂f/∂u` (length `n`) into
+    /// `dfdu`. Both arrive cleared.
+    fn jacobian(&self, x: &[f64], u: f64, dfdx: &mut [f64], dfdu: &mut [f64]);
+
+    fn output(&self, x: &[f64], u: f64) -> f64;
+
+    /// `∂y/∂x` into `dydx` (cleared on arrival); returns `∂y/∂u`.
+    ///
+    /// A direct input-to-output path is normal here — a washout and a lead-lag
+    /// both have one — and it is what makes the chain rule in
+    /// [`unit`](unit) more than a block-diagonal copy.
+    fn output_jacobian(&self, x: &[f64], u: f64, dydx: &mut [f64]) -> f64;
+
+    /// Choose states, and latch whatever reference that implies, so that
+    /// `output(x, u) == y` **and** every derivative is zero.
+    ///
+    /// Both conditions matter. Reproducing the output without sitting at an
+    /// equilibrium gives a control that starts moving at `t = 0` for no
+    /// physical reason.
+    fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError>;
 }
 
 /// A central-difference oracle for [`DynamicModel::jacobian`].

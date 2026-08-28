@@ -363,6 +363,11 @@ name = "remote_voltage_test"
 path = "tests/remote_voltage_test.rs"
 
 [[test]]
+name = "dynamics_models_test"
+path = "tests/dynamics_models_test.rs"
+required-features = ["dynamics"]
+
+[[test]]
 name = "dynamics_events_test"
 path = "tests/dynamics_events_test.rs"
 required-features = ["dynamics"]
