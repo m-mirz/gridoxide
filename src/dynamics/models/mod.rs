@@ -71,7 +71,7 @@ use num_complex::Complex;
 pub use avr::Sexs;
 pub use gov::Tgov1;
 pub use load::ZipLoad;
-pub use machine::{GenCls, GenTransient, Machine, MachineInit, MachineJacobian};
+pub use machine::{GenCls, GenRound, GenTransient, Machine, MachineInit, MachineJacobian};
 pub use pss::Stab1;
 pub use unit::GeneratingUnit;
 
@@ -187,6 +187,30 @@ pub trait DynamicModel: std::fmt::Debug {
     /// digits), but it is also the easiest thing in the crate to get subtly
     /// wrong, so it is never trusted without the oracle.
     fn jacobian(&self, x: &[f64], v: Complex<f64>, out: &mut ModelJacobian);
+
+    /// Disconnect or reconnect this device.
+    ///
+    /// A disconnected device contributes no current, no admittance and no
+    /// derivatives, so its states freeze where they were and the network stops
+    /// seeing it. That is enough to make a unit trip a **value-only** event:
+    /// the device's rows stay in the DAE, its Jacobian block becomes the
+    /// identity the implicit rule contributes, and the sparsity pattern is
+    /// untouched — so no re-analysis, and the run's one symbolic factorization
+    /// still serves.
+    ///
+    /// Freezing is a modelling choice and worth naming. A real tripped machine
+    /// keeps spinning and accelerates, having lost its load; nothing in the
+    /// network can observe that, and reconnecting it would need
+    /// synchronization, which is not modelled. So the states are held rather
+    /// than integrated, and a reconnected unit resumes from where it stopped.
+    ///
+    /// The default ignores it — a device with no meaningful disconnected state
+    /// need not implement this.
+    fn set_connected(&mut self, _connected: bool) {}
+
+    fn is_connected(&self) -> bool {
+        true
+    }
 
     /// Choose `x` so that `derivatives(x, v) == 0` at this terminal condition,
     /// and latch whatever internal references that implies (`P_m`, `V_ref`,

@@ -459,13 +459,13 @@ impl GenTransient {
     }
 
     /// Network-frame voltage into rotor coordinates.
-    fn to_dq(delta: f64, v: Complex<f64>) -> (f64, f64) {
+    pub(crate) fn to_dq(delta: f64, v: Complex<f64>) -> (f64, f64) {
         let (sd, cd) = delta.sin_cos();
         (v.re * sd - v.im * cd, v.re * cd + v.im * sd)
     }
 
     /// Rotor-frame current back into the network frame.
-    fn from_dq(delta: f64, i_d: f64, i_q: f64) -> Complex<f64> {
+    pub(crate) fn from_dq(delta: f64, i_d: f64, i_q: f64) -> Complex<f64> {
         let (sd, cd) = delta.sin_cos();
         Complex::new(i_d * sd + i_q * cd, -i_d * cd + i_q * sd)
     }
@@ -654,4 +654,401 @@ impl Machine for GenTransient {
 /// this is the shorter spelling.
 pub fn bare(machine: Box<dyn Machine>) -> Box<dyn DynamicModel> {
     Box::new(super::unit::GeneratingUnit::machine_only(machine))
+}
+
+// ---------------------------------------------------------------------------
+// Sixth-order subtransient
+// ---------------------------------------------------------------------------
+
+/// The sixth-order subtransient machine: a field winding and a damper on the
+/// `d` axis, two dampers on the `q` axis.
+///
+/// States: `δ`, `ω`, `e'_q`, `e'_d`, `ψ_1d`, `ψ_2q`.
+///
+/// # Why the sign conventions here are derived and not cited
+///
+/// Published statements of this model disagree with each other about the sign
+/// of `ψ_2q` and of `e'_d`, and a formulation copied from one source and
+/// checked against another produces a machine that is internally consistent
+/// and physically wrong. The conventions below are instead **pinned by two
+/// requirements**, each of which the code can be checked against:
+///
+/// 1. **The steady state must reduce to [`GenTransient`]'s.** Setting the flux
+///    derivatives to zero gives `ψ_1d = e'_q − (x'_d − x_l)i_d` and
+///    `ψ_2q = e'_d + (x'_q − x_l)i_q`; substituting those into the
+///    subtransient EMFs must turn the subtransient stator equations into the
+///    transient ones, term for term. It does, and only for one choice of
+///    signs.
+/// 2. **The two axes must map onto each other** under
+///    `(e'_q, ψ_1d, i_d) ↔ (e'_d, ψ_2q, −i_q)`. That is what fixes the sign of
+///    the damper-coupling correction in `ė'_d`, which requirement 1 cannot see
+///    because the correction vanishes at steady state.
+///
+/// # The equations
+///
+/// ```text
+/// e''_q = a_d·e'_q + b_d·ψ_1d          a_d = (x''_d − x_l)/(x'_d − x_l)
+/// e''_d = a_q·e'_d + b_q·ψ_2q          b_d = (x'_d − x''_d)/(x'_d − x_l)
+///                                      a_d + b_d = 1, and likewise on q
+///
+/// v_d = e''_d − r_a·i_d + x''_q·i_q    det = r_a² + x''_d·x''_q
+/// v_q = e''_q − r_a·i_q − x''_d·i_d
+///
+/// Δ_d = ψ_1d − e'_q + (x'_d − x_l)·i_d      (zero at steady state)
+/// Δ_q = ψ_2q − e'_d − (x'_q − x_l)·i_q      (zero at steady state)
+///
+/// T'_d0 ·ė'_q  = −e'_q − (x_d − x'_d)(i_d − K_d·Δ_d) + E_fd
+/// T'_q0 ·ė'_d  = −e'_d + (x_q − x'_q)(i_q + K_q·Δ_q)
+/// T''_d0·ψ̇_1d = −Δ_d
+/// T''_q0·ψ̇_2q = −Δ_q
+/// ```
+///
+/// with `K_d = b_d/(x'_d − x_l)` and `K_q = b_q/(x'_q − x_l)`. That the two
+/// damper equations are just `−Δ/T''` is not a rearrangement for tidiness — it
+/// is the same `Δ` the correction terms use, and seeing one expression serve
+/// both is itself a check that the signs agree.
+///
+/// # What this buys over the fourth order
+///
+/// The damper windings. Immediately after a disturbance the machine's
+/// effective impedance is `x''`, not `x'` — the dampers hold their flux and
+/// oppose the change — and only after their time constants elapse does the
+/// response settle onto the transient reactances. A fourth-order machine
+/// misses that first, largest current excursion entirely.
+#[derive(Clone, Debug)]
+pub struct GenRound {
+    h: f64,
+    d: f64,
+    ra: f64,
+    xd: f64,
+    xdp: f64,
+    xdpp: f64,
+    xq: f64,
+    xqp: f64,
+    xqpp: f64,
+    xl: f64,
+    td0p: f64,
+    tq0p: f64,
+    td0pp: f64,
+    tq0pp: f64,
+    ad: f64,
+    bd: f64,
+    aq: f64,
+    bq: f64,
+    kd: f64,
+    kq: f64,
+    omega_base: f64,
+    y: Complex<f64>,
+}
+
+/// [`GenRound`]'s parameters, on the machine's own MVA rating.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GenRoundParams {
+    pub h: f64,
+    pub d: f64,
+    pub ra: f64,
+    pub xd: f64,
+    pub xq: f64,
+    pub xdp: f64,
+    pub xqp: f64,
+    /// Subtransient reactances. Below the transient ones, and both above the
+    /// leakage reactance — the ordering `x_l < x'' < x' < x` is what makes the
+    /// interpolation coefficients lie in `[0, 1]`, and a set that violates it
+    /// is not a machine.
+    pub xdpp: f64,
+    pub xqpp: f64,
+    /// Stator leakage reactance.
+    pub xl: f64,
+    pub td0p: f64,
+    pub tq0p: f64,
+    /// Open-circuit subtransient time constants, seconds. Short — tens of
+    /// milliseconds — which is what makes this model stiff and what the
+    /// integrator's backward-Euler damping was put in for.
+    pub td0pp: f64,
+    pub tq0pp: f64,
+    pub mbase: f64,
+}
+
+const GENROUND_STATES: [&str; 6] = ["delta", "omega", "eqp", "edp", "psi1d", "psi2q"];
+
+impl GenRound {
+    pub fn new(params: GenRoundParams, s_base: f64, f_nom: f64) -> Result<Self, InitError> {
+        require_positive("h", params.h)?;
+        require_positive("td0p", params.td0p)?;
+        require_positive("tq0p", params.tq0p)?;
+        require_positive("td0pp", params.td0pp)?;
+        require_positive("tq0pp", params.tq0pp)?;
+        // x_l < x'' < x' < x, on both axes.
+        for (name, lo, hi) in [
+            ("xdpp - xl", params.xl, params.xdpp),
+            ("xdp - xdpp", params.xdpp, params.xdp),
+            ("xd - xdp", params.xdp, params.xd),
+            ("xqpp - xl", params.xl, params.xqpp),
+            ("xqp - xqpp", params.xqpp, params.xqp),
+            ("xq - xqp", params.xqp, params.xq),
+        ] {
+            if hi <= lo {
+                return Err(InitError::NonPositiveParameter { name, value: hi - lo });
+            }
+        }
+
+        let k = base_ratio(params.mbase, s_base)?;
+        let (xd, xdp, xdpp) = (params.xd / k, params.xdp / k, params.xdpp / k);
+        let (xq, xqp, xqpp) = (params.xq / k, params.xqp / k, params.xqpp / k);
+        let (ra, xl) = (params.ra / k, params.xl / k);
+
+        let bd = (xdp - xdpp) / (xdp - xl);
+        let bq = (xqp - xqpp) / (xqp - xl);
+        // The stamp is the average of the two subtransient axes: it is the
+        // impedance the machine actually presents at the instant a disturbance
+        // arrives, which is what makes it the right conditioning choice here.
+        let z_norton = Complex::new(ra, 0.5 * (xdpp + xqpp));
+        Ok(Self {
+            h: params.h * k,
+            d: params.d * k,
+            ra,
+            xd,
+            xdp,
+            xdpp,
+            xq,
+            xqp,
+            xqpp,
+            xl,
+            td0p: params.td0p,
+            tq0p: params.tq0p,
+            td0pp: params.td0pp,
+            tq0pp: params.tq0pp,
+            ad: 1.0 - bd,
+            bd,
+            aq: 1.0 - bq,
+            bq,
+            kd: bd / (xdp - xl),
+            kq: bq / (xqp - xl),
+            omega_base: std::f64::consts::TAU * f_nom,
+            y: Complex::new(1.0, 0.0) / z_norton,
+        })
+    }
+
+    pub fn h(&self) -> f64 {
+        self.h
+    }
+
+    /// The subtransient impedance the machine presents to a sudden change.
+    /// Exposed because that is the property distinguishing this model from
+    /// [`GenTransient`], and a gate needs to be able to name it.
+    pub fn subtransient_impedance(&self) -> Complex<f64> {
+        Complex::new(self.ra, 0.5 * (self.xdpp + self.xqpp))
+    }
+
+    /// The subtransient EMFs, interpolated between the transient flux states
+    /// and the damper fluxes.
+    fn subtransient_emf(&self, eqp: f64, edp: f64, psi1d: f64, psi2q: f64) -> (f64, f64) {
+        (self.ad * eqp + self.bd * psi1d, self.aq * edp + self.bq * psi2q)
+    }
+
+    fn det(&self) -> f64 {
+        self.ra * self.ra + self.xdpp * self.xqpp
+    }
+
+    fn currents(&self, eqpp: f64, edpp: f64, v_d: f64, v_q: f64) -> (f64, f64) {
+        let (a, b) = (edpp - v_d, eqpp - v_q);
+        let det = self.det();
+        ((self.ra * a + self.xqpp * b) / det, (-self.xdpp * a + self.ra * b) / det)
+    }
+}
+
+impl Machine for GenRound {
+    fn n_states(&self) -> usize {
+        6
+    }
+
+    fn state_names(&self) -> &[&'static str] {
+        &GENROUND_STATES
+    }
+
+    fn omega_index(&self) -> usize {
+        1
+    }
+
+    fn norton_admittance(&self) -> Complex<f64> {
+        self.y
+    }
+
+    fn derivatives(&self, x: &[f64], v: Complex<f64>, e_fd: f64, p_m: f64, out: &mut [f64]) {
+        let (delta, omega, eqp, edp, psi1d, psi2q) = (x[0], x[1], x[2], x[3], x[4], x[5]);
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let (eqpp, edpp) = self.subtransient_emf(eqp, edp, psi1d, psi2q);
+        let (i_d, i_q) = self.currents(eqpp, edpp, v_d, v_q);
+
+        let p_e = edpp * i_d + eqpp * i_q + (self.xqpp - self.xdpp) * i_d * i_q;
+        let delta_d = psi1d - eqp + (self.xdp - self.xl) * i_d;
+        let delta_q = psi2q - edp - (self.xqp - self.xl) * i_q;
+
+        out[0] = self.omega_base * (omega - 1.0);
+        out[1] = (p_m - p_e - self.d * (omega - 1.0)) / (2.0 * self.h);
+        out[2] = (-eqp - (self.xd - self.xdp) * (i_d - self.kd * delta_d) + e_fd) / self.td0p;
+        out[3] = (-edp + (self.xq - self.xqp) * (i_q + self.kq * delta_q)) / self.tq0p;
+        out[4] = -delta_d / self.td0pp;
+        out[5] = -delta_q / self.tq0pp;
+    }
+
+    fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64> {
+        let (delta, eqp, edp, psi1d, psi2q) = (x[0], x[2], x[3], x[4], x[5]);
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let (eqpp, edpp) = self.subtransient_emf(eqp, edp, psi1d, psi2q);
+        let (i_d, i_q) = self.currents(eqpp, edpp, v_d, v_q);
+        GenTransient::from_dq(delta, i_d, i_q) + self.y * v
+    }
+
+    fn jacobian(
+        &self,
+        x: &[f64],
+        v: Complex<f64>,
+        _e_fd: f64,
+        _p_m: f64,
+        out: &mut MachineJacobian,
+    ) {
+        let (delta, eqp, edp, psi1d, psi2q) = (x[0], x[2], x[3], x[4], x[5]);
+        let (sd, cd) = delta.sin_cos();
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let (eqpp, edpp) = self.subtransient_emf(eqp, edp, psi1d, psi2q);
+        let (i_d, i_q) = self.currents(eqpp, edpp, v_d, v_q);
+        let det = self.det();
+        let two_h = 2.0 * self.h;
+        let n = 6;
+
+        // Columns, in order: δ, ω, e'_q, e'_d, ψ_1d, ψ_2q, v_re, v_im.
+        //
+        // `a = e''_d − v_d` and `b = e''_q − v_q` are all the currents depend
+        // on, and the subtransient EMFs are linear in the flux states, so each
+        // column is one `(∂a, ∂b)` pair pushed through one fixed 2×2 inverse.
+        let dab: [(f64, f64); 8] = [
+            (-v_q, v_d),         // δ
+            (0.0, 0.0),          // ω
+            (0.0, self.ad),      // e'_q
+            (self.aq, 0.0),      // e'_d
+            (0.0, self.bd),      // ψ_1d
+            (self.bq, 0.0),      // ψ_2q
+            (-sd, -cd),          // v_re
+            (cd, -sd),           // v_im
+        ];
+        // ∂e''_q and ∂e''_d, in the same column order.
+        let deqpp = [0.0, 0.0, self.ad, 0.0, self.bd, 0.0, 0.0, 0.0];
+        let dedpp = [0.0, 0.0, 0.0, self.aq, 0.0, self.bq, 0.0, 0.0];
+
+        let mut di_d = [0.0; 8];
+        let mut di_q = [0.0; 8];
+        for (k, (da, db)) in dab.iter().enumerate() {
+            di_d[k] = (self.ra * da + self.xqpp * db) / det;
+            di_q[k] = (-self.xdpp * da + self.ra * db) / det;
+        }
+
+        let sal = self.xqpp - self.xdpp;
+        let (xdd, xqq) = (self.xdp - self.xl, self.xqp - self.xl);
+        let mut dpe = [0.0; 8];
+        let mut d_delta_d = [0.0; 8];
+        let mut d_delta_q = [0.0; 8];
+        for k in 0..8 {
+            dpe[k] = edpp * di_d[k]
+                + eqpp * di_q[k]
+                + sal * (i_q * di_d[k] + i_d * di_q[k])
+                + i_d * dedpp[k]
+                + i_q * deqpp[k];
+            d_delta_d[k] = xdd * di_d[k];
+            d_delta_q[k] = -xqq * di_q[k];
+        }
+        // Clippy would rather these three were iterator chains; they are one
+        // fused pass over parallel arrays and read better as an indexed loop.
+        d_delta_d[4] += 1.0; // ∂Δ_d/∂ψ_1d
+        d_delta_d[2] -= 1.0; // ∂Δ_d/∂e'_q
+        d_delta_q[5] += 1.0; // ∂Δ_q/∂ψ_2q
+        d_delta_q[3] -= 1.0; // ∂Δ_q/∂e'_d
+
+        // `dfdx` is row-major n×n.
+        out.dfdx[1] = self.omega_base;
+        for k in 0..n {
+            out.dfdx[n + k] = -dpe[k] / two_h;
+            out.dfdx[2 * n + k] =
+                -(self.xd - self.xdp) * (di_d[k] - self.kd * d_delta_d[k]) / self.td0p;
+            out.dfdx[3 * n + k] =
+                (self.xq - self.xqp) * (di_q[k] + self.kq * d_delta_q[k]) / self.tq0p;
+            out.dfdx[4 * n + k] = -d_delta_d[k] / self.td0pp;
+            out.dfdx[5 * n + k] = -d_delta_q[k] / self.tq0pp;
+        }
+        out.dfdx[n + 1] -= self.d / two_h;
+        out.dfdx[2 * n + 2] -= 1.0 / self.td0p;
+        out.dfdx[3 * n + 3] -= 1.0 / self.tq0p;
+
+        // `dfdv` is row-major n×2; columns 6 and 7 above are v_re and v_im.
+        for (col, k) in [(0usize, 6usize), (1, 7)] {
+            out.dfdv[2 + col] = -dpe[k] / two_h;
+            out.dfdv[4 + col] =
+                -(self.xd - self.xdp) * (di_d[k] - self.kd * d_delta_d[k]) / self.td0p;
+            out.dfdv[6 + col] =
+                (self.xq - self.xqp) * (di_q[k] + self.kq * d_delta_q[k]) / self.tq0p;
+            out.dfdv[8 + col] = -d_delta_d[k] / self.td0pp;
+            out.dfdv[10 + col] = -d_delta_q[k] / self.tq0pp;
+        }
+
+        out.dfde[2] = 1.0 / self.td0p;
+        out.dfdp[1] = 1.0 / two_h;
+
+        for k in 0..n {
+            let (mut d_re, mut d_im) =
+                (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
+            if k == 0 {
+                d_re += i_d * cd - i_q * sd;
+                d_im += i_d * sd + i_q * cd;
+            }
+            out.didx[k] = d_re;
+            out.didx[n + k] = d_im;
+        }
+
+        let (g, b) = (self.y.re, self.y.im);
+        for (col, k) in [(0usize, 6usize), (1, 7)] {
+            out.didv[col] = di_d[k] * sd + di_q[k] * cd;
+            out.didv[2 + col] = -di_d[k] * cd + di_q[k] * sd;
+        }
+        out.didv[0] += g;
+        out.didv[1] += -b;
+        out.didv[2] += b;
+        out.didv[3] += g;
+    }
+
+    fn initialize(&mut self, v: Complex<f64>, s: Complex<f64>) -> Result<MachineInit, InitError> {
+        if v.norm() == 0.0 {
+            return Err(InitError::ZeroTerminalVoltage);
+        }
+        let i = (s / v).conj();
+
+        // The same q-axis locator the fourth-order model uses, and for the same
+        // reason: at steady state the machine looks like x_q behind its
+        // terminal on the q axis, whatever damper windings it has. Working that
+        // through the subtransient stator equations gives
+        // `v_d = x_q·i_q − r_a·i_d` exactly, which is the statement that the
+        // d-axis component of `V + (r_a + j·x_q)·I` is zero.
+        let e_q = v + Complex::new(self.ra, self.xq) * i;
+        let delta = e_q.arg();
+
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let (i_d, i_q) = GenTransient::to_dq(delta, i);
+
+        // Work inward from the stator, then outward through the steady-state
+        // flux relations. Every step is forced; there is nothing to choose.
+        let eqpp = v_q + self.ra * i_q + self.xdpp * i_d;
+        let edpp = v_d + self.ra * i_d - self.xqpp * i_q;
+        let edp = (self.xq - self.xqp) * i_q;
+        let psi2q = edp + (self.xqp - self.xl) * i_q;
+        let eqp = eqpp + (self.xdp - self.xdpp) * i_d;
+        let psi1d = eqp - (self.xdp - self.xl) * i_d;
+
+        let e_fd = eqp + (self.xd - self.xdp) * i_d;
+        let p_m = edpp * i_d + eqpp * i_q + (self.xqpp - self.xdpp) * i_d * i_q;
+
+        Ok(MachineInit {
+            states: vec![delta, 1.0, eqp, edp, psi1d, psi2q],
+            e_fd,
+            p_m,
+        })
+    }
 }

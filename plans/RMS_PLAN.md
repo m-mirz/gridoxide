@@ -1,7 +1,7 @@
 # RMS simulation in gridoxide
 
-Status: **phases 1–2 implemented**, 2026-08-27, against `6f212eb`. Phases 3–6 outstanding.
-§11 and §12 record what was actually done, including the places this plan was wrong.
+Status: **phases 1–3 implemented**, 2026-08-28, against `6f212eb`. Phases 4–6 outstanding.
+§11, §12 and §13 record what was actually done, including the places this plan was wrong.
 
 ## Context
 
@@ -625,3 +625,137 @@ nothing pretends to support it.
 State-triggered events — a relay on an under-voltage or over-frequency
 threshold — remain out of scope as §5 said, and
 `continuation::events`'s Illinois locator remains the piece to reuse.
+
+
+---
+
+## 13. What happened: phase 3
+
+Landed: the model library, and the composite that holds it together.
+`GeneratingUnit` (`models/unit.rs`), `GenTransient` and `GenRound`
+(`models/machine.rs`), `Sexs`, `Tgov1`, `Stab1`, `ZipLoad`, and unit
+trip/close. Fourteen gates in `tests/dynamics_models_test.rs`; twenty-eight
+dynamics gates in total, all passing, and the rest of the suite is unaffected.
+
+### The composite, and why the chain rule rather than enumeration
+
+§3 said a machine and its controls form one device with one contiguous state
+block. What it did not say is how the couplings get written, and writing them
+per combination would be combinatorial — three optional controls is eight
+combinations before any second model exists.
+
+Instead each part declares its derivatives with respect to its own states and
+its own **scalar** input, and the unit composes them by the chain rule over the
+signal graph. The graph turns out to be acyclic and shallow, and no block's
+output depends on its own input through another block, so one forward pass
+evaluates it and one sweep differentiates it. That is what made eight
+combinations cost the same as one.
+
+The governor's direct feedthrough from `Δω` to `P_m` looks like a loop and is
+not: `P_m` enters `ω̇`, and `ω̇` does not enter `P_m` — only `ω` does.
+
+### The two identities that pin the rotor-frame algebra
+
+Neither was in this plan, and they turned out to be the most valuable gates in
+the phase, because both are **exact** rather than tolerance-bounded:
+
+1. **A machine reproduces its own terminal current.** After initialization,
+   `injection(x₀, V₀) − y_norton·V₀` must equal `conj(S/V)` to 1e-12. A
+   transposed sine and cosine, a `q` axis defined the other way round, or a
+   sign slip in the stator solve all survive a plausibility reading; none
+   survives this.
+2. **A machine with no subtransient saliency cancels its own Norton stamp
+   exactly.** When `x''_d = x''_q` the machine really is an impedance in the
+   network frame, the stamp is that impedance, and `∂I/∂V` comes out zero to
+   the last bit. This also makes visible what §2 claimed about the stamp — that
+   it is a conditioning device changing no answer — as an identity rather than
+   an assertion.
+
+### Deriving the sixth-order model instead of citing it
+
+§7 predicted that convention mismatches between references would produce
+disagreements that are not bugs. That prediction landed earlier than expected
+and inside a single model: published statements of the subtransient machine
+disagree with each other about the sign of `ψ_2q` and of `e'_d`, and a
+formulation copied from one source and checked against another is internally
+consistent and physically wrong.
+
+So the conventions were **derived**, from two requirements the code can be held
+to:
+
+- the steady state must reduce to `GenTransient`'s, term for term — which pins
+  `e''` and the damper flux equations;
+- the two axes must map onto each other under
+  `(e'_q, ψ_1d, i_d) ↔ (e'_d, ψ_2q, −i_q)` — which pins the sign of the
+  damper-coupling correction in `ė'_d`, something the first requirement cannot
+  see because that correction vanishes at steady state.
+
+A pleasant confirmation fell out: both damper equations reduce to `−Δ/T''` for
+the same `Δ` the correction terms use. One expression serving both is itself
+evidence the signs agree.
+
+`the_subtransient_machine_reduces_to_the_transient_one` is the gate: take `x''`
+up to `x'` and the sixth-order machine must trace the fourth-order machine's
+trajectory through a fault. Since `GenTransient` is independently pinned by the
+two identities above, that transfers the confidence. **What it cannot confirm is
+the magnitude of the damper coupling in the regime where it matters** — that
+waits for phase 5.
+
+Saturation is not implemented, and deliberately: it is the single largest
+convention divergence between PSS/E, Dynawo and ANDES, and choosing a
+representation is better done with the reference comparison actually running
+than from a reading of three disagreeing sources.
+
+### Unit trip is value-only after all
+
+§12 recorded `UnitTrip` as the one event kind that is genuinely structural,
+because a tripped unit's states leave the system. That was a failure of
+imagination. **Freezing** the unit rather than removing it keeps the variable
+layout and the sparsity pattern identical — its rows become `x₁ − x₀ = 0`, its
+Jacobian block the identity the implicit rule contributes — so a trip is a
+refill like every other event and nothing re-analyzes. The run's single
+symbolic factorization still serves.
+
+Freezing is also the better model. Nothing in the network can observe a
+disconnected machine's rotor, so integrating it would be tracking a quantity no
+result depends on, and reconnecting it properly would need synchronization,
+which is not modelled.
+
+### The gate that took four attempts
+
+`a_stabilizer_leaves_no_steady_signal`. The claim — a washout contributes
+nothing at steady state — is right; every way of asserting it was wrong first.
+
+A washout's **state does not go to zero, it goes to the input**: `ẋ = (u − x)/T_w`,
+so `x → u` and it is the *output* `u − x` that vanishes. That is the mechanism,
+not an artifact. With no governor the frequency stays permanently low at
+`(P_m − P_e)/D`, and the washout state settles on exactly that. Then: the state
+trails the input by `T_w·dΔω/dt` while the input is still creeping, so a fixed
+tolerance was really asserting the frequency had stopped moving, which on an
+asymptotic approach it never has. And everything downstream is that same
+residual scaled — the first lead-lag's leftover is exactly `K(1 − T₁/T₂)·y₁`.
+
+The gate now predicts each residual from the observed drift rate rather than
+bounding it. That is a better test than the one intended, and the same pattern
+as §12's: a complete quantitative account of every departure beats a passing
+tolerance.
+
+### Limits are absent, on purpose
+
+No exciter ceiling, no governor valve limit, no stabilizer output clamp. A hard
+clamp makes the right-hand side non-smooth, so the analytic Jacobian acquires a
+discontinuity the step's Newton solve can chatter against, and doing it properly
+needs non-windup logic plus limiter state. Half-implemented limits would be
+worse than none, because they would look present. A model with no limits is at
+least honestly unlimited, and its `E_fd` can be read to see whether a study
+would have hit one.
+
+### A limitation worth recording
+
+An islanded machine running off-nominal accumulates rotor angle without bound —
+`δ` reached −10⁴ rad in a 400-second gate, which is physical, since `δ` is
+measured against a reference rotating at nominal frequency. `sin δ` and `cos δ`
+stay accurate at that magnitude, but the argument's relative precision degrades
+with `|δ|`, and a much longer run or a much larger frequency excursion would
+start to feel it. Not a phase-3 problem; worth knowing before anyone runs an
+hour of simulated time.
