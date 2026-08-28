@@ -139,3 +139,67 @@ impl Control for Tgov1 {
         Ok(vec![x, x])
     }
 }
+
+/// A purely proportional governor: `P_m = P_ref − K·Δω`.
+///
+/// No states, no lags: the mechanical power follows the speed within the
+/// instant. Real turbines do not, which is what [`Tgov1`]'s two time constants
+/// are for — but this is exactly Dynawo's `GoverProportional`, so a Dynawo case
+/// maps onto it without inventing time constants that were never stated.
+///
+/// The gain is the reciprocal of a droop: `K = 1/R`. Stated as a gain here
+/// rather than as a droop because that is what the files carry, and converting
+/// once at the boundary beats converting at every use.
+#[derive(Clone, Debug)]
+pub struct GoverProportional {
+    k: f64,
+    p_ref: f64,
+}
+
+const NO_GOV_STATES: [&str; 0] = [];
+
+impl GoverProportional {
+    /// `k` is per unit on the **network** base: a gain of 20 is a 5% droop.
+    pub fn new(k: f64) -> Result<Self, InitError> {
+        if k <= 0.0 {
+            return Err(InitError::NonPositiveParameter { name: "gov gain", value: k });
+        }
+        Ok(Self { k, p_ref: 0.0 })
+    }
+
+    pub fn p_ref(&self) -> f64 {
+        self.p_ref
+    }
+
+    /// The equivalent droop, for comparison with [`Tgov1::r`].
+    pub fn droop(&self) -> f64 {
+        1.0 / self.k
+    }
+}
+
+impl Control for GoverProportional {
+    fn n_states(&self) -> usize {
+        0
+    }
+
+    fn state_names(&self) -> &[&'static str] {
+        &NO_GOV_STATES
+    }
+
+    fn derivatives(&self, _x: &[f64], _u: f64, _out: &mut [f64]) {}
+
+    fn jacobian(&self, _x: &[f64], _u: f64, _dfdx: &mut [f64], _dfdu: &mut [f64]) {}
+
+    fn output(&self, _x: &[f64], u: f64) -> f64 {
+        self.p_ref - self.k * u
+    }
+
+    fn output_jacobian(&self, _x: &[f64], _u: f64, _dydx: &mut [f64]) -> f64 {
+        -self.k
+    }
+
+    fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {
+        self.p_ref = y + self.k * u;
+        Ok(Vec::new())
+    }
+}

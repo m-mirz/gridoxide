@@ -151,3 +151,67 @@ impl Control for Sexs {
         Ok(vec![w * (1.0 - self.ta_over_tb), y])
     }
 }
+
+/// A purely proportional voltage regulator: `E_fd = K·(V_ref + v_s − |V|)`.
+///
+/// **No states at all.** The field voltage is an algebraic function of the
+/// terminal voltage, so a change in `|V|` reaches `ė'_q` within the same
+/// instant rather than through a lag. That is not a simplification of
+/// [`Sexs`] — it is a different device, and it is the one Dynawo's
+/// `VRProportional` implements, so mapping a Dynawo case onto it is exact
+/// rather than approximate.
+///
+/// It is also the regulator Kundur's worked examples use, which makes it the
+/// natural counterpart for the textbook cases.
+///
+/// A zero-state control is a legitimate member of this library for the same
+/// reason a ZIP load is a legitimate device: it contributes derivatives to
+/// nothing and sensitivities to everything downstream, and the chain rule in
+/// [`unit`](super::unit) needs no special case for it.
+#[derive(Clone, Debug)]
+pub struct VrProportional {
+    k: f64,
+    v_ref: f64,
+}
+
+const NO_AVR_STATES: [&str; 0] = [];
+
+impl VrProportional {
+    pub fn new(k: f64) -> Result<Self, InitError> {
+        if k <= 0.0 {
+            return Err(InitError::NonPositiveParameter { name: "avr gain", value: k });
+        }
+        Ok(Self { k, v_ref: 0.0 })
+    }
+
+    pub fn v_ref(&self) -> f64 {
+        self.v_ref
+    }
+}
+
+impl Control for VrProportional {
+    fn n_states(&self) -> usize {
+        0
+    }
+
+    fn state_names(&self) -> &[&'static str] {
+        &NO_AVR_STATES
+    }
+
+    fn derivatives(&self, _x: &[f64], _u: f64, _out: &mut [f64]) {}
+
+    fn jacobian(&self, _x: &[f64], _u: f64, _dfdx: &mut [f64], _dfdu: &mut [f64]) {}
+
+    fn output(&self, _x: &[f64], u: f64) -> f64 {
+        self.k * (self.v_ref + u)
+    }
+
+    fn output_jacobian(&self, _x: &[f64], _u: f64, _dydx: &mut [f64]) -> f64 {
+        self.k
+    }
+
+    fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {
+        self.v_ref = y / self.k - u;
+        Ok(Vec::new())
+    }
+}

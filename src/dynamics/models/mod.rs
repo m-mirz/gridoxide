@@ -68,8 +68,8 @@ pub mod unit;
 
 use num_complex::Complex;
 
-pub use avr::Sexs;
-pub use gov::Tgov1;
+pub use avr::{Sexs, VrProportional};
+pub use gov::{GoverProportional, Tgov1};
 pub use load::ZipLoad;
 pub use machine::{GenCls, GenRound, GenTransient, Machine, MachineInit, MachineJacobian};
 pub use pss::Stab1;

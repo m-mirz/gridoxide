@@ -1,7 +1,7 @@
 # RMS simulation in gridoxide
 
-Status: **phases 1–3 implemented**, 2026-08-28, against `6f212eb`. Phases 4–6 outstanding.
-§11, §12 and §13 record what was actually done, including the places this plan was wrong.
+Status: **phases 1–4 implemented**, 2026-08-28, against `6f212eb`. Phases 5–6 outstanding.
+§11–§14 record what was actually done, including the places this plan was wrong.
 
 ## Context
 
@@ -759,3 +759,106 @@ stay accurate at that magnitude, but the argument's relative precision degrades
 with `|δ|`, and a much longer run or a much larger frequency excursion would
 start to feel it. Not a phase-3 problem; worth knowing before anyone runs an
 hour of simulated time.
+
+
+---
+
+## 14. What happened: phase 4
+
+Landed: all three readers. `src/dynamics/json.rs` (the native format),
+`src/dynamics/dyr.rs` (PSS/E records), `src/dynamics/dyd.rs` (Dynawo, gated on
+`iidm` for its XML reader). Twenty-one more gates; forty-nine dynamics gates in
+total.
+
+### The format defines itself
+
+The native format's model blocks **are** the models' own parameter structs —
+`GenRoundParams` and friends derive `Deserialize` — rather than a parallel set
+of file structs mapped across. The two therefore cannot drift: a renamed field
+is a missing-field parse error at the point of use, not a silently defaulted
+zero somewhere downstream.
+
+### §11's hazard is closed for the ordinary case
+
+A wrong device/load split is self-consistent and no gate can see it. A *file*
+removes the need to state it: a device may give its own `p` and `q`, and if it
+does not, it takes what its bus's solved injection has left. One device omitting
+it is unambiguous; two at the same bus is refused by name.
+
+The hazard is not gone — a file that states the split wrongly is still silent —
+but the common case no longer requires anyone to state it at all.
+
+### The `.dyr` reads half a pair of files, and says so
+
+Two things every machine model needs are simply absent from a `.dyr`: the MVA
+rating and the armature resistance, which are the `.raw`'s `MBASE` and `ZSORCE`.
+So is the bus numbering. All three are demanded from the caller, and the error
+message says where they live. That is a real limitation of the format, not of
+the reader, and stating it beats inventing defaults.
+
+Two parsing details earned their gates. A record ends at the `/` and not at the
+newline, so a three-line `GENROU` is one record with fourteen parameters rather
+than three truncated ones. And a leading `/` is a *comment* only when no record
+is open — mid-record the same character is the terminator, and files do put it
+on a line of its own. Nothing but "is anything pending" distinguishes the two.
+
+`SEXS`'s first field is the ratio `T_a/T_b` and not a time constant. Misreading
+it gives a plausible exciter an order of magnitude too fast.
+
+### Dynawo: the fixtures are real, and that was the point
+
+`.par` is addressed by parameter **name**, so the only real risk is looking up a
+name no file uses — and a hand-written fixture would have agreed with whatever
+the reader happened to expect. The fixtures under
+`tests/data/dynamics/dynawo/` are therefore copied verbatim from Dynawo's own
+repository (MPL-2.0, provenance recorded beside them), and the gates assert
+against the file's own literal values.
+
+Getting them cost a sparse shallow clone, not the 1 GB install §8 phase 0
+assumed.
+
+**Two findings changed the plan.**
+
+First, `GeneratorSynchronousFourWindings*` maps onto `GenRound` parameter for
+parameter, with `generator_SNom` as the machine base — no approximation
+anywhere. But `...ProportionalRegulations` carries a purely *proportional*
+voltage regulator and governor, which are **not** approximations of `Sexs` and
+`Tgov1` — they are different devices with no states at all. Rather than invent
+time constants a Dynawo file never stated, the library grew `VrProportional` and
+`GoverProportional`: zero-state controls, pure feedthrough, exact
+correspondences. They cost about eighty lines each and they are also what
+Kundur's worked examples use.
+
+That a zero-state control drops into the chain rule with no special case is
+worth noting — it is the same property that let `ZipLoad` be a device with no
+states.
+
+Second, and larger: **Dynawo's repository ships its own reference outputs.**
+`examples/…/reference/outputs/curves/curves.csv` holds the trajectories its
+solver produced, committed. So phase 5's Dynawo comparison needs **no Dynawo
+install at all** — the same arrangement `tests/data/ucte/` and
+`tests/data/iidm/` already use for pypowsybl. §8's phase-0 prerequisite was
+wrong about the cost of the most expensive gate in the plan.
+
+That vendored case also records `PMIN : activation` in its own timeline: its
+governors hit their power limits, which this library does not model. So it is
+known *in advance* to diverge, for a stated reason — which is a much better
+position than discovering it during the comparison.
+
+### One conversion is inferred rather than read
+
+`governor_KGover` is a gain on the machine's own `governor_PNom`, and
+`GoverProportional` wants one on the network base, so the reader applies
+`k = KGover · PNom / s_base`. Every other quantity is read as stated. This one
+rests on a reading of Dynawo's base convention rather than on anything in the
+file, and it is flagged in the module doc so phase 5 knows where to look first
+if the frequencies disagree.
+
+### Saturation, twice, incompatibly
+
+PSS/E states it as `S(1.0)`/`S(1.2)`, two points on a curve. Dynawo states it as
+`md`/`mq`/`nd`/`nq`, an exponential characteristic. They are not convertible
+without committing to a curve shape. Both readers parse it, neither uses it, and
+both report a nonzero value — which is exactly the divergence §7 predicted and
+exactly why §13 declined to pick a representation before a reference was
+running.
