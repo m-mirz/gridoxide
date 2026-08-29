@@ -189,6 +189,7 @@ fn case_with(speed_voltages: bool) -> DynamicsDocument {
                 // Line 2 is branch index 1, in the order the network lists them.
                 EventSpec::BranchTrip { t: CLEAR_AT, branch: 1 },
             ],
+            relays: Vec::new(),
         },
     }
 }

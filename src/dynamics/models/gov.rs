@@ -8,9 +8,18 @@
 //! Valve **position** limits are implemented, and non-windup, for the reason
 //! [`avr`](super::avr) sets out: a governor whose valve is wide open cannot
 //! open further however far the frequency falls, and a wound-up integrator
-//! would keep it there long after the frequency recovered. Valve *rate* limits
-//! are not implemented — they constrain the derivative rather than the state,
-//! which is a different and more intrusive piece of machinery.
+//! would keep it there long after the frequency recovered.
+//!
+//! Valve **rate** limits are implemented too, and they constrain a different
+//! thing: not where the valve may be but how fast it may travel. A steam valve
+//! that can open in a fifth of a second and a hydro gate that takes five are
+//! the same model with different rates, and the difference decides whether a
+//! machine can arrest a frequency excursion at all.
+//!
+//! The two compose in one order and not the other. The rate limit clips the
+//! derivative first; the position limit then decides whether the valve may move
+//! at all. Reversing them would let a valve pinned at its ceiling still
+//! "travel" at its rate limit, which is nothing.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,8 +58,14 @@ pub struct Tgov1 {
     t3: f64,
     dt: f64,
     limits: Limits,
+    /// How fast the valve may travel, per unit per second.
+    rate: Limits,
     /// Which limit is holding the valve this step, decided once at its start.
+    /// Covers both the position and the rate: while either holds, the valve's
+    /// derivative is a constant and its Jacobian row is zero.
     limit: Cell<LimitState>,
+    /// The rate-clipped derivative for this step, if the rate limit binds.
+    held_rate: Cell<Option<f64>>,
     /// Latched by [`Control::initialize`].
     p_ref: f64,
 }
@@ -72,6 +87,10 @@ pub struct Tgov1Params {
     /// absent.
     #[serde(default)]
     pub limits: Limits,
+    /// Valve **rate** limits, per unit per second — how fast it may travel,
+    /// closing (`min`, negative) and opening (`max`). Unbounded when absent.
+    #[serde(default)]
+    pub rate: Limits,
 }
 
 const TGOV1_STATES: [&str; 2] = ["gov_valve", "gov_turbine"];
@@ -94,7 +113,9 @@ impl Tgov1 {
             t3: params.t3,
             dt: params.dt,
             limits: params.limits,
+            rate: params.rate,
             limit: Cell::new(LimitState::Free),
+            held_rate: Cell::new(None),
             p_ref: 0.0,
         })
     }
@@ -113,6 +134,17 @@ impl Tgov1 {
     fn raw_valve_derivative(&self, x: &[f64], u: f64) -> f64 {
         (self.p_ref - u / self.r - x[0]) / self.t1
     }
+
+    /// The rate limits, per unit per second.
+    pub fn rate(&self) -> Limits {
+        self.rate
+    }
+
+    /// The valve's derivative under whichever limits are latched for this step.
+    fn valve_derivative(&self, x: &[f64], u: f64) -> f64 {
+        let raw = self.held_rate.get().unwrap_or_else(|| self.raw_valve_derivative(x, u));
+        self.limits.held(self.limit.get(), raw)
+    }
 }
 
 impl Control for Tgov1 {
@@ -125,16 +157,25 @@ impl Control for Tgov1 {
     }
 
     fn latch(&self, x: &[f64], u: f64) {
-        self.limit.set(self.limits.latch(x[0], self.raw_valve_derivative(x, u)));
+        // The rate limit clips the derivative first; the position limit then
+        // decides whether the valve may move at all. In the other order a valve
+        // pinned at its ceiling would still be "travelling" at its rate limit.
+        let raw = self.raw_valve_derivative(x, u);
+        let (clipped, scale) = self.rate.clamp(raw);
+        self.held_rate.set((scale == 0.0).then_some(clipped));
+        self.limit.set(self.limits.latch(x[0], clipped));
     }
 
     fn derivatives(&self, x: &[f64], u: f64, out: &mut [f64]) {
-        out[0] = self.limits.held(self.limit.get(), self.raw_valve_derivative(x, u));
+        out[0] = self.valve_derivative(x, u);
         out[1] = (self.limits.under(self.limit.get(), x[0]).0 - x[1]) / self.t3;
     }
 
     fn jacobian(&self, x: &[f64], _u: f64, dfdx: &mut [f64], dfdu: &mut [f64]) {
-        if self.limit.get() == LimitState::Free {
+        // Free of *both* limits, or the derivative is a constant and its whole
+        // row is zero — the exact Jacobian of what the step is solving, since
+        // the active set is fixed for its duration.
+        if self.limit.get() == LimitState::Free && self.held_rate.get().is_none() {
             dfdx[0] = -1.0 / self.t1;
             dfdu[0] = -1.0 / (self.r * self.t1);
         }

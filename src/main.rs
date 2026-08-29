@@ -939,7 +939,8 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
     if flags.iter().any(|f| f == "--no-speed-voltages") {
         document.dynamics.speed_voltages = false;
     }
-    let (mut system, events) = document.build().map_err(|e| e.to_string())?;
+    let (mut system, events, relays) =
+        document.build_with_relays().map_err(|e| e.to_string())?;
 
     // `--modes` asks a different question from a run, so it answers that one
     // and stops: not "what happens after this disturbance" but "what dynamic
@@ -969,6 +970,7 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
                 .map_err(|_| format!("--damping: expected a count, got {raw:?}"))?,
         },
         events,
+        relays,
         backend,
         ..Default::default()
     };
@@ -1005,6 +1007,12 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
     }
     for warning in &report.warnings {
         println!("warning: {warning}");
+    }
+    for action in &report.relay_actions {
+        println!(
+            "relay {} saw its threshold at {:.4} s and acted at {:.4} s: {:?}",
+            action.id, action.crossed_at, action.fired_at, action.action
+        );
     }
 
     // Per machine: did it stay in step, and where did its speed go?
@@ -1124,6 +1132,19 @@ fn report_modes(system: &gridoxide::dynamics::DynamicSystem, count: usize) -> Re
             mode.frequency,
             who.join(", ")
         );
+        // For an oscillation, *how* the rotors move is the part that separates
+        // an inter-area mode from a local one, and participation cannot say it.
+        if mode.eigenvalue.im > 0.0 && mode.shape.len() > 1 {
+            let shape: Vec<String> = result
+                .shape(mode)
+                .into_iter()
+                .take(4)
+                .map(|(name, magnitude, phase)| {
+                    format!("{name} {magnitude:.2}∠{phase:+.0}°")
+                })
+                .collect();
+            println!("{:>62}   shape: {}", "", shape.join(", "));
+        }
     }
 
     let unstable = result.unstable();

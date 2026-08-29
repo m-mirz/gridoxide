@@ -242,6 +242,7 @@ fn a_dyr_case_initializes_and_runs() {
             loads: Vec::new(),
             fixed_buses: Vec::new(),
             events: Vec::new(),
+            relays: Vec::new(),
         },
     };
 

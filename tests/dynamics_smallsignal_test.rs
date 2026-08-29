@@ -320,3 +320,114 @@ fn a_non_equilibrium_is_refused() {
     );
     assert!(err.to_string().contains("describes nothing"), "{err}");
 }
+
+/// The mode shape says *how* the machines move, which participation cannot.
+///
+/// Two machines islanded together have two rotor modes, and they are opposites.
+/// One is the **common mode**: both rotors drift as one, nothing oscillates,
+/// and the eigenvalue is at the origin — an islanded system's absolute angle is
+/// free, so this mode is the freedom itself. The other is the **inter-machine
+/// oscillation**: the two swing *against* each other, which shows up as their
+/// shape components sitting near opposite phase.
+///
+/// Participation cannot make that distinction. It would say both modes are the
+/// rotors', which is true of both and useful about neither.
+#[test]
+fn the_mode_shape_separates_a_swing_from_a_drift() {
+    let machine = |p: f64| {
+        GenCls::new(
+            GenClsParams { h: H, d: 1.0, ra: 0.0, xdp: XDP, mbase: S_BASE },
+            S_BASE,
+            F_NOM,
+        )
+        .map(|m| (m, p))
+        .unwrap()
+    };
+    let buses = vec![
+        bus(0, BusType::Slack, 0.4),
+        bus(1, BusType::PV, 0.4),
+        bus(2, BusType::PQ, -0.8),
+    ];
+    let lines = vec![
+        Line { from: 0, to: 2, r: 0.0, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
+        Line { from: 1, to: 2, r: 0.0, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
+    ];
+    let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
+        buses,
+        lines: lines.clone(),
+    });
+    let buses = report.buses;
+    let ybus = build_ybus(buses.len(), &lines, &[]).finish();
+    let (p_calc, q_calc) = power_injections(&buses, &ybus);
+
+    let devices = (0..2)
+        .map(|i| DeviceSpec {
+            id: format!("G{}", i + 1),
+            bus: i,
+            s: Complex::new(p_calc[i], q_calc[i]),
+            model: Box::new(GeneratingUnit::machine_only(Box::new(machine(0.4).0)))
+                as Box<dyn DynamicModel>,
+        })
+        .collect();
+
+    // No fixed bus: the two machines are islanded together, which is what makes
+    // the common mode free.
+    let system = build(SystemSpec {
+        buses: &buses,
+        lines: &lines,
+        transformers: &[],
+        shunts: &[],
+        devices,
+        fixed_buses: Vec::new(),
+    })
+    .unwrap();
+
+    let result = smallsignal::analyze(&system).unwrap();
+    assert_eq!(result.modes.len(), 4, "two classical machines, four states");
+
+    // The oscillation: the two rotors near opposite phase.
+    let swing = result
+        .modes
+        .iter()
+        .filter(|m| m.is_oscillatory())
+        .max_by(|a, b| a.frequency.partial_cmp(&b.frequency).unwrap())
+        .expect("there is an oscillatory mode");
+    let shape = result.shape(swing);
+    assert_eq!(shape.len(), 2, "one component per rotor: {shape:?}");
+    let separation = (shape[0].2 - shape[1].2).abs();
+    assert!(
+        (separation - 180.0).abs() < 5.0,
+        "the two machines should swing against each other, but their phases are \
+         {:.1}° apart: {shape:?}",
+        separation
+    );
+    // Equal machines on a symmetric network take equal parts in it.
+    assert!(
+        (shape[0].1 - shape[1].1).abs() < 1e-6,
+        "identical machines should have equal magnitudes: {shape:?}"
+    );
+
+    // The drift: an islanded system's absolute angle is free, so one mode sits
+    // at the origin and carries no oscillation to have a shape.
+    let free = result
+        .modes
+        .iter()
+        .min_by(|a, b| a.eigenvalue.norm().partial_cmp(&b.eigenvalue.norm()).unwrap())
+        .unwrap();
+    assert!(
+        free.eigenvalue.norm() < 1e-8,
+        "an islanded pair should have a zero mode, found {}",
+        free.eigenvalue
+    );
+    assert!(free.shape.is_empty(), "a non-oscillatory mode has no shape to report");
+}
+
+/// The dense method says so rather than running for hours.
+#[test]
+fn a_system_too_large_for_the_dense_method_is_refused() {
+    // Not built — the check is on the message, and standing a 2000-state system
+    // up to be refused would cost more than the refusal is worth.
+    let err = SmallSignalError::TooLarge { states: 20_480, limit: 2000 };
+    assert!(err.to_string().contains("sparse Arnoldi"), "{err}");
+    assert!(err.to_string().contains("not implemented"), "{err}");
+}

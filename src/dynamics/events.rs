@@ -40,9 +40,10 @@
 //! library. See `plans/RMS_PLAN.md` §11.
 
 use num_complex::Complex;
+use serde::{Deserialize, Serialize};
 
 /// What happens, and when.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     /// Seconds from the start of the run. Steps are truncated to land exactly
     /// here, so the value need not be a multiple of the step size.
@@ -70,7 +71,13 @@ impl Event {
 }
 
 /// The kinds of disturbance a run can schedule.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Tagged by `"kind"`, the same spelling
+/// [`EventSpec`](super::json::EventSpec) uses, so a relay's action and a
+/// scheduled event read identically in a file. One vocabulary for what can
+/// happen, whether a time or a threshold decides when.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
     /// Add a shunt admittance to ground at `bus`. Replaces any fault already
     /// standing there rather than adding to it, so a sequence of faults at one
@@ -204,7 +211,8 @@ impl std::fmt::Display for DynamicsWarning {
 /// Deliberately a small set. A relay's *decision logic* is the interesting
 /// part, and it is the same whatever the input; adding a quantity is adding one
 /// match arm, not a new mechanism.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "watch", rename_all = "snake_case")]
 pub enum Watch {
     /// A bus's voltage magnitude, per unit.
     BusVoltage { bus: usize },
@@ -217,10 +225,11 @@ pub enum Watch {
 }
 
 /// Which side of a threshold trips the relay.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "when", rename_all = "snake_case")]
 pub enum Trigger {
-    Below(f64),
-    Above(f64),
+    Below { threshold: f64 },
+    Above { threshold: f64 },
 }
 
 impl Trigger {
@@ -231,8 +240,8 @@ impl Trigger {
     /// happened to notice — see [`Relay::delay`].
     pub fn residual(&self, value: f64) -> f64 {
         match *self {
-            Trigger::Below(threshold) => threshold - value,
-            Trigger::Above(threshold) => value - threshold,
+            Trigger::Below { threshold } => threshold - value,
+            Trigger::Above { threshold } => value - threshold,
         }
     }
 
@@ -255,10 +264,12 @@ impl Trigger {
 /// inside its bounds before the delay elapses, the relay resets and forgets —
 /// which is exactly what a fault cleared in time should cause, and is the
 /// difference between a relay and a stopwatch.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Relay {
     pub id: String,
+    #[serde(flatten)]
     pub watch: Watch,
+    #[serde(flatten)]
     pub trigger: Trigger,
     /// How long the condition must hold before the action fires, in seconds.
     /// Zero acts at the crossing.
@@ -266,6 +277,7 @@ pub struct Relay {
     pub action: EventKind,
     /// Whether the relay may fire more than once. One-shot by default: a trip
     /// is a trip.
+    #[serde(default)]
     pub repeating: bool,
 }
 
@@ -281,7 +293,7 @@ impl Relay {
         Self {
             id: id.into(),
             watch: Watch::BusVoltage { bus },
-            trigger: Trigger::Below(threshold),
+            trigger: Trigger::Below { threshold },
             delay,
             action,
             repeating: false,
@@ -299,7 +311,7 @@ impl Relay {
         Self {
             id: id.into(),
             watch: Watch::UnitSpeed { unit },
-            trigger: Trigger::Above(threshold),
+            trigger: Trigger::Above { threshold },
             delay,
             action,
             repeating: false,
@@ -308,7 +320,7 @@ impl Relay {
 }
 
 /// What a relay did, and when.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RelayAction {
     pub id: String,
     /// When the watched quantity crossed its threshold — **located**, not

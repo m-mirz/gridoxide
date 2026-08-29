@@ -57,6 +57,25 @@ at all.
 This is the output that gets used. A poorly damped mode at 0.8 Hz with 90% participation from two
 machines' speeds is an inter-area oscillation between them, and it names the machines to tune.
 
+## Mode shape
+
+A participation factor says *whose* a mode is. It cannot say **how they move**, and for an
+oscillation that is the more useful half. The mode shape is the right eigenvector read at the rotor
+angles, rotated and scaled so the largest component is `1∠0`:
+
+```text
+G1.delta 1.00∠+0°, G2.delta 1.00∠-180°
+```
+
+Two rotors near opposite phase are swinging *against* each other — an inter-machine or inter-area
+mode. Two near the same phase are riding together, which is a different phenomenon needing a
+different remedy.
+
+Participation cannot make that distinction. On two islanded machines it says both rotor modes belong
+to the rotors, which is true of both and useful about neither; the shape separates the oscillation
+from the free drift of the island's absolute angle, and that drift is reported with no shape at all,
+because a relative phase between things that are not oscillating means nothing.
+
 ## What it looks like
 
 ```text

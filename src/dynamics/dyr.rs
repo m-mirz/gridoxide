@@ -413,6 +413,8 @@ impl DyrRecord {
             t3: p[5],
             dt: p[6],
             limits: Limits { min: Some(p[3]), max: Some(p[2]) },
+            // PSS/E's TGOV1 states no rate limit.
+            rate: Limits::NONE,
         }))
     }
 }

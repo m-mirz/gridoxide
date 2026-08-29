@@ -57,7 +57,7 @@ use crate::network::{build_ybus, power_injections};
 use crate::solver::SolveStatus;
 use crate::types::Bus;
 
-use super::events::{Event, EventKind};
+use super::events::{Event, EventKind, Relay};
 use super::init::{build, BuildError, DeviceSpec, SystemSpec};
 use super::models::avr::{Sexs, SexsParams, VrProportional};
 use super::models::gov::{GoverProportional, Tgov1, Tgov1Params};
@@ -123,6 +123,10 @@ pub struct DynamicsData {
     pub fixed_buses: Vec<usize>,
     #[serde(default)]
     pub events: Vec<EventSpec>,
+    /// Protection relays. Unlike an event these carry no time: when they act is
+    /// found, not stated. See [`Relay`](super::events::Relay).
+    #[serde(default)]
+    pub relays: Vec<super::events::Relay>,
 }
 
 /// One generating unit: a machine, and whichever controls it carries.
@@ -430,6 +434,14 @@ impl DynamicsDocument {
     /// Returns the system together with the event schedule the file states, so
     /// a caller has everything a run needs from one call.
     pub fn build(&self) -> Result<(DynamicSystem, Vec<Event>), DynamicsError> {
+        self.build_with_relays().map(|(system, events, _)| (system, events))
+    }
+
+    /// As [`build`](Self::build), additionally returning the relays the
+    /// document declares.
+    pub fn build_with_relays(
+        &self,
+    ) -> Result<(DynamicSystem, Vec<Event>, Vec<Relay>), DynamicsError> {
         let report = crate::run_power_flow_analysis(self.network.clone());
         if report.stats.status != SolveStatus::Converged {
             return Err(DynamicsError::PowerFlow(report.stats.status));
@@ -507,7 +519,7 @@ impl DynamicsDocument {
         })?;
 
         let events = self.dynamics.events.iter().copied().map(Event::from).collect();
-        Ok((system, events))
+        Ok((system, events, self.dynamics.relays.clone()))
     }
 }
 

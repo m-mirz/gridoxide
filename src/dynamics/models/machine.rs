@@ -147,6 +147,13 @@ pub trait Machine: std::fmt::Debug {
     /// both read it, and neither should have to know the model's layout.
     fn omega_index(&self) -> usize;
 
+    /// Which state is the rotor angle. Every machine here puts it first, but
+    /// saying so is what keeps that from being an unwritten contract a modal
+    /// analysis quietly depends on.
+    fn angle_index(&self) -> usize {
+        0
+    }
+
     /// The constant admittance stamped into `Y` at this machine's bus. See the
     /// module doc: it is a conditioning device, cancelled inside
     /// [`injection`](Self::injection).

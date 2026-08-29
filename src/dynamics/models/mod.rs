@@ -192,6 +192,15 @@ pub trait DynamicModel: std::fmt::Debug {
     /// wrong, so it is never trusted without the oracle.
     fn jacobian(&self, x: &[f64], v: Complex<f64>, out: &mut ModelJacobian);
 
+    /// Which of this device's states is a rotor **angle**, if any.
+    ///
+    /// A mode shape is read off the angles: they are what swing against each
+    /// other, and their relative phases are what separate a local mode from an
+    /// inter-area one. A device with no rotor honestly has none.
+    fn angle_index(&self) -> Option<usize> {
+        None
+    }
+
     /// Which of this device's states is a rotor speed, if any.
     ///
     /// A relay watching a machine needs to find its speed without knowing the

@@ -93,6 +93,16 @@ pub struct Mode {
     /// Which states take part, largest first, as `(state index, factor)`.
     /// Factors are normalized to sum to one across the mode.
     pub participation: Vec<(usize, f64)>,
+    /// The **mode shape** at the rotor angles: `(state index, component)`, with
+    /// the components rotated and scaled so the largest is `1∠0`.
+    ///
+    /// Participation says *whose* a mode is; the shape says *how they move*.
+    /// Two machines with components at nearly opposite phase are swinging
+    /// against each other, which is what distinguishes an inter-area mode from
+    /// a local one — and a local mode from a machine simply riding along.
+    ///
+    /// Empty for a non-oscillatory mode, where a relative phase means nothing.
+    pub shape: Vec<(usize, Complex<f64>)>,
 }
 
 impl Mode {
@@ -135,6 +145,16 @@ impl SmallSignal {
             .map(|&(k, p)| (self.state_names[k].clone(), p))
             .collect()
     }
+
+    /// The named mode shape: each rotor's magnitude and phase in degrees.
+    pub fn shape(&self, mode: &Mode) -> Vec<(String, f64, f64)> {
+        mode.shape
+            .iter()
+            .map(|&(k, c)| {
+                (self.state_names[k].clone(), c.norm(), c.arg().to_degrees())
+            })
+            .collect()
+    }
 }
 
 /// Why a system could not be analyzed.
@@ -153,6 +173,13 @@ pub enum SmallSignalError {
     SingularNetwork,
     /// The eigen-decomposition did not converge.
     Eigen,
+    /// Too many states for the dense method.
+    ///
+    /// Refused rather than attempted: the reduction alone is `O(n²·n_net)` and
+    /// the decomposition `O(n³)`, so a system past this size does not run
+    /// slowly, it runs for hours. A sparse Arnoldi method targeting a region of
+    /// the complex plane is what such a system wants, and is not implemented.
+    TooLarge { states: usize, limit: usize },
 }
 
 impl std::fmt::Display for SmallSignalError {
@@ -168,6 +195,12 @@ impl std::fmt::Display for SmallSignalError {
                 write!(f, "the algebraic block is singular, so the network cannot be eliminated")
             }
             SmallSignalError::Eigen => write!(f, "the eigen-decomposition did not converge"),
+            SmallSignalError::TooLarge { states, limit } => write!(
+                f,
+                "{states} states is past the {limit} this dense method is honest about; \
+                 a system this size wants sparse Arnoldi targeting a region of the complex \
+                 plane, which is not implemented"
+            ),
         }
     }
 }
@@ -181,12 +214,23 @@ impl std::error::Error for SmallSignalError {}
 /// arithmetic.
 const EQUILIBRIUM_TOL: f64 = 1e-6;
 
+/// The largest system the dense method will attempt.
+///
+/// Not a hard numerical limit — an honesty one. At two thousand states the
+/// decomposition is minutes and the reduction is worse; past that a caller
+/// deserves to be told the method is wrong for the problem rather than left
+/// waiting.
+const MAX_DENSE_STATES: usize = 2000;
+
 /// Linearizes about the system's current state and returns its modes.
 pub fn analyze(system: &DynamicSystem) -> Result<SmallSignal, SmallSignalError> {
     let layout = system.pattern.layout().clone();
     let (n_x, n_net) = (layout.n_diff, 2 * layout.n_bus);
     if n_x == 0 {
         return Err(SmallSignalError::NoStates);
+    }
+    if n_x > MAX_DENSE_STATES {
+        return Err(SmallSignalError::TooLarge { states: n_x, limit: MAX_DENSE_STATES });
     }
     let drift = system.max_derivative();
     if drift > EQUILIBRIUM_TOL {
@@ -259,6 +303,14 @@ pub fn analyze(system: &DynamicSystem) -> Result<SmallSignal, SmallSignalError> 
         }
     }
 
+    // Which states are rotor angles, for the mode shapes below.
+    let angle_states: Vec<usize> = (0..layout.n_devices())
+        .filter_map(|d| {
+            let offset = layout.dev_offset[d];
+            system.models[d].angle_index().map(|k| offset + k)
+        })
+        .collect();
+
     let eigen = a.eigen().map_err(|_| SmallSignalError::Eigen)?;
     let u = eigen.U();
     let s = eigen.S();
@@ -290,7 +342,33 @@ pub fn analyze(system: &DynamicSystem) -> Result<SmallSignal, SmallSignalError> 
         // A long tail of numerically-zero participations tells nobody anything.
         participation.retain(|&(_, p)| p > 1e-6);
 
-        modes.push(Mode { eigenvalue: lambda, damping, frequency, time_constant, participation });
+        // The mode shape, read off the rotor angles and normalized so the
+        // largest component is 1∠0. An eigenvector is defined only up to a
+        // complex scale, so only the *relative* magnitudes and phases mean
+        // anything — normalizing is what makes two runs comparable.
+        let mut shape: Vec<(usize, Complex<f64>)> = Vec::new();
+        if lambda.im.abs() > 0.0 {
+            let raw: Vec<(usize, Complex<f64>)> = angle_states
+                .iter()
+                .map(|&k| (k, Complex::new(u[(k, i)].re, u[(k, i)].im)))
+                .collect();
+            if let Some(&(_, pivot)) = raw
+                .iter()
+                .max_by(|a, b| a.1.norm().partial_cmp(&b.1.norm()).unwrap())
+                .filter(|(_, c)| c.norm() > 0.0)
+            {
+                shape = raw.into_iter().map(|(k, c)| (k, c / pivot)).collect();
+            }
+        }
+
+        modes.push(Mode {
+            eigenvalue: lambda,
+            damping,
+            frequency,
+            time_constant,
+            participation,
+            shape,
+        });
     }
     // Least damped first: that is the order the question is asked in, and a
     // conjugate pair sorts adjacently because both halves share a damping.

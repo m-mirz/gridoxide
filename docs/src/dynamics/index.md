@@ -91,7 +91,7 @@ disturbance happened to excite it.
 | Governors | `TGOV1`, and a purely proportional governor |
 | Stabilizers | washout plus two lead-lag stages |
 | Loads | constant admittance by default; ZIP with a low-voltage cutoff on request |
-| Limits | non-windup on the exciter's field voltage and the governor's valve; a clamp on the stabilizer's output |
+| Limits | non-windup on the exciter's field voltage and the governor's valve position, a rate limit on the valve's travel, a clamp on the stabilizer's output |
 | Events | bus faults, clearings, branch trip and close, unit trip and close, load steps |
 | Protection | relays on bus voltage, machine speed or angle excursion, with a delay and a located crossing |
 | Input | gridoxide JSON, PSS/E `.dyr`, Dynawo `.dyd`/`.par` |
