@@ -174,23 +174,49 @@ fn proportional_regulators_map_exactly() {
     }
 }
 
-/// A three-windings generator is a fifth-order machine this library does not
-/// have. Skipped and named, not silently mapped onto the nearest thing.
+/// Every generator in the case maps: three four-windings onto the sixth-order
+/// machine, two three-windings onto the fifth-order one.
+///
+/// A three-windings parameter set carries no `XpqPu` and no `Tpq0`, because a
+/// salient-pole rotor has no `q`-axis transient to have a time constant for.
+/// The reader keys on the **library name** rather than on which parameters
+/// happen to be present, which is the difference between reading a model and
+/// guessing one from its data.
 #[test]
-fn an_unimplemented_library_is_skipped_by_name() {
+fn both_generator_libraries_map() {
     let (dyd, par) = documents();
     let (units, warnings) = dyd::to_units(&dyd, &par, &bus_of(&dyd), 100.0).unwrap();
 
-    assert_eq!(units.len(), 3, "three of the five generators are four-windings");
-    let skipped: Vec<&DydWarning> = warnings
-        .iter()
-        .filter(|w| matches!(w, DydWarning::UnsupportedLib { .. }))
-        .collect();
-    assert_eq!(skipped.len(), 2);
-    assert!(
-        skipped.iter().all(|w| w.to_string().contains("ThreeWindings")),
-        "got {skipped:?}"
+    assert_eq!(units.len(), 5, "all five generators should map now");
+    assert_eq!(
+        warnings.iter().filter(|w| matches!(w, DydWarning::UnsupportedLib { .. })).count(),
+        0,
+        "nothing in this case is unsupported any more"
     );
+
+    let round = units.iter().filter(|u| matches!(u.machine, MachineSpec::GenRound(_))).count();
+    let salient = units.iter().filter(|u| matches!(u.machine, MachineSpec::GenSalient(_))).count();
+    assert_eq!((round, salient), (3, 2));
+
+    // The fifth-order machine's own values, from the file.
+    let g6 = units.iter().find(|u| u.id == "GEN____6_SM").expect("mapped");
+    match g6.machine {
+        MachineSpec::GenSalient(p) => {
+            assert_eq!(p.h, 4.975);
+            assert_eq!(p.ra, 0.004);
+            assert_eq!(p.xd, 0.75);
+            assert_eq!(p.xdp, 0.225);
+            assert_eq!(p.xdpp, 0.154);
+            assert_eq!(p.xq, 0.45);
+            assert_eq!(p.xqpp, 0.2, "the one q-axis reactance there is");
+            assert_eq!(p.xl, 0.102);
+            assert_eq!(p.td0p, 3.0);
+            assert_eq!(p.td0pp, 0.04);
+            assert_eq!(p.tq0pp, 0.04, "the one q-axis time constant there is");
+            assert_eq!(p.mbase, 80.0);
+        }
+        ref other => panic!("expected a salient-pole machine, got {other:?}"),
+    }
 }
 
 /// Saturation is stated as an exponential characteristic here and as a pair of

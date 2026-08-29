@@ -63,7 +63,8 @@ use super::models::avr::{Sexs, SexsParams, VrProportional};
 use super::models::gov::{GoverProportional, Tgov1, Tgov1Params};
 use super::models::load::ZipLoad;
 use super::models::machine::{
-    GenCls, GenClsParams, GenRound, GenRoundParams, GenTransient, GenTransientParams, Machine,
+    GenCls, GenClsParams, GenRound, GenRoundParams, GenSalient, GenSalientParams, GenTransient,
+    GenTransientParams, Machine,
 };
 use super::models::pss::{Stab1, Stab1Params};
 use super::models::{Control, DynamicModel, GeneratingUnit, InitError, Limits};
@@ -167,6 +168,8 @@ pub enum MachineSpec {
     GenCls(GenClsParams),
     GenTransient(GenTransientParams),
     GenRound(GenRoundParams),
+    /// Fifth order: a salient-pole machine, with one `q`-axis damper.
+    GenSalient(GenSalientParams),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -358,6 +361,9 @@ impl MachineSpec {
             }
             MachineSpec::GenRound(p) => {
                 Box::new(GenRound::new(p, s_base, f_nom)?.with_speed_voltages(speed_voltages))
+            }
+            MachineSpec::GenSalient(p) => {
+                Box::new(GenSalient::new(p, s_base, f_nom)?.with_speed_voltages(speed_voltages))
             }
         })
     }

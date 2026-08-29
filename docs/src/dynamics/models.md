@@ -34,6 +34,7 @@ feedthrough from `Δω` to `P_m` is not a loop: `P_m` enters `ω̇`, and `ω̇` 
 |---|---|---|
 | Classical | `δ, ω` | Constant voltage behind transient reactance. The model the equal-area criterion is written for |
 | Transient (4th) | `+ e'_q, e'_d` | A field winding — the first model an exciter can act on — and one `q`-axis damper |
+| Salient (5th) | `+ ψ_1d` on `d`, one flux on `q` | A salient-pole rotor: a damper on each axis, but no `q`-axis transient — there is no `q`-axis field for the flux to hide in |
 | Subtransient (6th) | `+ ψ_1d, ψ_2q` | Two more damper windings. Immediately after a disturbance the machine's effective impedance is `x''`, not `x'` |
 
 Every machine offers **both stator formulations**. By default the speed-voltage terms omit the
