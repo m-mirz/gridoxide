@@ -114,6 +114,7 @@ fn case(n_bus: usize) -> DynamicsDocument {
         dynamics: DynamicsData {
             s_base: S_BASE,
             f_nom: 50.0,
+            speed_voltages: false,
             units,
             loads: Vec::new(),
             fixed_buses: Vec::new(),

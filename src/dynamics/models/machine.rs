@@ -28,9 +28,9 @@
 //!
 //! # The `ω ≈ 1` approximation, and what it costs
 //!
-//! Every stator equation here omits the rotor speed. The full form carries it
-//! on the speed-voltage terms, and writes the swing equation in **torque**
-//! rather than power:
+//! By default every stator equation here omits the rotor speed. The full form
+//! carries it on the speed-voltage terms, and writes the swing equation in
+//! **torque** rather than power:
 //!
 //! ```text
 //! full:          v_d = −r_a·i_d − ω·λ_q      2H·ω̇ = c_m − c_e − D·Δω
@@ -46,8 +46,16 @@
 //!
 //! It is not free, and its size is known rather than guessed:
 //! `tests/dynamics_reference_test.rs` measures it against Dynawo on Kundur's
-//! Example 13.2 at **0.6% of terminal power for a 0.9% speed deviation**. That
-//! is the number to weigh if this is ever revisited.
+//! Example 13.2 at **0.6% of terminal power for a 0.9% speed deviation**.
+//!
+//! **Both forms are available.** `with_speed_voltages(true)` on any machine
+//! here — or `"speed_voltages": true` in a document's `dynamics` section —
+//! switches to the full one. It is off by default because the approximation is
+//! what makes the phasor formulation coherent in the first place, and because
+//! every closed-form gate in this crate (the equal-area criterion above all) is
+//! derived from the power form. Turning it on drives the measured 0.6% offset
+//! against Dynawo to under 0.05%, which is what closes the loop on the
+//! attribution rather than leaving it an assertion.
 //!
 //! # The Norton stamp, and saliency
 //!
@@ -215,6 +223,13 @@ pub struct GenCls {
     omega_base: f64,
     /// Constant internal EMF magnitude, latched by [`Machine::initialize`].
     e_mag: f64,
+    /// Whether to carry the rotor speed on the speed-voltage terms and write
+    /// the swing equation in torque. See the module doc.
+    speed_voltages: bool,
+    /// The armature resistance and transient reactance separately, since the
+    /// full form needs them apart rather than as one impedance.
+    ra: f64,
+    xdp: f64,
 }
 
 /// [`GenCls`]'s parameters as a data file states them: on the machine's own MVA
@@ -241,7 +256,8 @@ impl GenCls {
         require_positive("h", params.h)?;
         require_positive("xdp", params.xdp)?;
         let k = base_ratio(params.mbase, s_base)?;
-        let z = Complex::new(params.ra / k, params.xdp / k);
+        let (ra, xdp) = (params.ra / k, params.xdp / k);
+        let z = Complex::new(ra, xdp);
         Ok(Self {
             h: params.h * k,
             d: params.d * k,
@@ -249,7 +265,17 @@ impl GenCls {
             z,
             omega_base: std::f64::consts::TAU * f_nom,
             e_mag: 0.0,
+            speed_voltages: false,
+            ra,
+            xdp,
         })
+    }
+
+    /// Carry the rotor speed on the speed-voltage terms, and write the swing
+    /// equation in torque. See the module doc for what this costs and buys.
+    pub fn with_speed_voltages(mut self, on: bool) -> Self {
+        self.speed_voltages = on;
+        self
     }
 
     /// The latched internal EMF magnitude, network base. Exposed because the
@@ -272,13 +298,56 @@ impl GenCls {
         Complex::from_polar(self.e_mag, delta)
     }
 
-    /// Air-gap power `Re(E·conj(I))` with `I = (E − V)·y`, expanded so the
-    /// derivatives read off the same two quantities: `∂P_e/∂δ = Im(w)` and
-    /// `∂P_e/∂V = −E·conj(y)` componentwise.
-    fn air_gap_power(&self, e: Complex<f64>, v: Complex<f64>) -> (f64, Complex<f64>) {
-        let w = e * v.conj() * self.y.conj();
-        (e.norm_sqr() * self.y.re - w.re, w)
+    /// The speed factor on the flux-derived terms: the rotor speed in the full
+    /// form, one in the approximate one. `dw` is its derivative with respect to
+    /// `ω`, which is what makes the two forms one code path.
+    fn speed(&self, omega: f64) -> (f64, f64) {
+        if self.speed_voltages {
+            (omega, 1.0)
+        } else {
+            (1.0, 0.0)
+        }
     }
+
+    /// The stator solve, and its sensitivity to the rotor speed.
+    ///
+    /// `I = (w·E − V)/(r_a + j·w·x'_d)`. With `w = 1` this is the ordinary
+    /// Norton current; with `w = ω` it is the full form, in which the machine's
+    /// admittance itself moves with speed — which is why the constant stamp can
+    /// no longer cancel exactly and `∂I/∂V` stops being zero.
+    fn stator(&self, e: Complex<f64>, v: Complex<f64>, omega: f64) -> Stator {
+        let (w, dw) = self.speed(omega);
+        let y = Complex::new(1.0, 0.0) / Complex::new(self.ra, w * self.xdp);
+        let current = (e * w - v) * y;
+        // dy/dω = −j·x'_d·y²·dw, by differentiating 1/(r_a + j·w·x'_d).
+        let dy = -Complex::new(0.0, 1.0) * self.xdp * y * y * dw;
+        Stator { y, current, di_domega: e * dw * y + (e * w - v) * dy, w }
+    }
+
+    /// The air-gap **torque**, `Re(E·conj(I))` with `E` the unscaled internal
+    /// EMF. At `w = 1` this is the air-gap power, which is why the two forms
+    /// coincide at synchronous speed.
+    fn torque(e: Complex<f64>, current: Complex<f64>) -> f64 {
+        (e * current.conj()).re
+    }
+
+    /// The mechanical term the swing equation subtracts the torque from:
+    /// `P_m` in the approximate form, `P_m/ω` in the full one.
+    fn mechanical(&self, p_m: f64, omega: f64) -> (f64, f64) {
+        if self.speed_voltages {
+            (p_m / omega, -p_m / (omega * omega))
+        } else {
+            (p_m, 0.0)
+        }
+    }
+}
+
+/// What one stator solve produces, plus what it needs for the `ω` column.
+struct Stator {
+    y: Complex<f64>,
+    current: Complex<f64>,
+    di_domega: Complex<f64>,
+    w: f64,
 }
 
 impl Machine for GenCls {
@@ -300,15 +369,19 @@ impl Machine for GenCls {
 
     fn derivatives(&self, x: &[f64], v: Complex<f64>, _e_fd: f64, p_m: f64, out: &mut [f64]) {
         let (delta, omega) = (x[0], x[1]);
-        let (p_e, _) = self.air_gap_power(self.emf(delta), v);
+        let e = self.emf(delta);
+        let c_e = Self::torque(e, self.stator(e, v, omega).current);
+        let (mech, _) = self.mechanical(p_m, omega);
         out[0] = self.omega_base * (omega - 1.0);
-        out[1] = (p_m - p_e - self.d * (omega - 1.0)) / (2.0 * self.h);
+        out[1] = (mech - c_e - self.d * (omega - 1.0)) / (2.0 * self.h);
     }
 
-    fn injection(&self, x: &[f64], _v: Complex<f64>) -> Complex<f64> {
-        // I_machine + y·V = (E − V)·y + y·V = E·y, so the cancellation is
-        // exact and nothing here depends on V at all.
-        self.emf(x[0]) * self.y
+    fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64> {
+        // In the approximate form `I_machine + y·V = (E − V)·y + y·V = E·y`,
+        // so the constant stamp cancels exactly and nothing depends on V. In
+        // the full form the machine's own admittance moves with speed, so a
+        // residual remains — which is the speed voltage, made visible.
+        self.stator(self.emf(x[0]), v, x[1]).current + self.y * v
     }
 
     fn jacobian(
@@ -316,36 +389,55 @@ impl Machine for GenCls {
         x: &[f64],
         v: Complex<f64>,
         _e_fd: f64,
-        _p_m: f64,
+        p_m: f64,
         out: &mut MachineJacobian,
     ) {
-        let e = self.emf(x[0]);
-        let (_, w) = self.air_gap_power(e, v);
+        let (delta, omega) = (x[0], x[1]);
+        let e = self.emf(delta);
+        let stator = self.stator(e, v, omega);
         let two_h = 2.0 * self.h;
-        let eyc = e * self.y.conj();
+        let (_, dmech) = self.mechanical(p_m, omega);
+
+        // Everything follows from ∂I, chained through `c_e = Re(E·conj(I))`.
+        // Writing it this way rather than expanding the torque means the two
+        // forms differ in exactly one place — the stator solve — instead of in
+        // every derivative.
+        let i = stator.current;
+        let di_ddelta = Complex::new(0.0, 1.0) * e * stator.w * stator.y;
+        let di_dvre = -stator.y;
+        let di_dvim = -Complex::new(0.0, 1.0) * stator.y;
+        let de_ddelta = Complex::new(0.0, 1.0) * e;
+
+        let dce_ddelta = (de_ddelta * i.conj()).re + (e * di_ddelta.conj()).re;
+        let dce_domega = (e * stator.di_domega.conj()).re;
+        let dce_dvre = (e * di_dvre.conj()).re;
+        let dce_dvim = (e * di_dvim.conj()).re;
 
         out.dfdx[0] = 0.0;
         out.dfdx[1] = self.omega_base;
-        out.dfdx[2] = -w.im / two_h;
-        out.dfdx[3] = -self.d / two_h;
+        out.dfdx[2] = -dce_ddelta / two_h;
+        out.dfdx[3] = (dmech - dce_domega - self.d) / two_h;
 
         out.dfdv[0] = 0.0;
         out.dfdv[1] = 0.0;
-        out.dfdv[2] = eyc.re / two_h;
-        out.dfdv[3] = eyc.im / two_h;
+        out.dfdv[2] = -dce_dvre / two_h;
+        out.dfdv[3] = -dce_dvim / two_h;
 
         out.dfde[0] = 0.0;
         out.dfde[1] = 0.0;
         out.dfdp[0] = 0.0;
-        out.dfdp[1] = 1.0 / two_h;
+        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
 
-        let jey = Complex::new(0.0, 1.0) * e * self.y;
-        out.didx[0] = jey.re;
-        out.didx[1] = 0.0;
-        out.didx[2] = jey.im;
-        out.didx[3] = 0.0;
+        out.didx[0] = di_ddelta.re;
+        out.didx[1] = stator.di_domega.re;
+        out.didx[2] = di_ddelta.im;
+        out.didx[3] = stator.di_domega.im;
 
-        out.didv = [0.0; 4];
+        // ∂I_inj/∂V = ∂I_machine/∂V + y_const, zero in the approximate form and
+        // the speed voltage itself in the full one.
+        let d_re = di_dvre + self.y;
+        let d_im = di_dvim + Complex::new(0.0, 1.0) * self.y;
+        out.didv = [d_re.re, d_im.re, d_re.im, d_im.im];
     }
 
     fn initialize(&mut self, v: Complex<f64>, s: Complex<f64>) -> Result<MachineInit, InitError> {
@@ -415,6 +507,7 @@ pub struct GenTransient {
     tq0p: f64,
     omega_base: f64,
     y: Complex<f64>,
+    speed_voltages: bool,
 }
 
 /// [`GenTransient`]'s parameters, on the machine's own MVA rating.
@@ -475,11 +568,32 @@ impl GenTransient {
             tq0p: params.tq0p,
             omega_base: std::f64::consts::TAU * f_nom,
             y: Complex::new(1.0, 0.0) / z_norton,
+            speed_voltages: false,
         })
+    }
+
+    /// Carry the rotor speed on the speed-voltage terms, and write the swing
+    /// equation in torque. See the module doc.
+    pub fn with_speed_voltages(mut self, on: bool) -> Self {
+        self.speed_voltages = on;
+        self
     }
 
     pub fn h(&self) -> f64 {
         self.h
+    }
+
+    /// The speed factor on the flux-derived terms, and its derivative.
+    fn speed(&self, omega: f64) -> (f64, f64) {
+        if self.speed_voltages { (omega, 1.0) } else { (1.0, 0.0) }
+    }
+
+    fn mechanical(&self, p_m: f64, omega: f64) -> (f64, f64) {
+        if self.speed_voltages {
+            (p_m / omega, -p_m / (omega * omega))
+        } else {
+            (p_m, 0.0)
+        }
     }
 
     /// Network-frame voltage into rotor coordinates.
@@ -494,18 +608,27 @@ impl GenTransient {
         Complex::new(i_d * sd + i_q * cd, -i_d * cd + i_q * sd)
     }
 
-    fn det(&self) -> f64 {
-        self.ra * self.ra + self.xdp * self.xqp
+    /// `det` of the 2×2 stator solve. The speed factor enters squared, which is
+    /// what makes the full form's `ω` column more than a scaling.
+    fn det(&self, w: f64) -> f64 {
+        self.ra * self.ra + w * w * self.xdp * self.xqp
     }
 
-    /// Armature currents from the stator equations, given the flux states and
-    /// the terminal voltage in rotor coordinates.
-    fn currents(&self, eqp: f64, edp: f64, v_d: f64, v_q: f64) -> (f64, f64) {
-        let (a, b) = (edp - v_d, eqp - v_q);
-        let det = self.det();
-        ((self.ra * a + self.xqp * b) / det, (-self.xdp * a + self.ra * b) / det)
+    /// Armature currents from the stator equations, given the flux states, the
+    /// terminal voltage in rotor coordinates, and the speed factor.
+    fn currents(&self, eqp: f64, edp: f64, v_d: f64, v_q: f64, w: f64) -> (f64, f64, f64, f64) {
+        let (a, b) = (w * edp - v_d, w * eqp - v_q);
+        let det = self.det(w);
+        (
+            (self.ra * a + w * self.xqp * b) / det,
+            (-w * self.xdp * a + self.ra * b) / det,
+            a,
+            b,
+        )
     }
 
+    /// Air-gap **torque**. The expression does not change between the two
+    /// forms; only the currents it is evaluated at do.
     fn air_gap_power(&self, eqp: f64, edp: f64, i_d: f64, i_q: f64) -> f64 {
         edp * i_d + eqp * i_q + (self.xqp - self.xdp) * i_d * i_q
     }
@@ -530,20 +653,23 @@ impl Machine for GenTransient {
 
     fn derivatives(&self, x: &[f64], v: Complex<f64>, e_fd: f64, p_m: f64, out: &mut [f64]) {
         let (delta, omega, eqp, edp) = (x[0], x[1], x[2], x[3]);
+        let (w, _) = self.speed(omega);
         let (v_d, v_q) = Self::to_dq(delta, v);
-        let (i_d, i_q) = self.currents(eqp, edp, v_d, v_q);
+        let (i_d, i_q, _, _) = self.currents(eqp, edp, v_d, v_q, w);
         let p_e = self.air_gap_power(eqp, edp, i_d, i_q);
+        let (mech, _) = self.mechanical(p_m, omega);
 
         out[0] = self.omega_base * (omega - 1.0);
-        out[1] = (p_m - p_e - self.d * (omega - 1.0)) / (2.0 * self.h);
+        out[1] = (mech - p_e - self.d * (omega - 1.0)) / (2.0 * self.h);
         out[2] = (-eqp - (self.xd - self.xdp) * i_d + e_fd) / self.td0p;
         out[3] = (-edp + (self.xq - self.xqp) * i_q) / self.tq0p;
     }
 
     fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64> {
-        let (delta, eqp, edp) = (x[0], x[2], x[3]);
+        let (delta, omega, eqp, edp) = (x[0], x[1], x[2], x[3]);
+        let (w, _) = self.speed(omega);
         let (v_d, v_q) = Self::to_dq(delta, v);
-        let (i_d, i_q) = self.currents(eqp, edp, v_d, v_q);
+        let (i_d, i_q, _, _) = self.currents(eqp, edp, v_d, v_q, w);
         Self::from_dq(delta, i_d, i_q) + self.y * v
     }
 
@@ -552,14 +678,16 @@ impl Machine for GenTransient {
         x: &[f64],
         v: Complex<f64>,
         _e_fd: f64,
-        _p_m: f64,
+        p_m: f64,
         out: &mut MachineJacobian,
     ) {
-        let (delta, eqp, edp) = (x[0], x[2], x[3]);
+        let (delta, omega, eqp, edp) = (x[0], x[1], x[2], x[3]);
+        let (w, dw) = self.speed(omega);
+        let (_, dmech) = self.mechanical(p_m, omega);
         let (sd, cd) = delta.sin_cos();
         let (v_d, v_q) = Self::to_dq(delta, v);
-        let (i_d, i_q) = self.currents(eqp, edp, v_d, v_q);
-        let det = self.det();
+        let (i_d, i_q, a, b) = self.currents(eqp, edp, v_d, v_q, w);
+        let det = self.det(w);
         let two_h = 2.0 * self.h;
 
         // `a = e'_d − v_d`, `b = e'_q − v_q` are the only things the currents
@@ -570,19 +698,28 @@ impl Machine for GenTransient {
         //   ∂v_d/∂(v_re, v_im) = (sin δ, −cos δ)
         //   ∂v_q/∂(v_re, v_im) = (cos δ,  sin δ)
         let dab: [(f64, f64); 6] = [
-            (-v_q, v_d),   // δ
-            (0.0, 0.0),    // ω
-            (0.0, 1.0),    // e'_q
-            (1.0, 0.0),    // e'_d
-            (-sd, -cd),    // v_re
-            (cd, -sd),     // v_im
+            (-v_q, v_d),       // δ
+            (0.0, 0.0),        // ω — the speed factor is not linear here, see below
+            (0.0, w),          // e'_q
+            (w, 0.0),          // e'_d
+            (-sd, -cd),        // v_re
+            (cd, -sd),         // v_im
         ];
         let mut di_d = [0.0; 6];
         let mut di_q = [0.0; 6];
         for (k, (da, db)) in dab.iter().enumerate() {
-            di_d[k] = (self.ra * da + self.xqp * db) / det;
-            di_q[k] = (-self.xdp * da + self.ra * db) / det;
+            di_d[k] = (self.ra * da + w * self.xqp * db) / det;
+            di_q[k] = (-w * self.xdp * da + self.ra * db) / det;
         }
+        // The `ω` column cannot go through the same fixed inverse: the speed
+        // factor appears in the coefficients *and* in `det`, so it has to be
+        // differentiated as a product. `dw` is zero in the approximate form,
+        // which leaves this column zero and the two forms identical.
+        let ddet = 2.0 * w * dw * self.xdp * self.xqp;
+        di_d[1] = (self.ra * dw * edp + dw * self.xqp * b + w * self.xqp * dw * eqp) / det
+            - i_d * ddet / det;
+        di_q[1] = (-dw * self.xdp * a - w * self.xdp * dw * edp + self.ra * dw * eqp) / det
+            - i_q * ddet / det;
 
         // ∂P_e/∂z, with the explicit e'_d and e'_q terms where they apply.
         let sal = self.xqp - self.xdp;
@@ -601,7 +738,7 @@ impl Machine for GenTransient {
         for k in 0..n {
             out.dfdx[n + k] = -dpe[k] / two_h;
         }
-        out.dfdx[n + 1] -= self.d / two_h;
+        out.dfdx[n + 1] += (dmech - self.d) / two_h;
         // ė'_q and ė'_d
         for k in 0..n {
             out.dfdx[2 * n + k] = -(self.xd - self.xdp) * di_d[k] / self.td0p;
@@ -617,7 +754,7 @@ impl Machine for GenTransient {
         }
 
         out.dfde[2] = 1.0 / self.td0p;
-        out.dfdp[1] = 1.0 / two_h;
+        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
 
         // I_machine = (i_d·sin δ + i_q·cos δ) + j(−i_d·cos δ + i_q·sin δ), so
         // δ moves it both through the currents and through the rotation.
@@ -763,6 +900,7 @@ pub struct GenRound {
     kq: f64,
     omega_base: f64,
     y: Complex<f64>,
+    speed_voltages: bool,
 }
 
 /// [`GenRound`]'s parameters, on the machine's own MVA rating.
@@ -850,11 +988,32 @@ impl GenRound {
             kq: bq / (xqp - xl),
             omega_base: std::f64::consts::TAU * f_nom,
             y: Complex::new(1.0, 0.0) / z_norton,
+            speed_voltages: false,
         })
+    }
+
+    /// Carry the rotor speed on the speed-voltage terms, and write the swing
+    /// equation in torque. See the module doc.
+    pub fn with_speed_voltages(mut self, on: bool) -> Self {
+        self.speed_voltages = on;
+        self
     }
 
     pub fn h(&self) -> f64 {
         self.h
+    }
+
+    /// The speed factor on the flux-derived terms, and its derivative.
+    fn speed(&self, omega: f64) -> (f64, f64) {
+        if self.speed_voltages { (omega, 1.0) } else { (1.0, 0.0) }
+    }
+
+    fn mechanical(&self, p_m: f64, omega: f64) -> (f64, f64) {
+        if self.speed_voltages {
+            (p_m / omega, -p_m / (omega * omega))
+        } else {
+            (p_m, 0.0)
+        }
     }
 
     /// The subtransient impedance the machine presents to a sudden change.
@@ -870,14 +1029,26 @@ impl GenRound {
         (self.ad * eqp + self.bd * psi1d, self.aq * edp + self.bq * psi2q)
     }
 
-    fn det(&self) -> f64 {
-        self.ra * self.ra + self.xdpp * self.xqpp
+    fn det(&self, w: f64) -> f64 {
+        self.ra * self.ra + w * w * self.xdpp * self.xqpp
     }
 
-    fn currents(&self, eqpp: f64, edpp: f64, v_d: f64, v_q: f64) -> (f64, f64) {
-        let (a, b) = (edpp - v_d, eqpp - v_q);
-        let det = self.det();
-        ((self.ra * a + self.xqpp * b) / det, (-self.xdpp * a + self.ra * b) / det)
+    fn currents(
+        &self,
+        eqpp: f64,
+        edpp: f64,
+        v_d: f64,
+        v_q: f64,
+        w: f64,
+    ) -> (f64, f64, f64, f64) {
+        let (a, b) = (w * edpp - v_d, w * eqpp - v_q);
+        let det = self.det(w);
+        (
+            (self.ra * a + w * self.xqpp * b) / det,
+            (-w * self.xdpp * a + self.ra * b) / det,
+            a,
+            b,
+        )
     }
 }
 
@@ -900,16 +1071,18 @@ impl Machine for GenRound {
 
     fn derivatives(&self, x: &[f64], v: Complex<f64>, e_fd: f64, p_m: f64, out: &mut [f64]) {
         let (delta, omega, eqp, edp, psi1d, psi2q) = (x[0], x[1], x[2], x[3], x[4], x[5]);
+        let (w, _) = self.speed(omega);
         let (v_d, v_q) = GenTransient::to_dq(delta, v);
         let (eqpp, edpp) = self.subtransient_emf(eqp, edp, psi1d, psi2q);
-        let (i_d, i_q) = self.currents(eqpp, edpp, v_d, v_q);
+        let (i_d, i_q, _, _) = self.currents(eqpp, edpp, v_d, v_q, w);
+        let (mech, _) = self.mechanical(p_m, omega);
 
         let p_e = edpp * i_d + eqpp * i_q + (self.xqpp - self.xdpp) * i_d * i_q;
         let delta_d = psi1d - eqp + (self.xdp - self.xl) * i_d;
         let delta_q = psi2q - edp - (self.xqp - self.xl) * i_q;
 
         out[0] = self.omega_base * (omega - 1.0);
-        out[1] = (p_m - p_e - self.d * (omega - 1.0)) / (2.0 * self.h);
+        out[1] = (mech - p_e - self.d * (omega - 1.0)) / (2.0 * self.h);
         out[2] = (-eqp - (self.xd - self.xdp) * (i_d - self.kd * delta_d) + e_fd) / self.td0p;
         out[3] = (-edp + (self.xq - self.xqp) * (i_q + self.kq * delta_q)) / self.tq0p;
         out[4] = -delta_d / self.td0pp;
@@ -917,10 +1090,11 @@ impl Machine for GenRound {
     }
 
     fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64> {
-        let (delta, eqp, edp, psi1d, psi2q) = (x[0], x[2], x[3], x[4], x[5]);
+        let (delta, omega, eqp, edp, psi1d, psi2q) = (x[0], x[1], x[2], x[3], x[4], x[5]);
+        let (w, _) = self.speed(omega);
         let (v_d, v_q) = GenTransient::to_dq(delta, v);
         let (eqpp, edpp) = self.subtransient_emf(eqp, edp, psi1d, psi2q);
-        let (i_d, i_q) = self.currents(eqpp, edpp, v_d, v_q);
+        let (i_d, i_q, _, _) = self.currents(eqpp, edpp, v_d, v_q, w);
         GenTransient::from_dq(delta, i_d, i_q) + self.y * v
     }
 
@@ -929,15 +1103,17 @@ impl Machine for GenRound {
         x: &[f64],
         v: Complex<f64>,
         _e_fd: f64,
-        _p_m: f64,
+        p_m: f64,
         out: &mut MachineJacobian,
     ) {
-        let (delta, eqp, edp, psi1d, psi2q) = (x[0], x[2], x[3], x[4], x[5]);
+        let (delta, omega, eqp, edp, psi1d, psi2q) = (x[0], x[1], x[2], x[3], x[4], x[5]);
+        let (w, dw) = self.speed(omega);
+        let (_, dmech) = self.mechanical(p_m, omega);
         let (sd, cd) = delta.sin_cos();
         let (v_d, v_q) = GenTransient::to_dq(delta, v);
         let (eqpp, edpp) = self.subtransient_emf(eqp, edp, psi1d, psi2q);
-        let (i_d, i_q) = self.currents(eqpp, edpp, v_d, v_q);
-        let det = self.det();
+        let (i_d, i_q, a, b) = self.currents(eqpp, edpp, v_d, v_q, w);
+        let det = self.det(w);
         let two_h = 2.0 * self.h;
         let n = 6;
 
@@ -947,14 +1123,14 @@ impl Machine for GenRound {
         // on, and the subtransient EMFs are linear in the flux states, so each
         // column is one `(∂a, ∂b)` pair pushed through one fixed 2×2 inverse.
         let dab: [(f64, f64); 8] = [
-            (-v_q, v_d),         // δ
-            (0.0, 0.0),          // ω
-            (0.0, self.ad),      // e'_q
-            (self.aq, 0.0),      // e'_d
-            (0.0, self.bd),      // ψ_1d
-            (self.bq, 0.0),      // ψ_2q
-            (-sd, -cd),          // v_re
-            (cd, -sd),           // v_im
+            (-v_q, v_d),             // δ
+            (0.0, 0.0),              // ω — handled below, not linear here
+            (0.0, w * self.ad),      // e'_q
+            (w * self.aq, 0.0),      // e'_d
+            (0.0, w * self.bd),      // ψ_1d
+            (w * self.bq, 0.0),      // ψ_2q
+            (-sd, -cd),              // v_re
+            (cd, -sd),               // v_im
         ];
         // ∂e''_q and ∂e''_d, in the same column order.
         let deqpp = [0.0, 0.0, self.ad, 0.0, self.bd, 0.0, 0.0, 0.0];
@@ -963,9 +1139,17 @@ impl Machine for GenRound {
         let mut di_d = [0.0; 8];
         let mut di_q = [0.0; 8];
         for (k, (da, db)) in dab.iter().enumerate() {
-            di_d[k] = (self.ra * da + self.xqpp * db) / det;
-            di_q[k] = (-self.xdpp * da + self.ra * db) / det;
+            di_d[k] = (self.ra * da + w * self.xqpp * db) / det;
+            di_q[k] = (-w * self.xdpp * da + self.ra * db) / det;
         }
+        // The speed factor appears in the coefficients *and* in `det`, so the
+        // `ω` column is a product rule rather than the fixed inverse above.
+        // `dw` is zero in the approximate form, leaving this column zero.
+        let ddet = 2.0 * w * dw * self.xdpp * self.xqpp;
+        di_d[1] = (self.ra * dw * edpp + dw * self.xqpp * b + w * self.xqpp * dw * eqpp) / det
+            - i_d * ddet / det;
+        di_q[1] = (-dw * self.xdpp * a - w * self.xdpp * dw * edpp + self.ra * dw * eqpp) / det
+            - i_q * ddet / det;
 
         let sal = self.xqpp - self.xdpp;
         let (xdd, xqq) = (self.xdp - self.xl, self.xqp - self.xl);
@@ -999,7 +1183,7 @@ impl Machine for GenRound {
             out.dfdx[4 * n + k] = -d_delta_d[k] / self.td0pp;
             out.dfdx[5 * n + k] = -d_delta_q[k] / self.tq0pp;
         }
-        out.dfdx[n + 1] -= self.d / two_h;
+        out.dfdx[n + 1] += (dmech - self.d) / two_h;
         out.dfdx[2 * n + 2] -= 1.0 / self.td0p;
         out.dfdx[3 * n + 3] -= 1.0 / self.tq0p;
 
@@ -1015,7 +1199,7 @@ impl Machine for GenRound {
         }
 
         out.dfde[2] = 1.0 / self.td0p;
-        out.dfdp[1] = 1.0 / two_h;
+        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
 
         for k in 0..n {
             let (mut d_re, mut d_im) =
@@ -1059,6 +1243,8 @@ impl Machine for GenRound {
 
         // Work inward from the stator, then outward through the steady-state
         // flux relations. Every step is forced; there is nothing to choose.
+        // Initialization is at synchronous speed, where the two forms coincide
+        // exactly, so nothing here needs to know which is in use.
         let eqpp = v_q + self.ra * i_q + self.xdpp * i_d;
         let edpp = v_d + self.ra * i_d - self.xqpp * i_q;
         let edp = (self.xq - self.xqp) * i_q;

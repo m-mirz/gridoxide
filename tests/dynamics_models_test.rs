@@ -990,3 +990,176 @@ fn a_tripped_unit_freezes_and_the_rest_picks_up_the_load() {
         "the survivor should pick up −Δω/R = {predicted:.5}, picked up {actual:.5}"
     );
 }
+
+/// The full form — rotor speed on the speed-voltage terms, swing equation in
+/// torque — is a *different model*, and has to be as well founded as the
+/// approximate one.
+///
+/// Both properties that matter carry over, and neither is automatic. The
+/// analytic Jacobian gains a whole column: `ω` now enters the stator solve
+/// through the coefficients *and* through its determinant, so its derivative is
+/// a product rule rather than the fixed 2×2 inverse every other column goes
+/// through. And initialization is untouched, because at synchronous speed the
+/// two forms coincide exactly — which is why the equilibrium still holds
+/// without a line of new initialization code.
+#[test]
+fn the_full_form_is_as_well_founded_as_the_approximate_one() {
+    // The oracle, over every machine, with the speed voltages on.
+    let machines: Vec<Box<dyn Machine>> = vec![
+        Box::new(new_machine(2.0).with_speed_voltages(true)),
+        Box::new(GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM)
+            .unwrap()
+            .with_speed_voltages(true)),
+    ];
+    for machine in machines {
+        let mut model = GeneratingUnit::new(
+            machine,
+            Some(Box::new(new_avr())),
+            Some(Box::new(new_gov(0.05))),
+            None,
+        );
+        model
+            .initialize(Complex::from_polar(1.02, 0.15), Complex::new(0.8, 0.3))
+            .unwrap();
+        let n = model.n_states();
+        for scale in [0.13, -0.19] {
+            // The speed is probed *away* from 1.0 deliberately: at synchronous
+            // speed the new terms vanish and the oracle would be checking the
+            // approximate form all over again.
+            let mut x: Vec<f64> = (0..n).map(|k| 0.4 + scale * k as f64).collect();
+            x[1] = 1.03;
+            let v = Complex::new(0.97, 0.11);
+            let mut analytic = ModelJacobian::zeros(n);
+            analytic.clear();
+            model.jacobian(&x, v, &mut analytic);
+            let numeric = finite_difference(&model, &x, v, 1e-6);
+            for (name, a, b) in [
+                ("dfdx", &analytic.dfdx, &numeric.dfdx),
+                ("dfdv", &analytic.dfdv, &numeric.dfdv),
+                ("didx", &analytic.didx, &numeric.didx),
+                ("didv", &analytic.didv.to_vec(), &numeric.didv.to_vec()),
+            ] {
+                for (k, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
+                    let sc = av.abs().max(bv.abs()).max(1.0);
+                    assert!(
+                        (av - bv).abs() / sc < 1e-6,
+                        "{name}[{k}]: analytic {av:e} vs numeric {bv:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    // And the equilibrium, through a whole run.
+    let model: Box<dyn DynamicModel> = Box::new(GeneratingUnit::new(
+        Box::new(GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM)
+            .unwrap()
+            .with_speed_voltages(true)),
+        Some(Box::new(new_avr())),
+        Some(Box::new(new_gov(0.05))),
+        None,
+    ));
+    let (mut system, _) = islanded_with(vec![model], &[0.8], (-0.8, -0.2));
+    assert!(
+        system.max_derivative() < 1e-11,
+        "the full form must initialize to an equilibrium too, drift {:e}",
+        system.max_derivative()
+    );
+    let report = run_dynamics(&mut system, &options(0.01, 20.0, Vec::new()));
+    assert_eq!(report.status, DynamicsStatus::Completed);
+    let omega = report.trajectory.series("G1.omega").unwrap();
+    let drift = omega.iter().fold(0.0f64, |m, w| m.max((w - omega[0]).abs()));
+    assert!(drift < 1e-9, "undisturbed speed drifted by {drift:e}");
+}
+
+/// The two forms are **identical** at synchronous speed and differ in
+/// proportion to the speed deviation — which is the whole basis of the claim
+/// that the difference is the factor of `ω` and not something else.
+///
+/// The first half is exact and is the sharper statement: with nothing
+/// disturbed, `ω` is one, every new term collapses, and the two trajectories
+/// must agree bit for bit. A flag that changed anything there would not be the
+/// `ω` factor.
+///
+/// The machine needs something to swing *against*, so this builds a
+/// single-machine-infinite-bus case rather than reusing the islanded helper —
+/// an islanded machine's rotor angle drifts freely with the system frequency,
+/// and comparing two drifts says nothing about either.
+#[test]
+fn the_two_forms_agree_at_synchronous_speed_and_part_in_proportion_to_deviation() {
+    let run = |speed_voltages: bool, events: Vec<Event>| {
+        let buses = vec![
+            bus(0, BusType::PV, 1.0, 0.8, 0.0),
+            bus(1, BusType::Slack, 1.0, 0.0, 0.0),
+        ];
+        let lines = vec![Line { from: 0, to: 1, r: 0.0, x: 0.20, b_shunt: 0.0, g_shunt: 0.0 }];
+        let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
+            buses,
+            lines: lines.clone(),
+        });
+        let buses = report.buses;
+        let ybus = build_ybus(buses.len(), &lines, &[]).finish();
+        let (p_calc, q_calc) = power_injections(&buses, &ybus);
+
+        let machine = GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM)
+            .unwrap()
+            .with_speed_voltages(speed_voltages);
+        let mut system = build(SystemSpec {
+            buses: &buses,
+            lines: &lines,
+            transformers: &[],
+            shunts: &[],
+            devices: vec![DeviceSpec {
+                id: "G1".to_string(),
+                bus: 0,
+                s: Complex::new(p_calc[0], q_calc[0]),
+                model: Box::new(GeneratingUnit::machine_only(Box::new(machine))),
+            }],
+            fixed_buses: vec![1],
+        })
+        .expect("both forms initialize to the same equilibrium");
+
+        let report = run_dynamics(&mut system, &options(0.002, 6.0, events));
+        assert_eq!(report.status, DynamicsStatus::Completed);
+        (
+            report.trajectory.series("G1.delta").unwrap(),
+            report.trajectory.series("G1.omega").unwrap(),
+        )
+    };
+
+    // Undisturbed: identical, bit for bit.
+    let (still_approx, _) = run(false, Vec::new());
+    let (still_full, _) = run(true, Vec::new());
+    for (a, b) in still_approx.iter().zip(still_full.iter()) {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "at synchronous speed the two forms must be the same equations"
+        );
+    }
+
+    // Disturbed: different, and by the order of the speed deviation.
+    let fault = vec![
+        Event::bolted_fault(1.0, 0),
+        Event::new(1.06, EventKind::ClearFault { bus: 0 }),
+    ];
+    let (d_approx, w_approx) = run(false, fault.clone());
+    let (d_full, _) = run(true, fault);
+
+    let deviation = w_approx.iter().fold(0.0f64, |m, w| m.max((w - 1.0).abs()));
+    let gap = d_approx
+        .iter()
+        .zip(d_full.iter())
+        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    let swing = d_approx.iter().fold(0.0f64, |m, d| m.max(*d))
+        - d_approx.iter().fold(f64::MAX, |m, d| m.min(*d));
+
+    assert!(deviation > 1e-3, "the case must actually leave synchronous speed");
+    assert!(swing < std::f64::consts::TAU, "the machine must stay in step, swing {swing:e}");
+    assert!(gap > 1e-5, "the flag must reach the equations, but the gap was {gap:e}");
+    assert!(
+        gap < 5.0 * deviation * swing,
+        "the two forms should differ by the order of the speed deviation: gap {gap:e} \
+         against a deviation of {deviation:e} on a swing of {swing:e}"
+    );
+}

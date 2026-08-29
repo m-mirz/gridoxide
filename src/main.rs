@@ -143,6 +143,7 @@ usage:
                                 Reads a PGM JSON document.
   gridoxide dynamics <path> [--stop <t>] [--step <h>] [--tol <t>]
                      [--damping <n>] [--backend scalar|klu-native]
+                     [--speed-voltages | --no-speed-voltages]
                      [--csv <out>] [--observe <substring>]
                                 run an RMS (phasor-domain) dynamic simulation:
                                 what the network does over *time* after a
@@ -159,6 +160,15 @@ usage:
                                 the case must be one that solves; every device
                                 is then initialized so that nothing moves until
                                 the first event does.
+                                --speed-voltages carries the rotor speed on the
+                                machines' speed-voltage terms and writes their
+                                swing equations in torque, which is what Dynawo
+                                and Sauer & Pai do. Off by default: the omega
+                                approximately one assumption is what makes the
+                                phasor formulation coherent, and it is what the
+                                closed-form gates are derived from. It is worth
+                                0.6% of terminal power at a 0.9% speed
+                                deviation — turning it on moves the answer.
   gridoxide short-circuit <path> [--scaling max|min]
                                 run an IEC 60909 short-circuit calculation over
                                 a PGM JSON document containing `fault` entries,
@@ -911,7 +921,15 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
     use gridoxide::solver::JacobianBackend;
 
-    let document = json::read(path).map_err(|e| e.to_string())?;
+    let mut document = json::read(path).map_err(|e| e.to_string())?;
+    // The document states this; the flag overrides it, because it is a
+    // modelling question a reader may want to ask both ways of the same case.
+    if flags.iter().any(|f| f == "--speed-voltages") {
+        document.dynamics.speed_voltages = true;
+    }
+    if flags.iter().any(|f| f == "--no-speed-voltages") {
+        document.dynamics.speed_voltages = false;
+    }
     let (mut system, events) = document.build().map_err(|e| e.to_string())?;
 
     let backend = match flag_value(flags, "--backend")?.as_deref() {

@@ -2035,6 +2035,12 @@ impl DynamicsResult {
 /// document's own schedule when given, which is what a caller sweeping clearing
 /// times wants.
 ///
+/// `speed_voltages` overrides the document's own choice of machine
+/// formulation: `False` (the default) makes the classical `ω ≈ 1` assumption,
+/// `True` carries the rotor speed on the speed-voltage terms and writes the
+/// swing equation in torque, which is what Dynawo does. On Kundur's Example
+/// 13.2 the difference is 0.6% of terminal power at a 0.9% speed deviation.
+///
 /// The physics is gated in the Rust suite — against closed forms, against a
 /// finite-difference oracle, and against Dynawo's own published answer for
 /// Kundur's Example 13.2. This binding only has to reach it.
@@ -2042,7 +2048,7 @@ impl DynamicsResult {
 #[pyfunction]
 #[pyo3(signature = (
     path, stop = 10.0, step = 0.005, tol = 1e-9, max_newton = 20,
-    damping_steps = 2, backend = None, events = None,
+    damping_steps = 2, backend = None, events = None, speed_voltages = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn dynamics(
@@ -2055,6 +2061,7 @@ fn dynamics(
     damping_steps: usize,
     backend: Option<&str>,
     events: Option<Vec<Bound<'_, pyo3::types::PyAny>>>,
+    speed_voltages: Option<bool>,
 ) -> PyResult<DynamicsResult> {
     use crate::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
     use crate::solver::JacobianBackend;
@@ -2069,7 +2076,12 @@ fn dynamics(
         }
     };
 
-    let document = json::read(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let mut document = json::read(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // The document states this; the argument overrides it, so one case can be
+    // asked both ways without editing the file.
+    if let Some(on) = speed_voltages {
+        document.dynamics.speed_voltages = on;
+    }
     let (mut system, mut schedule) =
         document.build().map_err(|e| PyValueError::new_err(e.to_string()))?;
 

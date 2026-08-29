@@ -54,7 +54,13 @@ and part in proportion to the speed deviation.
 
 That is the classical assumption — Kundur §13.3 states it explicitly — and its size is **measured**
 rather than assumed: against Dynawo on Kundur's own Example 13.2 it costs 0.6% of terminal power at
-a 0.9% speed deviation. See [Against Dynawo](./validation.md).
+a 0.9% speed deviation.
+
+**Both forms are available.** `"speed_voltages": true` switches to the full one, and doing so drives
+that 0.6% to 0.026% and the rotor-angle agreement over the first swing from 1.9e-2 to 1.8e-3 rad.
+The approximation stays the default because it is what makes the phasor formulation coherent, and
+because every closed-form gate here is derived from the power form. See
+[Against Dynawo](./validation.md).
 
 ## The shape of a run
 

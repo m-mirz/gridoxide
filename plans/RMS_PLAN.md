@@ -1,8 +1,8 @@
 # RMS simulation in gridoxide
 
-Status: **complete except G6**, 2026-08-28, against `6f212eb`. Phases 1–4 and 6 done, phase 5
-half done — Dynawo yes, ANDES no. §11–§16 record what was actually done, including the places
-this plan was wrong.
+Status: **complete except G6**, 2026-08-29, against `6f212eb`. Phases 1–4 and 6 done, phase 5
+half done — Dynawo yes, ANDES dropped. §11–§17 record what was actually done, including the
+places this plan was wrong. §17 is follow-on work beyond the plan's own scope.
 
 ## Context
 
@@ -1047,3 +1047,65 @@ after its trajectory diverged from ours.
 - Regulator limits, saturation, state-triggered events, a fifth-order machine.
 - Coupling the Dynawo reader to `src/iidm.rs` so a full IIDM-plus-`.dyd` case loads in one step.
 - Small-signal analysis, which is now much closer than the plan assumed.
+
+
+---
+
+## 17. Beyond the plan: closing the `ω ≈ 1` finding
+
+§15 measured a 0.6% disagreement with Dynawo, attributed it by reading Dynawo's Modelica, and
+stopped there — the attribution was an argument, not a demonstration. This closes it.
+
+Both machine formulations are now available on every machine, selected by
+`with_speed_voltages(true)` in Rust, `"speed_voltages": true` in a document, `--speed-voltages` on
+the command line, or `speed_voltages=True` in Python:
+
+```text
+approximate (default):  v_d = −r_a·i_d − λ_q            2H·ω̇ = P_m   − P_e − D·Δω
+full (Dynawo, S&P):     v_d = −r_a·i_d − ω·λ_q          2H·ω̇ = P_m/ω − c_e − D·Δω
+```
+
+Turning the full form on:
+
+| | approximate | full form |
+|---|---|---|
+| Post-fault power offset at matched angle | −0.611% | **−0.026%** |
+| Rotor angle vs Dynawo, first swing | 1.89e-2 rad | **1.76e-3 rad** |
+| Rotor angle vs Dynawo, whole 5 s | 2.06e-1 rad | **3.81e-2 rad** |
+
+A factor of twenty-four on the offset. Had the approximation not been the cause, switching it off
+would have moved the number somewhere arbitrary rather than to zero. That is the difference between
+attributing a discrepancy and proving the attribution.
+
+The residual 0.026% is genuinely unexplained and is bounded by a gate so it stays visible.
+
+### It stays the default
+
+Two reasons, both stated in the code. The `ω ≈ 1` assumption is what makes the phasor formulation
+coherent in the first place. And every closed-form gate in this crate is derived from the power
+form — the equal-area criterion above all, whose critical clearing time gridoxide reproduces to
+12 µs. Changing the default would have meant either losing that gate or rewriting the closed form it
+checks against.
+
+### What it cost, and what made it cheap
+
+Three machines and their analytic Jacobians. The change is one speed factor `w` — `ω` in the full
+form, `1` in the approximate one — threaded through each stator solve, plus its derivative `dw`,
+which is `0` in the approximate form and therefore leaves every existing column untouched. One code
+path, and the two forms are the same equations at `dw = 0`.
+
+The `ω` column is the one place it is not mechanical: the speed factor enters the stator
+coefficients **and** the determinant of the 2×2 solve, so that column is a product rule rather than
+the fixed inverse every other column goes through. The finite-difference oracle caught nothing here,
+which is the point of having had it all along — it was probed deliberately at `ω = 1.03`, since at
+synchronous speed the new terms vanish and the oracle would have been re-checking the old form.
+
+Two gates hold it down: undisturbed, the two forms are **bit-identical** (at `ω = 1` they are the
+same equations); disturbed, they differ by the order of the speed deviation and no more.
+
+### Still outstanding
+
+- Regulator limits, saturation, state-triggered events, a fifth-order machine.
+- Coupling the Dynawo reader to `src/iidm.rs` so a full IIDM-plus-`.dyd` case loads in one step.
+- Small-signal analysis.
+- G6 (ANDES) — dropped, not deferred.

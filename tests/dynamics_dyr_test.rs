@@ -217,6 +217,7 @@ fn a_dyr_case_initializes_and_runs() {
         dynamics: DynamicsData {
             s_base: 100.0,
             f_nom: 50.0,
+            speed_voltages: false,
             units,
             loads: Vec::new(),
             fixed_buses: Vec::new(),
