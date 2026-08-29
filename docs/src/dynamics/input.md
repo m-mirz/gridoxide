@@ -90,8 +90,10 @@ file's own literal values.
 
 `GeneratorSynchronousFourWindings*` maps onto the sixth-order machine parameter for parameter, with
 `generator_SNom` as the machine base. `...ProportionalRegulations` maps onto the proportional
-regulator and governor exactly. `GeneratorSynchronousThreeWindings*` is a fifth-order machine this
-library does not have; it is skipped and named.
+regulator and governor exactly. `GeneratorSynchronousThreeWindings*` maps onto the fifth-order
+salient-pole machine — its parameter set carries no `XpqPu` and no `Tpq0`, so the reader keys on the
+**library name** rather than on which parameters happen to be present, which is the difference
+between reading a model and guessing one from its data.
 
 **One conversion is inferred rather than read**, and is flagged in the source: `governor_KGover` is a
 gain on the machine's own `governor_PNom`, while the proportional governor wants one on the network
