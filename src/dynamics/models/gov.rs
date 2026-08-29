@@ -5,12 +5,18 @@
 //! islanded system never returns after a disturbance — it settles at whatever
 //! the swing equation's new equilibrium is, or does not settle at all.
 //!
-//! Rate and position limits on the valve are absent for the same reason
-//! exciter limits are — see [`avr`](super::avr).
+//! Valve **position** limits are implemented, and non-windup, for the reason
+//! [`avr`](super::avr) sets out: a governor whose valve is wide open cannot
+//! open further however far the frequency falls, and a wound-up integrator
+//! would keep it there long after the frequency recovered. Valve *rate* limits
+//! are not implemented — they constrain the derivative rather than the state,
+//! which is a different and more intrusive piece of machinery.
 
 use serde::{Deserialize, Serialize};
 
-use super::{Control, InitError};
+use std::cell::Cell;
+
+use super::{Control, InitError, LimitState, Limits};
 
 /// `TGOV1`: a steam turbine-governor, the simplest model in wide use.
 ///
@@ -42,6 +48,9 @@ pub struct Tgov1 {
     t2_over_t3: f64,
     t3: f64,
     dt: f64,
+    limits: Limits,
+    /// Which limit is holding the valve this step, decided once at its start.
+    limit: Cell<LimitState>,
     /// Latched by [`Control::initialize`].
     p_ref: f64,
 }
@@ -59,6 +68,10 @@ pub struct Tgov1Params {
     pub t3: f64,
     /// Turbine damping, per unit. Often zero.
     pub dt: f64,
+    /// Valve position limits, per unit on the network base. Unbounded when
+    /// absent.
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 const TGOV1_STATES: [&str; 2] = ["gov_valve", "gov_turbine"];
@@ -80,6 +93,8 @@ impl Tgov1 {
             t2_over_t3: params.t2 / params.t3,
             t3: params.t3,
             dt: params.dt,
+            limits: params.limits,
+            limit: Cell::new(LimitState::Free),
             p_ref: 0.0,
         })
     }
@@ -93,6 +108,11 @@ impl Tgov1 {
     pub fn r(&self) -> f64 {
         self.r
     }
+
+    /// The valve's derivative before any limit is applied.
+    fn raw_valve_derivative(&self, x: &[f64], u: f64) -> f64 {
+        (self.p_ref - u / self.r - x[0]) / self.t1
+    }
 }
 
 impl Control for Tgov1 {
@@ -104,30 +124,40 @@ impl Control for Tgov1 {
         &TGOV1_STATES
     }
 
-    fn derivatives(&self, x: &[f64], u: f64, out: &mut [f64]) {
-        let demand = self.p_ref - u / self.r;
-        out[0] = (demand - x[0]) / self.t1;
-        out[1] = (x[0] - x[1]) / self.t3;
+    fn latch(&self, x: &[f64], u: f64) {
+        self.limit.set(self.limits.latch(x[0], self.raw_valve_derivative(x, u)));
     }
 
-    fn jacobian(&self, _x: &[f64], _u: f64, dfdx: &mut [f64], dfdu: &mut [f64]) {
-        dfdx[0] = -1.0 / self.t1;
-        dfdx[1] = 0.0;
-        dfdu[0] = -1.0 / (self.r * self.t1);
+    fn derivatives(&self, x: &[f64], u: f64, out: &mut [f64]) {
+        out[0] = self.limits.held(self.limit.get(), self.raw_valve_derivative(x, u));
+        out[1] = (self.limits.under(self.limit.get(), x[0]).0 - x[1]) / self.t3;
+    }
 
-        dfdx[2] = 1.0 / self.t3;
+    fn jacobian(&self, x: &[f64], _u: f64, dfdx: &mut [f64], dfdu: &mut [f64]) {
+        if self.limit.get() == LimitState::Free {
+            dfdx[0] = -1.0 / self.t1;
+            dfdu[0] = -1.0 / (self.r * self.t1);
+        }
+        dfdx[1] = 0.0;
+
+        dfdx[2] = self.limits.under(self.limit.get(), x[0]).1 / self.t3;
         dfdx[3] = -1.0 / self.t3;
         dfdu[1] = 0.0;
     }
 
     fn output(&self, x: &[f64], u: f64) -> f64 {
-        x[1] + self.t2_over_t3 * (x[0] - x[1]) - self.dt * u
+        let valve = self.limits.under(self.limit.get(), x[0]).0;
+        x[1] + self.t2_over_t3 * (valve - x[1]) - self.dt * u
     }
 
-    fn output_jacobian(&self, _x: &[f64], _u: f64, dydx: &mut [f64]) -> f64 {
-        dydx[0] = self.t2_over_t3;
+    fn output_jacobian(&self, x: &[f64], _u: f64, dydx: &mut [f64]) -> f64 {
+        dydx[0] = self.t2_over_t3 * self.limits.under(self.limit.get(), x[0]).1;
         dydx[1] = 1.0 - self.t2_over_t3;
         -self.dt
+    }
+
+    fn project(&self, x: &mut [f64]) {
+        x[0] = self.limits.clamp(x[0]).0;
     }
 
     fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {
@@ -135,6 +165,7 @@ impl Control for Tgov1 {
         // x₂ plus the damping term. The reference absorbs whatever speed
         // deviation the operating point has — normally none.
         let x = y + self.dt * u;
+        self.limits.require("governor valve position", x)?;
         self.p_ref = x + u / self.r;
         Ok(vec![x, x])
     }
@@ -153,6 +184,8 @@ impl Control for Tgov1 {
 #[derive(Clone, Debug)]
 pub struct GoverProportional {
     k: f64,
+    limits: Limits,
+    limit: Cell<LimitState>,
     p_ref: f64,
 }
 
@@ -161,10 +194,16 @@ const NO_GOV_STATES: [&str; 0] = [];
 impl GoverProportional {
     /// `k` is per unit on the **network** base: a gain of 20 is a 5% droop.
     pub fn new(k: f64) -> Result<Self, InitError> {
+        Self::limited(k, Limits::NONE)
+    }
+
+    /// With mechanical-power limits. No states, so nothing winds up behind the
+    /// clamp.
+    pub fn limited(k: f64, limits: Limits) -> Result<Self, InitError> {
         if k <= 0.0 {
             return Err(InitError::NonPositiveParameter { name: "gov gain", value: k });
         }
-        Ok(Self { k, p_ref: 0.0 })
+        Ok(Self { k, limits, limit: Cell::new(LimitState::Free), p_ref: 0.0 })
     }
 
     pub fn p_ref(&self) -> f64 {
@@ -190,15 +229,27 @@ impl Control for GoverProportional {
 
     fn jacobian(&self, _x: &[f64], _u: f64, _dfdx: &mut [f64], _dfdu: &mut [f64]) {}
 
-    fn output(&self, _x: &[f64], u: f64) -> f64 {
-        self.p_ref - self.k * u
+    fn latch(&self, _x: &[f64], u: f64) {
+        let raw = self.p_ref - self.k * u;
+        self.limit.set(if raw > self.limits.upper() {
+            LimitState::AtMax
+        } else if raw < self.limits.lower() {
+            LimitState::AtMin
+        } else {
+            LimitState::Free
+        });
     }
 
-    fn output_jacobian(&self, _x: &[f64], _u: f64, _dydx: &mut [f64]) -> f64 {
-        -self.k
+    fn output(&self, _x: &[f64], u: f64) -> f64 {
+        self.limits.under(self.limit.get(), self.p_ref - self.k * u).0
+    }
+
+    fn output_jacobian(&self, _x: &[f64], u: f64, _dydx: &mut [f64]) -> f64 {
+        -self.k * self.limits.under(self.limit.get(), self.p_ref - self.k * u).1
     }
 
     fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {
+        self.limits.require("governor mechanical power", y)?;
         self.p_ref = y + self.k * u;
         Ok(Vec::new())
     }

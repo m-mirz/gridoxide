@@ -84,14 +84,15 @@ flat line to machine precision. See [Initialization](./initialization.md).
 | Governors | `TGOV1`, and a purely proportional governor |
 | Stabilizers | washout plus two lead-lag stages |
 | Loads | constant admittance by default; ZIP with a low-voltage cutoff on request |
+| Limits | non-windup on the exciter's field voltage and the governor's valve; a clamp on the stabilizer's output |
 | Events | bus faults, clearings, branch trip and close, unit trip and close, load steps |
 | Input | gridoxide JSON, PSS/E `.dyr`, Dynawo `.dyd`/`.par` |
 
 Deliberately **not** implemented, each for a stated reason:
 
-- **Limits** on exciter, governor and stabilizer outputs. A hard clamp makes the right-hand side
-  non-smooth, so doing it properly needs non-windup logic and limiter state; half-implemented
-  limits would be worse than none, because they would look present.
+- **Rate limits** on a governor valve. Position limits are implemented — non-windup, and carried
+  through from both readers; see [The Model Library](./models.md) — but a rate limit constrains a
+  derivative rather than a state and is a different piece of machinery.
 - **Saturation.** PSS/E states it as two points on a curve, Dynawo as an exponential characteristic,
   and the two are not convertible without committing to a shape. Both readers parse it, neither
   uses it, and both report a nonzero value rather than dropping it silently.

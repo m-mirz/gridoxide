@@ -1,8 +1,8 @@
 # RMS simulation in gridoxide
 
 Status: **complete except G6**, 2026-08-29, against `6f212eb`. Phases 1–4 and 6 done, phase 5
-half done — Dynawo yes, ANDES dropped. §11–§17 record what was actually done, including the
-places this plan was wrong. §17 is follow-on work beyond the plan's own scope.
+half done — Dynawo yes, ANDES dropped. §11–§18 record what was actually done, including the
+places this plan was wrong. §17 and §18 are follow-on work beyond the plan's own scope.
 
 ## Context
 
@@ -1109,3 +1109,63 @@ same equations); disturbed, they differ by the order of the speed deviation and 
 - Coupling the Dynawo reader to `src/iidm.rs` so a full IIDM-plus-`.dyd` case loads in one step.
 - Small-signal analysis.
 - G6 (ANDES) — dropped, not deferred.
+
+
+---
+
+## 18. Beyond the plan: limits
+
+§13 declined to implement regulator limits, and gave a reason that was right at the time: a hard
+clamp makes the right-hand side non-smooth, doing it properly needs non-windup logic plus limiter
+state, and half-implemented limits would be worse than none. This does it properly.
+
+Non-windup limits on the exciter's field voltage and the governor's valve, a clamp on the
+stabilizer's output, and both readers carrying them through — `SEXS`'s `EMIN`/`EMAX`, `TGOV1`'s
+`VMIN`/`VMAX`, Dynawo's `voltageRegulator_EfdMinPu`/`MaxPu` and `governor_PMin`/`PMax`. Five more
+gates; **seventy-one** dynamics gates in total.
+
+### Three failures, three pieces
+
+The design was not obvious in advance and the failures found it.
+
+**The first attempt chattered.** Recomputing the active set from each Newton iterate makes the
+residual non-smooth *inside* the solve: an iterate landing just above a boundary sees a zeroed
+derivative, the next lands just below and sees the full one, and they alternate. An ordinary exciter
+ceiling made the step fail outright — `NewtonFailed at t = 1.015`, on a case that completes without
+limits. So the active set is **latched once per step**, before any iteration. The step is then
+smooth and its Jacobian is exact for what is actually being solved; a limit engages one step late,
+which at five milliseconds is not worth avoiding.
+
+**The second attempt overshot.** The step that *crosses* a boundary still carries the state past it,
+because the trapezoidal rule averages a start-of-step derivative that was still driving hard with an
+end-of-step one that has been zeroed — and a latched derivative cannot then bring it back. Measured
+at 0.1 pu past a 2.6 pu ceiling. So states are **projected** onto their limits after each accepted
+step. The projection is exact rather than a correction: a non-windup state has no legitimate value
+outside its limits. Locating the crossing time instead would be the state-triggered-event machinery
+this library deliberately does not have.
+
+**The third failure was a wrong test.** Non-windup was asserted as "comes off the ceiling within
+100 ms of clearing", and it does not — it stays there for seconds, because the field flux decayed
+during the fault and recovers with `T'_d0 = 8 s`, so the error the exciter is answering is genuinely
+still positive. That is physics, not windup. The gate now asserts the property that actually
+distinguishes the two: **the state never exceeds the ceiling at all**, where the same fault drives
+an unlimited exciter to 18 pu. A wound-up state would sit at the boundary for as long as it took to
+fall back through fifteen per unit.
+
+### A base question settled on the way
+
+Dynawo's regulator limits are stated in per-unit field voltage, so carrying them is only sound if
+the two tools mean the same thing by that. They do: gridoxide's initialization derives 2.420747 for
+the Kundur machine and the reference file's `efdPu` at `t = 0` is 2.420747. That is now a gate of
+its own — a third independent check on the machine model, alongside the rotor angle and the air-gap
+power — and it is what the `.dyd` reader carries the ceiling on the strength of.
+
+Dynawo's governor limits are in MW and divide by the network base; `TGOV1` states `VMAX` **before**
+`VMIN`, and reading them in field order gives a valve limited upside-down that therefore never
+moves. Both are gated.
+
+### Still outstanding
+
+- Saturation; valve **rate** limits; state-triggered events; a fifth-order machine.
+- Coupling the Dynawo reader to `src/iidm.rs`.
+- Small-signal analysis.

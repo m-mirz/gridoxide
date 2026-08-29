@@ -365,6 +365,31 @@ impl DynamicModel for GeneratingUnit {
         out.didv = s.machine.didv;
     }
 
+    fn latch(&self, x: &[f64], v: Complex<f64>) {
+        let sig = self.signals(x, v);
+        if let Some(c) = &self.avr {
+            c.latch(&x[self.off_a..self.off_a + self.n_a], sig.u_avr);
+        }
+        if let Some(c) = &self.gov {
+            c.latch(&x[self.off_g..self.off_g + self.n_g], sig.d_omega);
+        }
+        if let Some(c) = &self.pss {
+            c.latch(&x[self.off_p..self.off_p + self.n_p], sig.d_omega);
+        }
+    }
+
+    fn project(&self, x: &mut [f64]) {
+        if let Some(c) = &self.avr {
+            c.project(&mut x[self.off_a..self.off_a + self.n_a]);
+        }
+        if let Some(c) = &self.gov {
+            c.project(&mut x[self.off_g..self.off_g + self.n_g]);
+        }
+        if let Some(c) = &self.pss {
+            c.project(&mut x[self.off_p..self.off_p + self.n_p]);
+        }
+    }
+
     fn initialize(&mut self, v: Complex<f64>, s: Complex<f64>) -> Result<Vec<f64>, InitError> {
         let init = self.machine.initialize(v, s)?;
         self.e_fd0 = init.e_fd;

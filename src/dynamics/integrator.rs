@@ -312,6 +312,7 @@ pub fn integrate<S: LinearSolver>(
         system.reassemble();
 
         // The algebraic variables jump; the differential ones do not.
+        system.latch(x, v);
         let x_prev = x.clone();
         let zero = vec![0.0; x.len()];
         match newton(
@@ -356,6 +357,11 @@ pub fn integrate<S: LinearSolver>(
             let rule = if damping_left > 0 { Rule::BackwardEuler } else { Rule::Trapezoidal };
             let (a, b) = rule.coefficients();
 
+            // Which limits hold, for this whole step. Fixing the active set
+            // here is what keeps the step's residual smooth; see
+            // `DynamicSystem::latch`.
+            system.latch(&x, &v);
+
             // Derivatives at the start of the step. Trapezoidal needs them;
             // backward Euler multiplies them by zero, and computing them
             // anyway keeps one code path.
@@ -384,6 +390,11 @@ pub fn integrate<S: LinearSolver>(
                     break;
                 }
             }
+
+            // Non-windup limits hold a state at its boundary; the step that
+            // crosses one can still carry it past, so it goes back before
+            // anything reads it.
+            system.project(&mut x);
 
             // Snapped rather than accumulated, so an event time is hit exactly
             // however many steps preceded it.

@@ -151,15 +151,24 @@ fn proportional_regulators_map_exactly() {
     let (units, _) = dyd::to_units(&dyd, &par, &bus_of(&dyd), 100.0).unwrap();
     let g1 = units.iter().find(|u| u.id == "GEN____1_SM").unwrap();
 
-    assert!(
-        matches!(g1.avr, Some(AvrSpec::VrProportional { k }) if k == 20.0),
-        "got {:?}",
-        g1.avr
-    );
+    match g1.avr {
+        Some(AvrSpec::VrProportional { k, limits }) => {
+            assert_eq!(k, 20.0);
+            // Carried straight through: gridoxide's own initialization
+            // reproduces Dynawo's `efdPu` exactly, so the two agree on what a
+            // per-unit field voltage is.
+            assert_eq!(limits.min, Some(-5.0));
+            assert_eq!(limits.max, Some(1.44));
+        }
+        ref other => panic!("expected a proportional regulator, got {other:?}"),
+    }
     match g1.gov {
-        Some(GovSpec::GoverProportional { k }) => {
+        Some(GovSpec::GoverProportional { k, limits }) => {
             // 5 × 1090 / 100.
             assert!((k - 54.5).abs() < 1e-9, "governor gain was {k}");
+            // Stated in MW, so divided by the network base.
+            assert_eq!(limits.min, Some(0.0));
+            assert!((limits.max.unwrap() - 10.9).abs() < 1e-9);
         }
         ref other => panic!("expected a proportional governor, got {other:?}"),
     }
@@ -200,8 +209,9 @@ fn saturation_and_limits_are_reported() {
     assert!(!saturation.is_empty(), "the vendored case states nonzero md/mq");
     assert!(saturation[0].to_string().contains("exponential saturation"));
 
+    // Limits are carried, not dropped, so nothing warns about them.
     let limits = warnings.iter().filter(|w| matches!(w, DydWarning::LimitsIgnored { .. })).count();
-    assert!(limits >= 2, "both the regulator ceiling and the governor limits are stated");
+    assert_eq!(limits, 0, "limits reach the models now");
 }
 
 /// A `staticId` with no bus is refused by name — the reader does not invent the

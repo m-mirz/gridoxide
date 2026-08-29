@@ -17,6 +17,7 @@
 use num_complex::Complex;
 
 use gridoxide::dynamics::models::avr::{Sexs, SexsParams};
+use gridoxide::dynamics::models::InitError;
 use gridoxide::dynamics::models::gov::{Tgov1, Tgov1Params};
 use gridoxide::dynamics::models::machine::{
     GenRound, GenRoundParams, GenTransient, GenTransientParams, Machine,
@@ -24,7 +25,7 @@ use gridoxide::dynamics::models::machine::{
 use gridoxide::dynamics::models::load::ZipLoad;
 use gridoxide::dynamics::models::pss::{Stab1, Stab1Params};
 use gridoxide::dynamics::models::{
-    finite_difference, Control, DynamicModel, GeneratingUnit, ModelJacobian,
+    finite_difference, Control, DynamicModel, GeneratingUnit, Limits, ModelJacobian,
 };
 use gridoxide::dynamics::{
     build, run_dynamics, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus, Event,
@@ -71,15 +72,15 @@ fn new_machine(d: f64) -> GenTransient {
 }
 
 fn new_avr() -> Sexs {
-    Sexs::new(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05 }).unwrap()
+    Sexs::new(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05, limits: Limits::NONE }).unwrap()
 }
 
 fn new_gov(r: f64) -> Tgov1 {
-    Tgov1::new(Tgov1Params { r, t1: 0.5, t2: 1.0, t3: 5.0, dt: 0.0 }).unwrap()
+    Tgov1::new(Tgov1Params { r, t1: 0.5, t2: 1.0, t3: 5.0, dt: 0.0, limits: Limits::NONE }).unwrap()
 }
 
 fn new_pss() -> Stab1 {
-    Stab1::new(Stab1Params { k: 5.0, tw: 10.0, t1: 0.15, t2: 0.03, t3: 0.15, t4: 0.03 }).unwrap()
+    Stab1::new(Stab1Params { k: 5.0, tw: 10.0, t1: 0.15, t2: 0.03, t3: 0.15, t4: 0.03, limits: Limits::NONE }).unwrap()
 }
 
 /// Which controls a unit carries, so the gates can sweep every combination.
@@ -1163,3 +1164,191 @@ fn the_two_forms_agree_at_synchronous_speed_and_part_in_proportion_to_deviation(
          against a deviation of {deviation:e} on a swing of {swing:e}"
     );
 }
+
+fn limited_avr(limits: Limits) -> Sexs {
+    Sexs::new(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05, limits }).unwrap()
+}
+
+/// A ceiling the operating point cannot respect has no equilibrium, and is
+/// refused by name rather than initialized to a state the model would leave.
+///
+/// This is what `InitError::OutsideLimits` was reserved for in phase 1 and
+/// never used until now.
+#[test]
+fn an_unreachable_equilibrium_is_refused() {
+    // The machine at this operating point needs about 2.3 pu of field voltage.
+    let mut avr = limited_avr(Limits::new(-1.0, 1.0));
+    let err = avr.initialize(2.3, -1.0).expect_err("a 1.0 ceiling cannot hold 2.3");
+    assert!(
+        matches!(err, InitError::OutsideLimits { name, value } if name.contains("field") && value == 2.3),
+        "got {err}"
+    );
+    assert!(err.to_string().contains("outside its limits"), "{err}");
+
+    // A ceiling that *can* hold it initializes exactly as an unlimited one.
+    let mut limited = limited_avr(Limits::new(-6.0, 6.0));
+    let mut free = limited_avr(Limits::NONE);
+    assert_eq!(limited.initialize(2.3, -1.0).unwrap(), free.initialize(2.3, -1.0).unwrap());
+}
+
+/// The limits are **non-windup**: the state is held at the boundary rather than
+/// integrating past it.
+///
+/// The signature is unmissable once looked for. This exciter has a gain of 200,
+/// so during a fault its unlimited state would climb to many times the ceiling;
+/// with windup it would then take a visible time to come back down after the
+/// fault cleared, pinning the field voltage long after the voltage error
+/// reversed. Held at the boundary instead, it starts falling on the next step.
+///
+/// Two assertions, and the first is the sharper: the state never meaningfully
+/// exceeds the ceiling at all.
+#[test]
+fn a_limit_is_non_windup() {
+    let ceiling = 2.6;
+    let fit = Fit { avr: true, gov: false, pss: false };
+    let unit = GeneratingUnit::new(
+        Box::new(new_machine(2.0)),
+        Some(Box::new(limited_avr(Limits::new(-6.0, ceiling)))),
+        None,
+        None,
+    );
+    let (mut system, _) = islanded_with(vec![Box::new(unit)], &[0.8], (-0.8, -0.2));
+    let _ = fit;
+
+    let clear = 1.6;
+    // Long enough for the field flux to recover, which is what actually
+    // releases the exciter — see below.
+    let opts = options(
+        0.002,
+        30.0,
+        vec![
+            Event::new(1.0, EventKind::BusFault { bus: 1, y: Complex::new(3.0, 0.0) }),
+            Event::new(clear, EventKind::ClearFault { bus: 1 }),
+        ],
+    );
+    let report = run_dynamics(&mut system, &opts);
+    assert_eq!(report.status, DynamicsStatus::Completed);
+
+    let time = &report.trajectory.time;
+    let efd = report.trajectory.series("G1.efd").unwrap();
+    let peak = efd.iter().fold(0.0f64, |m, e| m.max(*e));
+    assert!(
+        peak > ceiling - 1e-6,
+        "the fault should drive the exciter to its ceiling; it reached {peak}"
+    );
+    // A wound-up state would be far above this — the gain is 200, and the same
+    // fault drives an unlimited exciter to 18 pu. Held at the boundary and
+    // projected back after each step, it never exceeds it at all.
+    assert!(
+        peak <= ceiling + 1e-12,
+        "a non-windup limit holds the state at the boundary; it reached {peak}"
+    );
+
+    // And it does come off the ceiling and settle below it. Note that it stays
+    // there for **seconds** after the fault clears, and that is physical rather
+    // than windup: the field flux decayed during the fault and recovers with
+    // T'_d0 = 8 s, so the voltage error the exciter is answering is genuinely
+    // still positive. What windup would add is a further delay proportional to
+    // how far the state had travelled past the boundary — which is exactly what
+    // the assertion above rules out.
+    let settled = *efd.last().unwrap();
+    assert!(
+        settled < ceiling - 1e-3,
+        "the field voltage should settle back below the ceiling, but ended at {settled}"
+    );
+    let _ = time;
+}
+
+/// A ceiling changes the answer, which is the reason to model one.
+///
+/// A limited exciter cannot support the terminal voltage as hard, so the
+/// voltage sits lower through the disturbance. If it made no difference the
+/// limit would not be reaching the machine.
+#[test]
+fn a_ceiling_holds_the_voltage_lower() {
+    let recovery = |limits: Limits| {
+        let unit = GeneratingUnit::new(
+            Box::new(new_machine(2.0)),
+            Some(Box::new(limited_avr(limits))),
+            None,
+            None,
+        );
+        let (mut system, _) = islanded_with(vec![Box::new(unit)], &[0.8], (-0.8, -0.2));
+        let opts = options(
+            0.005,
+            20.0,
+            vec![Event::new(1.0, EventKind::LoadStep { bus: 1, ds: Complex::new(-0.35, -0.15) })],
+        );
+        let report = run_dynamics(&mut system, &opts);
+        assert_eq!(report.status, DynamicsStatus::Completed);
+        let v = report.trajectory.series("bus0.vmag").unwrap();
+        *v.last().unwrap()
+    };
+
+    let free = recovery(Limits::NONE);
+    let capped = recovery(Limits::new(-6.0, 2.35));
+    assert!(
+        capped < free - 1e-3,
+        "a capped exciter should leave the voltage lower: {capped:.5} against {free:.5}"
+    );
+}
+
+/// The analytic Jacobian stays exact on each side of a limit.
+///
+/// The boundary itself is a genuine kink — the derivative does not exist there
+/// — so the oracle is asked about points clearly inside and clearly outside,
+/// never straddling. That is the same treatment the ZIP load's low-voltage
+/// cutoff gets, and for the same reason: disagreeing across a discontinuity
+/// would say nothing about either side.
+#[test]
+fn a_limited_control_matches_the_oracle_on_both_sides() {
+    let mut model = GeneratingUnit::new(
+        Box::new(new_machine(2.0)),
+        Some(Box::new(limited_avr(Limits::new(-6.0, 2.6)))),
+        Some(Box::new(
+            Tgov1::new(Tgov1Params {
+                r: 0.05,
+                t1: 0.5,
+                t2: 1.0,
+                t3: 5.0,
+                dt: 0.0,
+                limits: Limits::new(0.0, 0.9),
+            })
+            .unwrap(),
+        )),
+        None,
+    );
+    model
+        .initialize(Complex::from_polar(1.02, 0.15), Complex::new(0.8, 0.3))
+        .unwrap();
+
+    let n = model.n_states();
+    // States 4 and 5 are the exciter's; 6 and 7 the governor's. The three
+    // probes sit well inside, well above and well below the boundaries.
+    for (efd, valve) in [(1.0, 0.5), (4.0, 1.6), (-9.0, -0.6)] {
+        let mut x: Vec<f64> = (0..n).map(|k| 0.3 + 0.11 * k as f64).collect();
+        x[1] = 1.004;
+        x[5] = efd;
+        x[6] = valve;
+        let v = Complex::new(0.98, 0.09);
+
+        let mut analytic = ModelJacobian::zeros(n);
+        analytic.clear();
+        model.jacobian(&x, v, &mut analytic);
+        let numeric = finite_difference(&model, &x, v, 1e-7);
+        for (name, a, b) in [
+            ("dfdx", &analytic.dfdx, &numeric.dfdx),
+            ("dfdv", &analytic.dfdv, &numeric.dfdv),
+            ("didx", &analytic.didx, &numeric.didx),
+        ] {
+            for (k, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
+                let sc = av.abs().max(bv.abs()).max(1.0);
+                assert!(
+                    (av - bv).abs() / sc < 1e-6,
+                    "{name}[{k}] at efd = {efd}, valve = {valve}: {av:e} vs {bv:e}"
+                );
+            }
+        }
+    }
+}
+

@@ -66,7 +66,7 @@ use super::models::machine::{
     GenCls, GenClsParams, GenRound, GenRoundParams, GenTransient, GenTransientParams, Machine,
 };
 use super::models::pss::{Stab1, Stab1Params};
-use super::models::{Control, DynamicModel, GeneratingUnit, InitError};
+use super::models::{Control, DynamicModel, GeneratingUnit, InitError, Limits};
 use super::DynamicSystem;
 
 /// A network document that also carries dynamic data.
@@ -174,7 +174,11 @@ pub enum MachineSpec {
 pub enum AvrSpec {
     Sexs(SexsParams),
     /// A pure gain, with no dynamics — what Dynawo's `VRProportional` is.
-    VrProportional { k: f64 },
+    VrProportional {
+        k: f64,
+        #[serde(default)]
+        limits: Limits,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -183,7 +187,11 @@ pub enum GovSpec {
     Tgov1(Tgov1Params),
     /// A pure gain, `K = 1/R`, on the **network** base — what Dynawo's
     /// `GoverProportional` is.
-    GoverProportional { k: f64 },
+    GoverProportional {
+        k: f64,
+        #[serde(default)]
+        limits: Limits,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -359,7 +367,9 @@ impl AvrSpec {
     fn build(self) -> Result<Box<dyn Control>, InitError> {
         match self {
             AvrSpec::Sexs(p) => Ok(Box::new(Sexs::new(p)?)),
-            AvrSpec::VrProportional { k } => Ok(Box::new(VrProportional::new(k)?)),
+            AvrSpec::VrProportional { k, limits } => {
+                Ok(Box::new(VrProportional::limited(k, limits)?))
+            }
         }
     }
 }
@@ -368,7 +378,9 @@ impl GovSpec {
     fn build(self) -> Result<Box<dyn Control>, InitError> {
         match self {
             GovSpec::Tgov1(p) => Ok(Box::new(Tgov1::new(p)?)),
-            GovSpec::GoverProportional { k } => Ok(Box::new(GoverProportional::new(k)?)),
+            GovSpec::GoverProportional { k, limits } => {
+                Ok(Box::new(GoverProportional::limited(k, limits)?))
+            }
         }
     }
 }
