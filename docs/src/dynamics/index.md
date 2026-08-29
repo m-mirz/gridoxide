@@ -75,6 +75,13 @@ because every closed-form gate here is derived from the power form. See
 Step 2 is the one that goes wrong, and it has a decisive gate: a run with no disturbance must be a
 flat line to machine precision. See [Initialization](./initialization.md).
 
+## Beyond a single run
+
+[Small-signal analysis](./smallsignal.md) linearizes the same system about its equilibrium and
+reports its modes — which oscillations exist, how fast each decays, and which machines take part.
+It is the only reliable way to find a negatively damped mode, since a run finds one only if the
+disturbance happened to excite it.
+
 ## Scope
 
 | | |

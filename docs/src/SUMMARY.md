@@ -46,6 +46,7 @@
 - [Initialization from a Power Flow](./dynamics/initialization.md)
 - [The Model Library](./dynamics/models.md)
 - [Events and Discontinuities](./dynamics/events.md)
+- [Small-Signal Analysis](./dynamics/smallsignal.md)
 - [Reading Dynamic Data](./dynamics/input.md)
 - [Kundur's Example 13.2, Against Dynawo](./dynamics/validation.md)
 

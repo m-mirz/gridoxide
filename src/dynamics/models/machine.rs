@@ -1582,7 +1582,10 @@ impl Machine for GenSalient {
         let e_q = v + Complex::new(self.ra, self.xq) * i;
         let delta = e_q.arg();
 
-        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        // Only the q-axis voltage is needed: the d-axis subtransient EMF comes
+        // from the flux relation `e''_d = (x_q − x''_q)·i_q` rather than from
+        // the stator, which is what the q-axis locator above guarantees.
+        let (_, v_q) = GenTransient::to_dq(delta, v);
         let (i_d, i_q) = GenTransient::to_dq(delta, i);
 
         let eqpp = v_q + self.ra * i_q + self.xdpp * i_d;

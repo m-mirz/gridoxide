@@ -141,6 +141,15 @@ usage:
                                 the exact lambda each machine saturates at is
                                 located rather than rounded to a step.
                                 Reads a PGM JSON document.
+  gridoxide dynamics <path> --modes <n>
+                                report the n least-damped modes of the
+                                linearized system instead of running it: which
+                                oscillations exist, how fast each decays, and
+                                which machines take part in it. Answers a
+                                question no single run can, and is the only
+                                reliable way to find a *negatively* damped mode
+                                — a run finds one only if the disturbance
+                                happened to excite it.
   gridoxide dynamics <path> [--stop <t>] [--step <h>] [--tol <t>]
                      [--damping <n>] [--backend scalar|klu-native]
                      [--speed-voltages | --no-speed-voltages]
@@ -932,6 +941,16 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
     }
     let (mut system, events) = document.build().map_err(|e| e.to_string())?;
 
+    // `--modes` asks a different question from a run, so it answers that one
+    // and stops: not "what happens after this disturbance" but "what dynamic
+    // character does this system have at all".
+    if let Some(count) = flag_value(flags, "--modes")? {
+        let count: usize = count
+            .parse()
+            .map_err(|_| format!("--modes: expected a count, got {count:?}"))?;
+        return report_modes(&system, count);
+    }
+
     let backend = match flag_value(flags, "--backend")?.as_deref() {
         None | Some("scalar") => JacobianBackend::Scalar,
         Some("klu-native") => JacobianBackend::KluNative,
@@ -1068,6 +1087,67 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
 fn run_dynamics_cli(_path: &str, _flags: &[String]) -> Result<(), String> {
     Err("this build has no RMS dynamics; rebuild with `cargo build --features dynamics`"
         .to_string())
+}
+
+/// `gridoxide dynamics --modes` — the modes of the linearized system.
+#[cfg(feature = "dynamics")]
+fn report_modes(system: &gridoxide::dynamics::DynamicSystem, count: usize) -> Result<(), String> {
+    use gridoxide::dynamics::smallsignal;
+
+    let result = smallsignal::analyze(system).map_err(|e| e.to_string())?;
+    println!(
+        "{} mode(s) over {} differential state(s)\n",
+        result.modes.len(),
+        result.state_names.len()
+    );
+    println!(
+        "{:>26}  {:>9}  {:>10}  {:>9}   participation",
+        "eigenvalue", "damping", "freq (Hz)", "tau (s)"
+    );
+    for mode in result.modes.iter().take(count) {
+        let who: Vec<String> = result
+            .participants(mode)
+            .into_iter()
+            .take(3)
+            .map(|(name, p)| format!("{name} {:.0}%", p * 100.0))
+            .collect();
+        let tau = if mode.time_constant.is_finite() {
+            format!("{:.3}", mode.time_constant)
+        } else {
+            "inf".to_string()
+        };
+        println!(
+            "{:>+12.5} {:>+12.5}j  {:>9.4}  {:>10.4}  {tau:>9}   {}",
+            mode.eigenvalue.re,
+            mode.eigenvalue.im,
+            mode.damping,
+            mode.frequency,
+            who.join(", ")
+        );
+    }
+
+    let unstable = result.unstable();
+    if unstable.is_empty() {
+        println!("\nevery mode decays");
+    } else {
+        println!("\n{} mode(s) GROW rather than decay:", unstable.len());
+        for mode in unstable {
+            println!(
+                "  {:+.5}{:+.5}j at {:.4} Hz — {}",
+                mode.eigenvalue.re,
+                mode.eigenvalue.im,
+                mode.frequency,
+                result
+                    .participants(mode)
+                    .into_iter()
+                    .take(2)
+                    .map(|(n, p)| format!("{n} {:.0}%", p * 100.0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `gridoxide qv` — a bus's reactive margin.

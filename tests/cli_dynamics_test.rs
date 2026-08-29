@@ -154,3 +154,24 @@ fn the_machine_formulation_is_selectable_and_changes_the_answer() {
     // The document's own setting is the default.
     assert_eq!(swing(&[]), approximate);
 }
+
+#[test]
+fn the_modes_flag_reports_the_linearized_system() {
+    let text = stdout_of(&dynamics(&["--modes", "4"]));
+
+    assert!(text.contains("13 mode(s) over 13 differential state(s)"), "{text}");
+    assert!(text.contains("eigenvalue"), "{text}");
+    assert!(text.contains("damping"), "{text}");
+    assert!(text.contains("participation"), "{text}");
+    // The swing mode is the rotor's, and the output names it rather than
+    // leaving a reader to work it out from an eigenvector.
+    assert!(text.contains("G1.omega"), "{text}");
+    assert!(text.contains("every mode decays"), "{text}");
+
+    // Four modes asked for, four printed — plus the header and the verdict.
+    let rows = text.lines().filter(|l| l.contains("j  ")).count();
+    assert_eq!(rows, 4, "{text}");
+
+    // It answers instead of running, because it is a different question.
+    assert!(!text.contains("ran to"), "{text}");
+}

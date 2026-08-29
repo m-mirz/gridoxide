@@ -58,6 +58,7 @@ pub mod init;
 pub mod json;
 pub mod integrator;
 pub mod models;
+pub mod smallsignal;
 
 use num_complex::Complex;
 
@@ -275,6 +276,18 @@ impl DynamicSystem {
     /// The current bus voltages.
     pub fn voltages(&self) -> &[Complex<f64>] {
         &self.v0
+    }
+
+    /// One name per differential state — the machine and control states, and
+    /// not the network's voltages, which have no dynamics of their own.
+    pub fn differential_state_names(&self) -> Vec<String> {
+        let mut names = Vec::with_capacity(self.x0.len());
+        for (d, model) in self.models.iter().enumerate() {
+            for state in model.state_names() {
+                names.push(format!("{}.{}", self.ids[d], state));
+            }
+        }
+        names
     }
 
     /// Column headings for [`Trajectory`], in row order.
