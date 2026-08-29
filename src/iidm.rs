@@ -217,6 +217,31 @@ pub struct IidmImport {
     pub notes: Vec<String>,
     /// Elements omitted because a terminal was disconnected.
     pub disconnected: Vec<String>,
+    /// Every generator and load, by its own IIDM id, with the bus it sits on
+    /// and the injection the file states.
+    ///
+    /// The importer folds each of these into its bus's net `p_spec`/`q_spec`,
+    /// which is all a power flow needs and is not reversible afterwards.
+    /// Anything that has to address an *individual* machine needs the
+    /// correspondence back — a Dynawo dynamic model attaches to a generator by
+    /// `staticId`, and a dynamic study needs each machine's own terminal power
+    /// rather than its bus's total.
+    pub injections: Vec<IidmInjection>,
+}
+
+/// One generator or load, addressable by the id its file gave it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IidmInjection {
+    pub id: String,
+    pub bus: usize,
+    /// A generator rather than a load. Note that a load with negative `p` is
+    /// still a load: the distinction is the element type the file used, not the
+    /// sign of the power.
+    pub generator: bool,
+    /// Active injection, per unit on the network base, **generation positive**
+    /// — the same convention `Bus::p_spec` uses.
+    pub p: f64,
+    pub q: f64,
 }
 
 impl IidmImport {
@@ -312,6 +337,11 @@ struct RawTapChanger {
 #[derive(Clone, Debug)]
 struct RawInjection {
     at: NodeKey,
+    /// The element's own IIDM id, retained so an individual machine stays
+    /// addressable after its power has been folded into its bus.
+    id: String,
+    /// Whether this is a generator rather than a load.
+    generator: bool,
     /// Net active injection in MW, generation positive.
     p: f64,
     q: f64,
@@ -692,6 +722,8 @@ fn open(
             let regulating = attrs.flag("voltageRegulatorOn").unwrap_or(false);
             c.injections.push(RawInjection {
                 at,
+                id: attrs.string("id").unwrap_or_default(),
+                generator: true,
                 p,
                 q: attrs.number("targetQ").or(attrs.number("reactivePowerSetpoint")).unwrap_or(0.0),
                 regulates: regulating
@@ -707,6 +739,8 @@ fn open(
             c.declare(&at);
             c.injections.push(RawInjection {
                 at,
+                id: attrs.string("id").unwrap_or_default(),
+                generator: false,
                 p: -attrs.or_zero("p0"),
                 q: -attrs.or_zero("q0"),
                 regulates: None,
@@ -748,6 +782,11 @@ fn open(
             // generated there.
             c.injections.push(RawInjection {
                 at: boundary,
+                // A dangling line's boundary injection belongs to the line, not
+                // to a machine, so it is not a generator for addressing
+                // purposes however much it generates.
+                id: id.clone(),
+                generator: false,
                 p: attrs.number("generationTargetP").unwrap_or(0.0) - attrs.or_zero("p0"),
                 q: attrs.number("generationTargetQ").unwrap_or(0.0) - attrs.or_zero("q0"),
                 regulates: None,
@@ -1034,10 +1073,19 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     // Injections.
     let mut generation = vec![0.0f64; n_buses];
     let mut regulating = vec![false; n_buses];
+    let mut injections = Vec::with_capacity(c.injections.len());
     for inj in &c.injections {
         let Some(b) = bus_of(&inj.at) else { continue };
-        buses[b].p_spec += inj.p * 1e6 / s_base_va;
-        buses[b].q_spec += inj.q * 1e6 / s_base_va;
+        let (p_pu, q_pu) = (inj.p * 1e6 / s_base_va, inj.q * 1e6 / s_base_va);
+        injections.push(IidmInjection {
+            id: inj.id.clone(),
+            bus: b,
+            generator: inj.generator,
+            p: p_pu,
+            q: q_pu,
+        });
+        buses[b].p_spec += p_pu;
+        buses[b].q_spec += q_pu;
         generation[b] += inj.generation;
         if let Some(target_kv) = inj.regulates {
             if target_kv > 0.0 && buses[b].u_rated > 0.0 {
@@ -1238,6 +1286,7 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         version: c.version.clone(),
         notes,
         disconnected,
+        injections,
     })
 }
 

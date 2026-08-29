@@ -122,3 +122,14 @@ it equally between both ends.
   `Line` carries one total that the π-model splits equally. Every line in every
   vendored fixture is symmetric, and any that is not is counted in `notes`
   rather than silently averaged.
+
+
+## Individual generators and loads stay addressable
+
+The importer folds every injection into its bus's net `p_spec`/`q_spec`, which is all a power flow
+needs and is not reversible afterwards. `IidmImport::injections` keeps the correspondence back:
+each generator and load by its own IIDM id, the bus it sits on, and the injection the file states.
+
+That is what lets something address an *individual* machine rather than a bus. A Dynawo dynamic
+model attaches to a generator by `staticId`, and a dynamic study needs each machine's own terminal
+power rather than its bus's total — see [Reading Dynamic Data](../dynamics/input.md).

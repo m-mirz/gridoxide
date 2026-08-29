@@ -10,9 +10,7 @@ SPDX-License-Identifier: MPL-2.0.
 
 They are here so `tests/dynamics_dyd_test.rs` reads the parameter names a real
 Dynawo case uses rather than names written from memory, which is the whole risk
-in a keyword-addressed format. The matching `IEEE14.iidm` is deliberately *not*
-vendored: this suite gates the reader, not a full case, and the static half is
-phase 5's business.
+in a keyword-addressed format.
 
 Dynawo's repository also ships `reference/outputs/curves/curves.csv` for this
 case — its own solver's trajectories, committed. That is the comparison data
