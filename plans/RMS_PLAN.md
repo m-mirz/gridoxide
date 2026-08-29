@@ -1,7 +1,8 @@
 # RMS simulation in gridoxide
 
-Status: **phases 1–4 implemented, phase 5 half done**, 2026-08-28, against `6f212eb`.
-§11–§15 record what was actually done, including the places this plan was wrong.
+Status: **complete except G6**, 2026-08-28, against `6f212eb`. Phases 1–4 and 6 done, phase 5
+half done — Dynawo yes, ANDES no. §11–§16 record what was actually done, including the places
+this plan was wrong.
 
 ## Context
 
@@ -970,3 +971,79 @@ comes from a failed initialization.
 
 G6, and phase 6 entirely — the CLI, the Python bindings, the book chapters and
 the feature-comparison row.
+
+
+---
+
+## 16. What happened: phase 6
+
+The surfaces. `gridoxide dynamics` in `src/main.rs`, `gridoxide.dynamics` in `src/python.rs`, seven
+book chapters, the feature-comparison row, and the scale measurement §7 called G10. Twelve more
+gates — five for the CLI, seven in Python — bringing the total to **sixty-six**.
+
+### G10, measured
+
+A ring of alternating generator and load buses, every generator a sixth-order machine with an
+exciter and a governor, through a bolted fault at a 5 ms step:
+
+| buses | units | unknowns | build | 3 s run | per step | Newton/step |
+|---|---|---|---|---|---|---|
+| 16 | 8 | 112 | 0.7 ms | 30 ms | 0.050 ms | 1.34 |
+| 256 | 128 | 1 792 | 0.5 ms | 682 ms | 1.14 ms | 1.34 |
+| 4 096 | 2 048 | 28 672 | 9.2 ms | 16.4 s | 27.3 ms | 1.34 |
+
+**Time per step is near-linear in system size** — 256× the unknowns costs 546×, an exponent of
+1.14 — which is what §2's formulation was chosen for. And **Newton iterations per step are flat at
+1.34** across four orders of magnitude, which is the signature of an exact analytic Jacobian.
+
+§8's phase 6 also asked for a "re-analyze count". There is no such counter, because nothing
+re-analyzes: §12 and §13 between them made every event value-only, so one symbolic factorization
+serves a whole run however long and whatever happens in it.
+
+The first sweep stopped at 1024 buses — not on the dynamics but on the *power flow*, because a
+4096-bus ring carrying heavy flow is a hard base case. Lowering the injections fixed it. Worth
+recording because the ceiling looked like a dynamics limit and was not; a synthetic benchmark can
+put a wall in front of the thing it is trying to measure.
+
+### The surfaces
+
+The CLI summary is deliberately about **machines** rather than states: a trajectory has hundreds of
+columns and almost none is the answer to anything, while "did each machine stay in step, how far did
+the frequency go, how deep did the voltage dip" are. It also prints the initial state derivative,
+because a nonzero one invalidates everything after it and a reader should not have to ask.
+
+The Python binding takes an optional `events` list in the **same vocabulary the document uses**, so
+a caller sweeping clearing times has one event language rather than two. It returns plain lists
+rather than numpy arrays, keeping the extension free of a numpy dependency.
+
+### The row
+
+`docs/src/reference/feature_comparison.md`'s RMS row goes ❌ → ✅. The small-signal row's note
+changes too: it used to say the row "presupposes the RMS row", and now records that `∂f/∂x`,
+`∂f/∂V`, `∂I/∂x` and `∂I/∂V` are already assembled analytically every step and oracle-checked, so
+what remains is the reduction and the eigen-decomposition rather than the modelling.
+
+### What the whole plan got right, and what it did not
+
+Right: the formulation (§2 needed no correction), the choice of Dynawo as the reference, and the
+estimate that the corpus would come close to free — it was freer than expected, since Dynawo ships
+its own solver's outputs.
+
+Wrong, and each recorded where it happened: the placeholder-pattern assumption about
+`LinearSolver::new` (§11); the claim that the equilibrium gate catches a mis-declared split (§11);
+the claim that the states were already continuous across an event (§12); that `UnitTrip` was
+structural (§13); and that the Dynawo gate needed a Dynawo install (§14).
+
+And the thing no part of this plan anticipated: that the largest real risk was not the integrator or
+the DAE but the **conventions** — the subtransient signs, saturation's two incompatible
+representations, and the `ω ≈ 1` stator approximation. None of those is a bug in anyone's code, and
+none of them is visible to a self-consistency check. Two were settled by declining to copy a source
+and deriving instead; the third was settled by reading the reference implementation's own equations
+after its trajectory diverged from ours.
+
+### Still outstanding
+
+- **G6 (ANDES)** — see §15.
+- Regulator limits, saturation, state-triggered events, a fifth-order machine.
+- Coupling the Dynawo reader to `src/iidm.rs` so a full IIDM-plus-`.dyd` case loads in one step.
+- Small-signal analysis, which is now much closer than the plan assumed.
