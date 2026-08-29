@@ -75,7 +75,9 @@ use crate::sparse_pardiso::PardisoRealSystem;
 use dae::DaePattern;
 use models::DynamicModel;
 
-pub use events::{DynamicsWarning, Event, EventError, EventKind};
+pub use events::{
+    DynamicsWarning, Event, EventError, EventKind, Relay, RelayAction, Trigger, Watch,
+};
 pub use init::{build, BuildError, DeviceSpec, SystemSpec};
 pub use json::{DynamicsData, DynamicsDocument, DynamicsError};
 
@@ -103,6 +105,11 @@ pub struct DynamicsOptions {
     /// Steps are truncated to land exactly on each event time, so an event
     /// need not fall on a multiple of [`step`](Self::step).
     pub events: Vec<Event>,
+    /// Protection relays: actions triggered by a *state* rather than by a time.
+    ///
+    /// Their trip times are found rather than read, so they need no place in
+    /// the schedule above. See [`Relay`](events::Relay).
+    pub relays: Vec<events::Relay>,
     /// Which sparse-LU backend solves each step.
     ///
     /// [`JacobianBackend::Block`] is refused: it assumes a uniform 2×2 block
@@ -121,6 +128,7 @@ impl Default for DynamicsOptions {
             max_newton: 20,
             damping_steps: 2,
             events: Vec::new(),
+            relays: Vec::new(),
             backend: JacobianBackend::Scalar,
         }
     }
@@ -200,6 +208,8 @@ pub struct DynamicsReport {
     /// Anything noticed that is not an error — a de-energized island, a
     /// skipped event.
     pub warnings: Vec<DynamicsWarning>,
+    /// What each relay did, and when it decided to.
+    pub relay_actions: Vec<events::RelayAction>,
 }
 
 /// An assembled, initialized system, ready to integrate.
@@ -401,6 +411,38 @@ impl DynamicSystem {
             .into_iter()
             .filter(|component| !component.iter().any(|&b| alive[b]))
             .collect()
+    }
+
+    /// The quantity a relay is watching, at a given state.
+    ///
+    /// `reference` is the state the run started from, which
+    /// [`Watch::UnitAngleExcursion`](events::Watch::UnitAngleExcursion) measures
+    /// against. `None` means the relay names something that does not exist.
+    pub(crate) fn watched(
+        &self,
+        watch: events::Watch,
+        x: &[f64],
+        v: &[Complex<f64>],
+        reference: &[f64],
+    ) -> Option<f64> {
+        let layout = self.pattern.layout();
+        match watch {
+            events::Watch::BusVoltage { bus } => v.get(bus).map(|value| value.norm()),
+            events::Watch::UnitSpeed { unit } => {
+                let offset = *layout.dev_offset.get(unit)?;
+                let omega = self.models.get(unit)?.speed_index()?;
+                x.get(offset + omega).copied()
+            }
+            events::Watch::UnitAngleExcursion { unit } => {
+                let offset = *layout.dev_offset.get(unit)?;
+                // The rotor angle is the state immediately before the speed in
+                // every machine here, and asking the model rather than assuming
+                // an index is what keeps that from becoming a hidden contract.
+                let omega = self.models.get(unit)?.speed_index()?;
+                let delta = offset + omega.checked_sub(1)?;
+                Some((x.get(delta)? - reference.get(delta)?).abs())
+            }
+        }
     }
 
     /// The largest absolute derivative at the current state — the number gate

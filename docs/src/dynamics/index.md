@@ -93,6 +93,7 @@ disturbance happened to excite it.
 | Loads | constant admittance by default; ZIP with a low-voltage cutoff on request |
 | Limits | non-windup on the exciter's field voltage and the governor's valve; a clamp on the stabilizer's output |
 | Events | bus faults, clearings, branch trip and close, unit trip and close, load steps |
+| Protection | relays on bus voltage, machine speed or angle excursion, with a delay and a located crossing |
 | Input | gridoxide JSON, PSS/E `.dyr`, Dynawo `.dyd`/`.par` |
 
 Deliberately **not** implemented, each for a stated reason:
@@ -103,6 +104,5 @@ Deliberately **not** implemented, each for a stated reason:
 - **Saturation.** PSS/E states it as two points on a curve, Dynawo as an exponential characteristic,
   and the two are not convertible without committing to a shape. Both readers parse it, neither
   uses it, and both report a nonzero value rather than dropping it silently.
-- **State-triggered events** — a relay opening on an under-voltage threshold. Every event here is
-  scheduled at a time, which is what makes the step truncation exact and the root-finding
-  unnecessary.
+- **Valve rate limits** on a governor. Position limits are implemented; a rate limit constrains a
+  derivative rather than a state, which is a different piece of machinery.

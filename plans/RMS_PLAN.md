@@ -1,7 +1,7 @@
 # RMS simulation in gridoxide
 
 Status: **complete except G6**, 2026-08-29, against `6f212eb`. Phases 1–4 and 6 done, phase 5
-half done — Dynawo yes, ANDES dropped. §11–§20 record what was actually done, including the
+half done — Dynawo yes, ANDES dropped. §11–§21 record what was actually done, including the
 places this plan was wrong. §17 onward is follow-on work beyond the plan's own scope.
 
 ## Context
@@ -1292,4 +1292,59 @@ study whose answer depended on saturation is told so.
 
 - Saturation, on the terms above.
 - Valve **rate** limits; state-triggered events.
+- Sparse (Arnoldi) small-signal for systems of thousands of states; eigenvalue sensitivities.
+
+
+---
+
+## 21. Beyond the plan: protection relays
+
+State-triggered events, which §5 deferred and named the Illinois locator for. Six gates;
+**87** dynamics gates in total.
+
+A [`Relay`] watches a quantity — a bus voltage, a machine's speed, its angle excursion — and acts if
+it stays out of bounds for a stated delay.
+
+### The delay is the design, and it is why the crossing is located
+
+A relay that acted the instant a threshold were crossed would trip on every fault in the network
+rather than the ones it is meant to clear. And because the delay is measured *from the crossing*, an
+error in when the crossing happened is an error in when the relay acts. So the step is **shortened
+onto the crossing**, using the same Illinois locator `continuation` uses to find a reactive limit
+along its curve; from that instant the relay's action is an ordinary scheduled event, and the whole
+existing truncate-apply-resolve machinery carries it.
+
+A relay whose condition stops holding **forgets**. That is what separates it from a stopwatch, and
+it is what makes a fault cleared inside the delay trip nothing — gated as the same fault held for
+0.2 s tripping nothing and for 0.9 s tripping, against a 0.4 s relay.
+
+### The subtlety that would have been silent
+
+A condition can begin holding **at an event** — a fault collapses a voltage within the instant — and
+then both ends of the *following* step are already inside the trip region, so a comparison local to
+that step sees no crossing at all and the relay never fires.
+
+The first implementation had exactly that bug, and it did not announce itself: the relay simply did
+nothing, which is indistinguishable from a threshold never being reached. What is compared is
+therefore the value at the last accepted point, **remembered across events**, rather than the step's
+own start.
+
+Watching an algebraic quantity and watching a differential one differ in kind, and both are gated. A
+bus voltage moves discontinuously at an event, so its crossings tend to sit exactly on event times; a
+rotor speed is integrated and crosses somewhere strictly inside a step, where the located time
+reproduces the threshold to `1e-7` on a 20 ms step. And an inert relay must leave a trajectory
+**bit-identical** — the crossing search must not disturb the step it searches inside.
+
+### Three test bugs of my own, all the same shape
+
+Every failure in this piece was a disturbance too gentle to reach the threshold I had written: a
+0.9 pu fault admittance moves a bus voltage by 0.4%, not the 15% the relay was waiting for. Worth
+recording because "the relay did not fire" reads like a logic bug and was three times a *modelling*
+mistake in the test — and because it is the same lesson §19's centring bugs taught, in a different
+costume: a gate that fails for a reason outside the code under test is the expensive kind.
+
+### Still outstanding
+
+- Saturation, on §20's terms.
+- Valve **rate** limits.
 - Sparse (Arnoldi) small-signal for systems of thousands of states; eigenvalue sensitivities.

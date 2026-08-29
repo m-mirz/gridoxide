@@ -365,6 +365,10 @@ impl DynamicModel for GeneratingUnit {
         out.didv = s.machine.didv;
     }
 
+    fn speed_index(&self) -> Option<usize> {
+        Some(self.omega_col)
+    }
+
     fn latch(&self, x: &[f64], v: Complex<f64>) {
         let sig = self.signals(x, v);
         if let Some(c) = &self.avr {
