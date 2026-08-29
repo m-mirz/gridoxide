@@ -365,6 +365,10 @@ impl DynamicModel for GeneratingUnit {
         out.didv = s.machine.didv;
     }
 
+    fn angle_index(&self) -> Option<usize> {
+        Some(self.machine.angle_index())
+    }
+
     fn speed_index(&self) -> Option<usize> {
         Some(self.omega_col)
     }

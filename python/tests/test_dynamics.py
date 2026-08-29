@@ -167,3 +167,72 @@ def test_small_signal_reports_the_modes():
 def test_small_signal_refuses_a_case_it_cannot_linearize():
     with pytest.raises(ValueError):
         gridoxide.small_signal("/nonexistent/case.json")
+
+
+def test_relays_are_given_in_the_same_vocabulary_as_events():
+    """A relay's action and a scheduled event read identically — one vocabulary
+    for what can happen, whether a time or a threshold decides when."""
+    result = gridoxide.dynamics(
+        str(CASE),
+        stop=4.0,
+        events=[
+            {"kind": "bus_fault", "t": 1.0, "bus": 1},
+            {"kind": "clear_fault", "t": 1.6, "bus": 1},
+        ],
+        relays=[
+            {
+                "id": "uv1",
+                "watch": "bus_voltage",
+                "bus": 1,
+                "when": "below",
+                "threshold": 0.5,
+                "delay": 0.2,
+                # A load step rather than a trip: this two-line fixture has no
+                # redundant branch, so tripping one islands the machine.
+                "action": {"kind": "load_step", "bus": 1, "ds": [0.3, 0.0]},
+            }
+        ],
+    )
+    assert result.completed(), result.status
+    assert len(result.relay_actions) == 1
+    name, crossed, fired = result.relay_actions[0]
+    assert name == "uv1"
+    # The fault collapses the bus within the instant, so the crossing is there.
+    assert abs(crossed - 1.0) < 1e-3
+    assert abs(fired - crossed - 0.2) < 1e-6
+
+    # A relay that never sees its threshold does nothing.
+    quiet = gridoxide.dynamics(
+        str(CASE),
+        stop=2.0,
+        events=[],
+        relays=[
+            {
+                "id": "never",
+                "watch": "unit_speed",
+                "unit": 0,
+                "when": "above",
+                "threshold": 2.0,
+                "delay": 0.1,
+                "action": {"kind": "load_step", "bus": 1, "ds": [0.3, 0.0]},
+            }
+        ],
+    )
+    assert quiet.relay_actions == []
+
+
+def test_a_mode_carries_its_shape():
+    """Participation says whose a mode is; the shape says how they move."""
+    modes = gridoxide.small_signal(str(CASE))
+    swing = max((m for m in modes if m.frequency > 0), key=lambda m: m.frequency)
+    # One machine, so one rotor: the shape is trivially itself, normalized.
+    assert len(swing.shape) == 1
+    name, magnitude, phase = swing.shape[0]
+    assert name.endswith(".delta")
+    assert magnitude == pytest.approx(1.0)
+    assert phase == pytest.approx(0.0)
+
+    # A non-oscillatory mode has no relative phase to report.
+    for mode in modes:
+        if mode.frequency == 0.0:
+            assert mode.shape == []

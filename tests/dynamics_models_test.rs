@@ -77,7 +77,7 @@ fn new_avr() -> Sexs {
 }
 
 fn new_gov(r: f64) -> Tgov1 {
-    Tgov1::new(Tgov1Params { r, t1: 0.5, t2: 1.0, t3: 5.0, dt: 0.0, limits: Limits::NONE }).unwrap()
+    Tgov1::new(Tgov1Params { r, t1: 0.5, t2: 1.0, t3: 5.0, dt: 0.0, limits: Limits::NONE, rate: Limits::NONE }).unwrap()
 }
 
 fn new_pss() -> Stab1 {
@@ -1314,6 +1314,7 @@ fn a_limited_control_matches_the_oracle_on_both_sides() {
                 t3: 5.0,
                 dt: 0.0,
                 limits: Limits::new(0.0, 0.9),
+                rate: Limits::NONE,
             })
             .unwrap(),
         )),
@@ -1498,4 +1499,108 @@ fn the_round_machine_reduces_to_the_salient_one() {
         "with one effective q winding the two orders should agree; \
          the rotor angles differ by {worst:e} rad"
     );
+}
+
+/// A valve rate limit constrains how fast the valve travels, not where it may
+/// be — and while it binds, the valve moves at **exactly** the rate.
+///
+/// That is the sharp check: a rate-limited trajectory is a straight line in
+/// time, with the slope the parameter states. A position limit would flatten it
+/// instead, and an unlimited governor would follow an exponential.
+#[test]
+fn a_rate_limit_makes_the_valve_travel_at_exactly_its_rate() {
+    let rate = 0.01;
+    let travel = |limited: bool| {
+        let gov = Tgov1::new(Tgov1Params {
+            r: 0.05,
+            t1: 0.5,
+            t2: 1.0,
+            t3: 5.0,
+            dt: 0.0,
+            limits: Limits::NONE,
+            rate: if limited { Limits::new(-rate, rate) } else { Limits::NONE },
+        })
+        .unwrap();
+        let unit = GeneratingUnit::new(
+            Box::new(new_machine(2.0)),
+            None,
+            Some(Box::new(gov)),
+            None,
+        );
+        let (mut system, _) = islanded_with(vec![Box::new(unit)], &[0.8], (-0.8, -0.2));
+        let opts = options(
+            0.002,
+            8.0,
+            vec![Event::new(1.0, EventKind::LoadStep { bus: 1, ds: Complex::new(-0.4, 0.0) })],
+        );
+        let report = run_dynamics(&mut system, &opts);
+        assert_eq!(report.status, DynamicsStatus::Completed);
+        (
+            report.trajectory.time.clone(),
+            report.trajectory.series("G1.gov_valve").unwrap(),
+        )
+    };
+
+    let (time, free) = travel(false);
+    let (_, capped) = travel(true);
+
+    // The unlimited governor opens faster than the rate at first — otherwise
+    // the limit would have nothing to bind on.
+    let slope = |series: &[f64], from: f64, to: f64| {
+        let a = time.iter().position(|t| *t >= from).unwrap();
+        let b = time.iter().position(|t| *t >= to).unwrap();
+        (series[b] - series[a]) / (time[b] - time[a])
+    };
+    assert!(
+        slope(&free, 1.01, 1.05) > 1.5 * rate,
+        "the unlimited valve should want to move faster than {rate}, it moved at {}",
+        slope(&free, 1.01, 1.05)
+    );
+
+    // The limited one travels at exactly the rate while it binds — a straight
+    // line, measured over a window well inside the limited stretch.
+    let measured = slope(&capped, 1.05, 1.30);
+    assert!(
+        (measured - rate).abs() < 1e-6,
+        "a rate-limited valve should travel at exactly {rate} per second, not {measured}"
+    );
+
+    // And it is a straight line, not merely the right average.
+    let a = time.iter().position(|t| *t >= 1.05).unwrap();
+    let b = time.iter().position(|t| *t >= 1.30).unwrap();
+    let (t0, v0) = (time[a], capped[a]);
+    for k in a..=b {
+        let expected = v0 + rate * (time[k] - t0);
+        assert!(
+            (capped[k] - expected).abs() < 1e-6,
+            "at t = {}: {} against a straight line at {expected}",
+            time[k],
+            capped[k]
+        );
+    }
+
+    // The defining property, over the whole run: the valve never travels
+    // faster than its rate, anywhere. Comparing final *values* would say
+    // nothing here — a rate limit changes the whole trajectory, so at any given
+    // instant the two governors are at quite different points of quite
+    // different transients, and neither has settled at eight seconds against a
+    // five-second turbine lag.
+    for k in 1..capped.len() {
+        let dt = time[k] - time[k - 1];
+        if dt <= 0.0 {
+            continue;
+        }
+        let travelled = (capped[k] - capped[k - 1]).abs() / dt;
+        assert!(
+            travelled <= rate + 1e-6,
+            "the valve travelled at {travelled} at t = {}, past its {rate} limit",
+            time[k]
+        );
+    }
+    // And the free one does exceed it, so the comparison means something.
+    let fastest = (1..free.len())
+        .filter(|&k| time[k] > time[k - 1])
+        .map(|k| (free[k] - free[k - 1]).abs() / (time[k] - time[k - 1]))
+        .fold(0.0f64, f64::max);
+    assert!(fastest > 2.0 * rate, "the unlimited valve peaked at {fastest}");
 }

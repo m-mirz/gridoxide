@@ -29,6 +29,11 @@ The native format, and the one the other two target. A `dynamics` section alongs
       { "kind": "bus_fault",   "t": 1.0, "bus": 1 },
       { "kind": "clear_fault", "t": 1.1, "bus": 1 },
       { "kind": "branch_trip", "t": 1.1, "branch": 1 }
+    ],
+    "relays": [
+      { "id": "uv1", "watch": "bus_voltage", "bus": 1,
+        "when": "below", "threshold": 0.7, "delay": 0.2,
+        "action": { "kind": "branch_trip", "branch": 1 } }
     ]
   }
 }
@@ -37,6 +42,10 @@ The native format, and the one the other two target. A `dynamics` section alongs
 The model parameter blocks **are** the models' own parameter structs. That is deliberate: the file
 format cannot drift away from what the models take, because a renamed field is a missing-field parse
 error rather than a silently defaulted zero.
+
+A relay's `action` and a scheduled event are spelled the same way — one
+vocabulary for *what can happen*, whether a time or a threshold decides *when*. A relay carries no
+time at all: see [Events and Discontinuities](./events.md).
 
 `speed_voltages` (default `false`) chooses the machine formulation for the whole case — see
 [The Model Library](./models.md).

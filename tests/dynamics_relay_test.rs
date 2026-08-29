@@ -150,7 +150,7 @@ fn a_smooth_crossing_is_located_inside_the_step() {
     let relay = Relay {
         id: "os1".to_string(),
         watch: Watch::UnitSpeed { unit: 0 },
-        trigger: Trigger::Above(threshold),
+        trigger: Trigger::Above { threshold },
         delay: 0.0,
         action: EventKind::BranchTrip { branch: 2 },
         repeating: false,
@@ -233,7 +233,7 @@ fn a_relay_can_watch_a_machine_and_fires_once() {
     let relay = Relay {
         id: "os1".to_string(),
         watch: Watch::UnitSpeed { unit: 0 },
-        trigger: Trigger::Above(1.002),
+        trigger: Trigger::Above { threshold: 1.002 },
         delay: 0.05,
         action: EventKind::LoadStep { bus: 1, ds: Complex::new(-0.2, 0.0) },
         repeating: false,

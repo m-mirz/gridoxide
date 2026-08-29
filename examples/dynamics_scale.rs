@@ -94,6 +94,7 @@ fn case(n_bus: usize) -> DynamicsDocument {
                     t3: 5.0,
                     dt: 0.0,
                     limits: Limits::NONE,
+                    rate: Limits::NONE,
                 })),
                 pss: None,
             });
@@ -124,6 +125,7 @@ fn case(n_bus: usize) -> DynamicsDocument {
                 EventSpec::BusFault { t: 1.0, bus: 1, y: None },
                 EventSpec::ClearFault { t: 1.08, bus: 1 },
             ],
+            relays: Vec::new(),
         },
     }
 }

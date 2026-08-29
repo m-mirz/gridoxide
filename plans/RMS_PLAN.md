@@ -1,7 +1,7 @@
 # RMS simulation in gridoxide
 
 Status: **complete except G6**, 2026-08-29, against `6f212eb`. Phases 1–4 and 6 done, phase 5
-half done — Dynawo yes, ANDES dropped. §11–§21 record what was actually done, including the
+half done — Dynawo yes, ANDES dropped. §11–§22 record what was actually done, including the
 places this plan was wrong. §17 onward is follow-on work beyond the plan's own scope.
 
 ## Context
@@ -1348,3 +1348,69 @@ costume: a gate that fails for a reason outside the code under test is the expen
 - Saturation, on §20's terms.
 - Valve **rate** limits.
 - Sparse (Arnoldi) small-signal for systems of thousands of states; eigenvalue sensitivities.
+
+
+---
+
+## 22. Beyond the plan: rate limits, mode shape, and where this stops
+
+### Valve rate limits
+
+A position limit says where the valve may be; a rate limit says how fast it may travel. A steam
+valve that opens in a fifth of a second and a hydro gate that takes five are the same model with
+different rates, and the difference decides whether a machine can arrest a frequency excursion at
+all.
+
+They compose in one order and not the other. The rate limit clips the derivative first; the position
+limit then decides whether the valve may move. Reversed, a valve pinned at its ceiling would still
+be "travelling" at its rate limit, which is nothing.
+
+The gate is sharp because a rate-limited trajectory is a **straight line in time**: the valve's
+position is checked against `v₀ + rate·(t − t₀)` to `1e-6` over the whole limited stretch, and no
+step anywhere in the run moves it faster than its rate.
+
+One test assertion had to be withdrawn, and the reason is worth keeping: comparing the *final*
+valve positions of a limited and an unlimited governor says nothing. A rate limit changes the whole
+trajectory, so at any given instant the two are at different points of different transients — the
+limited one was *above* the free one at eight seconds, which looks like a bug and is not. What is
+true and checkable is the bound itself, everywhere.
+
+### Mode shape
+
+A participation factor says whose a mode is. It cannot say **how they move**, and for an oscillation
+that is the more useful half. The shape is the right eigenvector read at the rotor angles, rotated
+and scaled so the largest is `1∠0`.
+
+Gated on two islanded machines, which have exactly two rotor modes and they are opposites:
+the oscillation, whose components sit `180°` apart to within `5°`, and the free drift of the
+island's absolute angle, whose eigenvalue is at the origin. Participation says both modes belong to
+the rotors, which is true of both and useful about neither; the shape separates them. A
+non-oscillatory mode is reported with **no** shape, because a relative phase between things that are
+not oscillating means nothing.
+
+### One vocabulary for what can happen
+
+`EventKind` is now tagged the same way `EventSpec` is, so a relay's `action` and a scheduled event
+read identically in a file and in Python. A relay carries no time; that is the only difference, and
+it is the interesting one.
+
+### Sparse small-signal: declined, with a size guard
+
+The dense method is `O(n³)` in the states and `O(n²·n_net)` in the reduction. A four-thousand-bus
+case has twenty thousand states, where that is hours rather than slow. The right tool is a sparse
+Arnoldi method with shift-invert, targeting a region of the complex plane rather than computing
+every mode — a serious numerical project in its own right, and not one to start at the end of
+this one.
+
+What is implemented instead is a **refusal**: past two thousand states the analysis says the method
+is wrong for the problem rather than leaving a caller waiting. That is not the feature, but it is
+honest about not being it, which is the same standard §20 applied to saturation.
+
+### What is left
+
+- **Saturation**, on §20's terms: two incompatible representations, and no case that both states it
+  and is otherwise modellable. The reason has not changed.
+- **Sparse Arnoldi small-signal**, and eigenvalue sensitivities.
+- The EMT half of the small-signal row, which is a different simulation entirely.
+
+Everything else this plan named, and everything the follow-on sections named, is built and gated.

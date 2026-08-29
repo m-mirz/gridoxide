@@ -158,8 +158,14 @@ derivative that was still driving hard with an end-of-step one that has been zer
 derivative cannot then bring it back. The projection is exact rather than a correction: a non-windup
 state has no legitimate value outside its limits.
 
-**Rate limits are not implemented.** They constrain a derivative rather than a state, which is a
-different and more intrusive piece of machinery.
+**Rate limits** are implemented too, on the governor valve, and they constrain a different thing:
+not where the valve may be but how fast it may travel. A steam valve that opens in a fifth of a
+second and a hydro gate that takes five are the same model with different rates, and the difference
+decides whether a machine can arrest a frequency excursion at all.
+
+The two compose in one order and not the other. The rate limit clips the derivative first; the
+position limit then decides whether the valve may move at all. Reversing them would let a valve
+pinned at its ceiling still "travel" at its rate limit, which is nothing.
 
 What remains genuinely absent is saturation — see the readers.
 

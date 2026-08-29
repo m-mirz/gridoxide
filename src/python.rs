@@ -1977,6 +1977,10 @@ pub struct DynamicsResult {
     /// naming something that does not exist.
     #[pyo3(get)]
     warnings: Vec<String>,
+    /// What each relay did: `(id, crossing time, firing time)`. The crossing
+    /// time is **located** inside the step, not rounded to its boundary.
+    #[pyo3(get)]
+    relay_actions: Vec<(String, f64, f64)>,
     #[pyo3(get)]
     time: Vec<f64>,
     #[pyo3(get)]
@@ -2049,6 +2053,7 @@ impl DynamicsResult {
 #[pyo3(signature = (
     path, stop = 10.0, step = 0.005, tol = 1e-9, max_newton = 20,
     damping_steps = 2, backend = None, events = None, speed_voltages = None,
+    relays = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn dynamics(
@@ -2062,6 +2067,7 @@ fn dynamics(
     backend: Option<&str>,
     events: Option<Vec<Bound<'_, pyo3::types::PyAny>>>,
     speed_voltages: Option<bool>,
+    relays: Option<Vec<Bound<'_, pyo3::types::PyAny>>>,
 ) -> PyResult<DynamicsResult> {
     use crate::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
     use crate::solver::JacobianBackend;
@@ -2082,8 +2088,8 @@ fn dynamics(
     if let Some(on) = speed_voltages {
         document.dynamics.speed_voltages = on;
     }
-    let (mut system, mut schedule) =
-        document.build().map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (mut system, mut schedule, mut protection) =
+        document.build_with_relays().map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // An overriding schedule is given as dicts in the same shape the document
     // uses, so there is one vocabulary for events and not two.
@@ -2100,6 +2106,19 @@ fn dynamics(
         }
         schedule = parsed;
     }
+    // Relays are given in the same shape the document uses, so there is one
+    // vocabulary for protection and not two.
+    if let Some(given) = relays {
+        let mut parsed = Vec::with_capacity(given.len());
+        for item in given {
+            let text: String = py.import("json")?.call_method1("dumps", (item,))?.extract()?;
+            parsed.push(
+                serde_json::from_str(&text)
+                    .map_err(|e| PyValueError::new_err(format!("relay: {e}")))?,
+            );
+        }
+        protection = parsed;
+    }
 
     let report = run_dynamics(
         &mut system,
@@ -2110,6 +2129,7 @@ fn dynamics(
             max_newton,
             damping_steps,
             events: schedule,
+            relays: protection,
             backend,
         },
     );
@@ -2125,6 +2145,11 @@ fn dynamics(
         newton_iterations: report.newton_iterations,
         events_applied: report.events_applied,
         warnings: report.warnings.iter().map(|w| w.to_string()).collect(),
+        relay_actions: report
+            .relay_actions
+            .iter()
+            .map(|a| (a.id.clone(), a.crossed_at, a.fired_at))
+            .collect(),
         time: report.trajectory.time,
         names: report.trajectory.names,
         rows: report.trajectory.rows,
@@ -2154,6 +2179,15 @@ pub struct DynamicsMode {
     /// `(state name, factor)`, largest first, normalized to sum to one.
     #[pyo3(get)]
     participation: Vec<(String, f64)>,
+    /// The mode shape at the rotor angles: `(state name, magnitude, phase in
+    /// degrees)`, scaled so the largest is `1∠0`.
+    ///
+    /// Participation says whose a mode is; the shape says how they move. Two
+    /// rotors near opposite phase are swinging *against* each other, which is
+    /// what separates an inter-area mode from a local one. Empty for a
+    /// non-oscillatory mode, where a relative phase means nothing.
+    #[pyo3(get)]
+    shape: Vec<(String, f64, f64)>,
 }
 
 #[cfg(feature = "dynamics")]
@@ -2207,6 +2241,7 @@ fn small_signal(path: &str, speed_voltages: Option<bool>) -> PyResult<Vec<Dynami
             frequency: mode.frequency,
             time_constant: mode.time_constant,
             participation: result.participants(mode),
+            shape: result.shape(mode),
         })
         .collect())
 }
