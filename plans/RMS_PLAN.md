@@ -1,8 +1,8 @@
 # RMS simulation in gridoxide
 
 Status: **complete except G6**, 2026-08-29, against `6f212eb`. Phases 1–4 and 6 done, phase 5
-half done — Dynawo yes, ANDES dropped. §11–§18 record what was actually done, including the
-places this plan was wrong. §17 and §18 are follow-on work beyond the plan's own scope.
+half done — Dynawo yes, ANDES dropped. §11–§19 record what was actually done, including the
+places this plan was wrong. §17 onward is follow-on work beyond the plan's own scope.
 
 ## Context
 
@@ -1169,3 +1169,64 @@ moves. Both are gated.
 - Saturation; valve **rate** limits; state-triggered events; a fifth-order machine.
 - Coupling the Dynawo reader to `src/iidm.rs`.
 - Small-signal analysis.
+
+
+---
+
+## 19. Beyond the plan: the fifth-order machine, and small-signal analysis
+
+Two of the items §18 left outstanding.
+
+### The fifth-order machine
+
+A salient-pole rotor: a field winding and a damper on the `d` axis, one damper on the `q` axis.
+Dynawo's `ThreeWindings`, PSS/E's `GENSAL`. Its two axes are borrowed wholesale from the models
+either side of it — the `d` axis is `GenRound`'s, the `q` axis is `GenTransient`'s — so it cost
+little beyond the Jacobian bookkeeping.
+
+There is no `x'_q` and no `T'_q0`, and that is the physics rather than a simplification: a salient
+rotor has no `q`-axis field for a transient to live in. The `.dyd` reader therefore keys on the
+**library name** rather than on which parameters happen to be present — a three-windings set simply
+has no `XpqPu` to find, and reading its absence as a modelling decision would be right only by
+coincidence. All five generators in the vendored IEEE 14 case now map, where three did before.
+
+Gated the way its neighbours were, including a reduction: take the sixth-order model's `q`-axis
+transient reactance down to its subtransient one and it must trace the fifth-order model's
+trajectory, which it does to `1e-5` rad.
+
+### Small-signal analysis
+
+The feature-comparison row that used to say "presupposes the RMS row". §16 already noted the
+modelling was done; this is the reduction and the eigen-decomposition.
+
+`A = A_x − A_v·C_v⁻¹·C_x`, then eigenvalues, damping ratios, modal frequencies and **participation
+factors**. The four blocks are **not re-derived**: they are exactly what `DaePattern::fill` already
+assembles for every Newton iteration of every step, read out at `h·a = 1`. That is worth more than
+the saved code — two hand-written derivations of one Jacobian would be two things to keep in step,
+and a modal analysis that had quietly drifted from the simulation it describes would be worse than
+none.
+
+The gates go through the closed form the time-domain run is *independently* checked against: for an
+undamped classical machine the swing eigenvalue is exactly `±j√(Ω_b·K_s/2H)`, and both halves are
+asserted — the frequency, and that the real part is zero because nothing dissipates. Two more
+compare against the run itself, through almost no shared code: the predicted period matches the
+observed one to `2e-3`, and the real part predicts the peak-to-peak decay to 2%.
+
+Two test bugs of my own on the way, and both the same mistake: measuring an oscillation about the
+*perturbed* starting value rather than about the equilibrium. That makes every zero crossing a
+tangency, and leaves a constant offset in the envelope that never decays. Worth recording because
+the symptom — "no crossings found", "decays too slowly" — reads exactly like a physics failure.
+
+Analysing a point the system is not sitting at is refused. A linearization about a mid-transient
+state describes nothing in particular, and its eigenvalues would look entirely plausible.
+
+The output is where the value is. On the smallest fixture it separates three distinct mechanisms and
+names each by the states it belongs to: an electromechanical swing at 1.27 Hz that is 77% the
+rotor's, an excitation-and-field-flux mode at 0.36 Hz on the AVR's lead stage and `e'_q`, and a fast
+mode on the damper winding and the stabilizer. None of that has to be inferred from a trajectory.
+
+### Still outstanding
+
+- Saturation; valve **rate** limits; state-triggered events.
+- Coupling the Dynawo reader to `src/iidm.rs`.
+- Sparse (Arnoldi) small-signal for systems of thousands of states; eigenvalue sensitivities.

@@ -2131,6 +2131,86 @@ fn dynamics(
     })
 }
 
+
+/// One mode of the linearized system.
+#[cfg(feature = "dynamics")]
+#[pyclass]
+pub struct DynamicsMode {
+    /// Real part of the eigenvalue, in reciprocal seconds. Positive grows.
+    #[pyo3(get)]
+    sigma: f64,
+    /// Imaginary part, in radians per second.
+    #[pyo3(get)]
+    omega: f64,
+    /// Damping ratio. **Negative means growing.**
+    #[pyo3(get)]
+    damping: f64,
+    /// Oscillation frequency in Hz; zero for a non-oscillatory mode.
+    #[pyo3(get)]
+    frequency: f64,
+    /// `1/e` decay time in seconds; `inf` for an undamped mode.
+    #[pyo3(get)]
+    time_constant: f64,
+    /// `(state name, factor)`, largest first, normalized to sum to one.
+    #[pyo3(get)]
+    participation: Vec<(String, f64)>,
+}
+
+#[cfg(feature = "dynamics")]
+#[pymethods]
+impl DynamicsMode {
+    fn __repr__(&self) -> String {
+        format!(
+            "DynamicsMode({:+.5}{:+.5}j, damping={:.4}, f={:.4} Hz)",
+            self.sigma, self.omega, self.damping, self.frequency
+        )
+    }
+}
+
+/// Linearizes a case about its equilibrium and returns its modes.
+///
+/// ```python
+/// modes = gridoxide.small_signal("case.json")
+/// worst = modes[0]                      # least damped first
+/// print(worst.frequency, worst.damping, worst.participation[:3])
+/// ```
+///
+/// This answers a question no single run can — what oscillations the system
+/// has at all, and which machines take part in each — and it is the only
+/// reliable way to find a *negatively* damped mode, since a time-domain run
+/// finds one only if the disturbance happened to excite it.
+///
+/// Refuses a case that is not at an equilibrium: a linearization about a point
+/// the system is not sitting at describes nothing in particular, and its
+/// eigenvalues would look entirely plausible.
+#[cfg(feature = "dynamics")]
+#[pyfunction]
+#[pyo3(signature = (path, speed_voltages = None))]
+fn small_signal(path: &str, speed_voltages: Option<bool>) -> PyResult<Vec<DynamicsMode>> {
+    use crate::dynamics::{json, smallsignal};
+
+    let mut document = json::read(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    if let Some(on) = speed_voltages {
+        document.dynamics.speed_voltages = on;
+    }
+    let (system, _) = document.build().map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let result =
+        smallsignal::analyze(&system).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(result
+        .modes
+        .iter()
+        .map(|mode| DynamicsMode {
+            sigma: mode.eigenvalue.re,
+            omega: mode.eigenvalue.im,
+            damping: mode.damping,
+            frequency: mode.frequency,
+            time_constant: mode.time_constant,
+            participation: result.participants(mode),
+        })
+        .collect())
+}
+
 /// The physics is gated in `tests/continuation_test.rs` (against a closed-form
 /// two-bus nose) and `tests/continuation_events_test.rs` (against a brute-force
 /// bisection); this binding only has to reach it.
@@ -2951,7 +3031,9 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "dynamics")]
     {
         m.add_class::<DynamicsResult>()?;
+        m.add_class::<DynamicsMode>()?;
         m.add_function(wrap_pyfunction!(dynamics, m)?)?;
+        m.add_function(wrap_pyfunction!(small_signal, m)?)?;
     }
     #[cfg(feature = "opf")]
     {

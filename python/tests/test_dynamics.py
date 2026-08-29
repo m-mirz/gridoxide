@@ -133,3 +133,37 @@ def test_the_machine_formulation_is_selectable():
     gap = max(abs(a - b) for a, b in zip(approx.series("G1.delta"), full.series("G1.delta")))
     assert gap > 1e-5, "the argument must reach the machines"
     assert gap < 0.1, "but it is a per-cent effect on the swing, not a different model"
+
+
+def test_small_signal_reports_the_modes():
+    """The modes of the linearized system, least damped first.
+
+    The physics is gated in `tests/dynamics_smallsignal_test.rs` — against the
+    closed-form swing frequency and against the time-domain run's own observed
+    period and decay. What is checked here is that the binding reaches it.
+    """
+    modes = gridoxide.small_signal(str(CASE))
+    assert len(modes) == 13, "one mode per differential state"
+
+    # Least damped first, which is the order the question is asked in.
+    dampings = [m.damping for m in modes]
+    assert dampings == sorted(dampings)
+
+    worst = modes[0]
+    assert worst.damping > 0, "this case is stable"
+    assert 0.5 < worst.frequency < 3.0, "the electromechanical mode is around 1 Hz"
+    assert worst.time_constant > 0
+
+    # A participation factor names the states, not just their indices.
+    names = [name for name, _ in worst.participation]
+    assert any(n.endswith(".omega") for n in names), names
+    factors = [p for _, p in worst.participation]
+    assert abs(sum(factors) - 1.0) < 1e-6
+    assert factors == sorted(factors, reverse=True)
+
+    assert "DynamicsMode" in repr(worst)
+
+
+def test_small_signal_refuses_a_case_it_cannot_linearize():
+    with pytest.raises(ValueError):
+        gridoxide.small_signal("/nonexistent/case.json")

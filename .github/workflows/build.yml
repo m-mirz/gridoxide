@@ -79,6 +79,10 @@ jobs:
       run: |
         cargo build --verbose --features iidm
         cargo test --verbose --features iidm,ucte
+    # Small-signal analysis rides along on the same feature: it reuses the
+    # time-domain solve's own Jacobian blocks rather than deriving its own, so
+    # there is nothing extra to build or install.
+    #
     # `dynamics` is in CI for the same reason `opf` is: pure Rust on this
     # crate's own sparse backends, no system library and nothing to install.
     #

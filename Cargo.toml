@@ -368,6 +368,11 @@ path = "tests/cli_dynamics_test.rs"
 required-features = ["dynamics"]
 
 [[test]]
+name = "dynamics_smallsignal_test"
+path = "tests/dynamics_smallsignal_test.rs"
+required-features = ["dynamics"]
+
+[[test]]
 name = "dynamics_reference_test"
 path = "tests/dynamics_reference_test.rs"
 required-features = ["dynamics", "iidm"]

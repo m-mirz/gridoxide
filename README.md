@@ -59,6 +59,10 @@ See [Building and Running](docs/src/getting_started/building.md) and
   Gated against the equal-area criterion's closed-form critical clearing time and against
   [Dynawo's own published answer](docs/src/dynamics/validation.md) for Kundur's Example 13.2 —
   see [The RMS Simulation Problem](docs/src/dynamics/index.md).
+- **Small-signal (modal) analysis** on the same system — eigenvalues, damping ratios and
+  participation factors naming the states each mode belongs to, from the very Jacobian blocks the
+  time-domain solve already assembles. See
+  [Small-Signal Analysis](docs/src/dynamics/smallsignal.md).
 - **Five interchangeable linear-solver backends** — `faer` (`Scalar`), a hand-written block LU
   (`Block`), vendored SuiteSparse KLU over FFI (`Klu`), a from-scratch Rust translation of KLU
   (`KluNative`, always built), and Intel oneMKL PARDISO (`Pardiso`). All five produce identical
