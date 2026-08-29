@@ -70,10 +70,35 @@ Steps are truncated to land exactly on each event time, and the time is then *sn
 event's own value rather than accumulated — so an event time need not be a multiple of the step, and
 does not drift with the number of steps that preceded it.
 
-No root-finding is needed because every event here is scheduled at a time rather than triggered by a
-state. State-triggered events — a relay opening on an under-voltage threshold — are not implemented;
-the Illinois locator in [continuation](../powerflow/continuation.md) is the piece to reuse when they
-arrive.
+No root-finding is needed for a **scheduled** event: it is already a time. A relay is different.
+
+## Relays: events triggered by a state
+
+A relay watches a quantity — a bus voltage, a machine's speed, its angle excursion — and acts if it
+stays out of bounds for a stated delay.
+
+**The delay is the whole design.** A relay that acted the instant a threshold were crossed would
+trip on every fault in the network rather than the ones it is meant to clear. And because the delay
+is measured *from the crossing*, an error in when the crossing happened is an error in when the
+relay acts — so the crossing is **located**, not rounded to whichever step happened to notice it.
+The step is shortened onto it with the same Illinois locator
+[continuation](../powerflow/continuation.md) uses to find a reactive limit along its curve, and from
+that instant the relay's action is an ordinary scheduled event.
+
+**A relay whose condition stops holding forgets.** That is what separates it from a stopwatch, and
+it is what makes a fault cleared inside the delay trip nothing. It is gated as such: the same fault
+held for 0.2 s trips nothing and held for 0.9 s trips, against a 0.4 s relay.
+
+One subtlety is worth naming, because getting it wrong is silent. A condition can begin holding **at
+an event** — a fault collapses a voltage within the instant — and then both ends of the *following*
+step are already inside the trip region, so a comparison local to that step sees no crossing at all
+and the relay never fires. What is compared is therefore the value at the last accepted point,
+remembered across events, rather than the step's own start.
+
+Watching an algebraic quantity and watching a differential one differ in kind, and the gates cover
+both: a bus voltage moves discontinuously at an event, so its crossings tend to sit exactly on event
+times, while a rotor speed is integrated and crosses somewhere strictly inside a step. The located
+time reproduces the threshold to `1e-7` on a 20 ms step.
 
 ## Backward-Euler damping, and what it costs
 

@@ -64,7 +64,7 @@ use num_complex::Complex;
 use crate::solver::LinearSolver;
 
 use super::dae::residual;
-use super::events::{DynamicsWarning, Event, EventError, EventKind};
+use super::events::{DynamicsWarning, Event, EventError, EventKind, Relay, RelayAction};
 use super::models::ModelJacobian;
 use super::{DynamicSystem, DynamicsOptions, DynamicsReport, DynamicsStatus, Trajectory};
 
@@ -271,6 +271,40 @@ pub fn integrate<S: LinearSolver>(
     // snapped exactly, so it never has to absorb accumulated drift.
     let eps = opts.step * 1e-9;
 
+    // A relay whose condition holds is waiting out its delay. The crossing
+    // time is *located* rather than rounded to a step boundary, because the
+    // delay is measured from it.
+    struct Pending {
+        relay: usize,
+        crossed_at: f64,
+        fires_at: f64,
+    }
+    let relays: Vec<Relay> = opts.relays.clone();
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut spent = vec![false; relays.len()];
+    let mut relay_actions: Vec<RelayAction> = Vec::new();
+    let reference = x.clone();
+    // Whether each relay's condition held at the last accepted point.
+    //
+    // Remembered rather than recomputed from the step's own start, because a
+    // condition can begin holding **at an event** — a fault collapses a voltage
+    // within the instant — and then both ends of the following step are already
+    // inside the trip region, so a step-local comparison would see no crossing
+    // at all and the relay would never fire.
+    let mut holding = vec![false; relays.len()];
+    for (i, relay) in relays.iter().enumerate() {
+        match system.watched(relay.watch, &x, &v, &reference) {
+            Some(value) => holding[i] = relay.trigger.holds(value),
+            None => {
+                warnings.push(DynamicsWarning::RelayDropped {
+                    id: relay.id.clone(),
+                    detail: format!("{:?} names nothing that exists", relay.watch),
+                });
+                spent[i] = true;
+            }
+        }
+    }
+
     let mut t = 0.0;
     let mut steps = 0usize;
     let mut status = DynamicsStatus::Completed;
@@ -345,13 +379,23 @@ pub fn integrate<S: LinearSolver>(
 
         while t < opts.end_time - eps {
             let mut h = opts.step.min(opts.end_time - t);
-            let mut lands_on_event = false;
-            if next_event < events.len() {
-                let dt = events[next_event].time - t;
-                if dt > eps && dt < h {
-                    h = dt;
-                    lands_on_event = true;
+            // The next instant the run must land on exactly: a scheduled event,
+            // or a relay whose delay expires. Both are times by the time they
+            // get here — locating a relay's *crossing* is what turned its
+            // trigger into one.
+            let mut snap: Option<f64> = None;
+            let consider = |candidate: f64, h: &mut f64, snap: &mut Option<f64>| {
+                let dt = candidate - t;
+                if dt > eps && dt < *h {
+                    *h = dt;
+                    *snap = Some(candidate);
                 }
+            };
+            if next_event < events.len() {
+                consider(events[next_event].time, &mut h, &mut snap);
+            }
+            for p in &pending {
+                consider(p.fires_at, &mut h, &mut snap);
             }
 
             let rule = if damping_left > 0 { Rule::BackwardEuler } else { Rule::Trapezoidal };
@@ -368,17 +412,29 @@ pub fn integrate<S: LinearSolver>(
             system.derivatives_at(&x, &v, &mut f0);
 
             let x_prev = x.clone();
-            // Explicit-Euler predictor for the differential half; the algebraic
-            // half starts where it was, which already solves the constraint at
-            // the previous point.
-            for i in 0..layout.n_diff {
-                x[i] = x_prev[i] + h * f0[i];
+            let v_prev = v.clone();
+
+            // One step of arbitrary size from the saved start. Used for the
+            // step itself, and again — at trial sizes — to locate a relay's
+            // crossing inside it.
+            macro_rules! attempt {
+                ($size:expr) => {{
+                    x.copy_from_slice(&x_prev);
+                    v.copy_from_slice(&v_prev);
+                    // Explicit-Euler predictor for the differential half; the
+                    // algebraic half starts where it was, which already solves
+                    // the constraint at the previous point.
+                    for i in 0..layout.n_diff {
+                        x[i] = x_prev[i] + $size * f0[i];
+                    }
+                    newton(
+                        system, &mut solver, &mut ws, &x_prev, &f0, &mut x, &mut v,
+                        $size * a, $size * b, false, opts.tol, opts.max_newton,
+                    )
+                }};
             }
 
-            let outcome = newton(
-                system, &mut solver, &mut ws, &x_prev, &f0, &mut x, &mut v, h * a, h * b,
-                false, opts.tol, opts.max_newton,
-            );
+            let outcome = attempt!(h);
             match outcome {
                 StepOutcome::Converged { .. } => {}
                 StepOutcome::NotConverged => {
@@ -391,6 +447,55 @@ pub fn integrate<S: LinearSolver>(
                 }
             }
 
+            // Did any relay's condition begin holding inside this step? If so,
+            // the step is *shortened onto the crossing* rather than accepted
+            // past it — the delay is measured from that instant, so rounding it
+            // to a step boundary would be rounding the trip time.
+            let mut crossed: Option<(usize, f64)> = None;
+            for (i, relay) in relays.iter().enumerate() {
+                if spent[i] || holding[i] || pending.iter().any(|p| p.relay == i) {
+                    continue;
+                }
+                let before = system
+                    .watched(relay.watch, &x_prev, &v_prev, &reference)
+                    .unwrap_or(0.0);
+                let after = system.watched(relay.watch, &x, &v, &reference).unwrap_or(0.0);
+                if relay.trigger.holds(after) && !relay.trigger.holds(before) {
+                    // Illinois on the step fraction: the same locator
+                    // `continuation` uses to find a Q-limit along its curve.
+                    let mut bracket = crate::continuation::events::Illinois {
+                        lo: 0.0,
+                        hi: 1.0,
+                        f_lo: relay.trigger.residual(before),
+                        f_hi: relay.trigger.residual(after),
+                    };
+                    for _ in 0..24 {
+                        if bracket.width() * h < 1e-9 {
+                            break;
+                        }
+                        let theta = bracket.next();
+                        if !matches!(attempt!(theta * h), StepOutcome::Converged { .. }) {
+                            break;
+                        }
+                        let value =
+                            system.watched(relay.watch, &x, &v, &reference).unwrap_or(0.0);
+                        bracket.update(theta, relay.trigger.residual(value));
+                    }
+                    let theta = bracket.hi.clamp(1e-9, 1.0);
+                    if crossed.is_none_or(|(_, best)| theta < best) {
+                        crossed = Some((i, theta));
+                    }
+                }
+            }
+            if let Some((_, theta)) = crossed {
+                h *= theta;
+                snap = None;
+                if !matches!(attempt!(h), StepOutcome::Converged { .. }) {
+                    status = DynamicsStatus::NewtonFailed { time: t + h };
+                    break;
+                }
+            }
+
             // Non-windup limits hold a state at its boundary; the step that
             // crosses one can still carry it past, so it goes back before
             // anything reads it.
@@ -398,10 +503,12 @@ pub fn integrate<S: LinearSolver>(
 
             // Snapped rather than accumulated, so an event time is hit exactly
             // however many steps preceded it.
-            t = if lands_on_event { events[next_event].time } else { t + h };
+            t = snap.unwrap_or(t + h);
             steps += 1;
             damping_left = damping_left.saturating_sub(1);
             traj.push(t, &x, &v);
+
+            let _ = crossed;
 
             let before = events_applied;
             if let Some(bad) = fire(
@@ -413,6 +520,83 @@ pub fn integrate<S: LinearSolver>(
             }
             if events_applied > before {
                 damping_left = opts.damping_steps;
+            }
+
+            // One pass, after everything that could move a watched quantity has
+            // moved. A condition that has just begun to hold starts its relay's
+            // delay — at the located crossing when the step was shortened onto
+            // one, and at the event's own instant when an event caused it.
+            for (i, relay) in relays.iter().enumerate() {
+                if spent[i] {
+                    continue;
+                }
+                let Some(value) = system.watched(relay.watch, &x, &v, &reference) else {
+                    continue;
+                };
+                let now = relay.trigger.holds(value);
+                if now && !holding[i] && !pending.iter().any(|p| p.relay == i) {
+                    pending.push(Pending { relay: i, crossed_at: t, fires_at: t + relay.delay });
+                }
+                holding[i] = now;
+            }
+            // A relay whose condition stops holding **resets and forgets**.
+            // That is the difference between a relay and a stopwatch, and it is
+            // what makes a fault cleared in time not trip anything.
+            pending.retain(|p| holding[p.relay]);
+
+            // Anything whose delay has elapsed acts now.
+            let mut due: Vec<(usize, f64)> = Vec::new();
+            pending.retain(|p| {
+                if p.fires_at <= t + eps {
+                    due.push((p.relay, p.crossed_at));
+                    false
+                } else {
+                    true
+                }
+            });
+            let mut halted = false;
+            for (i, crossed_at) in due {
+                let relay = &relays[i];
+                match apply(system, relay.action) {
+                    Ok(()) => {
+                        system.reassemble();
+                        let x_frozen = x.clone();
+                        let zero = vec![0.0; x.len()];
+                        system.latch(&x, &v);
+                        if !matches!(
+                            newton(
+                                system, &mut solver, &mut ws, &x_frozen, &zero, &mut x, &mut v,
+                                0.0, 0.0, true, opts.tol, opts.max_newton,
+                            ),
+                            StepOutcome::Converged { .. }
+                        ) {
+                            status = DynamicsStatus::NewtonFailed { time: t };
+                            halted = true;
+                            break;
+                        }
+                        traj.push(t, &x, &v);
+                        relay_actions.push(RelayAction {
+                            id: relay.id.clone(),
+                            crossed_at,
+                            fired_at: t,
+                            action: relay.action,
+                        });
+                        damping_left = opts.damping_steps;
+                        for island in system.dead_islands() {
+                            let warning = DynamicsWarning::DeadIsland { buses: island, time: t };
+                            if !warnings.contains(&warning) {
+                                warnings.push(warning);
+                            }
+                        }
+                    }
+                    Err(error) => warnings.push(DynamicsWarning::Skipped { time: t, error }),
+                }
+                if !relay.repeating {
+                    spent[i] = true;
+                }
+            }
+            if halted {
+                break;
             }
         }
     }
@@ -426,6 +610,7 @@ pub fn integrate<S: LinearSolver>(
         newton_iterations: ws.newton_iterations,
         events_applied,
         warnings,
+        relay_actions,
     }
 }
 

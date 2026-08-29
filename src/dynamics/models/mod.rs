@@ -192,6 +192,16 @@ pub trait DynamicModel: std::fmt::Debug {
     /// wrong, so it is never trusted without the oracle.
     fn jacobian(&self, x: &[f64], v: Complex<f64>, out: &mut ModelJacobian);
 
+    /// Which of this device's states is a rotor speed, if any.
+    ///
+    /// A relay watching a machine needs to find its speed without knowing the
+    /// model's layout, and a device that has no rotor — a load — honestly has
+    /// none. Asking rather than assuming an index is what keeps the layout from
+    /// becoming an unwritten contract.
+    fn speed_index(&self) -> Option<usize> {
+        None
+    }
+
     /// Decide which limits are active for the coming step. See
     /// [`Control::latch`].
     fn latch(&self, _x: &[f64], _v: Complex<f64>) {}

@@ -19,11 +19,10 @@
 //! 4. resume, with a couple of backward-Euler steps to damp the ringing the
 //!    trapezoidal rule would otherwise show — see [`integrator`](super::integrator).
 //!
-//! Step 1 needs no root-finding: every event here is scheduled at a time, not
-//! triggered by a state. State-triggered events — a relay opening on an
-//! under-voltage threshold — are a later phase, and the Illinois locator in
-//! [`continuation::events`](crate::continuation::events) is the piece to reuse
-//! when they arrive.
+//! Step 1 needs no root-finding for a **scheduled** event: it is already a
+//! time. A [`Relay`] is different — it is triggered by a *state*, so when it
+//! trips has to be found rather than read. See [`Relay`] for why that matters
+//! and how it is done.
 //!
 //! # Value-only versus structural
 //!
@@ -172,6 +171,8 @@ pub enum DynamicsWarning {
     DeadIsland { buses: Vec<usize>, time: f64 },
     /// An event named something that does not exist; it was skipped.
     Skipped { time: f64, error: EventError },
+    /// A relay watching something that does not exist; it was dropped.
+    RelayDropped { id: String, detail: String },
 }
 
 impl std::fmt::Display for DynamicsWarning {
@@ -187,6 +188,133 @@ impl std::fmt::Display for DynamicsWarning {
             DynamicsWarning::Skipped { time, error } => {
                 write!(f, "at t = {time}: {error}")
             }
+            DynamicsWarning::RelayDropped { id, detail } => {
+                write!(f, "relay {id}: {detail}; dropped")
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// State-triggered events: protection
+// ---------------------------------------------------------------------------
+
+/// What a relay watches.
+///
+/// Deliberately a small set. A relay's *decision logic* is the interesting
+/// part, and it is the same whatever the input; adding a quantity is adding one
+/// match arm, not a new mechanism.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Watch {
+    /// A bus's voltage magnitude, per unit.
+    BusVoltage { bus: usize },
+    /// A machine's rotor speed, per unit — `1.0` is synchronous.
+    UnitSpeed { unit: usize },
+    /// A machine's rotor angle relative to where it started, radians. Rises
+    /// without bound on a machine that has lost synchronism, which is what an
+    /// out-of-step relay is for.
+    UnitAngleExcursion { unit: usize },
+}
+
+/// Which side of a threshold trips the relay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Trigger {
+    Below(f64),
+    Above(f64),
+}
+
+impl Trigger {
+    /// The signed distance into the trip region: positive once tripped.
+    ///
+    /// A signed residual rather than a boolean, so the exact crossing time can
+    /// be *located* rather than rounded up to the end of whichever step
+    /// happened to notice — see [`Relay::delay`].
+    pub fn residual(&self, value: f64) -> f64 {
+        match *self {
+            Trigger::Below(threshold) => threshold - value,
+            Trigger::Above(threshold) => value - threshold,
+        }
+    }
+
+    pub fn holds(&self, value: f64) -> bool {
+        self.residual(value) > 0.0
+    }
+}
+
+/// A protection relay: watch a quantity, and act if it stays out of bounds.
+///
+/// # Why the delay is the whole design
+///
+/// A relay that acted the instant a threshold were crossed would trip on every
+/// fault in the network rather than the ones it is meant to clear. The delay is
+/// what makes it selective, and it is why the crossing time has to be *located*
+/// rather than rounded to a step boundary: the delay is measured from the
+/// crossing, so an error there is an error in when the relay acts.
+///
+/// The condition must hold **continuously**. If the watched quantity comes back
+/// inside its bounds before the delay elapses, the relay resets and forgets —
+/// which is exactly what a fault cleared in time should cause, and is the
+/// difference between a relay and a stopwatch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Relay {
+    pub id: String,
+    pub watch: Watch,
+    pub trigger: Trigger,
+    /// How long the condition must hold before the action fires, in seconds.
+    /// Zero acts at the crossing.
+    pub delay: f64,
+    pub action: EventKind,
+    /// Whether the relay may fire more than once. One-shot by default: a trip
+    /// is a trip.
+    pub repeating: bool,
+}
+
+impl Relay {
+    /// An under-voltage trip: act if a bus stays below `threshold` for `delay`.
+    pub fn under_voltage(
+        id: impl Into<String>,
+        bus: usize,
+        threshold: f64,
+        delay: f64,
+        action: EventKind,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            watch: Watch::BusVoltage { bus },
+            trigger: Trigger::Below(threshold),
+            delay,
+            action,
+            repeating: false,
+        }
+    }
+
+    /// An over-speed trip.
+    pub fn over_speed(
+        id: impl Into<String>,
+        unit: usize,
+        threshold: f64,
+        delay: f64,
+        action: EventKind,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            watch: Watch::UnitSpeed { unit },
+            trigger: Trigger::Above(threshold),
+            delay,
+            action,
+            repeating: false,
+        }
+    }
+}
+
+/// What a relay did, and when.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelayAction {
+    pub id: String,
+    /// When the watched quantity crossed its threshold — **located**, not
+    /// rounded to a step boundary.
+    pub crossed_at: f64,
+    /// When the action fired: `crossed_at + delay`.
+    pub fired_at: f64,
+    pub action: EventKind,
 }
