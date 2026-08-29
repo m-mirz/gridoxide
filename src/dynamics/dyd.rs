@@ -36,8 +36,11 @@
 //! [`GoverProportional`](super::models::GoverProportional) to match them
 //! exactly, rather than inventing time constants a Dynawo file never stated.
 //!
-//! `GeneratorSynchronousThreeWindings*` is a fifth-order machine, which this
-//! library does not have. It is skipped and named.
+//! `GeneratorSynchronousThreeWindings*` is a fifth-order salient-pole machine
+//! and maps onto [`GenSalient`](super::models::GenSalient). Its parameter set
+//! carries no `XpqPu` and no `Tpq0` — a salient rotor has no `q`-axis transient
+//! to have a time constant for — so the reader keys on the library name rather
+//! than on which parameters happen to be present.
 //!
 //! # The one conversion that is inferred
 //!
@@ -73,7 +76,7 @@ use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader;
 
 use super::json::{AvrSpec, GovSpec, MachineSpec, UnitSpec};
-use super::models::machine::GenRoundParams;
+use super::models::machine::{GenRoundParams, GenSalientParams};
 use super::models::Limits;
 
 /// One `blackBoxModel` entry.
@@ -311,6 +314,10 @@ fn is_four_windings(lib: &str) -> bool {
     lib.starts_with("GeneratorSynchronousFourWindings")
 }
 
+fn is_three_windings(lib: &str) -> bool {
+    lib.starts_with("GeneratorSynchronousThreeWindings")
+}
+
 fn is_generator(lib: &str) -> bool {
     lib.starts_with("GeneratorSynchronous")
 }
@@ -352,7 +359,7 @@ pub fn to_units(
         if !is_generator(&model.lib) {
             continue;
         }
-        if !is_four_windings(&model.lib) {
+        if !is_four_windings(&model.lib) && !is_three_windings(&model.lib) {
             warnings.push(DydWarning::UnsupportedLib {
                 id: model.id.clone(),
                 lib: model.lib.clone(),
@@ -380,25 +387,48 @@ pub fn to_units(
         })?;
 
         let g = |name: &str| need(par, &model.id, &set, name);
-        let params = GenRoundParams {
-            h: g("generator_H")?,
-            d: g("generator_DPu")?,
-            ra: g("generator_RaPu")?,
-            xd: g("generator_XdPu")?,
-            xq: g("generator_XqPu")?,
-            xdp: g("generator_XpdPu")?,
-            xqp: g("generator_XpqPu")?,
-            xdpp: g("generator_XppdPu")?,
-            xqpp: g("generator_XppqPu")?,
-            xl: g("generator_XlPu")?,
-            td0p: g("generator_Tpd0")?,
-            tq0p: g("generator_Tpq0")?,
-            td0pp: g("generator_Tppd0")?,
-            tq0pp: g("generator_Tppq0")?,
-            // Dynawo states the machine's rating as its apparent-power
-            // nominal, and puts every reactance above on that base — which is
-            // the same convention every model here already expects.
-            mbase: g("generator_SNom")?,
+        // Dynawo states the machine's rating as its apparent-power nominal, and
+        // puts every reactance on that base — the same convention every model
+        // here already expects.
+        //
+        // A three-windings set carries no `XpqPu` and no `Tpq0`, because a
+        // salient-pole rotor has no q-axis transient to have a time constant
+        // for. That absence *is* the model, so the reader keys on the library
+        // name rather than on which parameters happen to be present.
+        let machine = if is_three_windings(&model.lib) {
+            MachineSpec::GenSalient(GenSalientParams {
+                h: g("generator_H")?,
+                d: g("generator_DPu")?,
+                ra: g("generator_RaPu")?,
+                xd: g("generator_XdPu")?,
+                xq: g("generator_XqPu")?,
+                xdp: g("generator_XpdPu")?,
+                xdpp: g("generator_XppdPu")?,
+                xqpp: g("generator_XppqPu")?,
+                xl: g("generator_XlPu")?,
+                td0p: g("generator_Tpd0")?,
+                td0pp: g("generator_Tppd0")?,
+                tq0pp: g("generator_Tppq0")?,
+                mbase: g("generator_SNom")?,
+            })
+        } else {
+            MachineSpec::GenRound(GenRoundParams {
+                h: g("generator_H")?,
+                d: g("generator_DPu")?,
+                ra: g("generator_RaPu")?,
+                xd: g("generator_XdPu")?,
+                xq: g("generator_XqPu")?,
+                xdp: g("generator_XpdPu")?,
+                xqp: g("generator_XpqPu")?,
+                xdpp: g("generator_XppdPu")?,
+                xqpp: g("generator_XppqPu")?,
+                xl: g("generator_XlPu")?,
+                td0p: g("generator_Tpd0")?,
+                tq0p: g("generator_Tpq0")?,
+                td0pp: g("generator_Tppd0")?,
+                tq0pp: g("generator_Tppq0")?,
+                mbase: g("generator_SNom")?,
+            })
         };
 
         let (md, mq, nd, nq) = (
@@ -451,7 +481,7 @@ pub fn to_units(
             bus,
             p: None,
             q: None,
-            machine: MachineSpec::GenRound(params),
+            machine,
             avr,
             gov,
             pss: None,

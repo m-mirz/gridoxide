@@ -79,7 +79,7 @@ flat line to machine precision. See [Initialization](./initialization.md).
 
 | | |
 |---|---|
-| Machines | classical (2nd order), transient (4th), subtransient (6th) |
+| Machines | classical (2nd order), transient (4th), salient-pole (5th), subtransient (6th) |
 | Excitation | `SEXS`, and a purely proportional regulator |
 | Governors | `TGOV1`, and a purely proportional governor |
 | Stabilizers | washout plus two lead-lag stages |

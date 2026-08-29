@@ -1262,3 +1262,337 @@ impl Machine for GenRound {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fifth-order, salient pole
+// ---------------------------------------------------------------------------
+
+/// The fifth-order machine: a field winding and a damper on the `d` axis, and
+/// **one** damper on the `q` axis.
+///
+/// States: `δ`, `ω`, `e'_q`, `ψ_1d`, `e''_d`.
+///
+/// This is the model a salient-pole machine gets, and it is what Dynawo calls
+/// `GeneratorSynchronousThreeWindings` and PSS/E calls `GENSAL`. Its two axes
+/// are borrowed wholesale from the models either side of it: the `d` axis is
+/// [`GenRound`]'s, with the same interpolated subtransient EMF and the same
+/// damper-coupling correction, and the `q` axis is [`GenTransient`]'s, with a
+/// single winding and therefore a single flux state.
+///
+/// ```text
+/// e''_q = a_d·e'_q + b_d·ψ_1d          Δ_d = ψ_1d − e'_q + (x'_d − x_l)·i_d
+///
+/// T'_d0 ·ė'_q  = −e'_q − (x_d − x'_d)(i_d − K_d·Δ_d) + E_fd
+/// T''_d0·ψ̇_1d = −Δ_d
+/// T''_q0·ė''_d = −e''_d + (x_q − x''_q)·i_q
+/// ```
+///
+/// There is no `x'_q` and no `T'_q0`, and that is the physical content rather
+/// than a simplification: one winding gives one time constant. A salient-pole
+/// rotor has no path for a `q`-axis transient because it has no `q`-axis field
+/// — the flux there sees the interpolar gap, and only the damper bars respond.
+///
+/// PSS/E's `GENSAL` additionally forces `x''_q = x''_d`; Dynawo states the two
+/// separately. This model allows them to differ, which reads both.
+#[derive(Clone, Debug)]
+pub struct GenSalient {
+    h: f64,
+    d: f64,
+    ra: f64,
+    xd: f64,
+    xdp: f64,
+    xdpp: f64,
+    xq: f64,
+    xqpp: f64,
+    xl: f64,
+    td0p: f64,
+    td0pp: f64,
+    tq0pp: f64,
+    ad: f64,
+    bd: f64,
+    kd: f64,
+    omega_base: f64,
+    y: Complex<f64>,
+    speed_voltages: bool,
+}
+
+/// [`GenSalient`]'s parameters, on the machine's own MVA rating.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GenSalientParams {
+    pub h: f64,
+    pub d: f64,
+    pub ra: f64,
+    pub xd: f64,
+    pub xq: f64,
+    pub xdp: f64,
+    pub xdpp: f64,
+    /// The single `q`-axis subtransient reactance. There is no `x'_q`.
+    pub xqpp: f64,
+    pub xl: f64,
+    pub td0p: f64,
+    pub td0pp: f64,
+    /// The single `q`-axis open-circuit time constant.
+    pub tq0pp: f64,
+    pub mbase: f64,
+}
+
+const GENSALIENT_STATES: [&str; 5] = ["delta", "omega", "eqp", "psi1d", "edpp"];
+
+impl GenSalient {
+    pub fn new(params: GenSalientParams, s_base: f64, f_nom: f64) -> Result<Self, InitError> {
+        require_positive("h", params.h)?;
+        require_positive("td0p", params.td0p)?;
+        require_positive("td0pp", params.td0pp)?;
+        require_positive("tq0pp", params.tq0pp)?;
+        for (name, lo, hi) in [
+            ("xdpp - xl", params.xl, params.xdpp),
+            ("xdp - xdpp", params.xdpp, params.xdp),
+            ("xd - xdp", params.xdp, params.xd),
+            ("xq - xqpp", params.xqpp, params.xq),
+        ] {
+            if hi <= lo {
+                return Err(InitError::NonPositiveParameter { name, value: hi - lo });
+            }
+        }
+
+        let k = base_ratio(params.mbase, s_base)?;
+        let (xdp, xdpp, xl) = (params.xdp / k, params.xdpp / k, params.xl / k);
+        let (ra, xqpp) = (params.ra / k, params.xqpp / k);
+        let bd = (xdp - xdpp) / (xdp - xl);
+        let z_norton = Complex::new(ra, 0.5 * (xdpp + xqpp));
+        Ok(Self {
+            h: params.h * k,
+            d: params.d * k,
+            ra,
+            xd: params.xd / k,
+            xdp,
+            xdpp,
+            xq: params.xq / k,
+            xqpp,
+            xl,
+            td0p: params.td0p,
+            td0pp: params.td0pp,
+            tq0pp: params.tq0pp,
+            ad: 1.0 - bd,
+            bd,
+            kd: bd / (xdp - xl),
+            omega_base: std::f64::consts::TAU * f_nom,
+            y: Complex::new(1.0, 0.0) / z_norton,
+            speed_voltages: false,
+        })
+    }
+
+    /// Carry the rotor speed on the speed-voltage terms, and write the swing
+    /// equation in torque. See the module doc.
+    pub fn with_speed_voltages(mut self, on: bool) -> Self {
+        self.speed_voltages = on;
+        self
+    }
+
+    pub fn h(&self) -> f64 {
+        self.h
+    }
+
+    fn speed(&self, omega: f64) -> (f64, f64) {
+        if self.speed_voltages { (omega, 1.0) } else { (1.0, 0.0) }
+    }
+
+    fn mechanical(&self, p_m: f64, omega: f64) -> (f64, f64) {
+        if self.speed_voltages {
+            (p_m / omega, -p_m / (omega * omega))
+        } else {
+            (p_m, 0.0)
+        }
+    }
+
+    fn det(&self, w: f64) -> f64 {
+        self.ra * self.ra + w * w * self.xdpp * self.xqpp
+    }
+
+    fn currents(&self, eqpp: f64, edpp: f64, v_d: f64, v_q: f64, w: f64) -> (f64, f64, f64, f64) {
+        let (a, b) = (w * edpp - v_d, w * eqpp - v_q);
+        let det = self.det(w);
+        (
+            (self.ra * a + w * self.xqpp * b) / det,
+            (-w * self.xdpp * a + self.ra * b) / det,
+            a,
+            b,
+        )
+    }
+}
+
+impl Machine for GenSalient {
+    fn n_states(&self) -> usize {
+        5
+    }
+
+    fn state_names(&self) -> &[&'static str] {
+        &GENSALIENT_STATES
+    }
+
+    fn omega_index(&self) -> usize {
+        1
+    }
+
+    fn norton_admittance(&self) -> Complex<f64> {
+        self.y
+    }
+
+    fn derivatives(&self, x: &[f64], v: Complex<f64>, e_fd: f64, p_m: f64, out: &mut [f64]) {
+        let (delta, omega, eqp, psi1d, edpp) = (x[0], x[1], x[2], x[3], x[4]);
+        let (w, _) = self.speed(omega);
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let eqpp = self.ad * eqp + self.bd * psi1d;
+        let (i_d, i_q, _, _) = self.currents(eqpp, edpp, v_d, v_q, w);
+        let (mech, _) = self.mechanical(p_m, omega);
+
+        let c_e = edpp * i_d + eqpp * i_q + (self.xqpp - self.xdpp) * i_d * i_q;
+        let delta_d = psi1d - eqp + (self.xdp - self.xl) * i_d;
+
+        out[0] = self.omega_base * (omega - 1.0);
+        out[1] = (mech - c_e - self.d * (omega - 1.0)) / (2.0 * self.h);
+        out[2] = (-eqp - (self.xd - self.xdp) * (i_d - self.kd * delta_d) + e_fd) / self.td0p;
+        out[3] = -delta_d / self.td0pp;
+        out[4] = (-edpp + (self.xq - self.xqpp) * i_q) / self.tq0pp;
+    }
+
+    fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64> {
+        let (delta, omega, eqp, psi1d, edpp) = (x[0], x[1], x[2], x[3], x[4]);
+        let (w, _) = self.speed(omega);
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let eqpp = self.ad * eqp + self.bd * psi1d;
+        let (i_d, i_q, _, _) = self.currents(eqpp, edpp, v_d, v_q, w);
+        GenTransient::from_dq(delta, i_d, i_q) + self.y * v
+    }
+
+    fn jacobian(
+        &self,
+        x: &[f64],
+        v: Complex<f64>,
+        _e_fd: f64,
+        p_m: f64,
+        out: &mut MachineJacobian,
+    ) {
+        let (delta, omega, eqp, psi1d, edpp) = (x[0], x[1], x[2], x[3], x[4]);
+        let (w, dw) = self.speed(omega);
+        let (_, dmech) = self.mechanical(p_m, omega);
+        let (sd, cd) = delta.sin_cos();
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let eqpp = self.ad * eqp + self.bd * psi1d;
+        let (i_d, i_q, a, b) = self.currents(eqpp, edpp, v_d, v_q, w);
+        let det = self.det(w);
+        let two_h = 2.0 * self.h;
+        let n = 5;
+
+        // Columns: δ, ω, e'_q, ψ_1d, e''_d, v_re, v_im.
+        let dab: [(f64, f64); 7] = [
+            (-v_q, v_d),
+            (0.0, 0.0),
+            (0.0, w * self.ad),
+            (0.0, w * self.bd),
+            (w, 0.0),
+            (-sd, -cd),
+            (cd, -sd),
+        ];
+        let deqpp = [0.0, 0.0, self.ad, self.bd, 0.0, 0.0, 0.0];
+        let dedpp = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+        let mut di_d = [0.0; 7];
+        let mut di_q = [0.0; 7];
+        for (k, (da, db)) in dab.iter().enumerate() {
+            di_d[k] = (self.ra * da + w * self.xqpp * db) / det;
+            di_q[k] = (-w * self.xdpp * da + self.ra * db) / det;
+        }
+        let ddet = 2.0 * w * dw * self.xdpp * self.xqpp;
+        di_d[1] = (self.ra * dw * edpp + dw * self.xqpp * b + w * self.xqpp * dw * eqpp) / det
+            - i_d * ddet / det;
+        di_q[1] = (-dw * self.xdpp * a - w * self.xdpp * dw * edpp + self.ra * dw * eqpp) / det
+            - i_q * ddet / det;
+
+        let sal = self.xqpp - self.xdpp;
+        let xdd = self.xdp - self.xl;
+        let mut dce = [0.0; 7];
+        let mut d_delta_d = [0.0; 7];
+        for k in 0..7 {
+            dce[k] = edpp * di_d[k]
+                + eqpp * di_q[k]
+                + sal * (i_q * di_d[k] + i_d * di_q[k])
+                + i_d * dedpp[k]
+                + i_q * deqpp[k];
+            d_delta_d[k] = xdd * di_d[k];
+        }
+        d_delta_d[3] += 1.0; // ∂Δ_d/∂ψ_1d
+        d_delta_d[2] -= 1.0; // ∂Δ_d/∂e'_q
+
+        out.dfdx[1] = self.omega_base;
+        for k in 0..n {
+            out.dfdx[n + k] = -dce[k] / two_h;
+            out.dfdx[2 * n + k] =
+                -(self.xd - self.xdp) * (di_d[k] - self.kd * d_delta_d[k]) / self.td0p;
+            out.dfdx[3 * n + k] = -d_delta_d[k] / self.td0pp;
+            out.dfdx[4 * n + k] = (self.xq - self.xqpp) * di_q[k] / self.tq0pp;
+        }
+        out.dfdx[n + 1] += (dmech - self.d) / two_h;
+        out.dfdx[2 * n + 2] -= 1.0 / self.td0p;
+        out.dfdx[4 * n + 4] -= 1.0 / self.tq0pp;
+
+        for (col, k) in [(0usize, 5usize), (1, 6)] {
+            out.dfdv[2 + col] = -dce[k] / two_h;
+            out.dfdv[4 + col] =
+                -(self.xd - self.xdp) * (di_d[k] - self.kd * d_delta_d[k]) / self.td0p;
+            out.dfdv[6 + col] = -d_delta_d[k] / self.td0pp;
+            out.dfdv[8 + col] = (self.xq - self.xqpp) * di_q[k] / self.tq0pp;
+        }
+
+        out.dfde[2] = 1.0 / self.td0p;
+        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
+
+        for k in 0..n {
+            let (mut d_re, mut d_im) =
+                (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
+            if k == 0 {
+                d_re += i_d * cd - i_q * sd;
+                d_im += i_d * sd + i_q * cd;
+            }
+            out.didx[k] = d_re;
+            out.didx[n + k] = d_im;
+        }
+
+        let (g, b_y) = (self.y.re, self.y.im);
+        for (col, k) in [(0usize, 5usize), (1, 6)] {
+            out.didv[col] = di_d[k] * sd + di_q[k] * cd;
+            out.didv[2 + col] = -di_d[k] * cd + di_q[k] * sd;
+        }
+        out.didv[0] += g;
+        out.didv[1] += -b_y;
+        out.didv[2] += b_y;
+        out.didv[3] += g;
+    }
+
+    fn initialize(&mut self, v: Complex<f64>, s: Complex<f64>) -> Result<MachineInit, InitError> {
+        if v.norm() == 0.0 {
+            return Err(InitError::ZeroTerminalVoltage);
+        }
+        let i = (s / v).conj();
+
+        // The same q-axis locator the other models use. It still holds: at
+        // steady state `e''_d = (x_q − x''_q)·i_q`, so the subtransient stator
+        // relation reduces to `v_d = x_q·i_q − r_a·i_d`, which is exactly the
+        // statement that E_q has no d-axis component.
+        let e_q = v + Complex::new(self.ra, self.xq) * i;
+        let delta = e_q.arg();
+
+        let (v_d, v_q) = GenTransient::to_dq(delta, v);
+        let (i_d, i_q) = GenTransient::to_dq(delta, i);
+
+        let eqpp = v_q + self.ra * i_q + self.xdpp * i_d;
+        let edpp = (self.xq - self.xqpp) * i_q;
+        let eqp = eqpp + (self.xdp - self.xdpp) * i_d;
+        let psi1d = eqp - (self.xdp - self.xl) * i_d;
+
+        let e_fd = eqp + (self.xd - self.xdp) * i_d;
+        let p_m = edpp * i_d + eqpp * i_q + (self.xqpp - self.xdpp) * i_d * i_q;
+
+        Ok(MachineInit { states: vec![delta, 1.0, eqp, psi1d, edpp], e_fd, p_m })
+    }
+}

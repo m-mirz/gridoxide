@@ -20,7 +20,8 @@ use gridoxide::dynamics::models::avr::{Sexs, SexsParams};
 use gridoxide::dynamics::models::InitError;
 use gridoxide::dynamics::models::gov::{Tgov1, Tgov1Params};
 use gridoxide::dynamics::models::machine::{
-    GenRound, GenRoundParams, GenTransient, GenTransientParams, Machine,
+    GenRound, GenRoundParams, GenSalient, GenSalientParams, GenTransient, GenTransientParams,
+    Machine,
 };
 use gridoxide::dynamics::models::load::ZipLoad;
 use gridoxide::dynamics::models::pss::{Stab1, Stab1Params};
@@ -1352,3 +1353,149 @@ fn a_limited_control_matches_the_oracle_on_both_sides() {
     }
 }
 
+
+fn salient_params() -> GenSalientParams {
+    GenSalientParams {
+        h: 5.0,
+        d: 1.0,
+        ra: 0.003,
+        xd: 1.8,
+        xq: 1.7,
+        xdp: 0.30,
+        xdpp: 0.22,
+        xqpp: 0.25,
+        xl: 0.15,
+        td0p: 8.0,
+        td0pp: 0.03,
+        tq0pp: 0.05,
+        mbase: S_BASE,
+    }
+}
+
+/// The fifth-order machine is self-consistent, and its `q` axis really does
+/// carry one winding rather than two.
+#[test]
+fn the_salient_machine_is_self_consistent() {
+    for (v, s) in [
+        (Complex::from_polar(1.0, 0.0), Complex::new(0.8, 0.3)),
+        (Complex::from_polar(1.05, 0.2), Complex::new(0.5, -0.15)),
+        (Complex::from_polar(0.95, -0.1), Complex::new(1.0, 0.6)),
+    ] {
+        let mut m = GenSalient::new(salient_params(), S_BASE, F_NOM).unwrap();
+        let init = m.initialize(v, s).unwrap();
+        assert_eq!(init.states.len(), 5, "δ, ω, e'_q, ψ_1d and one q-axis flux");
+
+        let i_model = m.injection(&init.states, v) - m.norton_admittance() * v;
+        let i_expected = (s / v).conj();
+        assert!(
+            (i_model - i_expected).norm() < 1e-12,
+            "terminal current {i_model} should be {i_expected}"
+        );
+        let copper = i_expected.norm_sqr() * salient_params().ra;
+        assert!((init.p_m - (s.re + copper)).abs() < 1e-12);
+    }
+
+    // The oracle, with controls attached so the chain rule is under test too.
+    let mut model = GeneratingUnit::new(
+        Box::new(GenSalient::new(salient_params(), S_BASE, F_NOM).unwrap()),
+        Some(Box::new(new_avr())),
+        Some(Box::new(new_gov(0.05))),
+        None,
+    );
+    model
+        .initialize(Complex::from_polar(1.02, 0.15), Complex::new(0.8, 0.3))
+        .unwrap();
+    let n = model.n_states();
+    for scale in [0.13, -0.21] {
+        let x: Vec<f64> = (0..n).map(|k| 0.4 + scale * k as f64).collect();
+        let v = Complex::new(0.97, 0.11);
+        let mut analytic = ModelJacobian::zeros(n);
+        analytic.clear();
+        model.jacobian(&x, v, &mut analytic);
+        let numeric = finite_difference(&model, &x, v, 1e-6);
+        for (name, a, b) in [
+            ("dfdx", &analytic.dfdx, &numeric.dfdx),
+            ("dfdv", &analytic.dfdv, &numeric.dfdv),
+            ("didx", &analytic.didx, &numeric.didx),
+        ] {
+            for (k, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
+                let sc = av.abs().max(bv.abs()).max(1.0);
+                assert!(
+                    (av - bv).abs() / sc < 1e-6,
+                    "{name}[{k}]: analytic {av:e} vs numeric {bv:e}"
+                );
+            }
+        }
+    }
+}
+
+/// The sixth-order machine reduces to the fifth-order one when its second
+/// `q`-axis winding is made redundant.
+///
+/// Take `x'_q` down to `x''_q` and `T'_q0` to `T''_q0`, and the round-rotor
+/// model's `q` axis has one effective winding rather than two: `b_q` goes to
+/// zero, `ψ_2q` decouples, and `e''_d` collapses onto `e'_d` with the
+/// subtransient time constant. That is precisely the salient-pole model's `q`
+/// axis, and the two must then trace the same trajectory.
+///
+/// This is the same kind of gate that pinned the subtransient conventions in
+/// the first place, and it transfers that confidence one model further along.
+#[test]
+fn the_round_machine_reduces_to_the_salient_one() {
+    let trajectory = |salient: bool| {
+        let machine: Box<dyn Machine> = if salient {
+            Box::new(GenSalient::new(salient_params(), S_BASE, F_NOM).unwrap())
+        } else {
+            let p = salient_params();
+            Box::new(
+                GenRound::new(
+                    GenRoundParams {
+                        h: p.h,
+                        d: p.d,
+                        ra: p.ra,
+                        xd: p.xd,
+                        xq: p.xq,
+                        xdp: p.xdp,
+                        // One effective q winding: the transient reactance sits
+                        // a hair above the subtransient one, so b_q ≈ 0.
+                        xqp: p.xqpp + 1e-7,
+                        xdpp: p.xdpp,
+                        xqpp: p.xqpp,
+                        xl: p.xl,
+                        td0p: p.td0p,
+                        tq0p: p.tq0pp,
+                        td0pp: p.td0pp,
+                        tq0pp: p.tq0pp,
+                        mbase: p.mbase,
+                    },
+                    S_BASE,
+                    F_NOM,
+                )
+                .unwrap(),
+            )
+        };
+        let model: Box<dyn DynamicModel> =
+            Box::new(GeneratingUnit::machine_only(machine));
+        let (mut system, _) = islanded_with(vec![model], &[0.8], (-0.8, -0.2));
+        let opts = options(
+            0.002,
+            8.0,
+            vec![
+                Event::bolted_fault(1.0, 1),
+                Event::new(1.08, EventKind::ClearFault { bus: 1 }),
+            ],
+        );
+        let report = run_dynamics(&mut system, &opts);
+        assert_eq!(report.status, DynamicsStatus::Completed);
+        report.trajectory.series("G1.delta").unwrap()
+    };
+
+    let (round, salient) = (trajectory(false), trajectory(true));
+    assert_eq!(round.len(), salient.len());
+    let worst = round.iter().zip(salient.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    assert!(
+        worst < 1e-5,
+        "with one effective q winding the two orders should agree; \
+         the rotor angles differ by {worst:e} rad"
+    );
+}
