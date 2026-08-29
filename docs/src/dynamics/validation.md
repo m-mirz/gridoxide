@@ -79,9 +79,30 @@ proportion to the speed deviation — which is the observed pattern exactly: nil
 early in the fault where `ω − 1 = 0.0015`, and 0.6% after clearing where `ω − 1 = 0.009`.
 
 **Neither form is wrong.** Kundur §13.3 states the approximation explicitly; Sauer & Pai keep the
-terms. What changed is that the cost is now *measured* — 0.6% of terminal power per 0.9% of speed
-deviation — recorded where the equations are, and pinned by a gate, so that adopting the full form
-would visibly drive it to zero rather than pass unnoticed.
+terms.
+
+## Acting on the attribution
+
+Both forms are now available — `"speed_voltages": true` in a document, `--speed-voltages` on the
+command line, `speed_voltages=True` in Python — and turning the full one on **drives the
+discrepancy to nothing**:
+
+| | approximate | full form |
+|---|---|---|
+| Post-fault power offset at matched angle | −0.611% | **−0.026%** |
+| Rotor angle over the first swing | 1.89e-2 rad | **1.76e-3 rad** |
+| Rotor angle over the whole 5 s | 2.06e-1 rad | **3.81e-2 rad** |
+
+That is the proof rather than the argument. Measuring a discrepancy and attributing it by reading
+the reference's source is one thing; acting on the attribution and watching the number collapse by a
+factor of twenty-four is another. Had the `ω ≈ 1` assumption not been the cause, switching it off
+would have moved the offset somewhere arbitrary rather than to zero.
+
+What remains — 0.026% — is genuinely unexplained, and is bounded by a gate so it stays visible.
+
+The approximation is still the **default**, for two reasons: it is what makes the phasor formulation
+coherent in the first place, and every closed-form gate in this crate, the equal-area criterion above
+all, is derived from the power form. A run that wants Dynawo's answer asks for Dynawo's model.
 
 This is what an external gate is for: a difference invisible to every self-consistency check,
 because both formulations are internally perfect.

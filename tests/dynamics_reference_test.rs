@@ -135,6 +135,12 @@ fn bus(idx: usize, bus_type: BusType, vmag: f64, p: f64, q: f64) -> Bus {
 /// through the reader, and the network from the same file's line and
 /// transformer reactances.
 fn case() -> DynamicsDocument {
+    case_with(false)
+}
+
+/// The same case, with the rotor speed carried on the machine's speed-voltage
+/// terms and its swing equation written in torque — Dynawo's own form.
+fn case_with(speed_voltages: bool) -> DynamicsDocument {
     let dyd = dyd::read_dyd(format!("{DIR}/KundurExample13_SetPoint.dyd")).expect("parses");
     let par = dyd::read_par(format!("{DIR}/KundurExample13.par")).expect("parses");
     // The standalone case has no staticId, so the model's own id identifies it.
@@ -172,6 +178,7 @@ fn case() -> DynamicsDocument {
         dynamics: DynamicsData {
             s_base: S_BASE,
             f_nom: F_NOM,
+            speed_voltages,
             units,
             loads: Vec::new(),
             fixed_buses: vec![0],
@@ -462,3 +469,121 @@ fn the_published_clearing_time_is_survivable_and_a_longer_one_is_not() {
     assert!(!stays_in_step(1.0 + 0.5), "half a second of fault must not be");
 }
 
+
+/// **Adopting Dynawo's own form drives the 0.6% offset to nothing.**
+///
+/// This is what closes the loop on the phase-5 finding. Measuring a
+/// discrepancy and attributing it by reading the reference's source is one
+/// thing; *acting* on the attribution and watching the number collapse is the
+/// proof. If the `ω ≈ 1` approximation were not the cause, switching it off
+/// would move the offset somewhere arbitrary rather than to zero.
+///
+/// The residual after the switch is what remains genuinely unexplained, and it
+/// is bounded here so that it stays visible.
+#[test]
+fn the_full_form_removes_the_offset_against_dynawo() {
+    let offset = |speed_voltages: bool| {
+        let reference = Reference::read();
+        let expected_delta = reference.column("SM_generator_theta");
+        let expected_power = reference.column("SM_generator_PGenPu");
+        let (mut system, events) = case_with(speed_voltages).build().unwrap();
+        let report = run_dynamics(
+            &mut system,
+            &DynamicsOptions { end_time: 2.0, step: 0.00025, events, ..Default::default() },
+        );
+        assert_eq!(report.status, DynamicsStatus::Completed);
+
+        let (dm, da) = (
+            report.trajectory.column("SM.delta").unwrap(),
+            report.trajectory.column("bus1.vang").unwrap(),
+        );
+        let (m1, m2, a2) = (
+            report.trajectory.column("bus1.vmag").unwrap(),
+            report.trajectory.column("bus2.vmag").unwrap(),
+            report.trajectory.column("bus2.vang").unwrap(),
+        );
+        let mut offsets = Vec::new();
+        for (k, &t) in reference.time.iter().enumerate() {
+            if !(CLEAR_AT + 0.01..CLEAR_AT + 0.06).contains(&t) {
+                continue;
+            }
+            let delta = sample(&report.trajectory, dm, t);
+            if (delta - expected_delta[k]).abs() > 1e-3 {
+                continue;
+            }
+            let (v1, ang1) =
+                (sample(&report.trajectory, m1, t), sample(&report.trajectory, da, t));
+            let (v2, ang2) =
+                (sample(&report.trajectory, m2, t), sample(&report.trajectory, a2, t));
+            let ours = v1 * v2 * (ang2 - ang1).sin() / X_TRANSFORMER;
+            offsets.push((ours - expected_power[k]) / expected_power[k]);
+        }
+        assert!(offsets.len() >= 5, "not enough matched samples: {}", offsets.len());
+        offsets.iter().sum::<f64>() / offsets.len() as f64
+    };
+
+    let approximate = offset(false);
+    let full = offset(true);
+    println!(
+        "post-fault power offset: {:.4}% with the approximation, {:.4}% without",
+        approximate * 100.0,
+        full * 100.0
+    );
+
+    assert!(
+        full.abs() < 0.1 * approximate.abs(),
+        "adopting Dynawo's form should remove most of the offset: {:.4}% became {:.4}%",
+        approximate * 100.0,
+        full * 100.0
+    );
+    assert!(
+        full.abs() < 1e-3,
+        "what remains after the switch should be under 0.1%; it was {:.4}%",
+        full * 100.0
+    );
+}
+
+/// And the trajectory agrees far longer, which is the thing a user would
+/// actually notice.
+#[test]
+fn the_full_form_tracks_dynawo_through_the_whole_first_swing() {
+    let reference = Reference::read();
+    let worst_over = |speed_voltages: bool, until: f64| {
+        let (mut system, events) = case_with(speed_voltages).build().unwrap();
+        let report = run_dynamics(
+            &mut system,
+            &DynamicsOptions { end_time: 5.0, step: 0.00025, events, ..Default::default() },
+        );
+        assert_eq!(report.status, DynamicsStatus::Completed);
+        let column = report.trajectory.column("SM.delta").unwrap();
+        let expected = reference.column("SM_generator_theta");
+        let mut worst = 0.0f64;
+        for (k, &t) in reference.time.iter().enumerate() {
+            if t > until {
+                break;
+            }
+            if (t - FAULT_AT).abs() < 2e-3 || (t - CLEAR_AT).abs() < 2e-3 {
+                continue;
+            }
+            worst = worst.max((sample(&report.trajectory, column, t) - expected[k]).abs());
+        }
+        worst
+    };
+
+    let (approx_swing, full_swing) = (worst_over(false, 1.5), worst_over(true, 1.5));
+    let (approx_run, full_run) = (worst_over(false, 5.0), worst_over(true, 5.0));
+    println!(
+        "rotor angle vs Dynawo — first swing: {approx_swing:.3e} → {full_swing:.3e} rad; \
+         whole 5 s: {approx_run:.3e} → {full_run:.3e} rad"
+    );
+
+    assert!(
+        full_swing < 0.2 * approx_swing,
+        "over the first swing the full form should agree far better: \
+         {approx_swing:e} against {full_swing:e}"
+    );
+    assert!(
+        full_run < approx_run,
+        "and it should not be worse over the whole run: {approx_run:e} against {full_run:e}"
+    );
+}

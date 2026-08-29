@@ -125,3 +125,32 @@ fn tempfile() -> PathBuf {
     ));
     path
 }
+
+#[test]
+fn the_machine_formulation_is_selectable_and_changes_the_answer() {
+    let swing = |extra: &[&str]| {
+        let text = stdout_of(&dynamics(&[&["--stop", "4"], extra].concat()));
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("G1"))
+            .unwrap_or_default()
+            .to_string();
+        line.split_whitespace()
+            .nth(3)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("no swing in {line:?}"))
+    };
+
+    let approximate = swing(&["--no-speed-voltages"]);
+    let full = swing(&["--speed-voltages"]);
+    assert!(approximate > 0.5 && full > 0.5, "both should swing: {approximate} {full}");
+    // A modelling choice that moved nothing would mean the flag was not
+    // reaching the equations; one that moved a great deal would mean something
+    // other than a factor of omega had changed.
+    let gap = (approximate - full).abs();
+    assert!(gap > 1e-4, "the flag must reach the machines, gap {gap:e}");
+    assert!(gap < 0.05 * approximate, "but it is a per-cent effect, not a new model: {gap:e}");
+
+    // The document's own setting is the default.
+    assert_eq!(swing(&[]), approximate);
+}

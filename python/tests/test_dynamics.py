@@ -113,3 +113,23 @@ def test_the_backend_is_a_performance_choice_not_an_answer():
 def test_a_bad_document_is_a_value_error():
     with pytest.raises(ValueError):
         gridoxide.dynamics("/nonexistent/case.json")
+
+
+def test_the_machine_formulation_is_selectable():
+    """`speed_voltages` chooses between the classical RMS approximation and
+    Dynawo's fuller form. It agrees exactly at synchronous speed and parts in
+    proportion to the speed deviation, so an undisturbed run must be identical
+    and a disturbed one must not."""
+    still_a = gridoxide.dynamics(str(CASE), stop=2.0, events=[], speed_voltages=False)
+    still_b = gridoxide.dynamics(str(CASE), stop=2.0, events=[], speed_voltages=True)
+    assert still_a.series("G1.delta") == still_b.series("G1.delta")
+
+    fault = [
+        {"kind": "bus_fault", "t": 1.0, "bus": 1},
+        {"kind": "clear_fault", "t": 1.1, "bus": 1},
+    ]
+    approx = gridoxide.dynamics(str(CASE), stop=4.0, events=fault, speed_voltages=False)
+    full = gridoxide.dynamics(str(CASE), stop=4.0, events=fault, speed_voltages=True)
+    gap = max(abs(a - b) for a, b in zip(approx.series("G1.delta"), full.series("G1.delta")))
+    assert gap > 1e-5, "the argument must reach the machines"
+    assert gap < 0.1, "but it is a per-cent effect on the swing, not a different model"

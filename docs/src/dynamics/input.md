@@ -38,6 +38,9 @@ The model parameter blocks **are** the models' own parameter structs. That is de
 format cannot drift away from what the models take, because a renamed field is a missing-field parse
 error rather than a silently defaulted zero.
 
+`speed_voltages` (default `false`) chooses the machine formulation for the whole case — see
+[The Model Library](./models.md).
+
 `fixed_buses` names buses held at constant voltage for the whole run — an infinite bus, represented
 *exactly* rather than approximated by a large inertia or a small source impedance. It is optional: a
 system with no fixed bus is perfectly well posed, since every machine's rotor angle is an absolute

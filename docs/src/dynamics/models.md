@@ -36,6 +36,13 @@ feedthrough from `Δω` to `P_m` is not a loop: `P_m` enters `ω̇`, and `ω̇` 
 | Transient (4th) | `+ e'_q, e'_d` | A field winding — the first model an exciter can act on — and one `q`-axis damper |
 | Subtransient (6th) | `+ ψ_1d, ψ_2q` | Two more damper windings. Immediately after a disturbance the machine's effective impedance is `x''`, not `x'` |
 
+Every machine offers **both stator formulations**. By default the speed-voltage terms omit the
+rotor speed and the swing equation is written in power — the classical RMS assumption. With
+`speed_voltages` on, the speed is carried and the swing equation is written in torque, which is what
+Dynawo and Sauer & Pai do. The two agree exactly at synchronous speed and part in proportion to the
+speed deviation; on Kundur's Example 13.2 the full form removes 96% of the disagreement with
+Dynawo. See [Against Dynawo](./validation.md).
+
 `P_e` throughout is the **air-gap** power, not the terminal power. With armature resistance the two
 differ by the stator copper loss, and it is the air-gap power the rotor feels. Using the terminal
 power gives a machine damped by its own resistance — wrong in a way that looks entirely plausible,

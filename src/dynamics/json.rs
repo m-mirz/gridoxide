@@ -102,6 +102,16 @@ pub struct DynamicsData {
     /// Nominal frequency, Hz. The one place a physical time unit enters.
     #[serde(default = "default_f_nom")]
     pub f_nom: f64,
+    /// Carry the rotor speed on the machines' speed-voltage terms, and write
+    /// their swing equations in torque rather than power.
+    ///
+    /// Off by default, because the `ω ≈ 1` approximation is what makes the
+    /// phasor formulation coherent and is what every closed-form gate in this
+    /// crate is derived from. On, gridoxide matches Dynawo's and Sauer & Pai's
+    /// form instead — worth 0.6% of terminal power at a 0.9% speed deviation.
+    /// See `src/dynamics/models/machine.rs`.
+    #[serde(default)]
+    pub speed_voltages: bool,
     #[serde(default)]
     pub units: Vec<UnitSpec>,
     #[serde(default)]
@@ -325,11 +335,22 @@ pub fn parse(text: &str) -> Result<DynamicsDocument, DynamicsError> {
 }
 
 impl MachineSpec {
-    fn build(self, s_base: f64, f_nom: f64) -> Result<Box<dyn Machine>, InitError> {
+    fn build(
+        self,
+        s_base: f64,
+        f_nom: f64,
+        speed_voltages: bool,
+    ) -> Result<Box<dyn Machine>, InitError> {
         Ok(match self {
-            MachineSpec::GenCls(p) => Box::new(GenCls::new(p, s_base, f_nom)?),
-            MachineSpec::GenTransient(p) => Box::new(GenTransient::new(p, s_base, f_nom)?),
-            MachineSpec::GenRound(p) => Box::new(GenRound::new(p, s_base, f_nom)?),
+            MachineSpec::GenCls(p) => {
+                Box::new(GenCls::new(p, s_base, f_nom)?.with_speed_voltages(speed_voltages))
+            }
+            MachineSpec::GenTransient(p) => {
+                Box::new(GenTransient::new(p, s_base, f_nom)?.with_speed_voltages(speed_voltages))
+            }
+            MachineSpec::GenRound(p) => {
+                Box::new(GenRound::new(p, s_base, f_nom)?.with_speed_voltages(speed_voltages))
+            }
         })
     }
 }
@@ -412,10 +433,12 @@ impl DynamicsDocument {
         let mut devices = Vec::with_capacity(placed.len());
         for (i, spec) in self.dynamics.units.iter().enumerate() {
             let model = GeneratingUnit::new(
-                spec.machine.build(s_base, f_nom).map_err(|source| DynamicsError::Model {
-                    id: spec.id.clone(),
-                    source,
-                })?,
+                spec.machine.build(s_base, f_nom, self.dynamics.speed_voltages).map_err(
+                    |source| DynamicsError::Model {
+                        id: spec.id.clone(),
+                        source,
+                    },
+                )?,
                 option_build(spec.avr, |a| a.build(), &spec.id)?,
                 option_build(spec.gov, |g| g.build(), &spec.id)?,
                 option_build(spec.pss, |p| p.build(), &spec.id)?,
