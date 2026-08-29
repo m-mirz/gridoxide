@@ -55,3 +55,33 @@ Two results from that second benchmark are worth stating here because they shape
   on this real transmission-topology data, even though PGM still clearly beats every gridoxide
   backend on the synthetic radial-distribution topology. The comparison genuinely depends on grid
   topology, not just implementation language.
+
+
+## RMS dynamics
+
+`cargo run --release --features dynamics --example dynamics_scale` times a ring of alternating
+generator and load buses, every generator carrying a sixth-order machine with an exciter and a
+governor — ten differential states per unit on top of the network's two per bus — through a bolted
+fault and its clearing, at a 5 ms step.
+
+| buses | units | unknowns | build | 3 s run | per step | Newton/step |
+|---|---|---|---|---|---|---|
+| 16 | 8 | 112 | 0.7 ms | 30 ms | 0.050 ms | 1.34 |
+| 64 | 32 | 448 | 0.15 ms | 160 ms | 0.266 ms | 1.34 |
+| 256 | 128 | 1 792 | 0.5 ms | 682 ms | 1.14 ms | 1.34 |
+| 1 024 | 512 | 7 168 | 2.1 ms | 3.15 s | 5.25 ms | 1.34 |
+| 4 096 | 2 048 | 28 672 | 9.2 ms | 16.4 s | 27.3 ms | 1.34 |
+
+Two things are worth reading off this.
+
+**Time per step is very close to linear in the system size** — 256× the unknowns costs 546× the
+step, an exponent of 1.14. That is what the formulation was chosen for: the network block is the
+constant real form of the Y-bus, every device stamp is local, and the pattern is analyzed **once for
+the whole run** because every event is value-only. Nothing re-analyzes, whatever happens.
+
+**Newton iterations per step are flat at 1.34** across four orders of magnitude. A step normally
+converges on the first correction and occasionally needs a second; the count does not grow with the
+system, which is the signature of an exact analytic Jacobian rather than an approximated one.
+
+The `build` column is the power flow plus initialization, and it is negligible against the run —
+which is the right shape, since a study sweeps many scenarios over one build.

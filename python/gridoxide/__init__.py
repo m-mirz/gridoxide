@@ -1,7 +1,7 @@
 """gridoxide: AC power flow analysis (Newton-Raphson) — Python bindings.
 
 `PowerFlowModel`, `StateEstimationModel`, `AcSensitivityModel`,
-`short_circuit` and `continuation` are implemented in Rust
+`short_circuit`, `continuation` and `dynamics` are implemented in Rust
 (`src/python.rs`) and built as the
 private `_gridoxide` compiled extension alongside this package (see
 `pyproject.toml`'s `python-source`/`module-name`), re-exported here so
@@ -46,3 +46,17 @@ except ImportError:  # pragma: no cover - depends on build features
     pass
 else:
     __all__ += ["ac_opf", "dc_opf"]
+
+# RMS dynamic simulation needs the `dynamics` feature compiled in, so like the
+# optimal power flow it is present in some builds and not others.
+# `hasattr(gridoxide, "dynamics")` is the check.
+#
+# It needs nothing installed either: the DAE, its integrator and the whole
+# machine/exciter/governor model library are gridoxide's own, pure Rust on the
+# same sparse backends the power flow uses.
+try:
+    from ._gridoxide import DynamicsResult, dynamics  # noqa: F401
+except ImportError:  # pragma: no cover - depends on build features
+    pass
+else:
+    __all__ += ["DynamicsResult", "dynamics"]

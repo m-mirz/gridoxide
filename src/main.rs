@@ -141,6 +141,24 @@ usage:
                                 the exact lambda each machine saturates at is
                                 located rather than rounded to a step.
                                 Reads a PGM JSON document.
+  gridoxide dynamics <path> [--stop <t>] [--step <h>] [--tol <t>]
+                     [--damping <n>] [--backend scalar|klu-native]
+                     [--csv <out>] [--observe <substring>]
+                                run an RMS (phasor-domain) dynamic simulation:
+                                what the network does over *time* after a
+                                disturbance, rather than at one instant. Reads a
+                                gridoxide JSON document carrying a `dynamics`
+                                section — the machines, their exciters,
+                                governors and stabilizers, and the schedule of
+                                faults, trips and load steps to apply.
+                                Prints how each machine fared and what the
+                                voltages did; --csv writes the whole trajectory,
+                                and --observe narrows it to the columns whose
+                                names contain a substring.
+                                Everything starts from a solved power flow, so
+                                the case must be one that solves; every device
+                                is then initialized so that nothing moves until
+                                the first event does.
   gridoxide short-circuit <path> [--scaling max|min]
                                 run an IEC 60909 short-circuit calculation over
                                 a PGM JSON document containing `fault` entries,
@@ -319,6 +337,18 @@ fn main() {
             _ => {
                 eprintln!("usage: gridoxide continuation <path> [options]");
                 std::process::exit(1);
+            }
+        },
+        Some("dynamics") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_dynamics_cli(path, &args[2..]) {
+                    eprintln!("error: {message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("error: dynamics needs a document path\n\n{USAGE}");
+                std::process::exit(2);
             }
         },
         Some("short-circuit") => match args.get(1) {
@@ -864,6 +894,162 @@ fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
             .map(Some)
             .map_err(|_| format!("{flag}: expected a number, got {raw:?}")),
     }
+}
+
+/// `gridoxide dynamics` — what the network does over time.
+///
+/// Everything else this binary offers answers a question about one instant.
+/// This one integrates: the machines' rotors and fluxes, their controls, and
+/// the network constraint, all as one implicit system.
+///
+/// The summary is deliberately about *machines* rather than about states. A
+/// trajectory has hundreds of columns and almost none of them is the answer to
+/// anything; whether each machine stayed in step, how far the frequency went
+/// and how deep the voltage dipped are.
+#[cfg(feature = "dynamics")]
+fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
+    use gridoxide::solver::JacobianBackend;
+
+    let document = json::read(path).map_err(|e| e.to_string())?;
+    let (mut system, events) = document.build().map_err(|e| e.to_string())?;
+
+    let backend = match flag_value(flags, "--backend")?.as_deref() {
+        None | Some("scalar") => JacobianBackend::Scalar,
+        Some("klu-native") => JacobianBackend::KluNative,
+        Some(other) => {
+            return Err(format!("--backend: expected scalar or klu-native, got {other:?}"))
+        }
+    };
+    let options = DynamicsOptions {
+        end_time: parse_f64_flag(flags, "--stop")?.unwrap_or(10.0),
+        step: parse_f64_flag(flags, "--step")?.unwrap_or(0.005),
+        tol: parse_f64_flag(flags, "--tol")?.unwrap_or(1e-9),
+        damping_steps: match flag_value(flags, "--damping")? {
+            None => 2,
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| format!("--damping: expected a count, got {raw:?}"))?,
+        },
+        events,
+        backend,
+        ..Default::default()
+    };
+
+    println!(
+        "{} bus(es), {} differential state(s), {} scheduled event(s)",
+        system.n_bus(),
+        system.n_states(),
+        options.events.len()
+    );
+    // Worth printing: it is the number that says the case was initialized
+    // consistently, and a nonzero one invalidates everything after it.
+    println!("initial state derivative: {:.2e}", system.max_derivative());
+
+    let started = std::time::Instant::now();
+    let report = run_dynamics(&mut system, &options);
+    let elapsed = started.elapsed();
+
+    match report.status {
+        DynamicsStatus::Completed => {
+            println!(
+                "\nran to {:.3} s in {} step(s), {} Newton iteration(s), {:.2?}",
+                options.end_time, report.steps, report.newton_iterations, elapsed
+            );
+        }
+        DynamicsStatus::NewtonFailed { time } => println!(
+            "\nstopped at {time:.4} s: the step did not converge. A smaller --step usually \
+             fixes this; an unstable system integrates perfectly well and simply diverges."
+        ),
+        DynamicsStatus::Singular { time } => println!(
+            "\nstopped at {time:.4} s: the Jacobian was singular. An island with no machine \
+             and no voltage reference does this."
+        ),
+    }
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
+
+    // Per machine: did it stay in step, and where did its speed go?
+    let trajectory = &report.trajectory;
+    let machines: Vec<String> = trajectory
+        .names
+        .iter()
+        .filter(|n| n.ends_with(".omega"))
+        .map(|n| n.trim_end_matches(".omega").to_string())
+        .collect();
+    if !machines.is_empty() {
+        println!("\n{:<14}  {:>12}  {:>12}  {:>12}", "machine", "min speed", "max speed", "swing");
+        for id in &machines {
+            let omega = trajectory.series(&format!("{id}.omega")).unwrap_or_default();
+            let delta = trajectory.series(&format!("{id}.delta")).unwrap_or_default();
+            let (lo, hi) = omega.iter().fold((f64::MAX, f64::MIN), |(l, h), w| (l.min(*w), h.max(*w)));
+            let swing = delta
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(l, h), d| (l.min(*d), h.max(*d)));
+            println!(
+                "{id:<14}  {lo:>12.6}  {hi:>12.6}  {:>11.4} rad",
+                swing.1 - swing.0
+            );
+        }
+    }
+
+    let voltages: Vec<&String> = trajectory.names.iter().filter(|n| n.ends_with(".vmag")).collect();
+    if !voltages.is_empty() {
+        let mut lowest = (f64::MAX, String::new(), 0.0f64);
+        for name in &voltages {
+            let series = trajectory.series(name).unwrap_or_default();
+            for (k, v) in series.iter().enumerate() {
+                if *v < lowest.0 {
+                    lowest = (*v, (*name).clone(), trajectory.time[k]);
+                }
+            }
+        }
+        println!(
+            "\nlowest voltage {:.4} pu at {}, t = {:.4} s",
+            lowest.0, lowest.1, lowest.2
+        );
+    }
+
+    if let Some(out) = flag_value(flags, "--csv")? {
+        let filter = flag_value(flags, "--observe")?;
+        let keep: Vec<usize> = (0..trajectory.names.len())
+            .filter(|&k| match &filter {
+                None => true,
+                Some(pattern) => trajectory.names[k].contains(pattern.as_str()),
+            })
+            .collect();
+        if keep.is_empty() {
+            return Err(format!(
+                "--observe {:?} matched none of the {} columns",
+                filter.unwrap_or_default(),
+                trajectory.names.len()
+            ));
+        }
+        let mut text = String::from("time");
+        for &k in &keep {
+            text.push(',');
+            text.push_str(&trajectory.names[k]);
+        }
+        text.push('\n');
+        for (row, t) in trajectory.rows.iter().zip(trajectory.time.iter()) {
+            text.push_str(&format!("{t:.6}"));
+            for &k in &keep {
+                text.push_str(&format!(",{:.9}", row[k]));
+            }
+            text.push('\n');
+        }
+        fs::write(&out, text).map_err(|e| format!("writing {out}: {e}"))?;
+        println!("wrote {} column(s) x {} row(s) to {out}", keep.len(), trajectory.rows.len());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "dynamics"))]
+fn run_dynamics_cli(_path: &str, _flags: &[String]) -> Result<(), String> {
+    Err("this build has no RMS dynamics; rebuild with `cargo build --features dynamics`"
+        .to_string())
 }
 
 /// `gridoxide qv` — a bus's reactive margin.

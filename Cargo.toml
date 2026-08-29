@@ -363,6 +363,11 @@ name = "remote_voltage_test"
 path = "tests/remote_voltage_test.rs"
 
 [[test]]
+name = "cli_dynamics_test"
+path = "tests/cli_dynamics_test.rs"
+required-features = ["dynamics"]
+
+[[test]]
 name = "dynamics_reference_test"
 path = "tests/dynamics_reference_test.rs"
 required-features = ["dynamics", "iidm"]
@@ -548,6 +553,11 @@ required-features = ["cgmes"]
 name = "cgmes_microgrid_type3_test"
 path = "tests/cgmes_microgrid_type3_test.rs"
 required-features = ["cgmes"]
+
+[[example]]
+name = "dynamics_scale"
+path = "examples/dynamics_scale.rs"
+required-features = ["dynamics"]
 
 [[example]]
 name = "doc_numbers"

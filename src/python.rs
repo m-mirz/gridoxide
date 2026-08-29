@@ -1951,6 +1951,174 @@ struct ContinuationCurve {
 /// the nose is, and the λ at which each machine saturates is located exactly
 /// rather than rounded to whichever step noticed it.
 ///
+
+// --- RMS dynamics -----------------------------------------------------------
+//
+// Only present when the `dynamics` feature was built in.
+// `hasattr(gridoxide, "dynamics")` is the check a caller makes.
+
+/// A trajectory: one column per observable, one row per time point.
+///
+/// Returned as plain lists rather than as numpy arrays, so the extension keeps
+/// no numpy dependency; `numpy.asarray(result.values())` is one call away for
+/// anyone who wants one.
+#[cfg(feature = "dynamics")]
+#[pyclass]
+pub struct DynamicsResult {
+    #[pyo3(get)]
+    status: String,
+    #[pyo3(get)]
+    steps: usize,
+    #[pyo3(get)]
+    newton_iterations: usize,
+    #[pyo3(get)]
+    events_applied: usize,
+    /// Anything noticed that is not an error — a de-energized island, an event
+    /// naming something that does not exist.
+    #[pyo3(get)]
+    warnings: Vec<String>,
+    #[pyo3(get)]
+    time: Vec<f64>,
+    #[pyo3(get)]
+    names: Vec<String>,
+    rows: Vec<Vec<f64>>,
+}
+
+#[cfg(feature = "dynamics")]
+#[pymethods]
+impl DynamicsResult {
+    /// One observable's whole series, by name.
+    ///
+    /// The names are `"<machine>.<state>"` for a device state — `"G1.delta"`,
+    /// `"G1.omega"` — and `"bus<i>.vmag"` / `"bus<i>.vang"` for the network.
+    fn series(&self, name: &str) -> PyResult<Vec<f64>> {
+        let column = self
+            .names
+            .iter()
+            .position(|n| n == name)
+            .ok_or_else(|| PyValueError::new_err(format!("no observable named {name:?}")))?;
+        Ok(self.rows.iter().map(|r| r[column]).collect())
+    }
+
+    /// Every column, in `names` order — the whole trajectory as a list of rows.
+    fn values(&self) -> Vec<Vec<f64>> {
+        self.rows.clone()
+    }
+
+    /// Whether the run reached its end time.
+    fn completed(&self) -> bool {
+        self.status == "completed"
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DynamicsResult(status={:?}, steps={}, points={}, observables={})",
+            self.status,
+            self.steps,
+            self.time.len(),
+            self.names.len()
+        )
+    }
+}
+
+/// Runs an RMS (phasor-domain) dynamic simulation over a gridoxide JSON
+/// document carrying a `dynamics` section.
+///
+/// ```python
+/// result = gridoxide.dynamics("case.json", stop=10.0, step=0.005)
+/// omega = result.series("G1.omega")
+/// ```
+///
+/// The document states the machines, their controls and the schedule of faults,
+/// trips and load steps; the base case is solved and every device initialized
+/// so that nothing moves until the first event does. `events` overrides the
+/// document's own schedule when given, which is what a caller sweeping clearing
+/// times wants.
+///
+/// The physics is gated in the Rust suite — against closed forms, against a
+/// finite-difference oracle, and against Dynawo's own published answer for
+/// Kundur's Example 13.2. This binding only has to reach it.
+#[cfg(feature = "dynamics")]
+#[pyfunction]
+#[pyo3(signature = (
+    path, stop = 10.0, step = 0.005, tol = 1e-9, max_newton = 20,
+    damping_steps = 2, backend = None, events = None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn dynamics(
+    py: Python<'_>,
+    path: &str,
+    stop: f64,
+    step: f64,
+    tol: f64,
+    max_newton: usize,
+    damping_steps: usize,
+    backend: Option<&str>,
+    events: Option<Vec<Bound<'_, pyo3::types::PyAny>>>,
+) -> PyResult<DynamicsResult> {
+    use crate::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
+    use crate::solver::JacobianBackend;
+
+    let backend = match backend {
+        None | Some("scalar") => JacobianBackend::Scalar,
+        Some("klu_native") => JacobianBackend::KluNative,
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "backend must be \"scalar\" or \"klu_native\", got {other:?}"
+            )))
+        }
+    };
+
+    let document = json::read(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (mut system, mut schedule) =
+        document.build().map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // An overriding schedule is given as dicts in the same shape the document
+    // uses, so there is one vocabulary for events and not two.
+    if let Some(given) = events {
+        let mut parsed = Vec::with_capacity(given.len());
+        for item in given {
+            let text: String = py
+                .import("json")?
+                .call_method1("dumps", (item,))?
+                .extract()?;
+            let spec: json::EventSpec = serde_json::from_str(&text)
+                .map_err(|e| PyValueError::new_err(format!("event: {e}")))?;
+            parsed.push(crate::dynamics::Event::from(spec));
+        }
+        schedule = parsed;
+    }
+
+    let report = run_dynamics(
+        &mut system,
+        &DynamicsOptions {
+            end_time: stop,
+            step,
+            tol,
+            max_newton,
+            damping_steps,
+            events: schedule,
+            backend,
+        },
+    );
+
+    let status = match report.status {
+        DynamicsStatus::Completed => "completed".to_string(),
+        DynamicsStatus::NewtonFailed { time } => format!("newton_failed at {time}"),
+        DynamicsStatus::Singular { time } => format!("singular at {time}"),
+    };
+    Ok(DynamicsResult {
+        status,
+        steps: report.steps,
+        newton_iterations: report.newton_iterations,
+        events_applied: report.events_applied,
+        warnings: report.warnings.iter().map(|w| w.to_string()).collect(),
+        time: report.trajectory.time,
+        names: report.trajectory.names,
+        rows: report.trajectory.rows,
+    })
+}
+
 /// The physics is gated in `tests/continuation_test.rs` (against a closed-form
 /// two-bus nose) and `tests/continuation_events_test.rs` (against a brute-force
 /// bisection); this binding only has to reach it.
@@ -2766,6 +2934,13 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Only present when the optimization layer was built in — see the `opf`
     // feature. `hasattr(gridoxide, "dc_opf")` is the check a caller makes.
+    // Only present when the RMS dynamics layer was built in — see the
+    // `dynamics` feature. `hasattr(gridoxide, "dynamics")` is the check.
+    #[cfg(feature = "dynamics")]
+    {
+        m.add_class::<DynamicsResult>()?;
+        m.add_function(wrap_pyfunction!(dynamics, m)?)?;
+    }
     #[cfg(feature = "opf")]
     {
         m.add_class::<DcOpfResult>()?;
