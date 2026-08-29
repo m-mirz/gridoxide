@@ -406,6 +406,24 @@ struct Placed {
     stated: Option<Complex<f64>>,
 }
 
+impl UnitSpec {
+    /// Builds this unit's model. Exposed so a reader that assembles a case its
+    /// own way — the Dynawo one, which gets its network from IIDM — does not
+    /// have to reimplement the composition.
+    pub fn into_model(
+        self,
+        s_base: f64,
+        f_nom: f64,
+    ) -> Result<Box<dyn DynamicModel>, InitError> {
+        Ok(Box::new(GeneratingUnit::new(
+            self.machine.build(s_base, f_nom, false)?,
+            self.avr.map(|a| a.build()).transpose()?,
+            self.gov.map(|g| g.build()).transpose()?,
+            self.pss.map(|p| p.build()).transpose()?,
+        )))
+    }
+}
+
 impl DynamicsDocument {
     /// Solves the base-case power flow and assembles the initialized system.
     ///

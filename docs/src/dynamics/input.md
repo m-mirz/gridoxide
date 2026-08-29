@@ -95,6 +95,30 @@ salient-pole machine — its parameter set carries no `XpqPu` and no `Tpq0`, so 
 **library name** rather than on which parameters happen to be present, which is the difference
 between reading a model and guessing one from its data.
 
+### A whole case, in one call
+
+`dyd::load_case` reads both halves together — the IIDM network through
+[gridoxide's IIDM importer](../import/iidm.md), the models through the reader above — and returns a
+system ready to integrate. The `staticId` on each `blackBoxModel` is the correspondence between
+them.
+
+Each machine's **own** terminal power is recovered exactly rather than apportioned. A power flow
+produces a bus's total; the IIDM states every load's `p0` and `q0`, and those are precisely what went
+into that bus's specification, so
+
+```text
+machine's injection = bus's solved injection − the loads the file states there
+```
+
+holds for both active and reactive power, at a `PV` bus as much as a `PQ` one. That closes for a
+Dynawo case the one hazard no downstream gate can catch — a wrong device/load split is
+self-consistent and therefore silent. **Two machines on one bus** is the case it cannot resolve:
+their share of the bus's solved reactive power is genuinely not in the file, only the total is, so
+it is refused by name.
+
+Tap-changing load models, and anything else attached to a static element that is not a generator,
+are treated as static and **named** — the network is right, but their dynamics are not there.
+
 **One conversion is inferred rather than read**, and is flagged in the source: `governor_KGover` is a
 gain on the machine's own `governor_PNom`, while the proportional governor wants one on the network
 base, so the reader applies `k = KGover · PNom / s_base`.

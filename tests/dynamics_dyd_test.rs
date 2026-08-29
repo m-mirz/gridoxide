@@ -290,3 +290,87 @@ fn the_curve_file_yields_its_requests() {
         "every request should carry both halves"
     );
 }
+
+/// A whole Dynawo case — the IIDM network and the `.dyd`/`.par` pair — loads in
+/// one call and initializes to an equilibrium.
+///
+/// This is what the two halves were always for. `src/iidm.rs` reads the static
+/// network, the reader above reads the dynamic models, and the `staticId` on
+/// each `blackBoxModel` is the correspondence between them.
+#[test]
+fn a_whole_case_loads_from_its_two_halves() {
+    let (system, warnings) = dyd::load_case(
+        format!("{DIR}/IEEE14.iidm"),
+        format!("{DIR}/IEEE14.dyd"),
+        format!("{DIR}/IEEE14.par"),
+        50.0,
+    )
+    .expect("the case loads");
+
+    assert_eq!(system.n_bus(), 14);
+    // Three sixth-order machines and two fifth-order ones. The proportional
+    // regulators contribute no states at all, which is what they are.
+    assert_eq!(system.n_states(), 3 * 6 + 2 * 5);
+
+    // The invariant, on somebody else's data and somebody else's network.
+    assert!(
+        system.max_derivative() < 1e-11,
+        "a case assembled from two files must still initialize to an equilibrium, \
+         drift {:e}",
+        system.max_derivative()
+    );
+    assert!(system.network_residual_norm() < 1e-11);
+
+    // What it cannot model, it names: saturation on every machine, and the
+    // tap-changing load models it treats as static.
+    // Four of the five machines state a nonzero saturation characteristic;
+    // `Generator8` states `md = 0`, so there is nothing to drop and nothing to
+    // warn about. Reporting only what was actually discarded is the point —
+    // a warning on a machine with no saturation would be noise a reader learns
+    // to ignore.
+    let saturation =
+        warnings.iter().filter(|w| matches!(w, DydWarning::SaturationIgnored { .. })).count();
+    assert_eq!(saturation, 4, "four of the five machines state nonzero saturation");
+    let skipped: Vec<&DydWarning> =
+        warnings.iter().filter(|w| matches!(w, DydWarning::UnsupportedLib { .. })).collect();
+    assert!(
+        skipped.iter().any(|w| w.to_string().contains("TapChanger")),
+        "the tap-changing loads should be named, not silently treated as static: {skipped:?}"
+    );
+}
+
+/// Each machine's terminal power is recovered exactly, not apportioned.
+///
+/// A power flow gives a bus's total; a dynamic study needs the machine's own.
+/// For a Dynawo case that is not a guess — the IIDM states every load's `p0`
+/// and `q0`, and those are precisely what went into the bus's specification, so
+/// subtracting them leaves the machine's share exactly, at a `PV` bus as much
+/// as a `PQ` one.
+///
+/// The check is the equilibrium itself: a wrong split is silent everywhere else
+/// (see `plans/RMS_PLAN.md` §11), but here it would have to be *consistent*
+/// with a network the file also fixes, and it is not free to be.
+#[test]
+fn a_machine_sharing_its_bus_with_a_load_still_initializes() {
+    let (system, _) = dyd::load_case(
+        format!("{DIR}/IEEE14.iidm"),
+        format!("{DIR}/IEEE14.dyd"),
+        format!("{DIR}/IEEE14.par"),
+        50.0,
+    )
+    .unwrap();
+
+    // Bus 5 carries generator 1; the case puts load on several machine buses,
+    // so at least one machine is sharing.
+    let network = gridoxide::iidm::read(format!("{DIR}/IEEE14.iidm")).unwrap();
+    let generator_buses: Vec<usize> =
+        network.injections.iter().filter(|i| i.generator).map(|i| i.bus).collect();
+    let shared = network
+        .injections
+        .iter()
+        .filter(|i| !i.generator && generator_buses.contains(&i.bus))
+        .count();
+    assert!(shared > 0, "the case should have at least one machine sharing a bus with a load");
+
+    assert!(system.max_derivative() < 1e-11);
+}

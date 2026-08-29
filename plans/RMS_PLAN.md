@@ -1,7 +1,7 @@
 # RMS simulation in gridoxide
 
 Status: **complete except G6**, 2026-08-29, against `6f212eb`. Phases 1–4 and 6 done, phase 5
-half done — Dynawo yes, ANDES dropped. §11–§19 record what was actually done, including the
+half done — Dynawo yes, ANDES dropped. §11–§20 record what was actually done, including the
 places this plan was wrong. §17 onward is follow-on work beyond the plan's own scope.
 
 ## Context
@@ -1229,4 +1229,67 @@ mode on the damper winding and the stabilizer. None of that has to be inferred f
 
 - Saturation; valve **rate** limits; state-triggered events.
 - Coupling the Dynawo reader to `src/iidm.rs`.
+- Sparse (Arnoldi) small-signal for systems of thousands of states; eigenvalue sensitivities.
+
+
+---
+
+## 20. Beyond the plan: a whole Dynawo case, and why saturation still waits
+
+### `load_case`
+
+`dyd::load_case` reads both halves of a Dynawo case together — the IIDM network through
+`src/iidm.rs`, the models through the `.dyd`/`.par` reader — and returns a system ready to
+integrate. The vendored IEEE 14 case loads in one call: 14 buses, five machines, 28 states,
+initializing to an equilibrium at `2.4e-15`.
+
+It needed one change outside `dynamics/`. The IIDM importer folded every injection into its bus's
+net `p_spec`/`q_spec` and kept no ids, which is all a power flow needs and is not reversible
+afterwards — but a Dynawo model attaches to a **generator** by `staticId`, not to a bus.
+`IidmImport::injections` now keeps the correspondence back.
+
+That turned out to be worth more than the addressing. Each machine's **own** terminal power is now
+recovered *exactly* rather than apportioned: the IIDM states every load's `p0`/`q0`, and those are
+precisely what went into the bus's specification, so
+
+```text
+machine's injection = bus's solved injection − the loads the file states there
+```
+
+holds for both active and reactive power, at a `PV` bus as much as a `PQ` one. That closes, for a
+Dynawo case, the one hazard §11 identified as invisible to every downstream gate. Two machines on
+one bus is the case it cannot resolve — their share of the bus's solved reactive power is genuinely
+not in the file, only the total is — and it is refused by name.
+
+Tap-changing load models, and anything else attached to a static element that is not a generator,
+are treated as static and **named**. The network is right; their dynamics are not there.
+
+### Saturation still waits, and the reason has not changed
+
+§13 deferred saturation because choosing a representation was better done with a reference actually
+running. It is tempting to call that condition met — Dynawo *is* running now — but it is not, and
+the distinction is worth being precise about.
+
+- The Dynawo case that gridoxide is validated against, Kundur's Example 13.2, states
+  `md = mq = 0`. **There is no saturation in it to compare against.**
+- The Dynawo case that *does* state saturation, IEEE 14, also carries tap-changing loads this
+  library does not model, so any disagreement would be confounded.
+- Dynawo's saturation acts on the **mutual inductances** of a flux-linkage parameterization;
+  gridoxide's machines use the reactance-and-time-constant one. The two are not the same knob, and
+  translating between them is its own derivation.
+- PSS/E's `S(1.0)`/`S(1.2)` form does fit gridoxide's parameterization — but there is no PSS/E
+  reference running to check it against.
+
+So implementing it now would mean adding physics whose *magnitude* nothing could check. Unlike the
+subtransient signs, saturation has no limiting case that reduces to something already validated: with
+`S = 0` it vanishes identically, which is necessary and says nothing about the rest. That is exactly
+the position §13 declined to be in, and it is still the position.
+
+Both readers continue to parse it and report a nonzero value, which is the honest halfway house: a
+study whose answer depended on saturation is told so.
+
+### Still outstanding
+
+- Saturation, on the terms above.
+- Valve **rate** limits; state-triggered events.
 - Sparse (Arnoldi) small-signal for systems of thousands of states; eigenvalue sensitivities.

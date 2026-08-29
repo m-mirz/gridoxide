@@ -72,9 +72,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use num_complex::Complex;
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader;
 
+use super::init::{build, DeviceSpec, SystemSpec};
 use super::json::{AvrSpec, GovSpec, MachineSpec, UnitSpec};
 use super::models::machine::{GenRoundParams, GenSalientParams};
 use super::models::Limits;
@@ -132,6 +134,17 @@ pub enum DydError {
     MissingParameter { id: String, set: String, name: String },
     /// A `staticId` with no corresponding bus index.
     UnknownStaticId { id: String, static_id: String },
+    /// The IIDM half of the case could not be read.
+    Iidm(String),
+    /// The base-case power flow did not converge, so there is no operating
+    /// point to initialize from.
+    PowerFlow(crate::solver::SolveStatus),
+    /// Two dynamic models attached to generators on the same bus. Their share
+    /// of that bus's solved reactive power cannot be recovered from the file —
+    /// only the total is a fact — so it is refused rather than guessed.
+    SharedBus { bus: usize, models: Vec<String> },
+    /// The assembled system could not be initialized.
+    Build(String),
 }
 
 impl std::fmt::Display for DydError {
@@ -148,6 +161,18 @@ impl std::fmt::Display for DydError {
             DydError::UnknownStaticId { id, static_id } => {
                 write!(f, "{id} attaches to static element `{static_id}`, which has no bus")
             }
+            DydError::Iidm(message) => write!(f, "{message}"),
+            DydError::PowerFlow(status) => {
+                write!(f, "the base-case power flow did not converge ({status:?})")
+            }
+            DydError::SharedBus { bus, models } => write!(
+                f,
+                "bus {bus} carries {} dynamic machines ({}); their share of its solved \
+                 reactive power is not in the file, only the total is",
+                models.len(),
+                models.join(", ")
+            ),
+            DydError::Build(message) => write!(f, "{message}"),
         }
     }
 }
@@ -489,4 +514,138 @@ pub fn to_units(
     }
 
     Ok((units, warnings))
+}
+
+/// Reads a whole Dynawo case — the IIDM network and the `.dyd`/`.par` pair —
+/// and returns a system ready to integrate.
+///
+/// This is what the two halves were always for. `src/iidm.rs` reads the static
+/// network, [`to_units`] reads the dynamic models, and the `staticId` on each
+/// `blackBoxModel` is the correspondence between them.
+///
+/// # How each machine's terminal power is recovered, exactly
+///
+/// A dynamic study needs each machine's *own* terminal power, and a power flow
+/// produces only its bus's total. For a Dynawo case that is not a guess: the
+/// IIDM states every load's `p0`/`q0`, and those are precisely what went into
+/// the bus's specification, so
+///
+/// ```text
+/// machine's injection = bus's solved injection − the loads the file states there
+/// ```
+///
+/// is exact for both active and reactive power, at a `PV` bus as much as a `PQ`
+/// one. The one case it cannot resolve is **two machines on one bus**: their
+/// share of the bus's solved reactive power is genuinely not in the file, only
+/// the total is, so that is refused by name rather than split by a guess. It
+/// is the same position `json::resolve_split` takes, reached from the other
+/// direction.
+///
+/// # What is not carried over
+///
+/// Tap changers, whose dynamics this library does not model, and saturation.
+/// A case that depends on either is known in advance to diverge — which is a
+/// better position than discovering it during a comparison.
+#[cfg(feature = "iidm")]
+pub fn load_case(
+    iidm_path: impl AsRef<Path>,
+    dyd_path: impl AsRef<Path>,
+    par_path: impl AsRef<Path>,
+    f_nom: f64,
+) -> Result<(super::DynamicSystem, Vec<DydWarning>), DydError> {
+    use crate::network::{build_ybus, power_injections, stamp_shunts};
+    use crate::solver::{PowerFlowOptions, SolveStatus};
+
+    let network = crate::iidm::read(iidm_path).map_err(|e| DydError::Iidm(e.to_string()))?;
+    let dyd = read_dyd(dyd_path)?;
+    let par = read_par(par_path)?;
+
+    // A dynamic model attaches to a *generator*, not to a bus, so the map is
+    // the one the importer now retains rather than a bus lookup.
+    let bus_of: HashMap<String, usize> = network
+        .injections
+        .iter()
+        .filter(|i| i.generator)
+        .map(|i| (i.id.clone(), i.bus))
+        .collect();
+    let (units, mut warnings) = to_units(&dyd, &par, &bus_of, network.base_mva)?;
+
+    // A model attached to a static element that is not a generator is a
+    // dynamic model of something this library treats as static — the case's
+    // tap-changing loads, most often. Their static data is still used, so the
+    // network is right; what is lost is their dynamics, and that is worth
+    // saying rather than leaving to be noticed.
+    for model in dyd.models.iter().filter(|m| m.static_id.is_some() && !is_generator(&m.lib)) {
+        warnings.push(DydWarning::UnsupportedLib {
+            id: model.id.clone(),
+            lib: model.lib.clone(),
+        });
+    }
+
+    let report = crate::run_power_flow(
+        network.buses.clone(),
+        &network.lines,
+        &network.transformers,
+        &network.shunts,
+        crate::TapData::none(),
+        PowerFlowOptions::default(),
+    );
+    if report.stats.status != SolveStatus::Converged {
+        return Err(DydError::PowerFlow(report.stats.status));
+    }
+    let buses = report.buses;
+
+    let mut ybus = build_ybus(buses.len(), &network.lines, &network.transformers);
+    stamp_shunts(&mut ybus, &network.shunts);
+    let (p_calc, q_calc) = power_injections(&buses, &ybus.finish());
+
+    // Loads are stated, so they come off exactly; whatever is left at a bus is
+    // its machine's.
+    let mut machine_share: HashMap<usize, Complex<f64>> = HashMap::new();
+    for unit in &units {
+        machine_share
+            .entry(unit.bus)
+            .or_insert_with(|| Complex::new(p_calc[unit.bus], q_calc[unit.bus]));
+    }
+    for injection in network.injections.iter().filter(|i| !i.generator) {
+        if let Some(share) = machine_share.get_mut(&injection.bus) {
+            *share -= Complex::new(injection.p, injection.q);
+        }
+    }
+
+    let mut per_bus: HashMap<usize, Vec<String>> = HashMap::new();
+    for unit in &units {
+        per_bus.entry(unit.bus).or_default().push(unit.id.clone());
+    }
+    for (&bus, models) in &per_bus {
+        if models.len() > 1 {
+            return Err(DydError::SharedBus { bus, models: models.clone() });
+        }
+    }
+
+    let mut devices = Vec::with_capacity(units.len());
+    for unit in units {
+        let model = unit
+            .clone()
+            .into_model(network.base_mva, f_nom)
+            .map_err(|e| DydError::Build(e.to_string()))?;
+        devices.push(DeviceSpec {
+            id: unit.id.clone(),
+            bus: unit.bus,
+            s: machine_share[&unit.bus],
+            model,
+        });
+    }
+
+    let system = build(SystemSpec {
+        buses: &buses,
+        lines: &network.lines,
+        transformers: &network.transformers,
+        shunts: &network.shunts,
+        devices,
+        fixed_buses: Vec::new(),
+    })
+    .map_err(|e| DydError::Build(e.to_string()))?;
+
+    Ok((system, warnings))
 }
