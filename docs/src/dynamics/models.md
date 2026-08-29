@@ -130,15 +130,37 @@ implementation artifact.
 **The cutoff changes answers.** It is a modelling parameter, not a numerical tolerance, and it
 should be reported alongside a result that depended on it.
 
-## Limits, and why there are none
+## Limits, and why they are non-windup
 
-No exciter ceiling, no governor valve limit, no stabilizer output clamp. A hard clamp makes the
-right-hand side non-smooth, so the analytic Jacobian acquires a discontinuity the step's Newton
-solve can chatter against, and doing it properly needs non-windup logic plus limiter state.
+An exciter ceiling, a governor valve limit and a stabilizer output clamp are all implemented, and
+both readers carry them through from their files.
 
-Half-implemented limits would be worse than none, because they would look present. A model with no
-limits is at least honestly unlimited, and its `E_fd` can be read to see whether a study would have
-hit one. Both readers report limits they find in a file and drop.
+They are **non-windup**, which is the distinction that matters. With windup the state keeps
+integrating past the boundary while the output is pinned there, so when the error finally reverses
+the output stays pinned for however long the state takes to travel back — a delay with no physical
+basis. On the gated case an unlimited exciter reaches 18 pu against a 2.6 pu ceiling; a wound-up one
+would sit at that ceiling for as long as it took to fall back through fifteen per unit. Held at the
+boundary, the state never exceeds it at all.
+
+Three pieces make that work, and each answers a real failure:
+
+**The active set is fixed for the duration of a step.** Recomputing it from each Newton iterate
+makes the residual non-smooth *inside* the solve: an iterate landing just above the boundary sees a
+zeroed derivative, the next lands just below and sees the full one, and the two alternate. Measured,
+that made an ordinary exciter ceiling fail the step outright. Frozen, the step is smooth and the
+Jacobian is exact for what is actually being solved. A limit therefore engages one step late, which
+at five milliseconds is not worth the machinery to avoid.
+
+**States are projected onto their limits after each accepted step.** The step that *crosses* a
+boundary can still carry a state past it, because the trapezoidal rule averages a start-of-step
+derivative that was still driving hard with an end-of-step one that has been zeroed — and a frozen
+derivative cannot then bring it back. The projection is exact rather than a correction: a non-windup
+state has no legitimate value outside its limits.
+
+**Rate limits are not implemented.** They constrain a derivative rather than a state, which is a
+different and more intrusive piece of machinery.
+
+What remains genuinely absent is saturation — see the readers.
 
 ## Every model is checked against an oracle
 

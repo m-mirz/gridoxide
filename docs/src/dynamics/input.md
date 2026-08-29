@@ -97,6 +97,15 @@ library does not have; it is skipped and named.
 gain on the machine's own `governor_PNom`, while the proportional governor wants one on the network
 base, so the reader applies `k = KGover · PNom / s_base`.
 
+## Limits are carried through
+
+`SEXS`'s `EMIN`/`EMAX`, `TGOV1`'s `VMIN`/`VMAX`, Dynawo's `voltageRegulator_EfdMinPu`/`MaxPu` and
+its `governor_PMin`/`PMax` all reach the models. Two details are worth knowing: `TGOV1` states
+**`VMAX` before `VMIN`**, so reading them in field order gives a valve limited upside-down that
+therefore never moves; and Dynawo's power limits are in MW, so they divide by the network base while
+its field-voltage limits go through unchanged — which is sound because gridoxide's own
+initialization reproduces Dynawo's `efdPu` exactly.
+
 ## Saturation, stated twice and incompatibly
 
 PSS/E gives two points on a curve, `S(1.0)` and `S(1.2)`. Dynawo gives an exponential

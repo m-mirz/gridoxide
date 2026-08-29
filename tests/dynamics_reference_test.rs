@@ -32,6 +32,7 @@
 use std::collections::HashMap;
 
 use gridoxide::dynamics::dyd;
+use num_complex::Complex;
 use gridoxide::dynamics::json::{DynamicsData, DynamicsDocument, EventSpec, MachineSpec};
 use gridoxide::dynamics::{run_dynamics, DynamicsOptions, DynamicsStatus, Trajectory};
 use gridoxide::json::NetworkData;
@@ -585,5 +586,37 @@ fn the_full_form_tracks_dynawo_through_the_whole_first_swing() {
     assert!(
         full_run < approx_run,
         "and it should not be worse over the whole run: {approx_run:e} against {full_run:e}"
+    );
+}
+
+/// The **field-voltage per-unit base** agrees with Dynawo's, exactly.
+///
+/// This matters beyond a curiosity: a regulator's ceiling is stated in that
+/// base, so carrying `voltageRegulator_EfdMaxPu` from a Dynawo file into
+/// gridoxide's exciter is only sound if the two mean the same thing by "per
+/// unit field voltage". They do — the initialization derives 2.420747 and the
+/// reference file's `efdPu` at `t = 0` is 2.420747 — and the `.dyd` reader
+/// carries the limits on the strength of it.
+///
+/// It is also a third independent check on the machine model, alongside the
+/// rotor angle and the air-gap power.
+#[test]
+fn the_field_voltage_base_agrees_with_dynawos() {
+    use gridoxide::dynamics::models::machine::{GenRound, Machine};
+
+    let params = match case().dynamics.units[0].machine {
+        MachineSpec::GenRound(p) => p,
+        ref other => panic!("expected a subtransient machine, got {other:?}"),
+    };
+    let mut machine = GenRound::new(params, S_BASE, F_NOM).unwrap();
+    let init = machine
+        .initialize(Complex::from_polar(1.0, 0.49445), Complex::new(-P0_PU, 9.68))
+        .expect("initializes");
+
+    let expected = Reference::read().column("SM_generator_efdPu")[0];
+    assert!(
+        (init.e_fd - expected).abs() < 1e-5,
+        "field voltage {:.6} against Dynawo's {expected:.6}",
+        init.e_fd
     );
 }

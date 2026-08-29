@@ -7,23 +7,32 @@
 //! to matter for the integrator's damping (see
 //! [`integrator`](crate::dynamics::integrator)).
 //!
-//! # Limits are deliberately absent
+//! # Limits, and why they are non-windup
 //!
-//! Real exciters have ceiling and floor limits on `E_fd`, and a real study of a
-//! severe fault is shaped by them. They are not implemented here, and that is a
-//! considered omission rather than an oversight: a hard clamp makes the
-//! right-hand side non-smooth, so the analytic Jacobian acquires a
-//! discontinuity that the step's Newton solve can chatter against, and doing it
-//! properly needs non-windup limiter logic plus the state to remember whether a
-//! limit is active. That is a piece of machinery in its own right.
+//! Real exciters have a ceiling and a floor on `E_fd`, and a study of a severe
+//! fault is shaped by them: a machine whose field voltage is pinned at its
+//! ceiling cannot support its terminal voltage any harder, however large the
+//! error.
 //!
-//! Half-implemented limits would be worse than none, because they would look
-//! present. A model with no limits is at least honestly unlimited, and its
-//! `E_fd` can be read to see whether a study would have hit one.
+//! They are implemented as **non-windup** limits, which is the distinction that
+//! matters. With windup the state keeps integrating past the ceiling while the
+//! output is pinned there, so when the voltage error finally reverses the
+//! output stays pinned for however long the state takes to travel back — a
+//! delay with no physical basis, and one that can be seconds on a slow
+//! exciter. A non-windup limit holds the state *at* the boundary and lets it
+//! leave the instant its derivative reverses.
+//!
+//! The cost is a right-hand side that is not smooth at the boundary, so the
+//! analytic Jacobian is exact on each side and undefined exactly on it. That is
+//! the same character as [`ZipLoad`](super::load::ZipLoad)'s low-voltage
+//! cutoff, and it is handled the same way: the oracle checks each side and
+//! never straddles.
 
 use serde::{Deserialize, Serialize};
 
-use super::{Control, InitError};
+use std::cell::Cell;
+
+use super::{Control, InitError, LimitState, Limits};
 
 /// The IEEE simplified excitation system, `SEXS`.
 ///
@@ -54,6 +63,9 @@ pub struct Sexs {
     ta_over_tb: f64,
     tb: f64,
     te: f64,
+    limits: Limits,
+    /// Which limit is holding `E_fd` this step, decided once at its start.
+    limit: Cell<LimitState>,
     /// Latched by [`Control::initialize`], never read from a file.
     v_ref: f64,
 }
@@ -70,6 +82,9 @@ pub struct SexsParams {
     pub tb: f64,
     /// Exciter time constant, seconds.
     pub te: f64,
+    /// Field-voltage ceiling and floor. Unbounded when absent.
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 const SEXS_STATES: [&str; 2] = ["avr_lead", "efd"];
@@ -93,6 +108,8 @@ impl Sexs {
             ta_over_tb: params.ta / params.tb,
             tb: params.tb,
             te: params.te,
+            limits: params.limits,
+            limit: Cell::new(LimitState::Free),
             v_ref: 0.0,
         })
     }
@@ -101,6 +118,13 @@ impl Sexs {
     /// that the machine really is driven back to the voltage it started at.
     pub fn v_ref(&self) -> f64 {
         self.v_ref
+    }
+
+    /// `Ė_fd` before any limit is applied.
+    fn raw_field_derivative(&self, x: &[f64], u: f64) -> f64 {
+        let w = self.v_ref + u;
+        let y1 = x[0] + self.ta_over_tb * w;
+        (self.k * y1 - x[1]) / self.te
     }
 }
 
@@ -113,11 +137,15 @@ impl Control for Sexs {
         &SEXS_STATES
     }
 
+    fn latch(&self, x: &[f64], u: f64) {
+        let raw = self.raw_field_derivative(x, u);
+        self.limit.set(self.limits.latch(x[1], raw));
+    }
+
     fn derivatives(&self, x: &[f64], u: f64, out: &mut [f64]) {
         let w = self.v_ref + u;
-        let y1 = x[0] + self.ta_over_tb * w;
         out[0] = (w * (1.0 - self.ta_over_tb) - x[0]) / self.tb;
-        out[1] = (self.k * y1 - x[1]) / self.te;
+        out[1] = self.limits.held(self.limit.get(), self.raw_field_derivative(x, u));
     }
 
     fn jacobian(&self, _x: &[f64], _u: f64, dfdx: &mut [f64], dfdu: &mut [f64]) {
@@ -125,24 +153,37 @@ impl Control for Sexs {
         dfdx[1] = 0.0;
         dfdu[0] = (1.0 - self.ta_over_tb) / self.tb;
 
-        dfdx[2] = self.k / self.te;
-        dfdx[3] = -1.0 / self.te;
-        dfdu[1] = self.k * self.ta_over_tb / self.te;
+        // A held state's derivative is a constant zero, so its whole row is —
+        // the exact Jacobian of what the step is actually solving, since the
+        // active set is fixed for its duration.
+        if self.limit.get() == LimitState::Free {
+            dfdx[2] = self.k / self.te;
+            dfdx[3] = -1.0 / self.te;
+            dfdu[1] = self.k * self.ta_over_tb / self.te;
+        }
     }
 
     fn output(&self, x: &[f64], _u: f64) -> f64 {
-        x[1]
+        self.limits.under(self.limit.get(), x[1]).0
     }
 
-    fn output_jacobian(&self, _x: &[f64], _u: f64, dydx: &mut [f64]) -> f64 {
+    fn output_jacobian(&self, x: &[f64], _u: f64, dydx: &mut [f64]) -> f64 {
         dydx[0] = 0.0;
-        dydx[1] = 1.0;
+        dydx[1] = self.limits.under(self.limit.get(), x[1]).1;
         // No feedthrough: the field voltage is a state, so a step in terminal
         // voltage reaches E_fd only through T_e.
         0.0
     }
 
+    fn project(&self, x: &mut [f64]) {
+        x[1] = self.limits.clamp(x[1]).0;
+    }
+
     fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {
+        // An operating point needing more field voltage than the ceiling allows
+        // has no equilibrium; saying so beats initializing to a state the model
+        // would immediately leave.
+        self.limits.require("exciter field voltage", y)?;
         // At DC the lead-lag is unity, so E_fd = K·(V_ref + u) and the
         // reference is whatever makes that reproduce the field voltage the
         // machine turned out to need.
@@ -171,6 +212,8 @@ impl Control for Sexs {
 #[derive(Clone, Debug)]
 pub struct VrProportional {
     k: f64,
+    limits: Limits,
+    limit: Cell<LimitState>,
     v_ref: f64,
 }
 
@@ -178,10 +221,17 @@ const NO_AVR_STATES: [&str; 0] = [];
 
 impl VrProportional {
     pub fn new(k: f64) -> Result<Self, InitError> {
+        Self::limited(k, Limits::NONE)
+    }
+
+    /// With a field-voltage ceiling and floor. No states means no windup to
+    /// worry about: the clamp is on the output and nothing integrates behind
+    /// it.
+    pub fn limited(k: f64, limits: Limits) -> Result<Self, InitError> {
         if k <= 0.0 {
             return Err(InitError::NonPositiveParameter { name: "avr gain", value: k });
         }
-        Ok(Self { k, v_ref: 0.0 })
+        Ok(Self { k, limits, limit: Cell::new(LimitState::Free), v_ref: 0.0 })
     }
 
     pub fn v_ref(&self) -> f64 {
@@ -202,15 +252,29 @@ impl Control for VrProportional {
 
     fn jacobian(&self, _x: &[f64], _u: f64, _dfdx: &mut [f64], _dfdu: &mut [f64]) {}
 
-    fn output(&self, _x: &[f64], u: f64) -> f64 {
-        self.k * (self.v_ref + u)
+    fn latch(&self, _x: &[f64], u: f64) {
+        // A pure gain has no state, so "latching" is fixing which branch of the
+        // clamp the step uses — the same reason, and the same smoothness.
+        let raw = self.k * (self.v_ref + u);
+        self.limit.set(if raw > self.limits.upper() {
+            LimitState::AtMax
+        } else if raw < self.limits.lower() {
+            LimitState::AtMin
+        } else {
+            LimitState::Free
+        });
     }
 
-    fn output_jacobian(&self, _x: &[f64], _u: f64, _dydx: &mut [f64]) -> f64 {
-        self.k
+    fn output(&self, _x: &[f64], u: f64) -> f64 {
+        self.limits.under(self.limit.get(), self.k * (self.v_ref + u)).0
+    }
+
+    fn output_jacobian(&self, _x: &[f64], u: f64, _dydx: &mut [f64]) -> f64 {
+        self.k * self.limits.under(self.limit.get(), self.k * (self.v_ref + u)).1
     }
 
     fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {
+        self.limits.require("exciter field voltage", y)?;
         self.v_ref = y / self.k - u;
         Ok(Vec::new())
     }

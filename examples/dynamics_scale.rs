@@ -17,6 +17,7 @@
 
 use gridoxide::dynamics::json::{DynamicsData, DynamicsDocument, EventSpec, MachineSpec};
 use gridoxide::dynamics::models::machine::GenRoundParams;
+use gridoxide::dynamics::models::Limits;
 use gridoxide::dynamics::json::{AvrSpec, GovSpec, UnitSpec};
 use gridoxide::dynamics::models::avr::SexsParams;
 use gridoxide::dynamics::models::gov::Tgov1Params;
@@ -85,13 +86,14 @@ fn case(n_bus: usize) -> DynamicsDocument {
                     tq0pp: 0.05,
                     mbase: S_BASE,
                 }),
-                avr: Some(AvrSpec::Sexs(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05 })),
+                avr: Some(AvrSpec::Sexs(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05, limits: Limits::NONE })),
                 gov: Some(GovSpec::Tgov1(Tgov1Params {
                     r: 0.05,
                     t1: 0.5,
                     t2: 1.0,
                     t3: 5.0,
                     dt: 0.0,
+                    limits: Limits::NONE,
                 })),
                 pss: None,
             });

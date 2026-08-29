@@ -114,26 +114,27 @@ fn the_positional_mapping_is_right() {
     assert!(g2.avr.is_none() && g2.gov.is_none());
 }
 
-/// What the reader drops, it names.
+/// What the reader drops, it names — and what it can now carry, it carries.
 ///
-/// Saturation and output limits are both absent from this model library. Both
-/// change answers, so a silent drop would show up later as a small unexplained
-/// disagreement with a reference — the exact failure mode
-/// `plans/RMS_PLAN.md` §7 warns about.
+/// Saturation is still absent from this model library, so it is reported.
+/// Limits are not: `SEXS`'s `EMIN`/`EMAX` and `TGOV1`'s `VMIN`/`VMAX` reach the
+/// models and are enforced as non-windup limits, so there is nothing to warn
+/// about.
 #[test]
-fn dropped_data_is_reported() {
+fn dropped_data_is_reported_and_limits_are_carried() {
     let doc = dyr::read(FIXTURE).unwrap();
-    let (_, warnings) = dyr::to_units(&doc, &bus_index(), &supplied()).unwrap();
+    let (units, warnings) = dyr::to_units(&doc, &bus_index(), &supplied()).unwrap();
 
     let saturation = warnings
         .iter()
         .filter(|w| matches!(w, DyrWarning::SaturationIgnored { .. }))
         .count();
     assert_eq!(saturation, 1, "the GENROU's nonzero S(1.0)/S(1.2) should be reported");
-
-    let limits =
-        warnings.iter().filter(|w| matches!(w, DyrWarning::LimitsIgnored { .. })).count();
-    assert_eq!(limits, 2, "SEXS and TGOV1 both state limits this library ignores");
+    assert_eq!(
+        warnings.iter().filter(|w| matches!(w, DyrWarning::LimitsIgnored { .. })).count(),
+        0,
+        "limits are no longer dropped, so nothing should warn about them"
+    );
 
     let unsupported: Vec<&DyrWarning> = warnings
         .iter()
@@ -145,6 +146,25 @@ fn dropped_data_is_reported() {
         "an unimplemented model should be skipped by name: {}",
         unsupported[0]
     );
+
+    // The fixture's own values, and in the right order. `TGOV1` states VMAX
+    // before VMIN; reading them in field order gives a valve limited
+    // upside-down, which would simply never move.
+    let g1 = units.iter().find(|u| u.id == "1_1").unwrap();
+    match g1.avr {
+        Some(AvrSpec::Sexs(p)) => {
+            assert_eq!(p.limits.min, Some(-5.0));
+            assert_eq!(p.limits.max, Some(5.0));
+        }
+        ref other => panic!("{other:?}"),
+    }
+    match g1.gov {
+        Some(GovSpec::Tgov1(p)) => {
+            assert_eq!(p.limits.min, Some(0.0), "VMIN is the fourth field, not the third");
+            assert_eq!(p.limits.max, Some(1.0));
+        }
+        ref other => panic!("{other:?}"),
+    }
 }
 
 /// The two things a `.dyr` cannot state are demanded, not invented.

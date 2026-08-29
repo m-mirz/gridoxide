@@ -49,6 +49,15 @@
 //! it is flagged here so phase 5's comparison knows where to look first if the
 //! frequencies disagree.
 //!
+//! # Limits are carried through
+//!
+//! `voltageRegulator_EfdMinPu`/`MaxPu` and `governor_PMin`/`PMax` both reach
+//! the models. The field-voltage pair goes through unchanged because
+//! gridoxide's initialization reproduces Dynawo's `efdPu` exactly — the two
+//! agree on what a per-unit field voltage is, which is what makes carrying a
+//! ceiling stated in that base sound. The power pair is stated in MW and
+//! divides by the network base.
+//!
 //! # Saturation, again
 //!
 //! Dynawo states saturation as `generator_md`, `mq`, `nd`, `nq` — an
@@ -65,6 +74,7 @@ use quick_xml::Reader;
 
 use super::json::{AvrSpec, GovSpec, MachineSpec, UnitSpec};
 use super::models::machine::GenRoundParams;
+use super::models::Limits;
 
 /// One `blackBoxModel` entry.
 #[derive(Clone, Debug, PartialEq)]
@@ -149,7 +159,8 @@ pub enum DydWarning {
     /// A nonzero exponential saturation characteristic, which no model here
     /// uses.
     SaturationIgnored { id: String, md: f64, mq: f64, nd: f64, nq: f64 },
-    /// Regulator limits, which this library does not model.
+    /// A limit this reader carries through but that the model does not use.
+    /// Kept for anything that gains a limit the library still cannot represent.
     LimitsIgnored { id: String, detail: String },
 }
 
@@ -408,27 +419,31 @@ pub fn to_units(
 
         let (mut avr, mut gov) = (None, None);
         if has_proportional_regulations(&model.lib) {
-            let gain = g("voltageRegulator_Gain")?;
-            avr = Some(AvrSpec::VrProportional { k: gain });
-            if par.number(&set, "voltageRegulator_EfdMinPu").is_some() {
-                warnings.push(DydWarning::LimitsIgnored {
-                    id: model.id.clone(),
-                    detail: "the voltage regulator's field-voltage ceiling".to_string(),
-                });
-            }
+            // The field-voltage ceiling is carried straight through: gridoxide's
+            // own initialization reproduces Dynawo's `efdPu` exactly, so the two
+            // agree on what a per-unit field voltage is. See
+            // `tests/dynamics_reference_test.rs`.
+            avr = Some(AvrSpec::VrProportional {
+                k: g("voltageRegulator_Gain")?,
+                limits: Limits {
+                    min: par.number(&set, "voltageRegulator_EfdMinPu"),
+                    max: par.number(&set, "voltageRegulator_EfdMaxPu"),
+                },
+            });
 
             // The one inferred conversion — see the module doc. KGover is a
             // gain on the machine's own PNom, and GoverProportional wants one
-            // on the network base.
+            // on the network base. The power limits are stated in MW, so they
+            // divide by the network base directly.
             let k_gover = g("governor_KGover")?;
             let p_nom = g("governor_PNom")?;
-            gov = Some(GovSpec::GoverProportional { k: k_gover * p_nom / s_base });
-            if par.number(&set, "governor_PMin").is_some() {
-                warnings.push(DydWarning::LimitsIgnored {
-                    id: model.id.clone(),
-                    detail: "the governor's power limits".to_string(),
-                });
-            }
+            gov = Some(GovSpec::GoverProportional {
+                k: k_gover * p_nom / s_base,
+                limits: Limits {
+                    min: par.number(&set, "governor_PMin").map(|p| p / s_base),
+                    max: par.number(&set, "governor_PMax").map(|p| p / s_base),
+                },
+            });
         }
 
         units.push(UnitSpec {

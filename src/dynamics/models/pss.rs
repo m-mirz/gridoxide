@@ -10,12 +10,17 @@
 //! blocks and not two: the stabilizer's output is an input to the exciter, not
 //! to the machine.
 //!
-//! Output limits are absent, as they are for the other controls — see
-//! [`avr`](super::avr).
+//! Output limits are implemented as a plain clamp rather than a non-windup
+//! one, and that is the standard treatment here: the limited quantity is the
+//! *output*, which is not a state, so there is no integrator behind the clamp
+//! to wind up. A stabilizer's limits are deliberately tight — a fraction of a
+//! per unit — precisely so that a mistuned one cannot do much harm.
 
 use serde::{Deserialize, Serialize};
 
-use super::{Control, InitError};
+use std::cell::Cell;
+
+use super::{Control, InitError, LimitState, Limits};
 
 /// A speed-input stabilizer: a washout followed by two lead-lag stages.
 ///
@@ -50,6 +55,8 @@ pub struct Stab1 {
     t2: f64,
     t3_over_t4: f64,
     t4: f64,
+    limits: Limits,
+    limit: Cell<LimitState>,
 }
 
 /// [`Stab1`]'s parameters.
@@ -65,6 +72,9 @@ pub struct Stab1Params {
     pub t2: f64,
     pub t3: f64,
     pub t4: f64,
+    /// Output limits on `v_s`. Unbounded when absent.
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 const STAB1_STATES: [&str; 3] = ["pss_washout", "pss_lead1", "pss_lead2"];
@@ -85,6 +95,8 @@ impl Stab1 {
             t2: params.t2,
             t3_over_t4: params.t3 / params.t4,
             t4: params.t4,
+            limits: params.limits,
+            limit: Cell::new(LimitState::Free),
         })
     }
 
@@ -132,19 +144,33 @@ impl Control for Stab1 {
         dfdu[2] = g3 * self.t1_over_t2 * self.k;
     }
 
-    fn output(&self, x: &[f64], u: f64) -> f64 {
+    fn latch(&self, x: &[f64], u: f64) {
         let (_, y2) = self.stages(x, u);
-        x[2] + self.t3_over_t4 * y2
+        let raw = x[2] + self.t3_over_t4 * y2;
+        self.limit.set(if raw > self.limits.upper() {
+            LimitState::AtMax
+        } else if raw < self.limits.lower() {
+            LimitState::AtMin
+        } else {
+            LimitState::Free
+        });
     }
 
-    fn output_jacobian(&self, _x: &[f64], _u: f64, dydx: &mut [f64]) -> f64 {
+    fn output(&self, x: &[f64], u: f64) -> f64 {
+        let (_, y2) = self.stages(x, u);
+        self.limits.under(self.limit.get(), x[2] + self.t3_over_t4 * y2).0
+    }
+
+    fn output_jacobian(&self, x: &[f64], u: f64, dydx: &mut [f64]) -> f64 {
+        let (_, y2) = self.stages(x, u);
+        let scale = self.limits.under(self.limit.get(), x[2] + self.t3_over_t4 * y2).1;
         let a = self.t3_over_t4 * self.t1_over_t2 * self.k;
-        dydx[0] = -a;
-        dydx[1] = self.t3_over_t4;
-        dydx[2] = 1.0;
+        dydx[0] = -a * scale;
+        dydx[1] = self.t3_over_t4 * scale;
+        dydx[2] = scale;
         // The washout and both lead-lags each pass their input straight
         // through, so a speed step reaches the exciter with no delay at all.
-        a
+        a * scale
     }
 
     fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {

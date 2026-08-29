@@ -34,6 +34,13 @@
 //! to bus indices is also the caller's to supply. This is a real limitation of
 //! reading half a pair of files, and it is stated rather than papered over.
 //!
+//! # Limits are carried through
+//!
+//! `SEXS`'s `EMIN`/`EMAX` and `TGOV1`'s `VMIN`/`VMAX` reach the models, which
+//! enforce them as non-windup limits — see [`avr`](super::models::avr). Note
+//! that `TGOV1` states them **VMAX first**; reading them in field order gives a
+//! governor whose valve is limited upside-down and which therefore never moves.
+//!
 //! # Saturation is read and discarded
 //!
 //! `GENROU` carries `S(1.0)` and `S(1.2)`, the saturation characteristic. No
@@ -51,6 +58,7 @@ use super::json::{AvrSpec, GovSpec, MachineSpec, UnitSpec};
 use super::models::avr::SexsParams;
 use super::models::gov::Tgov1Params;
 use super::models::machine::{GenClsParams, GenRoundParams};
+use super::models::Limits;
 
 /// One record, tokenized but not yet interpreted.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,9 +136,9 @@ pub enum DyrWarning {
     UnsupportedModel { bus: i64, id: String, model: String, line: usize },
     /// A nonzero saturation characteristic, which no model here uses.
     SaturationIgnored { bus: i64, id: String, s10: f64, s12: f64 },
-    /// A limit this library does not implement — see
-    /// `src/dynamics/models/avr.rs` for why they are absent. Named because a
-    /// study whose answer depended on one would be wrong without warning.
+    /// A limit this reader carries through but that the model does not use.
+    /// Retained for anything that gains a limit the library still cannot
+    /// represent — a valve *rate* limit, say.
     LimitsIgnored { bus: i64, id: String, model: String },
 }
 
@@ -382,31 +390,30 @@ impl DyrRecord {
     /// `SEXS`: `TA/TB TB K TE EMIN EMAX`. The first field is a **ratio**, not a
     /// time constant — a detail that silently produces a very fast exciter if
     /// missed.
-    fn as_sexs(&self, warnings: &mut Vec<DyrWarning>) -> Result<AvrSpec, DyrError> {
+    fn as_sexs(&self, _warnings: &mut Vec<DyrWarning>) -> Result<AvrSpec, DyrError> {
         arity(self, 6)?;
         let p = &self.params;
-        if p[4] != 0.0 || p[5] != 0.0 {
-            warnings.push(DyrWarning::LimitsIgnored {
-                bus: self.bus,
-                id: self.id.clone(),
-                model: self.model.clone(),
-            });
-        }
-        Ok(AvrSpec::Sexs(SexsParams { k: p[2], ta: p[0] * p[1], tb: p[1], te: p[3] }))
+        Ok(AvrSpec::Sexs(SexsParams {
+            k: p[2],
+            ta: p[0] * p[1],
+            tb: p[1],
+            te: p[3],
+            limits: Limits { min: Some(p[4]), max: Some(p[5]) },
+        }))
     }
 
     /// `TGOV1`: `R T1 VMAX VMIN T2 T3 Dt`.
-    fn as_tgov1(&self, warnings: &mut Vec<DyrWarning>) -> Result<GovSpec, DyrError> {
+    fn as_tgov1(&self, _warnings: &mut Vec<DyrWarning>) -> Result<GovSpec, DyrError> {
         arity(self, 7)?;
         let p = &self.params;
-        if p[2] != 0.0 || p[3] != 0.0 {
-            warnings.push(DyrWarning::LimitsIgnored {
-                bus: self.bus,
-                id: self.id.clone(),
-                model: self.model.clone(),
-            });
-        }
-        Ok(GovSpec::Tgov1(Tgov1Params { r: p[0], t1: p[1], t2: p[4], t3: p[5], dt: p[6] }))
+        Ok(GovSpec::Tgov1(Tgov1Params {
+            r: p[0],
+            t1: p[1],
+            t2: p[4],
+            t3: p[5],
+            dt: p[6],
+            limits: Limits { min: Some(p[3]), max: Some(p[2]) },
+        }))
     }
 }
 

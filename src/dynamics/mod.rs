@@ -295,6 +295,33 @@ impl DynamicSystem {
         names
     }
 
+    /// Fixes every device's active limit set for the coming step.
+    ///
+    /// Called once per step, before any Newton iteration. See
+    /// [`Limits::latch`](models::Limits::latch) for why the set must be frozen
+    /// rather than recomputed from each iterate — recomputing made an ordinary
+    /// exciter ceiling fail the step's solve outright.
+    pub(crate) fn latch(&self, x: &[f64], v: &[Complex<f64>]) {
+        let layout = self.pattern.layout();
+        for (d, model) in self.models.iter().enumerate() {
+            let (off, len, bus) = (layout.dev_offset[d], layout.dev_len[d], layout.dev_bus[d]);
+            model.latch(&x[off..off + len], v[bus]);
+        }
+    }
+
+    /// Puts every device's states back on whatever limits it enforces.
+    ///
+    /// Called after each accepted step. See
+    /// [`DynamicModel::project`](models::DynamicModel::project) for why a
+    /// projection is exact here rather than a correction.
+    pub(crate) fn project(&self, x: &mut [f64]) {
+        let layout = self.pattern.layout();
+        for (d, model) in self.models.iter().enumerate() {
+            let (off, len) = (layout.dev_offset[d], layout.dev_len[d]);
+            model.project(&mut x[off..off + len]);
+        }
+    }
+
     /// `f(x, V)` for every device, written into `out`.
     pub(crate) fn derivatives_at(&self, x: &[f64], v: &[Complex<f64>], out: &mut [f64]) {
         let layout = self.pattern.layout();
