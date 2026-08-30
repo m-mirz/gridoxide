@@ -368,6 +368,10 @@ name = "area_interchange_test"
 path = "tests/area_interchange_test.rs"
 
 [[test]]
+name = "pgm_asym_three_winding_test"
+path = "tests/pgm_asym_three_winding_test.rs"
+
+[[test]]
 name = "cli_estimate_test"
 path = "tests/cli_estimate_test.rs"
 

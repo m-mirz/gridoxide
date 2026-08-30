@@ -262,29 +262,40 @@ def test_asymmetric_carries_the_analyses():
     assert len(suspects) <= 5
 
 
-def test_asymmetric_refuses_only_what_it_cannot_model():
-    """A three-winding transformer is named; a link and a voltage regulator are
-    not, because they are modelled and ignored respectively.
+def test_asymmetric_reads_every_component_the_symmetric_path_does():
+    """Nothing is refused any more, and four things used to be.
 
-    The symmetric path reads all three without complaint, which is the point of
-    the refusal being about the phase domain's own model rather than about the
-    document being malformed.
+    `link`, `three_winding_transformer` and `voltage_regulator` each made a
+    document inestimable in the phase domain; the fourth, a transformer winding
+    pair outside Dyn/YNyn, had already gone when `transformer_seq_params` grew
+    power-grid-model's general zero-sequence algorithm. Every committed fixture
+    now builds in both domains, which is the check — a refusal that came back
+    would show up here as a `ValueError` rather than as a quietly narrower tool.
     """
-    refused, accepted = [], []
+    seen = {"link": 0, "three_winding_transformer": 0}
     for d in sorted(FIXTURES.iterdir()):
         if not (d / "input.json").is_file():
             continue
         data = json.loads((d / "input.json").read_text())["data"]
-        if data.get("three_winding_transformer"):
-            with pytest.raises(ValueError, match="three_winding_transformer"):
-                model(d.name, asymmetric=True)
-            refused.append(d.name)
-        elif data.get("link"):
-            # Modelled now: a link is a jumper, phase-transparent in all three
-            # sequences. It used to make the whole document inestimable.
-            m = model(d.name, asymmetric=True)
-            assert m.phases == 3
-            accepted.append(d.name)
+        for key in seen:
+            if data.get(key):
+                seen[key] += 1
 
-    assert refused, "a fixture with a three-winding transformer is committed"
-    assert accepted, "six committed fixtures use a link"
+        try:
+            m = model(d.name, asymmetric=True)
+        except ValueError as e:
+            # A document with no sensors is refused in both domains and for a
+            # reason that is about the sensors, not the components. Anything
+            # else is the regression this test is for.
+            assert "no usable sensors" in str(e), f"{d.name}: {e}"
+            with pytest.raises(ValueError, match="no usable sensors"):
+                model(d.name)
+            continue
+
+        assert m.phases == 3
+        # And the same document symmetrically, so a difference is about the
+        # domain rather than about the document.
+        assert model(d.name).phases == 1
+
+    assert seen["link"] >= 6, seen
+    assert seen["three_winding_transformer"] >= 1, seen

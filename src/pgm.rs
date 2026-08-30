@@ -127,6 +127,8 @@ pub const PGM_LINK_Y: Complex<f64> = Complex::new(1e8, 1e8);
 pub use crate::topology::IDEAL_CONNECTION_Y as LINK_Y;
 
 fn one() -> f64 { 1.0 }
+/// A three-winding transformer's winding default — see `PgmThreeWindingTransformer`.
+fn wye_n() -> u8 { crate::network::WYE_N }
 fn nan() -> f64 { f64::NAN }
 /// power-grid-model's documented `source.sk` default (`components.md`).
 fn default_sk() -> f64 { 1e10 }
@@ -377,6 +379,21 @@ pub struct PgmThreeWindingTransformer {
     pub p0: f64,
     pub clock_12: i32,
     pub clock_13: i32,
+    /// Winding configuration per side — `0` wye, `1` wye_n, `2` delta, `3`
+    /// zigzag, `4` zigzag_n, as `network::WYE`..`ZIGZAG_N`.
+    ///
+    /// Read only by the phase domain, and unread for a long time because the
+    /// symmetric star equivalent does not depend on them: the positive sequence
+    /// is the same whatever the windings are, and the **zero** sequence is
+    /// entirely determined by them. Defaulted to wye_n rather than required, so
+    /// a document written for a symmetric calculation still parses; every
+    /// committed three-winding fixture states all three.
+    #[serde(default = "wye_n")]
+    pub winding_1: u8,
+    #[serde(default = "wye_n")]
+    pub winding_2: u8,
+    #[serde(default = "wye_n")]
+    pub winding_3: u8,
     pub tap_side: u8,
     pub tap_pos: i32,
     pub tap_min: i32,
@@ -848,6 +865,115 @@ pub fn link_seq_params(lk: &PgmLink, id_to_idx: &HashMap<u64, usize>) -> Option<
     })
 }
 
+/// One leg of a three-winding transformer's star equivalent.
+///
+/// power-grid-model models a three-winding transformer as three two-winding
+/// transformers to a shared internal star node
+/// (`three_winding_transformer.hpp::convert_to_two_winding_transformers`), and
+/// so does gridoxide. What the symmetric path never had to carry is each leg's
+/// **winding configuration** — the zero sequence depends on it and the positive
+/// sequence does not, so a balanced case cannot tell a right one from a wrong
+/// one.
+///
+/// Assembled here once so the symmetric conversion and the phase-domain one
+/// cannot disagree about what the legs are.
+pub struct ThreeWindingLeg {
+    /// The physical node this leg reaches, as a document id.
+    pub node: u64,
+    pub status: u8,
+    pub y_series: Complex<f64>,
+    pub y_shunt: Complex<f64>,
+    pub tap: Complex<f64>,
+    /// The winding on the *physical* side.
+    pub winding_from: u8,
+    /// The winding on the *star* side.
+    pub winding_to: u8,
+    pub sn: f64,
+    pub uk: f64,
+    pub clock: i32,
+}
+
+/// The three legs of a three-winding transformer's star equivalent.
+///
+/// Follows power-grid-model exactly, including the two asymmetries a reader
+/// would not guess: T1 is `wye_n`/`wye_n` at clock 0 whatever `winding_1` is —
+/// it is the leg the star node's base is *defined* by — while T2 and T3 carry
+/// their own winding against `winding_1` and a **reversed** clock, `12 − clock`.
+/// Only T1 carries the magnetizing branch; T2 and T3 get `i0 = p0 = 0`, so the
+/// no-load loss is not counted three times.
+pub fn three_winding_legs(
+    t: &PgmThreeWindingTransformer,
+    id_to_u_rated: &HashMap<u64, f64>,
+    s_base_va: f64,
+) -> [ThreeWindingLeg; 3] {
+    let u1_rated = id_to_u_rated[&t.node_1];
+    let u2_rated = id_to_u_rated[&t.node_2];
+    let u3_rated = id_to_u_rated[&t.node_3];
+
+    // Tap adjustment applies to exactly one of u1/u2/u3, matching `tap_side`.
+    let tap_direction = if t.tap_max > t.tap_min { 1.0 } else { -1.0 };
+    let delta = tap_direction * (t.tap_pos - t.tap_nom) as f64 * t.tap_size;
+    let (u1_local, u2_local, u3_local) = match t.tap_side {
+        0 => (t.u1 + delta, t.u2, t.u3),
+        1 => (t.u1, t.u2 + delta, t.u3),
+        _ => (t.u1, t.u2, t.u3 + delta),
+    };
+
+    let ((uk_t1, uk_t2, uk_t3), (pk_t1, pk_t2, pk_t3)) = three_winding_star_params(
+        t.sn_1, t.sn_2, t.sn_3, t.uk_12, t.uk_13, t.uk_23, t.pk_12, t.pk_13, t.pk_23,
+    );
+
+    // All three legs' star-side nameplate is `u1_local` and their per-unit base
+    // is pinned to `u1_rated` (physical, fixed), which is why
+    // `transformer_admittances_ex` always takes `(u1_local, u1_rated)` whichever
+    // leg is being built.
+    let (t1_series, t1_shunt) =
+        transformer_admittances_ex(u1_local, u1_rated, t.sn_1, uk_t1, pk_t1, t.i0, t.p0, s_base_va);
+    let (t2_series, t2_shunt) =
+        transformer_admittances_ex(u1_local, u1_rated, t.sn_2, uk_t2, pk_t2, 0.0, 0.0, s_base_va);
+    let (t3_series, t3_shunt) =
+        transformer_admittances_ex(u1_local, u1_rated, t.sn_3, uk_t3, pk_t3, 0.0, 0.0, s_base_va);
+
+    [
+        ThreeWindingLeg {
+            node: t.node_1,
+            status: t.status_1,
+            y_series: t1_series,
+            y_shunt: t1_shunt,
+            tap: tap_ratio_from_voltages(u1_local * u1_rated, u1_local * u1_rated, 0),
+            winding_from: crate::network::WYE_N,
+            winding_to: crate::network::WYE_N,
+            sn: t.sn_1,
+            uk: uk_t1,
+            clock: 0,
+        },
+        ThreeWindingLeg {
+            node: t.node_2,
+            status: t.status_2,
+            y_series: t2_series,
+            y_shunt: t2_shunt,
+            tap: tap_ratio_from_voltages(u2_local * u1_rated, u1_local * u2_rated, 12 - t.clock_12),
+            winding_from: t.winding_2,
+            winding_to: t.winding_1,
+            sn: t.sn_2,
+            uk: uk_t2,
+            clock: 12 - t.clock_12,
+        },
+        ThreeWindingLeg {
+            node: t.node_3,
+            status: t.status_3,
+            y_series: t3_series,
+            y_shunt: t3_shunt,
+            tap: tap_ratio_from_voltages(u3_local * u1_rated, u1_local * u3_rated, 12 - t.clock_13),
+            winding_from: t.winding_3,
+            winding_to: t.winding_1,
+            sn: t.sn_3,
+            uk: uk_t3,
+            clock: 12 - t.clock_13,
+        },
+    ]
+}
+
 pub fn pgm_transformers_3ph(
     input: &PgmInput,
     id_to_idx: &HashMap<u64, usize>,
@@ -855,6 +981,7 @@ pub fn pgm_transformers_3ph(
 ) -> Vec<Transformer3PhSeq> {
     let id_to_u_rated: HashMap<u64, f64> =
         input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
+    let n_nodes = input.data.node.len();
     input.data.transformer.iter()
         .map(|t| {
             let tap = transformer_tap(
@@ -877,6 +1004,35 @@ pub fn pgm_transformers_3ph(
         // branch like any other here; dropping it leaves whatever hangs off it
         // de-energized and absent from the answer.
         .chain(input.data.link.iter().filter_map(|lk| link_seq_params(lk, id_to_idx)))
+        // Then the three-winding transformers, three legs each, to the star
+        // node `pgm_to_3ph_network` appended for them. Same order as the
+        // symmetric conversion, so the two agree about what a branch index is.
+        .chain(input.data.three_winding_transformer.iter().enumerate().flat_map(|(i, t)| {
+            let star = n_nodes + i;
+            three_winding_legs(t, &id_to_u_rated, s_base_va)
+                .into_iter()
+                .map(move |leg| {
+                    // The star side is always in service — it is an internal
+                    // node, not a terminal anyone can open — so only the
+                    // physical side's status varies, exactly as in
+                    // power-grid-model's own two-winding equivalents.
+                    let (y0, y1, y2) = crate::network::transformer_seq_params(
+                        leg.y_series,
+                        leg.y_shunt,
+                        leg.tap,
+                        leg.status,
+                        1,
+                        leg.winding_from,
+                        leg.winding_to,
+                        leg.sn,
+                        leg.uk,
+                        s_base_va,
+                        leg.clock,
+                    );
+                    Transformer3PhSeq { from: id_to_idx[&leg.node], to: star, y0, y1, y2 }
+                })
+                .collect::<Vec<_>>()
+        }))
         .collect()
 }
 
@@ -1199,22 +1355,7 @@ pub fn pgm_to_network(
     // must account for them via `n_3wdg`.
     for (i, t) in input.data.three_winding_transformer.iter().enumerate() {
         let star_idx = n_nodes + i;
-        let u1_rated = id_to_u_rated[&t.node_1];
-        let u2_rated = id_to_u_rated[&t.node_2];
-        let u3_rated = id_to_u_rated[&t.node_3];
-
-        // Tap adjustment applies to exactly one of u1/u2/u3, matching `tap_side`.
-        let tap_direction = if t.tap_max > t.tap_min { 1.0 } else { -1.0 };
-        let delta = tap_direction * (t.tap_pos - t.tap_nom) as f64 * t.tap_size;
-        let (u1_local, u2_local, u3_local) = match t.tap_side {
-            0 => (t.u1 + delta, t.u2, t.u3),
-            1 => (t.u1, t.u2 + delta, t.u3),
-            _ => (t.u1, t.u2, t.u3 + delta),
-        };
-
-        let ((uk_t1, uk_t2, uk_t3), (pk_t1, pk_t2, pk_t3)) = three_winding_star_params(
-            t.sn_1, t.sn_2, t.sn_3, t.uk_12, t.uk_13, t.uk_23, t.pk_12, t.pk_13, t.pk_23,
-        );
+        let legs = three_winding_legs(t, &id_to_u_rated, s_base_va);
 
         buses.push(Bus {
             idx: star_idx,
@@ -1225,46 +1366,25 @@ pub fn pgm_to_network(
             q_spec: 0.0,
             q_min: -f64::INFINITY,
             q_max: f64::INFINITY,
-            u_rated: u1_rated,
+            u_rated: id_to_u_rated[&t.node_1],
             zip_terms: Vec::new(),
         });
 
-        // All three legs' "to"-side nameplate/base is the star node, whose
-        // nameplate voltage is u1_local (tracks side 1's tap) and whose
-        // per-unit base is pinned to u1_rated (physical, fixed) — this is
-        // why `transformer_admittances_ex` always takes (u1_local, u1_rated)
-        // regardless of which leg is being built.
         three_winding_pos.insert(
             t.id,
             [transformers.len(), transformers.len() + 1, transformers.len() + 2],
         );
-
-        let t1_tap = tap_ratio_from_voltages(u1_local * u1_rated, u1_local * u1_rated, 0);
-        let (t1_series, t1_shunt) =
-            transformer_admittances_ex(u1_local, u1_rated, t.sn_1, uk_t1, pk_t1, t.i0, t.p0, s_base_va);
-        transformers.push(Transformer {
-            from: id_to_idx[&t.node_1], to: star_idx,
-            from_status: t.status_1, to_status: 1,
-            y_series: t1_series, y_shunt: t1_shunt, tap: t1_tap,
-        });
-
-        let t2_tap = tap_ratio_from_voltages(u2_local * u1_rated, u1_local * u2_rated, 12 - t.clock_12);
-        let (t2_series, t2_shunt) =
-            transformer_admittances_ex(u1_local, u1_rated, t.sn_2, uk_t2, pk_t2, 0.0, 0.0, s_base_va);
-        transformers.push(Transformer {
-            from: id_to_idx[&t.node_2], to: star_idx,
-            from_status: t.status_2, to_status: 1,
-            y_series: t2_series, y_shunt: t2_shunt, tap: t2_tap,
-        });
-
-        let t3_tap = tap_ratio_from_voltages(u3_local * u1_rated, u1_local * u3_rated, 12 - t.clock_13);
-        let (t3_series, t3_shunt) =
-            transformer_admittances_ex(u1_local, u1_rated, t.sn_3, uk_t3, pk_t3, 0.0, 0.0, s_base_va);
-        transformers.push(Transformer {
-            from: id_to_idx[&t.node_3], to: star_idx,
-            from_status: t.status_3, to_status: 1,
-            y_series: t3_series, y_shunt: t3_shunt, tap: t3_tap,
-        });
+        for leg in &legs {
+            transformers.push(Transformer {
+                from: id_to_idx[&leg.node],
+                to: star_idx,
+                from_status: leg.status,
+                to_status: 1,
+                y_series: leg.y_series,
+                y_shunt: leg.y_shunt,
+                tap: leg.tap,
+            });
+        }
     }
     let n_3wdg = input.data.three_winding_transformer.len();
 
@@ -1386,6 +1506,10 @@ pub struct PgmNetwork3Ph {
     /// Node id → physical node index. Physical nodes only; the virtual slack
     /// buses behind sources have no PGM id.
     pub node_idx: HashMap<u64, usize>,
+    /// `three_winding_transformer` id → its three legs' flat branch indices,
+    /// in side order. A sensor names the transformer and a side; this is what
+    /// turns that into a branch.
+    pub three_winding_idx: HashMap<u64, [usize; 3]>,
     /// `line` id → physical flat branch index.
     ///
     /// The flat order is the one [`pgm_to_3ph_network`] produces and
@@ -1419,10 +1543,7 @@ pub struct PgmNetwork3Ph {
 /// silently, which is survivable for a power flow whose caller chose the
 /// document, and not for an estimate whose answer would quietly describe a
 /// different network.
-pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
-    if !input.data.three_winding_transformer.is_empty() {
-        return Err(Unsupported3Ph::ThreeWindingTransformer);
-    }
+pub fn pgm_3ph_maps(input: &PgmInput) -> PgmNetwork3Ph {
     // `voltage_regulator` is deliberately *ignored* rather than refused, and it
     // used to be refused. These maps serve state estimation and nothing else,
     // and a voltage regulator has no meaning in an estimate: it pins a
@@ -1485,6 +1606,15 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
         branch_idx.insert(lk.id, next);
         next += 1;
     }
+    // Then the three-winding transformers, three legs each. A sensor names the
+    // transformer and a *side*, so all three indices are recorded against the
+    // one id — `three_winding_idx` is what resolves a side to its leg, exactly
+    // as the symmetric `three_winding_pos` does.
+    let mut three_winding_idx = HashMap::new();
+    for t in &input.data.three_winding_transformer {
+        three_winding_idx.insert(t.id, [next, next + 1, next + 2]);
+        next += 3;
+    }
 
     let mut appliance_bus = HashMap::new();
     for (id, node) in input.data.sym_load.iter().map(|a| (a.id, a.node))
@@ -1503,9 +1633,15 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
     // are structural here exactly as in the scalar case. Virtual slack buses are
     // excluded, being where a source's own unknown power enters.
     let n_sources = input.data.source.iter().filter(|s| s.status != 0).count();
-    let mut zero_injection = vec![true; n_physical + n_sources];
-    for k in n_physical..zero_injection.len() {
-        zero_injection[k] = false;
+    let n_3wdg = input.data.three_winding_transformer.len();
+    let mut zero_injection = vec![true; n_physical + n_3wdg + n_sources];
+    // A three-winding transformer's star node is internal: nothing is attached
+    // to it, so it injects nothing, and saying so is real information rather
+    // than an assumption — it is the one place a hard zero-injection constraint
+    // is unarguable. The virtual buses behind sources are the opposite case,
+    // and are where a source's own unknown power enters.
+    for flag in zero_injection.iter_mut().skip(n_physical + n_3wdg) {
+        *flag = false;
     }
     for node in input.data.sym_load.iter().map(|a| a.node)
         .chain(input.data.asym_load.iter().map(|a| a.node))
@@ -1517,41 +1653,17 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
         }
     }
 
-    Ok(PgmNetwork3Ph {
+    PgmNetwork3Ph {
         node_idx,
         branch_idx,
+        three_winding_idx,
         source_branch_idx,
         appliance_bus,
         zero_injection,
         half_open_terminal,
-        n_nodes: n_physical + n_sources,
-    })
-}
-
-/// A component the three-phase conversion does not model.
-///
-/// Each is a deliberate cut rather than an oversight, and failing is the point:
-/// both were being dropped silently. A three-winding transformer needs
-/// asymmetric star parameters.
-///
-/// `voltage_regulator` used to be a third variant and is not one any more — see
-/// [`pgm_3ph_maps`], where it is ignored rather than refused, because it cannot
-/// affect an estimate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unsupported3Ph {
-    ThreeWindingTransformer,
-}
-
-impl std::fmt::Display for Unsupported3Ph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let what = match self {
-            Self::ThreeWindingTransformer => "three_winding_transformer",
-        };
-        write!(f, "the three-phase conversion does not model `{what}`")
+        n_nodes: n_physical + n_3wdg + n_sources,
     }
 }
-
-impl std::error::Error for Unsupported3Ph {}
 
 /// Converts a document's `line` entries to per-unit three-phase branches.
 ///
@@ -1848,9 +1960,33 @@ pub fn pgm_to_3ph_network(
 
     let mut lines = pgm_lines_3ph(&input, &id_to_idx, s_base_va, freq_hz);
 
+    // Star nodes for the three-winding transformers, three buses each, between
+    // the physical nodes and the sources' virtual ones — the same layout the
+    // symmetric conversion uses, so a bus index means the same thing in both.
+    // Their branches are built by `pgm_transformers_3ph`, which is where every
+    // three-phase caller gets its transformers.
+    for (i, t) in input.data.three_winding_transformer.iter().enumerate() {
+        let star_phys = n_nodes + i;
+        for ph in 0..3 {
+            buses.push(Bus {
+                idx: 3 * star_phys + ph,
+                bus_type: BusType::PQ,
+                voltage_mag: 1.0,
+                voltage_ang: phase_ang[ph],
+                p_spec: 0.0,
+                q_spec: 0.0,
+                q_min: -f64::INFINITY,
+                q_max: f64::INFINITY,
+                u_rated: id_to_u_rated[&t.node_1],
+                zip_terms: Vec::new(),
+            });
+        }
+    }
+    let n_3wdg = input.data.three_winding_transformer.len();
+
     // Virtual Slack buses + source-impedance lines for each active source.
     for (i, src) in input.data.source.iter().filter(|s| s.status != 0).enumerate() {
-        let virtual_phys = n_nodes + i;
+        let virtual_phys = n_nodes + n_3wdg + i;
         let (r1_s, x1_s, r0_s, x0_s) =
             source_impedance_pu_seq(src.sk, src.rx_ratio, src.z01_ratio, s_base_va);
 

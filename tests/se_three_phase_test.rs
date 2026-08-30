@@ -323,7 +323,7 @@ fn estimates_transmission_case_in_the_phase_domain() {
     let input = common::load_pgm_input(&dir.join("input.json"));
     let expected = common::load_json(&dir.join("asym_output.json"));
 
-    let maps = pgm_3ph_maps(&input).expect("this fixture uses no unsupported component");
+    let maps = pgm_3ph_maps(&input);
     let id_to_idx = node_id_to_idx(&input);
     let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
     let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
@@ -419,7 +419,7 @@ fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
     let input = common::load_pgm_input(&dir.join("input.json"));
     let expected = common::load_json(&dir.join("asym_output.json"));
 
-    let maps = pgm_3ph_maps(&input).expect("no unsupported component");
+    let maps = pgm_3ph_maps(&input);
     let id_to_idx = node_id_to_idx(&input);
     let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
     let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
@@ -527,7 +527,7 @@ fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
     let dir = fixture("tests/data/pgm/state_estimation")
         .join("single-node-source-asym-voltage-sensor-no-angle");
     let input = common::load_pgm_input(&dir.join("input.json"));
-    let maps = pgm_3ph_maps(&input).expect("no unsupported component");
+    let maps = pgm_3ph_maps(&input);
     let id_to_idx = node_id_to_idx(&input);
     let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
     let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
@@ -613,7 +613,7 @@ fn the_entry_point_agrees_with_the_assembly() {
     // The canonical assembly, as `estimates_transmission_case_in_the_phase_domain`
     // performs it: `pgm_3ph_maps` for the source branches and the zero
     // injections, not the simplified `load_3ph` the Y-bus tests use.
-    let maps = gridoxide::pgm::pgm_3ph_maps(&input).unwrap();
+    let maps = gridoxide::pgm::pgm_3ph_maps(&input);
     let id_to_idx = node_id_to_idx(&input);
     let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
     let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
@@ -1008,7 +1008,7 @@ fn a_link_is_phase_transparent() {
 
     let dir = fixture("tests/data/pgm/state_estimation/dummy-test-sym");
     let input = common::load_pgm_input(&dir.join("input.json"));
-    let maps = pgm_3ph_maps(&input).expect("a link no longer stops the conversion");
+    let maps = pgm_3ph_maps(&input);
 
     let link = input.data.link.first().expect("this fixture has a link");
     let branch = *maps.branch_idx.get(&link.id).expect("a link takes a branch index");
@@ -1077,12 +1077,75 @@ fn a_current_sensor_on_a_link_is_refused() {
     );
 
     let input: gridoxide::pgm::PgmInput = serde_json::from_value(doc).unwrap();
-    let maps = pgm_3ph_maps(&input).unwrap();
+    let maps = pgm_3ph_maps(&input);
     let (buses, _, _) = pgm_to_3ph_network(input.clone(), S_BASE_VA, 50.0);
     let u_rated = |bus: usize| buses[bus].u_rated;
 
     match measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated) {
         Err(MeasurementError::CurrentSensorOnLink { sensor, .. }) => assert_eq!(sensor, 999_998),
         other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// A three-winding transformer estimates in the phase domain, against
+/// power-grid-model's own published magnitudes.
+///
+/// It used to make a document inestimable here — the last of four components
+/// that did. gridoxide models one as three two-winding legs to a synthesized
+/// star node, which the symmetric path has always done; what the phase domain
+/// adds is each leg's winding configuration, and the star node itself, which is
+/// three buses like any other node and injects nothing.
+///
+/// The sensors in this fixture sit on the transformer's three *sides*
+/// (`measured_terminal_type` 6, 7 and 8), so this also exercises resolving a
+/// side to its leg — which returned "unknown object" while the phase domain
+/// modelled no such transformer.
+#[test]
+fn a_three_winding_transformer_estimates_in_the_phase_domain() {
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+
+    let name = "tests/data/pgm/state_estimation/three_winding_transformer";
+    let case = case_3ph(name);
+
+    // Three physical nodes, one star node, one source: five nodes, fifteen
+    // buses. The star node is the one the symmetric model also synthesizes.
+    assert_eq!(case.buses.len(), 15);
+    assert_eq!(case.nodes().len(), 3);
+    // Three power sensors on the three sides, times three phases, plus a
+    // voltage sensor's three.
+    assert!(case.measurements.len() >= 12, "{}", case.measurements.len());
+
+    let mut buses = case.buses.clone();
+    linear_start(&mut buses, &case.network, &case.measurements);
+    let report = estimate(
+        &case.measurements,
+        &mut buses,
+        &case.network,
+        &SeOptions { max_iter: 40, ..SeOptions::default() },
+    );
+    assert_eq!(report.status, SeStatus::Converged, "objective {:.3e}", report.objective);
+
+    // Against the answer power-grid-model published for this document. The
+    // magnitudes are per-phase and must each equal the balanced one.
+    let expected = common::load_json(&fixture(name).join("sym_output.json"));
+    for node in expected["data"]["node"].as_array().unwrap() {
+        let id = node["id"].as_u64().unwrap();
+        let u_pu = node["u_pu"].as_f64().unwrap();
+        for phase in 0..3 {
+            let bus = case.bus_of(id, phase).expect("a document node");
+            assert!(
+                (buses[bus].voltage_mag - u_pu).abs() < 1e-5,
+                "node {id} phase {phase}: {} against power-grid-model's {u_pu}",
+                buses[bus].voltage_mag
+            );
+        }
+    }
+
+    // The star node injects nothing, and that is asserted rather than assumed:
+    // it is the one place a hard zero-injection constraint is unarguable, since
+    // nothing is attached to it.
+    let n_physical = 3 * case.nodes().len();
+    for bus in n_physical..n_physical + 3 {
+        assert!(case.network.zero_injection[bus], "the star node injects nothing");
     }
 }
