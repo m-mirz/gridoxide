@@ -171,6 +171,20 @@ typedef enum gridoxide_island_status {
 typedef struct gridoxide_powerflow gridoxide_powerflow;
 
 /**
+ * A limit on a state or an output. `None` on either side means unbounded.
+ *
+ * Held as `Option<f64>` rather than `±∞` because these come from and go back
+ * to JSON, which has no infinity — `null` is the natural spelling of "no
+ * limit" and survives a round trip, where `f64::INFINITY` does not.
+ */
+typedef struct Limits Limits;
+
+/**
+ * What a CRAC allows in one instant.
+ */
+typedef struct Limits Limits;
+
+/**
  * Everything that shapes a solve, in one struct.
  *
  * A struct rather than eight positional parameters because the equivalent
@@ -428,6 +442,32 @@ enum gridoxide_status gridoxide_powerflow_solve_distributing_slack(struct gridox
                                                                    size_t n_factors);
 
 /**
+ * Solves with **both** controls active: reactive limits and distributed slack
+ * in one solve.
+ *
+ * This is the capability the two single-control entry points above cannot
+ * express between them — before the outer-loop layer existed a caller picked
+ * one, and a network that needs both (a real transmission grid usually does)
+ * could not be solved correctly at all.
+ *
+ * `enforce_q_limits` is a boolean. `slack_factors` may be null, which means
+ * "no distributed slack" when `distribute_slack` is 0 and "an equal share for
+ * every `Slack` and `PV` bus" when it is 1. Both controls off is an ordinary
+ * solve.
+ *
+ * # Safety
+ *
+ * As [`gridoxide_powerflow_solve`]; `slack_factors`, if non-null, must point
+ * to `n_factors` readable doubles.
+ */
+enum gridoxide_status gridoxide_powerflow_solve_with_controls(struct gridoxide_powerflow *handle,
+                                                              int32_t enforce_q_limits,
+                                                              int32_t distribute_slack,
+                                                              const double *slack_factors,
+                                                              size_t n_factors,
+                                                              size_t max_outer_iterations);
+
+/**
  * Number of buses.
  *
  * # Safety
@@ -582,6 +622,49 @@ enum gridoxide_status gridoxide_powerflow_island_buses(const struct gridoxide_po
  * `out` must point to a writable [`GridoxideOptions`].
  */
 void gridoxide_options_default(struct gridoxide_options *out);
+
+extern void znaupd_c(a_int *ido,
+                     const char *bmat,
+                     a_int n,
+                     const char *which,
+                     a_int nev,
+                     double tol,
+                     Complex<double> *resid,
+                     a_int ncv,
+                     Complex<double> *v,
+                     a_int ldv,
+                     a_int *iparam,
+                     a_int *ipntr,
+                     Complex<double> *workd,
+                     Complex<double> *workl,
+                     a_int lworkl,
+                     double *rwork,
+                     a_int *info);
+
+extern void zneupd_c(a_int rvec,
+                     const char *howmny,
+                     const a_int *select,
+                     Complex<double> *d,
+                     Complex<double> *z,
+                     a_int ldz,
+                     Complex<double> sigma,
+                     Complex<double> *workev,
+                     const char *bmat,
+                     a_int n,
+                     const char *which,
+                     a_int nev,
+                     double tol,
+                     Complex<double> *resid,
+                     a_int ncv,
+                     Complex<double> *v,
+                     a_int ldv,
+                     a_int *iparam,
+                     a_int *ipntr,
+                     Complex<double> *workd,
+                     Complex<double> *workl,
+                     a_int lworkl,
+                     double *rwork,
+                     a_int *info);
 
 /**
  * `vendor/suitesparse/BTF/Include/btf.h`'s `btf_order` (real/int32

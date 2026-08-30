@@ -19,6 +19,7 @@ use super::types::{
 use super::{guard, invalid, island_status_code, set_error, write_slice, GridoxideIslandStatus, Status};
 use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, BranchParams, Terminal};
 use crate::network::{build_ybus, stamp_shunts, ShuntAdm, YBusSparse};
+use crate::outerloop::SlackDistribution;
 use crate::solver::{
     IslandReport, IslandStatus, JacobianBackend, PersistentSolver, SolveStats,
 };
