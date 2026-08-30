@@ -32,6 +32,7 @@
 
 pub mod bad_data;
 pub mod batch;
+pub mod case;
 pub mod constraints;
 pub mod functional;
 pub mod iterative;

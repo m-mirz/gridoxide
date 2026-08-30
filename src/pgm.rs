@@ -12,12 +12,12 @@ use num_complex::Complex;
 
 // ── Input structs ─────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmInput {
     pub data: PgmData,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmData {
     pub node: Vec<PgmNode>,
     #[serde(default)]
@@ -60,13 +60,13 @@ pub struct PgmData {
     pub fault: Vec<PgmFault>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmNode {
     pub id: u64,
     pub u_rated: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmLine {
     pub id: u64,
     pub from_node: u64,
@@ -174,7 +174,7 @@ where
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmSource {
     pub id: u64,
     pub node: u64,
@@ -212,7 +212,7 @@ pub struct PgmSource {
 /// (S ∝ |V|²), 2 = constant current (S ∝ |V|).
 fn default_load_type() -> u8 { 0 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmSymLoad {
     pub id: u64,
     pub node: u64,
@@ -230,7 +230,7 @@ pub struct PgmSymLoad {
     pub q_specified: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmAsymLoad {
     pub id: u64,
     pub node: u64,
@@ -245,7 +245,7 @@ pub struct PgmAsymLoad {
     pub q_specified: [f64; 3],
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmSymGen {
     pub id: u64,
     pub node: u64,
@@ -278,7 +278,7 @@ pub struct PgmSymGen {
 /// quantity per bus. See `solver::newton_raphson_enforcing_q_limits` for
 /// where these get enforced (PV→PQ switching); plain `newton_raphson`
 /// ignores them entirely, same as before.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmVoltageRegulator {
     pub id: u64,
     pub regulated_object: u64,
@@ -290,7 +290,7 @@ pub struct PgmVoltageRegulator {
     pub q_max: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmAsymGen {
     pub id: u64,
     pub node: u64,
@@ -336,7 +336,7 @@ pub struct PgmFault {
     pub x_f: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmShunt {
     pub id: u64,
     pub node: u64,
@@ -352,7 +352,7 @@ pub struct PgmShunt {
     pub b0: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmThreeWindingTransformer {
     pub id: u64,
     pub node_1: u64,
@@ -421,7 +421,7 @@ pub struct PgmTransformer {
 ///
 /// An angle-carrying voltage sensor is a phasor (PMU) measurement; one without
 /// is an ordinary magnitude-only SCADA measurement.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmSymVoltageSensor {
     pub id: u64,
     /// The measured `node`'s id.
@@ -449,7 +449,7 @@ pub struct PgmSymVoltageSensor {
 /// `power_sigma` applies to both components; `p_sigma`/`q_sigma` override it
 /// per component when present (only two of power-grid-model's own fixtures use
 /// them, but they are the more specific form).
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmSymPowerSensor {
     pub id: u64,
     pub measured_object: u64,
@@ -477,7 +477,7 @@ pub struct PgmSymPowerSensor {
 /// `u_sigma` stays a single scalar covering all three phases; PGM has no
 /// per-phase voltage sigma, and no `u_angle_sigma` at all (gridoxide's symmetric
 /// struct carries one as an extension).
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmAsymVoltageSensor {
     pub id: u64,
     /// The measured `node`'s id.
@@ -499,7 +499,7 @@ pub struct PgmAsymVoltageSensor {
 /// Unlike the voltage sensor, the per-component sigmas here *are* per-phase
 /// (`RealValue<sym>` in PGM's `PowerSensorInput`), while the fallback
 /// `power_sigma` remains one scalar for the whole sensor.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmAsymPowerSensor {
     pub id: u64,
     pub measured_object: u64,
@@ -527,7 +527,7 @@ pub struct PgmAsymPowerSensor {
 ///
 /// Only branch terminals carry one: `measured_terminal_type` 0/1 and 6/7/8, and
 /// never a `link`. Both sigmas are scalar, including on the asymmetric variant.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmSymCurrentSensor {
     pub id: u64,
     pub measured_object: u64,
@@ -547,7 +547,7 @@ pub struct PgmSymCurrentSensor {
 }
 
 /// PGM's `asym_current_sensor`: per-phase magnitudes and angles, scalar sigmas.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmAsymCurrentSensor {
     pub id: u64,
     pub measured_object: u64,
@@ -566,23 +566,23 @@ pub struct PgmAsymCurrentSensor {
 
 // ── Output structs (used by integration tests) ────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmOutput<N> {
     pub data: PgmOutputData<N>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmOutputData<N> {
     pub node: Vec<N>,
 }
 
 /// A batch output document: one `PgmOutputData<N>` per scenario, in scenario order.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmBatchOutput<N> {
     pub data: Vec<PgmOutputData<N>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmNodeOutput {
     pub id: u64,
     pub u_pu: f64,
@@ -718,7 +718,7 @@ pub struct PgmScBranchOutput {
 /// Merging would delete the branch those numbers describe. See
 /// [`crate::topology`] for the policy and
 /// `docs/src/powerflow/zero_impedance_branches.md` for the alternatives.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PgmLink {
     pub id: u64,
     pub from_node: u64,

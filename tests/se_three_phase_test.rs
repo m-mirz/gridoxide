@@ -570,3 +570,367 @@ fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
          row, and two combinations of them are still undetermined"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The analyses, in the phase domain
+// ---------------------------------------------------------------------------
+//
+// Observability, bad-data detection, the zero-injection constraints and the
+// batch solver all take `(&[Measurement], &[Bus], &SeNetwork, &StateLayout,
+// &Constraints)`, so they are domain-agnostic by signature and were *claimed*
+// to carry over. A claim by signature is not a gate: the reference handling is
+// exactly where a symmetric assumption would hide, since three per-phase
+// rotations are three symmetries where `StateLayout` removes one.
+
+/// The whole case, through the single entry point rather than the eight calls
+/// above it.
+fn case_3ph(path: &str) -> gridoxide::se::case::SeCase {
+    let input = common::load_pgm_input(&fixture(path).join("input.json"));
+    gridoxide::se::case::SeCase::from_pgm_3ph(&input, S_BASE_VA, 50.0)
+        .expect("this fixture uses no unsupported component")
+}
+
+fn case_1ph(path: &str) -> gridoxide::se::case::SeCase {
+    let input = common::load_pgm_input(&fixture(path).join("input.json"));
+    gridoxide::se::case::SeCase::from_pgm(&input, S_BASE_VA, 50.0).expect("builds")
+}
+
+/// The entry point builds what the eight-call assembly built.
+///
+/// Every test above stands the phase-domain model up by hand, in an order that
+/// matters — and that assembly is why the estimator was unreachable from
+/// anything but this file. If the door and the long way round ever disagree,
+/// everything below is testing a different network from everything above.
+#[test]
+fn the_entry_point_agrees_with_the_assembly() {
+    let dir = fixture("tests/data/pgm/state_estimation/transmission-case");
+    let input = common::load_pgm_input(&dir.join("input.json"));
+
+    // The canonical assembly, as `estimates_transmission_case_in_the_phase_domain`
+    // performs it: `pgm_3ph_maps` for the source branches and the zero
+    // injections, not the simplified `load_3ph` the Y-bus tests use.
+    let maps = gridoxide::pgm::pgm_3ph_maps(&input).unwrap();
+    let id_to_idx = node_id_to_idx(&input);
+    let transformers = pgm_transformers_3ph(&input, &id_to_idx, S_BASE_VA);
+    let shunts = pgm_shunts_3ph(&input, &id_to_idx, S_BASE_VA);
+    let (buses, lines, _) = pgm_to_3ph_network(input.clone(), S_BASE_VA, 50.0);
+    let mut ybus = build_ybus_3ph(buses.len() / 3, &lines);
+    stamp_transformers_3ph(&mut ybus, &transformers);
+    stamp_shunts_3ph(&mut ybus, &shunts);
+    let by_hand = SeNetwork::from_3ph(
+        ybus.finish(),
+        &lines,
+        &transformers,
+        &shunts,
+        &maps.source_branch_idx,
+        &maps.zero_injection,
+    );
+
+    let case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
+
+    assert_eq!(case.phases, 3);
+    assert_eq!(case.buses.len(), buses.len());
+    assert_eq!(case.network.ybus.n(), by_hand.ybus.n());
+    assert_eq!(case.network.terminals.len(), by_hand.terminals.len());
+    assert_eq!(case.network.zero_injection, by_hand.zero_injection);
+    assert_eq!(case.network.energized, by_hand.energized);
+    assert_eq!(case.network.source_branches, by_hand.source_branches);
+    for (a, b) in case.network.shunt_y.iter().zip(&by_hand.shunt_y) {
+        assert!((a - b).norm() < 1e-15);
+    }
+
+    let u_rated = |bus: usize| buses[bus].u_rated;
+    let expected =
+        gridoxide::measurement::measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated)
+            .unwrap();
+    assert_eq!(case.measurements.len(), expected.len());
+
+    // A node's three phases, and the arithmetic that finds them.
+    let (id, idx) = case.nodes()[0];
+    for phase in 0..3 {
+        assert_eq!(case.bus_of(id, phase), Some(3 * idx + phase));
+    }
+}
+
+/// Observability carries over, and reports the phase domain's own symmetries.
+///
+/// The interesting part is not the rank but *which* directions are missing. A
+/// source's virtual bus is unobservable when nothing measures the source's own
+/// power — the same statement as on the symmetric side — and in the phase
+/// domain there are three of them per source rather than one, because the
+/// virtual node is three buses like any other.
+#[test]
+fn observability_carries_over_to_the_phase_domain() {
+    use gridoxide::se::constraints::Constraints;
+    use gridoxide::se::jacobian::StateLayout;
+    use gridoxide::se::observability;
+
+    let case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
+    let layout = StateLayout::new(&case.buses, &case.measurements, &case.network);
+    let constraints = Constraints::new(&case.network);
+    let report =
+        observability::analyze(&case.measurements, &case.buses, &case.network, &layout, &constraints);
+
+    assert!(report.n_unknowns > 0);
+    assert!(report.rank <= report.n_unknowns);
+
+    // Every undetermined unknown sits on a synthesized bus, not a physical one:
+    // this fixture measures its physical network well enough to determine it,
+    // and a phase-domain estimate that could not say so would be reporting a
+    // defect of the model rather than of the data.
+    let n_physical = 3 * case.nodes().len();
+    for unknown in report.unobservable.iter().chain(&report.structurally_unmeasured) {
+        assert!(
+            unknown.bus >= n_physical,
+            "physical bus {} ({:?}) came back undetermined",
+            unknown.bus,
+            unknown.quantity
+        );
+    }
+
+    // The symmetric run of the same document reaches the same verdict about its
+    // physical network, which is what "carries over" has to mean.
+    let sym = case_1ph("tests/data/pgm/state_estimation/transmission-case");
+    let sym_layout = StateLayout::new(&sym.buses, &sym.measurements, &sym.network);
+    let sym_report = observability::analyze(
+        &sym.measurements,
+        &sym.buses,
+        &sym.network,
+        &sym_layout,
+        &Constraints::new(&sym.network),
+    );
+    for unknown in sym_report.unobservable.iter().chain(&sym_report.structurally_unmeasured) {
+        assert!(unknown.bus >= sym.nodes().len());
+    }
+}
+
+/// Bad-data detection carries over, and names the measurement that was
+/// corrupted.
+///
+/// This is the claim that had never been checked in the phase domain, and it
+/// holds — but only once the estimate underneath it does. See
+/// [`a_large_error_diverges_and_says_so`] for the part that does not.
+#[test]
+fn bad_data_detection_finds_the_corrupted_measurement() {
+    use gridoxide::se::bad_data::{self, Candidates};
+    use gridoxide::se::constraints::Constraints;
+    use gridoxide::se::jacobian::StateLayout;
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+
+    let mut case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
+
+    // One phase of one node, off by fifteen of its own sigmas. Large enough to
+    // be rejected, small enough that Gauss-Newton still reaches an answer to
+    // reject it from — the two are not the same threshold, which is the point
+    // of the test below.
+    let victim = case
+        .measurements
+        .iter()
+        .position(|m| matches!(m.kind, gridoxide::measurement::MeasurementKind::VoltageMagnitude))
+        .expect("this fixture has voltage sensors");
+    let sigma = case.measurements[victim].sigma;
+    case.measurements[victim].value += 15.0 * sigma;
+
+    let mut buses = case.buses.clone();
+    linear_start(&mut buses, &case.network, &case.measurements);
+    let report = estimate(
+        &case.measurements,
+        &mut buses,
+        &case.network,
+        &SeOptions { max_iter: 40, ..SeOptions::default() },
+    );
+    assert_eq!(report.status, SeStatus::Converged, "objective {:.3e}", report.objective);
+
+    let layout = StateLayout::new(&buses, &case.measurements, &case.network);
+    let bad = bad_data::analyze(
+        &case.measurements,
+        &report.residuals,
+        &buses,
+        &case.network,
+        &layout,
+        &Constraints::new(&case.network),
+        Candidates::default(),
+    );
+
+    assert!(
+        bad.rejects_at(0.05),
+        "a fifteen-sigma error should be rejected, chi-squared {:.3e} on {} dof",
+        bad.chi_squared,
+        bad.degrees_of_freedom
+    );
+    assert_eq!(
+        bad.suspects.first().map(|s| s.measurement),
+        Some(victim),
+        "the largest normalized residual should be the measurement that was corrupted"
+    );
+    // And it is that measurement by a margin, rather than by a hair.
+    let worst = bad.suspects[0].normalized_residual;
+    let next = bad.suspects.get(1).map_or(0.0, |s| s.normalized_residual);
+    assert!(worst > 5.0 * next.max(1e-12), "{worst} against a runner-up of {next}");
+}
+
+/// A large enough error makes Gauss-Newton diverge — and it says so.
+///
+/// Found while writing the test above, which originally corrupted a measurement
+/// by twenty sigmas and then blamed bad-data detection for the nonsense that
+/// came back: normalized residuals of `1e24` on measurements with nothing wrong
+/// with them. Bad-data detection was reporting faithfully. The *estimate* had
+/// diverged to an objective of `3.5e43`, and a residual covariance means
+/// nothing about a state that does not solve anything.
+///
+/// The cliff is not a property of the phase domain, though the phase domain
+/// reaches it sooner: on this fixture the phase-domain estimate converges at
+/// fifteen sigmas and diverges at twenty, while the symmetric one converges at
+/// twenty and diverges at fifty. Gauss-Newton takes an undamped step, so a
+/// measurement far enough from consistent throws the first step past the basin
+/// and there is nothing to come back to. A line search would raise the cliff;
+/// there is none.
+///
+/// What is gated is therefore not that it survives, but that it **reports**:
+/// `MaxIterations` rather than a converged-looking answer. An estimator that
+/// returned this state as an estimate would be the dangerous outcome, and the
+/// bad-data report built on top of it is exactly what that danger looks like.
+#[test]
+fn a_large_error_diverges_and_says_so() {
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+
+    let mut case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
+    let victim = case
+        .measurements
+        .iter()
+        .position(|m| matches!(m.kind, gridoxide::measurement::MeasurementKind::VoltageMagnitude))
+        .unwrap();
+    let sigma = case.measurements[victim].sigma;
+    case.measurements[victim].value += 20.0 * sigma;
+
+    let mut buses = case.buses.clone();
+    linear_start(&mut buses, &case.network, &case.measurements);
+    let report = estimate(
+        &case.measurements,
+        &mut buses,
+        &case.network,
+        &SeOptions { max_iter: 40, ..SeOptions::default() },
+    );
+
+    assert_eq!(
+        report.status,
+        SeStatus::MaxIterations,
+        "a diverged estimate must not report success, objective {:.3e}",
+        report.objective
+    );
+    assert!(
+        report.objective > 1e6,
+        "expected a diverged objective, got {:.3e}",
+        report.objective
+    );
+}
+
+/// A clean phase-domain estimate is not rejected.
+///
+/// The other half of the test above, and the one that would catch a
+/// degrees-of-freedom count that forgot the phase domain has three times the
+/// unknowns: an over-tight chi-squared would reject a case with nothing wrong
+/// with it, which looks like a finding and is a defect.
+#[test]
+fn a_clean_phase_domain_estimate_is_not_rejected() {
+    use gridoxide::se::bad_data::{self, Candidates};
+    use gridoxide::se::constraints::Constraints;
+    use gridoxide::se::jacobian::StateLayout;
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions};
+
+    let case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
+    let mut buses = case.buses.clone();
+    linear_start(&mut buses, &case.network, &case.measurements);
+    let report = estimate(
+        &case.measurements,
+        &mut buses,
+        &case.network,
+        &SeOptions { max_iter: 40, ..SeOptions::default() },
+    );
+
+    let layout = StateLayout::new(&buses, &case.measurements, &case.network);
+    let bad = bad_data::analyze(
+        &case.measurements,
+        &report.residuals,
+        &buses,
+        &case.network,
+        &layout,
+        &Constraints::new(&case.network),
+        Candidates::default(),
+    );
+    assert!(
+        !bad.rejects_at(0.05),
+        "nothing is wrong with this data, chi-squared {:.3e} on {} dof, p = {:.3e}",
+        bad.chi_squared,
+        bad.degrees_of_freedom,
+        bad.p_value
+    );
+    assert!(bad.degrees_of_freedom > 0);
+}
+
+/// The batch solver carries over, and agrees with a sequential loop.
+///
+/// It shares the estimator's own indifference to the domain — a scenario is an
+/// override on a measurement index, and an index means the same thing whether a
+/// bus is a node or a node's phase. What that leaves worth checking is the part
+/// batching adds: a factorization reused across scenarios and threads must give
+/// the answer a scenario computed alone would, and in the phase domain the
+/// pattern it caches is three times the size with three times the coupling.
+#[test]
+fn the_batch_solver_carries_over_to_the_phase_domain() {
+    use gridoxide::se::batch::{MeasurementOverride, SeBatchSolver, SeScenario};
+    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+
+    let case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
+
+    // Five snapshots of the same network: each nudges one voltage reading, the
+    // way a sequence of measurement scans differs from one another.
+    let voltages: Vec<usize> = case
+        .measurements
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m.kind, gridoxide::measurement::MeasurementKind::VoltageMagnitude))
+        .map(|(i, _)| i)
+        .take(5)
+        .collect();
+    assert_eq!(voltages.len(), 5, "this fixture has voltage sensors on several phases");
+
+    let scenarios: Vec<SeScenario> = voltages
+        .iter()
+        .map(|&i| {
+            let m = &case.measurements[i];
+            SeScenario::new(vec![MeasurementOverride::new(i).value(m.value + 2.0 * m.sigma)])
+        })
+        .collect();
+
+    let options = SeOptions { max_iter: 40, ..SeOptions::default() };
+    let solver = SeBatchSolver::new(options.clone());
+    let batched = solver
+        .estimate(&case.buses, &case.network, &case.measurements, &scenarios)
+        .expect("the batch runs");
+    assert_eq!(batched.len(), scenarios.len());
+
+    for (k, scenario) in scenarios.iter().enumerate() {
+        // The same scenario, estimated on its own.
+        let mut measurements = case.measurements.clone();
+        for ov in &scenario.overrides {
+            if let Some(value) = ov.value {
+                measurements[ov.measurement].value = value;
+            }
+        }
+        let mut buses = case.buses.clone();
+        linear_start(&mut buses, &case.network, &measurements);
+        let alone = estimate(&measurements, &mut buses, &case.network, &options);
+
+        assert_eq!(alone.status, SeStatus::Converged);
+        assert_eq!(batched[k].report.status, SeStatus::Converged);
+        for (a, b) in batched[k].buses.iter().zip(&buses) {
+            assert_eq!(
+                a.voltage_mag.to_bits(),
+                b.voltage_mag.to_bits(),
+                "scenario {k}: batching must not change a single bit of the answer"
+            );
+            assert_eq!(a.voltage_ang.to_bits(), b.voltage_ang.to_bits());
+        }
+    }
+}

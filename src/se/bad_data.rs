@@ -270,11 +270,25 @@ pub fn analyze(
         let Some(omega) = residual_variance(&mut system, &values, &rows[index], m, n_aug) else {
             continue;
         };
-        if omega <= 0.0 {
-            // A measurement whose residual has no variance is one the estimate
-            // is forced to reproduce exactly — critical, in the usual
-            // terminology. Its error cannot be detected at all, so reporting a
-            // normalized residual for it would be meaningless.
+        // A measurement whose residual has no variance is one the estimate is
+        // forced to reproduce exactly — *critical*, in the usual terminology.
+        // Its error cannot be detected at all, so reporting a normalized
+        // residual for it would be meaningless.
+        //
+        // The test has to be relative, and `omega <= 0.0` was not. `omega` is
+        // `sigma² − hᵀG⁻¹h`, a difference of two nearly equal numbers for
+        // exactly the measurements this is meant to exclude, so a critical
+        // one's true zero arrives as round-off of either sign — and a sign test
+        // lets half of them through with a variance of `1e-54`, which then
+        // divides a residual. What is scale-free is `omega/sigma²`, the
+        // measurement's **redundancy**, which lies in `[0, 1]` by construction.
+        //
+        // A hazard closed rather than a defect observed: no case in the suite
+        // distinguishes the two tests, and this was written while chasing
+        // something else that turned out to be a diverged estimate rather than
+        // a bad variance. It is kept because the absolute test is wrong about a
+        // cancelling subtraction whether or not a fixture has caught it yet.
+        if omega <= MIN_REDUNDANCY * m.sigma * m.sigma {
             continue;
         }
         suspects.push(Suspect { measurement: index, normalized_residual: r.abs() / omega.sqrt() });
@@ -294,6 +308,15 @@ pub fn analyze(
 /// zero-injection constraints are accounted for: a constrained estimate has
 /// less freedom to move, which changes how much of an error shows up in the
 /// residual rather than in the state.
+/// The least redundancy a measurement may have and still be judged.
+///
+/// Below this its residual variance is indistinguishable from zero: the
+/// subtraction that forms it loses everything to cancellation at about `1e-16`
+/// relative, so `1e-10` is a floor with six orders of margin. A measurement at
+/// this redundancy would have its residual amplified a hundred thousand times
+/// over, which is not a diagnosis either.
+const MIN_REDUNDANCY: f64 = 1e-10;
+
 fn residual_variance<S: LinearSolver>(
     system: &mut S,
     values: &[f64],
