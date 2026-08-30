@@ -23,6 +23,21 @@ pub struct ZipTerm {
     pub kind: ZipKind,
 }
 
+/// A reactive limit that is not a limit. See [`Bus::q_min`].
+fn unbounded_below() -> f64 {
+    f64::NEG_INFINITY
+}
+
+fn unbounded_above() -> f64 {
+    f64::INFINITY
+}
+
+/// Whether a limit is one JSON cannot hold — infinite either way, or `NaN`,
+/// which is not a limit either and would round-trip no better.
+fn is_unbounded(limit: &f64) -> bool {
+    !limit.is_finite()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bus {
     pub idx: usize,          // index in arrays (0-based)
@@ -31,8 +46,18 @@ pub struct Bus {
     pub voltage_ang: f64,    // Va (rad)
     pub p_spec: f64,         // P specified (generation - load) in p.u., constant-power part
     pub q_spec: f64,         // Q specified (generation - load) in p.u., constant-power part
-    pub q_min: f64,          // PV bus reactive limits, enforced only by
-    pub q_max: f64,          // solver::newton_raphson_enforcing_q_limits
+    /// PV bus reactive limits, enforced only by `outerloop::ReactiveLimits`.
+    ///
+    /// Unbounded is `±∞`, and JSON has no infinity — `serde_json` writes any
+    /// non-finite `f64` as `null` and then refuses to read it back, so a
+    /// document this crate wrote could not be reopened. Absence is the natural
+    /// spelling of "no limit" and survives the round trip, which is the same
+    /// choice [`models::Limits`](crate::dynamics::models::Limits) makes for the
+    /// same reason.
+    #[serde(default = "unbounded_below", skip_serializing_if = "is_unbounded")]
+    pub q_min: f64,
+    #[serde(default = "unbounded_above", skip_serializing_if = "is_unbounded")]
+    pub q_max: f64,
     #[serde(default)]
     pub u_rated: f64,        // rated line-to-line voltage in V (0 = not set)
     /// Additional voltage-dependent (constant-current/-impedance) injection terms,

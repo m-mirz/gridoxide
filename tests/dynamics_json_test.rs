@@ -166,3 +166,43 @@ fn a_document_round_trips() {
         assert_eq!(x.to_bits(), y.to_bits(), "a round trip must not move a single state");
     }
 }
+
+/// And it round-trips when a bus states no reactive limits at all.
+///
+/// The test above passes because the fixture states *finite* limits on every
+/// bus, which is exactly why this went unnoticed. Unbounded is `±∞`, JSON has
+/// no infinity, and `serde_json` writes any non-finite `f64` as `null` and then
+/// refuses to read it back — so a document this crate wrote could not be
+/// reopened, and the failure was `invalid type: null, expected f64` a megabyte
+/// into the file. Found by dumping a large synthetic case in order to run the
+/// CLI over it.
+///
+/// Absence is the spelling now, which is what `models::Limits` already chose
+/// for the same reason.
+#[test]
+fn an_unbounded_reactive_limit_round_trips() {
+    let mut doc = json::parse(&fixture()).unwrap();
+    for bus in &mut doc.network.buses {
+        bus.q_min = f64::NEG_INFINITY;
+        bus.q_max = f64::INFINITY;
+    }
+
+    let text = serde_json::to_string(&doc).expect("serializes");
+    assert!(!text.contains("q_min"), "an unbounded limit is absent, not null: {text}");
+    assert!(!text.contains("q_max"), "an unbounded limit is absent, not null: {text}");
+
+    let again = json::parse(&text).expect("re-parses");
+    for bus in &again.network.buses {
+        assert_eq!(bus.q_min, f64::NEG_INFINITY);
+        assert_eq!(bus.q_max, f64::INFINITY);
+    }
+
+    // A finite limit still survives, so the sentinel is not swallowing real
+    // data on its way past.
+    doc.network.buses[0].q_min = -0.4;
+    doc.network.buses[0].q_max = 0.7;
+    let again = json::parse(&serde_json::to_string(&doc).unwrap()).unwrap();
+    assert_eq!(again.network.buses[0].q_min, -0.4);
+    assert_eq!(again.network.buses[0].q_max, 0.7);
+    assert_eq!(again.network.buses[1].q_max, f64::INFINITY);
+}
