@@ -5,7 +5,7 @@
 //! reach a library; this module produces one so a library can reach us.
 //! `include/gridoxide.h` is generated from what is here.
 //!
-//! [`python`](crate::python) is the other binding, and its curation decisions
+//! `src/python.rs` is the other binding, and its curation decisions
 //! are followed rather than re-litigated — in particular **an opaque handle
 //! exists only where a factorization survives between calls**, everything else
 //! being a plain function. That is why there is one handle type here and not
@@ -70,7 +70,7 @@ pub const ABI_VERSION: u32 = 1;
 ///
 /// The split between [`InvalidArgument`](Self::InvalidArgument) and the
 /// numerical codes mirrors the `PyValueError`/`PyRuntimeError` distinction
-/// [`python`](crate::python) already draws: the first says *you* passed
+/// `src/python.rs` already draws: the first says *you* passed
 /// something wrong, the rest say the computation or its environment did not
 /// work out.
 #[repr(C)]

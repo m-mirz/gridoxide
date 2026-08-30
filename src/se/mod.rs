@@ -67,7 +67,7 @@ pub struct SeNetwork {
     ///
     /// In the phase domain the index is `3·branch + phase`, exactly as a bus
     /// index is `3·node + phase`. That is what keeps
-    /// [`Target`](crate::measurement::Target) unchanged between the two.
+    /// [`Target`] unchanged between the two.
     pub terminals: Vec<[functional::CurrentFunctional; 2]>,
     /// Total shunt admittance stamped at each bus, or zero.
     pub shunt_y: Vec<Complex<f64>>,
@@ -448,7 +448,8 @@ pub fn measurement_functions_with(
         .collect()
 }
 
-/// One resolved [`CurrentFunctional`] per measurement, in input order.
+/// One resolved [`CurrentFunctional`](functional::CurrentFunctional) per
+/// measurement, in input order.
 ///
 /// `None` for a voltage row, which reads the state directly and has no
 /// functional, and for a target that does not resolve in this network.
@@ -498,7 +499,7 @@ impl MeasurementModel {
         Self { functionals, live }
     }
 
-    /// Whether measurement `i` describes anything — see [`live`](Self::live).
+    /// Whether measurement `i` describes anything — see `Self::live`.
     pub fn is_live(&self, measurement: usize) -> bool {
         self.live[measurement]
     }

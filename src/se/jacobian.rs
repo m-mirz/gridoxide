@@ -18,7 +18,8 @@
 //!
 //! # Why the normal equations
 //!
-//! `H` is rectangular (`m × n`), and gridoxide's [`LinearSolver`] backends are
+//! `H` is rectangular (`m × n`), and gridoxide's
+//! [`LinearSolver`](crate::solver::LinearSolver) backends are
 //! all square — they are power flow's Jacobian solvers. Forming the normal
 //! equations `G Δx = HᵀW r` makes the system square *and* symmetric, so all
 //! five backends carry state estimation with no new solver abstraction. The

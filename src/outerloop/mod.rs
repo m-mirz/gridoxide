@@ -14,7 +14,7 @@
 //! gridoxide grew two such loops as standalone entry points —
 //! `newton_raphson_enforcing_q_limits` and
 //! `newton_raphson_distributing_slack` — each constructing its own
-//! [`PersistentSolver`](crate::solver::PersistentSolver) and running its own
+//! [`PersistentSolver`] and running its own
 //! pass counter. The consequence was that **they could not be used together**:
 //! a caller picked one. Real transmission networks want both, and tap control
 //! would have been a third.
@@ -28,7 +28,7 @@
 //! before the next is consulted, and any loop that moves something sends the
 //! driver back to the start of the list, so an outer loop's decision is
 //! re-examined by the inner ones. [`solve_with_loops`] documents the schedule;
-//! [`default_loops`] gives the order powsybl-open-loadflow uses, which encodes
+//! [`ordered`] gives the order powsybl-open-loadflow uses, which encodes
 //! that generators respond faster than tap changers.
 //!
 //! # Invalidation is the driver's job, never a loop's
