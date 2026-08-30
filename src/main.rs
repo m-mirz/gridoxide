@@ -141,7 +141,9 @@ usage:
                                 the exact lambda each machine saturates at is
                                 located rather than rounded to a step.
                                 Reads a PGM JSON document.
-  gridoxide dynamics <path> --modes <n>
+  gridoxide dynamics <path> --modes <n> [--modes-freq <Hz>]
+                     [--modes-damping <zeta>] [--modes-near <re>,<im>]
+                     [--modes-sensitivity]
                                 report the n least-damped modes of the
                                 linearized system instead of running it: which
                                 oscillations exist, how fast each decays, and
@@ -150,6 +152,21 @@ usage:
                                 reliable way to find a *negatively* damped mode
                                 — a run finds one only if the disturbance
                                 happened to excite it.
+                                Below two thousand states this computes *every*
+                                mode. Past that it switches to a sparse method
+                                that computes only the n nearest a point in the
+                                complex plane, and says so — name that point
+                                with --modes-freq (a frequency in Hz, with
+                                --modes-damping as a ratio) or with
+                                --modes-near. Naming any of them selects the
+                                sparse method at any size, which is how to ask
+                                about one band of a large system.
+                                --modes-sensitivity adds, for the least-damped
+                                mode, how far it moves per unit of each machine
+                                parameter — the question behind deciding what
+                                to change. Only parameters the equilibrium does
+                                not depend on are offered; see the docs for why
+                                that is a restriction and not an omission.
   gridoxide dynamics <path> [--stop <t>] [--step <h>] [--tol <t>]
                      [--damping <n>] [--backend scalar|klu-native]
                      [--speed-voltages | --no-speed-voltages]
@@ -949,7 +966,7 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
         let count: usize = count
             .parse()
             .map_err(|_| format!("--modes: expected a count, got {count:?}"))?;
-        return report_modes(&system, count);
+        return report_modes(&mut system, count, flags);
     }
 
     let backend = match flag_value(flags, "--backend")?.as_deref() {
@@ -1099,52 +1116,110 @@ fn run_dynamics_cli(_path: &str, _flags: &[String]) -> Result<(), String> {
 
 /// `gridoxide dynamics --modes` — the modes of the linearized system.
 #[cfg(feature = "dynamics")]
-fn report_modes(system: &gridoxide::dynamics::DynamicSystem, count: usize) -> Result<(), String> {
-    use gridoxide::dynamics::smallsignal;
+fn report_modes(
+    system: &mut gridoxide::dynamics::DynamicSystem,
+    count: usize,
+    flags: &[String],
+) -> Result<(), String> {
+    use gridoxide::dynamics::smallsignal::{self, Method, SmallSignalOptions};
 
-    let result = smallsignal::analyze(system).map_err(|e| e.to_string())?;
+    // Naming *where* to look selects the sparse method, whatever the size:
+    // asking about one band is a different question from asking for everything,
+    // and a caller who asks it should get it answered rather than overruled.
+    let aimed = parse_shift(flags)?;
+    let result = match aimed {
+        Some(shift) => {
+            let opts = SmallSignalOptions { shift, count, ..SmallSignalOptions::default() };
+            smallsignal::analyze_near(system, &opts).map_err(|e| e.to_string())?
+        }
+        None => smallsignal::analyze(system).map_err(|e| e.to_string())?,
+    };
+
     println!(
-        "{} mode(s) over {} differential state(s)\n",
+        "{} mode(s) over {} differential state(s)",
         result.modes.len(),
         result.state_names.len()
     );
+    match result.method {
+        Method::Dense => println!("every mode, by a dense decomposition of the state matrix"),
+        Method::Sparse { shift, restarts } => {
+            println!(
+                "the {} nearest {:+.4}{:+.4}j ({:.3} Hz) — sparse Arnoldi, {restarts} restart(s). \
+                 NOT every mode the system has.",
+                result.modes.len(),
+                shift.re,
+                shift.im,
+                shift.im / std::f64::consts::TAU
+            );
+            if !result.converged {
+                println!(
+                    "WARNING: not every mode converged — read the residual column before the rest"
+                );
+            }
+        }
+    }
+    println!();
     println!(
-        "{:>26}  {:>9}  {:>10}  {:>9}   participation",
-        "eigenvalue", "damping", "freq (Hz)", "tau (s)"
+        "{:>26}  {:>9}  {:>10}  {:>9}  {:>9}   participation",
+        "eigenvalue", "damping", "freq (Hz)", "tau (s)", "residual"
     );
     for mode in result.modes.iter().take(count) {
         let who: Vec<String> = result
             .participants(mode)
             .into_iter()
             .take(3)
-            .map(|(name, p)| format!("{name} {:.0}%", p * 100.0))
+            .map(|(name, p)| format!("{name} {}", percentage(p)))
             .collect();
         let tau = if mode.time_constant.is_finite() {
             format!("{:.3}", mode.time_constant)
         } else {
             "inf".to_string()
         };
+        // A mode judged non-oscillatory has a frequency of zero, so its
+        // imaginary part is printed as zero too rather than as the `-1e-17` the
+        // arithmetic left behind — the two columns should not contradict each
+        // other over a rounding artefact.
+        let omega = if mode.is_oscillatory() { mode.eigenvalue.im } else { 0.0 };
         println!(
-            "{:>+12.5} {:>+12.5}j  {:>9.4}  {:>10.4}  {tau:>9}   {}",
+            "{:>+12.5} {:>+12.5}j  {:>9.4}  {:>10.4}  {tau:>9}  {:>9.1e}   {}",
             mode.eigenvalue.re,
-            mode.eigenvalue.im,
+            omega,
             mode.damping,
             mode.frequency,
+            mode.residual,
             who.join(", ")
         );
         // For an oscillation, *how* the rotors move is the part that separates
         // an inter-area mode from a local one, and participation cannot say it.
-        if mode.eigenvalue.im > 0.0 && mode.shape.len() > 1 {
-            let shape: Vec<String> = result
-                .shape(mode)
+        //
+        // Printed for one half of a conjugate pair rather than both, since the
+        // shapes are conjugates and saying it twice says nothing. Which half is
+        // whichever sorts first, so the test is on the sign of the imaginary
+        // part of *this* mode against its own twin, not on it being positive.
+        if mode.is_oscillatory() && mode.shape.len() > 1 && mode.eigenvalue.im > 0.0 {
+            // Sorted by magnitude, because the components that move most are
+            // the ones the mode is about. Taking the first four in *state*
+            // order instead says nothing on a system with two thousand rotors:
+            // every one of them printed `0.00∠…`, since the shape is scaled so
+            // the largest is 1 and G0 was not it.
+            let mut shape = result.shape(mode);
+            shape.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let shape: Vec<String> = shape
                 .into_iter()
                 .take(4)
                 .map(|(name, magnitude, phase)| {
                     format!("{name} {magnitude:.2}∠{phase:+.0}°")
                 })
                 .collect();
-            println!("{:>62}   shape: {}", "", shape.join(", "));
+            println!("{:>73}   shape: {}", "", shape.join(", "));
         }
+    }
+
+    // Which knob moves the worst mode, when asked. The critical mode only:
+    // that is the question a stability study asks, and a sensitivity per mode
+    // per parameter is a table nobody reads.
+    if flags.iter().any(|f| f == "--modes-sensitivity") {
+        report_sensitivities(system, &result)?;
     }
 
     let unstable = result.unstable();
@@ -1162,13 +1237,146 @@ fn report_modes(system: &gridoxide::dynamics::DynamicSystem, count: usize) -> Re
                     .participants(mode)
                     .into_iter()
                     .take(2)
-                    .map(|(n, p)| format!("{n} {:.0}%", p * 100.0))
+                    .map(|(n, p)| format!("{n} {}", percentage(p)))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
         }
     }
     Ok(())
+}
+
+/// A participation factor, with enough digits to still say something.
+///
+/// Whole per cent for anything above one, and two decimals below. An
+/// oscillation spread across two thousand machines belongs to each of them at
+/// about 0.14%, and rounding that to `0%` reads as *no* participation when the
+/// truth is the opposite — that the mode is everyone's.
+#[cfg(feature = "dynamics")]
+fn percentage(p: f64) -> String {
+    if p >= 0.01 {
+        format!("{:.0}%", p * 100.0)
+    } else {
+        format!("{:.2}%", p * 100.0)
+    }
+}
+
+/// `--modes-sensitivity` — which parameter moves the least-damped mode.
+#[cfg(feature = "dynamics")]
+fn report_sensitivities(
+    system: &mut gridoxide::dynamics::DynamicSystem,
+    result: &gridoxide::dynamics::smallsignal::SmallSignal,
+) -> Result<(), String> {
+    use gridoxide::dynamics::smallsignal;
+
+    let Some(mode) = result.critical().cloned() else {
+        return Ok(());
+    };
+    let parameters = smallsignal::tunable_parameters(system);
+    if parameters.is_empty() {
+        println!("\nno device carries a parameter a sensitivity can be taken with respect to");
+        return Ok(());
+    }
+    let mut sensitivities = smallsignal::sensitivities(system, &mode, &parameters)
+        .map_err(|e| e.to_string())?;
+
+    // Ranked by what a study is actually choosing between: how much damping a
+    // change buys. Relative to the parameter's own size, since an inertia of
+    // 5 s and a damping coefficient of 1 are not comparable per unit.
+    sensitivities.sort_by(|a, b| {
+        let (x, y) = (a.d_damping * a.value, b.d_damping * b.value);
+        y.abs().partial_cmp(&x.abs()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    println!(
+        "\nsensitivity of the least-damped mode ({:+.5}{:+.5}j, ζ = {:.4}):",
+        mode.eigenvalue.re, mode.eigenvalue.im, mode.damping
+    );
+    println!(
+        "{:>18}  {:>10}  {:>26}  {:>10}  {:>12}",
+        "parameter", "value", "dlambda/dp", "dzeta/dp", "dzeta per 1%"
+    );
+    for s in sensitivities.iter().take(10) {
+        let name = format!("{}.{}", device_label(result, s.parameter.device), s.parameter.name);
+        println!(
+            "{name:>18}  {:>10.4}  {:>+12.5} {:>+12.5}j  {:>10.3e}  {:>12.3e}",
+            s.value,
+            s.d_eigenvalue.re,
+            s.d_eigenvalue.im,
+            s.d_damping,
+            s.d_damping * s.value * 0.01,
+        );
+    }
+    Ok(())
+}
+
+/// A device's name, taken from the states it owns.
+///
+/// The state names are `unit.state`, and every state of one device shares the
+/// prefix, so the device's own name is recoverable without a second list.
+#[cfg(feature = "dynamics")]
+fn device_label(
+    result: &gridoxide::dynamics::smallsignal::SmallSignal,
+    device: usize,
+) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for name in &result.state_names {
+        let unit = name.split('.').next().unwrap_or(name);
+        if !seen.contains(&unit) {
+            seen.push(unit);
+        }
+    }
+    seen.get(device).map(|s| (*s).to_string()).unwrap_or_else(|| format!("device{device}"))
+}
+
+/// Where `--modes` should look, if the caller said.
+///
+/// `--modes-freq` is the form the question comes in — "the modes near 1 Hz" —
+/// and `--modes-near` is the literal complex number for anyone who wants to
+/// name it directly. Giving neither means the dense method, which needs no aim
+/// because it computes everything.
+#[cfg(feature = "dynamics")]
+fn parse_shift(flags: &[String]) -> Result<Option<num_complex::Complex<f64>>, String> {
+    use gridoxide::dynamics::smallsignal::SmallSignalOptions;
+
+    let freq = parse_f64_flag(flags, "--modes-freq")?;
+    let damping = parse_f64_flag(flags, "--modes-damping")?;
+    let near = flag_value(flags, "--modes-near")?;
+
+    if let Some(near) = near {
+        if freq.is_some() || damping.is_some() {
+            return Err("--modes-near names the shift outright; \
+                        do not also give --modes-freq or --modes-damping"
+                .to_string());
+        }
+        let (re, im) = near.split_once(',').ok_or_else(|| {
+            format!("--modes-near: expected <re>,<im>, got {near:?}")
+        })?;
+        let re: f64 = re
+            .trim()
+            .parse()
+            .map_err(|_| format!("--modes-near: {re:?} is not a number"))?;
+        let im: f64 = im
+            .trim()
+            .parse()
+            .map_err(|_| format!("--modes-near: {im:?} is not a number"))?;
+        return Ok(Some(num_complex::Complex::new(re, im)));
+    }
+
+    match (freq, damping) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(
+            "--modes-damping only says how far off the axis to aim; \
+             give --modes-freq to say where"
+                .to_string(),
+        ),
+        (Some(hz), zeta) => {
+            if hz <= 0.0 {
+                return Err(format!("--modes-freq: expected a positive frequency, got {hz}"));
+            }
+            Ok(Some(SmallSignalOptions::near_frequency(hz, zeta.unwrap_or(0.05)).shift))
+        }
+    }
 }
 
 /// `gridoxide qv` — a bus's reactive margin.

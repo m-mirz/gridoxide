@@ -46,6 +46,12 @@
 //! model library (transient and subtransient machines, AVRs, governors, PSS),
 //! the readers and the external validation are phases 2 through 6.
 
+pub mod arnoldi;
+/// ARPACK, as the cross-check `arnoldi` is measured against — never as a
+/// dependency. Needs a system ARPACK; see `Cargo.toml`'s
+/// `smallsignal-arpack` feature.
+#[cfg(feature = "smallsignal-arpack")]
+pub mod arpack;
 pub mod dae;
 /// Dynawo `.dyd`/`.par`/`.crv`. Needs `iidm` for its XML reader — the same
 /// `quick-xml` that feature already pulls in — and pairs with the IIDM
@@ -58,6 +64,7 @@ pub mod init;
 pub mod json;
 pub mod integrator;
 pub mod models;
+pub mod shift;
 pub mod smallsignal;
 
 use num_complex::Complex;

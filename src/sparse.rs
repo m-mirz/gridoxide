@@ -205,6 +205,30 @@ impl ComplexSparseSystem {
         }
         Some((0..self.n).map(|i| x[i]).collect())
     }
+
+    /// Solves `Aᴴ x = b` — the *conjugate* transpose — against the same cached
+    /// factorization.
+    ///
+    /// No second factorization is involved, for the reason
+    /// [`RealFactorization::solve_transpose`] documents: an `LU = PAQ`
+    /// decomposition solves the transposed system by running the same
+    /// triangular factors in the opposite order.
+    ///
+    /// The conjugate transpose rather than the plain one, because that is the
+    /// form the question comes in. A *left* eigenvector satisfies
+    /// `wᴴ A = λ wᴴ`, i.e. `Aᴴ w = λ̄ w`, and left eigenvectors are what
+    /// participation factors and eigenvalue sensitivities are built from
+    /// (`dynamics::smallsignal`). `faer` offers it directly as
+    /// `solve_adjoint_in_place`, so nothing here has to conjugate by hand.
+    pub fn solve_adjoint(&self, rhs: &[Complex<f64>]) -> Option<Vec<Complex<f64>>> {
+        debug_assert_eq!(rhs.len(), self.n);
+        let mut b = Col::<Complex<f64>>::from_fn(self.n, |i| rhs[i]);
+        self.lu.solve_adjoint_in_place(b.as_mut());
+        if (0..self.n).any(|i| !b[i].re.is_finite() || !b[i].im.is_finite()) {
+            return None;
+        }
+        Some((0..self.n).map(|i| b[i]).collect())
+    }
 }
 
 /// A real sparse system whose sparsity *pattern* and *values* are both fixed
@@ -497,6 +521,47 @@ mod tests {
         let forward = a.solve(&[1.0, 0.0]).unwrap();
         let adjoint = a.solve_transpose(&[1.0, 0.0]).unwrap();
         assert!((forward[1] - adjoint[1]).abs() > 1e-6, "{forward:?} vs {adjoint:?}");
+    }
+
+    /// The complex adjoint solve must reuse the same factorization and agree
+    /// with a separately-factorized `Aᴴ`. Checked on a matrix that is neither
+    /// symmetric nor real, since on either of those the conjugate transpose
+    /// coincides with something else and the test would pass for the wrong
+    /// reason.
+    #[test]
+    fn complex_system_solve_adjoint_matches_an_explicit_conjugate_transpose() {
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let entries = vec![
+            (0, 0, c(2.0, 1.0)),
+            (0, 1, c(1.0, -3.0)),
+            (1, 0, c(5.0, 2.0)),
+            (1, 1, c(3.0, 0.5)),
+        ];
+        let adjoint_entries: Vec<(usize, usize, Complex<f64>)> =
+            entries.iter().map(|&(r, c_, v)| (c_, r, v.conj())).collect();
+
+        let a = ComplexSparseSystem::new(2, &entries).unwrap();
+        let ah = ComplexSparseSystem::new(2, &adjoint_entries).unwrap();
+
+        for rhs in [
+            [c(1.0, 0.0), c(0.0, 0.0)],
+            [c(0.0, 0.0), c(1.0, 0.0)],
+            [c(3.0, -1.0), c(-7.0, 2.0)],
+        ] {
+            let via_adjoint = a.solve_adjoint(&rhs).unwrap();
+            let via_explicit = ah.solve(&rhs).unwrap();
+            for i in 0..2 {
+                assert!(
+                    (via_adjoint[i] - via_explicit[i]).norm() < 1e-12,
+                    "rhs {rhs:?}: {via_adjoint:?} vs {via_explicit:?}"
+                );
+            }
+        }
+
+        // And it is genuinely the adjoint, not the same solve twice.
+        let forward = a.solve(&[c(1.0, 0.0), c(0.0, 0.0)]).unwrap();
+        let adjoint = a.solve_adjoint(&[c(1.0, 0.0), c(0.0, 0.0)]).unwrap();
+        assert!((forward[1] - adjoint[1]).norm() > 1e-6, "{forward:?} vs {adjoint:?}");
     }
 
     #[test]

@@ -55,8 +55,22 @@ else:
 # machine/exciter/governor model library are gridoxide's own, pure Rust on the
 # same sparse backends the power flow uses.
 try:
-    from ._gridoxide import DynamicsMode, DynamicsResult, dynamics, small_signal  # noqa: F401
+    from ._gridoxide import (  # noqa: F401
+        DynamicsMode,
+        DynamicsResult,
+        ModeSensitivity,
+        SmallSignalResult,
+        dynamics,
+        small_signal,
+    )
 except ImportError:  # pragma: no cover - depends on build features
     pass
 else:
-    __all__ += ["DynamicsMode", "DynamicsResult", "dynamics", "small_signal"]
+    __all__ += [
+        "DynamicsMode",
+        "DynamicsResult",
+        "ModeSensitivity",
+        "SmallSignalResult",
+        "dynamics",
+        "small_signal",
+    ]

@@ -160,6 +160,9 @@ fn the_modes_flag_reports_the_linearized_system() {
     let text = stdout_of(&dynamics(&["--modes", "4"]));
 
     assert!(text.contains("13 mode(s) over 13 differential state(s)"), "{text}");
+    // Which method answered is part of the answer: "every mode" and "the four
+    // nearest a point" support very different conclusions.
+    assert!(text.contains("every mode, by a dense decomposition"), "{text}");
     assert!(text.contains("eigenvalue"), "{text}");
     assert!(text.contains("damping"), "{text}");
     assert!(text.contains("participation"), "{text}");
@@ -174,4 +177,81 @@ fn the_modes_flag_reports_the_linearized_system() {
 
     // It answers instead of running, because it is a different question.
     assert!(!text.contains("ran to"), "{text}");
+
+    // A participation factor never prints as a bare `0%`. On a large system a
+    // mode is spread across every machine at a fraction of a per cent each, and
+    // rounding that away reads as *no* participation when the truth is the
+    // opposite — that the mode belongs to all of them.
+    assert!(!text.contains(" 0%"), "{text}");
+}
+
+/// Naming a frequency selects the sparse method and says so.
+///
+/// The interesting property is that it is *selectable*, not merely a fallback
+/// past a size threshold: asking about one band of a system small enough for
+/// the dense method is a legitimate question, and the answer has to say it is
+/// answering that one — a caller who reads "no unstable modes" off a list of
+/// four modes near 1 Hz has been misled unless the output told them.
+#[test]
+fn a_named_frequency_selects_the_sparse_method() {
+    let text = stdout_of(&dynamics(&["--modes", "3", "--modes-freq", "1.27"]));
+
+    assert!(text.contains("sparse Arnoldi"), "{text}");
+    assert!(text.contains("NOT every mode the system has"), "{text}");
+    assert!(text.contains("1.270 Hz"), "{text}");
+    assert!(text.contains("residual"), "{text}");
+
+    let rows = text.lines().filter(|l| l.contains("j  ")).count();
+    assert_eq!(rows, 3, "{text}");
+
+    // The swing mode is what sits nearest 1.27 Hz, and both methods find the
+    // same eigenvalue — the dense run above prints it too.
+    assert!(text.contains("-0.73018"), "{text}");
+    assert!(text.contains("G1.omega"), "{text}");
+}
+
+/// The literal form of the same flag.
+#[test]
+fn the_shift_can_be_named_outright() {
+    let text = stdout_of(&dynamics(&["--modes", "2", "--modes-near", "-0.4,7.98"]));
+    assert!(text.contains("sparse Arnoldi"), "{text}");
+    assert!(text.contains("-0.4000+7.9800j"), "{text}");
+    assert!(text.contains("-0.73018"), "{text}");
+}
+
+/// Flags that contradict each other are refused rather than silently ranked.
+#[test]
+fn the_aiming_flags_are_checked_against_each_other() {
+    let out = dynamics(&["--modes", "2", "--modes-near", "-0.4,7.98", "--modes-freq", "1.0"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--modes-near names the shift outright"), "{err}");
+
+    // A damping ratio says how far off the axis, not where along it.
+    let out = dynamics(&["--modes", "2", "--modes-damping", "0.05"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--modes-freq to say where"), "{err}");
+
+    let out = dynamics(&["--modes", "2", "--modes-near", "nonsense"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("expected <re>,<im>"), "{err}");
+}
+
+/// The sensitivity report answers "what should we change".
+#[test]
+fn the_sensitivity_flag_ranks_the_parameters() {
+    let text = stdout_of(&dynamics(&["--modes", "2", "--modes-sensitivity"]));
+
+    assert!(text.contains("sensitivity of the least-damped mode"), "{text}");
+    assert!(text.contains("dlambda/dp"), "{text}");
+    assert!(text.contains("dzeta/dp"), "{text}");
+    // The machine's inertia and damping coefficient, named against the device
+    // they belong to rather than by index.
+    assert!(text.contains("G1.h"), "{text}");
+    assert!(text.contains("G1.d"), "{text}");
+    // And nothing else: a reactance moves the equilibrium, so it is not on
+    // offer — see `Machine::tunable`.
+    assert!(!text.contains("G1.xdp"), "{text}");
 }

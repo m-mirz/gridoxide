@@ -211,6 +211,33 @@ pub trait DynamicModel: std::fmt::Debug {
         None
     }
 
+    /// Parameters an eigenvalue sensitivity may be taken with respect to.
+    ///
+    /// See [`Machine::tunable`](machine::Machine::tunable) for why the list is
+    /// as short as it is: the sensitivity holds the operating point fixed, so
+    /// only parameters the equilibrium does not depend on can be answered
+    /// honestly.
+    fn tunable(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The current value of one tunable parameter.
+    fn parameter(&self, _name: &str) -> Option<f64> {
+        None
+    }
+
+    /// Sets one tunable parameter, returning the value it replaced.
+    ///
+    /// Mutating rather than returning a modified copy, because a copy would
+    /// mean cloning every control a unit owns behind a trait object, and the
+    /// only caller — the central difference in
+    /// [`smallsignal::sensitivities`](crate::dynamics::smallsignal::sensitivities)
+    /// — sets the parameter back immediately afterwards. `None` means this
+    /// device has no such parameter and nothing was changed.
+    fn set_parameter(&mut self, _name: &str, _value: f64) -> Option<f64> {
+        None
+    }
+
     /// Decide which limits are active for the coming step. See
     /// [`Control::latch`].
     fn latch(&self, _x: &[f64], _v: Complex<f64>) {}

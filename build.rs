@@ -7,6 +7,8 @@ fn main() {
     highs::build();
     #[cfg(feature = "opf-ipopt")]
     ipopt::build();
+    #[cfg(feature = "smallsignal-arpack")]
+    arpack::build();
     #[cfg(feature = "capi")]
     capi::build();
 }
@@ -118,6 +120,58 @@ mod capi {
                 bindings.write(&mut buffer);
                 String::from_utf8_lossy(&buffer).into_owned()
             })
+    }
+}
+
+/// Links a system ARPACK for the `smallsignal-arpack` cross-check.
+///
+/// **The one module here that does not run `bindgen`,** and the reason is worth
+/// stating rather than leaving as an inconsistency. ARPACK's whole C surface
+/// here is two functions — `znaupd_c` and `zneupd_c`, the ISO_C_BINDING
+/// wrappers arpack-ng exports — and they are declared by hand in
+/// `src/dynamics/arpack.rs`. Generating two declarations would mean requiring
+/// `arpack.h`, which distributions place inconsistently (Debian's
+/// `libarpack2-dev` puts it at `/usr/include/arpack/arpack.h`, others at the
+/// include root, and the runtime package ships none), to save writing eighteen
+/// argument types once. The declarations are checked the only way that
+/// matters: by the cross-check test, which disagrees loudly with our own
+/// solver if a single argument is wrong.
+///
+/// Needs a linkable `libarpack.so` — the unversioned symlink, which comes from
+/// the development package (`apt install libarpack2-dev`). Set `ARPACK_ROOT` if
+/// it lives somewhere other than `/usr`.
+#[cfg(feature = "smallsignal-arpack")]
+mod arpack {
+    use std::env;
+    use std::path::PathBuf;
+
+    pub fn build() {
+        let root = PathBuf::from(env::var("ARPACK_ROOT").unwrap_or_else(|_| "/usr".to_string()));
+        let lib_dir = [
+            root.join("lib").join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
+                |_| "x86_64-linux-gnu".to_string(),
+                |arch| format!("{arch}-linux-gnu"),
+            )),
+            root.join("lib"),
+            root.join("lib64"),
+            root.clone(),
+        ]
+        .into_iter()
+        .find(|p| p.join("libarpack.so").is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "couldn't find `libarpack.so` under {} — the `smallsignal-arpack` \
+                 feature needs a local ARPACK *with its development files* (on \
+                 Debian/Ubuntu: `apt install libarpack2-dev`; the runtime package \
+                 alone ships only `libarpack.so.2`, which the linker will not \
+                 take). Set ARPACK_ROOT if it is installed elsewhere.",
+                root.display()
+            )
+        });
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=arpack");
+        println!("cargo:rerun-if-env-changed=ARPACK_ROOT");
     }
 }
 
