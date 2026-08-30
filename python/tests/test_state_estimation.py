@@ -262,25 +262,29 @@ def test_asymmetric_carries_the_analyses():
     assert len(suspects) <= 5
 
 
-def test_asymmetric_refuses_what_it_cannot_model():
-    """A component the three-phase conversion does not carry is named, not
-    dropped.
+def test_asymmetric_refuses_only_what_it_cannot_model():
+    """A three-winding transformer is named; a link and a voltage regulator are
+    not, because they are modelled and ignored respectively.
 
-    The symmetric path reads the same document without complaint, which is the
-    point: the refusal is about the phase domain's own model rather than about
-    the document being malformed.
+    The symmetric path reads all three without complaint, which is the point of
+    the refusal being about the phase domain's own model rather than about the
+    document being malformed.
     """
-    candidates = [d.name for d in FIXTURES.iterdir() if (d / "input.json").is_file()]
-    refused = []
-    for name in candidates:
-        raw = json.loads((FIXTURES / name / "input.json").read_text())
-        unsupported = ("three_winding_transformer", "voltage_regulator", "link")
-        if not any(raw["data"].get(k) for k in unsupported):
+    refused, accepted = [], []
+    for d in sorted(FIXTURES.iterdir()):
+        if not (d / "input.json").is_file():
             continue
-        with pytest.raises(ValueError) as excinfo:
-            model(name, asymmetric=True)
-        assert any(k in str(excinfo.value) for k in unsupported), excinfo.value
-        refused.append(name)
+        data = json.loads((d / "input.json").read_text())["data"]
+        if data.get("three_winding_transformer"):
+            with pytest.raises(ValueError, match="three_winding_transformer"):
+                model(d.name, asymmetric=True)
+            refused.append(d.name)
+        elif data.get("link"):
+            # Modelled now: a link is a jumper, phase-transparent in all three
+            # sequences. It used to make the whole document inestimable.
+            m = model(d.name, asymmetric=True)
+            assert m.phases == 3
+            accepted.append(d.name)
 
-    if not refused:
-        pytest.skip("no committed fixture uses a component the phase domain refuses")
+    assert refused, "a fixture with a three-winding transformer is committed"
+    assert accepted, "six committed fixtures use a link"
