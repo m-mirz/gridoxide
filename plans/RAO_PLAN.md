@@ -14,11 +14,13 @@ and 2 landed 2026-08-18.
 >
 > **What is left**, in the order it is worth doing:
 >
-> 1. **Action combinations beyond the greedy chain.** The structural one. The reference blooms
->    *combinations* at each depth; this search extends a single best chain, so a plan needing three
->    actions each worth little on its own is out of reach. It is the dominant cause of the remaining
->    disagreements in families 1.3 and 2.6 — not a missing rule but a different search, and therefore
->    a different size of job from anything in §8.3's list of nineteen.
+> 1. ~~**Action combinations beyond the greedy chain.**~~ **This diagnosis is wrong** — see
+>    `plans/RAO_SEARCH_PLAN.md` §2. The reference's `SearchTreeBloomer.bloom` is greedy too: it
+>    returns individual network actions plus the *predefined* combinations named in the RAO
+>    parameters, and every vendored configuration carries `"predefined-combinations": []`. So on the
+>    scenarios that fail, the reference reaches its answer with the same greedy chain this has. The
+>    real cause of families 1.3 and 2.6 is unidentified, the failures are **curative-only**, and
+>    finding it is what that plan is for.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
