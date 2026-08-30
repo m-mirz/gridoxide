@@ -405,8 +405,10 @@ matter:
    because standing the phase-domain model up took eight calls in a particular order against four
    converters and three stamping functions — which is why the estimator worked for some time with
    nothing outside the test suite able to call it. `gridoxide estimate --asymmetric` is that door,
-   and on a balanced document the two domains agree per phase to 1e-5 in magnitude and 1e-4 in angle,
-   which is a cross-check neither domain could perform alone.
+   as is `StateEstimationModel.from_pgm_json(..., asymmetric=True)` — the same class, with `solve`,
+   `solve_batch`, `observability` and `bad_data` unchanged, since none of them knows which domain it
+   is in. On a balanced document the two domains agree per phase to 1e-6, which is a cross-check
+   neither domain could perform alone.
 
    And **Gauss-Newton has a divergence cliff**, in both domains. It takes an undamped step, so a
    measurement far enough from consistent throws the first one past the basin: on `transmission-case`

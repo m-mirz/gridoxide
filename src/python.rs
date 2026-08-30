@@ -1516,7 +1516,18 @@ impl PowerFlowModel {
 #[pyclass]
 struct StateEstimationModel {
     buses: Vec<Bus>,
-    net: crate::pgm::PgmNetwork,
+    /// The state every `solve()` restarts from, so calling one after another is
+    /// idempotent rather than cumulative.
+    ///
+    /// Held directly rather than reached through a `PgmNetwork`, which is what
+    /// it used to be — the phase domain has no such object, and this was the
+    /// only thing ever taken from it.
+    buses_template: Vec<Bus>,
+    /// 1 symmetric, 3 in the phase domain.
+    phases: usize,
+    /// Document node id to *node* index; a node owns `phases` buses, starting
+    /// at `phases * index`.
+    node_idx: std::collections::HashMap<u64, usize>,
     se_net: crate::se::SeNetwork,
     measurements: Vec<crate::measurement::Measurement>,
     options: crate::se::nr::SeOptions,
@@ -1532,12 +1543,33 @@ struct StateEstimationModel {
 impl StateEstimationModel {
     /// Loads a PGM-format JSON document containing sensors.
     ///
-    /// The document needs `sym_voltage_sensor` and/or `sym_power_sensor`
-    /// entries; unlike a power-flow document it does *not* need `p_specified`
-    /// on its loads or `u_ref` on its sources, since those are quantities state
-    /// estimation solves for rather than inputs it consumes.
+    /// The document needs voltage, power or current sensors; unlike a
+    /// power-flow document it does *not* need `p_specified` on its loads or
+    /// `u_ref` on its sources, since those are quantities state estimation
+    /// solves for rather than inputs it consumes.
+    ///
+    /// # `asymmetric`
+    ///
+    /// `False` (the default) estimates one bus per node, with every sensor read
+    /// as a balanced total. `True` estimates in the **phase domain**: three
+    /// buses per node, laid out `3·node + phase`, with each asym sensor reading
+    /// its own phase against a line-to-neutral voltage base rather than
+    /// reducing to a total. That is what makes an unbalanced network estimable
+    /// rather than approximable, and on a distribution feeder the unbalance is
+    /// the question rather than a refinement.
+    ///
+    /// Everything downstream is the same object either way — `solve`,
+    /// `solve_batch`, `observability` and `bad_data` do not know which domain
+    /// they are in, because a three-phase branch terminal is a six-coefficient
+    /// current functional where a scalar one has two. What changes is the
+    /// length of `voltage_mag()` and what `phases` reports.
+    ///
+    /// The phase domain refuses, by name, the components its conversion does
+    /// not carry: `link`, `three_winding_transformer`, `voltage_regulator`, and
+    /// transformer winding pairs outside Dyn and YNyn.
     #[staticmethod]
-    #[pyo3(signature = (path, backend="scalar", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0))]
+    #[pyo3(signature = (path, backend="scalar", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0, asymmetric=false))]
+    #[allow(clippy::too_many_arguments)]
     fn from_pgm_json(
         path: &str,
         backend: &str,
@@ -1546,6 +1578,7 @@ impl StateEstimationModel {
         max_iter: usize,
         s_base_va: f64,
         freq_hz: f64,
+        asymmetric: bool,
     ) -> PyResult<Self> {
         let method = match method {
             "newton_raphson" => crate::se::nr::SeMethod::NewtonRaphson,
@@ -1560,29 +1593,17 @@ impl StateEstimationModel {
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
         let input: PgmInput = serde_json::from_str(&raw)
             .map_err(|e| PyValueError::new_err(format!("parsing {path} as PGM JSON: {e}")))?;
-        let id_to_idx = crate::pgm::node_id_to_idx(&input);
-        let shunts = crate::pgm::pgm_shunts_1ph(&input, &id_to_idx, s_base_va);
-
-        // The conversion consumes its input and the measurement builder needs
-        // it, so the document is parsed twice rather than cloned through.
-        let net = crate::pgm::pgm_to_network(
-            serde_json::from_str(&raw)
-                .map_err(|e| PyValueError::new_err(format!("parsing {path} as PGM JSON: {e}")))?,
-            s_base_va,
-            freq_hz,
-        );
-        let measurements = crate::measurement::measurements_from_pgm(&input, &net, s_base_va)
-            .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
-        if measurements.is_empty() {
-            return Err(PyValueError::new_err(format!(
-                "{path} contains no usable sensors, so there is nothing to estimate"
-            )));
+        // One door onto both domains. The assembly behind the phase-domain one
+        // is eight calls in a particular order; `SeCase` is where that lives, so
+        // that this binding and the CLI cannot drift apart in how they build a
+        // model.
+        let case = if asymmetric {
+            crate::se::case::SeCase::from_pgm_3ph(&input, s_base_va, freq_hz)
+        } else {
+            crate::se::case::SeCase::from_pgm(&input, s_base_va, freq_hz)
         }
+        .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
 
-        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
-        stamp_shunts(&mut ybus, &shunts);
-        let se_net = crate::se::SeNetwork::new(&net, ybus.finish(), &shunts);
-        let buses = net.buses.clone();
         // One value shared by the field and the estimator. These used to be two
         // separately-constructed copies, harmless while nothing read the field
         // — `solve_batch` now does.
@@ -1594,14 +1615,39 @@ impl StateEstimationModel {
         };
 
         Ok(Self {
-            buses,
-            net,
-            se_net,
-            measurements,
+            buses: case.buses.clone(),
+            buses_template: case.buses,
+            phases: case.phases,
+            node_idx: case.node_idx,
+            se_net: case.network,
+            measurements: case.measurements,
             options,
             report: None,
             estimator: crate::se::nr::PersistentEstimator::new(options),
         })
+    }
+
+    /// 1 symmetric, 3 in the phase domain.
+    ///
+    /// The one thing a caller downstream genuinely needs to know, because
+    /// `voltage_mag()` is a list of nodes in the first case and a list of
+    /// node-phases in the second, and the two are different claims about the
+    /// same network.
+    #[getter]
+    fn phases(&self) -> usize {
+        self.phases
+    }
+
+    /// `(node id, bus index)` for every document node, in index order.
+    ///
+    /// A node's phase `p` is at `bus index + p` in the phase domain. Returned
+    /// rather than left to the caller because the arithmetic is the model's,
+    /// not the document's.
+    fn nodes(&self) -> Vec<(u64, usize)> {
+        let mut out: Vec<(u64, usize)> =
+            self.node_idx.iter().map(|(&id, &i)| (id, self.phases * i)).collect();
+        out.sort_unstable();
+        out
     }
 
     /// Number of buses, including the virtual slack bus gridoxide synthesizes
@@ -1640,7 +1686,7 @@ impl StateEstimationModel {
 
     /// Runs the estimate from a linear start. Raises if it does not converge.
     fn solve(&mut self) -> PyResult<()> {
-        self.buses = self.net.buses.clone();
+        self.buses = self.buses_template.clone();
         crate::se::nr::linear_start(&mut self.buses, &self.se_net, &self.measurements);
         let report = self
             .estimator
@@ -1700,7 +1746,7 @@ impl StateEstimationModel {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
         let results = solver
-            .estimate(&self.net.buses, &self.se_net, &self.measurements, &scenarios)
+            .estimate(&self.buses_template, &self.se_net, &self.measurements, &scenarios)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(results
