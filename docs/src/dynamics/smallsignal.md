@@ -82,14 +82,15 @@ because a relative phase between things that are not oscillating means nothing.
 $ gridoxide dynamics case.json --modes 6
 
 13 mode(s) over 13 differential state(s)
+every mode, by a dense decomposition of the state matrix
 
-                eigenvalue    damping   freq (Hz)    tau (s)   participation
-    -0.73018     +7.99385j     0.0910      1.2723      1.370   G1.omega 41%, G1.delta 36%, G1.eqp 6%
-    -0.73018     -7.99385j     0.0910      1.2723      1.370   G1.omega 41%, G1.delta 36%, G1.eqp 6%
-    -1.02972     +2.23736j     0.4181      0.3561      0.971   G1.avr_lead 37%, G1.eqp 34%, G1.delta 7%
-    -1.02972     -2.23736j     0.4181      0.3561      0.971   G1.avr_lead 37%, G1.eqp 34%, G1.delta 7%
-   -40.55915     +5.54508j     0.9908      0.8825      0.025   G1.psi1d 39%, G1.pss_lead2 19%, G1.pss_lead1 19%
-   -40.55915     -5.54508j     0.9908      0.8825      0.025   G1.psi1d 39%, G1.pss_lead2 19%, G1.pss_lead1 19%
+                eigenvalue    damping   freq (Hz)    tau (s)   residual   participation
+    -0.73018     +7.99385j     0.0910      1.2723      1.370      0.0e0   G1.omega 41%, G1.delta 36%, G1.eqp 6%
+    -0.73018     -7.99385j     0.0910      1.2723      1.370      0.0e0   G1.omega 41%, G1.delta 36%, G1.eqp 6%
+    -1.02972     +2.23736j     0.4181      0.3561      0.971      0.0e0   G1.avr_lead 37%, G1.eqp 34%, G1.delta 7%
+    -1.02972     -2.23736j     0.4181      0.3561      0.971      0.0e0   G1.avr_lead 37%, G1.eqp 34%, G1.delta 7%
+   -40.55915     +5.54508j     0.9908      0.8825      0.025      0.0e0   G1.psi1d 39%, G1.pss_lead2 19%, G1.pss_lead1 19%
+   -40.55915     -5.54508j     0.9908      0.8825      0.025      0.0e0   G1.psi1d 39%, G1.pss_lead2 19%, G1.pss_lead1 19%
 
 every mode decays
 ```
@@ -121,8 +122,129 @@ rotor's, and the slowest real mode is the field flux with a time constant of the
 Analysing a point the system is not sitting at is **refused**. A linearization about a mid-transient
 state describes nothing in particular, and its eigenvalues would look entirely plausible.
 
+## Targeting a region
+
+Everything above computes *every* mode, by forming `A` and decomposing it whole. That is `O(n³)` in
+the states and `O(n²·n_net)` in the reduction, and it is the right method up to a couple of
+thousand states. A four-thousand-bus case has twenty thousand of them, where it is not slow but
+hours — and almost none of what it computes is wanted.
+
+The question a stability study actually asks is narrower: *the modes near this frequency*, or *the
+least damped ones*, six or ten of them. Naming where to look is what makes that affordable:
+
+```text
+$ gridoxide dynamics ring4096.json --modes 4 --modes-freq 1.0
+
+4 mode(s) over 20480 differential state(s)
+the 4 nearest -0.3146+6.2832j (1.000 Hz) — sparse Arnoldi, 3 restart(s). NOT every mode the system has.
+
+                eigenvalue    damping   freq (Hz)    tau (s)   residual   participation
+    -1.02387     +5.82374j     0.1732      0.9269      0.977    2.5e-14   G2068.omega 0.14%, G2070.omega 0.14%, G2066.omega 0.14%
+                                                    shape: G2062.delta 1.00∠+0°, G2060.delta 1.00∠+21°, G2064.delta 1.00∠-21°, G2058.delta 1.00∠+42°
+    -1.03416     +5.83962j     0.1744      0.9294      0.967    2.5e-14   G2052.omega 0.14%, G2054.omega 0.14%, G2050.omega 0.14%
+                                                    shape: G2048.delta 1.00∠+0°, G2050.delta 1.00∠-21°, G2046.delta 1.00∠+21°, G2052.delta 1.00∠-42°
+```
+
+Twenty thousand differential states, on a case the dense method cannot begin.
+
+Read the second line. A **partial** list of modes supports no statement about the system as a whole:
+"nothing unstable here" means *near this shift*, and the output says which kind of list it is rather
+than leaving a reader to remember. The Python binding carries the same distinction as
+`result.complete`.
+
+Then read the shape. Equal magnitudes with the phase advancing 21° from one rotor to the next is a
+**travelling wave** going round the ring — which is what a ring of near-identical machines should
+have, and is not something a participation factor could have told you: every machine takes part, at
+0.14% each, and the interesting content is entirely in the phases.
+
+## How the sparse method works
+
+Shift-invert. The eigenvalues of \\((A - \sigma I)^{-1}\\) are \\(1/(\lambda_i - \sigma)\\), so the
+ones *nearest* `σ` become the *largest* — and largest is what a Krylov method finds first. Aiming
+the analysis is choosing `σ`, and because the modes worth aiming at oscillate, `σ` is complex:
+`--modes-freq 0.5` is the shift \\(-\zeta\omega_d/\sqrt{1-\zeta^2} + j\omega_d\\).
+
+`A` is never formed. Write the linearized DAE as a *pencil* rather than a reduced matrix:
+
+```text
+ ⎡ A_x  A_v ⎤ ⎡x⎤       ⎡ I  0 ⎤ ⎡x⎤
+ ⎣ C_x  C_v ⎦ ⎣v⎦ = λ   ⎣ 0  0 ⎦ ⎣v⎦
+        J                    E
+```
+
+Its finite eigenvalues are exactly `A`'s — the bottom block-row carries no `λ`, so it reads
+`C_x x + C_v v = 0` whatever `λ` is, which is the elimination written down rather than performed.
+Then for a vector `b` in the state space,
+
+\\[ S(b) = \text{the leading } n_x \text{ entries of } (J - \sigma E)^{-1} \begin{bmatrix} b \\\\ 0 \end{bmatrix} \\]
+
+**is** \\((A - \sigma I)^{-1} b\\), by the Schur-complement identity. Each application costs one
+sparse solve on the bordered system, against a factorization computed once per shift.
+
+And the shift is free. `J - σE` is the same assembly [`DaePattern::fill`](./dae.md) produces at
+`h·a = 1`, with its top block-rows negated and `(1 − σ)` added on the state diagonal — and that
+diagonal is structurally present already, because the pattern carries a dense `∂f/∂x` block per
+device. A shift adds no fill-in and changes no pattern, which is the same property that makes every
+event in a [run](./events.md) value-only.
+
+Left eigenvectors — which participation factors need, and which the dense method gets by inverting
+`U` — come from a second Arnoldi pass on the adjoint operator, against the *same* factorization. The
+two passes converge from different subspaces and are matched by eigenvalue; where that match is
+ambiguous, the mode is reported **without** participation rather than with a plausible wrong one.
+
+Two things measured on the way are worth carrying:
+
+- **A restart means *growing*.** On a ring of two thousand machines the electromechanical modes are
+  packed into a tenth of a hertz, and restarting from a combination of Ritz vectors at a fixed
+  Krylov dimension barely helped — five restarts at dimension 32 moved the residual from `6e-2` to
+  `7e-3`. Raising the dimension to 128 converged to `2e-19` in one cycle, and faster in wall time.
+  So a restart doubles the dimension, up to a cap set by memory.
+- **A residual is not an error bar.** It is measured by applying the operator rather than by the
+  textbook estimate `|h_{m+1,m}||e_m^T y|`, which reported `8e-52` where the truth was `1.3e-14`.
+  But even a true residual only certifies that the pair solves the problem it claims to. How far the
+  *eigenvalue* could still move is the eigenvalue's condition, `1/|w^H u|`, and on that same ring the
+  forward and adjoint passes disagree at the `1e-4` level with residuals at `3e-14` — not a defect in
+  either, but the honest accuracy available for modes that ill-conditioned.
+
+## Eigenvalue sensitivities
+
+An eigenvalue says a mode is poorly damped. A sensitivity says what to change:
+
+\\[ \frac{d\lambda}{dp} = \frac{W^H (\partial J/\partial p)\, U}{w_x^H u} \\]
+
+in the pencil's own left and right eigenvectors — which avoids differentiating `C_v^{-1}`, since
+`∂J/∂p` touches only the rows of the device that owns `p`. It is reported as `dλ/dp` and, more
+usefully, as `dζ/dp`: how much damping ratio a unit of the parameter buys.
+
+```text
+$ gridoxide dynamics case.json --modes 3 --modes-sensitivity
+
+sensitivity of the least-damped mode (-0.73018+7.99385j, ζ = 0.0910):
+         parameter       value                  dlambda/dp    dzeta/dp  dzeta per 1%
+              G1.h      5.0000      +0.10135     -0.83398j   -3.110e-3     -1.555e-4
+              G1.d      1.0000      -0.05231     -0.00156j    6.480e-3      6.480e-5
+```
+
+`∂J/∂p` is a **central difference of the assembly** — set the parameter, refill the pattern,
+subtract — so nothing is re-derived and nothing can fall out of step with the models as they change.
+The pattern does not move, because sparsity depends on structure and not on values.
+
+**Only the inertia and the damping coefficient are offered**, and the restriction is the honest part
+rather than an omission. The formula above holds the operating point fixed, so it is the whole
+derivative only for parameters the equilibrium does not depend on. `H` appears only as `1/2H` in the
+swing equation and `D` only multiplying `(ω − 1)`, which is zero at rest. A reactance is different:
+initialization picks `δ`, `e'_q` and the flux states *from* the reactances, so changing one moves the
+point being linearized about, and the true derivative carries a `∂J/∂x · dx/dp` term this does not
+have. Offering it would produce a number that looks like an answer and is a fraction of one.
+
 ## Scope
 
-Dense: the reduced `A` is eigen-decomposed whole, which is `O(n³)` and is the normal approach for
-this analysis. A system of a few thousand states wants a sparse Arnoldi method targeting a region of
-the complex plane instead, and that is not implemented.
+Both methods are available and both say which one answered. The dense one computes every mode and
+is the default below two thousand states; past that, or whenever a shift is named, the sparse one
+computes the modes near a point. Sensitivities work from either.
+
+Not here: the **EMT** half of modal analysis, which is a different simulation entirely; block Arnoldi
+for genuinely degenerate spectra — a ring of identical machines has near-exact repeated modes, and a
+Krylov space holds one vector per invariant direction, so one of each pair is found and the
+multiplicity is not; and sensitivities to network parameters, which perturb through the Y-bus rather
+than through a device's own fill.

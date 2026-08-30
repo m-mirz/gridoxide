@@ -80,7 +80,9 @@ flat line to machine precision. See [Initialization](./initialization.md).
 [Small-signal analysis](./smallsignal.md) linearizes the same system about its equilibrium and
 reports its modes — which oscillations exist, how fast each decays, and which machines take part.
 It is the only reliable way to find a negatively damped mode, since a run finds one only if the
-disturbance happened to excite it.
+disturbance happened to excite it. On a case too large to decompose whole it answers a narrower
+question instead — the modes near a named frequency — and says that is what it answered. It will
+also say which machine parameter moves a mode, and by how much.
 
 ## Scope
 

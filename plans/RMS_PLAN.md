@@ -1394,7 +1394,14 @@ not oscillating means nothing.
 read identically in a file and in Python. A relay carries no time; that is the only difference, and
 it is the interesting one.
 
-### Sparse small-signal: declined, with a size guard
+### Sparse small-signal: declined here, and built next
+
+> **Superseded.** The refusal below stood for one day. `plans/SMALL_SIGNAL_PLAN.md` builds the
+> method this section describes as the right one, and the estimate here — that it is a serious
+> numerical project rather than an afternoon — held: the formulation was the easy half, and the
+> restarting strategy, the residual estimate and the left/right pairing all had to be found by
+> measurement rather than by reading.
+
 
 The dense method is `O(n³)` in the states and `O(n²·n_net)` in the reduction. A four-thousand-bus
 case has twenty thousand states, where that is hours rather than slow. The right tool is a sparse
@@ -1410,7 +1417,10 @@ honest about not being it, which is the same standard §20 applied to saturation
 
 - **Saturation**, on §20's terms: two incompatible representations, and no case that both states it
   and is otherwise modellable. The reason has not changed.
-- **Sparse Arnoldi small-signal**, and eigenvalue sensitivities.
+- ~~**Sparse Arnoldi small-signal**, and eigenvalue sensitivities.~~ Built — see
+  `plans/SMALL_SIGNAL_PLAN.md`. The size guard above is gone: past two thousand states `analyze`
+  hands the problem to a shift-invert Arnoldi method rather than refusing it, and says which method
+  answered. Twenty thousand states in under 15 s, cross-checked against ARPACK on the identical operator.
 - The EMT half of the small-signal row, which is a different simulation entirely.
 
 Everything else this plan named, and everything the follow-on sections named, is built and gated.
