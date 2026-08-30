@@ -9,6 +9,7 @@ power-grid-model's canonical worked example; `node-injection-sensor-and-zero-inj
 is its conflicting-sensor case, which exists to be rejected.
 """
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -187,3 +188,99 @@ def test_solve_batch_rejects_an_out_of_range_measurement():
     n = m.n_measurements
     with pytest.raises(ValueError, match="only .* measurement"):
         m.solve_batch([[(n, 1.0, 0.1)]])
+
+
+# ---------------------------------------------------------------------------
+# The phase domain
+# ---------------------------------------------------------------------------
+#
+# The estimator is the same object in either domain — `solve`, `solve_batch`,
+# `observability` and `bad_data` do not know which one they are in. What these
+# check is that the binding reaches the phase domain at all, that it says which
+# domain answered, and that the two agree about a network where they must.
+
+
+def test_asymmetric_estimates_in_the_phase_domain():
+    """Three buses per node rather than one, and the model says so."""
+    m = model("transmission-case", asymmetric=True)
+    m.solve()
+
+    assert m.phases == 3
+    sym = model("transmission-case")
+    sym.solve()
+    assert sym.phases == 1
+
+    # Three times the buses, including the synthesized one behind each source.
+    assert m.n_nodes == 3 * sym.n_nodes
+    assert len(m.voltage_mag()) == m.n_nodes
+    assert len(m.nodes()) == len(sym.nodes())
+
+    # A node's phases are consecutive from the index `nodes()` reports.
+    node_id, base = m.nodes()[0]
+    assert base % 3 == 0
+    assert base + 2 < m.n_nodes
+
+
+def test_the_two_domains_agree_about_a_balanced_network():
+    """The check that the phase domain is solving the same problem.
+
+    This fixture is balanced, so each node's three phases must come back at the
+    symmetric magnitude with the angles 120 degrees apart. A phase-domain
+    estimator with its sequence transform backwards would still converge, and
+    would still look plausible read on its own.
+    """
+    sym = model("transmission-case")
+    sym.solve()
+    asym = model("transmission-case", asymmetric=True)
+    asym.solve()
+
+    sym_mag, sym_ang = sym.voltage_mag(), sym.voltage_ang()
+    mag, ang = asym.voltage_mag(), asym.voltage_ang()
+    sym_base = {node: base for node, base in sym.nodes()}
+
+    for node, base in asym.nodes():
+        s = sym_base[node]
+        for phase, rotation in enumerate([0.0, -2 * math.pi / 3, 2 * math.pi / 3]):
+            assert mag[base + phase] == pytest.approx(sym_mag[s], abs=1e-6)
+            assert ang[base + phase] == pytest.approx(sym_ang[s] + rotation, abs=1e-6)
+
+
+def test_asymmetric_carries_the_analyses():
+    """Observability and bad-data reach the phase domain too."""
+    m = model("transmission-case", asymmetric=True)
+    m.solve()
+
+    # Nothing undetermined but gridoxide's own synthesized buses, of which
+    # there are three per source rather than one.
+    physical = 3 * len(m.nodes())
+    for bus, _quantity in m.observability():
+        assert bus >= physical
+
+    chi_squared, dof, p_value, suspects = m.bad_data(5)
+    assert dof > 0
+    assert p_value > 0.05, "nothing is wrong with this data"
+    assert len(suspects) <= 5
+
+
+def test_asymmetric_refuses_what_it_cannot_model():
+    """A component the three-phase conversion does not carry is named, not
+    dropped.
+
+    The symmetric path reads the same document without complaint, which is the
+    point: the refusal is about the phase domain's own model rather than about
+    the document being malformed.
+    """
+    candidates = [d.name for d in FIXTURES.iterdir() if (d / "input.json").is_file()]
+    refused = []
+    for name in candidates:
+        raw = json.loads((FIXTURES / name / "input.json").read_text())
+        unsupported = ("three_winding_transformer", "voltage_regulator", "link")
+        if not any(raw["data"].get(k) for k in unsupported):
+            continue
+        with pytest.raises(ValueError) as excinfo:
+            model(name, asymmetric=True)
+        assert any(k in str(excinfo.value) for k in unsupported), excinfo.value
+        refused.append(name)
+
+    if not refused:
+        pytest.skip("no committed fixture uses a component the phase domain refuses")
