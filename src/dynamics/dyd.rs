@@ -221,10 +221,19 @@ fn attributes(
         // does.
         let key = String::from_utf8_lossy(attribute.key.as_ref()).to_string();
         let key = key.rsplit(':').next().unwrap_or(&key).to_string();
-        let value = attribute
-            .unescape_value()
+        // Decoded by hand rather than through `unescape_value`, which
+        // quick-xml compiles only when its `encoding` feature is *off* —
+        // `decode_and_unescape_value` replaces it and wants a `Decoder` whose
+        // shape depends on that same feature. `cimdecoder` turns `encoding`
+        // on, so feature unification makes this file compile under
+        // `--features dynamics,iidm` and fail under `--features
+        // dynamics,iidm,cgmes`: a configuration CI builds and no single-feature
+        // step can see. `src/iidm.rs`'s `Attrs::of` carries the same note and
+        // the same workaround, which is the other half of this reader.
+        let raw = String::from_utf8_lossy(&attribute.value);
+        let value = quick_xml::escape::unescape(&raw)
             .map_err(|e| DydError::Xml(e.to_string()))?
-            .to_string();
+            .into_owned();
         out.insert(key, value);
     }
     Ok(out)
