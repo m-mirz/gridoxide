@@ -32,7 +32,7 @@
  *
  * The split between [`InvalidArgument`](Self::InvalidArgument) and the
  * numerical codes mirrors the `PyValueError`/`PyRuntimeError` distinction
- * [`python`](crate::python) already draws: the first says *you* passed
+ * `src/python.rs` already draws: the first says *you* passed
  * something wrong, the rest say the computation or its environment did not
  * work out.
  */
@@ -112,7 +112,7 @@ typedef enum gridoxide_backend {
 
 /**
  * What a bus is for the solve. Values are fixed by the ABI, not by the
- * discriminants of [`BusType`](crate::types::BusType).
+ * discriminants of [`BusType`].
  */
 typedef enum gridoxide_bus_type {
     /**
@@ -194,7 +194,7 @@ typedef struct Limits Limits;
  *
  * Zero-initializing gives an unusable configuration (`tol = 0`,
  * `max_iter = 0`); call
- * [`gridoxide_options_default`](gridoxide_options_default) first and then
+ * [`gridoxide_options_default`] first and then
  * override what you care about.
  */
 typedef struct gridoxide_options {
@@ -220,7 +220,7 @@ typedef struct gridoxide_options {
  *
  * # What is missing, and why
  *
- * **ZIP terms.** [`Bus`](crate::types::Bus) can carry voltage-dependent load
+ * **ZIP terms.** [`Bus`] can carry voltage-dependent load
  * components, which are a `Vec` and so have no place in a POD struct. A
  * network needing them must come in through the PGM document path, where they
  * are read as a matter of course.
@@ -429,7 +429,7 @@ enum gridoxide_status gridoxide_powerflow_solve_enforcing_q_limits(struct gridox
  * every `Slack` and `PV` bus.
  *
  * After this returns,
- * [`gridoxide_powerflow_slack_shift`](gridoxide_powerflow_slack_shift) reports
+ * [`gridoxide_powerflow_slack_shift`] reports
  * how far each bus's schedule moved.
  *
  * # Safety

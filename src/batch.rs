@@ -361,7 +361,7 @@ impl BatchSolver {
     /// one, so it would report the severed buses as still connected and their
     /// now-referenceless rows would come back as a singular solve instead of an
     /// honest `NoReferenceBus`. Those scenarios are detected up front with
-    /// [`structural_component_count`](crate::network::structural_component_count)
+    /// [`structural_component_count`]
     /// — removing branches can only *increase* the component count, so a count
     /// above the intact network's is exactly the "something split" condition —
     /// and take a slow path: the outaged branches are dropped outright and the

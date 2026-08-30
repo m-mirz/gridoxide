@@ -24,20 +24,20 @@
 //!
 //! `GeneratorSynchronousFourWindings*` is a field winding, one `d`-axis damper
 //! and two `q`-axis dampers — six electrical-plus-rotor states, which is
-//! exactly [`GenRound`](super::models::GenRound). Every parameter it needs is
+//! exactly [`GenRound`](crate::dynamics::models::GenRound). Every parameter it needs is
 //! read straight from the file by name, including `generator_SNom`, which is
 //! the machine's MVA base.
 //!
 //! `...ProportionalRegulations` carries a purely proportional voltage regulator
 //! and a purely proportional governor. Those are not approximations of
-//! [`Sexs`](super::models::Sexs) and [`Tgov1`](super::models::Tgov1) — they are
+//! [`Sexs`](crate::dynamics::models::Sexs) and [`Tgov1`](crate::dynamics::models::Tgov1) — they are
 //! different devices — so this library grew
-//! [`VrProportional`](super::models::VrProportional) and
-//! [`GoverProportional`](super::models::GoverProportional) to match them
+//! [`VrProportional`](crate::dynamics::models::VrProportional) and
+//! [`GoverProportional`](crate::dynamics::models::GoverProportional) to match them
 //! exactly, rather than inventing time constants a Dynawo file never stated.
 //!
 //! `GeneratorSynchronousThreeWindings*` is a fifth-order salient-pole machine
-//! and maps onto [`GenSalient`](super::models::GenSalient). Its parameter set
+//! and maps onto [`GenSalient`](crate::dynamics::models::GenSalient). Its parameter set
 //! carries no `XpqPu` and no `Tpq0` — a salient rotor has no `q`-axis transient
 //! to have a time constant for — so the reader keys on the library name rather
 //! than on which parameters happen to be present.
@@ -45,7 +45,8 @@
 //! # The one conversion that is inferred
 //!
 //! `governor_KGover` is a gain on the machine's own `governor_PNom` base, while
-//! [`GoverProportional`] wants one on the network base, so the reader applies
+//! [`GoverProportional`](crate::dynamics::models::GoverProportional) wants one on
+//! the network base, so the reader applies
 //! `k = KGover · PNom / s_base`. Every other quantity is read as stated or is
 //! converted by a model that documents its own rule. This one rests on a
 //! reading of Dynawo's base convention rather than on anything in the file, and

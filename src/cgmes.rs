@@ -2242,7 +2242,7 @@ pub struct VoltageControlReport {
     /// Controllers whose target disagreed with one already written at the same
     /// bus. Empty on every vendored fixture; reported rather than resolved,
     /// because neither answer is right — see
-    /// [`VoltageControl::regulate`].
+    /// `VoltageControl::regulate` (private).
     pub target_conflicts: Vec<TargetConflict>,
 }
 
@@ -3215,7 +3215,7 @@ pub struct CgmesNodeBreaker {
     /// assigned it, where it assigned one.
     ///
     /// This is the exporter's own answer to the same question
-    /// [`bus_view`](crate::topology::bus_view) computes, which makes it free
+    /// [`bus_view`](fn@crate::topology::bus_view) computes, which makes it free
     /// ground truth — see `tests/cgmes_node_breaker_test.rs`. Boundary nodes
     /// legitimately have none.
     pub tn_of_node: Vec<Option<String>>,
@@ -3224,7 +3224,7 @@ pub struct CgmesNodeBreaker {
 /// Reads the node-breaker graph: `ConnectivityNode`s as nodes, the nine CIM
 /// switch classes plus `Junction` as edges, `BusbarSection`s as busbars.
 ///
-/// Independent of [`build_ac_bus_skeleton`]'s `TopologicalNode` path, and
+/// Independent of `build_ac_bus_skeleton`'s `TopologicalNode` path, and
 /// deliberately so — the point of this function is to derive connectivity
 /// *without* relying on the reduction an exporter may or may not have
 /// performed. It needs EQ (for `ConnectivityNode` and equipment) and SSH (for
@@ -3571,7 +3571,7 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
 /// The operating limits CGMES declares for one piece of equipment, indexed by
 /// terminal.
 ///
-/// `terminals[i]` corresponds to the same `i` that [`TerminalIndex::bus`] uses
+/// `terminals[i]` corresponds to the same `i` that `TerminalIndex::bus` uses
 /// — 0 is `sequenceNumber` 1, the branch's starting point — so a caller that
 /// already knows which end of a branch it is looking at can index straight in.
 /// Equipment whose limits are attached to the *equipment* rather than to a

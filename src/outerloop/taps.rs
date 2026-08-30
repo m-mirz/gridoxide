@@ -19,7 +19,8 @@
 //!
 //! The incremental one is implemented here, for a reason specific to this
 //! crate: that derivative is already [`crate::ac_sensitivity::AcSensitivity`]
-//! with [`Variable::TransformerRatio`] against [`Function::VoltageMagnitude`],
+//! with [`Variable::TransformerRatio`] against
+//! [`Function::VoltageMagnitude`](crate::ac_sensitivity::Function::VoltageMagnitude),
 //! validated against a central-difference re-solve of the full nonlinear power
 //! flow. The continuous variants would need the ratio inside
 //! [`crate::jacobian::JacobianPattern`] and a different `n_unknowns`.

@@ -1,7 +1,7 @@
 //! The whole optimization: perimeters, in order, each carrying the last one's
 //! decisions forward.
 //!
-//! [`search`](super::search::search) answers one perimeter. This decides *which
+//! [`search`] answers one perimeter. This decides *which
 //! perimeters there are* and *in what order*, which is the difference between a
 //! set of independent answers and a plan.
 //!

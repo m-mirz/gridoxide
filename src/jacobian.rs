@@ -23,7 +23,7 @@
 //!   ("assembly becomes one flat kernel") is exactly this layout, extended to
 //!   a batch by adding a scenario stride.
 //!
-//! [`fill`] is a transliteration of `build_jacobian_triplets`' H/N/M/L
+//! [`JacobianPattern::fill`] is a transliteration of `build_jacobian_triplets`' H/N/M/L
 //! formulas, not a rederivation — `tests/jacobian_pattern_test.rs` asserts
 //! the two agree bit-for-bit in f64.
 

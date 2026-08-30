@@ -1,6 +1,6 @@
 //! Giving a retained switch a formulation.
 //!
-//! [`topology::bus_view`](crate::topology::bus_view) decides *which* switches
+//! [`topology::bus_view`](fn@crate::topology::bus_view) decides *which* switches
 //! survive into the solver; this module decides what they become once they are
 //! there. `docs/src/powerflow/zero_impedance_branches.md` surveys the three
 //! options and this implements the second:

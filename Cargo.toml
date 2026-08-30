@@ -22,6 +22,23 @@ license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
 # usually wants `libgridoxide.a` so the Rust runtime comes along in one
 # artifact rather than as a second file to install. It costs nothing when the
 # feature is off — cargo simply produces an archive nothing reads.
+# docs.rs builds with these and nothing else, which is the set that makes every
+# intra-doc link resolve. It is not `all-features`, and cannot be: `klu`,
+# `pardiso`, `opf-highs`, `opf-ipopt` and `smallsignal-arpack` each link a system
+# library docs.rs does not have.
+#
+# `python` and `capi` appear together here even though they must never be *built*
+# together — `pyo3`'s `extension-module` leaves libpython unlinked, which is
+# right for something Python dlopens and wrong for a library a C++ binary links.
+# Documenting does not link, so the pair is fine for rustdoc and only for
+# rustdoc.
+#
+# Fewer features is not an error, only a thinner crate: a link from an
+# always-compiled file into a feature-gated module is unresolved without that
+# feature, which is what `cargo doc` with no features reports and what it should.
+[package.metadata.docs.rs]
+features = ["cgmes", "ucte", "iidm", "opf", "rao", "dynamics", "capi", "python"]
+
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]
 

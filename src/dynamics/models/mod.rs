@@ -30,7 +30,7 @@
 //!
 //! The couplings are not written out per combination — that would be
 //! combinatorial. Each part declares its own derivatives with respect to its
-//! own states and its own scalar input, and [`unit`] composes them by the
+//! own states and its own scalar input, and [`mod@unit`] composes them by the
 //! chain rule over the signal graph, which is small and acyclic:
 //!
 //! ```text
@@ -213,7 +213,7 @@ pub trait DynamicModel: std::fmt::Debug {
 
     /// Parameters an eigenvalue sensitivity may be taken with respect to.
     ///
-    /// See [`Machine::tunable`](machine::Machine::tunable) for why the list is
+    /// See [`Machine::tunable`] for why the list is
     /// as short as it is: the sensitivity holds the operating point fixed, so
     /// only parameters the equilibrium does not depend on can be answered
     /// honestly.
@@ -398,7 +398,7 @@ impl Limits {
 /// what they are — an exciter sees a voltage error and produces a field
 /// voltage, a governor sees a speed deviation and produces a mechanical power.
 /// Keeping the interface that narrow is what lets
-/// [`GeneratingUnit`](unit::GeneratingUnit) compose any combination of them by
+/// [`GeneratingUnit`] compose any combination of them by
 /// the chain rule instead of enumerating combinations.
 ///
 /// The block's own **reference** — an exciter's `V_ref`, a governor's `P_ref` —
@@ -423,7 +423,7 @@ pub trait Control: std::fmt::Debug {
     ///
     /// A direct input-to-output path is normal here — a washout and a lead-lag
     /// both have one — and it is what makes the chain rule in
-    /// [`unit`](unit) more than a block-diagonal copy.
+    /// [`unit`](mod@unit) more than a block-diagonal copy.
     fn output_jacobian(&self, x: &[f64], u: f64, dydx: &mut [f64]) -> f64;
 
     /// Decide which limits are active for the coming step.

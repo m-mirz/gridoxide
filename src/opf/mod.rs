@@ -9,7 +9,8 @@
 //!
 //! # Why a boundary at all
 //!
-//! Because there will be two backends, deliberately. [`highs`] wraps a system
+//! Because there will be two backends, deliberately. `opf::highs` (the
+//! `opf-highs` feature) wraps a system
 //! HiGHS install; an in-house convex interior-point method follows. They are
 //! not redundant:
 //!
@@ -98,7 +99,7 @@ pub struct LinearProgram {
     /// to a discrete question is a plausible number that no one can act on: a
     /// phase shifter cannot sit at tap 4.3, and reporting that it should is
     /// worse than reporting nothing. [`ipm::IpmSolver`](crate::opf::ipm) is a
-    /// barrier method and refuses; [`highs::HighsSolver`](crate::opf::highs)
+    /// barrier method and refuses; `highs::HighsSolver` (the `opf-highs` feature)
     /// has a branch-and-cut MIP solver underneath and honours it.
     pub col_integral: Vec<bool>,
 }

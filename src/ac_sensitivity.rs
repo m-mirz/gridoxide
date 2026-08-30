@@ -219,7 +219,7 @@ pub struct FunctionRow {
 /// accessor is a triangular solve against it, never a refactorization — the
 /// same contract [`DcSensitivity`](crate::linear::sensitivity::DcSensitivity)
 /// offers, and the reason both own a
-/// [`RealFactorization`](crate::sparse::RealFactorization) rather than
+/// [`RealFactorization`] rather than
 /// borrowing the Newton path's solver.
 pub struct AcSensitivity {
     n_buses: usize,

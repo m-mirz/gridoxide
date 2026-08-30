@@ -4,7 +4,8 @@
 //! rather than solving its relaxation — a barrier method has no way to enforce
 //! an integer, and a tap of 4.3 is a plausible number nobody can act on. That
 //! refusal is correct and it leaves a gap: every discrete question has to go to
-//! [`highs`](crate::opf::highs), which needs a system library CI does not have.
+//! `opf::highs` (the `opf-highs` feature), which needs a system library CI does
+//! not have.
 //! So the whole mixed-integer half of the remedial-action work is verified only
 //! where `libhighs-dev` happens to be installed.
 //!

@@ -7,7 +7,7 @@
 //!
 //! # Why these are not just `#[repr(C)]` on the real types
 //!
-//! Because [`Bus`](crate::types::Bus) carries a `Vec<ZipTerm>`, which has no C
+//! Because [`Bus`] carries a `Vec<ZipTerm>`, which has no C
 //! layout. Mirroring lets that one field be handled deliberately (see
 //! [`GridoxideBus`]) instead of forcing the whole type into a shape it does not
 //! have — and it decouples the ABI from internal refactors, which matters more:
@@ -35,7 +35,7 @@ impl From<GridoxideComplex> for Complex<f64> {
 }
 
 /// What a bus is for the solve. Values are fixed by the ABI, not by the
-/// discriminants of [`BusType`](crate::types::BusType).
+/// discriminants of [`BusType`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GridoxideBusType {
@@ -51,7 +51,7 @@ pub enum GridoxideBusType {
 ///
 /// # What is missing, and why
 ///
-/// **ZIP terms.** [`Bus`](crate::types::Bus) can carry voltage-dependent load
+/// **ZIP terms.** [`Bus`] can carry voltage-dependent load
 /// components, which are a `Vec` and so have no place in a POD struct. A
 /// network needing them must come in through the PGM document path, where they
 /// are read as a matter of course.
@@ -209,7 +209,7 @@ pub enum GridoxideBackend {
 ///
 /// Zero-initializing gives an unusable configuration (`tol = 0`,
 /// `max_iter = 0`); call
-/// [`gridoxide_options_default`](gridoxide_options_default) first and then
+/// [`gridoxide_options_default`] first and then
 /// override what you care about.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

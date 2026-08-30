@@ -26,14 +26,14 @@
 //!
 //! 1. Solve an ordinary power flow. This crate's existing solver does it, with
 //!    whatever outer loops the case needs.
-//! 2. [`build`](init::build) turns the solved case into a [`DynamicSystem`]:
+//! 2. [`build`] turns the solved case into a [`DynamicSystem`]:
 //!    each device's states are chosen so its derivatives are *zero* at that
 //!    operating point, the remaining bus injections become constant
 //!    admittances, and every device's Norton admittance is stamped into `Y`.
 //! 3. [`run_dynamics`] integrates.
 //!
 //! Step 2 is the part that goes wrong. Its gate is stated in
-//! [`init`](init) and is worth repeating here: **a run with no disturbance
+//! [`init`] and is worth repeating here: **a run with no disturbance
 //! must produce a flat trajectory.** If initialization is consistent, every
 //! derivative is zero at `t = 0` and stays zero. If a sign is flipped or a
 //! per-unit base missed, the state drifts immediately. Nearly every mistake in
@@ -115,7 +115,7 @@ pub struct DynamicsOptions {
     /// Protection relays: actions triggered by a *state* rather than by a time.
     ///
     /// Their trip times are found rather than read, so they need no place in
-    /// the schedule above. See [`Relay`](events::Relay).
+    /// the schedule above. See [`Relay`].
     pub relays: Vec<events::Relay>,
     /// Which sparse-LU backend solves each step.
     ///

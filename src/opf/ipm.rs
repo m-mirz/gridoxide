@@ -2,11 +2,9 @@
 //!
 //! The second backend behind [`Solver`], and the portable one: pure Rust on
 //! the sparse factorization stack this crate already owns, with no system
-//! install and nothing to link. That is most of the point — [`highs`] needs a
-//! local HiGHS, which means the whole OPF surface is invisible to CI as long
-//! as it is the only backend.
-//!
-//! [`highs`]: super::highs
+//! install and nothing to link. That is most of the point — `opf::highs` (the
+//! `opf-highs` feature) needs a local HiGHS, which means the whole OPF surface
+//! is invisible to CI as long as it is the only backend.
 //!
 //! The other half of the point is that **two independent solvers are a
 //! validation gate**. On a convex problem the optimal objective is unique, so

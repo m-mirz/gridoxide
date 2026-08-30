@@ -6,7 +6,7 @@
 //! other. That is why this is an explicit input with named constructors rather
 //! than something the solver infers.
 //!
-//! [`Bus`](crate::types::Bus) stores only net `p_spec`/`q_spec` — every
+//! [`Bus`] stores only net `p_spec`/`q_spec` — every
 //! importer nets generation and load together before the solver sees them
 //! (`pgm::accumulate` is the clearest example) — so a direction is a per-bus
 //! `(Δp, Δq)` vector, and "load" has to be read off the sign of the net

@@ -1,6 +1,6 @@
 //! The power-flow handle.
 //!
-//! Follows the rule [`python`](crate::python) sets out: a handle exists because
+//! Follows the rule `src/python.rs` sets out: a handle exists because
 //! a factorization survives between calls. Construct once per topology, solve
 //! as many times as you like — the symbolic factorization inside
 //! [`PersistentSolver`] is computed on the first solve and reused by every one
@@ -467,7 +467,7 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_enforcing_q_limits(
 /// every `Slack` and `PV` bus.
 ///
 /// After this returns,
-/// [`gridoxide_powerflow_slack_shift`](gridoxide_powerflow_slack_shift) reports
+/// [`gridoxide_powerflow_slack_shift`] reports
 /// how far each bus's schedule moved.
 ///
 /// # Safety
