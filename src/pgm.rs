@@ -277,8 +277,8 @@ pub struct PgmSymGen {
 /// only tracks one netted P/Q per node — a real simplification versus a
 /// bus with a PV generator *and* a significant co-located load, but exactly
 /// consistent with how this parser already aggregates every other P/Q
-/// quantity per bus. See `solver::newton_raphson_enforcing_q_limits` for
-/// where these get enforced (PV→PQ switching); plain `newton_raphson`
+/// quantity per bus. See [`outerloop::ReactiveLimits`](crate::outerloop::ReactiveLimits)
+/// for where these get enforced (PV→PQ switching); plain `newton_raphson`
 /// ignores them entirely, same as before.
 #[derive(Clone, Deserialize)]
 pub struct PgmVoltageRegulator {
