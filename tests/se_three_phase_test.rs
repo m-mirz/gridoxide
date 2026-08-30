@@ -87,6 +87,10 @@ fn three_phase_terminal_functionals_agree_with_the_ybus() {
         "tests/data/pgm/powerflow/asymmetric/line",
         "tests/data/pgm/powerflow/asymmetric/transformer",
         "tests/data/pgm/powerflow/asymmetric/transmission-case",
+        // A document with a `link`. The phase domain used to refuse one
+        // outright, so its 3x3 blocks had never been checked against the Y-bus
+        // they are supposed to describe.
+        "tests/data/pgm/state_estimation/dummy-test-sym",
     ] {
         let (net, n_nodes) = load_3ph(path);
         let n = net.ybus.n();
@@ -932,5 +936,153 @@ fn the_batch_solver_carries_over_to_the_phase_domain() {
             );
             assert_eq!(a.voltage_ang.to_bits(), b.voltage_ang.to_bits());
         }
+    }
+}
+
+/// A `voltage_regulator` is ignored rather than refused.
+///
+/// It used to make the whole document inestimable in the phase domain. A
+/// voltage regulator pins a generator's bus to `u_ref` and lets Q float, which
+/// is a boundary condition for a *power flow*; an estimate treats every bus
+/// voltage as an unknown to be recovered from measurements, and has no PV bus
+/// for one to create. So it cannot change the answer, and refusing it made a
+/// document unestimable for a reason that could not have mattered — while the
+/// symmetric path read the same document without comment.
+#[test]
+fn a_voltage_regulator_does_not_stop_an_estimate() {
+    use gridoxide::se::case::SeCase;
+
+    let dir = fixture("tests/data/pgm/state_estimation/transmission-case");
+    let raw = std::fs::read_to_string(dir.join("input.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    // A regulator on whatever generator the document has, or on a node if it
+    // has none — `pgm_3ph_maps` should not care either way.
+    let data = doc.get_mut("data").unwrap().as_object_mut().unwrap();
+    let regulated = data
+        .get("sym_gen")
+        .and_then(|g| g.as_array())
+        .and_then(|g| g.first())
+        .and_then(|g| g.get("id"))
+        .cloned()
+        .unwrap_or_else(|| data["node"].as_array().unwrap()[0]["id"].clone());
+    data.insert(
+        "voltage_regulator".to_string(),
+        serde_json::json!([{
+            "id": 999_999,
+            "regulated_object": regulated,
+            "status": 1,
+            "u_ref": 1.0
+        }]),
+    );
+
+    let input: gridoxide::pgm::PgmInput =
+        serde_json::from_value(doc).expect("the document still parses");
+
+    let with = SeCase::from_pgm_3ph(&input, S_BASE_VA, 50.0).expect("estimable");
+    let without = case_3ph("tests/data/pgm/state_estimation/transmission-case");
+
+    // And it changes nothing: same buses, same measurements, same model.
+    assert_eq!(with.phases, without.phases);
+    assert_eq!(with.buses.len(), without.buses.len());
+    assert_eq!(with.measurements.len(), without.measurements.len());
+    assert_eq!(with.network.zero_injection, without.network.zero_injection);
+}
+
+/// A `link` is modelled, and modelled as phase-transparent.
+///
+/// The phase domain refused a document with one until now, which is why six of
+/// the committed state-estimation fixtures could not be estimated in it at all.
+///
+/// The Kirchhoff check above now covers a link-bearing document, but it cannot
+/// catch a link that is *consistently* wrong: it compares the terminal
+/// functionals against the Y-bus, and both are built from the same
+/// `Transformer3PhSeq`. So the value is pinned here independently, against the
+/// two things that say what a link is — `pgm::LINK_Y`, and the fact that an
+/// ideal connection couples no phase to any other. power-grid-model's own
+/// `link.hpp` agrees literally: `calc_param_y_asym(y_link, 0.0, y_link, 0.0,
+/// 1.0)`, the same admittance in the positive and zero sequences.
+#[test]
+fn a_link_is_phase_transparent() {
+    use gridoxide::pgm::{pgm_3ph_maps, LINK_Y};
+
+    let dir = fixture("tests/data/pgm/state_estimation/dummy-test-sym");
+    let input = common::load_pgm_input(&dir.join("input.json"));
+    let maps = pgm_3ph_maps(&input).expect("a link no longer stops the conversion");
+
+    let link = input.data.link.first().expect("this fixture has a link");
+    let branch = *maps.branch_idx.get(&link.id).expect("a link takes a branch index");
+    assert_eq!(link.from_status, 1);
+    assert_eq!(link.to_status, 1);
+
+    let case = case_3ph("tests/data/pgm/state_estimation/dummy-test-sym");
+    let from = maps.node_idx[&link.from_node];
+    let to = maps.node_idx[&link.to_node];
+
+    for phase in 0..3 {
+        let terminal = &case.network.terminals[3 * branch + phase][0];
+        assert_eq!(terminal.at, 3 * from + phase);
+
+        // Exactly two live coefficients, both on this phase: `I_p` depends on
+        // `V_from,p` and `V_to,p` and on nothing else. A link that coupled the
+        // phases would show up as a third.
+        //
+        // The threshold is relative to the link's own admittance, and has to
+        // be. The blocks are assembled by transforming sequence parameters into
+        // the phase domain, so the cross-phase terms are a cancellation rather
+        // than a structural zero: measured at 3e-11 against a diagonal of 2e5,
+        // which is 1.5e-16 relative — round-off, and exactly what a
+        // phase-transparent element should leave behind.
+        let floor = 1e-9 * LINK_Y.norm();
+        let live: Vec<_> =
+            terminal.coefficients.iter().filter(|(_, y)| y.norm() > floor).collect();
+        assert_eq!(live.len(), 2, "phase {phase}: {:?}", terminal.coefficients);
+
+        let self_y = live.iter().find(|(bus, _)| *bus == 3 * from + phase).unwrap().1;
+        let mutual_y = live.iter().find(|(bus, _)| *bus == 3 * to + phase).unwrap().1;
+        assert!((self_y - LINK_Y).norm() < 1e-6 * LINK_Y.norm(), "phase {phase}: {self_y}");
+        assert!((mutual_y + LINK_Y).norm() < 1e-6 * LINK_Y.norm(), "phase {phase}: {mutual_y}");
+    }
+}
+
+/// A current sensor on a link is refused in the phase domain too.
+///
+/// A link's admittance is a chosen regularization constant, so the current
+/// through one is an artifact of that choice rather than a physical quantity —
+/// power-grid-model refuses it outright and the symmetric path here already
+/// did. The phase domain could not, because a document with a link never got
+/// that far.
+#[test]
+fn a_current_sensor_on_a_link_is_refused() {
+    use gridoxide::measurement::{measurements_from_pgm_3ph, MeasurementError};
+    use gridoxide::pgm::pgm_3ph_maps;
+
+    let dir = fixture("tests/data/pgm/state_estimation/dummy-test-sym");
+    let raw = std::fs::read_to_string(dir.join("input.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let data = doc.get_mut("data").unwrap().as_object_mut().unwrap();
+    let link_id = data["link"].as_array().unwrap()[0]["id"].clone();
+    data.insert(
+        "sym_current_sensor".to_string(),
+        serde_json::json!([{
+            "id": 999_998,
+            "measured_object": link_id,
+            "measured_terminal_type": 0,
+            "angle_measurement_type": 0,
+            "i_measured": 1.0,
+            "i_angle_measured": 0.0,
+            "i_sigma": 0.01,
+            "i_angle_sigma": 0.01
+        }]),
+    );
+
+    let input: gridoxide::pgm::PgmInput = serde_json::from_value(doc).unwrap();
+    let maps = pgm_3ph_maps(&input).unwrap();
+    let (buses, _, _) = pgm_to_3ph_network(input.clone(), S_BASE_VA, 50.0);
+    let u_rated = |bus: usize| buses[bus].u_rated;
+
+    match measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated) {
+        Err(MeasurementError::CurrentSensorOnLink { sensor, .. }) => assert_eq!(sensor, 999_998),
+        other => panic!("expected a refusal, got {other:?}"),
     }
 }

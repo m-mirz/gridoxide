@@ -1336,9 +1336,23 @@ pub fn measurements_from_pgm_3ph(
             if !i_measured.is_finite() || !i_angle.is_finite() {
                 continue;
             }
-            // `pgm_3ph_maps` refuses links and three-winding transformers
-            // outright, so a current sensor here is on an ordinary branch
-            // terminal or on nothing.
+            // A `link`'s admittance is a chosen constant, so the current
+            // through one is not a measurable quantity. power-grid-model
+            // refuses it too, and so does the symmetric path here — see
+            // `MeasurementError::CurrentSensorOnLink`.
+            //
+            // This became reachable when the phase domain learned to model a
+            // link. Before that `pgm_3ph_maps` refused the whole document, and
+            // the comment here said so; without this check the `near` lookup
+            // below searches only lines and transformers, finds nothing, and
+            // reports the link as an unknown object — true in a sense, and the
+            // wrong diagnosis.
+            if input.data.link.iter().any(|l| l.id == object) {
+                return Err(MeasurementError::CurrentSensorOnLink { sensor: id, link: object });
+            }
+            // `pgm_3ph_maps` refuses three-winding transformers outright, so a
+            // current sensor here is on an ordinary branch terminal or on
+            // nothing.
             if !matches!(terminal_type, 0 | 1) {
                 return Err(MeasurementError::UnsupportedTerminalType {
                     sensor: id,

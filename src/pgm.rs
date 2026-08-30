@@ -818,6 +818,36 @@ pub fn pgm_shunts_3ph(
 /// consumed by `pgm_to_3ph_network`. Only Dyn (`winding_from`=delta,
 /// `winding_to`=wye_n) and YNyn (`winding_from`=`winding_to`=wye_n)
 /// transformers are supported — see `network::transformer_seq_params`.
+/// The three-phase sequence parameters of a `link`.
+///
+/// An ideal connection looks the same to all three sequences — a plain series
+/// admittance, no shunt, no tap, no phase shift — so the three sequence
+/// parameters are one `branch_calc_param` repeated. power-grid-model's own
+/// `link.hpp` agrees literally: its asymmetric parameter is
+/// `calc_param_y_asym(y_link, 0.0, y_link, 0.0, 1.0)`, the same admittance in
+/// the positive and zero sequences with no shunt in either.
+///
+/// `None` for a link with both terminals open, which is not a branch at all.
+pub fn link_seq_params(lk: &PgmLink, id_to_idx: &HashMap<u64, usize>) -> Option<Transformer3PhSeq> {
+    if lk.from_status == 0 && lk.to_status == 0 {
+        return None;
+    }
+    let y = branch_calc_param(
+        LINK_Y,
+        Complex::new(0.0, 0.0),
+        Complex::new(1.0, 0.0),
+        lk.from_status,
+        lk.to_status,
+    );
+    Some(Transformer3PhSeq {
+        from: id_to_idx[&lk.from_node],
+        to: id_to_idx[&lk.to_node],
+        y0: y,
+        y1: y,
+        y2: y,
+    })
+}
+
 pub fn pgm_transformers_3ph(
     input: &PgmInput,
     id_to_idx: &HashMap<u64, usize>,
@@ -842,6 +872,11 @@ pub fn pgm_transformers_3ph(
                 y0, y1, y2,
             }
         })
+        // Links, after the transformers — the position `pgm_3ph_maps` assigns
+        // them, and the one the short-circuit path already used. A link is a
+        // branch like any other here; dropping it leaves whatever hangs off it
+        // de-energized and absent from the answer.
+        .chain(input.data.link.iter().filter_map(|lk| link_seq_params(lk, id_to_idx)))
         .collect()
 }
 
@@ -1388,12 +1423,19 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
     if !input.data.three_winding_transformer.is_empty() {
         return Err(Unsupported3Ph::ThreeWindingTransformer);
     }
-    if !input.data.voltage_regulator.is_empty() {
-        return Err(Unsupported3Ph::VoltageRegulator);
-    }
-    if !input.data.link.is_empty() {
-        return Err(Unsupported3Ph::Link);
-    }
+    // `voltage_regulator` is deliberately *ignored* rather than refused, and it
+    // used to be refused. These maps serve state estimation and nothing else,
+    // and a voltage regulator has no meaning in an estimate: it pins a
+    // generator's bus to `u_ref` and lets Q float, which is a *boundary
+    // condition* for a power flow, while an estimate treats every bus voltage
+    // as an unknown to be recovered from measurements. There are no PV buses
+    // here for it to create.
+    //
+    // Refusing it therefore made an estimable document inestimable for a reason
+    // that could not have changed the estimate — and inconsistently, since the
+    // symmetric path reads the same document without comment. `pgm_to_network`
+    // does set the bus type, and the estimator ignores it for exactly this
+    // reason: every bus carries a magnitude unknown whatever its type says.
     // There used to be a winding-pair guard here, because
     // `transformer_seq_params` panicked outside Dyn and YNyn and a panic
     // reached from a document is not a diagnosis. That function now implements
@@ -1431,6 +1473,16 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
     }
     for t in &input.data.transformer {
         branch_idx.insert(t.id, next);
+        next += 1;
+    }
+    // Then the links, which `pgm_transformers_3ph` appends after the
+    // transformers. A fully-open link is not a branch and takes no index, the
+    // same rule a fully-open line follows above.
+    for lk in &input.data.link {
+        if lk.from_status == 0 && lk.to_status == 0 {
+            continue;
+        }
+        branch_idx.insert(lk.id, next);
         next += 1;
     }
 
@@ -1478,24 +1530,22 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> Result<PgmNetwork3Ph, Unsupported3Ph> {
 
 /// A component the three-phase conversion does not model.
 ///
-/// Each is a deliberate cut rather than an oversight. A three-winding
-/// transformer needs asymmetric star parameters; `voltage_regulator` has no
-/// meaning in an estimate, where a generator's voltage is an unknown; and a
-/// `link` needs its own three-phase stamping that `pgm_to_3ph_network` never
-/// grew. Failing is the point — all three were being dropped silently.
+/// Each is a deliberate cut rather than an oversight, and failing is the point:
+/// both were being dropped silently. A three-winding transformer needs
+/// asymmetric star parameters.
+///
+/// `voltage_regulator` used to be a third variant and is not one any more — see
+/// [`pgm_3ph_maps`], where it is ignored rather than refused, because it cannot
+/// affect an estimate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unsupported3Ph {
     ThreeWindingTransformer,
-    VoltageRegulator,
-    Link,
 }
 
 impl std::fmt::Display for Unsupported3Ph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let what = match self {
             Self::ThreeWindingTransformer => "three_winding_transformer",
-            Self::VoltageRegulator => "voltage_regulator",
-            Self::Link => "link",
         };
         write!(f, "the three-phase conversion does not model `{what}`")
     }
@@ -1648,38 +1698,13 @@ pub fn pgm_to_3ph_sc_network(
         input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
 
     let lines = pgm_lines_3ph(input, &node_idx, s_base_va, freq_hz);
-    let mut transformers = pgm_transformers_3ph(input, &node_idx, s_base_va);
+    let transformers = pgm_transformers_3ph(input, &node_idx, s_base_va);
     let shunts = pgm_shunts_3ph(input, &node_idx, s_base_va);
 
-    // Links, appended after the transformers. An ideal connection looks the
-    // same to all three sequences — it is a plain series admittance with no
-    // shunt, no tap and no phase shift — so the sequence parameters are just
-    // `branch_calc_param` three times over.
-    //
-    // Dropping them is not an option, even though the three-phase power-flow
-    // path does exactly that (`Unsupported3Ph::Link`): a link is what holds
-    // two nodes together, and silently losing one leaves whatever hangs off
-    // it de-energized and absent from the answer. That is precisely what
-    // `dummy-test-line-into-itself` catches.
-    for lk in &input.data.link {
-        if lk.from_status == 0 && lk.to_status == 0 {
-            continue;
-        }
-        let y = branch_calc_param(
-            LINK_Y,
-            Complex::new(0.0, 0.0),
-            Complex::new(1.0, 0.0),
-            lk.from_status,
-            lk.to_status,
-        );
-        transformers.push(Transformer3PhSeq {
-            from: node_idx[&lk.from_node],
-            to: node_idx[&lk.to_node],
-            y0: y,
-            y1: y,
-            y2: y,
-        });
-    }
+    // Links come with the transformers now — `pgm_transformers_3ph` appends
+    // them, so this path and the estimator cannot disagree about what a link
+    // is. This loop used to live here, and was the only place that modelled
+    // one in three phases.
 
     let sources = input
         .data
