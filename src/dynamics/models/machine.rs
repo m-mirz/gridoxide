@@ -137,6 +137,44 @@ pub struct MachineInit {
     pub p_m: f64,
 }
 
+
+/// `tunable`/`parameter`/`with_parameter` for a machine that keeps its params.
+///
+/// The same three lines four times over, and the only thing that varies is the
+/// type to rebuild. See [`Machine::tunable`] for why the list is `h` and `d`.
+macro_rules! tunable_machine {
+    ($machine:ty) => {
+        fn tunable(&self) -> &'static [&'static str] {
+            &["h", "d"]
+        }
+
+        fn parameter(&self, name: &str) -> Option<f64> {
+            match name {
+                "h" => Some(self.params.h),
+                "d" => Some(self.params.d),
+                _ => None,
+            }
+        }
+
+        fn with_parameter(&self, name: &str, value: f64) -> Option<Box<dyn Machine>> {
+            let mut params = self.params;
+            match name {
+                "h" => params.h = value,
+                "d" => params.d = value,
+                _ => return None,
+            }
+            let mut rebuilt = <$machine>::new(params, self.s_base, self.f_nom)
+                .ok()?
+                // The stator formulation is a modelling choice made after
+                // construction, so it has to be carried across or a perturbed
+                // copy would silently answer about the other one.
+                .with_speed_voltages(self.speed_voltages);
+            rebuilt.carry_latched_from(self);
+            Some(Box::new(rebuilt))
+        }
+    };
+}
+
 /// A synchronous machine: rotor dynamics plus whatever flux states the model
 /// carries, driven by a field voltage and a mechanical power.
 pub trait Machine: std::fmt::Debug {
@@ -146,6 +184,68 @@ pub trait Machine: std::fmt::Debug {
     /// Which state is the rotor speed, in per unit. A governor and a stabilizer
     /// both read it, and neither should have to know the model's layout.
     fn omega_index(&self) -> usize;
+
+    /// Parameters an eigenvalue sensitivity may be taken with respect to.
+    ///
+    /// Deliberately short: `h` and `d`, and nothing else. The restriction is
+    /// not laziness, it is what the sensitivity formula can honestly answer.
+    /// `dλ/dp` as computed by [`smallsignal::sensitivities`] holds the
+    /// operating point fixed, so it is only the whole derivative for parameters
+    /// the equilibrium does not depend on — and the inertia and the damping
+    /// coefficient are exactly those. `H` appears only as `1/2H` in the swing
+    /// equation and `D` only multiplying `(ω − 1)`, which is zero at rest.
+    ///
+    /// A reactance is different: initialization picks `δ`, `e'_q` and the flux
+    /// states *from* the reactances, so changing one moves the point being
+    /// linearized about, and the true derivative carries a `∂J/∂x · dx/dp` term
+    /// this does not have. Offering it would produce a number that looks like
+    /// an answer and is a fraction of one.
+    ///
+    /// [`smallsignal::sensitivities`]: crate::dynamics::smallsignal::sensitivities
+    fn tunable(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The current value of one tunable parameter, on the machine's own base.
+    fn parameter(&self, _name: &str) -> Option<f64> {
+        None
+    }
+
+    /// The same machine with one parameter changed.
+    ///
+    /// Rebuilt through the ordinary constructor rather than patched in place,
+    /// which is not a stylistic preference: `GenRound::new` stores
+    /// `h · (mbase/s_base)`, so writing a new `h` into the field directly would
+    /// skip the base conversion and quietly scale the answer by the machine's
+    /// rating.
+    fn with_parameter(&self, _name: &str, _value: f64) -> Option<Box<dyn Machine>> {
+        None
+    }
+
+    /// The latched internal EMF magnitude, network base, or zero for a machine
+    /// that carries its EMF as a state instead.
+    ///
+    /// Exists so [`carry_latched_from`](Self::carry_latched_from) can be
+    /// written against the trait rather than against a concrete type.
+    fn internal_emf(&self) -> f64 {
+        0.0
+    }
+
+    /// Carry across whatever [`initialize`](Self::initialize) latched.
+    ///
+    /// A machine rebuilt by [`with_parameter`](Self::with_parameter) is
+    /// *constructed*, not initialized, so anything the operating point put into
+    /// it is back at its default. [`GenCls`] keeps its internal EMF magnitude
+    /// that way, and a copy without it is a machine with no excitation: its
+    /// electrical torque and every derivative of it are zero, which does not
+    /// fail — it quietly answers about a different machine. Measured, before
+    /// this existed: `dλ/dH` came back as exactly zero on an undamped case,
+    /// and on a damped one as the `D/4H²` term alone with the whole
+    /// synchronizing part missing.
+    ///
+    /// The higher-order machines carry their EMF as *states* and so have
+    /// nothing to carry here, which is why the default does nothing.
+    fn carry_latched_from(&mut self, _other: &dyn Machine) {}
 
     /// Which state is the rotor angle. Every machine here puts it first, but
     /// saying so is what keeps that from being an unwritten contract a modal
@@ -223,6 +323,11 @@ fn require_positive(name: &'static str, value: f64) -> Result<f64, InitError> {
 /// [`GenTransient`] is the first model with a field winding to excite.
 #[derive(Clone, Debug)]
 pub struct GenCls {
+    /// What this machine was built from, kept so a perturbed copy
+    /// can be built the *same way* — see `Machine::with_parameter`.
+    params: GenClsParams,
+    s_base: f64,
+    f_nom: f64,
     h: f64,
     d: f64,
     y: Complex<f64>,
@@ -266,6 +371,9 @@ impl GenCls {
         let (ra, xdp) = (params.ra / k, params.xdp / k);
         let z = Complex::new(ra, xdp);
         Ok(Self {
+            params,
+            s_base,
+            f_nom,
             h: params.h * k,
             d: params.d * k,
             y: Complex::new(1.0, 0.0) / z,
@@ -358,6 +466,17 @@ struct Stator {
 }
 
 impl Machine for GenCls {
+    tunable_machine!(GenCls);
+
+    fn internal_emf(&self) -> f64 {
+        self.e_mag
+    }
+
+    /// The internal EMF magnitude, which nothing but initialization can supply.
+    fn carry_latched_from(&mut self, other: &dyn Machine) {
+        self.e_mag = other.internal_emf();
+    }
+
     fn n_states(&self) -> usize {
         2
     }
@@ -503,6 +622,11 @@ impl Machine for GenCls {
 /// exciter can actually act on — `E_fd` enters `ė'_q` directly.
 #[derive(Clone, Debug)]
 pub struct GenTransient {
+    /// What this machine was built from, kept so a perturbed copy
+    /// can be built the *same way* — see `Machine::with_parameter`.
+    params: GenTransientParams,
+    s_base: f64,
+    f_nom: f64,
     h: f64,
     d: f64,
     ra: f64,
@@ -564,6 +688,9 @@ impl GenTransient {
         // makes the residual ∂I/∂V — the saliency — as small as it can be.
         let z_norton = Complex::new(ra, 0.5 * (xdp + xqp));
         Ok(Self {
+            params,
+            s_base,
+            f_nom,
             h: params.h * k,
             d: params.d * k,
             ra,
@@ -642,6 +769,8 @@ impl GenTransient {
 }
 
 impl Machine for GenTransient {
+    tunable_machine!(GenTransient);
+
     fn n_states(&self) -> usize {
         4
     }
@@ -885,6 +1014,11 @@ pub fn bare(machine: Box<dyn Machine>) -> Box<dyn DynamicModel> {
 /// misses that first, largest current excursion entirely.
 #[derive(Clone, Debug)]
 pub struct GenRound {
+    /// What this machine was built from, kept so a perturbed copy
+    /// can be built the *same way* — see `Machine::with_parameter`.
+    params: GenRoundParams,
+    s_base: f64,
+    f_nom: f64,
     h: f64,
     d: f64,
     ra: f64,
@@ -973,6 +1107,9 @@ impl GenRound {
         // arrives, which is what makes it the right conditioning choice here.
         let z_norton = Complex::new(ra, 0.5 * (xdpp + xqpp));
         Ok(Self {
+            params,
+            s_base,
+            f_nom,
             h: params.h * k,
             d: params.d * k,
             ra,
@@ -1060,6 +1197,8 @@ impl GenRound {
 }
 
 impl Machine for GenRound {
+    tunable_machine!(GenRound);
+
     fn n_states(&self) -> usize {
         6
     }
@@ -1303,6 +1442,11 @@ impl Machine for GenRound {
 /// separately. This model allows them to differ, which reads both.
 #[derive(Clone, Debug)]
 pub struct GenSalient {
+    /// What this machine was built from, kept so a perturbed copy
+    /// can be built the *same way* — see `Machine::with_parameter`.
+    params: GenSalientParams,
+    s_base: f64,
+    f_nom: f64,
     h: f64,
     d: f64,
     ra: f64,
@@ -1368,6 +1512,9 @@ impl GenSalient {
         let bd = (xdp - xdpp) / (xdp - xl);
         let z_norton = Complex::new(ra, 0.5 * (xdpp + xqpp));
         Ok(Self {
+            params,
+            s_base,
+            f_nom,
             h: params.h * k,
             d: params.d * k,
             ra,
@@ -1429,6 +1576,8 @@ impl GenSalient {
 }
 
 impl Machine for GenSalient {
+    tunable_machine!(GenSalient);
+
     fn n_states(&self) -> usize {
         5
     }

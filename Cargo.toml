@@ -203,6 +203,23 @@ opf-highs = ["opf", "dep:bindgen"]
 # optima — which makes the comparison weaker than the convex one and worth
 # reading carefully rather than as a pass/fail.
 opf-ipopt = ["opf", "dep:bindgen"]
+# Builds the ARPACK cross-check for the sparse small-signal eigensolver
+# (src/dynamics/arpack.rs) — the modal-analysis counterpart of what `opf-highs`
+# is for DC-OPF and `opf-ipopt` for AC-OPF, and it plays exactly that role: the
+# reference `dynamics::arnoldi`'s own iteration is checked against, not
+# something anything depends on. Both are handed the *same* shift-invert
+# operator, so a disagreement isolates the eigensolver and nothing else.
+#
+# Unlike its three siblings it runs no `bindgen`: ARPACK's C surface here is two
+# functions, declared by hand — see `build.rs`'s `arpack` module for why.
+#
+# Needs a local ARPACK with its development files (on Debian/Ubuntu: `apt
+# install libarpack2-dev` — the runtime package alone ships only
+# `libarpack.so.2`, which cannot be linked against). Found at `/usr` by default;
+# set `ARPACK_ROOT` for anything else. Not built or tested in CI, since no
+# runner has ARPACK installed — the same local/manual-verification-only position
+# `pardiso`, `opf-highs` and `opf-ipopt` are in.
+smallsignal-arpack = ["dynamics"]
 # Exports a C ABI (src/capi/) so a C++ project can embed gridoxide, plus the
 # `cbindgen`-generated `include/gridoxide.h` that describes it.
 #
@@ -376,6 +393,11 @@ required-features = ["dynamics"]
 name = "dynamics_smallsignal_test"
 path = "tests/dynamics_smallsignal_test.rs"
 required-features = ["dynamics"]
+
+[[test]]
+name = "dynamics_smallsignal_arpack_test"
+path = "tests/dynamics_smallsignal_arpack_test.rs"
+required-features = ["smallsignal-arpack"]
 
 [[test]]
 name = "dynamics_reference_test"
@@ -563,6 +585,11 @@ required-features = ["cgmes"]
 name = "cgmes_microgrid_type3_test"
 path = "tests/cgmes_microgrid_type3_test.rs"
 required-features = ["cgmes"]
+
+[[example]]
+name = "smallsignal_scale"
+path = "examples/smallsignal_scale.rs"
+required-features = ["dynamics"]
 
 [[example]]
 name = "dynamics_scale"

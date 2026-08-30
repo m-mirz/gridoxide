@@ -8,6 +8,7 @@ checked here is that the binding reaches it, and that the arguments mean what
 the docstring says.
 """
 
+import math
 from pathlib import Path
 
 import pytest
@@ -236,3 +237,98 @@ def test_a_mode_carries_its_shape():
     for mode in modes:
         if mode.frequency == 0.0:
             assert mode.shape == []
+
+
+def test_small_signal_can_be_aimed_at_a_frequency():
+    """Naming a frequency selects the sparse method, and the result says so.
+
+    The physics is gated in `tests/dynamics_smallsignal_test.rs`, where the two
+    methods are checked against each other mode for mode. What matters here is
+    that the binding carries the distinction a caller must not lose: a partial
+    list of modes near a shift supports no statement about the whole system,
+    and `complete` is what says which kind of list this is.
+    """
+    every = gridoxide.small_signal(str(CASE))
+    assert every.method == "dense"
+    assert every.shift is None
+    assert every.complete is True
+    assert every.converged is True
+
+    near = gridoxide.small_signal(str(CASE), freq=1.27, count=3)
+    assert near.method == "sparse"
+    assert near.complete is False
+    assert near.converged is True
+    assert len(near) == 3
+    assert near.shift is not None
+    re, im = near.shift
+    assert im / (2 * math.pi) == pytest.approx(1.27)
+    assert re < 0, "a damped shift sits left of the axis"
+    assert "sparse" in repr(near)
+
+    # The mode nearest 1.27 Hz is the swing mode, and both methods agree on it.
+    swing = min(every, key=lambda m: abs(m.frequency - 1.27))
+    found = min(near, key=lambda m: abs(m.frequency - 1.27))
+    assert found.sigma == pytest.approx(swing.sigma, abs=1e-9)
+    assert found.omega == pytest.approx(swing.omega, abs=1e-9)
+    assert [n for n, _ in found.participation] == [n for n, _ in swing.participation]
+
+    # The sparse method measures how far off it might be; the dense one has
+    # nothing to iterate and so reports nothing.
+    assert all(m.residual == 0.0 for m in every)
+    assert all(0.0 < m.residual < 1e-9 for m in near)
+
+
+def test_small_signal_indexes_like_the_list_it_replaced():
+    """The result grew fields without breaking the code that treated it as a
+    sequence."""
+    modes = gridoxide.small_signal(str(CASE))
+    assert len(modes) == 13
+    assert modes[0].damping <= modes[1].damping
+    assert modes[-1] is not None
+    assert len([m for m in modes]) == 13
+    with pytest.raises(IndexError):
+        _ = modes[13]
+
+
+def test_small_signal_refuses_contradictory_aims():
+    """Two ways of naming the same shift, given at once, is a question with no
+    answer rather than one to rank."""
+    with pytest.raises(ValueError, match="names the shift outright"):
+        gridoxide.small_signal(str(CASE), freq=1.0, near=(-0.4, 8.0))
+    with pytest.raises(ValueError, match="give freq to say where"):
+        gridoxide.small_signal(str(CASE), damping=0.05)
+    with pytest.raises(ValueError, match="freq must be positive"):
+        gridoxide.small_signal(str(CASE), freq=-1.0)
+
+
+def test_small_signal_reports_parameter_sensitivities():
+    """Which knob moves the worst mode, and by how much.
+
+    The numbers are gated in `tests/dynamics_smallsignal_test.rs` — against the
+    closed form `dλ/dH = −λ/2H` and against a difference of two whole analyses.
+    What is checked here is that the binding reaches them, ranks them, and says
+    whose parameter each one is.
+    """
+    plain = gridoxide.small_signal(str(CASE))
+    assert plain.sensitivities == [], "not computed unless asked for"
+
+    result = gridoxide.small_signal(str(CASE), sensitivities=True)
+    assert len(result.sensitivities) == 2, "a machine offers its inertia and its damping"
+
+    names = {s.name for s in result.sensitivities}
+    assert names == {"h", "d"}
+    assert all(s.unit == "G1" for s in result.sensitivities)
+    assert all(s.device == 0 for s in result.sensitivities)
+
+    by_name = {s.name: s for s in result.sensitivities}
+    assert by_name["h"].value == pytest.approx(5.0)
+
+    # More damping coefficient, more damping ratio — the one sign that is not a
+    # convention.
+    assert by_name["d"].d_damping > 0
+
+    # Ranked by how much damping a 1% change buys, largest first.
+    weighted = [abs(s.d_damping * s.value) for s in result.sensitivities]
+    assert weighted == sorted(weighted, reverse=True)
+
+    assert "ModeSensitivity" in repr(result.sensitivities[0])

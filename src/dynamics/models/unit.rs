@@ -188,6 +188,28 @@ impl GeneratingUnit {
 }
 
 impl DynamicModel for GeneratingUnit {
+    /// Delegated straight to the machine: the tunable parameters are the
+    /// rotor's, and a control's would move the equilibrium — see
+    /// [`Machine::tunable`](super::machine::Machine::tunable).
+    fn tunable(&self) -> &'static [&'static str] {
+        self.machine.tunable()
+    }
+
+    fn parameter(&self, name: &str) -> Option<f64> {
+        self.machine.parameter(name)
+    }
+
+    fn set_parameter(&mut self, name: &str, value: f64) -> Option<f64> {
+        let previous = self.machine.parameter(name)?;
+        let rebuilt = self.machine.with_parameter(name, value)?;
+        // Nothing else about the unit moves: the state layout is the machine's
+        // own and unchanged, and `e_fd0`/`p_m0` are the operating point, which
+        // a tunable parameter by definition does not disturb.
+        debug_assert_eq!(rebuilt.n_states(), self.machine.n_states());
+        self.machine = rebuilt;
+        Some(previous)
+    }
+
     fn n_states(&self) -> usize {
         self.n_states
     }
