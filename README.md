@@ -59,9 +59,13 @@ See [Building and Running](docs/src/getting_started/building.md) and
   Gated against the equal-area criterion's closed-form critical clearing time and against
   [Dynawo's own published answer](docs/src/dynamics/validation.md) for Kundur's Example 13.2 —
   see [The RMS Simulation Problem](docs/src/dynamics/index.md).
-- **Small-signal (modal) analysis** on the same system — eigenvalues, damping ratios and
-  participation factors naming the states each mode belongs to, from the very Jacobian blocks the
-  time-domain solve already assembles. See
+- **Small-signal (modal) analysis** on the same system — eigenvalues, damping ratios,
+  participation factors naming the states each mode belongs to, and mode shapes saying how the
+  rotors move, from the very Jacobian blocks the time-domain solve already assembles. Dense below a
+  couple of thousand states; past that, **sparse shift-invert Arnoldi** takes over and returns the
+  modes near a named frequency without ever forming the state matrix — 20 480 states in under 15 s, and
+  cross-checked against ARPACK on the identical operator. With **eigenvalue sensitivities**: how far
+  a mode moves, and how much damping it gains, per unit of a machine parameter. See
   [Small-Signal Analysis](docs/src/dynamics/smallsignal.md).
 - **Five interchangeable linear-solver backends** — `faer` (`Scalar`), a hand-written block LU
   (`Block`), vendored SuiteSparse KLU over FFI (`Klu`), a from-scratch Rust translation of KLU
