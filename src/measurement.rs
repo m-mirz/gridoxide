@@ -424,11 +424,16 @@ impl Resolver for PhaseView<'_> {
     fn node_bus(&self, id: u64) -> Option<usize> {
         self.net.node_idx.get(&id).map(|&k| 3 * k + self.phase)
     }
-    fn three_winding_legs(&self, _id: u64) -> Option<[usize; 3]> {
-        // `pgm_to_3ph_network` does not model three-winding transformers at all,
-        // so a sensor on one has nothing to resolve against rather than
-        // something to guess at.
-        None
+    fn three_winding_legs(&self, id: u64) -> Option<[usize; 3]> {
+        // Three legs to a star node, indexed `3·leg + phase` like every other
+        // branch here. The phase domain used to model no three-winding
+        // transformer at all and this returned `None`; a sensor on one then
+        // reported the transformer as an unknown object, which was true of the
+        // model and a poor account of the document.
+        self.net
+            .three_winding_idx
+            .get(&id)
+            .map(|legs| legs.map(|b| 3 * b + self.phase))
     }
 }
 

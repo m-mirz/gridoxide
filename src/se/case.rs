@@ -26,7 +26,7 @@ use crate::measurement::{Measurement, MeasurementError};
 use crate::network::{
     build_ybus, build_ybus_3ph, stamp_shunts, stamp_shunts_3ph, stamp_transformers_3ph,
 };
-use crate::pgm::{PgmInput, Unsupported3Ph};
+use crate::pgm::PgmInput;
 use crate::types::Bus;
 
 use super::SeNetwork;
@@ -55,8 +55,6 @@ pub struct SeCase {
 /// Why a document could not be turned into an estimate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SeCaseError {
-    /// The phase domain does not model one of the document's components.
-    Unsupported(Unsupported3Ph),
     /// A sensor could not be resolved against the network.
     Measurement(MeasurementError),
     /// The document has no sensor this estimator can use.
@@ -70,7 +68,6 @@ pub enum SeCaseError {
 impl std::fmt::Display for SeCaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SeCaseError::Unsupported(e) => write!(f, "{e}"),
             SeCaseError::Measurement(e) => write!(f, "{e}"),
             SeCaseError::NoSensors => {
                 write!(f, "the document contains no usable sensors, so there is nothing to estimate")
@@ -80,12 +77,6 @@ impl std::fmt::Display for SeCaseError {
 }
 
 impl std::error::Error for SeCaseError {}
-
-impl From<Unsupported3Ph> for SeCaseError {
-    fn from(e: Unsupported3Ph) -> Self {
-        SeCaseError::Unsupported(e)
-    }
-}
 
 impl From<MeasurementError> for SeCaseError {
     fn from(e: MeasurementError) -> Self {
@@ -118,10 +109,10 @@ impl SeCase {
     /// balanced one, and on a distribution feeder the unbalance *is* the
     /// question.
     pub fn from_pgm_3ph(input: &PgmInput, s_base_va: f64, f_nom: f64) -> Result<Self, SeCaseError> {
-        // Refuses, by name, the components the three-phase conversion does not
-        // model — before anything is built, so a document that cannot be
-        // estimated says so rather than being estimated wrongly.
-        let maps = crate::pgm::pgm_3ph_maps(input)?;
+        // The three-phase conversion models everything the symmetric one does
+        // — links, three-winding transformers and all — so this cannot fail.
+        // It returned a `Result` while that was untrue.
+        let maps = crate::pgm::pgm_3ph_maps(input);
 
         let id_to_idx = crate::pgm::node_id_to_idx(input);
         let transformers = crate::pgm::pgm_transformers_3ph(input, &id_to_idx, s_base_va);
