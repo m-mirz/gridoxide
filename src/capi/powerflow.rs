@@ -488,7 +488,7 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_distributing_slack(
         };
         model.buses.clone_from(&model.template);
 
-        // Checked here rather than left to `newton_raphson_distributing_slack`,
+        // Checked here rather than left to `outerloop::DistributedSlack`,
         // which asserts — and an assert crossing this boundary would abort the
         // caller's process. `guard` would catch it, but reporting it as the
         // caller's mistake is far more useful than reporting it as our bug.

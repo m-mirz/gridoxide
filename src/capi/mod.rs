@@ -16,7 +16,7 @@
 //! **1. Panics must not cross it.** A `panic!` unwinding out of an
 //! `extern "C"` function aborts the process — it would take the host C++
 //! program down with it, from inside a library it merely linked. That is not
-//! hypothetical: [`newton_raphson_distributing_slack`] asserts on a
+//! hypothetical: [`DistributedSlack`](crate::outerloop::DistributedSlack) asserts on a
 //! wrong-length participation vector, `YBus::finish` expects its triplets to
 //! be well formed, and the PGM conversion unwraps in places. Every exported
 //! function therefore runs its body inside [`catch_unwind`], turning an abort
