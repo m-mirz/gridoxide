@@ -714,16 +714,21 @@ fn resting_tap(
     crac: &Crac,
     resolution: &Resolution,
     net: &ucte::UcteImport,
+    transformers: &[gridoxide::types::Transformer],
     action: &str,
 ) -> Option<i32> {
     let range = crac.range_actions.iter().find(|r| r.id == action)?;
     let RangeActionKind::Pst { element, initial_tap, .. } = &range.kind else { return None };
-    let branch = resolution.branch(element)?;
-    let changer = branch
-        .checked_sub(net.lines.len())
-        .and_then(|i| net.tap_changers.get(i))
-        .and_then(|c| c.as_ref());
-    Some(changer.map_or(*initial_tap, |c| c.position))
+    // Read out of the network **this state** is in, not out of the file. A
+    // shifter the preventive stage moved to −16 and that no curative action may
+    // touch is at −16 in the curative state, and the reference's
+    // `getOptimizedTapOnState` says so: it answers for every state, from the
+    // set-points in force there. Falling back to the file's position instead
+    // reports the plan undoing a decision it never revisited.
+    Some(
+        tap_in_network(crac, resolution, net, &[], transformers, element)
+            .unwrap_or(*initial_tap),
+    )
 }
 
 /// Where a phase shifter *in the network* ended up, addressed by network
@@ -1095,6 +1100,36 @@ fn check(scenario: &Scenario) -> Outcome {
         (used, taps)
     };
 
+    // The transformers as that point in the plan left them. A shifter with no
+    // set-point in this perimeter still has a tap — the one an earlier
+    // perimeter put it on — and only this network knows which.
+    let transformers_at = |at: &Where| -> &[gridoxide::types::Transformer] {
+        let Where::After { contingency, instant } = at else {
+            return &plan.preventive.transformers;
+        };
+        for scenario in &plan.scenarios {
+            if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
+                continue;
+            }
+            if crac.instants.iter().any(|i| i.id == *instant && i.kind == InstantKind::Auto) {
+                if let Some(a) = &scenario.automatons {
+                    return &a.transformers;
+                }
+            }
+            if let Some(perimeter) = scenario.perimeters.iter().find(|p| {
+                p.states.iter().any(|s| crac.instants[s.instant].id == *instant)
+            }) {
+                return &perimeter.transformers;
+            }
+            // A contingency with no perimeter at this instant is still after
+            // the automatons, where there are any.
+            if let Some(a) = &scenario.automatons {
+                return &a.transformers;
+            }
+        }
+        &plan.preventive.transformers
+    };
+
     let mut record = |ok: bool, detail: String| {
         if ok {
             outcome.matched.push(detail);
@@ -1189,7 +1224,9 @@ fn check(scenario: &Scenario) -> Outcome {
                     .1
                     .get(action)
                     .copied()
-                    .or_else(|| resting_tap(&crac, &resolution, &net, action));
+                    .or_else(|| {
+                        resting_tap(&crac, &resolution, &net, transformers_at(at), action)
+                    });
                 record(
                     got == Some(*tap),
                     format!("tap of `{action}` {got:?} (expected {tap}) {at:?}"),
@@ -1397,7 +1434,7 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///   the pair then differ by twice the flow.
 const BASELINE_MATCHED_AC: usize = 232;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **796 of 884**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **841 of 884**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1430,12 +1467,27 @@ const BASELINE_MATCHED_AC: usize = 232;
 /// close between them. Nothing regressed: every other family is unchanged to
 /// the assertion.
 ///
-/// What is still open, by size: 1.3 curative (53 of 457 wrong), 1.2 automatons
-/// (25 of 119), 3.2 (9), 5.2 MNEC (6), 1.4 (6), 2.6 (4). The character has
-/// changed with it — `remedial action X is used` failures went from 30 to 2,
-/// so what remains is almost entirely **which tap** a curative perimeter's
-/// range actions settle on, and the margins that follow from it.
-const BASELINE_MATCHED_AC16: usize = 796;
+/// Then the curative **range** actions, which is where that left the residue.
+/// Two causes, and the smaller one was in this harness:
+///
+/// - A `relativeToPreviousInstant` range was read as absolute, so a shifter the
+///   CRAC allowed ten taps either side of the preventive answer got ten taps
+///   either side of *zero*. On 1.3.4.3 that is tap 10 where the reference
+///   reaches 15, with five taps of permitted travel the optimizer never knew it
+///   had — and nothing about it visible in a margin, because the answer stays
+///   feasible, self-consistent and worse. Worth 39.
+/// - A shifter with no set-point in a perimeter was reported at the **file's**
+///   tap rather than at the one an earlier perimeter put it on, so a plan that
+///   moved a PST in preventive and never revisited it read as having undone the
+///   move. The reference's `getOptimizedTapOnState` answers for every state
+///   from the set-points in force there, and now so does this. Worth 6.
+///
+/// What is still open, by size: 1.2 automatons (23 of 121), 1.3 (14 of 458),
+/// 5.2 MNEC (9 of 68), 3.2 (9 of 33), 1.4 (6 of 9). Family 2.6 is complete at
+/// 134 of 134 and 2.2 at 63 of 63. Of the remaining tap disagreements, six are
+/// the `BestTapFinder` divergence recorded on [`BASELINE_MATCHED_AC`], eight
+/// are the automaton simulator's own sizing, and the rest are one tap apart.
+const BASELINE_MATCHED_AC16: usize = 841;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

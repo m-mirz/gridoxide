@@ -178,8 +178,10 @@ rounding takes a step that pays an MNEC penalty its rounding does not look at.
 - **HVDC range actions**, recognised and skipped: gridoxide models a DC network but nothing connects
   it to a range action yet.
 - **Second-preventive optimization** and multi-timestamp (MARMOT) runs.
-- **Multi-perimeter range actions** — the `relativeToPreviousInstant` range kind needs several states
-  in one problem.
+- **Several perimeters' set-points as variables in one LP.** Each perimeter is solved against the
+  previous one's fixed decisions, which is the CASTOR decomposition rather than a shortcut past it.
+  The `relativeToPreviousInstant` range kind *is* honoured — what chains across perimeters is the
+  bound, not the variable. See [the linear chapter](./linear.md#three-ways-to-say-how-far-it-may-move).
 
 Angle and voltage CNECs are counted rather than modelled, which is what the reference does too: it
 checks them in a separate monitoring pass after the fact rather than putting them in its LP.

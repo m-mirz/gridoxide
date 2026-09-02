@@ -409,6 +409,13 @@ pub fn search_with_open(
     // travels with the options rather than being re-derived per leaf.
     let mut linear = options.linear.clone();
     linear.available = constrained.clone();
+    // Where each phase shifter sits *before this perimeter acts*, which is what
+    // a `relativeToPreviousInstant` range is written against. Measured here,
+    // once, on the network the perimeter was handed — a curative one carries
+    // the preventive stage's and the automatons' decisions, and that is exactly
+    // the "previous instant" the CRAC means. Every leaf then optimizes against
+    // the same box, rather than one that moves with whatever the leaf did.
+    linear.previous_taps = super::linear::taps_now(crac, network, resolution);
     let options = &SearchOptions { linear, ..options.clone() };
 
     let offered = |index: usize| -> Option<Effect> {

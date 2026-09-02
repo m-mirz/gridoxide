@@ -883,3 +883,137 @@ fn a_curative_perimeter_has_its_own_depth() {
     assert!(together > 0, "the curative perimeters should evaluate something at depth 1");
     assert_eq!(apart, 0, "held at curative depth 0, no curative leaf should be evaluated");
 }
+
+/// A `relativeToPreviousInstant` range is anchored on where the **perimeter
+/// began**, not on tap zero.
+///
+/// The reference's scenario 1.3.4.3, reduced to the property. `pst_fr` sits at
+/// tap 5 in the network, is available only in curative, and carries a single
+/// range of ±10 *relative to the previous instant*. The preventive perimeter
+/// moves nothing, so the previous instant is tap 5 and the curative box is
+/// [−5, 15]. Read as absolute — which is what an unhandled range kind
+/// degenerates to — the box is [−10, 10], and the optimizer stops at 10 with
+/// five taps of permitted travel it never knew it had.
+///
+/// Nothing about that is visible in a margin: the answer stays feasible,
+/// self-consistent and worse, which is why it survived nineteen other defects.
+#[test]
+fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep13us4case3.json"),
+    )
+    .expect("crac");
+
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_fr")
+        .expect("the CRAC declares pst_fr");
+    let RangeActionKind::Pst { initial_tap, .. } = &crac.range_actions[pst].kind else {
+        panic!("pst_fr should be a phase shifter");
+    };
+    assert_eq!(*initial_tap, 5, "the fixture's anchor");
+    assert!(
+        crac.range_actions[pst]
+            .ranges
+            .iter()
+            .all(|r| r.kind == RangeKind::RelativeToPreviousInstant),
+        "this test needs the range to be relative to the previous instant"
+    );
+
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &[],
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+
+    // Preventive leaves it where the file had it, so the anchor is 5.
+    assert!(
+        plan.preventive.setpoints.iter().all(|s| s.action != pst || !s.moved()),
+        "the preventive perimeter should not move pst_fr — it is curative-only here"
+    );
+
+    let tap = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .flat_map(|p| p.setpoints.iter())
+        .find(|s| s.action == pst)
+        .and_then(|s| s.tap)
+        .expect("the curative perimeter should optimize pst_fr");
+
+    assert!(
+        (-5..=15).contains(&tap),
+        "tap {tap} is outside the box the previous instant anchors, [-5, 15]"
+    );
+    assert_eq!(tap, 15, "the reference reaches the top of that box");
+}
+
+/// The three range kinds are **intersected**, and they disagree on purpose.
+///
+/// `SL_ep13us5case3` declares all three on one shifter: absolute [−16, 16],
+/// ±10 of the network as imported (tap 5, so [−5, 15]), and ±10 of the previous
+/// instant. The preventive perimeter moves it to −5, so the last is [−15, 5]
+/// and the intersection is [−5, 5] — narrower than any of the three alone, and
+/// narrower than it would be if the two relative kinds shared an anchor.
+#[test]
+fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep13us5case3.json"),
+    )
+    .expect("crac");
+    let pst = crac.range_actions.iter().position(|r| r.id == "pst_fr").expect("pst_fr");
+    let kinds: Vec<RangeKind> = crac.range_actions[pst].ranges.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds.len(), 3, "this test needs all three kinds on one action");
+
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &[],
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+
+    let preventive = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst)
+        .and_then(|s| s.tap)
+        .expect("the preventive perimeter optimizes pst_fr here");
+    assert_eq!(preventive, -5, "the preventive answer, and the curative anchor");
+
+    for perimeter in plan.scenarios.iter().flat_map(|s| s.perimeters.iter()) {
+        let Some(tap) = perimeter.setpoints.iter().find(|s| s.action == pst).and_then(|s| s.tap)
+        else {
+            continue;
+        };
+        assert!(
+            (-5..=5).contains(&tap),
+            "curative tap {tap} is outside the intersection [-5, 5]: absolute [-16, 16], \
+             ten of the imported network's tap 5, and ten of the preventive answer -5"
+        );
+    }
+}

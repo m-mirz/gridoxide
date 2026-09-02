@@ -164,6 +164,19 @@ pub struct LinearOptions {
     /// [`search`](super::search::search) fills all three in; a caller
     /// optimizing a lone perimeter gets the unconstrained default for each.
     pub limits: Budget,
+    /// The tap each phase-shifter range action sat on when this **perimeter**
+    /// began, as `(range action index, tap)`.
+    ///
+    /// The anchor for a `relativeToPreviousInstant` range, and the only place
+    /// that information exists: by the time the LP runs, the live tap has moved
+    /// — a leaf may have applied a set-point action, and the outer iteration
+    /// moves it again every round. Anchoring the box on the live tap would let
+    /// it walk, one box-width per iteration, out of the range the CRAC wrote.
+    ///
+    /// Empty means "the network as imported", which is what a preventive
+    /// perimeter starts from and therefore the right answer for a caller
+    /// optimizing one on its own.
+    pub previous_taps: Vec<(usize, i32)>,
 }
 
 impl Default for LinearOptions {
@@ -179,6 +192,7 @@ impl Default for LinearOptions {
             mnec: Mnec::default(),
             available: Constrained::unmeasured(),
             limits: Budget::default(),
+            previous_taps: Vec::new(),
         }
     }
 }
@@ -1108,18 +1122,25 @@ fn build_controls(
                         .map(|(_, a)| *a)
                         .unwrap_or(0.0)
                 });
-                let tap = table
-                    .iter()
-                    .min_by(|a, b| (a.1 - live_angle).abs().total_cmp(&(b.1 - live_angle).abs()))
-                    .map(|(t, _)| *t)
-                    .unwrap_or(*initial_tap);
+                let tap = tap_nearest(&table, live_angle).unwrap_or(*initial_tap);
                 let current = table
                     .iter()
                     .find(|(t, _)| *t == tap)
                     .map(|(_, a)| *a)
                     .unwrap_or(live_angle);
 
-                let (lower, upper) = tap_bounds(action, &table, *initial_tap);
+                // Where this perimeter began, which is the anchor a
+                // `relativeToPreviousInstant` range is written against. The
+                // caller states it because only the caller knows where the
+                // perimeter began; falling back to `initial_tap` is the right
+                // answer for a preventive perimeter, whose previous instant
+                // *is* the network as imported.
+                let previous_tap = options
+                    .previous_taps
+                    .iter()
+                    .find(|(i, _)| *i == index)
+                    .map_or(*initial_tap, |(_, t)| *t);
+                let (lower, upper) = tap_bounds(action, &table, *initial_tap, previous_tap);
                 controls.push(Control {
                     action: index,
                     sensitivity: sensitivity_mw,
@@ -1188,21 +1209,94 @@ fn live_crac_angle(network: &NetworkMut<'_>, branch: usize) -> Option<f64> {
     Some(CRAC_ANGLE_SIGN * network.transformers.get(i)?.tap.arg().to_degrees())
 }
 
+/// The position in `table` whose angle is nearest `angle`.
+///
+/// A search over the table rather than arithmetic on the step size, because a
+/// tap-to-angle map is not necessarily linear and is not necessarily monotone.
+fn tap_nearest(table: &[(i32, f64)], angle: f64) -> Option<i32> {
+    table
+        .iter()
+        .min_by(|a, b| (a.1 - angle).abs().total_cmp(&(b.1 - angle).abs()))
+        .map(|(t, _)| *t)
+}
+
+/// The tap each phase-shifter range action sits on in `network`, as
+/// [`LinearOptions::previous_taps`] wants it.
+///
+/// Call this on the network a perimeter is **handed**, before anything in that
+/// perimeter has acted: for a preventive perimeter that is the network as
+/// imported, and for a curative one it is what the preventive stage and the
+/// automatons left, which is precisely the instant a
+/// `relativeToPreviousInstant` range is written against.
+pub fn taps_now(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+) -> Vec<(usize, i32)> {
+    crac.range_actions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, action)| {
+            let RangeActionKind::Pst { element, initial_tap, tap_to_angle } = &action.kind else {
+                return None;
+            };
+            let branch = resolution.branch(element)?;
+            let table =
+                tap_table(tap_to_angle, network.tap_changers, branch, network.lines.len());
+            if table.is_empty() {
+                return None;
+            }
+            let i = branch.checked_sub(network.lines.len())?;
+            let angle =
+                CRAC_ANGLE_SIGN * network.transformers.get(i)?.tap.arg().to_degrees();
+            Some((index, tap_nearest(&table, angle).unwrap_or(*initial_tap)))
+        })
+        .collect()
+}
+
 /// Angle bounds from a PST range action's tap ranges.
+///
+/// The three kinds are three different anchors and the ranges are
+/// **intersected**, so a CRAC declaring all three — and the reference's own
+/// `SL_ep13us5case3` does — is constrained by whichever binds:
+///
+/// | kind | anchored on |
+/// |---|---|
+/// | `absolute` | nothing; the bounds are tap positions |
+/// | `relativeToInitialNetwork` | `initial_tap`, the network as imported |
+/// | `relativeToPreviousInstant` | `previous_tap`, where this perimeter began |
+///
+/// The last two coincide for a preventive perimeter and part company for a
+/// curative one, which is the whole point of having both: "no more than ten
+/// taps from where the file had it" and "no more than ten taps from whatever
+/// the preventive plan left" are different permissions, and a TSO writes both.
+///
+/// `previous_tap` is **not** the live tap. By the time this is called the
+/// shifter may have been moved by this leaf's own set-point action and will be
+/// moved again by every outer iteration; anchoring on that lets the box walk a
+/// width per round until the answer bears no relation to what the CRAC allowed.
 fn tap_bounds(
     action: &super::crac::RangeAction,
     table: &[(i32, f64)],
     initial_tap: i32,
+    previous_tap: i32,
 ) -> (f64, f64) {
     let (mut low, mut high) = (i32::MIN, i32::MAX);
     for range in &action.ranges {
-        let (min, max) = match range.kind {
-            super::crac::RangeKind::RelativeToInitialNetwork => (
-                range.min.map(|m| initial_tap + m as i32),
-                range.max.map(|m| initial_tap + m as i32),
-            ),
-            _ => (range.min.map(|m| m as i32), range.max.map(|m| m as i32)),
+        let anchor = match range.kind {
+            super::crac::RangeKind::RelativeToInitialNetwork => initial_tap,
+            super::crac::RangeKind::RelativeToPreviousInstant => previous_tap,
+            // Absolute bounds anchor on nothing. `relativeToPreviousTimeStep`
+            // belongs to the multi-timestamp RAO this does not model, and is
+            // read as absolute rather than silently anchored on the wrong
+            // instant — there is no previous time step to be relative to.
+            super::crac::RangeKind::Absolute
+            | super::crac::RangeKind::RelativeToPreviousTimeStep => 0,
         };
+        let (min, max) = (
+            range.min.map(|m| anchor + m as i32),
+            range.max.map(|m| anchor + m as i32),
+        );
         if let Some(m) = min {
             low = low.max(m);
         }

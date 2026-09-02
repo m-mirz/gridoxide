@@ -289,6 +289,32 @@ Note that at tap 13 the flow has crossed zero and the **lower** bound is now the
 \\(\text{limit} - \vert F \vert\\) would have given the same answer here, because the bounds are
 symmetric; on a one-sided CNEC it would not.
 
+### Three ways to say how far it may move
+
+A range is a pair of bounds and an **anchor**, and the CRAC names the anchor per range:
+
+| kind | anchored on | means |
+|---|---|---|
+| `absolute` | nothing | the bounds are tap positions |
+| `relativeToInitialNetwork` | the tap in the network as imported | "no more than *n* taps from where the file had it" |
+| `relativeToPreviousInstant` | the tap this perimeter began at | "no more than *n* taps from whatever the plan already did" |
+
+An action carries several ranges and they are **intersected**, so the binding one wins. The two
+relative kinds coincide for a preventive perimeter, whose previous instant *is* the network as
+imported, and part company for a curative one — which is the whole reason a CRAC bothers to write
+both. `SL_ep13us5case3` in the reference's own suite declares all three on one shifter: absolute
+\([-16, 16]\), ten taps of the imported network's 5, and ten taps of the preventive answer \(-5\).
+The intersection is \([-5, 5]\), narrower than any of them alone.
+
+The anchor for the last kind is measured **once, on the network the perimeter was handed** — before
+any leaf has applied a set-point and before the outer iteration has moved anything. It is not the
+live tap. Anchoring on the live tap lets the box walk one width per iteration, until the answer bears
+no relation to what the CRAC allowed; and reading the kind as absolute, which is what an unhandled
+range kind degenerates to, silently shrinks the permission instead. On scenario 1.3.4.3 that second
+failure stops the optimizer at tap 10 where 15 was allowed, with five taps of travel it never knew it
+had — and nothing about it is visible in a margin, because the answer stays feasible,
+self-consistent and worse.
+
 ### What the code does
 
 ```console
@@ -328,9 +354,11 @@ needs only an LP, so it runs on gridoxide's own interior-point solver.
 **Network actions.** This layer moves continuous set-points; choosing which discrete actions to take
 is [the search tree's](./search.md) job, and the two interleave rather than run in sequence.
 
-**Cross-perimeter range actions.** One perimeter at a time. Chaining a curative action to the
-preventive one before it — the `relativeToPreviousInstant` range kind — needs several states in one
-problem.
+**Cross-perimeter range actions in one problem.** One perimeter at a time: the preventive perimeter
+is solved, its decisions are fixed, and each curative perimeter is solved against them. That is the
+CASTOR decomposition, not an approximation of it — but it means a curative set-point cannot be
+*traded against* a preventive one inside a single LP. What the ranges below chain is the **bound**,
+not the variable.
 
 **HVDC range actions** are recognised and skipped. A counter trade has no network sensitivity at all,
 which is why the reference leaves it out of its LP too.

@@ -9,7 +9,7 @@ and 2 landed 2026-08-18.
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **138 of 142** DC assertions, **192 of 203** AC ones on TestCase12Nodes, and **795 of 883** on
+> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **841 of 884** on
 > TestCase16Nodes.
 >
 > **What is left**, in the order it is worth doing:
@@ -20,17 +20,25 @@ and 2 landed 2026-08-18.
 >    real cause was §8.3's defect 20: a curative perimeter could not *close* anything. Fixing it took
 >    1.3 to 404 of 457 and 2.6 to 130 of 134, and left the residue a different shape: **which tap** a
 >    curative perimeter's range actions settle on, not which actions it takes.
-> 1b. **Curative range actions start from the wrong point.** The new largest family. On 1.3.4.7 the
->    curative perimeter reports `pst_fr` at +5 where the reference says −5 and `pst_be` at 0 where it
->    says −16 — the preventive taps, reverted rather than carried forward, on a perimeter whose
->    network action and every margin now match exactly. 19 of the remaining 53 in family 1.3.
+> 1b. ~~**Curative range actions start from the wrong point.**~~ **Settled**, as §8.3's defects 21
+>    and 22: a `relativeToPreviousInstant` range read as absolute, and a shifter with no set-point in
+>    a perimeter reported at the file's tap rather than at the one already in force. Worth 45
+>    together; family 1.3 is now 444 of 458 and 2.6 is complete.
+> 1c. **The automaton simulator's own tap sizing.** The new largest, at 23 of 121 — family 1.2, which
+>    every plan so far has held out of scope on the grounds that it is a different subsystem. It now
+>    is the subsystem. `pst_be` lands on −7 where the reference says −8 on 1.2.2.2, and −6 against −3
+>    on 1.2.2.3: the speed-ordered formula shifts each range action toward relieving the worst CNEC
+>    and stops somewhere else than an LP would.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
-> 4. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`,
->    multi-perimeter chaining (`relativeToPreviousInstant`), HVDC range actions, costly optimization.
->    ~~`predefined-combinations` and `max-curative-search-tree-depth`~~ are now read and gated; both
->    are inert on the vendored corpus, which is why each needed a test of its own.
+> 4. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
+>    range actions, costly optimization. ~~`predefined-combinations` and
+>    `max-curative-search-tree-depth`~~ are now read and gated; both are inert on the vendored corpus,
+>    which is why each needed a test of its own. ~~Multi-perimeter chaining
+>    (`relativeToPreviousInstant`)~~ is built: the *bound* chains across perimeters, which is what
+>    that range kind asks for. What is still not here is several states' set-points as variables in
+>    **one** LP, which the CASTOR decomposition does not want anyway.
 > 5. **The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json` that three refuted hypotheses
 >    have not explained. See §8.3.
 >
@@ -514,9 +522,9 @@ regression in another:
 
 | File | Scenarios | Assertions | Matching |
 |---|---|---|---|
-| `dc_scenarios.feature` | 25, across eleven networks | 142 | **138** |
-| `ac_scenarios.feature` | 38, on TestCase12Nodes | 203 | **192** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 883 | **795** |
+| `dc_scenarios.feature` | 25, across eleven networks | 156 | **150** |
+| `ac_scenarios.feature` | 38, on TestCase12Nodes | 244 | **232** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **841** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -710,6 +718,30 @@ that found 17 — showed the largest one was not a matter of degree at all:
     settle on. `plans/RAO_SEARCH_PLAN.md` had budgeted a phase of candidate-trace instrumentation to
     find this; reading `castor.rs` against `automaton.rs` answered it, which is worth recording as
     the one case where the code said what the gate could not.
+
+Fixing 20 left family 1.3 at 405 of 458 and the residue a different shape — no longer *which
+actions* but *which tap* — and that was one defect too:
+
+21. **A `relativeToPreviousInstant` range was read as absolute.** A CRAC states a range action's
+    bounds against one of three anchors, and the ranges are intersected: absolute positions, so many
+    taps from the network as imported, or so many taps from **wherever this perimeter began**. The
+    third is what chains a curative shifter to the preventive answer, `tap_bounds` handled only the
+    second, and an unhandled kind degenerates to absolute — so a shifter allowed ten taps either side
+    of the preventive answer got ten taps either side of *zero*. On 1.3.4.3 that is tap 10 against
+    the reference's 15, with five taps of permitted travel the optimizer never knew it had. Invisible
+    in a margin, because the answer stays feasible, self-consistent and worse. The anchor has to be
+    measured **once, on the network the perimeter was handed**, and not on the live tap: by the time
+    the LP runs a leaf may have applied a set-point and the outer iteration moves it every round, so
+    anchoring on the live tap lets the box walk a width per iteration out of what the CRAC allowed.
+    Worth **39** assertions — 1.3 from 405 to 440, 2.6 to 134 of 134.
+22. **A shifter with no set-point in a perimeter was reported at the file's tap.** In the gate, not
+    the optimizer: the plan carried the tap forward correctly and the harness read
+    `net.tap_changers[i].position` when a perimeter produced no set-point of its own. So a PST moved
+    to −16 in preventive and never revisited read as sitting at 0 in curative — a plan undoing a
+    decision it had not touched. The reference's `getOptimizedTapOnState` answers for every state
+    from the set-points in force *there*, which is what the harness now does. Worth **6**, and worth
+    recording because a gate that misreports the thing it is measuring is the one failure a gate
+    cannot catch for itself.
 
 Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
 objective function` were being skipped, and the quantity they name — the negated worst margin plus
