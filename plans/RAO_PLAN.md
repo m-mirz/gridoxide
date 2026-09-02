@@ -29,6 +29,8 @@ and 2 landed 2026-08-18.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
 > 4. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`,
 >    multi-perimeter chaining (`relativeToPreviousInstant`), HVDC range actions, costly optimization.
+>    ~~`predefined-combinations` and `max-curative-search-tree-depth`~~ are now read and gated; both
+>    are inert on the vendored corpus, which is why each needed a test of its own.
 > 5. **The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json` that three refuted hypotheses
 >    have not explained. See §8.3.
 >

@@ -17,7 +17,12 @@ built on**. §2 is that finding; the plan followed from it rather than from `RAO
 > Phase 4's residue question is answered with it: with the closes taken, `remedial action X is used`
 > failures fall from 30 to 2, so there is **no** body of scenarios where every action was considered
 > and correctly judged and the answer is still out of reach. Nothing here justifies a combinatorial
-> search. Phase 4's cheap form (read `predefined-combinations`) and phase 5 stand as written.
+> search. Phase 4's cheap form and phase 5 are **built**, 2026-09-02: `SearchOptions` carries
+> `predefined_combinations` and `curative_max_depth`, the harness reads both, and each is gated by a
+> test of its own since the corpus cannot exercise either — every vendored configuration carries
+> `"predefined-combinations": []` and sets the two depths the same. Neither moves an assertion, which
+> is expected and is the whole point: they close the reference's own mechanisms, so a configuration
+> that used one would no longer be silently scored against a different search.
 >
 > The new largest cause is different in kind and is tracked in `RAO_PLAN.md` §15 item 1b: a curative
 > perimeter's **range actions start from the wrong point**, reverting the preventive taps rather than
@@ -174,7 +179,7 @@ One fix per cause, each with the gate re-run and the family table recorded befor
 change that moves 1.3 and breaks 2.4 is visible immediately. `RAO_PLAN.md` §8.3's nineteen defects
 were found this way and every one of them was "internally consistent and externally wrong".
 
-### Phase 4 — Only then, combinations
+### Phase 4 — Only then, combinations ~~(cheap form built; the large form is not justified)~~
 
 If the phase-2 table shows a residue of scenarios where gridoxide considered every action, judged
 each correctly, and still could not reach the reference's answer, *that* residue is the combination
@@ -186,7 +191,7 @@ parameters and offer each as one candidate. That is a parameter gridoxide ignore
 work, and it closes the reference's own mechanism exactly. Enumerating subsets is a different and
 much larger thing, and nothing yet justifies it.
 
-### Phase 5 — The small one from §5
+### Phase 5 — The small one from §5 ~~(done)~~
 
 Read `max-curative-search-tree-depth`, and give the curative perimeters their own depth. Gated by a
 configuration that sets the two differently.

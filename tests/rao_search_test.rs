@@ -579,3 +579,101 @@ fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
         "an action nothing authorized was taken: {taken:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Predefined combinations
+// ---------------------------------------------------------------------------
+
+/// Everything but the winner's bookkeeping, on a fixture where both actions
+/// hurt.
+fn combination_run(c: &Case, combinations: Vec<Vec<String>>) -> gridoxide::rao::SearchResult {
+    run(
+        c,
+        &SearchOptions {
+            max_depth: 1,
+            // Take whatever scores best, so the search cannot decline a
+            // candidate for a reason this test is not about.
+            absolute_min_impact: -1e9,
+            relative_min_impact: -1e9,
+            predefined_combinations: combinations,
+            ..Default::default()
+        },
+    )
+}
+
+/// A predefined combination is **one** candidate, evaluated at **one** depth.
+///
+/// This is the reference's entire mechanism for searching anything other than a
+/// greedy chain — `SearchTreeBloomer.bloom` returns these plus one candidate per
+/// individual action, and never enumerates subsets — so the breadth of both
+/// searches is configuration rather than algorithm. Every vendored
+/// configuration carries `[]`, which is why reading this parameter moves no
+/// assertion in the Cucumber gate and is worth having anyway.
+///
+/// Measured on the leaf count, which is the only place a candidate that is
+/// offered and loses can be seen at all. Both of this fixture's actions make
+/// the margin worse, so the combination of them is worse still and is correctly
+/// not taken; that it was *evaluated* is the property under test.
+#[test]
+fn a_predefined_combination_is_offered_as_one_more_candidate() {
+    let c = case();
+    let ids: Vec<String> = c.crac.network_actions.iter().map(|a| a.id.clone()).collect();
+    assert_eq!(ids.len(), 2, "this test needs exactly two actions to combine");
+
+    let alone = combination_run(&c, Vec::new());
+    let with_pair = combination_run(&c, vec![ids]);
+
+    assert_eq!(alone.leaves, 2, "one leaf per individual action");
+    assert_eq!(with_pair.leaves, 3, "the combination adds exactly one leaf, not one per member");
+    assert!(with_pair.depth <= 1, "a combination costs one depth, not one per member");
+}
+
+/// A combination is taken **whole or not at all**, so anything wrong with it
+/// removes it entirely rather than degrading it to the members that survive.
+///
+/// Applying half of one produces a network the CRAC never described — the same
+/// rule [`effect_of`](gridoxide::rao::search) already applies to the elementary
+/// actions inside a single network action, one level up.
+#[test]
+fn a_malformed_predefined_combination_is_dropped_whole() {
+    let c = case();
+    let ids: Vec<String> = c.crac.network_actions.iter().map(|a| a.id.clone()).collect();
+    let baseline = combination_run(&c, Vec::new()).leaves;
+
+    for (why, combination) in [
+        ("an id no action carries", vec![ids[0].clone(), "no such action".to_string()]),
+        ("fewer than two members", vec![ids[0].clone()]),
+        ("the same action twice, which conflicts with itself", vec![ids[0].clone(), ids[0].clone()]),
+        ("no members at all", Vec::new()),
+    ] {
+        let got = combination_run(&c, vec![combination]).leaves;
+        assert_eq!(got, baseline, "a combination with {why} should offer no candidate");
+    }
+}
+
+/// Two actions on the same network element cannot be taken together, and a
+/// combination naming both is dropped rather than applied in some order.
+///
+/// The order would decide the answer, and a set has none — which is exactly why
+/// [`compatible`](gridoxide::rao::search) exists for the chain. A predefined
+/// combination is not an exemption from it.
+#[test]
+fn a_predefined_combination_of_conflicting_actions_is_dropped() {
+    let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
+    let (mut crac, _) = crac_json::read(rao_fixture("crac-for-12nodes.json")).expect("crac");
+    // A second action on the element the first one opens.
+    let mut clash = crac.network_actions[0].clone();
+    clash.id = "close the same line".to_string();
+    for elementary in &mut clash.elementary {
+        if let ElementaryAction::TerminalsConnection { connected, .. } = elementary {
+            *connected = true;
+        }
+    }
+    let first = crac.network_actions[0].id.clone();
+    crac.network_actions.push(clash);
+    let c = Case { net, crac };
+
+    let baseline = combination_run(&c, Vec::new()).leaves;
+    let got = combination_run(&c, vec![vec![first, "close the same line".to_string()]]).leaves;
+    assert_eq!(got, baseline, "two actions on one element should offer no combined candidate");
+}

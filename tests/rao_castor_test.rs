@@ -836,3 +836,50 @@ fn a_curative_action_can_close_an_out_of_service_branch() {
         "the branch should still be open in the preventive perimeter, which does not close it"
     );
 }
+
+/// A curative perimeter gets its own search depth.
+///
+/// The reference keeps `max-preventive-search-tree-depth` and
+/// `max-curative-search-tree-depth` apart because they answer different
+/// questions: how much may be planned in advance, against how much may be
+/// carried out under time pressure by people who did not plan it. Every
+/// vendored configuration sets the two the same, so this moves no assertion in
+/// the Cucumber gate — and a configuration that set them differently would
+/// otherwise have been scored against the preventive depth without a word,
+/// which is the only reason to have it.
+#[test]
+fn a_curative_perimeter_has_its_own_depth() {
+    let c = case("crac-for-12nodes.json");
+    let curative_leaves = |options: &SearchOptions| -> usize {
+        let mut solver = IpmSolver::new();
+        run(&c.crac, &c.network(), &c.resolution(), &mut solver, options)
+            .scenarios
+            .iter()
+            .flat_map(|s| s.perimeters.iter())
+            .map(|p| p.leaves)
+            .sum()
+    };
+
+    // Depth 0 evaluates the root and nothing else, so a curative perimeter held
+    // at zero must not evaluate a single leaf however deep preventive goes.
+    let shared = SearchOptions {
+        max_depth: 1,
+        // Take whatever scores best, so the count reflects the depth rather
+        // than a threshold.
+        absolute_min_impact: -1e9,
+        relative_min_impact: -1e9,
+        // A curative perimeter stops the moment it beats the preventive one,
+        // and these already do — with the default improvement of zero both
+        // settings would read as zero leaves for that reason rather than for
+        // the depth. Demanding an improvement nothing can reach keeps the
+        // search looking, which is what makes the depth observable.
+        curative_min_obj_improvement: 1e9,
+        ..Default::default()
+    };
+    let together = curative_leaves(&shared);
+    let apart =
+        curative_leaves(&SearchOptions { curative_max_depth: Some(0), ..shared.clone() });
+
+    assert!(together > 0, "the curative perimeters should evaluate something at depth 1");
+    assert_eq!(apart, 0, "held at curative depth 0, no curative leaf should be evaluated");
+}

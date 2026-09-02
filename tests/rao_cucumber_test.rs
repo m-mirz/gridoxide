@@ -655,11 +655,30 @@ fn options_from(config: &Path) -> SearchOptions {
         }
     }
     if let Some(topology) = extension.and_then(|e| e.get("topological-actions-optimization")) {
+        // The reference's default is i32::MAX; anything that large is a depth
+        // bound in name only, and running it would evaluate every combination
+        // of a corpus this harness has no time budget for.
         if let Some(v) = topology.get("max-preventive-search-tree-depth").and_then(|v| v.as_u64()) {
-            // The reference's default is i32::MAX; anything that large is a
-            // depth bound in name only, and running it would evaluate every
-            // combination of a corpus this harness has no time budget for.
             options.max_depth = (v as usize).min(3);
+        }
+        // Read separately, because the reference states it separately. Every
+        // vendored configuration sets the two the same, so this moves nothing
+        // here — and a configuration that did not would otherwise have been
+        // scored against the preventive depth without a word.
+        if let Some(v) = topology.get("max-curative-search-tree-depth").and_then(|v| v.as_u64()) {
+            options.curative_max_depth = Some((v as usize).min(3));
+        }
+        // The reference's whole mechanism for offering anything but a greedy
+        // chain. Every vendored configuration carries `[]`, which is the
+        // finding that killed the "gridoxide needs a combinatorial search"
+        // diagnosis: on the scenarios that fail, the reference reaches its
+        // answer with the same single-action chain.
+        if let Some(list) = topology.get("predefined-combinations").and_then(|v| v.as_array()) {
+            options.predefined_combinations = list
+                .iter()
+                .filter_map(|c| c.as_array())
+                .map(|c| c.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .collect();
         }
     }
     options
