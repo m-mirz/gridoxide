@@ -223,6 +223,23 @@ pub struct CnecResult {
     /// `|P| / (√3·U_nominal)` — which is what a DC study means by a current and
     /// what the reference computes in its own DC mode.
     pub current_a: f64,
+    /// Active power and current at the branch's **other** terminal — side two
+    /// where [`flow_mw`](Self::flow_mw) is side one — as `(MW, A)`.
+    ///
+    /// Measured in the **same direction along the branch** as
+    /// [`flow_mw`](Self::flow_mw): power entering at side one, power *leaving*
+    /// at side two. So the two differ only by the branch's own losses, which is
+    /// the comparison anyone asking for both sides wants, and their currents
+    /// differ again by the two buses' voltages. Reporting side two as the power
+    /// *entering* there would negate it, and the two figures would then differ
+    /// by roughly twice the flow rather than by the losses.
+    ///
+    /// The AC path computes both terminals already, to measure a threshold on
+    /// the side it names; this stops the second one being discarded. Under DC
+    /// there are no losses, so side two's active power is exactly `flow_mw` and
+    /// only its current differs, at the far bus's nominal voltage. That is not
+    /// a shortcut — it is what a DC study means by the far end.
+    pub side_two: (f64, f64),
 }
 
 impl CnecResult {
@@ -368,6 +385,19 @@ impl Network<'_> {
     fn branch_voltage(&self, branch: usize, dc: &[crate::linear::btheta::DcBranch]) -> Option<f64> {
         let b = dc.iter().find(|b| b.index == branch)?;
         Some(self.buses.get(b.from)?.u_rated)
+    }
+
+    /// The same at the branch's `to` bus — side two. Equal to
+    /// [`branch_voltage`](Self::branch_voltage) on a line and different across
+    /// a transformer, which is the only place a DC side-two current differs
+    /// from a side-one one.
+    fn branch_far_voltage(
+        &self,
+        branch: usize,
+        dc: &[crate::linear::btheta::DcBranch],
+    ) -> Option<f64> {
+        let b = dc.iter().find(|b| b.index == branch)?;
+        Some(self.buses.get(b.to)?.u_rated)
     }
 }
 
@@ -639,6 +669,10 @@ pub fn evaluate_with(
                 continue;
             }
             let (margin_mw, u_bind) = bound.margin(flow_mw);
+            // Lossless, so the far end passes on exactly what the near end
+            // took. Only the current differs, at the far bus's own nominal
+            // voltage — which is to say across a transformer and nowhere else.
+            let u_far = network.branch_far_voltage(branch, &dc).unwrap_or(u_bind);
             cnecs.push(CnecResult {
                 cnec: i,
                 branch,
@@ -650,6 +684,7 @@ pub fn evaluate_with(
                 conversion_v: u_bind,
                 margin_a: to_amperes(margin_mw, u_bind),
                 current_a: to_amperes(flow_mw.abs(), u_bind),
+                side_two: (flow_mw, to_amperes(flow_mw.abs(), u_far)),
             });
         }
         perimeters.push(PerimeterResult { state, cnecs, severed });
@@ -920,6 +955,9 @@ pub fn evaluate_ac(
             };
 
             let (margin_mw, u_bind) = bound.margin(flow_mw);
+            // Negated: `ends[1]` is the power *entering* the branch at its far
+            // terminal, and side two reports what leaves there.
+            let (p_two, q_two, u_two) = (-ends[1].0, -ends[1].1, ends[1].2);
             cnecs.push(CnecResult {
                 cnec: i,
                 branch,
@@ -931,6 +969,14 @@ pub fn evaluate_ac(
                 conversion_v: u_bind,
                 margin_a: to_amperes(margin_mw, u_bind),
                 current_a,
+                side_two: (
+                    p_two,
+                    if u_two > 0.0 {
+                        p_two.hypot(q_two) * 1e6 / (3f64.sqrt() * u_two)
+                    } else {
+                        0.0
+                    },
+                ),
             });
         }
         perimeters.push(PerimeterResult { state, cnecs, severed });
