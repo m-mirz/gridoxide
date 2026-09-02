@@ -218,7 +218,17 @@ pub fn run(
         // which can only make the target harder to reach.
         if options.enforce_curative_security { target.max(0.0) } else { target }
     });
-    let options = &SearchOptions { stop_at_target: Some(curative_target), ..options.clone() };
+    // A curative perimeter gets its own depth where the configuration states
+    // one. The reference keeps `max-preventive-search-tree-depth` and
+    // `max-curative-search-tree-depth` apart because they answer different
+    // questions — how much may be planned, against how much may be carried out
+    // under time pressure — and this is the only layer that knows which
+    // perimeter it is about to search.
+    let options = &SearchOptions {
+        stop_at_target: Some(curative_target),
+        max_depth: options.curative_max_depth.unwrap_or(options.max_depth),
+        ..options.clone()
+    };
 
     let mut scenarios = Vec::new();
     for (contingency, _) in crac.contingencies.iter().enumerate() {

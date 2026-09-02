@@ -28,7 +28,34 @@ The price is the usual one: greedy picks the best single action at each level, a
 not always two actions that are individually best. `SearchResult::leaves` reports the count actually
 evaluated, and it is the number to watch when a case gets big.
 
-The default depth is 2.
+The default depth is 2, and a **curative** perimeter may be given its own. The reference keeps
+`max-preventive-search-tree-depth` and `max-curative-search-tree-depth` apart because they answer
+different questions: how much may be planned in advance, against how much may be carried out under
+time pressure by people who did not plan it.
+
+### Combinations are configuration, not algorithm
+
+The greedy price above is real but smaller than it looks, because the reference is greedy too.
+`SearchTreeBloomer.bloom` returns exactly two things: one candidate per individual network action,
+and each **predefined combination** named in the RAO parameters. It never enumerates subsets. So
+`predefined-combinations` is the whole of its breadth, and gridoxide offers the same:
+
+```text
+candidates = every individual action + every predefined combination
+```
+
+A combination is **one** candidate. It costs one depth, not one per member; it spends one usage
+allowance per member, because the limits count remedial actions and taking three at once is still
+taking three; and it is taken whole or not at all. An entry naming an unknown action, naming fewer
+than two, whose members conflict with one another, or any of whose members is unavailable or
+inexpressible in this perimeter is dropped entirely — half a combination is a network nobody
+described, which is the rule elementary actions inside a single network action already follow one
+level down.
+
+Worth stating because it settled an argument: this parameter is `[]` in *every* configuration the
+reference ships with its own test suite. So on the scenarios where the two implementations disagree,
+the reference reaches its answer with the same single-action chain — and a plan to build a
+combinatorial search would have been closing a gap that is not there.
 
 ### Every leaf re-runs the whole linear optimization
 

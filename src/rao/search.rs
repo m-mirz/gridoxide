@@ -44,6 +44,33 @@ pub struct SearchOptions {
     /// How many network actions may be stacked. `0` optimizes range actions
     /// only.
     pub max_depth: usize,
+    /// The same, for a **curative** perimeter. `None` uses
+    /// [`max_depth`](Self::max_depth).
+    ///
+    /// The reference states the two separately —
+    /// `max-preventive-search-tree-depth` and
+    /// `max-curative-search-tree-depth` — and read by
+    /// [`castor::run`](super::castor::run) rather than here, since only that
+    /// layer knows which kind of perimeter it is answering. Both are
+    /// `i32::MAX` in every vendored configuration, so this changes no answer on
+    /// that corpus; it is here so a configuration that sets them differently is
+    /// not silently scored against the preventive one.
+    pub curative_max_depth: Option<usize>,
+    /// Sets of network actions offered as **one** candidate each, by id.
+    ///
+    /// The reference's `predefined-combinations`, and its entire mechanism for
+    /// searching anything but a greedy chain: `SearchTreeBloomer.bloom` returns
+    /// these plus one candidate per individual action, and never enumerates
+    /// subsets. So the breadth of both searches is configuration rather than
+    /// algorithm — and every vendored configuration carries `[]`, which is why
+    /// this changes no answer on that corpus either.
+    ///
+    /// A combination costs **one depth** and spends one usage allowance per
+    /// member. An entry naming an unknown action, naming fewer than two, whose
+    /// members conflict with each other, or any of whose members is unavailable
+    /// or inexpressible in this perimeter is dropped whole: a combination is
+    /// one decision, and half of one is a network nobody described.
+    pub predefined_combinations: Vec<Vec<String>>,
     /// A candidate must improve the objective by at least this much, in MW, to
     /// be taken.
     pub absolute_min_impact: f64,
@@ -103,6 +130,8 @@ impl Default for SearchOptions {
     fn default() -> Self {
         Self {
             max_depth: 2,
+            curative_max_depth: None,
+            predefined_combinations: Vec::new(),
             absolute_min_impact: 0.0,
             relative_min_impact: 0.0,
             linear: LinearOptions::default(),
@@ -270,6 +299,28 @@ fn effect_of(
         .then_some(effect)
 }
 
+/// One thing the search may try at a depth: a set of network actions applied
+/// together, and the network state they produce.
+///
+/// Usually a set of one. The reference's `SearchTreeBloomer.bloom` offers each
+/// individual network action **plus** each *predefined combination* named in
+/// the RAO parameters, and a combination is one decision rather than a chain of
+/// them — it is taken whole or not at all, and it costs one depth. So the
+/// search's unit is a candidate, not an action.
+///
+/// Its breadth is therefore configuration, not algorithm: with no predefined
+/// combinations — which is every vendored configuration — this is exactly the
+/// greedy chain it has always been.
+struct Candidate {
+    /// Indices into [`Crac::network_actions`], in the CRAC's own order.
+    actions: Vec<usize>,
+    effect: Effect,
+    /// The tie-break key: the members' ids joined, so a combination orders
+    /// deterministically among single actions rather than by whatever position
+    /// it was built at.
+    key: String,
+}
+
 /// Whether two actions can be taken together.
 ///
 /// Two actions touching the same network element conflict: one may open a line
@@ -360,30 +411,77 @@ pub fn search_with_open(
     linear.available = constrained.clone();
     let options = &SearchOptions { linear, ..options.clone() };
 
-    let available: Vec<(usize, Effect)> = crac
-        .network_actions
-        .iter()
-        .filter(|action| constrained.allows(&action.usage_rules, perimeter, crac))
-        .filter_map(|action| {
-            let index = crac.network_actions.iter().position(|a| a.id == action.id)?;
-            let effect =
-                effect_of(action, crac, resolution, network.tap_changers, network.lines.len())?;
-            Some((index, effect))
+    let offered = |index: usize| -> Option<Effect> {
+        let action = crac.network_actions.get(index)?;
+        constrained
+            .allows(&action.usage_rules, perimeter, crac)
+            .then(|| effect_of(action, crac, resolution, network.tap_changers, network.lines.len()))
+            .flatten()
+    };
+    let mut available: Vec<Candidate> = (0..crac.network_actions.len())
+        .filter_map(|index| {
+            Some(Candidate {
+                actions: vec![index],
+                effect: offered(index)?,
+                key: crac.network_actions[index].id.clone(),
+            })
         })
         .collect();
-    let available = match options.skip_far_actions {
-        Some(max) => {
-            near_most_limiting(
-                crac,
-                network,
-                resolution,
-                perimeter,
-                &base_open,
-                available,
-                max,
-                options.linear.flow_model,
-            )
+    // Then the predefined combinations, each as **one** candidate. A member
+    // that is unavailable here, inexpressible, or incompatible with another
+    // member takes the whole combination with it: the reference offers a
+    // combination as a single decision, and half of one is a network nobody
+    // described.
+    for combination in &options.predefined_combinations {
+        let members: Option<Vec<usize>> = combination
+            .iter()
+            .map(|id| crac.network_actions.iter().position(|a| a.id == *id))
+            .collect();
+        let Some(members) = members else { continue };
+        if members.len() < 2 {
+            continue;
         }
+        let pairwise_ok = members.iter().enumerate().all(|(i, &a)| {
+            members[i + 1..]
+                .iter()
+                .all(|&b| compatible(&crac.network_actions[a], &crac.network_actions[b]))
+        });
+        if !pairwise_ok {
+            continue;
+        }
+        let mut effect = Effect { open: Vec::new(), close: Vec::new(), taps: Vec::new() };
+        let mut expressible = true;
+        for &index in &members {
+            match offered(index) {
+                Some(part) => {
+                    effect.open.extend(part.open);
+                    effect.close.extend(part.close);
+                    effect.taps.extend(part.taps);
+                }
+                None => expressible = false,
+            }
+        }
+        if !expressible {
+            continue;
+        }
+        let key = members
+            .iter()
+            .map(|&i| crac.network_actions[i].id.as_str())
+            .collect::<Vec<_>>()
+            .join("+");
+        available.push(Candidate { actions: members, effect, key });
+    }
+    let available = match options.skip_far_actions {
+        Some(max) => near_most_limiting(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            &base_open,
+            available,
+            max,
+            options.linear.flow_model,
+        ),
         None => available,
     };
     // What the CRAC allows in this perimeter's own instant. A perimeter spans
@@ -459,37 +557,41 @@ pub fn search_with_open(
         let mut open_here: Vec<usize> = base_open.clone();
         let mut taps_here: Vec<(usize, i32, f64)> = Vec::new();
         for &index in &chosen {
-            if let Some((_, effect)) = available.iter().find(|(i, _)| *i == index) {
+            if let Some(effect) = effect_of_chosen(&available, index) {
                 open_here.extend(&effect.open);
                 open_here.retain(|b| !effect.close.contains(b));
                 taps_here.extend(&effect.taps);
             }
         }
 
-        let mut winner: Option<(usize, Evaluated)> = None;
+        let mut winner: Option<(&Candidate, Evaluated)> = None;
         // A fixed order, so the search reproduces itself.
-        for (index, effect) in &available {
-            if chosen.contains(index) {
+        for offer in &available {
+            if offer.actions.iter().any(|i| chosen.contains(i)) {
                 continue;
             }
-            if chosen.iter().any(|&c| {
-                !compatible(&crac.network_actions[c], &crac.network_actions[*index])
+            if offer.actions.iter().any(|&index| {
+                chosen.iter().any(|&c| {
+                    !compatible(&crac.network_actions[c], &crac.network_actions[index])
+                })
             }) {
                 continue;
             }
             // More than the plan's allowance permits. Checked before the leaf
             // is evaluated rather than after: a candidate the CRAC forbids is
-            // not a worse answer, it is not an answer.
+            // not a worse answer, it is not an answer. A combination spends one
+            // allowance **per member**: the limits count remedial actions, and
+            // taking three at once is still taking three.
             let mut with_candidate = chosen.clone();
-            with_candidate.push(*index);
+            with_candidate.extend(&offer.actions);
             if !limits.admits(crac, &with_candidate) {
                 continue;
             }
             let mut open = open_here.clone();
-            open.extend(&effect.open);
-            open.retain(|b| !effect.close.contains(b));
+            open.extend(&offer.effect.open);
+            open.retain(|b| !offer.effect.close.contains(b));
             let mut taps = taps_here.clone();
-            taps.extend(&effect.taps);
+            taps.extend(&offer.effect.taps);
 
             let candidate = leaf(
                 crac,
@@ -506,19 +608,18 @@ pub fn search_with_open(
             // ampere objective those can order two candidates differently.
             let better = match &winner {
                 None => true,
-                Some((previous_index, previous)) => {
-                    candidate.objective > previous.objective + 1e-12
-                        || ((candidate.objective - previous.objective).abs() <= 1e-12
-                            && crac.network_actions[*index].id
-                                < crac.network_actions[*previous_index].id)
+                Some((previous, evaluated)) => {
+                    candidate.objective > evaluated.objective + 1e-12
+                        || ((candidate.objective - evaluated.objective).abs() <= 1e-12
+                            && offer.key < previous.key)
                 }
             };
             if better {
-                winner = Some((*index, candidate));
+                winner = Some((offer, candidate));
             }
         }
 
-        let Some((index, candidate)) = winner else { break };
+        let Some((offer, candidate)) = winner else { break };
         // A candidate that reaches the target is taken even if it falls short
         // of the minimum-impact thresholds: those exist to stop the search
         // spending an action for nothing, and securing the network is not
@@ -528,14 +629,14 @@ pub fn search_with_open(
         if !enough {
             break;
         }
-        chosen.push(index);
+        chosen.extend(&offer.actions);
         best = candidate;
         depth += 1;
     }
 
     let mut open_branches: Vec<usize> = base_open.clone();
     for &index in &chosen {
-        if let Some((_, effect)) = available.iter().find(|(i, _)| *i == index) {
+        if let Some(effect) = effect_of_chosen(&available, index) {
             open_branches.extend(&effect.open);
             open_branches.retain(|b| !effect.close.contains(b));
         }
@@ -557,6 +658,19 @@ pub fn search_with_open(
         transformers: best.transformers,
         buses: best.buses,
     }
+}
+
+/// The effect of one chosen action, found among the candidates that offered it.
+///
+/// Prefers the single-action candidate, so a chain that took an action on its
+/// own is rebuilt from that action alone rather than from a combination that
+/// merely happened to contain it.
+fn effect_of_chosen(available: &[Candidate], index: usize) -> Option<&Effect> {
+    available
+        .iter()
+        .find(|c| c.actions == [index])
+        .or_else(|| available.iter().find(|c| c.actions.contains(&index)))
+        .map(|c| &c.effect)
 }
 
 /// Whether a candidate beats the incumbent by enough to be worth taking.
@@ -900,10 +1014,10 @@ fn near_most_limiting(
     resolution: &Resolution,
     perimeter: &[State],
     open: &[usize],
-    available: Vec<(usize, Effect)>,
+    available: Vec<Candidate>,
     max_boundaries: usize,
     model: super::evaluate::FlowModel,
-) -> Vec<(usize, Effect)> {
+) -> Vec<Candidate> {
     if network.bus_countries.is_empty() {
         return available;
     }
@@ -932,7 +1046,8 @@ fn near_most_limiting(
     let boundaries = country_boundaries(network, &dc);
     available
         .into_iter()
-        .filter(|(_, effect)| {
+        .filter(|candidate| {
+            let effect = &candidate.effect;
             let mut touched: Vec<String> = Vec::new();
             for &branch in effect.open.iter().chain(&effect.close) {
                 touched.extend(branch_countries(network, branch, &dc));
