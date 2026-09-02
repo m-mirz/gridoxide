@@ -102,19 +102,56 @@ enum MarginUnit {
     Ampere,
 }
 
-/// A margin in both units, as the evaluator reported it.
+/// One CNEC's reading in one network: its margin in both units, and the flow
+/// that produced it at both terminals.
+///
+/// The flows travel with the margin rather than in a map of their own because
+/// they are read at the same three stages and out of the same
+/// [`CnecResult`](gridoxide::rao::CnecResult) — a second set of maps would be a
+/// second chance to look a stage up in the wrong one.
 #[derive(Debug, Clone, Copy)]
 struct Margin {
     mw: f64,
     a: f64,
+    /// `(MW, A)` at side one and side two. Under AC these differ by the
+    /// branch's losses and by the two buses' voltages; under DC side two is the
+    /// negation of side one.
+    flow: [(f64, f64); 2],
 }
 
 impl Margin {
+    fn of(c: &gridoxide::rao::CnecResult) -> Self {
+        Self {
+            mw: c.margin_mw,
+            a: c.margin_a,
+            flow: [(c.flow_mw, c.current_a), c.side_two],
+        }
+    }
+
     fn in_unit(&self, unit: MarginUnit) -> f64 {
         match unit {
             MarginUnit::Megawatt => self.mw,
             MarginUnit::Ampere => self.a,
         }
+    }
+
+    /// The flow at one side, in the unit the step is written in. `side` is the
+    /// reference's own 1-based numbering.
+    ///
+    /// The ampere figure is **signed by the active power** at that terminal.
+    /// `CnecResult::current_a` is a magnitude, correctly — a current is one, and
+    /// it is what a threshold is compared against. But the reference's
+    /// `getFlow(cnec, side, AMPERE)` divides the *signed* megawatts by
+    /// `√3·U`, so a step reading `-1444.0 A on side 2` is naming a direction
+    /// and not just a size. Comparing a magnitude against it fails on every
+    /// reverse flow while agreeing to five significant figures, which is a
+    /// confusing way to be right.
+    fn flow_in_unit(&self, unit: MarginUnit, side: usize) -> Option<f64> {
+        let (mw, a) = *self.flow.get(side.checked_sub(1)?)?;
+        Some(match unit {
+            MarginUnit::Megawatt => mw,
+            MarginUnit::Ampere => a.copysign(mw),
+        })
     }
 }
 
@@ -136,7 +173,26 @@ enum Expect {
     ObjectiveValue { value: f64, stage: Option<Stage> },
     PstTap { action: String, tap: i32, at: Where },
     ActionUsed { action: String, at: Where },
+    /// `the remedial action "X" is not used ...` — the negative, and worth
+    /// having for exactly the reason it is easy to skip: nothing else in this
+    /// harness penalizes taking an action the reference declines, which is the
+    /// shape two recorded defects already had.
+    ActionNotUsed { action: String, at: Where },
     ActionCount { count: usize, at: Where },
+    /// `the flow on cnec "X" after PRA should be N A on side N`, and the
+    /// `initial flow` form with `stage: None`. Sides are the reference's own
+    /// 1-based numbering.
+    CnecFlow { cnec: String, value: f64, unit: MarginUnit, side: usize, stage: Option<Stage> },
+    /// `the "upper"/"lower" threshold on cnec "X" should be N A` — the bound
+    /// itself, not the distance to it.
+    CnecThreshold { cnec: String, upper: bool, value: f64, unit: MarginUnit },
+    /// `PST "X" in network file with PRA is on tap N` — where the *network*
+    /// left the shifter, addressed by network element rather than by range
+    /// action. Distinct from [`PstTap`](Self::PstTap): a scenario asserts this
+    /// for a shifter no range action names.
+    NetworkTap { element: String, tap: i32 },
+    /// `line "X" in network file with PRA has connection status to "X"`.
+    Connected { element: String, connected: bool },
     /// A step this harness does not implement, kept so it is counted rather
     /// than quietly dropped.
     Unsupported(String),
@@ -212,6 +268,19 @@ fn number_after_quotes(line: &str) -> Option<f64> {
         }
     }
     token.parse::<f64>().ok()
+}
+
+/// The `n`th double-quoted span, zero-based.
+///
+/// Needed because the reference does not put the subject first in every step:
+/// `the "upper" threshold on cnec "X"` names the bound before the CNEC.
+fn quoted_nth(line: &str, n: usize) -> Option<String> {
+    line.split('"').skip(1).step_by(2).nth(n).map(str::to_string)
+}
+
+/// The terminal a flow step names, in the reference's 1-based numbering.
+fn side_of(line: &str) -> Option<usize> {
+    line.split_once(" on side ")?.1.trim().split_whitespace().next()?.parse().ok()
 }
 
 fn parse(text: &str) -> Vec<Scenario> {
@@ -351,6 +420,65 @@ fn expectation(line: &str) -> Expect {
         };
         return match number_after_quotes(line) {
             Some(value) => Expect::ObjectiveValue { value, stage },
+            None => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("flow on cnec") {
+        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
+        let Some(side) = side_of(line) else { return Expect::Unsupported(line.to_string()) };
+        // `initial` is the untouched network; every other form names a stage.
+        let stage = (!line.contains("initial flow")).then(|| stage_of(line));
+        return match (quoted(line), number_after_quotes(line)) {
+            (Some(cnec), Some(value)) => Expect::CnecFlow { cnec, value, unit, side, stage },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("threshold on cnec") {
+        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
+        let upper = match quoted(line).as_deref() {
+            Some("upper") => true,
+            Some("lower") => false,
+            _ => return Expect::Unsupported(line.to_string()),
+        };
+        return match (quoted_nth(line, 1), number_after_quotes(line)) {
+            (Some(cnec), Some(value)) => Expect::CnecThreshold { cnec, upper, value, unit },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("the setpoint of RangeAction") {
+        // Parsed and deliberately **not** compared: the two sides name
+        // different quantities. gridoxide's `Setpoint::value` for an injection
+        // range action is the *shift* it applies, starting from zero; the
+        // reference's `getOptimizedSetPointOnState` is the generator's
+        // **absolute** target, which it recovers as `targetP / key`. On 2.3.1.4
+        // both actions are used, both are named correctly and the margin is
+        // exact to 500.0 — only the number's origin differs, and gridoxide
+        // cannot produce the reference's without per-generator injections the
+        // bus-aggregating UCTE importer does not keep (`Bus::p_spec` is
+        // generation minus load). Recording it as a failure would cap the ratio
+        // for something that is not wrong, so it is skipped **with its reason
+        // attached** rather than silently.
+        return Expect::Unsupported(format!(
+            "{line}  [not comparable: gridoxide reports the shift, the reference the \
+             generator's absolute target]"
+        ));
+    }
+    if line.contains("in network file with PRA is on tap") {
+        return match (quoted(line), number_after_quotes(line)) {
+            (Some(element), Some(tap)) => Expect::NetworkTap { element, tap: tap as i32 },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("in network file with PRA has connection status to") {
+        return match (quoted(line), quoted_nth(line, 1).as_deref()) {
+            (Some(element), Some("true")) => Expect::Connected { element, connected: true },
+            (Some(element), Some("false")) => Expect::Connected { element, connected: false },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("remedial action") && line.contains(" is not used") {
+        return match quoted(line) {
+            Some(action) => Expect::ActionNotUsed { action, at: where_of(line) },
             None => Expect::Unsupported(line.to_string()),
         };
     }
@@ -579,6 +707,69 @@ fn resting_tap(
     Some(changer.map_or(*initial_tap, |c| c.position))
 }
 
+/// Where a phase shifter *in the network* ended up, addressed by network
+/// element rather than by range action.
+///
+/// Distinct from [`resting_tap`], which answers for a range action. A scenario
+/// asks this of a shifter no range action need name, so the position is
+/// recovered from the transformer the plan left behind: the tap changer's own
+/// steps are the only authority on which position an angle corresponds to, and
+/// the search reports angles.
+fn tap_in_network(
+    crac: &Crac,
+    resolution: &Resolution,
+    net: &ucte::UcteImport,
+    setpoints: &[gridoxide::rao::Setpoint],
+    transformers: &[gridoxide::types::Transformer],
+    element: &str,
+) -> Option<i32> {
+    // A range action on this element already knows the answer, and knows it
+    // exactly. Under the continuous tap model the optimizer leaves the
+    // transformer on an angle *between* two steps and the set-point carries the
+    // position it was rounded to, so recovering the position from the angle
+    // afterwards can land on the other neighbour — the same off-by-one
+    // `BestTapFinder` exists to settle.
+    let by_action = setpoints.iter().find_map(|s| match &crac.range_actions[s.action].kind {
+        RangeActionKind::Pst { element: e, .. } if e == element => s.tap,
+        _ => None,
+    });
+    if by_action.is_some() {
+        return by_action;
+    }
+    let branch = resolution.branch(element)?;
+    let i = branch.checked_sub(net.lines.len())?;
+    let changer = net.tap_changers.get(i)?.as_ref()?;
+    let angle = transformers.get(i)?.tap.arg();
+    (changer.low..=changer.high())
+        .filter(|p| changer.at(*p).is_some())
+        .min_by(|a, b| {
+            let d = |p: &i32| (changer.at(*p).unwrap().arg() - angle).abs();
+            d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+/// A CNEC's declared threshold in one direction, in the unit the step names.
+///
+/// Read from the **CRAC**, not from the evaluator. The step asserts what the
+/// file says — `frm` is zero on every CNEC that carries one of these steps —
+/// while the evaluator's bound has already been tightened by the reliability
+/// margin and, under AC, charged for reactive flow. Those are the right numbers
+/// for a margin and the wrong ones for this question.
+fn declared_threshold(crac: &Crac, cnec: &str, upper: bool, unit: MarginUnit) -> Option<f64> {
+    let cnec = crac.flow_cnecs.iter().find(|c| c.id == cnec)?;
+    let want = match unit {
+        MarginUnit::Ampere => Unit::Ampere,
+        MarginUnit::Megawatt => Unit::Megawatt,
+    };
+    cnec.thresholds
+        .iter()
+        .filter(|t| t.unit == want)
+        .filter_map(|t| if upper { t.max } else { t.min })
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map_or(v, |a| if upper { a.min(v) } else { a.max(v) }))
+        })
+}
+
 /// The worst margin across every **optimized** CNEC, each measured at its own
 /// stage.
 ///
@@ -695,7 +886,7 @@ fn check(scenario: &Scenario) -> Outcome {
                 for c in &perimeter.cnecs {
                     out.insert(
                         crac.flow_cnecs[c.cnec].id.clone(),
-                        Margin { mw: c.margin_mw, a: c.margin_a },
+                        Margin::of(c),
                     );
                 }
             }
@@ -734,7 +925,7 @@ fn check(scenario: &Scenario) -> Outcome {
         .iter()
         .flat_map(|p| p.cnecs.iter())
         .map(|c| {
-            (crac.flow_cnecs[c.cnec].id.as_str(), Margin { mw: c.margin_mw, a: c.margin_a })
+            (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c))
         })
         .collect();
 
@@ -751,7 +942,7 @@ fn check(scenario: &Scenario) -> Outcome {
         .iter()
         .flat_map(|p| p.cnecs.iter())
         .map(|c| {
-            (crac.flow_cnecs[c.cnec].id.as_str(), Margin { mw: c.margin_mw, a: c.margin_a })
+            (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c))
         })
         .collect();
 
@@ -990,6 +1181,55 @@ fn check(scenario: &Scenario) -> Outcome {
                 let got = used.iter().any(|u| u == action);
                 record(got, format!("`{action}` used: {got} {at:?}"));
             }
+            Expect::ActionNotUsed { action, at } => {
+                let (used, _) = decisions(at);
+                let got = used.iter().any(|u| u == action);
+                record(!got, format!("`{action}` used: {got} (expected false) {at:?}"));
+            }
+            Expect::CnecFlow { cnec, value, unit, side, stage } => {
+                let reading = match stage {
+                    None => initial_margins.get(cnec.as_str()).copied(),
+                    Some(s) => pick(*s, cnec, &margins, &ara_margins, &cra_margins),
+                };
+                let got = reading.and_then(|m| m.flow_in_unit(*unit, *side));
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!("flow on `{cnec}` side {side} {got:?} (expected {value})"),
+                );
+            }
+            Expect::CnecThreshold { cnec, upper, value, unit } => {
+                let got = declared_threshold(&crac, cnec, *upper, *unit);
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!(
+                        "{} threshold on `{cnec}` {got:?} (expected {value})",
+                        if *upper { "upper" } else { "lower" }
+                    ),
+                );
+            }
+            Expect::NetworkTap { element, tap } => {
+                let got = tap_in_network(
+                    &crac,
+                    &resolution,
+                    &net,
+                    &plan.preventive.setpoints,
+                    &plan.preventive.transformers,
+                    element,
+                );
+                record(
+                    got == Some(*tap),
+                    format!("network tap of `{element}` {got:?} (expected {tap})"),
+                );
+            }
+            Expect::Connected { element, connected } => {
+                let got = resolution
+                    .branch(element)
+                    .map(|b| !plan.preventive.open_branches.contains(&b));
+                record(
+                    got == Some(*connected),
+                    format!("`{element}` connected: {got:?} (expected {connected})"),
+                );
+            }
             Expect::ActionCount { count, at } => {
                 let got = decisions(at).0.len();
                 record(got == *count, format!("{got} action(s) used (expected {count}) {at:?}"));
@@ -1066,7 +1306,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
     );
 }
 
-/// How many of the reference's assertions currently hold: **138 of 142**,
+/// How many of the reference's assertions currently hold: **150 of 156**,
 /// across all 25 scenarios.
 ///
 /// It was 124 of 124 before the three MNEC scenarios (5.2.1.2 to 5.2.1.4)
@@ -1074,14 +1314,20 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 /// two taps and the two margins that follow from them, and they are the
 /// `BestTapFinder` divergence described on [`BASELINE_MATCHED_AC`].
 ///
+/// It was 138 of 142 before the per-side flow, threshold, resting-tap and
+/// connection-status steps were taken out of the skip bucket. Twelve of the
+/// fourteen new assertions hold; the two that do not are the third and fourth
+/// sighting of that same `BestTapFinder` divergence, now visible as a tap
+/// position in the network as well as a margin.
+///
 /// It is a recorded number rather than an assertion of perfection. These are
 /// two heuristic search trees and §8.3 says up front that a different set of
 /// actions reaching the same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
-const BASELINE_MATCHED_DC: usize = 138;
+const BASELINE_MATCHED_DC: usize = 150;
 
-/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **192 of 203**.
+/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **232 of 244**.
 ///
 /// Lower than the DC file's score, and expected to be. These scenarios are
 /// judged on margins the reference measured with an AC load flow that also
@@ -1114,9 +1360,25 @@ const BASELINE_MATCHED_DC: usize = 138;
 ///
 /// Matching these four assertions would mean reproducing that rounding, at the
 /// cost of a worse answer. They are left as recorded disagreements.
-const BASELINE_MATCHED_AC: usize = 192;
+///
+/// # What the per-side flow steps bought
+///
+/// It was 192 of 203 before the `flow on cnec … on side N` steps left the skip
+/// bucket — 41 new assertions, 40 of which hold. Getting there needed two
+/// conventions stated that the evaluator had never had to commit to, and
+/// neither was guessable from the margins:
+///
+/// - An ampere flow is **signed by the active power**. `CnecResult::current_a`
+///   is a magnitude, correctly, but `getFlow(cnec, side, AMPERE)` divides the
+///   signed megawatts by `√3·U`, so a step reading `-1444.0 A` is naming a
+///   direction. The magnitudes had agreed to five figures all along.
+/// - **Side two is measured in the same direction as side one** — power
+///   entering at one end, leaving at the other — so the two differ by the
+///   branch's losses. Reporting the power *entering* side two negates it, and
+///   the pair then differ by twice the flow.
+const BASELINE_MATCHED_AC: usize = 232;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **795 of 883**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **796 of 884**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1154,7 +1416,7 @@ const BASELINE_MATCHED_AC: usize = 192;
 /// changed with it — `remedial action X is used` failures went from 30 to 2,
 /// so what remains is almost entirely **which tap** a curative perimeter's
 /// range actions settle on, and the margins that follow from it.
-const BASELINE_MATCHED_AC16: usize = 795;
+const BASELINE_MATCHED_AC16: usize = 796;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

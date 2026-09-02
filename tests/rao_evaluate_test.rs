@@ -610,3 +610,79 @@ fn distributing_the_slack_solves_and_agrees_where_losses_are_negligible() {
     }
     assert!(compared > 0, "nothing was compared");
 }
+
+#[test]
+fn side_two_is_the_far_end_of_the_same_flow() {
+    // Gated against pypowsybl's own `p2`, not against gridoxide's `p1`, because
+    // the question is a *convention* and an internal check cannot settle one.
+    //
+    // powsybl reports `terminal.getP()` — power **entering** the branch — at
+    // both ends, so its `p2` is the negation of what `side_two` reports. Side
+    // two is the power *leaving*, measured in the same direction along the
+    // branch as `flow_mw`, so that the two differ by the branch's losses rather
+    // than by twice the flow. That is what the reference's own per-side flow
+    // expectations mean, and reading it the other way agrees on magnitude while
+    // being wrong about direction on every one of them.
+    let c = case();
+    let reference = reference_flows("TestCase12Nodes.pypowsybl.json");
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let result = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
+
+    let base = result
+        .perimeters
+        .iter()
+        .find(|p| p.state.contingency.is_none())
+        .expect("a preventive perimeter");
+
+    let mut checked = 0;
+    for cnec in &base.cnecs {
+        let id = &c.net.branch_ids[cnec.branch];
+        let Some([p1, _, p2, _]) = reference.get(id.trim()).or_else(|| reference.get(id)) else {
+            continue;
+        };
+        assert!(
+            (cnec.side_two.0 - -p2).abs() < 0.5,
+            "{id}: side two {} MW against the reference's {} MW",
+            cnec.side_two.0,
+            -p2
+        );
+        // The losses, and nothing more. On these near-lossless fixtures that is
+        // a fraction of a megawatt, which is exactly the point: a sign error
+        // here would show up as twice the flow.
+        assert!(
+            (cnec.flow_mw - cnec.side_two.0).abs() < 0.05 * p1.abs().max(1.0),
+            "{id}: {} MW in, {} MW out — that is not losses",
+            cnec.flow_mw,
+            cnec.side_two.0
+        );
+        checked += 1;
+    }
+    assert!(checked >= 2, "only {checked} branches checked");
+}
+
+#[test]
+fn a_dc_far_end_carries_exactly_what_the_near_end_took() {
+    // DC is lossless, so there is no room for the two sides to differ in power
+    // at all — only in current, and then only across a transformer, where the
+    // two buses' nominal voltages differ.
+    let c = case();
+    let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
+    let result = evaluate::evaluate(&c.crac, &c.network(), &resolution);
+
+    let mut checked = 0;
+    for perimeter in &result.perimeters {
+        for cnec in &perimeter.cnecs {
+            assert!(
+                (cnec.flow_mw - cnec.side_two.0).abs() < 1e-9,
+                "{}: {} MW in, {} MW out under a lossless model",
+                c.net.branch_ids[cnec.branch],
+                cnec.flow_mw,
+                cnec.side_two.0
+            );
+            assert!(cnec.side_two.1 >= 0.0, "a current is a magnitude");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "the CRAC should monitor something");
+}

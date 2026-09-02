@@ -79,6 +79,25 @@ one-sided CNEC.
 
 The sign carries the verdict: \\(m < 0\\) is an overload, exactly, and by exactly the amount reported.
 
+### Two ends of one flow
+
+`CnecResult` reports `flow_mw` at side one and `side_two` — active power and current — at the other,
+and the pair follows one rule: **both are measured in the same direction along the branch**. Power
+entering at side one, power *leaving* at side two. So the two differ by the branch's own losses,
+which is the comparison anyone asking for both ends wants, and under DC they are equal to the last
+bit because a linear model has no losses to spend.
+
+The alternative reading — report the power *entering* at each end, which is what powsybl's
+`Terminal::getP` gives and what the AC evaluator computes internally — negates side two, and the two
+figures then differ by roughly twice the flow rather than by a fraction of a megawatt. Both readings
+agree on magnitude, so nothing but a per-side expectation from outside can tell them apart.
+
+One consequence worth stating because it looks like an inconsistency: `current_a` and `side_two.1`
+are **magnitudes**, since a current is one and a threshold is compared against one. A flow *reported*
+in amperes is signed, by the active power at that terminal — the reference divides the signed
+megawatts by \(\sqrt{3}\,U\) — so `-1444.0 A` names a direction rather than a smaller number. The
+evaluator keeps the magnitude and the caller applies the sign, which is why the two live apart.
+
 ### One margin, in two units
 
 `CnecResult` reports `margin_mw` and `margin_a`, and the second is *not* a unit conversion of the

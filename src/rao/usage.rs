@@ -320,6 +320,7 @@ mod tests {
             margin_a: margin,
             conversion_v: 0.0,
             current_a: 0.0,
+            side_two: (0.0, 0.0),
         };
         let result = SecurityResult {
             perimeters: vec![PerimeterResult {
