@@ -39,7 +39,7 @@ use super::evaluate::{evaluate_with, Network, Resolution};
 use super::linear::Setpoint;
 use super::automaton::{simulate, AutomatonResult};
 use super::mnec::Baseline;
-use super::search::{search, SearchOptions, SearchResult};
+use super::search::{search, search_with_open, SearchOptions, SearchResult};
 
 /// What one perimeter was told to do.
 #[derive(Clone, Debug)]
@@ -276,10 +276,12 @@ pub fn run(
             let result = curative_search(
                 crac, &view, resolution, &[state.clone()], solver, options, &open,
             );
-            let mut in_force = open.clone();
-            in_force.extend(result.open_branches.iter().copied());
-            in_force.sort_unstable();
-            in_force.dedup();
+            // The result's own set, not a union with what went in. A union
+            // would be safe only while a perimeter could never *close*
+            // anything: `result.open_branches` starts from `open` and the
+            // search removes from it, so re-adding `open` puts back exactly the
+            // branch a closing remedial action just shut.
+            let in_force = result.open_branches.clone();
             perimeters.push(PerimeterPlan {
                 states: vec![state],
                 network_actions: result.network_actions.clone(),
@@ -332,10 +334,14 @@ pub fn run(
 /// A search over a curative perimeter, with branches already open from earlier
 /// decisions.
 ///
-/// The open set has to be *inside* the leaf evaluation rather than applied to
-/// the network first, because a search leaf adds to it — and a branch opened
-/// twice is still one branch, which the union handles and a re-application
-/// would not.
+/// The set is **stated**, not applied to the network first. Writing
+/// `OPEN_BRANCH_Z` into a copy of the lines and searching the result looks
+/// equivalent and is not: a closing remedial action is expressed by removing a
+/// branch *from the open set*, so a set that has been emptied into the
+/// impedances leaves a close with nothing to remove and the branch open no
+/// matter what the action says. It does not fail — it evaluates as a change
+/// that does nothing, which is why the perimeter then reports that no remedial
+/// action was worth taking. See [`search_with_open`] for what that cost.
 fn curative_search(
     crac: &Crac,
     network: &Network<'_>,
@@ -345,46 +351,7 @@ fn curative_search(
     options: &SearchOptions,
     already_open: &[usize],
 ) -> SearchResult {
-    // No early return for an empty set. "Nothing is open" is a *result* here —
-    // an automaton that closes the file's only standby circuit produces exactly
-    // that — and handing the unmodified network back would let `search` re-derive
-    // the open set from `initially_open` and undo the closure. The set has to be
-    // stated, including when it is empty.
-    //
-    // Represent the already-open branches by removing them from the working
-    // copy, so the search's own candidates compose with them naturally.
-    let mut lines = network.lines.to_vec();
-    let mut transformers = network.transformers.to_vec();
-    for &branch in already_open {
-        if branch < lines.len() {
-            lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
-            lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
-            lines[branch].b_shunt = 0.0;
-            lines[branch].g_shunt = 0.0;
-        } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
-            t.from_status = 0;
-            t.to_status = 0;
-        }
-    }
-    let view = Network {
-        buses: network.buses,
-        lines: &lines,
-        transformers: &transformers,
-        branch_ids: network.branch_ids,
-        bus_ids: network.bus_ids,
-        // Empty, deliberately: the open state is already baked into
-        // `lines`/`transformers` above. Leaving the file's own list here
-        // would re-open branches a *closing* remedial action has just shut,
-        // because `evaluate` derives its open set from this field. That is
-        // silent — every margin stays self-consistent and the optimizer
-        // simply measures a network in which the automaton never acted.
-        initially_open: &[],
-        bus_countries: network.bus_countries,
-        shunts: network.shunts,
-        tap_changers: network.tap_changers,
-        base_mva: network.base_mva,
-    };
-    search(crac, &view, resolution, perimeter, solver, options)
+    search_with_open(crac, network, resolution, perimeter, solver, options, already_open)
 }
 
 fn worst_margin(

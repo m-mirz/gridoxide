@@ -287,6 +287,10 @@ fn compatible(a: &NetworkAction, b: &NetworkAction) -> bool {
 ///
 /// `transformers` is mutated to the winning leaf's state, matching
 /// [`optimize`]'s contract: the caller's network ends up where the result says.
+///
+/// Starts from the network's own out-of-service circuits. A perimeter that
+/// begins somewhere else — a curative one, carrying the preventive stage's and
+/// the automatons' decisions — wants [`search_with_open`] instead.
 pub fn search(
     crac: &Crac,
     network: &Network<'_>,
@@ -295,8 +299,44 @@ pub fn search(
     solver: &mut dyn Solver,
     options: &SearchOptions,
 ) -> SearchResult {
+    search_with_open(crac, network, resolution, perimeter, solver, options, network.initially_open)
+}
+
+/// [`search`], starting from a stated open set rather than the network's own.
+///
+/// # Why this is a parameter and not a pre-modified network
+///
+/// The obvious way to say "these branches are already open" is to write
+/// [`OPEN_BRANCH_Z`](crate::topology::reduction::OPEN_BRANCH_Z) into a copy of
+/// the lines before searching. That is what this used to do, and it made a
+/// **closing** remedial action structurally impossible: a close is expressed by
+/// removing a branch from the open set, so with the set emptied into the
+/// impedances there is nothing left to remove and the branch stays at 1e9 Ω
+/// whatever the action says.
+///
+/// The failure is silent in the worst way. The action is not refused — it
+/// evaluates as a change that does nothing, loses to every other candidate, and
+/// the perimeter reports that no remedial action was worth taking. Against the
+/// reference's own suite that was 21 curative closes declined out of 21 offered,
+/// while the same actions matched 8 of 8 in preventive and 3 of 3 in auto,
+/// which is where the asymmetry gave it away: [`automaton`](super::automaton)
+/// carries the set as a list and retains against it, exactly as this now does.
+///
+/// So the set stays a list all the way down to
+/// [`optimize_with_open`], which knows how to apply it — including stating it
+/// as outages so the AC path removes those branches from the Y-bus rather than
+/// leaving them coupled through a ~1e-9 admittance.
+pub fn search_with_open(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    perimeter: &[State],
+    solver: &mut dyn Solver,
+    options: &SearchOptions,
+    already_open: &[usize],
+) -> SearchResult {
     // The root: no network action, range actions untouched.
-    let base_open: Vec<usize> = network.initially_open.to_vec();
+    let base_open: Vec<usize> = already_open.to_vec();
 
     // Which CNECs are constrained *here*, before this perimeter acts. A usage
     // rule conditional on a CNEC is answered against this and never
@@ -565,7 +605,15 @@ fn leaf(
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
-        initially_open: network.initially_open,
+        // The candidate's own open set, not the file's. `optimize_with_open`
+        // overrides this whenever the set is non-empty, so the only path this
+        // field decides is the empty one — and an empty set is a *result* here,
+        // not an absence: a closing remedial action that shuts the network's
+        // last out-of-service circuit produces exactly it. Handing the file's
+        // list over at that point would re-open the branch the action just
+        // closed, and every margin downstream would stay self-consistent while
+        // describing a network in which nothing was closed.
+        initially_open: applied.open,
         bus_countries: network.bus_countries,
         shunts: network.shunts,
         tap_changers: network.tap_changers,

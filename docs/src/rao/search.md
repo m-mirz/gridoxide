@@ -214,6 +214,36 @@ instant's result fixed before the next begins.
         (its own perimeters, chronological, independent of the others)
 ```
 
+### How the decisions are carried forward
+
+A curative perimeter inherits an open set: the network file's own out-of-service circuits, whatever
+the preventive stage opened, and whatever the automatons opened or closed. That set is passed to the
+search **as a list**, and this is the one implementation detail in this layer worth stating in a
+book, because the obvious alternative is wrong in a way that produces no error.
+
+The alternative is to bake the set into the network — write a 10⁹ Ω impedance into a copy of the
+lines and search the result. It reads as equivalent. It is not, because a **closing** remedial action
+is expressed by removing a branch *from the open set*:
+
+```text
+open = base_open ∪ action.open ∖ action.close
+```
+
+With the set already spent on the impedances, `base_open` is empty, the removal removes nothing, and
+the branch stays at 10⁹ Ω whatever the CRAC says. The action is not refused — it evaluates as a
+change that does nothing, loses to every candidate that does something, and the perimeter reports
+that no remedial action was worth taking. Every margin downstream stays perfectly self-consistent
+while describing a network in which the standby circuit was never reconnected.
+
+Against the reference's suite that was **21 curative closes declined out of 21 offered**, while the
+same actions were taken 8 times out of 8 in the preventive perimeter and 3 out of 3 by automatons —
+which is how it was found. The automaton simulator had always carried its open set as a list; only
+the curative path had not.
+
+The same rule governs what a perimeter hands the next one: the effective set is the search's own
+result, never a union with what went in. A union is safe only while nothing can ever be closed, since
+it puts back exactly the branch the closing action just shut.
+
 ### Why curative actions are not optimized jointly
 
 Refusing to put every contingency's curative actions into one problem is **not** an approximation for
