@@ -1,8 +1,27 @@
 # Closing the curative search gap
 
-Status: **proposal**, 2026-08-30, against `43a5a33`. Written after re-running the Cucumber gate and
-reading the reference's search, which **falsified the premise this plan was going to be built on**.
-§2 is that finding; the plan follows from it rather than from `RAO_PLAN.md` §15's item 1.
+Status: **answered**, 2026-09-02. Written 2026-08-30 against `43a5a33`, after re-running the Cucumber
+gate and reading the reference's search, which **falsified the premise this plan was going to be
+built on**. §2 is that finding; the plan followed from it rather than from `RAO_PLAN.md` §15's item 1.
+
+> **Outcome.** §2's refutation stands and §1's measurement was right about where to look. Phases 1
+> and 2 — a candidate trace, then a table classifying every curative mismatch by why the action was
+> declined — were **not needed**: reading `castor::curative_search` against `automaton.rs` gave the
+> answer directly, and it is one of the four outcomes phase 1 was built to distinguish. A curative
+> perimeter's inherited open set was applied by writing `OPEN_BRANCH_Z` into the lines, so a
+> **closing** action — which is expressed by removing a branch from that set — had nothing to remove
+> and evaluated as a change that does nothing. Closes matched 8 of 8 in preventive and 3 of 3 in
+> auto, and 0 of 21 in curative; that asymmetry is the whole diagnosis. Fixed 2026-09-02, worth 68
+> assertions on the sixteen-node file (727 → 795), recorded as defect 20 in `RAO_PLAN.md` §8.3.
+>
+> Phase 4's residue question is answered with it: with the closes taken, `remedial action X is used`
+> failures fall from 30 to 2, so there is **no** body of scenarios where every action was considered
+> and correctly judged and the answer is still out of reach. Nothing here justifies a combinatorial
+> search. Phase 4's cheap form (read `predefined-combinations`) and phase 5 stand as written.
+>
+> The new largest cause is different in kind and is tracked in `RAO_PLAN.md` §15 item 1b: a curative
+> perimeter's **range actions start from the wrong point**, reverting the preventive taps rather than
+> carrying them forward.
 
 > **What this is.** 167 of 1 072 checkable assertions in the reference's own Cucumber suite do not
 > match. `plans/RAO_PLAN.md` names the dominant cause as *action combinations beyond the greedy
@@ -102,7 +121,7 @@ The shape follows from §4: the cheap hypotheses are exhausted, so the first pha
 rather than a fix. This is the discipline `plans/RAO_PLAN.md` §8.3 already used to find nineteen
 defects — the gate is a measurement tool, and what it currently measures is "wrong", not "why".
 
-### Phase 1 — Make the search say why it declined
+### Phase 1 — Make the search say why it declined ~~(not built; answered by reading the code)~~
 
 `SearchResult` records what was chosen. It does not record what was considered and rejected, which
 is the only thing that distinguishes the remaining hypotheses. Add a per-candidate trace, behind the
@@ -134,7 +153,7 @@ different fixes, and today's output cannot tell them apart.
 **Gate:** on 1.3.3.4, the trace names `close_fr1_fr5` and gives one of the outcomes above. Whichever
 it is, that is the finding.
 
-### Phase 2 — Classify every curative mismatch by that outcome
+### Phase 2 — Classify every curative mismatch by that outcome ~~(not built)~~
 
 Extend the Cucumber harness to print, for each mismatching scenario, the trace for the actions the
 reference used and gridoxide did not. Then group as §1 groups margins:
@@ -149,7 +168,7 @@ reference used and gridoxide did not. Then group as §1 groups margins:
 **This table is the deliverable of phase 2**, and it decides phases 3 and 4. Writing them now would
 be guessing — which is exactly what produced the item this plan replaces.
 
-### Phase 3 — Fix by cause, largest first
+### Phase 3 — Fix by cause, largest first ~~(done: one cause, defect 20)~~
 
 One fix per cause, each with the gate re-run and the family table recorded before and after, so a
 change that moves 1.3 and breaks 2.4 is visible immediately. `RAO_PLAN.md` §8.3's nineteen defects

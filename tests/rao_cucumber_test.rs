@@ -1116,7 +1116,7 @@ const BASELINE_MATCHED_DC: usize = 138;
 /// cost of a worse answer. They are left as recorded disagreements.
 const BASELINE_MATCHED_AC: usize = 192;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **727 of 883**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **795 of 883**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1127,7 +1127,7 @@ const BASELINE_MATCHED_AC: usize = 192;
 /// file's remaining disagreements sit, MNECs or no MNECs.
 ///
 /// The `value of the objective function` steps are checked here too — 39 of
-/// them, of which 27 hold. Every one of the twelve that does not sits in a
+/// them, of which 31 hold. Every one of the eight that does not sits in a
 /// scenario whose margins already disagree, so they add no new *kind* of
 /// failure; they make the existing ones visible in one more place, which is
 /// what a gate is for.
@@ -1141,13 +1141,20 @@ const BASELINE_MATCHED_AC: usize = 192;
 /// it beats the preventive one and no further — took 1.2 from 69 of 119 to 94
 /// and 1.3 from 335 of 420 to 346.
 ///
-/// What is still open, by size: 1.3 curative (86 of 459 wrong), 2.6 usage
-/// limits (31 of 134), 1.2 automatons (25 of 119), 2.2 range actions (9 of 63).
-/// The 2.6 remainder has changed character completely — it was "gridoxide
-/// spends actions the CRAC forbids" and is now "gridoxide stops before the
-/// reference does", the greedy chain that shows up wherever three actions are
-/// needed and each is worth little on its own.
-const BASELINE_MATCHED_AC16: usize = 727;
+/// Then making a curative **close** possible at all — the perimeter's
+/// already-open branches are now a stated set rather than an impedance, so an
+/// action that removes one from it actually reconnects the branch — took 1.3
+/// from 372 to 404, 2.6 from 103 to 130, and 2.2 to 63 of 63. It was worth 68
+/// assertions on this file and none on the other two, which have no curative
+/// close between them. Nothing regressed: every other family is unchanged to
+/// the assertion.
+///
+/// What is still open, by size: 1.3 curative (53 of 457 wrong), 1.2 automatons
+/// (25 of 119), 3.2 (9), 5.2 MNEC (6), 1.4 (6), 2.6 (4). The character has
+/// changed with it — `remedial action X is used` failures went from 30 to 2,
+/// so what remains is almost entirely **which tap** a curative perimeter's
+/// range actions settle on, and the margins that follow from it.
+const BASELINE_MATCHED_AC16: usize = 795;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

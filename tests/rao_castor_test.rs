@@ -759,3 +759,80 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
         }
     }
 }
+
+/// A **curative** action may close a branch the network file has out of service.
+///
+/// This is the one the gate found the hard way. The already-open branches a
+/// curative perimeter inherits used to be applied by writing `OPEN_BRANCH_Z`
+/// into a copy of the lines, and a close is expressed by *removing* a branch
+/// from the open set — so once the set had been spent on the impedances there
+/// was nothing left to remove, and the branch stayed open however the CRAC read.
+///
+/// The failure was silent in the worst way: the action was not refused, it
+/// evaluated as a change that does nothing, lost to every other candidate, and
+/// the perimeter reported that no remedial action was worth taking. Against the
+/// reference's own suite that was 21 curative closes declined out of 21
+/// offered, while the same actions matched 8 of 8 in preventive and 3 of 3 in
+/// auto.
+///
+/// `close_fr1_fr5` on the scenario the reference numbers 1.3.3.4.
+#[test]
+fn a_curative_action_can_close_an_out_of_service_branch() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep13us3case4.json"),
+    )
+    .expect("crac");
+
+    let closes = crac
+        .network_actions
+        .iter()
+        .position(|a| a.id == "close_fr1_fr5")
+        .expect("the CRAC declares close_fr1_fr5");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let branch = match &crac.network_actions[closes].elementary[..] {
+        [ElementaryAction::TerminalsConnection { element, connected: true }] => {
+            resolution.branch(element).expect("the branch resolves")
+        }
+        other => panic!("expected one closing elementary action, got {other:?}"),
+    };
+    assert!(
+        net.initially_open.contains(&branch),
+        "this test needs a branch the file has out of service — otherwise there is \
+         nothing to close and the assertion below passes for the wrong reason"
+    );
+
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &[],
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+
+    let taken = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find(|p| p.network_actions.contains(&closes))
+        .expect("some curative perimeter closes fr1-fr5");
+    // Not just chosen — actually in force. The open set the perimeter reports
+    // is what every downstream margin is measured against, so an action that is
+    // recorded and not applied is the same defect one step later.
+    assert!(
+        !taken.open_branches.contains(&branch),
+        "close_fr1_fr5 was chosen but the branch is still in the perimeter's open set"
+    );
+    assert!(
+        plan.preventive.open_branches.contains(&branch),
+        "the branch should still be open in the preventive perimeter, which does not close it"
+    );
+}

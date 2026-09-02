@@ -9,18 +9,21 @@ and 2 landed 2026-08-18.
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **138 of 142** DC assertions, **192 of 203** AC ones on TestCase12Nodes, and **727 of 883** on
-> TestCase16Nodes, with **108 of those 156 scenarios matching completely**.
+> **138 of 142** DC assertions, **192 of 203** AC ones on TestCase12Nodes, and **795 of 883** on
+> TestCase16Nodes.
 >
 > **What is left**, in the order it is worth doing:
 >
-> 1. ~~**Action combinations beyond the greedy chain.**~~ **This diagnosis is wrong** — see
->    `plans/RAO_SEARCH_PLAN.md` §2. The reference's `SearchTreeBloomer.bloom` is greedy too: it
->    returns individual network actions plus the *predefined* combinations named in the RAO
->    parameters, and every vendored configuration carries `"predefined-combinations": []`. So on the
->    scenarios that fail, the reference reaches its answer with the same greedy chain this has. The
->    real cause of families 1.3 and 2.6 is unidentified, the failures are **curative-only**, and
->    finding it is what that plan is for.
+> 1. ~~**Action combinations beyond the greedy chain.**~~ ~~**The real cause of families 1.3 and 2.6
+>    is unidentified.**~~ **Both are settled.** The combination diagnosis was refuted in
+>    `plans/RAO_SEARCH_PLAN.md` §2 — the reference's `SearchTreeBloomer.bloom` is greedy too — and the
+>    real cause was §8.3's defect 20: a curative perimeter could not *close* anything. Fixing it took
+>    1.3 to 404 of 457 and 2.6 to 130 of 134, and left the residue a different shape: **which tap** a
+>    curative perimeter's range actions settle on, not which actions it takes.
+> 1b. **Curative range actions start from the wrong point.** The new largest family. On 1.3.4.7 the
+>    curative perimeter reports `pst_fr` at +5 where the reference says −5 and `pst_be` at 0 where it
+>    says −16 — the preventive taps, reverted rather than carried forward, on a perimeter whose
+>    network action and every margin now match exactly. 19 of the remaining 53 in family 1.3.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
@@ -511,7 +514,7 @@ regression in another:
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 142 | **138** |
 | `ac_scenarios.feature` | 38, on TestCase12Nodes | 203 | **192** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 883 | **727** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 883 | **795** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -684,6 +687,27 @@ aggregate — pointed straight at the next one:
     entirely alone rather than merely spared its network actions — the difference between two
     curative remedial actions and none on 1.3.9.1. Worth **36** assertions: 1.2 from 69 of 119 to 94,
     1.3 from 335 of 420 to 346, with nothing regressed.
+
+Then grouping the sixteen-node file's mismatches by scenario family again — the same measurement
+that found 17 — showed the largest one was not a matter of degree at all:
+
+20. **A curative perimeter could not close anything.** The branches a curative perimeter inherits —
+    the file's own out-of-service circuits, plus whatever preventive and the automatons left — were
+    applied by writing `OPEN_BRANCH_Z` into a copy of the lines and then handing the search an empty
+    open set. But a *closing* action is expressed by removing a branch from that set, so with the set
+    spent on the impedances there was nothing to remove and the branch stayed open however the CRAC
+    read. The action was not refused: it evaluated as a change that does nothing, lost to every
+    candidate that does something, and the perimeter reported that no remedial action was worth
+    taking — with every margin downstream perfectly self-consistent about a network in which the
+    standby circuit was never reconnected. The split by instant is what gave it away, because
+    `automaton.rs` had always carried its set as a list: closes matched **8 of 8** in preventive and
+    **3 of 3** in auto, and **0 of 21** in curative. Worth **68** assertions — 1.3 from 372 to 404,
+    2.6 from 103 to 130, 2.2 to 63 of 63, with every other family unchanged to the assertion — and it
+    changed the residue's character as much as its size: `remedial action X is used` failures went
+    from 30 to 2, so what is left is almost entirely *which tap* a curative perimeter's range actions
+    settle on. `plans/RAO_SEARCH_PLAN.md` had budgeted a phase of candidate-trace instrumentation to
+    find this; reading `castor.rs` against `automaton.rs` answered it, which is worth recording as
+    the one case where the code said what the gate could not.
 
 Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
 objective function` were being skipped, and the quantity they name — the negated worst margin plus
