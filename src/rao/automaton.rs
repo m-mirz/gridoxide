@@ -9,10 +9,11 @@
 //!
 //! # The order matters, and it is `speed`
 //!
-//! Automatons fire in ascending order of their stated speed, in batches, and
-//! **the trigger conditions are re-evaluated between batches but not within
-//! one**. Both halves of that are load-bearing, and two vendored scenarios pin
-//! them from opposite sides:
+//! Automatons fire in ascending order of their speed — [`DEFAULT_SPEED`] for
+//! one that states none, which puts it **first** — in batches, and **the
+//! trigger conditions are re-evaluated between batches but not within one**.
+//! Both halves of that are load-bearing, and two vendored scenarios pin them
+//! from opposite sides:
 //!
 //! - Re-evaluating *between* batches is why a fast automaton that relieves an
 //!   overload stops a slower one from ever seeing the condition that would have
@@ -104,6 +105,32 @@ const MAX_SHIFTS: usize = 11;
 const SENSI_UNDERESTIMATOR_STEP: f64 = 0.15;
 const SENSI_UNDERESTIMATOR_MIN: f64 = 0.5;
 
+/// Where an automaton that states no speed fires: **first**.
+///
+/// The reference's `DEFAULT_SPEED`, and it is worth spelling out because the
+/// opposite reading is the tempting one. "No speed stated" looks like "no claim
+/// to be fast", which argues for firing such an action last so it cannot
+/// pre-empt equipment the file actually timed. The reference reads it the other
+/// way: an unstated speed is zero, so an untimed automaton goes before
+/// everything that named a speed at all.
+///
+/// It changes answers rather than just ordering. On scenario 1.2.2.4 the
+/// untimed `open_be1_be4` opens a Belgian circuit, and the two phase shifters
+/// that follow are sized against the network that leaves behind. Fired last
+/// instead, they size themselves against an overload the line opening was about
+/// to remove and spend four taps where one is enough — with every margin after
+/// that correspondingly adrift.
+///
+/// Actions that all leave the speed out still share one batch, so the rule that
+/// a batch samples the grid once is untouched; what moves is where that batch
+/// sits relative to the timed ones.
+const DEFAULT_SPEED: i64 = 0;
+
+/// An automaton's firing order, with [`DEFAULT_SPEED`] for one that states none.
+fn speed_of(speed: Option<i64>) -> i64 {
+    speed.unwrap_or(DEFAULT_SPEED)
+}
+
 /// Simulate the automatons of one contingency's `auto` state.
 ///
 /// `open` and `transformers` come in as the preventive perimeter left them and
@@ -147,15 +174,14 @@ pub fn simulate(
         resolution,
     );
 
-    // Speeds, ascending. An action without one goes last: an unstated speed is
-    // not "instant", and assuming it were would let it pre-empt equipment the
-    // file actually timed.
+    // Speeds, ascending — see [`DEFAULT_SPEED`] for where an action that states
+    // none belongs, which is not where it looks like it belongs.
     let mut speeds: Vec<i64> = Vec::new();
     for action in crac.network_actions.iter().filter(|a| covers(&a.usage_rules, &state)) {
-        speeds.push(action.speed.unwrap_or(i64::MAX));
+        speeds.push(speed_of(action.speed));
     }
     for action in crac.range_actions.iter().filter(|a| covers(&a.usage_rules, &state)) {
-        speeds.push(action.speed.unwrap_or(i64::MAX));
+        speeds.push(speed_of(action.speed));
     }
     speeds.sort_unstable();
     speeds.dedup();
@@ -173,7 +199,7 @@ pub fn simulate(
             if result.network_actions.contains(&index) {
                 continue;
             }
-            if action.speed.unwrap_or(i64::MAX) != speed {
+            if speed_of(action.speed) != speed {
                 continue;
             }
             if !triggered(&action.usage_rules, &state, &snapshot) {
@@ -200,7 +226,7 @@ pub fn simulate(
                 if result.range_actions.iter().any(|(i, _, _)| *i == index) {
                     continue;
                 }
-                if action.speed.unwrap_or(i64::MAX) != speed {
+                if speed_of(action.speed) != speed {
                     continue;
                 }
                 if !triggered(&action.usage_rules, &state, &violations) {
