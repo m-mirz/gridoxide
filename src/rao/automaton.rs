@@ -53,7 +53,7 @@ use crate::linear::DcOptions;
 use crate::types::Transformer;
 
 use super::crac::{Crac, ElementaryAction, InstantKind, RangeActionKind, State, UsageRule};
-use super::evaluate::{evaluate_model, AcOptions, CnecResult, FlowModel, Network, Resolution};
+use super::evaluate::{evaluate_model, CnecResult, FlowModel, Network, Resolution};
 use super::linear::{phase_shift_sensitivity, tap_table};
 
 /// What fired, and what it left behind.
@@ -439,6 +439,7 @@ fn shift_until_secure(
 
     for _ in 0..MAX_SHIFTS {
         let view = Network {
+            generation: network.generation,
             buses: network.buses,
             lines: network.lines,
             transformers: &transformers,
@@ -590,6 +591,7 @@ fn smallest_securing(
         let mut transformers = result.transformers.clone();
         apply_tap(network, &mut transformers, i, tap, angle);
         let view = Network {
+            generation: network.generation,
             buses: network.buses,
             lines: network.lines,
             transformers: &transformers,
@@ -688,7 +690,7 @@ fn measure(
     open: &[usize],
     model: FlowModel,
 ) -> super::evaluate::SecurityResult {
-    let ac = AcOptions { shunts: network.shunts, ..Default::default() };
+    let ac = super::evaluate::ac_options(network);
     evaluate_model(crac, network, resolution, open, model, &ac)
 }
 
@@ -725,6 +727,7 @@ fn violated(
     model: FlowModel,
 ) -> Vec<String> {
     let view = Network {
+        generation: network.generation,
         buses: network.buses,
         lines: network.lines,
         transformers,
@@ -755,6 +758,7 @@ fn margin(
     model: FlowModel,
 ) -> f64 {
     let view = Network {
+        generation: network.generation,
         buses: network.buses,
         lines: network.lines,
         transformers,

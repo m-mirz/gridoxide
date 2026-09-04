@@ -143,6 +143,7 @@ fn validate_perimeter(
     options: &ValidationOptions<'_>,
 ) -> PerimeterValidation {
     let post = Network {
+        generation: network.generation,
         buses: &plan.buses,
         lines: network.lines,
         transformers: &plan.transformers,

@@ -80,7 +80,7 @@ use crate::opf::{LinearProgram, OptStatus, Solver};
 use crate::types::Transformer;
 
 use super::crac::{Crac, RangeActionKind, State};
-use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution};
+use super::evaluate::{evaluate_model, FlowModel, Network, Resolution};
 use super::limits::Budget;
 use super::mnec::{Mnec, NO_CNEC_MARGIN};
 use super::usage::Constrained;
@@ -267,7 +267,7 @@ fn evaluate_in(
     resolution: &Resolution,
     model: FlowModel,
 ) -> super::evaluate::SecurityResult {
-    let ac = AcOptions { shunts: view.shunts, ..Default::default() };
+    let ac = super::evaluate::ac_options(view);
     evaluate_model(crac, view, resolution, view.initially_open, model, &ac)
 }
 
@@ -793,6 +793,8 @@ pub struct NetworkMut<'a> {
     pub bus_countries: &'a [Option<String>],
     /// Shunt admittances; see [`Network::shunts`].
     pub shunts: &'a [crate::network::ShuntAdm],
+    /// Per-bus generation; see [`Network::generation`].
+    pub generation: &'a [f64],
     pub tap_changers: &'a [Option<crate::types::TapChanger>],
     pub base_mva: f64,
 }
@@ -800,6 +802,7 @@ pub struct NetworkMut<'a> {
 impl NetworkMut<'_> {
     fn view(&self) -> Network<'_> {
         Network {
+            generation: self.generation,
             buses: self.buses,
             lines: self.lines,
             transformers: self.transformers,

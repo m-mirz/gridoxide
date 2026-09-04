@@ -2243,6 +2243,7 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
     let resolution =
         Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
     let view = Network {
+        generation: &network.generation,
         buses: &network.buses,
         lines: &network.lines,
         transformers: &network.transformers,
@@ -2331,6 +2332,10 @@ struct SecurityNetwork {
     /// Shunt admittances. Only the AC re-validation stage reads them; the DC
     /// search has no use for them.
     shunts: Vec<gridoxide::network::ShuntAdm>,
+    /// Per-bus generation, per-unit and positive. Empty where the importer does
+    /// not retain it, which leaves a distributed slack weighting by net
+    /// injection instead.
+    generation: Vec<f64>,
     base_mva: f64,
     notes: Vec<String>,
 }
@@ -2347,6 +2352,10 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             transformers: n.transformers,
             branch_ids: n.branch_ids,
             bus_ids: n.bus_labels,
+            // The IIDM importer does not retain per-generator set-points as a
+            // per-bus total, so a distributed slack falls back to weighting by
+            // net injection here.
+            generation: Vec::new(),
             // The IIDM importer omits disconnected branches rather than keeping
             // them openable, so there is nothing to seed here yet.
             initially_open: Vec::new(),
@@ -2372,6 +2381,7 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
             bus_countries: n.bus_countries,
             tap_changers: n.tap_changers,
             shunts: n.shunts,
+            generation: n.generation,
             base_mva: n.base_mva,
             notes: n.notes,
         });
@@ -2469,6 +2479,7 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     let resolution =
         Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
     let view = Network {
+        generation: &network.generation,
         buses: &network.buses,
         lines: &network.lines,
         transformers: &network.transformers,

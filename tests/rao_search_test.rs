@@ -54,6 +54,7 @@ impl Case {
 
     fn network(&self) -> Network<'_> {
         Network {
+            generation: &self.net.generation,
             buses: &self.net.buses,
             lines: &self.net.lines,
             transformers: &self.net.transformers,
@@ -166,6 +167,7 @@ fn the_reported_margin_matches_an_independent_evaluation_of_the_winning_network(
     assert!(!result.open_branches.is_empty(), "this test needs a chosen action");
 
     let network = Network {
+        generation: &c.net.generation,
         buses: &c.net.buses,
         lines: &c.net.lines,
         transformers: &result.transformers,
@@ -507,6 +509,7 @@ fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
