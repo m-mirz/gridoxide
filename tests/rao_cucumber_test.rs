@@ -1434,7 +1434,7 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///   the pair then differ by twice the flow.
 const BASELINE_MATCHED_AC: usize = 232;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **861 of 884**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **864 of 884**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1506,11 +1506,20 @@ const BASELINE_MATCHED_AC: usize = 232;
 /// Dropping it, as `doesPrePerimeterSetpointRespectRange` does, takes 1.2 to
 /// 118 of 121 and 1.2.2.5 to 22 of 22.
 ///
+/// The last three were an ordering rule, not a sizing one: an automaton that
+/// states **no speed fires first**, since the reference's `DEFAULT_SPEED` is
+/// zero. The tempting reading is the opposite — "no speed stated" looks like
+/// "no claim to be fast" — and it costs answers rather than order. On 1.2.2.4
+/// the untimed `open_be1_be4` opens a Belgian circuit and the two shifters that
+/// follow are sized against what that leaves behind, so `pst_be` needs one tap;
+/// fired last they are sized against an overload the opening was about to
+/// remove, and spend four. **Family 1.2 is now 121 of 121.**
+///
 /// What is still open, by size: 3.2 (9 of 33), 5.2 MNEC (9 of 68), 1.4 (6 of
-/// 9), 1.3 (14 of 458), 1.2 (3 of 121). Families 2.6 and 2.2 are complete. Of
-/// the remaining tap disagreements six are the `BestTapFinder` divergence
-/// recorded on [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
-const BASELINE_MATCHED_AC16: usize = 861;
+/// 9), 1.3 (14 of 458). Families 1.2, 2.2 and 2.6 are complete. Of the
+/// remaining tap disagreements six are the `BestTapFinder` divergence recorded
+/// on [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
+const BASELINE_MATCHED_AC16: usize = 864;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

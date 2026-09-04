@@ -9,7 +9,7 @@ and 2 landed 2026-08-18.
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **861 of 884** on
+> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **864 of 884** on
 > TestCase16Nodes.
 >
 > **What is left**, in the order it is worth doing:
@@ -29,10 +29,9 @@ and 2 landed 2026-08-18.
 >    reference iterates. Family 1.2 is 111 of 121.
 > 1d. **What is left is no longer one cause.** 3.2 (9 of 33), 5.2 MNEC (9 of 68) — six of which are
 >    the recorded `BestTapFinder` divergence where gridoxide scores better on the reference's own
->    objective — 1.4 (6 of 9), 1.3 (14 of 458) and 1.2 (3 of 121). The 1.2 remainder is scenario
->    1.2.2.4 alone, where the two implementations disagree about how much one phase-shifter tap is
->    worth rather than about which tap to pick: gridoxide needs four taps of `pst_be` to reach the
->    margin the reference reaches in one, and then agrees with it to two decimals.
+>    objective — 1.4 (6 of 9) and 1.3 (14 of 458). Families 1.2, 2.2, 2.6, 2.4, 2.3, 2.1, 5.1, 5.3,
+>    5.5, 0.1 and 0.2 are complete. 1.4 is one scenario, 1.4.4.2, where gridoxide spends three
+>    preventive actions on a network the reference leaves alone.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
@@ -528,7 +527,7 @@ regression in another:
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 156 | **150** |
 | `ac_scenarios.feature` | 38, on TestCase12Nodes | 244 | **232** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **861** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **864** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -797,6 +796,23 @@ curative stop criterion. That was wrong — this configuration sets `curative-mi
     Safe by inspection as well as by the gate: across the whole vendored corpus no injection or HVDC
     range excludes zero and no absolute PST range excludes its own `initialTap`, so the rule can only
     bite where an earlier perimeter has moved the device — which is exactly the case it is for.
+
+And the last of that family was an ordering rule rather than a sizing one. The tap map was the
+suspect and was innocent: the UCTE `##R` SYMM record for both shifters reproduces the CRAC's
+`tapToAngleConversionMap` to thirteen significant figures, so network and CRAC describe the same
+machine.
+
+27. **An automaton that states no speed was fired last; the reference fires it first.** Its
+    `DEFAULT_SPEED` is zero, so an untimed automaton goes before everything that named a speed at
+    all. The opposite reading is the tempting one and this plan's own module documentation argued for
+    it — "an unstated speed is not *instant*, and assuming it were would let it pre-empt equipment
+    the file actually timed" — which is a good argument about equipment and the wrong answer about
+    this data model. On 1.2.2.4 the untimed `open_be1_be4` opens a Belgian circuit and the two phase
+    shifters that follow are sized against what that leaves behind, so `pst_be` needs **one** tap;
+    fired last they are sized against an overload the opening was about to remove and spend **four**,
+    with every margin after that adrift. Actions that all omit the speed still share one batch, so
+    the rule that a batch samples the grid once is untouched — what moves is where that batch sits
+    relative to the timed ones. Worth **3** assertions, and **family 1.2 is now 121 of 121**.
 
 Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
 objective function` were being skipped, and the quantity they name — the negated worst margin plus

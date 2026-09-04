@@ -1180,3 +1180,55 @@ fn a_range_action_that_starts_outside_its_range_is_dropped() {
         "useless_pst permits only tap 0 and the shifter is at -8, so it should not be optimized"
     );
 }
+
+/// An automaton that states no speed fires **first**, not last.
+///
+/// The tempting reading is the other one: "no speed stated" looks like "no
+/// claim to be fast", which argues for firing such an action last so it cannot
+/// pre-empt equipment the file actually timed. The reference reads it the other
+/// way — its `DEFAULT_SPEED` is zero — so an untimed automaton goes before
+/// everything that named a speed at all.
+///
+/// Scenario 1.2.2.4 is where that changes an answer rather than just an order.
+/// The untimed `open_be1_be4` opens a Belgian circuit; the two phase shifters
+/// that follow are sized against the network that leaves behind, and `pst_be`
+/// needs **one** tap. Fired last, they size themselves against an overload the
+/// line opening was about to remove, and spend four.
+#[test]
+fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep15us11-3case4.json"),
+    )
+    .expect("crac");
+
+    let opening = crac
+        .network_actions
+        .iter()
+        .position(|a| a.id == "open_be1_be4")
+        .expect("open_be1_be4");
+    assert_eq!(crac.network_actions[opening].speed, None, "the untimed one");
+    let be = crac.range_actions.iter().position(|r| r.id == "pst_be").expect("pst_be");
+    assert_eq!(crac.range_actions[be].speed, Some(2), "and a timed shifter after it");
+
+    let plan = ac_plan(&net, &crac);
+    let automatons = plan
+        .scenarios
+        .iter()
+        .filter_map(|s| s.automatons.as_ref())
+        .find(|a| a.network_actions.contains(&opening))
+        .expect("the untimed automaton should fire");
+
+    let tap = automatons
+        .range_actions
+        .iter()
+        .find(|(i, _, _)| *i == be)
+        .and_then(|(_, _, tap)| *tap)
+        .expect("pst_be should be sized after it");
+    assert_eq!(
+        tap, -1,
+        "sized against the network the line opening left; -4 is what it costs to be sized \
+         against the overload that opening was about to remove"
+    );
+}

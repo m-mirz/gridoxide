@@ -295,8 +295,17 @@ The `auto` instant is not a decision. A protection scheme fires when its trigger
 whether or not that helps anything else, and the job is to reproduce what the equipment does rather
 than to choose what it should do.
 
-Automatons fire in ascending order of their stated `speed`, **in batches**, and the trigger conditions
-are re-evaluated between batches but not within one. Both halves are load-bearing:
+Automatons fire in ascending order of `speed`, **in batches**, and the trigger conditions are
+re-evaluated between batches but not within one. An automaton that states **no** speed is read as
+speed zero, so it fires *first* — before everything that named a speed at all. The opposite reading
+is the tempting one ("no speed stated" sounds like "no claim to be fast") and it changes answers, not
+just order: on scenario 1.2.2.4 an untimed automaton opens a Belgian circuit, and the two phase
+shifters that follow are sized against the network that leaves behind. Fired last instead, they size
+themselves against an overload the line opening was about to remove and spend four taps where one is
+enough. Actions that all omit the speed still share one batch, so the sampling rule below is
+untouched.
+
+Both halves of that rule are load-bearing:
 
 - Re-evaluating *between* batches is why a fast automaton that relieves an overload stops a slower one
   from ever seeing the condition that would have triggered it.
