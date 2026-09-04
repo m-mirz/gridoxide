@@ -391,6 +391,39 @@ choice and an operator reading the plan is being told what the optimizer decided
 equipment will do. And the leaf counts survive: they record what the search evaluated on the way to
 deciding, and the search did evaluate them.
 
+## Second preventive
+
+The decomposition is sequential, and that is its one weakness: the first preventive perimeter is
+judged on the base case and the outage states, so a curative constraint **no curative action can
+fix** is invisible to it — it is not in the perimeter, and the perimeter that does contain it comes
+later and cannot revisit preventive decisions.
+
+So the preventive perimeter is optimized a second time, with three things changed:
+
+- **every CNEC is optimized**, whatever its state — the whole point, since the curative constraints
+  are now in front of the preventive optimizer;
+- the **automatons** are held applied, so it works on what they cannot fix;
+- the **curative decisions** are held applied too, for the same reason.
+
+It runs only when the configuration asks and the first pass leaves something to gain — either a
+curative perimeter that did not reach its stop criterion, or a plan that ended up costing more than
+doing nothing. What it produces is kept only if the whole plan it leads to is better, judged the same
+way a plan is judged against doing nothing.
+
+Two things fall out of "the preventive perimeter, optimizing every CNEC". It optimizes every state
+while remaining a preventive perimeter, so *which CNECs are optimized* and *which actions may be
+taken* stop being the same question — the second is still the preventive instant's. And the held
+decisions have to be stripped back out of its answer: they were in force so the pass could see past
+them, and leaving them in would put one contingency's curative switching into the preventive plan,
+hence into force for every other contingency.
+
+What the reference does here and this does not is re-optimize the curative **range** actions inside
+that same problem, which needs a set-point per action per state. `plans/RAO_PLAN.md` §8.7 records an
+attempt at it, and the more interesting half of that record is why it does not pay yet: the reference
+keeps its curative answer afterwards *because* its second preventive computed one, and gridoxide's
+curative search — a full search tree, with its own stop criterion and per-leaf LP — is currently
+better than any curative column its second preventive problem can produce.
+
 ## Reading the plan
 
 ```console
