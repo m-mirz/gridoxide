@@ -24,9 +24,10 @@ and 2 landed 2026-08-18, and the optimizer reached agreement with the reference 
 >    15 of the reference's own scenarios are vendored and it scores **75 of 108**, from 45 with
 >    nothing implemented. Its prerequisite, a linearization per state, is **done** (`28fb146`) and
 >    cost nothing. The columns themselves are drafted twice over in §8.7 and still below the
->    baseline; the cheapest next step is not more code but a **measurement** — whether the scenario
->    that blocks them is gridoxide being worse or gridoxide being better, on the reference's own
->    objective. §8.7 says why that decides the size of what is left.
+>    baseline. §8.7 now carries the measurement that sizes it: **four genuine gaps**, one recorded
+>    disagreement where gridoxide is 85 A ahead, and two scenarios the drafted work already reaches.
+>    The obstacle named there is composition, not the columns — the second pass optimizes as though
+>    its own curative choice will stand while the curative perimeters re-derive theirs.
 > 2. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
 > 3. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
@@ -1010,12 +1011,31 @@ the baseline. The pieces oscillate: 75 holding curative range actions, 74 with t
 the columns and the tap fix. Every individual step is defensible and the aggregate is not, which says
 the model is still missing something rather than mis-tuned.
 
-**Where to look next, in order.** With the tap fix, 1.4.1.1.4 reaches a curative margin of 295.6 A
-where the reference reports 210 — gridoxide *ahead* on the CNEC the scenario is about, not behind.
-That is the shape of a recorded disagreement rather than a defect, and if it survives it belongs in
-`RECORDED_DISAGREEMENTS`; but it has to be measured on the reference's own objective first, and
-nothing has done that yet. Doing that measurement is the cheapest next step, because it decides
-whether the remaining gap is three scenarios or one.
+**The measurement is done, and it was cheap.** Not one CRAC in this corpus declares an MNEC, so the
+objective *is* the worst margin and every scenario asserts it: `worst margin is X` is the reference's
+own objective value, and the comparison needs no probe at all. It sizes what is left:
+
+| scenario | held (75) | with `A(r, s)` | reference | |
+|---|---|---|---|---|
+| 1.4.5.1 | −146.65 | **−40.54** | −40.5 | `A(r, s)` **fixes** it |
+| 1.4.1.1.3 | 295.61 | 320.94 *(columns only)* | 321 | fixed by the columns, lost again to the tap fix |
+| 1.4.1.1.4 | 209.68 | **295.61** | 210 | gridoxide **ahead by 85 A** |
+| 1.4.1.2 | 700.43 | 700.43 | 721 | worse — a real gap |
+| 1.4.1.5 | 13.08 | 13.08 | 43 | worse — a real gap |
+| 1.4.1.6 | −32.36 | −32.36 | 43 | worse — a real gap |
+| 1.4.4.4 | 638.20 | 638.20 | 795 | worse — a real gap |
+
+So what remains is **four genuine gaps, not seven**: 1.4.5.1 is fixed by work already drafted,
+1.4.1.1.4 is a recorded disagreement waiting to be written down, and 1.4.1.1.3 is reachable.
+
+**And one finding that says where the model is still wrong.** The tap fix — `apply` updating a
+curative control's tap, which the per-state measurement reads the network step by — is correct, and
+applying it *loses* 1.4.1.1.3. A search that does better with a measurement that cannot see curative
+moves than with one that can is not being mis-tuned; it is being rescued by the error. The likely
+reason is composition rather than the LP: the second pass optimizes as though its own curative choice
+will stand, and the curative perimeters that follow re-derive theirs from scratch. Until those two
+agree, richer columns make the preventive decision *more* confidently wrong. That is the thing to
+understand before writing more of them.
 
 ### 8.4 Two independent MILP solvers
 
