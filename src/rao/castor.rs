@@ -35,11 +35,11 @@
 use crate::opf::Solver;
 
 use super::crac::{Crac, InstantKind, State};
-use super::evaluate::{evaluate_with, Network, Resolution};
+use super::evaluate::{evaluate_model, evaluate_with, AcOptions, Network, PerimeterResult, Resolution, SecurityResult};
 use super::linear::Setpoint;
 use super::automaton::{simulate, AutomatonResult};
 use super::mnec::Baseline;
-use super::search::{search, search_with_open, SearchOptions, SearchResult};
+use super::search::{objective_of, search, search_with_open, SearchOptions, SearchResult};
 
 /// What one perimeter was told to do.
 #[derive(Clone, Debug)]
@@ -340,12 +340,98 @@ pub fn run(
     pulled_forward.sort_unstable();
     pulled_forward.dedup();
 
-    Plan {
+    let plan = Plan {
         preventive: plan_preventive,
         scenarios,
         pulled_forward,
         initial_margin_mw: initial,
         final_margin_mw: final_margin,
+    };
+
+    // Having done all that, check it was worth doing.
+    //
+    // Every perimeter only ever accepts a candidate that improves *its own*
+    // objective, so it is tempting to conclude the plan cannot come out worse
+    // than the network it started from. It can, because the perimeters do not
+    // partition the harm. A preventive action is judged on the base case and
+    // the outage states; the damage it does to a **curative** state is invisible
+    // there, and by the time a curative perimeter sees it, the preventive
+    // decisions are fixed and it can only make the best of them. On the
+    // reference's scenario 1.4.4.2 the preventive perimeter improves itself from
+    // 590.6 to 681.7 MW by closing two circuits, and those closures take the
+    // curative state to −342; the curative perimeter recovers half of it and the
+    // plan still ends worse than doing nothing.
+    //
+    // So the last thing the reference does is compare the finished plan against
+    // the untouched network and, if the plan is worse, throw it away —
+    // `postCheckResults`, whose `handleCostIncrease` is passed `true` at every
+    // call site, so this is a rule rather than a setting. "First preventive fell
+    // back to initial situation" is what its own report calls the outcome.
+    //
+    // Compared on the **objective**, not on the megawatt margin: under an
+    // ampere objective two CNECs at different voltages order differently in the
+    // two units, and a monitored CNEC's violation is part of the cost the
+    // comparison is about.
+    let all = crac.states();
+    let untouched = assess(crac, network, resolution, network.initially_open, options);
+    let before = objective_of(crac, &untouched, &all, &options.linear);
+    let after = objective_of(
+        crac,
+        &final_assessment(crac, network, resolution, &plan.preventive, &plan.scenarios, options),
+        &all,
+        &options.linear,
+    );
+    if after < before - 1e-6 {
+        return unoptimized(network, &plan, initial);
+    }
+    plan
+}
+
+/// The plan that does nothing, reported as such.
+///
+/// Everything the optimizer chose is dropped and every perimeter is reported at
+/// the network as it arrived. The automatons go with it, which is the
+/// reference's own behaviour — `UnoptimizedRaoResultImpl` wraps the result from
+/// *before* they were simulated — and is worth flagging as a position rather
+/// than an accident: an automaton is not a choice, so an operator reading this
+/// plan is being told what the RAO decided, not what the equipment will do. No
+/// vendored scenario reaches this path with an automaton present, so the
+/// question has never been put.
+fn unoptimized(network: &Network<'_>, plan: &Plan, initial: f64) -> Plan {
+    // `leaves` survives, alone among the fields. It is not a claim about the
+    // plan — it is the count of what the search evaluated on the way to
+    // deciding, and the search did evaluate them. Zeroing it would report that
+    // no work was done rather than that the work was rejected, and it is the
+    // one number a caller watching cost has to be able to trust.
+    let bare = |states: Vec<State>, leaves: usize| PerimeterPlan {
+        states,
+        network_actions: Vec::new(),
+        setpoints: Vec::new(),
+        initial_margin_mw: initial,
+        final_margin_mw: initial,
+        leaves,
+        open_branches: network.initially_open.to_vec(),
+        buses: network.buses.to_vec(),
+        transformers: network.transformers.to_vec(),
+    };
+    Plan {
+        preventive: bare(plan.preventive.states.clone(), plan.preventive.leaves),
+        scenarios: plan
+            .scenarios
+            .iter()
+            .map(|s| ScenarioPlan {
+                contingency: s.contingency,
+                automatons: None,
+                perimeters: s
+                    .perimeters
+                    .iter()
+                    .map(|p| bare(p.states.clone(), p.leaves))
+                    .collect(),
+            })
+            .collect(),
+        pulled_forward: plan.pulled_forward.clone(),
+        initial_margin_mw: initial,
+        final_margin_mw: initial,
     }
 }
 
@@ -370,6 +456,88 @@ fn curative_search(
     already_open: &[usize],
 ) -> SearchResult {
     search_with_open(crac, network, resolution, perimeter, solver, options, already_open)
+}
+
+/// Evaluate one network with the flow model the run is using.
+///
+/// The same choice [`search`](super::search) and [`automaton`](super::automaton)
+/// make, and for the same reason: what "the truth" means when an answer is
+/// judged has to be the model the answer will be reported in.
+fn assess(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+    options: &SearchOptions,
+) -> SecurityResult {
+    let ac = AcOptions { shunts: network.shunts, ..Default::default() };
+    evaluate_model(crac, network, resolution, open, options.linear.flow_model, &ac)
+}
+
+/// The plan's own view of every state: each measured in the network *its* own
+/// decisions produced.
+///
+/// A preventive state is read in the post-preventive network, an `auto` state
+/// after that contingency's automatons, and a curative state after its curative
+/// perimeter. Three different networks, and reading a curative CNEC in the
+/// preventive one reports the overload the curative actions exist to remove.
+fn final_assessment(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    preventive: &PerimeterPlan,
+    scenarios: &[ScenarioPlan],
+    options: &SearchOptions,
+) -> SecurityResult {
+    let mut perimeters: Vec<PerimeterResult> = Vec::new();
+    let mut take = |result: SecurityResult, states: &[State]| {
+        for p in result.perimeters {
+            if states.contains(&p.state) && !perimeters.iter().any(|q| q.state == p.state) {
+                perimeters.push(p);
+            }
+        }
+    };
+
+    // Most specific first, so a state a curative perimeter governs is not taken
+    // from the preventive network that also reports it.
+    for scenario in scenarios {
+        for stage in scenario.perimeters.iter().rev() {
+            let net = Network {
+                buses: &stage.buses,
+                transformers: &stage.transformers,
+                ..*network
+            };
+            take(
+                assess(crac, &net, resolution, &stage.open_branches, options),
+                &stage.states,
+            );
+        }
+        if let Some(automatons) = &scenario.automatons {
+            let net = Network {
+                buses: &preventive.buses,
+                transformers: &automatons.transformers,
+                ..*network
+            };
+            let auto_states: Vec<State> = crac
+                .states()
+                .into_iter()
+                .filter(|s| s.contingency == Some(scenario.contingency))
+                .filter(|s| crac.instants[s.instant].kind == InstantKind::Auto)
+                .collect();
+            take(
+                assess(crac, &net, resolution, &automatons.open_branches, options),
+                &auto_states,
+            );
+        }
+    }
+    let net = Network {
+        buses: &preventive.buses,
+        transformers: &preventive.transformers,
+        ..*network
+    };
+    let rest = crac.states();
+    take(assess(crac, &net, resolution, &preventive.open_branches, options), &rest);
+    SecurityResult { perimeters, skipped: Vec::new() }
 }
 
 fn worst_margin(

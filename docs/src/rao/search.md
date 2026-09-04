@@ -361,6 +361,36 @@ neighbourhood and the tap is then settled by measuring: the position nearest the
 secures everything watched wins. That makes the answer independent of how good the gradient was,
 which is the property the reference gets for free by having an exact one.
 
+## The last check: was it worth doing?
+
+Every perimeter accepts only candidates that improve **its own** objective, so it looks as though the
+finished plan cannot come out worse than the network it started from. It can, because the perimeters
+do not partition the harm.
+
+A preventive action is judged on the base case and the outage states. What it costs a **curative**
+state is invisible there — and by the time a curative perimeter sees it, the preventive decisions are
+fixed and it can only make the best of them. The reference's scenario 1.4.4.2 is built on exactly
+that shape:
+
+```text
+                        preventive perimeter      curative state
+  do nothing                    590.6 MW               (secure, +113 A overall)
+  close two circuits            681.7 MW   ← improved       −342 MW   ← wrecked
+  curative recovers what it can                            −167.7 MW
+```
+
+Both perimeters did their jobs and the plan still ends below where it began. So the last thing the
+optimization does is compare the finished plan against the untouched network and, if it lost ground,
+**throw the whole plan away** and report doing nothing. The comparison is on the objective rather
+than on the megawatt margin: under an ampere objective two CNECs at different voltages order
+differently in the two units, and a monitored CNEC's violation is part of the cost at stake.
+
+Two details of what "throw it away" means. The automatons go with it — which is the reference's own
+behaviour, and worth flagging as a position rather than an accident, since an automaton is not a
+choice and an operator reading the plan is being told what the optimizer decided rather than what the
+equipment will do. And the leaf counts survive: they record what the search evaluated on the way to
+deciding, and the search did evaluate them.
+
 ## Reading the plan
 
 ```console

@@ -1434,7 +1434,7 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///   the pair then differ by twice the flow.
 const BASELINE_MATCHED_AC: usize = 232;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **864 of 884**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **870 of 884**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1515,11 +1515,23 @@ const BASELINE_MATCHED_AC: usize = 232;
 /// fired last they are sized against an overload the opening was about to
 /// remove, and spend four. **Family 1.2 is now 121 of 121.**
 ///
-/// What is still open, by size: 3.2 (9 of 33), 5.2 MNEC (9 of 68), 1.4 (6 of
-/// 9), 1.3 (14 of 458). Families 1.2, 2.2 and 2.6 are complete. Of the
-/// remaining tap disagreements six are the `BestTapFinder` divergence recorded
-/// on [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
-const BASELINE_MATCHED_AC16: usize = 864;
+/// Then the rule that the perimeters cannot see between them: **a plan that
+/// ends worse than doing nothing is thrown away**. Each perimeter accepts only
+/// candidates that improve its own objective, but they do not partition the
+/// harm — a preventive action is judged on the base case and the outage states,
+/// and what it costs a *curative* state is invisible there. On 1.4.4.2 closing
+/// two circuits takes the preventive perimeter from 590.6 to 681.7 MW and the
+/// curative state to −342; the curative perimeter recovers half and the plan
+/// still ends below where it began. The reference compares the finished plan
+/// against the untouched network and discards it — `postCheckResults` — and its
+/// own report calls the outcome "First preventive fell back to initial
+/// situation". **Family 1.4 is now 9 of 9.**
+///
+/// What is still open, by size: 3.2 (9 of 33), 5.2 MNEC (9 of 68), 1.3 (14 of
+/// 458). Families 1.2, 1.4, 2.2 and 2.6 are complete. Of the remaining tap
+/// disagreements six are the `BestTapFinder` divergence recorded on
+/// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
+const BASELINE_MATCHED_AC16: usize = 870;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

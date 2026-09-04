@@ -1232,3 +1232,52 @@ fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
          against the overload that opening was about to remove"
     );
 }
+
+
+/// A plan that ends worse than doing nothing is thrown away.
+///
+/// Every perimeter only accepts a candidate that improves **its own**
+/// objective, so it looks as though the plan cannot come out worse than the
+/// network it started from. It can, because the perimeters do not partition the
+/// harm: a preventive action is judged on the base case and the outage states,
+/// and the damage it does to a *curative* state is invisible there. By the time
+/// a curative perimeter sees it the preventive decisions are fixed, and it can
+/// only make the best of them.
+///
+/// The reference's scenario 1.4.4.2 is built on exactly that. Closing two
+/// circuits takes the preventive perimeter from 590.6 to 681.7 MW and the
+/// curative state to −342; the curative perimeter recovers half and the plan
+/// still ends below where it began. So the last thing the reference does is
+/// compare the finished plan against the untouched network and discard it if it
+/// lost ground — `postCheckResults`, whose `handleCostIncrease` argument is
+/// `true` at every call site, so it is a rule and not a setting.
+#[test]
+fn a_plan_that_loses_ground_is_discarded() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep20us5case2.json"),
+    )
+    .expect("crac");
+
+    let plan = ac_plan(&net, &crac);
+
+    assert!(plan.preventive.network_actions.is_empty(), "the preventive plan should be empty");
+    for perimeter in plan.scenarios.iter().flat_map(|s| s.perimeters.iter()) {
+        assert!(perimeter.network_actions.is_empty(), "and so should every curative one");
+        assert!(
+            !perimeter.setpoints.iter().any(|s| s.moved()),
+            "including its set-points — the fixture's search moves pst_be to -16 before the \
+             plan is thrown away"
+        );
+    }
+    assert!(
+        plan.is_secure(),
+        "doing nothing leaves this network secure, which is the whole point: {} MW",
+        plan.final_margin_mw
+    );
+    assert_eq!(
+        plan.final_margin_mw, plan.initial_margin_mw,
+        "a discarded plan reports the network it started from"
+    );
+}

@@ -9,7 +9,7 @@ and 2 landed 2026-08-18.
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **864 of 884** on
+> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **870 of 884** on
 > TestCase16Nodes.
 >
 > **What is left**, in the order it is worth doing:
@@ -29,9 +29,9 @@ and 2 landed 2026-08-18.
 >    reference iterates. Family 1.2 is 111 of 121.
 > 1d. **What is left is no longer one cause.** 3.2 (9 of 33), 5.2 MNEC (9 of 68) — six of which are
 >    the recorded `BestTapFinder` divergence where gridoxide scores better on the reference's own
->    objective — 1.4 (6 of 9) and 1.3 (14 of 458). Families 1.2, 2.2, 2.6, 2.4, 2.3, 2.1, 5.1, 5.3,
->    5.5, 0.1 and 0.2 are complete. 1.4 is one scenario, 1.4.4.2, where gridoxide spends three
->    preventive actions on a network the reference leaves alone.
+>    objective — and 1.3 (14 of 458). Every other family is complete: 1.2, 1.4, 2.1, 2.2, 2.3, 2.4,
+>    2.6, 5.1, 5.3, 5.5, 0.1 and 0.2. What remains in 1.3 is one-tap divergences plus 1.3.2.6, where
+>    gridoxide reaches the reference's own objective with one fewer action.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
@@ -527,7 +527,7 @@ regression in another:
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 156 | **150** |
 | `ac_scenarios.feature` | 38, on TestCase12Nodes | 244 | **232** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **864** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **870** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -813,6 +813,31 @@ machine.
     with every margin after that adrift. Actions that all omit the speed still share one batch, so
     the rule that a batch samples the grid once is untouched — what moves is where that batch sits
     relative to the timed ones. Worth **3** assertions, and **family 1.2 is now 121 of 121**.
+
+One rule was missing that no perimeter could have supplied, because it is about all of them at once:
+
+28. **A plan that ends worse than doing nothing was kept.** Every perimeter accepts only candidates
+    that improve *its own* objective, which makes it look as though the plan cannot lose ground. It
+    can, because the perimeters do not partition the harm: a preventive action is judged on the base
+    case and the outage states, and the damage it does to a **curative** state is invisible there —
+    by the time a curative perimeter sees it, the preventive decisions are fixed and it can only make
+    the best of them. On 1.4.4.2 closing two circuits takes the preventive perimeter from 590.6 to
+    681.7 MW and the curative state to −342; the curative perimeter recovers half of it and the plan
+    still ends below where it began, at −242 A against the +113 of doing nothing. So the last thing
+    the reference does is compare the finished plan against the untouched network and throw it away
+    if it lost ground — `postCheckResults`, whose `handleCostIncrease` argument is `true` at every
+    call site, so this is a rule rather than a setting; "First preventive fell back to initial
+    situation" is what its own report calls the outcome. Compared on the **objective** rather than on
+    the megawatt margin, for defect 12's reason and because a monitored CNEC's violation is part of
+    the cost being compared. Worth **6** assertions, and **family 1.4 is complete at 9 of 9**.
+
+    Two positions inside it worth stating. The reference reverts the *automatons* too — its
+    `UnoptimizedRaoResultImpl` wraps the result from before they were simulated — which is faithful
+    but tells an operator what the RAO decided rather than what the equipment will do; no vendored
+    scenario reaches this path with an automaton present, so the question has never been put. And
+    `leaves` survives the discard, alone among the fields: it counts what the search evaluated on the
+    way to deciding, and zeroing it would report that no work was done rather than that the work was
+    rejected.
 
 Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
 objective function` were being skipped, and the quantity they name — the negated worst margin plus
