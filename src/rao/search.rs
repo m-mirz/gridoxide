@@ -721,6 +721,7 @@ fn leaf(
     // discarded must not leave them moved.
     let mut buses = network.buses.to_vec();
     let mut mutable = NetworkMut {
+        generation: network.generation,
         buses: &mut buses,
         lines: network.lines,
         transformers: &mut transformers,
@@ -833,6 +834,7 @@ fn optimize_with_open(
     }
     let mut inner = NetworkMut {
         buses: network.buses,
+        generation: network.generation,
         lines: &lines,
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
@@ -875,7 +877,7 @@ fn measure_with(
     open: &[usize],
     model: super::evaluate::FlowModel,
 ) -> super::evaluate::SecurityResult {
-    let ac = super::evaluate::AcOptions { shunts: network.shunts, ..Default::default() };
+    let ac = super::evaluate::ac_options(network);
     super::evaluate::evaluate_model(crac, network, resolution, open, model, &ac)
 }
 

@@ -183,5 +183,13 @@ rounding takes a step that pays an MNEC penalty its rounding does not look at.
   The `relativeToPreviousInstant` range kind *is* honoured — what chains across perimeters is the
   bound, not the variable. See [the linear chapter](./linear.md#three-ways-to-say-how-far-it-may-move).
 
+The AC evaluation **distributes the slack**, weighted by generation, because every configuration the
+reference ships does. It is not a refinement: when a contingency islands a generator the imbalance is
+that machine's whole output, and where it reappears decides the flows. On one vendored fixture a
+single slack sits at the end of a tie into the country that just lost 1000 MW, so it pushes the
+entire make-up back through that country and over the line being measured — 1165 MW against a true
+1000. Weighting by *net* injection rather than generation puts 70% of it back in the same place and
+barely helps, which is why the setting looked innocent for a long time.
+
 Angle and voltage CNECs are counted rather than modelled, which is what the reference does too: it
 checks them in a separate monitoring pass after the fact rather than putting them in its LP.

@@ -41,6 +41,7 @@ impl Case {
 
     fn network(&self) -> Network<'_> {
         Network {
+            generation: &self.net.generation,
             buses: &self.net.buses,
             lines: &self.net.lines,
             transformers: &self.net.transformers,

@@ -9,7 +9,7 @@ and 2 landed 2026-08-18.
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **870 of 884** on
+> **150 of 156** DC assertions, **238 of 244** AC ones on TestCase12Nodes, and **870 of 884** on
 > TestCase16Nodes.
 >
 > **What is left**, in the order it is worth doing:
@@ -30,8 +30,8 @@ and 2 landed 2026-08-18.
 > 1d. **What is left is no longer one cause.** 3.2 (9 of 33), 5.2 MNEC (9 of 68) — six of which are
 >    the recorded `BestTapFinder` divergence where gridoxide scores better on the reference's own
 >    objective — and 1.3 (14 of 458). Every other family is complete: 1.2, 1.4, 2.1, 2.2, 2.3, 2.4,
->    2.6, 5.1, 5.3, 5.5, 0.1 and 0.2. What remains in 1.3 is one-tap divergences plus 1.3.2.6, where
->    gridoxide reaches the reference's own objective with one fewer action.
+>    2.6, 3.2, 5.1, 5.3, 5.5, 0.1 and 0.2. What remains in 1.3 is one-tap divergences plus 1.3.2.6,
+>    where gridoxide reaches the reference's own objective with one fewer action.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
@@ -42,9 +42,9 @@ and 2 landed 2026-08-18.
 >    (`relativeToPreviousInstant`)~~ is built: the *bound* chains across perimeters, which is what
 >    that range kind asks for. What is still not here is several states' set-points as variables in
 >    **one** LP, which the CASTOR decomposition does not want anyway.
-> 5. ~~**The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json`.~~ **Both causes now
->    identified.** Three were §8.3's defect 29. The remaining six are a *flow* disagreement, and it is
->    **diagnosed and measured but not yet built** — see §8.5, which is the next thing to do here.
+> 5. ~~**The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json`.~~ **Closed.** Three were
+>    §8.3's defect 29, the ampere margin; the other six were the slack, §8.5. **Family 3.2 is
+>    complete**, and with it every family except 1.3 and 5.2.
 >
 > Loop flows and relative margins stay out of scope for the reasons in §11.
 >
@@ -527,7 +527,7 @@ regression in another:
 | File | Scenarios | Assertions | Matching |
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 156 | **150** |
-| `ac_scenarios.feature` | 38, on TestCase12Nodes | 244 | **232** |
+| `ac_scenarios.feature` | 38, on TestCase12Nodes | 244 | **238** |
 | `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **870** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
@@ -894,8 +894,8 @@ the evaluation half.
 
 ### 8.5 The slack has to be distributed, and weighted by generation
 
-The last six assertions on `epic5/SL_ep5us1.json` are a flow disagreement, not a margin one, and it
-is worth writing down because the diagnosis is complete and the fix is not.
+**Built, 2026-09-04.** This was the last six assertions on `epic5/SL_ep5us1.json` — a flow
+disagreement rather than a margin one — and closing it makes **family 3.2 complete at 33 of 33**.
 
 The scenario opens both of FFR1AA1's branches, and it has only two — `FFR1AA1 FFR2AA1 1` and
 `FFR1AA1 FFR3AA1 1`. That **islands** the node, which carries 2000 MW of generation against 1000 MW
@@ -923,13 +923,21 @@ Every vendored configuration says so outright: `"distributedSlack": true` with
 Note also that DC and AC disagree by 215 MW on this topology while agreeing to 1.6 MW on the other
 two, which is a second symptom of the same thing.
 
-**What it needs, and why it is not done here.** Generation is not recoverable from the model:
-`Bus::p_spec` is generation *minus* load, `zip_terms` is left empty by the UCTE importer, and
-`UcteImport::p_limits` holds permissible-generation bounds rather than the set-point. So it is an
-importer change (retain per-node generation), a `rao::Network` field beside `shunts`, its use in
-`solve_distributing_slack`, and `distribute_slack` turned **on** for the RAO's AC path — which
-changes every AC scenario's flows and therefore needs a measured pass of its own, not a hurried one.
-The hypothesis is validated to 0.02%; the work is bounded and untouched.
+**What it took.** Generation is not recoverable from the model — `Bus::p_spec` is generation *minus*
+load, `zip_terms` is left empty by the UCTE importer, and `UcteImport::p_limits` holds
+permissible-generation bounds rather than the set-point — so `UcteImport` now retains it,
+`rao::Network` carries it beside `shunts`, and `AcOptions::slack_weights` hands it to
+`solve_distributing_slack`. An importer that has no generation figure passes an empty slice and falls
+back to the net-injection weighting, which is the honest answer for a model that never had it.
+
+The AC settings also stopped being five separate literals. `evaluate::ac_options` builds them once
+for the search, the automaton simulator, the MNEC baseline, the validation stage and the Cucumber
+harness alike — because a layer measuring under a different slack from the one that produced the
+answer is marking its own homework wrong, and five literals is five chances to drift.
+
+The result is 999.77 MW against the reference's 1000 and 1594.27 A against its 1594. **Nothing else
+moved**: every other family is unchanged to the assertion, which is the reassuring part of turning on
+a setting that touches every AC flow in the corpus.
 
 ### 8.4 Two independent MILP solvers
 

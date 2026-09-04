@@ -206,6 +206,17 @@ pub struct UcteImport {
     pub regulation: Vec<crate::outerloop::TapRegulation>,
     /// Bus index of the slack, and how it was chosen.
     pub slack: usize,
+    /// Per-node active generation in per-unit, **positive**, kept apart from
+    /// the net injection [`Bus::p_spec`](crate::types::Bus::p_spec) folds it
+    /// into.
+    ///
+    /// A slack distribution proportional to *generation* — which is what every
+    /// one of the reference's own configurations asks for
+    /// (`PROPORTIONAL_TO_GENERATION_P`) — cannot be recovered from the net
+    /// figure. A node generating 2000 MW against 1000 MW of load nets to the
+    /// same 1000 as one generating 1000 against nothing, and the two machines
+    /// do not pick up an imbalance alike.
+    pub generation: Vec<f64>,
     /// Per-node active generation limits in per-unit, `(p_min, p_max)`, from
     /// the permissible-generation fields. Kept because a redispatch range
     /// action needs them and nothing in [`Bus`] has anywhere to put them.
@@ -791,6 +802,7 @@ fn convert(
     let mut bus_countries = Vec::with_capacity(nodes.len());
     let mut node_index = HashMap::with_capacity(nodes.len());
     let mut p_limits = Vec::with_capacity(nodes.len());
+    let mut generation: Vec<f64> = Vec::new();
     let mut x_nodes = 0usize;
 
     for (idx, node) in nodes.iter().enumerate() {
@@ -842,6 +854,12 @@ fn convert(
             (Some(lo), Some(hi)) => Some((-lo * 1e6 / s_base_va, -hi * 1e6 / s_base_va)),
             _ => None,
         });
+        // Kept apart from `p_spec`, which nets it against the load. A slack
+        // distribution proportional to *generation* cannot be recovered from
+        // the net figure: a node generating 2000 against a load of 1000 nets to
+        // the same 1000 as one generating 1000 against nothing, and the two
+        // machines do not respond alike.
+        generation.push(node.generation_mw().max(0.0) * 1e6 / s_base_va);
         node_index.insert(node.code.clone(), idx);
         node_codes.push(node.code.clone());
         bus_countries.push(node.country.clone());
@@ -1057,6 +1075,7 @@ fn convert(
     buses[slack].bus_type = BusType::Slack;
 
     Ok(UcteImport {
+        generation,
         buses,
         lines,
         transformers,

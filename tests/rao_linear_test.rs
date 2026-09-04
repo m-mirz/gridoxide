@@ -139,6 +139,7 @@ fn optimizing_a_perimeter_improves_its_worst_margin() {
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -181,6 +182,7 @@ fn a_phase_shifter_lands_on_a_tap_the_operator_can_select() {
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -229,6 +231,7 @@ fn the_network_is_left_where_the_result_says_it_is() {
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -246,6 +249,7 @@ fn the_network_is_left_where_the_result_says_it_is() {
 
     // Re-evaluate from scratch against the network as it now stands.
     let view = Network {
+        generation: &c.net.generation,
         buses: &c.net.buses,
         lines: &c.net.lines,
         transformers: &transformers,
@@ -283,6 +287,7 @@ fn a_perimeter_with_no_range_actions_reports_no_improvement() {
     let before = transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -318,6 +323,7 @@ fn the_movement_penalty_prefers_the_smaller_move() {
         let mut transformers = c.net.transformers.clone();
         let mut buses = c.net.buses.clone();
         let mut network = NetworkMut {
+            generation: &c.net.generation,
             buses: &mut buses,
             lines: &c.net.lines,
             transformers: &mut transformers,
@@ -368,6 +374,7 @@ fn a_curative_perimeter_optimizes_its_own_state() {
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -387,6 +394,7 @@ fn a_curative_perimeter_optimizes_its_own_state() {
     // differs from the preventive margin — optimizing the wrong perimeter is
     // the mistake this catches.
     let view = Network {
+        generation: &c.net.generation,
         buses: &c.net.buses,
         lines: &c.net.lines,
         transformers: &c.net.transformers,
@@ -440,6 +448,7 @@ fn a_perimeter_of_monitored_only_cnecs_optimizes_nothing() {
     let before = transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -474,6 +483,7 @@ fn usage_rules_decide_which_perimeter_an_action_reaches() {
         let mut transformers = c.net.transformers.clone();
         let mut buses = c.net.buses.clone();
         let mut network = NetworkMut {
+            generation: &c.net.generation,
             buses: &mut buses,
             lines: &c.net.lines,
             transformers: &mut transformers,
@@ -532,6 +542,7 @@ fn the_objective_unit_changes_what_the_optimizer_maximizes() {
     let resolution = Resolution::new(&crac, &net.branch_ids);
 
     let view = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -578,6 +589,7 @@ fn an_ampere_objective_is_reported_in_megawatts_all_the_same() {
     let mut buses = c.net.buses.clone();
     let mut transformers = c.net.transformers.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,

@@ -69,7 +69,7 @@ use std::path::{Path, PathBuf};
 
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
-use gridoxide::rao::evaluate::{evaluate_model, AcOptions, FlowModel};
+use gridoxide::rao::evaluate::{evaluate_model, FlowModel};
 use gridoxide::rao::linear::ObjectiveUnit;
 use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
@@ -848,9 +848,9 @@ fn check(scenario: &Scenario) -> Outcome {
     // *checked*. What the model changes here is every margin the scenario
     // asserts on.
     let model = flow_model_from(&resolve(&scenario.config));
-    let ac_options = AcOptions { shunts: &net.shunts, ..Default::default() };
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let view = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -862,6 +862,10 @@ fn check(scenario: &Scenario) -> Outcome {
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
+    // The same settings the optimizer measures with, from the same builder: a
+    // harness that scored the answer under a different slack from the one that
+    // produced it would be marking its own homework wrong.
+    let ac_options = gridoxide::rao::ac_options(&view);
     let mut solver = IpmSolver::new();
     let plan = run(&crac, &view, &resolution, &mut solver, &search_options);
 
@@ -890,6 +894,7 @@ fn check(scenario: &Scenario) -> Outcome {
                 &plan.preventive.buses,
             ));
             let view = Network {
+                generation: &net.generation,
                 buses,
                 lines: &net.lines,
                 transformers,
@@ -921,6 +926,7 @@ fn check(scenario: &Scenario) -> Outcome {
     let cra_margins = margins_at(Stage::Cra);
 
     let after_pra = Network {
+        generation: &net.generation,
         // The plan's own buses, not the file's: a redispatch lives only there,
         // and re-evaluating against the original buses reports a network in
         // which no injection ever moved.
@@ -1383,7 +1389,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 /// the printed report says which assertion moved.
 const BASELINE_MATCHED_DC: usize = 150;
 
-/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **232 of 244**.
+/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **238 of 244**.
 ///
 /// Lower than the DC file's score, and expected to be. These scenarios are
 /// judged on margins the reference measured with an AC load flow that also
@@ -1415,7 +1421,8 @@ const BASELINE_MATCHED_DC: usize = 150;
 /// included.
 ///
 /// Matching these assertions would mean reproducing that rounding, at the cost
-/// of a worse answer. They are left as recorded disagreements.
+/// of a worse answer. They are left as recorded disagreements, and with family
+/// 3.2 complete they are now the whole of what this file still misses.
 ///
 /// 5.2.3.2 joined them when the **ampere margin** was corrected — an ampere
 /// margin is now the limit in amperes less the current, rather than the
@@ -1427,6 +1434,17 @@ const BASELINE_MATCHED_DC: usize = 150;
 /// better answer by 4.2. The reference does not score it and takes −12. Three
 /// assertions here, against three gained in 3.2 on the same change.
 
+///
+/// # The slack, which family 3.2 turned on
+///
+/// It was 232 before the slack was **distributed** and weighted by
+/// **generation**, which took 3.2 from 24 of 33 to 33 of 33 and moved nothing
+/// else. Both halves matter and the second is the one that hides: netting
+/// generation against load puts 70% of an islanded node's make-up back inside
+/// or next to the country that lost it, so distributing barely changes the
+/// answer and the whole idea looks refuted. See
+/// [`the_slack_is_shared_out_in_proportion_to_generation`] in
+/// `tests/rao_evaluate_test.rs`.
 ///
 /// # What the per-side flow steps bought
 ///
@@ -1443,7 +1461,7 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///   entering at one end, leaving at the other — so the two differ by the
 ///   branch's losses. Reporting the power *entering* side two negates it, and
 ///   the pair then differ by twice the flow.
-const BASELINE_MATCHED_AC: usize = 232;
+const BASELINE_MATCHED_AC: usize = 238;
 
 /// The same, for the 93 AC scenarios on `TestCase16Nodes`: **870 of 884**.
 ///

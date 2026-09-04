@@ -35,7 +35,7 @@
 use crate::opf::Solver;
 
 use super::crac::{Crac, InstantKind, State};
-use super::evaluate::{evaluate_model, evaluate_with, AcOptions, Network, PerimeterResult, Resolution, SecurityResult};
+use super::evaluate::{evaluate_model, evaluate_with, Network, PerimeterResult, Resolution, SecurityResult};
 use super::linear::Setpoint;
 use super::automaton::{simulate, AutomatonResult};
 use super::mnec::Baseline;
@@ -248,6 +248,7 @@ pub fn run(
         let mut transformers = carried_transformers.clone();
         let automatons = {
             let view = Network {
+                generation: network.generation,
                 buses: network.buses,
                 lines: network.lines,
                 transformers: &transformers,
@@ -280,6 +281,7 @@ pub fn run(
         for instant in curative_instants {
             let state = State { instant, contingency: Some(contingency) };
             let view = Network {
+                generation: network.generation,
                 buses: network.buses,
                 lines: network.lines,
                 transformers: &transformers,
@@ -470,7 +472,7 @@ fn assess(
     open: &[usize],
     options: &SearchOptions,
 ) -> SecurityResult {
-    let ac = AcOptions { shunts: network.shunts, ..Default::default() };
+    let ac = super::evaluate::ac_options(network);
     evaluate_model(crac, network, resolution, open, options.linear.flow_model, &ac)
 }
 

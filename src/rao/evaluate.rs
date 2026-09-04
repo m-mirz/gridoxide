@@ -364,6 +364,15 @@ pub struct Network<'a> {
     pub bus_countries: &'a [Option<String>],
     /// Shunt admittances. Read only by the AC flow model; DC ignores them.
     pub shunts: &'a [ShuntAdm],
+    /// Per-bus active generation, per-unit and positive — the participation
+    /// weights a distributed slack shares an imbalance out by.
+    ///
+    /// Travels with the network rather than with the options for the same
+    /// reason [`shunts`](Self::shunts) does: it is a property of the machines,
+    /// and every layer that builds an [`AcOptions`] from a `Network` needs it.
+    /// Empty is allowed and means "weight by net injection instead", which is
+    /// what an importer that never retained generation can offer.
+    pub generation: &'a [f64],
     /// Tap changers, parallel to `transformers`.
     ///
     /// A CRAC's PST range action *may* carry its own tap-to-angle table and
@@ -784,6 +793,36 @@ pub fn evaluate_with(
     SecurityResult { perimeters, skipped }
 }
 
+/// The AC settings every RAO layer measures with.
+///
+/// One builder rather than five literals, because the settings are not a
+/// caller's taste — they are what the studies these CRACs come from were run
+/// with, and a layer that measured differently from its neighbours would score
+/// candidates against a network the next layer does not agree exists.
+///
+/// **The slack is distributed.** Every configuration the reference ships sets
+/// `distributedSlack: true` with `PROPORTIONAL_TO_GENERATION_P`, and it is not
+/// a refinement: a single slack puts the whole imbalance at one bus, and when a
+/// contingency islands a generator the imbalance is that generator's entire
+/// output. On the reference's `epic5` fixture, opening both of a node's only
+/// two branches strands 1000 MW of net injection, and where it reappears
+/// decides the answer — the slack there sits at one end of the Belgium–France
+/// tie, so a single slack pushes the whole make-up through France and out over
+/// the CNEC being measured. 1165.5 MW against the reference's 1000.
+///
+/// The weighting is what makes it work, and it is why this looked innocent for
+/// a long time: weighting by *net* injection puts 70% of the make-up back
+/// inside or next to the country that lost it and lands on 1160.8, barely
+/// moving. Weighting by generation lands on 1000.2.
+pub fn ac_options<'a>(network: &Network<'a>) -> AcOptions<'a> {
+    AcOptions {
+        shunts: network.shunts,
+        distribute_slack: true,
+        slack_weights: network.generation,
+        ..Default::default()
+    }
+}
+
 /// Fall-back flows for a contingency the Woodbury update cannot answer —
 /// typically one that severs the network, where there is no rank-`k` correction
 /// to apply because the base factorization no longer describes the topology.
@@ -836,6 +875,19 @@ pub struct AcOptions<'a> {
     /// Costs the shared factorization — each scenario is solved on its own
     /// Y-bus — so it is off unless asked for.
     pub distribute_slack: bool,
+    /// Per-bus participation weight for [`distribute_slack`](Self::distribute_slack),
+    /// which the reference wants proportional to **generation**.
+    ///
+    /// Empty falls back to the net injection at each generator bus, which is
+    /// the only figure the model carries on its own — and which is *not* the
+    /// same distribution. A node generating 2000 MW behind 1000 MW of load nets
+    /// to the same 1000 as one generating 1000 behind nothing, so netting
+    /// concentrates the share on whichever machines happen to sit behind little
+    /// load. On the reference's `epic5` fixture that is the difference between
+    /// 1160.8 MW and 1000.2 on the CNEC being measured, against its own 1000:
+    /// the net-injection weighting puts 70% of the make-up back inside or next
+    /// to the country that lost it, which is exactly where it must not go.
+    pub slack_weights: &'a [f64],
 }
 
 impl Default for AcOptions<'_> {
@@ -846,6 +898,7 @@ impl Default for AcOptions<'_> {
             max_iter: 30,
             backend: JacobianBackend::Scalar,
             distribute_slack: false,
+            slack_weights: &[],
         }
     }
 }
@@ -1105,14 +1158,30 @@ fn solve_distributing_slack(
 ) -> Vec<crate::PowerFlowReport> {
     let n = network.buses.len();
     let n_branches = network.n_branches();
-    let weights: Vec<f64> = network
-        .buses
-        .iter()
-        .map(|b| match b.bus_type {
-            crate::types::BusType::Slack | crate::types::BusType::PV => b.p_spec.max(0.0),
-            crate::types::BusType::PQ => 0.0,
-        })
-        .collect();
+    // Generation where the caller supplied it, net injection otherwise. The
+    // fallback is the honest one for a network model that never retained the
+    // generation, and it is a different distribution — see
+    // [`AcOptions::slack_weights`].
+    let weights: Vec<f64> = if ac.slack_weights.len() == network.buses.len() {
+        network
+            .buses
+            .iter()
+            .zip(ac.slack_weights)
+            .map(|(b, w)| match b.bus_type {
+                crate::types::BusType::Slack | crate::types::BusType::PV => w.max(0.0),
+                crate::types::BusType::PQ => 0.0,
+            })
+            .collect()
+    } else {
+        network
+            .buses
+            .iter()
+            .map(|b| match b.bus_type {
+                crate::types::BusType::Slack | crate::types::BusType::PV => b.p_spec.max(0.0),
+                crate::types::BusType::PQ => 0.0,
+            })
+            .collect()
+    };
     let distribution = if weights.iter().sum::<f64>() > 0.0 {
         SlackDistribution::from_weights(weights)
     } else {

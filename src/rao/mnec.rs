@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 
 use super::crac::{Crac, State};
-use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution, SecurityResult};
+use super::evaluate::{evaluate_model, FlowModel, Network, Resolution, SecurityResult};
 use super::linear::ObjectiveUnit;
 
 /// The reference's own stand-in for "no margin at all to speak of".
@@ -170,7 +170,7 @@ impl Baseline {
         resolution: &Resolution,
         model: FlowModel,
     ) -> Self {
-        let ac = AcOptions { shunts: network.shunts, ..Default::default() };
+        let ac = super::evaluate::ac_options(network);
         let result =
             evaluate_model(crac, network, resolution, network.initially_open, model, &ac);
         Self::from_result(&result)

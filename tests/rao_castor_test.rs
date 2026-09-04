@@ -45,6 +45,7 @@ impl Case {
 
     fn network(&self) -> Network<'_> {
         Network {
+            generation: &self.net.generation,
             buses: &self.net.buses,
             lines: &self.net.lines,
             transformers: &self.net.transformers,
@@ -502,6 +503,7 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
 
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -574,6 +576,7 @@ fn a_curative_perimeter_stops_once_it_is_better_than_preventive() {
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -651,6 +654,7 @@ fn automatons_are_simulated_rather_than_chosen() {
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -730,6 +734,7 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -804,6 +809,7 @@ fn a_curative_action_can_close_an_out_of_service_branch() {
     );
 
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -925,6 +931,7 @@ fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
 
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -982,6 +989,7 @@ fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
 
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -1106,6 +1114,7 @@ fn an_automaton_stops_at_the_smallest_set_point_that_secures() {
 fn ac_plan(net: &ucte::UcteImport, crac: &Crac) -> gridoxide::rao::Plan {
     let resolution = Resolution::with_buses(crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,

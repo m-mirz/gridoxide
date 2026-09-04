@@ -39,6 +39,7 @@ fn case() -> Case {
 impl Case {
     fn network(&self) -> Network<'_> {
         Network {
+            generation: &self.net.generation,
             buses: &self.net.buses,
             lines: &self.net.lines,
             transformers: &self.net.transformers,
@@ -721,6 +722,7 @@ fn an_ampere_margin_is_measured_in_amperes() {
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -778,4 +780,124 @@ fn an_ampere_margin_is_measured_in_amperes() {
              reading this test exists to rule out"
         );
     }
+}
+
+/// The slack is distributed, and the weights are **generation**.
+///
+/// Both halves are load-bearing and the second is the one that hides.
+///
+/// The reference's `epic5` scenario opens both of `FFR1AA1`'s branches — it has
+/// only those two — which islands a node carrying 2000 MW of generation against
+/// 1000 MW of load. The main component loses 1000 MW of net injection and
+/// something has to supply it, and *where* it appears decides the answer:
+/// this network's slack is `BBE2AA1`, one end of the Belgium–France tie, so a
+/// single slack pushes its entire make-up straight through France and out over
+/// the CNEC being measured.
+///
+/// Against the reference's 1000 MW on `FFR2AA1  DDE3AA1  1`:
+///
+/// | how the 1000 MW is supplied | flow |
+/// |---|---|
+/// | single slack | 1165.5 MW |
+/// | distributed, weighted by **net injection** | 1160.8 MW |
+/// | distributed, weighted by **generation** | 1000.2 MW |
+///
+/// That middle row is why this looked like an innocent setting for a long time:
+/// netting generation against load puts 40% of the make-up back at `BBE2AA1`
+/// and 30% at `FFR3AA1` — 70% of it inside or next to the country that lost it
+/// — so distributing barely moves the answer and the whole idea looks refuted.
+/// It is the weighting that was wrong, and every configuration the reference
+/// ships says so outright: `PROPORTIONAL_TO_GENERATION_P`.
+#[test]
+fn the_slack_is_shared_out_in_proportion_to_generation() {
+    let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep5us1.json"),
+    )
+    .expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        generation: &net.generation,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+
+    // Both of the islanded node's branches.
+    let mut open = net.initially_open.clone();
+    for name in ["Open tie-line FR1 FR2", "Open tie-line FR1 FR3"] {
+        let action = crac.network_actions.iter().find(|a| a.id == name).expect(name);
+        for elementary in &action.elementary {
+            for element in elementary.elements() {
+                if let Some(b) = resolution.branch(element) {
+                    open.push(b);
+                }
+            }
+        }
+    }
+
+    let flow = |ac: &gridoxide::rao::AcOptions<'_>| -> f64 {
+        gridoxide::rao::evaluate_model(
+            &crac,
+            &network,
+            &resolution,
+            &open,
+            gridoxide::rao::FlowModel::Ac,
+            ac,
+        )
+        .perimeters
+        .iter()
+        .flat_map(|p| p.cnecs.iter())
+        .find(|c| crac.flow_cnecs[c.cnec].id == "FFR2AA1  DDE3AA1  1 - preventive")
+        .map(|c| c.flow_mw)
+        .expect("the preventive CNEC")
+    };
+
+    let shared = flow(&gridoxide::rao::ac_options(&network));
+    assert!(
+        (shared - 1000.0).abs() < 5.0,
+        "generation-weighted, the flow should be the reference's 1000 MW, not {shared}"
+    );
+
+    // The weighting, not merely the distributing. Both wrong answers are what
+    // this test exists to keep out.
+    let netted = flow(&gridoxide::rao::AcOptions {
+        shunts: &net.shunts,
+        distribute_slack: true,
+        slack_weights: &[],
+        ..Default::default()
+    });
+    let single = flow(&gridoxide::rao::AcOptions {
+        shunts: &net.shunts,
+        distribute_slack: false,
+        ..Default::default()
+    });
+    assert!(
+        netted > 1100.0 && single > 1100.0,
+        "weighting by net injection ({netted}) and a single slack ({single}) should both \
+         still push the make-up through France"
+    );
+}
+
+/// The UCTE importer keeps generation apart from the load it is netted against.
+#[test]
+fn generation_is_retained_alongside_the_net_injection() {
+    let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
+    assert_eq!(net.generation.len(), net.buses.len());
+
+    // FFR1AA1: 2000 MW of generation behind 1000 MW of load. The net figure
+    // cannot tell it apart from a node generating 1000 behind nothing, which is
+    // exactly why it is kept.
+    let fr1 = net.node_codes.iter().position(|c| c.trim() == "FFR1AA1").expect("FFR1AA1");
+    assert!((net.generation[fr1] * net.base_mva - 2000.0).abs() < 1e-6);
+    assert!((net.buses[fr1].p_spec * net.base_mva - 1000.0).abs() < 1e-6);
+    assert!(net.generation.iter().all(|g| *g >= 0.0), "generation is stored positive");
 }
