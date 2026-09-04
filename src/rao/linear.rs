@@ -1141,6 +1141,9 @@ fn build_controls(
                     .find(|(i, _)| *i == index)
                     .map_or(*initial_tap, |(_, t)| *t);
                 let (lower, upper) = tap_bounds(action, &table, *initial_tap, previous_tap);
+                if !starts_inside_its_range(current, lower, upper) {
+                    continue;
+                }
                 controls.push(Control {
                     action: index,
                     sensitivity: sensitivity_mw,
@@ -1178,6 +1181,9 @@ fn build_controls(
                 let sensitivity_mw: Vec<f64> =
                     cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0)).collect();
                 let (lower, upper) = standard_bounds(action);
+                if !starts_inside_its_range(0.0, lower, upper) {
+                    continue;
+                }
                 controls.push(Control {
                     action: index,
                     sensitivity: sensitivity_mw,
@@ -1320,6 +1326,28 @@ pub(super) fn tap_bounds(
         angles.iter().copied().fold(f64::INFINITY, f64::min),
         angles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     )
+}
+
+/// Whether a range action can be optimized at all from where the perimeter
+/// found it.
+///
+/// A range action whose **starting** set-point is already outside its own range
+/// is not a tightly-constrained lever, it is not a lever: the CRAC is saying
+/// this device may only be at positions it is not at, and no movement the
+/// optimizer chooses can make that true. The reference drops such an action
+/// from the perimeter outright — `doesPrePerimeterSetpointRespectRange` — and
+/// so does this.
+///
+/// It bites when an earlier perimeter has moved the device. The reference's own
+/// `SL_ep15us11-3case2_withPstCra` declares four range actions on **one**
+/// phase shifter, of which the one named `useless_pst` permits tap 0 and
+/// nothing else; by the time the curative perimeter runs, an automaton has put
+/// that shifter on tap −8. Kept, it becomes a second control on a device that
+/// already has one, pinned to a position the machine is not at and pulling
+/// against the action the scenario is about — so the curative perimeter moves
+/// nothing and reports that nothing helped.
+fn starts_inside_its_range(current: f64, lower: f64, upper: f64) -> bool {
+    current >= lower - 1e-6 && current <= upper + 1e-6
 }
 
 fn standard_bounds(action: &super::crac::RangeAction) -> (f64, f64) {
