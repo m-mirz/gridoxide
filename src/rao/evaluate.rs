@@ -411,6 +411,17 @@ struct Bounds {
     lower: f64,
     u_upper: f64,
     u_lower: f64,
+    /// The same two bounds expressed in **amperes**, carried alongside rather
+    /// than derived from the megawatt pair.
+    ///
+    /// They cannot be derived, and that is the whole point. A megawatt margin
+    /// is `limit − |P|`; the ampere margin the reference reports is
+    /// `limit_in_amperes − I`, and `I` carries reactive power and the bus's
+    /// actual voltage while `|P|` carries neither. The two differ by whatever
+    /// those contribute, which on the reference's own `epic5` fixture is 150 A
+    /// on a 2000 MW threshold — enough to change which action the search takes.
+    upper_a: f64,
+    lower_a: f64,
 }
 
 impl Bounds {
@@ -420,21 +431,52 @@ impl Bounds {
             lower: f64::NEG_INFINITY,
             u_upper: u_rated,
             u_lower: u_rated,
+            upper_a: f64::INFINITY,
+            lower_a: f64::NEG_INFINITY,
         }
     }
 
     /// Fold in one threshold's bounds, each tightened by the reliability margin
     /// and by whatever headroom reactive flow has already consumed.
-    fn tighten(&mut self, lower: f64, upper: f64, voltage: f64, frm: f64, charge: f64) {
+    /// `expressed` is the voltage at which this threshold's bound is stated in
+    /// amperes, which is **not** always the voltage it was converted from. An
+    /// ampere threshold converts to megawatts at the voltage the CRAC says it
+    /// was written against, and expressing it back in amperes undoes exactly
+    /// that. A megawatt threshold converts from nothing — it is already the
+    /// unit the limit is written in — so the voltage that turns it into amperes
+    /// is the network's own, which is what the reference's CNEC carries.
+    ///
+    /// The charge is deliberately absent from the ampere pair. It exists to
+    /// make a megawatt margin behave like an ampere one by taking reactive flow
+    /// and the voltage deviation off the limit; in the ampere domain the
+    /// current already carries both, and charging twice would take them off
+    /// again.
+    fn tighten(
+        &mut self,
+        lower: f64,
+        upper: f64,
+        voltage: f64,
+        expressed: f64,
+        frm: f64,
+        charge: f64,
+    ) {
+        let per_amp = 3f64.sqrt() * expressed / 1e6;
+        let (upper_a, lower_a) = if per_amp > 0.0 {
+            ((upper - frm) / per_amp, (lower + frm) / per_amp)
+        } else {
+            (f64::INFINITY, f64::NEG_INFINITY)
+        };
         let upper = upper - frm - charge;
         let lower = lower + frm + charge;
         if upper < self.upper {
             self.upper = upper;
             self.u_upper = voltage;
+            self.upper_a = upper_a;
         }
         if lower > self.lower {
             self.lower = lower;
             self.u_lower = voltage;
+            self.lower_a = lower_a;
         }
     }
 
@@ -451,6 +493,38 @@ impl Bounds {
         let from_upper = self.upper - flow_mw;
         let from_lower = flow_mw - self.lower;
         if from_upper <= from_lower { (from_upper, self.u_upper) } else { (from_lower, self.u_lower) }
+    }
+
+    /// The expression voltage of whichever bound the megawatt margin found
+    /// binding — recovered from the pair, so the two can never drift apart.
+    fn expressed(&self, flow_mw: f64) -> f64 {
+        let volts = |bound_mw: f64, bound_a: f64| {
+            if bound_a.is_finite() && bound_a.abs() > 0.0 {
+                bound_mw.abs() / bound_a.abs() * 1e6 / 3f64.sqrt()
+            } else {
+                0.0
+            }
+        };
+        if self.upper - flow_mw <= flow_mw - self.lower {
+            volts(self.upper, self.upper_a)
+        } else {
+            volts(self.lower, self.lower_a)
+        }
+    }
+
+    /// The margin in **amperes** against a signed current, measured against
+    /// whichever bound the megawatt margin found binding.
+    ///
+    /// The binding side is decided once, in megawatts, rather than a second
+    /// time here: a CNEC whose two units disagreed about which of its own
+    /// bounds is closer would report a margin and a limit belonging to
+    /// different constraints.
+    fn margin_amperes(&self, flow_mw: f64, flow_a: f64) -> f64 {
+        if self.upper - flow_mw <= flow_mw - self.lower {
+            self.upper_a - flow_a
+        } else {
+            flow_a - self.lower_a
+        }
     }
 
     /// The tighter bound's magnitude, for display.
@@ -479,7 +553,7 @@ fn threshold_bounds(
     cnec: &FlowCnec,
     u_rated_v: f64,
     s_base_va: f64,
-) -> Option<(f64, f64, f64)> {
+) -> Option<(f64, f64, f64, f64)> {
     if threshold.min.is_none() && threshold.max.is_none() {
         return None;
     }
@@ -521,7 +595,17 @@ fn threshold_bounds(
     };
     let lower = threshold.min.map_or(f64::NEG_INFINITY, |v| v * scale);
     let upper = threshold.max.map_or(f64::INFINITY, |v| v * scale);
-    Some((lower, upper, voltage))
+    // The voltage that expresses this bound in amperes, which is the voltage it
+    // was converted *from* — and a megawatt threshold was converted from
+    // nothing. There the network's own base is the answer, because that is the
+    // nominal voltage the reference's CNEC carries: it reads it off the network
+    // rather than out of the CRAC. On the `epic5` fixture that is 380 kV
+    // against the CRAC's stated 400, which is 150 A on a 2000 MW limit.
+    let expressed = match threshold.unit {
+        Unit::Megawatt if u_rated_v > 0.0 => u_rated_v,
+        _ => voltage,
+    };
+    Some((lower, upper, voltage, expressed))
 }
 
 /// Evaluate every perimeter the CRAC defines, in DC.
@@ -660,15 +744,22 @@ pub fn evaluate_with(
             // different number.
             let mut bound = Bounds::unbounded(u_rated);
             for t in &cnec.thresholds {
-                let Some((lo, hi, v)) = threshold_bounds(t, cnec, u_rated, s_base_va) else {
+                let Some((lo, hi, v, expressed)) = threshold_bounds(t, cnec, u_rated, s_base_va)
+                else {
                     continue;
                 };
-                bound.tighten(lo, hi, v, cnec.reliability_margin, 0.0);
+                bound.tighten(lo, hi, v, expressed, cnec.reliability_margin, 0.0);
             }
             if !bound.is_constraining() {
                 continue;
             }
             let (margin_mw, u_bind) = bound.margin(flow_mw);
+            // No reactive power and no voltage deviation, so the current is the
+            // active power at the bound's own expression voltage — and the
+            // ampere margin then comes out as the megawatt one converted, which
+            // is what a DC study means by it.
+            let current_a = to_amperes(flow_mw.abs(), bound.expressed(flow_mw));
+            let margin_a = bound.margin_amperes(flow_mw, current_a.copysign(flow_mw));
             // Lossless, so the far end passes on exactly what the near end
             // took. Only the current differs, at the far bus's own nominal
             // voltage — which is to say across a transformer and nowhere else.
@@ -682,8 +773,8 @@ pub fn evaluate_with(
                 lower_mw: bound.lower,
                 limit_mw: bound.magnitude(),
                 conversion_v: u_bind,
-                margin_a: to_amperes(margin_mw, u_bind),
-                current_a: to_amperes(flow_mw.abs(), u_bind),
+                margin_a,
+                current_a,
                 side_two: (flow_mw, to_amperes(flow_mw.abs(), u_far)),
             });
         }
@@ -904,7 +995,8 @@ pub fn evaluate_ac(
 
             let mut bound = Bounds::unbounded(u_rated);
             for t in &cnec.thresholds {
-                let Some((lo, hi, u_written)) = threshold_bounds(t, cnec, u_rated, s_base_va)
+                let Some((lo, hi, u_written, expressed)) =
+                    threshold_bounds(t, cnec, u_rated, s_base_va)
                 else {
                     continue;
                 };
@@ -935,7 +1027,7 @@ pub fn evaluate_ac(
                     // limit, so the `continue` above has already fired.
                     Unit::Megawatt | Unit::Degree | Unit::Kilovolt => 0.0,
                 };
-                bound.tighten(lo, hi, u_written, cnec.reliability_margin, charge);
+                bound.tighten(lo, hi, u_written, expressed, cnec.reliability_margin, charge);
             }
             if !bound.is_constraining() {
                 continue;
@@ -955,6 +1047,18 @@ pub fn evaluate_ac(
             };
 
             let (margin_mw, u_bind) = bound.margin(flow_mw);
+            // The ampere margin is a difference of two ampere quantities, not
+            // the megawatt margin converted. `margin_mw` is `limit − |P|` and
+            // carries neither reactive power nor the bus's actual voltage; the
+            // current carries both, and the reference's own margin is
+            // `limit_in_amperes − I`. On its `epic5` fixture the two readings
+            // differ by 150 A on a 2000 MW threshold — enough to change which
+            // action the search takes, which is how it was found.
+            //
+            // For an ampere threshold the two agree exactly, because the charge
+            // above has already taken the same two effects off the megawatt
+            // limit. This is the general form of that trick, not a second one.
+            let margin_a = bound.margin_amperes(flow_mw, current_a.copysign(flow_mw));
             // Negated: `ends[1]` is the power *entering* the branch at its far
             // terminal, and side two reports what leaves there.
             let (p_two, q_two, u_two) = (-ends[1].0, -ends[1].1, ends[1].2);
@@ -967,7 +1071,7 @@ pub fn evaluate_ac(
                 lower_mw: bound.lower,
                 limit_mw: bound.magnitude(),
                 conversion_v: u_bind,
-                margin_a: to_amperes(margin_mw, u_bind),
+                margin_a,
                 current_a,
                 side_two: (
                     p_two,
