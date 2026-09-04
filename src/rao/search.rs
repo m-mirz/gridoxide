@@ -883,7 +883,7 @@ fn measure_with(
 /// optimized margin in the objective's unit, less what the monitored CNECs
 /// cost. Mirrors `linear::objective`, which computes the same thing from a
 /// network rather than from a result.
-fn objective_of(
+pub(super) fn objective_of(
     crac: &Crac,
     result: &super::evaluate::SecurityResult,
     perimeter: &[State],
