@@ -164,6 +164,13 @@ pub struct LinearOptions {
     /// [`search`](super::search::search) fills all three in; a caller
     /// optimizing a lone perimeter gets the unconstrained default for each.
     pub limits: Budget,
+    /// The states whose usage rules decide which range actions are available,
+    /// when that is not the same as the states being optimized. See
+    /// [`SearchOptions::available_at`](super::search::SearchOptions::available_at)
+    /// — second preventive optimizes every CNEC while remaining a preventive
+    /// perimeter, and without this it would help itself to every contingency's
+    /// curative shifters.
+    pub available_at: Option<Vec<State>>,
     /// The tap each phase-shifter range action sat on when this **perimeter**
     /// began, as `(range action index, tap)`.
     ///
@@ -192,6 +199,7 @@ impl Default for LinearOptions {
             mnec: Mnec::default(),
             available: Constrained::unmeasured(),
             limits: Budget::default(),
+            available_at: None,
             previous_taps: Vec::new(),
         }
     }
@@ -557,7 +565,10 @@ fn usable_range_actions(crac: &Crac, perimeter: &[State], options: &LinearOption
     crac.range_actions
         .iter()
         .enumerate()
-        .filter(|(_, a)| options.available.allows(&a.usage_rules, perimeter, crac))
+        .filter(|(_, a)| {
+            let at = options.available_at.as_deref().unwrap_or(perimeter);
+            options.available.allows(&a.usage_rules, at, crac)
+        })
         .map(|(i, _)| i)
         .collect()
 }
@@ -1085,7 +1096,8 @@ fn build_controls(
 
     let mut controls = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
-        if !options.available.allows(&action.usage_rules, perimeter, crac) {
+        let at = options.available_at.as_deref().unwrap_or(perimeter);
+        if !options.available.allows(&action.usage_rules, at, crac) {
             continue;
         }
         // A usage limit already spent on network actions leaves room for only

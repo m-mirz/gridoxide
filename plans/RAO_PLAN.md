@@ -9,9 +9,9 @@ and 2 landed 2026-08-18, and the optimizer reached agreement with the reference 
 > in every conformity fixture, but CGMES tap *tables* are still discarded at import (`cgmes.rs`
 > evaluates the current step and drops the rest).
 >
-> §8.3's external Cucumber gate runs two flow models across three files and 156 scenarios:
-> **150 of 156** DC assertions, **238 of 244** AC ones on TestCase12Nodes, and **870 of 884** on
-> TestCase16Nodes — **1258 of 1284**.
+> §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
+> **150 of 156** DC assertions, **238 of 244** AC ones on TestCase12Nodes, **870 of 884** on
+> TestCase16Nodes, and **75 of 108** on the second-preventive corpus — **1333 of 1392**.
 >
 > **Thirteen of the fifteen scenario families match in full.** The 26 assertions that do not are
 > **recorded disagreements, not a backlog**: eight scenarios where gridoxide's answer has been
@@ -20,9 +20,12 @@ and 2 landed 2026-08-18, and the optimizer reached agreement with the reference 
 >
 > **What is left**, in the order it is worth doing:
 >
-> 1. **Second-preventive optimization.** The largest untouched capability. Its scenarios are excluded
->    from the corpus outright, so the gate is silent on it and no amount of tuning will move a
->    number; the 156 skipped `execution details` steps are its bookkeeping.
+> 1. **Second preventive: `A(r, s)`, a set-point per range action *per state*.** The pass itself is
+>    built and gated — 15 of the reference's own scenarios are vendored and it scores **75 of 108**,
+>    from 45 with nothing implemented. What is left is one thing: the reference re-optimizes curative
+>    range actions *inside* the second preventive problem, which needs the per-state set-point §7.3
+>    declares and nobody built. Five of the six scenarios still failing turn on it — they ask for one
+>    PST at two different taps. This is now the largest single item in the plan and it has a gate.
 > 2. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
 > 3. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC

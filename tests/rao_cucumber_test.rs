@@ -71,7 +71,9 @@ use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
 use gridoxide::rao::evaluate::{evaluate_model, FlowModel};
 use gridoxide::rao::linear::ObjectiveUnit;
-use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
+use gridoxide::rao::{
+    crac_json, run, Network, Resolution, SearchOptions, SecondPreventiveCondition,
+};
 use gridoxide::ucte;
 use serde_json::Value;
 
@@ -243,6 +245,13 @@ struct Scenario {
     core_cc: bool,
     crac: String,
     config: String,
+    /// `I launch rao with a time limit of N seconds`, where the reference has
+    /// one. A **negative** limit is the suite's way of saying the run had no
+    /// time for a second preventive pass — 1.4.4.5 and 1.4.4.6 are the same
+    /// scenario at −1 and 600 seconds, and they assert different answers.
+    /// gridoxide has no wall clock in the optimizer, so the limit is honoured
+    /// where it is a statement about *what runs* rather than about how long.
+    time_limit: Option<f64>,
     expectations: Vec<Expect>,
 }
 
@@ -280,7 +289,7 @@ fn quoted_nth(line: &str, n: usize) -> Option<String> {
 
 /// The terminal a flow step names, in the reference's 1-based numbering.
 fn side_of(line: &str) -> Option<usize> {
-    line.split_once(" on side ")?.1.trim().split_whitespace().next()?.parse().ok()
+    line.split_once(" on side ")?.1.split_whitespace().next()?.parse().ok()
 }
 
 fn parse(text: &str) -> Vec<Scenario> {
@@ -315,6 +324,8 @@ fn parse(text: &str) -> Vec<Scenario> {
             scenario.crac = quoted(line).unwrap_or_default();
         } else if line.starts_with("Given configuration file is") {
             scenario.config = quoted(line).unwrap_or_default();
+        } else if line.contains("launch rao with a time limit of") {
+            scenario.time_limit = number_after_quotes(line);
         } else if line.starts_with("Then") {
             scenario.expectations.push(expectation(line));
         }
@@ -654,6 +665,22 @@ fn options_from(config: &Path) -> SearchOptions {
             options.linear.mnec.options.constraint_adjustment_coefficient = v;
         }
     }
+    // `second-preventive-rao`. Off unless the configuration says otherwise,
+    // which is the reference's own default.
+    if let Some(second) = extension.and_then(|e| e.get("second-preventive-rao")) {
+        options.second_preventive.condition =
+            match second.get("execution-condition").and_then(|v| v.as_str()) {
+                Some("POSSIBLE_CURATIVE_IMPROVEMENT") => {
+                    SecondPreventiveCondition::PossibleCurativeImprovement
+                }
+                Some("COST_INCREASE") => SecondPreventiveCondition::CostIncrease,
+                _ => SecondPreventiveCondition::Disabled,
+            };
+        options.second_preventive.hint = second
+            .get("hint-from-first-preventive-rao")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    }
     if let Some(topology) = extension.and_then(|e| e.get("topological-actions-optimization")) {
         // The reference's default is i32::MAX; anything that large is a depth
         // bound in name only, and running it would evaluate every combination
@@ -842,7 +869,17 @@ fn check(scenario: &Scenario) -> Outcome {
     };
     let net = ucte::read_with(resolve(&scenario.network), &options).expect("network");
     let (crac, _) = crac_json::read(resolve(&scenario.crac)).expect("crac");
-    let search_options = options_from(&resolve(&scenario.config));
+    let mut search_options = options_from(&resolve(&scenario.config));
+    // A run given no time does not get a second preventive pass. That is the
+    // whole of what the time limit means here: gridoxide's optimizer has no
+    // wall clock, and inventing one to reproduce a wall-clock decision would be
+    // reproducing the symptom rather than the rule. 1.4.4.5 and 1.4.4.6 are the
+    // same scenario at −1 and 600 seconds and assert different answers, which
+    // is exactly the distinction being made.
+    if scenario.time_limit.is_some_and(|t| t <= 0.0) {
+        search_options.second_preventive.condition = SecondPreventiveCondition::Disabled;
+    }
+    let search_options = search_options;
     // The search stays on DC whatever the model: it is what makes the tree
     // finish, and phase 11's whole argument is that AC is where the answer gets
     // *checked*. What the model changes here is every margin the scenario
@@ -1067,10 +1104,10 @@ fn check(scenario: &Scenario) -> Outcome {
                     if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
                         continue;
                     }
-                    if crac.instants.iter().any(|i| {
-                        i.id == *instant && i.kind == InstantKind::Auto
-                    }) {
-                        if let Some(a) = &scenario.automatons {
+                    if crac.instants.iter().any(|i| i.id == *instant && i.kind == InstantKind::Auto)
+                        && let Some(a) = &scenario.automatons
+                    {
+                        {
                             used.extend(
                                 a.network_actions
                                     .iter()
@@ -1117,10 +1154,10 @@ fn check(scenario: &Scenario) -> Outcome {
             if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
                 continue;
             }
-            if crac.instants.iter().any(|i| i.id == *instant && i.kind == InstantKind::Auto) {
-                if let Some(a) = &scenario.automatons {
-                    return &a.transformers;
-                }
+            if crac.instants.iter().any(|i| i.id == *instant && i.kind == InstantKind::Auto)
+                && let Some(a) = &scenario.automatons
+            {
+                return &a.transformers;
             }
             if let Some(perimeter) = scenario.perimeters.iter().find(|p| {
                 p.states.iter().any(|s| crac.instants[s.instant].id == *instant)
@@ -1350,11 +1387,11 @@ const FILES: [(&str, usize, usize, Option<&str>); 4] = [
         15,
         BASELINE_MATCHED_2P,
         // The fourth field says a whole corpus is allowed to disagree, and why.
-        // It exists so "the capability is not built" cannot be confused with
+        // It exists so "the capability is partly built" cannot be confused with
         // "nobody has looked", which is the distinction the per-scenario check
-        // beside it enforces everywhere else. Delete it when the capability
-        // lands — leaving it is how a corpus stops being measured.
-        Some("second-preventive optimization is not implemented"),
+        // beside it enforces everywhere else. Delete it when the six scenarios
+        // below are settled — leaving it is how a corpus stops being measured.
+        Some("second preventive holds curative range actions rather than re-optimizing them"),
     ),
 ];
 
@@ -1555,7 +1592,6 @@ const BASELINE_MATCHED_DC: usize = 150;
 /// at −11 it is −156.28 with none, and scoring the virtual cost makes −11 the
 /// better answer by 4.2. The reference does not score it and takes −12. Three
 /// assertions here, against three gained in 3.2 on the same change.
-
 ///
 /// # The slack, which family 3.2 turned on
 ///
@@ -1684,14 +1720,31 @@ const BASELINE_MATCHED_AC: usize = 238;
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
 const BASELINE_MATCHED_AC16: usize = 870;
 
-/// The 15 second-preventive scenarios: **recorded once the capability exists**.
+/// The 15 second-preventive scenarios: **75 of 108**, from 45 before the
+/// capability existed.
 ///
-/// Set to zero deliberately while it does not. The corpus is here first, which
-/// is the order everything else in this file was built in and the only order
-/// that works: the gate found all twenty-nine defects in §8.3, and building a
-/// capability with nothing to check it against is how the twenty-ninth stayed
-/// hidden for three refuted hypotheses.
-const BASELINE_MATCHED_2P: usize = 0;
+/// The corpus was vendored first and scored at 45 with nothing implemented,
+/// which is the order everything else in this file was built in and the only
+/// order that works: the gate found all twenty-nine defects in §8.3, and
+/// building a capability with nothing to check it against is how the
+/// twenty-ninth survived three refuted hypotheses.
+///
+/// # What the 33 that remain are
+///
+/// Four scenarios need one range action at **two set-points** — a PST at +5 in
+/// preventive and −5 in curative, say. The reference re-optimizes curative range
+/// actions inside the second preventive problem, which needs a set-point per
+/// action *per state*: `A(r, s)` in `plans/RAO_PLAN.md` §7.3, declared there and
+/// not built, because this LP carries one set-point per action. Until it does, a
+/// shifter the CRAC allows in both instants is held where the curative stage put
+/// it rather than re-tuned, and 1.4.1.1.3, 1.4.1.2, 1.4.1.5 and 1.4.1.6 turn on
+/// exactly that.
+///
+/// 1.4.4.4 is the same gap reached from the other side: the reference keeps a
+/// curative action and moves a preventive shifter two taps, where gridoxide
+/// spends a second preventive action instead and lands 150 A short. 1.4.5.1 is
+/// one margin on a DC scenario.
+const BASELINE_MATCHED_2P: usize = 75;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
