@@ -32,7 +32,7 @@ pub use crac::{
 };
 pub use crac_json::{CracError, CracReport};
 pub use automaton::{simulate, AutomatonResult};
-pub use castor::{run, PerimeterPlan, Plan, ScenarioPlan};
+pub use castor::{run, PerimeterPlan, Plan, ScenarioPlan, StepsExecuted};
 pub use search::{
     search, search_with_open, SearchOptions, SearchResult, SecondPreventive,
     SecondPreventiveCondition,

@@ -166,11 +166,11 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1333 of 1392 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1503 of 1563 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
-counts, objective values and security statuses, across two flow models and three networks. Of the 59
-that do not, 33 belong to the second-preventive corpus, which is the one capability still short of
-the reference.
+counts, objective values, security statuses and **which optimization steps ran**, across two flow
+models and three networks. Of the 60 that do not, 34 belong to the second-preventive corpus, which is
+the one capability still short of the reference.
 
 The other 26 are **recorded disagreements rather than a backlog**. Each has been measured on
 the reference's *own* objective, in the unit its own configuration selects and with its own MNEC

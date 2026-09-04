@@ -11,26 +11,25 @@ second preventive was built and gated the same day.
 > evaluates the current step and drops the rest).
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
-> **150 of 156** DC assertions, **238 of 244** AC ones on TestCase12Nodes, **870 of 884** on
-> TestCase16Nodes, and **75 of 108** on the second-preventive corpus — **1333 of 1392**.
+> **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
+> TestCase16Nodes, and **89 of 123** on the second-preventive corpus — **1503 of 1563**, with
+> **six** steps left unsupported out of what was 177.
 >
-> 59 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> 60 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
 > reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
-> asserts that nothing may disagree without a measurement behind it. **33 are the second-preventive
+> asserts that nothing may disagree without a measurement behind it. **34 are the second-preventive
 > corpus**, which is the one capability still short of the reference and is exempt by name until it
 > is not (§8.7).
 >
 > **What is left**, in the order it is worth doing — which this session reordered:
 >
-> 1. **`execution details`: the cheapest 171 assertions in the corpus.** Of 177 skipped steps, 171
->    are that one — `"The RAO only went through first preventive"`, `"Second preventive improved
->    first preventive results"`, `"First preventive fell back to initial situation"`. When the skip
->    was written it named a capability that did not exist. It now names three states `castor::run`
->    already distinguishes: whether it discarded the plan (§8.3's defect 28), whether a second pass
->    ran and was kept, and whether neither happened. §8.3's rule is that anything the code can answer
->    belongs in the denominator, and this is the largest such block by a wide margin. Expect the
->    ratio to fall when it lands; that is the point.
+> 1. ~~**`execution details`.**~~ **Done**, and it did not cost what was expected. 171 assertions
+>    left the skip bucket and **170 hold**; the skip list is down from 177 steps to six. The one
+>    that does not is 1.4.1.5, where gridoxide's second pass ran and was *declined* and it says so —
+>    the step reporting a gap §8.7 already records rather than adding one. `Plan::steps` now carries
+>    which optimization steps ran, which is a thing an operator wants and no margin can supply: a
+>    plan and the plan it fell back to have different margins but the same shape.
 > 2. **A richer second-preventive problem**, which is the only thing that unlocks the rest. Its
 >    corpus is gated at **75 of 108**, from 45 with nothing implemented, and §8.7 sizes the
 >    remainder: four genuine gaps, one recorded disagreement where gridoxide is 85 A ahead of the

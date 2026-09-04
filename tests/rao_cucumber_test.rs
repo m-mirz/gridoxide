@@ -195,6 +195,12 @@ enum Expect {
     NetworkTap { element: String, tap: i32 },
     /// `line "X" in network file with PRA has connection status to "X"`.
     Connected { element: String, connected: bool },
+    /// `the execution details should be "X"` — which optimization steps ran and
+    /// how each turned out. The most-asserted step in the whole suite, and the
+    /// one thing no margin can tell you: whether the answer in front of you is
+    /// the plan the optimizer wanted, the plan it fell back to, or the network
+    /// untouched.
+    Steps(String),
     /// A step this harness does not implement, kept so it is counted rather
     /// than quietly dropped.
     Unsupported(String),
@@ -485,6 +491,12 @@ fn expectation(line: &str) -> Expect {
             (Some(element), Some("true")) => Expect::Connected { element, connected: true },
             (Some(element), Some("false")) => Expect::Connected { element, connected: false },
             _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("the execution details should be") {
+        return match quoted(line) {
+            Some(text) => Expect::Steps(text),
+            None => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("remedial action") && line.contains(" is not used") {
@@ -1280,6 +1292,10 @@ fn check(scenario: &Scenario) -> Outcome {
                 let got = used.iter().any(|u| u == action);
                 record(got, format!("`{action}` used: {got} {at:?}"));
             }
+            Expect::Steps(want) => {
+                let got = plan.steps.as_str();
+                record(got == want, format!("execution details {got:?} (expected {want:?})"));
+            }
             Expect::ActionNotUsed { action, at } => {
                 let (used, _) = decisions(at);
                 let got = used.iter().any(|u| u == action);
@@ -1527,8 +1543,16 @@ fn recorded_reason(name: &str) -> Option<&'static str> {
     RECORDED_DISAGREEMENTS.iter().find(|(s, _)| *s == id).map(|(_, why)| *why)
 }
 
-/// How many of the reference's assertions currently hold: **150 of 156**,
+/// How many of the reference's assertions currently hold: **175 of 181**,
 /// across all 25 scenarios.
+///
+/// It was 150 of 156 before `the execution details should be` left the skip
+/// bucket. That step was skipped 171 times across the four files — more than
+/// every other unsupported step put together — on the grounds that it named
+/// second-preventive bookkeeping. It does not: it names which optimization
+/// steps ran and how each turned out, and it is the one thing no margin can
+/// tell you, because a plan and the plan it fell back to have different
+/// margins but the same *shape*. All 25 of this file's hold.
 ///
 /// It was 124 of 124 before the three MNEC scenarios (5.2.1.2 to 5.2.1.4)
 /// joined it. Eight of their twelve assertions hold; the four that do not are
@@ -1546,9 +1570,9 @@ fn recorded_reason(name: &str) -> Option<&'static str> {
 /// actions reaching the same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
-const BASELINE_MATCHED_DC: usize = 150;
+const BASELINE_MATCHED_DC: usize = 175;
 
-/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **238 of 244**.
+/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **276 of 282**.
 ///
 /// Lower than the DC file's score, and expected to be. These scenarios are
 /// judged on margins the reference measured with an AC load flow that also
@@ -1619,9 +1643,9 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///   entering at one end, leaving at the other — so the two differ by the
 ///   branch's losses. Reporting the power *entering* side two negates it, and
 ///   the pair then differ by twice the flow.
-const BASELINE_MATCHED_AC: usize = 238;
+const BASELINE_MATCHED_AC: usize = 276;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **870 of 884**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **963 of 977**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1718,10 +1742,16 @@ const BASELINE_MATCHED_AC: usize = 238;
 /// 458). Families 1.2, 1.4, 2.2 and 2.6 are complete. Of the remaining tap
 /// disagreements six are the `BestTapFinder` divergence recorded on
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
-const BASELINE_MATCHED_AC16: usize = 870;
+const BASELINE_MATCHED_AC16: usize = 963;
 
-/// The 15 second-preventive scenarios: **75 of 108**, from 45 before the
+/// The 15 second-preventive scenarios: **89 of 123**, from 45 of 108 before the
 /// capability existed.
+///
+/// 14 of the 15 `execution details` assertions hold. The one that does not is
+/// 1.4.1.5, and it is honest: gridoxide's second pass ran and was **declined**,
+/// so it says so, where the reference's improved. That scenario is already one
+/// of the four §8.7 records as a genuine gap — the step is reporting the gap
+/// rather than adding one.
 ///
 /// The corpus was vendored first and scored at 45 with nothing implemented,
 /// which is the order everything else in this file was built in and the only
@@ -1744,7 +1774,7 @@ const BASELINE_MATCHED_AC16: usize = 870;
 /// curative action and moves a preventive shifter two taps, where gridoxide
 /// spends a second preventive action instead and lands 150 A short. 1.4.5.1 is
 /// one margin on a DC scenario.
-const BASELINE_MATCHED_2P: usize = 75;
+const BASELINE_MATCHED_2P: usize = 89;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
