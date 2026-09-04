@@ -24,10 +24,13 @@ and 2 landed 2026-08-18, and the optimizer reached agreement with the reference 
 >    15 of the reference's own scenarios are vendored and it scores **75 of 108**, from 45 with
 >    nothing implemented. Its prerequisite, a linearization per state, is **done** (`28fb146`) and
 >    cost nothing. The columns themselves are drafted twice over in §8.7 and still below the
->    baseline. §8.7 now carries the measurement that sizes it: **four genuine gaps**, one recorded
->    disagreement where gridoxide is 85 A ahead, and two scenarios the drafted work already reaches.
->    The obstacle named there is composition, not the columns — the second pass optimizes as though
->    its own curative choice will stand while the curative perimeters re-derive theirs.
+>    baseline, and §8.7 now explains why in a way that reorders the work. The reference keeps its
+>    curative answer after a second preventive pass **because** its second preventive computed one;
+>    the two are a package, and gridoxide's curative *search* is currently better than any curative
+>    column its second preventive problem can produce. Six steps toward the reference's architecture
+>    cost six drops. So `A(r, s)` and the composition rule come **last**, after the second preventive
+>    problem is rich enough to earn them — not first. §8.7 also sizes the gap: **four genuine gaps**,
+>    one recorded disagreement where gridoxide is 85 A ahead, two scenarios already reachable.
 > 2. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
 > 3. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
@@ -1028,14 +1031,39 @@ own objective value, and the comparison needs no probe at all. It sizes what is 
 So what remains is **four genuine gaps, not seven**: 1.4.5.1 is fixed by work already drafted,
 1.4.1.1.4 is a recorded disagreement waiting to be written down, and 1.4.1.1.3 is reachable.
 
-**And one finding that says where the model is still wrong.** The tap fix — `apply` updating a
-curative control's tap, which the per-state measurement reads the network step by — is correct, and
-applying it *loses* 1.4.1.1.3. A search that does better with a measurement that cannot see curative
-moves than with one that can is not being mis-tuned; it is being rescued by the error. The likely
-reason is composition rather than the LP: the second pass optimizes as though its own curative choice
-will stand, and the curative perimeters that follow re-derive theirs from scratch. Until those two
-agree, richer columns make the preventive decision *more* confidently wrong. That is the thing to
-understand before writing more of them.
+### The composition rule, and why adopting it costs
+
+The suspicion above was right about the mechanism and wrong about the remedy, and the reference
+settles the mechanism outright. After its second preventive pass it calls
+`optimizeContingencyScenarios(..., automatonsOnly = true, ...)` and carries the curative remedial
+actions across as `appliedArasAndCras` — **the network actions from the first pass, the range-action
+set-points from the second**. It does not re-run the curative search. gridoxide does.
+
+So the two are a package, not two independent improvements: the reference may keep its curative
+answer *because* its second preventive computed one. Adopting either half alone is worse than either
+whole. Adopting the whole thing is worse still:
+
+| | second_preventive.feature |
+|---|---|
+| hold curative range actions, re-derive after (**current**) | **75** |
+| \+ `A(r, s)` columns | 74 |
+| \+ the tap fix, which is correct on its own | 71 |
+| \+ keep the curative decisions, without the columns | 68 |
+| \+ keep them, with the columns, first pass's set-points | 67 |
+| \+ keep them, with the second pass's — the reference's exact rule | 66 |
+
+**Six steps toward the reference's architecture, six drops.** That is the finding, and it is not a
+failure to tune. gridoxide's curative search is a full search tree — its own stop criterion, usage
+limits, a per-leaf LP — while the second preventive problem's curative column is one continuous
+variable in a large linear program. Carrying the second is worth doing only when it is at least as
+good as the first, and here it is not: the reference can carry its own because its 2P is a far larger
+problem than gridoxide's, with network actions and discrete taps inside it.
+
+**So the order is the other way round from what §8.7 assumed.** `A(r, s)` and the composition rule
+are the *last* two steps, not the first, and neither pays until gridoxide's second preventive problem
+is rich enough that its curative answer beats a dedicated curative search. Until then the current
+arrangement — hold the curative decisions during the second pass, re-derive them after — is not a
+shortcut. It is the better answer, and 75 of 108 is what it is worth.
 
 ### 8.4 Two independent MILP solvers
 
