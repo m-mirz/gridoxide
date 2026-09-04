@@ -1085,14 +1085,17 @@ fn build_controls(
     options: &LinearOptions,
     allowed: Option<&[usize]>,
 ) -> Option<Vec<Control>> {
-    let cnec_branches: Vec<usize> = cnecs
-        .iter()
-        .map(|&i| resolution.branch(&crac.flow_cnecs[i].network_element).unwrap())
-        .collect();
-
-    let branches = dc_branches(network.lines, network.transformers, dc_options);
-    let sensitivity =
-        DcSensitivity::new(network.buses, &branches, network.lines.len() + network.transformers.len())?;
+    // One linearization point **per contingency**, not one for the whole
+    // perimeter.
+    //
+    // A CNEC's sensitivity to a shifter is a property of the network that CNEC
+    // lives in, and a post-contingency network is not the intact one. While a
+    // perimeter was always a single contingency's — which every ordinary
+    // perimeter is — reading them all off the intact network was a small and
+    // uniform error. A perimeter spanning every state has no single network,
+    // and there the error stops being uniform: preventive columns are traded
+    // against curative CNECs whose response to them is the wrong number.
+    let points = SensitivityPoints::build(network, crac, resolution, cnecs, dc_options)?;
 
     let mut controls = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
@@ -1117,15 +1120,14 @@ fn build_controls(
                 if table.is_empty() {
                     continue;
                 }
-                let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else {
+                let Some(column) = points.phase_shift(branch) else {
                     continue;
                 };
                 // MW per degree *of the CRAC's angle*: the column is per-unit
                 // per radian of gridoxide's, so the sign flips with it.
                 let scale =
                     CRAC_ANGLE_SIGN * network.base_mva * std::f64::consts::PI / 180.0;
-                let sensitivity_mw: Vec<f64> =
-                    cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0) * scale).collect();
+                let sensitivity_mw: Vec<f64> = column.iter().map(|s| s * scale).collect();
 
                 // The live tap is whatever the transformer's angle is closest
                 // to, not the CRAC's `initialTap` — a search tree may have
@@ -1174,7 +1176,7 @@ fn build_controls(
                 // A redispatch shifts power between buses by its distribution
                 // keys. Its sensitivity is the PTDF combination those keys
                 // produce, which is exact in DC.
-                let mut injections = vec![0.0; sensitivity.n_buses()];
+                let mut injections = vec![0.0; network.buses.len()];
                 let mut keys: Vec<(usize, f64)> = Vec::new();
                 let mut usable = false;
                 for (element, key) in distribution {
@@ -1192,9 +1194,7 @@ fn build_controls(
                 if !usable {
                     continue;
                 }
-                let Some((_, column)) = sensitivity.response(&injections) else { continue };
-                let sensitivity_mw: Vec<f64> =
-                    cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0)).collect();
+                let Some(sensitivity_mw) = points.injection(&injections) else { continue };
                 let (lower, upper) = standard_bounds(action);
                 if !starts_inside_its_range(0.0, lower, upper) {
                     continue;
@@ -1341,6 +1341,120 @@ pub(super) fn tap_bounds(
         angles.iter().copied().fold(f64::INFINITY, f64::min),
         angles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     )
+}
+
+/// One DC linearization per contingency, so every CNEC's sensitivity is read in
+/// the network that CNEC actually lives in.
+///
+/// Built once per `build_controls` call and shared by every control: the
+/// expensive part is the factorization, and it does not depend on which range
+/// action is being differentiated.
+struct SensitivityPoints {
+    /// `(contingency, branches, sensitivity)`; `None` is the intact network.
+    points: Vec<(Option<usize>, Vec<DcBranch>, DcSensitivity)>,
+    /// Which point each CNEC position reads from.
+    per_cnec: Vec<usize>,
+    /// The branch each CNEC position monitors.
+    branches: Vec<usize>,
+}
+
+impl SensitivityPoints {
+    fn build(
+        network: &NetworkMut<'_>,
+        crac: &Crac,
+        resolution: &Resolution,
+        cnecs: &[usize],
+        dc_options: DcOptions,
+    ) -> Option<Self> {
+        let n_branches = network.lines.len() + network.transformers.len();
+        // The contingencies this perimeter's CNECs actually live under, so a
+        // perimeter spanning one state pays for one factorization exactly as it
+        // did before.
+        let mut wanted: Vec<Option<usize>> =
+            cnecs.iter().map(|&i| crac.flow_cnecs[i].state.contingency).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let mut points = Vec::with_capacity(wanted.len());
+        for contingency in wanted {
+            let mut lines = network.lines.to_vec();
+            let mut transformers = network.transformers.clone();
+            if let Some(c) = contingency {
+                for element in &crac.contingencies[c].elements {
+                    let Some(branch) = resolution.branch(element) else { continue };
+                    if branch < lines.len() {
+                        lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
+                        lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
+                        lines[branch].b_shunt = 0.0;
+                        lines[branch].g_shunt = 0.0;
+                    } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
+                        t.from_status = 0;
+                        t.to_status = 0;
+                    }
+                }
+            }
+            let branches = dc_branches(&lines, &transformers, dc_options);
+            // A contingency that severs the network has no linearization of its
+            // own; those CNECs fall back to the intact point below, which is a
+            // better answer than none — and the evaluator reports the state as
+            // severed regardless.
+            let Some(sensitivity) = DcSensitivity::new(network.buses, &branches, n_branches) else {
+                continue;
+            };
+            points.push((contingency, branches, sensitivity));
+        }
+        if points.is_empty() {
+            return None;
+        }
+        let per_cnec = cnecs
+            .iter()
+            .map(|&i| {
+                let want = crac.flow_cnecs[i].state.contingency;
+                points.iter().position(|(c, _, _)| *c == want).unwrap_or(0)
+            })
+            .collect();
+        let branches = cnecs
+            .iter()
+            .map(|&i| resolution.branch(&crac.flow_cnecs[i].network_element).unwrap())
+            .collect();
+        Some(Self { points, per_cnec, branches })
+    }
+
+    /// MW per radian of `branch`'s phase shift at each CNEC, each read in its
+    /// own network.
+    fn phase_shift(&self, branch: usize) -> Option<Vec<f64>> {
+        let columns: Vec<Option<Vec<f64>>> = self
+            .points
+            .iter()
+            .map(|(_, branches, s)| phase_shift_sensitivity(s, branches, branch))
+            .collect();
+        columns.iter().any(Option::is_some).then(|| self.gather(&columns))
+    }
+
+    /// The same for an injection pattern.
+    fn injection(&self, injections: &[f64]) -> Option<Vec<f64>> {
+        let columns: Vec<Option<Vec<f64>>> = self
+            .points
+            .iter()
+            .map(|(_, _, s)| s.response(injections).map(|(_, column)| column))
+            .collect();
+        columns.iter().any(Option::is_some).then(|| self.gather(&columns))
+    }
+
+    fn gather(&self, columns: &[Option<Vec<f64>>]) -> Vec<f64> {
+        self.per_cnec
+            .iter()
+            .zip(&self.branches)
+            .map(|(&point, &branch)| {
+                columns
+                    .get(point)
+                    .and_then(|c| c.as_ref())
+                    .and_then(|c| c.get(branch))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+            .collect()
+    }
 }
 
 /// Whether a range action can be optimized at all from where the perimeter
