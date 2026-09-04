@@ -180,21 +180,7 @@ pub fn run(
     let options = &with_mnec_baseline(crac, network, resolution, options);
 
     let preventive = search(crac, network, resolution, &preventive_states, solver, options);
-    let mut plan_preventive = PerimeterPlan {
-        states: preventive_states.clone(),
-        network_actions: preventive.network_actions.clone(),
-        setpoints: preventive.setpoints.clone(),
-        initial_margin_mw: preventive.initial_margin_mw,
-        final_margin_mw: preventive.final_margin_mw,
-        leaves: preventive.leaves,
-        open_branches: preventive.open_branches.clone(),
-        buses: preventive.buses.clone(),
-        transformers: preventive.transformers.clone(),
-    };
-
-    // Everything downstream sees the preventive decisions already taken.
-    let carried_open = preventive.open_branches.clone();
-    let carried_transformers = preventive.transformers.clone();
+    let mut plan_preventive = perimeter_plan(&preventive, preventive_states.clone());
 
     // A curative perimeter does not search for the best answer it can find. It
     // searches until it is **better than preventive**, by a stated margin, and
@@ -212,111 +198,48 @@ pub fn run(
     //
     // Under `SECURE_FLOW` the target is 0 for every perimeter, so whatever the
     // caller set stands.
-    let curative_target = options.stop_at_target.unwrap_or_else(|| {
-        let target = preventive.final_objective + options.curative_min_obj_improvement;
-        // `enforce-curative-security` additionally demands a secure perimeter,
-        // which can only make the target harder to reach.
-        if options.enforce_curative_security { target.max(0.0) } else { target }
-    });
-    // A curative perimeter gets its own depth where the configuration states
-    // one. The reference keeps `max-preventive-search-tree-depth` and
-    // `max-curative-search-tree-depth` apart because they answer different
-    // questions — how much may be planned, against how much may be carried out
-    // under time pressure — and this is the only layer that knows which
-    // perimeter it is about to search.
-    let options = &SearchOptions {
-        stop_at_target: Some(curative_target),
-        max_depth: options.curative_max_depth.unwrap_or(options.max_depth),
-        ..options.clone()
+    let mut scenarios = scenarios_after(crac, network, resolution, solver, options, &preventive);
+
+    // Second preventive: optimize the preventive perimeter again, this time
+    // able to see what the curative stage could and could not do about the
+    // constraints the first pass left it.
+    // The plan as it stands, against doing nothing. Needed twice: to decide
+    // whether a cost increase should trigger a second pass, and — at the very
+    // end — whether the finished plan is worth keeping at all.
+    let all_states = crac.states();
+    let untouched = assess(crac, network, resolution, network.initially_open, options);
+    let before = objective_of(crac, &untouched, &all_states, &options.linear);
+    let judge = |p: &PerimeterPlan, s: &[ScenarioPlan]| {
+        objective_of(
+            crac,
+            &final_assessment(crac, network, resolution, p, s, options),
+            &all_states,
+            &options.linear,
+        )
     };
+    let first_objective = judge(&plan_preventive, &scenarios);
 
-    let mut scenarios = Vec::new();
-    for (contingency, _) in crac.contingencies.iter().enumerate() {
-        let mut curative_instants: Vec<usize> = states
-            .iter()
-            .filter(|s| s.contingency == Some(contingency))
-            .filter(|s| crac.instants[s.instant].kind == InstantKind::Curative)
-            .filter(|s| actionable(s))
-            .map(|s| s.instant)
-            .collect();
-        curative_instants.sort_unstable();
-        curative_instants.dedup();
-
-        // Automatons fire before anything curative is decided, and what they
-        // leave behind is what the curative perimeters see.
-        let mut open = carried_open.clone();
-        let mut transformers = carried_transformers.clone();
-        let automatons = {
-            let view = Network {
-                generation: network.generation,
-                buses: network.buses,
-                lines: network.lines,
-                transformers: &transformers,
-                branch_ids: network.branch_ids,
-                bus_ids: network.bus_ids,
-                initially_open: network.initially_open,
-                bus_countries: network.bus_countries,
-                shunts: network.shunts,
-                tap_changers: network.tap_changers,
-                base_mva: network.base_mva,
-            };
-            simulate(
-                crac,
-                &view,
-                resolution,
-                contingency,
-                &open,
-                &transformers,
-                options.linear.flow_model,
-            )
-        };
-        if let Some(result) = &automatons {
-            open = result.open_branches.clone();
-            transformers = result.transformers.clone();
+    if let Some(second) = second_preventive(
+        crac,
+        network,
+        resolution,
+        solver,
+        options,
+        &preventive,
+        &scenarios,
+        first_objective < before - 1e-6,
+    ) {
+        let after = scenarios_after(crac, network, resolution, solver, options, &second);
+        // Kept only if the whole plan it leads to is better, measured the same
+        // way `postCheckResults` measures the plan against doing nothing. A
+        // second preventive that improves its own perimeter and costs a
+        // curative one more than it gains is not an improvement, and the first
+        // pass is a perfectly good answer to fall back to.
+        let second_plan = perimeter_plan(&second, preventive_states.clone());
+        if judge(&second_plan, &after) > first_objective + 1e-6 {
+            plan_preventive = second_plan;
+            scenarios = after;
         }
-        if curative_instants.is_empty() && automatons.is_none() {
-            continue;
-        }
-        let mut perimeters = Vec::new();
-        for instant in curative_instants {
-            let state = State { instant, contingency: Some(contingency) };
-            let view = Network {
-                generation: network.generation,
-                buses: network.buses,
-                lines: network.lines,
-                transformers: &transformers,
-                branch_ids: network.branch_ids,
-                bus_ids: network.bus_ids,
-                initially_open: network.initially_open,
-                bus_countries: network.bus_countries,
-                shunts: network.shunts,
-                tap_changers: network.tap_changers,
-                base_mva: network.base_mva,
-            };
-            let result = curative_search(
-                crac, &view, resolution, &[state.clone()], solver, options, &open,
-            );
-            // The result's own set, not a union with what went in. A union
-            // would be safe only while a perimeter could never *close*
-            // anything: `result.open_branches` starts from `open` and the
-            // search removes from it, so re-adding `open` puts back exactly the
-            // branch a closing remedial action just shut.
-            let in_force = result.open_branches.clone();
-            perimeters.push(PerimeterPlan {
-                states: vec![state],
-                network_actions: result.network_actions.clone(),
-                setpoints: result.setpoints.clone(),
-                initial_margin_mw: result.initial_margin_mw,
-                final_margin_mw: result.final_margin_mw,
-                leaves: result.leaves,
-                open_branches: in_force.clone(),
-                buses: result.buses.clone(),
-                transformers: result.transformers.clone(),
-            });
-            open = in_force;
-            transformers = result.transformers;
-        }
-        scenarios.push(ScenarioPlan { contingency, automatons, perimeters });
     }
 
     // The worst margin after everything, measured once over every state with
@@ -374,15 +297,9 @@ pub fn run(
     // ampere objective two CNECs at different voltages order differently in the
     // two units, and a monitored CNEC's violation is part of the cost the
     // comparison is about.
-    let all = crac.states();
-    let untouched = assess(crac, network, resolution, network.initially_open, options);
-    let before = objective_of(crac, &untouched, &all, &options.linear);
-    let after = objective_of(
-        crac,
-        &final_assessment(crac, network, resolution, &plan.preventive, &plan.scenarios, options),
-        &all,
-        &options.linear,
-    );
+    // `before` was measured above, where the same comparison decided whether a
+    // second preventive pass was worth attempting.
+    let after = judge(&plan.preventive, &plan.scenarios);
     if after < before - 1e-6 {
         return unoptimized(network, &plan, initial);
     }
@@ -578,4 +495,308 @@ fn with_mnec_baseline(
     options.linear.mnec.baseline =
         Baseline::measure(crac, network, resolution, options.linear.flow_model);
     options
+}
+
+/// Everything a preventive answer implies: the automatons it leaves to fire,
+/// and the curative perimeters that follow.
+///
+/// Extracted so it can run **twice** — once on the first preventive result and
+/// once on the second's — because the curative answer depends on the preventive
+/// one and comparing two preventive answers means comparing what each leads to,
+/// not just the preventive perimeter in isolation.
+#[allow(clippy::too_many_arguments)]
+fn scenarios_after(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    solver: &mut dyn Solver,
+    options: &SearchOptions,
+    preventive: &SearchResult,
+) -> Vec<ScenarioPlan> {
+    let states = crac.states();
+    let actionable = |state: &State| -> bool {
+        crac.network_actions.iter().any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
+            || crac.range_actions.iter().any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
+    };
+    let carried_open = preventive.open_branches.clone();
+    let carried_transformers = preventive.transformers.clone();
+    let curative_target = options.stop_at_target.unwrap_or_else(|| {
+        let target = preventive.final_objective + options.curative_min_obj_improvement;
+        // `enforce-curative-security` additionally demands a secure perimeter,
+        // which can only make the target harder to reach.
+        if options.enforce_curative_security { target.max(0.0) } else { target }
+    });
+    // A curative perimeter gets its own depth where the configuration states
+    // one. The reference keeps `max-preventive-search-tree-depth` and
+    // `max-curative-search-tree-depth` apart because they answer different
+    // questions — how much may be planned, against how much may be carried out
+    // under time pressure — and this is the only layer that knows which
+    // perimeter it is about to search.
+    let options = &SearchOptions {
+        stop_at_target: Some(curative_target),
+        max_depth: options.curative_max_depth.unwrap_or(options.max_depth),
+        ..options.clone()
+    };
+
+    let mut scenarios = Vec::new();
+    for (contingency, _) in crac.contingencies.iter().enumerate() {
+        let mut curative_instants: Vec<usize> = states
+            .iter()
+            .filter(|s| s.contingency == Some(contingency))
+            .filter(|s| crac.instants[s.instant].kind == InstantKind::Curative)
+            .filter(|s| actionable(s))
+            .map(|s| s.instant)
+            .collect();
+        curative_instants.sort_unstable();
+        curative_instants.dedup();
+
+        // Automatons fire before anything curative is decided, and what they
+        // leave behind is what the curative perimeters see.
+        let mut open = carried_open.clone();
+        let mut transformers = carried_transformers.clone();
+        let automatons = {
+            let view = Network {
+                generation: network.generation,
+                buses: network.buses,
+                lines: network.lines,
+                transformers: &transformers,
+                branch_ids: network.branch_ids,
+                bus_ids: network.bus_ids,
+                initially_open: network.initially_open,
+                bus_countries: network.bus_countries,
+                shunts: network.shunts,
+                tap_changers: network.tap_changers,
+                base_mva: network.base_mva,
+            };
+            simulate(
+                crac,
+                &view,
+                resolution,
+                contingency,
+                &open,
+                &transformers,
+                options.linear.flow_model,
+            )
+        };
+        if let Some(result) = &automatons {
+            open = result.open_branches.clone();
+            transformers = result.transformers.clone();
+        }
+        if curative_instants.is_empty() && automatons.is_none() {
+            continue;
+        }
+        let mut perimeters = Vec::new();
+        for instant in curative_instants {
+            let state = State { instant, contingency: Some(contingency) };
+            let view = Network {
+                generation: network.generation,
+                buses: network.buses,
+                lines: network.lines,
+                transformers: &transformers,
+                branch_ids: network.branch_ids,
+                bus_ids: network.bus_ids,
+                initially_open: network.initially_open,
+                bus_countries: network.bus_countries,
+                shunts: network.shunts,
+                tap_changers: network.tap_changers,
+                base_mva: network.base_mva,
+            };
+            let result = curative_search(
+                crac, &view, resolution, &[state.clone()], solver, options, &open,
+            );
+            // The result's own set, not a union with what went in. A union
+            // would be safe only while a perimeter could never *close*
+            // anything: `result.open_branches` starts from `open` and the
+            // search removes from it, so re-adding `open` puts back exactly the
+            // branch a closing remedial action just shut.
+            let in_force = result.open_branches.clone();
+            perimeters.push(PerimeterPlan {
+                states: vec![state],
+                network_actions: result.network_actions.clone(),
+                setpoints: result.setpoints.clone(),
+                initial_margin_mw: result.initial_margin_mw,
+                final_margin_mw: result.final_margin_mw,
+                leaves: result.leaves,
+                open_branches: in_force.clone(),
+                buses: result.buses.clone(),
+                transformers: result.transformers.clone(),
+            });
+            open = in_force;
+            transformers = result.transformers;
+        }
+        scenarios.push(ScenarioPlan { contingency, automatons, perimeters });
+    }
+    scenarios
+}
+
+/// One perimeter's answer, as the plan reports it.
+fn perimeter_plan(result: &SearchResult, states: Vec<State>) -> PerimeterPlan {
+    PerimeterPlan {
+        states,
+        network_actions: result.network_actions.clone(),
+        setpoints: result.setpoints.clone(),
+        initial_margin_mw: result.initial_margin_mw,
+        final_margin_mw: result.final_margin_mw,
+        leaves: result.leaves,
+        open_branches: result.open_branches.clone(),
+        buses: result.buses.clone(),
+        transformers: result.transformers.clone(),
+    }
+}
+
+/// Optimize the preventive perimeter a second time, now that the curative
+/// stage has shown what it can do.
+///
+/// # Why a second pass exists at all
+///
+/// The decomposition is sequential, and that is its one weakness. The first
+/// preventive perimeter is judged on the base case and the outage states, so a
+/// curative constraint that **no curative action can fix** is invisible to it —
+/// it is not in the perimeter, and the perimeter that does contain it comes
+/// later and cannot revisit preventive decisions. The result is a preventive
+/// answer that spends nothing on a problem only it could have solved.
+///
+/// So the reference runs the preventive perimeter again with three things
+/// changed, and this reproduces them:
+///
+/// - **Every CNEC is optimized**, whatever its state. That is the whole point:
+///   the curative constraints are now in front of the preventive optimizer.
+/// - **The automatons are held applied**, so it works on what they cannot fix
+///   rather than re-solving what they will.
+/// - **The curative decisions are held applied** too, for the same reason.
+///
+/// # What this does not do
+///
+/// The reference also **re-optimizes curative range actions** inside that same
+/// problem, which needs a set-point per range action *per state* — `A(r, s)` in
+/// `plans/RAO_PLAN.md` §7.3, which is declared there and not built: this LP
+/// carries one set-point per action. So a shifter the CRAC allows in both
+/// instants is held at whatever the curative stage chose rather than re-tuned
+/// against the preventive answer, and four of the reference's fifteen
+/// second-preventive scenarios turn on exactly that. They are the ones that ask
+/// for one PST at two different taps.
+#[allow(clippy::too_many_arguments)]
+fn second_preventive(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    solver: &mut dyn Solver,
+    options: &SearchOptions,
+    preventive: &SearchResult,
+    scenarios: &[ScenarioPlan],
+    cost_increased: bool,
+) -> Option<SearchResult> {
+    if !options.second_preventive.runs(options, preventive, scenarios, cost_increased) {
+        return None;
+    }
+
+    // The network the second pass starts from: the automatons' and the curative
+    // stage's decisions in force, the preventive stage's *not*. Those are what
+    // is being reconsidered.
+    let mut open: Vec<usize> = network.initially_open.to_vec();
+    let mut transformers = network.transformers.to_vec();
+    for scenario in scenarios {
+        for perimeter in &scenario.perimeters {
+            for &branch in &perimeter.open_branches {
+                if !preventive.open_branches.contains(&branch) || network.initially_open.contains(&branch) {
+                    open.push(branch);
+                }
+            }
+        }
+    }
+    open.sort_unstable();
+    open.dedup();
+    // A curative shifter keeps the position the curative stage put it on; a
+    // preventive one goes back to where the file had it, since the second pass
+    // is about to choose again.
+    for scenario in scenarios {
+        for perimeter in &scenario.perimeters {
+            for (i, t) in perimeter.transformers.iter().enumerate() {
+                if network.transformers.get(i).is_some_and(|n| n.tap != t.tap)
+                    && preventive.transformers.get(i).is_some_and(|p| p.tap == network.transformers[i].tap)
+                    && let Some(slot) = transformers.get_mut(i)
+                {
+                    slot.tap = t.tap;
+                }
+            }
+        }
+    }
+
+    let view = Network { transformers: &transformers, ..*network };
+    // Every CNEC, but still only the preventive perimeter's actions.
+    let all = crac.states();
+    let preventive_states: Vec<State> = all
+        .iter()
+        .filter(|s| crac.instants[s.instant].kind == InstantKind::Preventive)
+        .cloned()
+        .collect();
+    let options = SearchOptions {
+        available_at: Some(preventive_states),
+        // The reference's `hint-from-first-preventive-rao`: offer the first
+        // pass's winning set as one candidate, so a second pass that agrees
+        // with it gets there at the first depth instead of rediscovering it.
+        predefined_combinations: if options.second_preventive.hint {
+            let hint: Vec<String> = preventive
+                .network_actions
+                .iter()
+                .map(|&a| crac.network_actions[a].id.clone())
+                .collect();
+            let mut combos = options.predefined_combinations.clone();
+            if hint.len() > 1 {
+                combos.push(hint);
+            }
+            combos
+        } else {
+            options.predefined_combinations.clone()
+        },
+        ..options.clone()
+    };
+    let mut result = search_with_open(crac, &view, resolution, &all, solver, &options, &open);
+
+    // Strip the held decisions back out. They were in force so the second pass
+    // could *see* past them; they are not part of its answer, and leaving them
+    // in would put one contingency's curative switching into the preventive
+    // plan — hence into force for every other contingency, which is the one
+    // thing the perimeter decomposition exists to prevent.
+    let held: Vec<usize> =
+        open.iter().filter(|b| !network.initially_open.contains(b)).copied().collect();
+    result.open_branches.retain(|b| !held.contains(b));
+    for &b in network.initially_open {
+        if !result.open_branches.contains(&b) && !closed_by(crac, resolution, &result, b) {
+            result.open_branches.push(b);
+        }
+    }
+    result.open_branches.sort_unstable();
+    result.open_branches.dedup();
+    for (i, t) in result.transformers.iter_mut().enumerate() {
+        // A shifter the second pass did not itself move goes back to where the
+        // file had it, for the same reason.
+        if transformers.get(i).is_some_and(|held| held.tap == t.tap)
+            && let Some(original) = network.transformers.get(i)
+        {
+            t.tap = original.tap;
+        }
+    }
+    Some(result)
+}
+
+/// Whether one of `result`'s own network actions closes `branch`.
+///
+/// Restoring the file's out-of-service circuits after stripping the held set
+/// must not undo a *closing* action the second pass chose for itself.
+fn closed_by(
+    crac: &Crac,
+    resolution: &Resolution,
+    result: &SearchResult,
+    branch: usize,
+) -> bool {
+    result.network_actions.iter().any(|&a| {
+        crac.network_actions[a].elementary.iter().any(|e| match e {
+            super::crac::ElementaryAction::TerminalsConnection { element, connected: true }
+            | super::crac::ElementaryAction::Switch { element, open: false } => {
+                resolution.branch(element) == Some(branch)
+            }
+            _ => false,
+        })
+    })
 }

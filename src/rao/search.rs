@@ -56,6 +56,19 @@ pub struct SearchOptions {
     /// that corpus; it is here so a configuration that sets them differently is
     /// not silently scored against the preventive one.
     pub curative_max_depth: Option<usize>,
+    /// Whether, and when, to optimize the preventive perimeter a second time.
+    pub second_preventive: SecondPreventive,
+    /// The states whose usage rules decide what is *available*, when that is
+    /// not the same as the states being optimized.
+    ///
+    /// `None` — the ordinary case — means the perimeter answers both questions:
+    /// a perimeter optimizes its own CNECs using its own actions. Second
+    /// preventive is the exception and the reason this exists. It optimizes
+    /// **every** CNEC in the CRAC, curative ones included, while the actions it
+    /// may take are still only the preventive ones; handing it a perimeter of
+    /// every state would offer it every contingency's curative actions as
+    /// though they were preventive.
+    pub available_at: Option<Vec<State>>,
     /// Sets of network actions offered as **one** candidate each, by id.
     ///
     /// The reference's `predefined-combinations`, and its entire mechanism for
@@ -126,11 +139,83 @@ pub struct SearchOptions {
     pub stop_at_target: Option<f64>,
 }
 
+/// When the preventive perimeter is optimized a second time.
+///
+/// The reference's `second-preventive-rao` parameters, and its default is
+/// **off** — a second pass costs another full search and another round of
+/// curative ones, and it only pays where the sequential decomposition left
+/// something on the table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SecondPreventive {
+    pub condition: SecondPreventiveCondition,
+    /// `hint-from-first-preventive-rao`: offer the first pass's winning set of
+    /// network actions as one candidate at the first depth. It cannot change
+    /// the answer, only how quickly the second pass reaches it — a combination
+    /// that was optimal once is worth trying before rediscovering it action by
+    /// action.
+    pub hint: bool,
+}
+
+/// What makes a second preventive pass worth running.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SecondPreventiveCondition {
+    #[default]
+    Disabled,
+    /// Run if the finished plan costs more than doing nothing — the same
+    /// comparison [`castor`](super::castor) makes before discarding a plan
+    /// outright, asked earlier so there is a chance to fix it rather than throw
+    /// it away.
+    CostIncrease,
+    /// Run if any curative perimeter failed to reach its stop criterion, which
+    /// is the case where the sequential decomposition demonstrably left
+    /// something for the preventive perimeter to do. The reference's default
+    /// when the feature is switched on at all.
+    PossibleCurativeImprovement,
+}
+
+impl SecondPreventive {
+    /// Whether to run, given how the first pass turned out.
+    pub fn runs(
+        &self,
+        options: &SearchOptions,
+        preventive: &SearchResult,
+        scenarios: &[super::castor::ScenarioPlan],
+        cost_increased: bool,
+    ) -> bool {
+        match self.condition {
+            SecondPreventiveCondition::Disabled => false,
+            // "A curative perimeter reached an objective worse than the
+            // preventive perimeter's" is the reference's own wording, and it is
+            // the negation of the criterion those perimeters stop on: if one
+            // stopped without reaching the target, something is left.
+            SecondPreventiveCondition::PossibleCurativeImprovement => {
+                let target = options
+                    .stop_at_target
+                    .unwrap_or(preventive.final_objective + options.curative_min_obj_improvement);
+                scenarios
+                    .iter()
+                    .flat_map(|s| s.perimeters.iter())
+                    .any(|p| p.final_margin_mw < target - 1e-6)
+            }
+            // The comparison the caller has already made: the finished plan
+            // against doing nothing, over every state at once. Per-perimeter
+            // margins cannot answer it — each perimeter improves *itself* by
+            // construction, and a plan costs more than doing nothing exactly
+            // when a preventive decision hurts a state its own perimeter could
+            // not see. That is the case this condition exists for, so it is the
+            // one it has to measure.
+            SecondPreventiveCondition::CostIncrease => cost_increased,
+        }
+    }
+}
+
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
             max_depth: 2,
             curative_max_depth: None,
+            second_preventive: SecondPreventive::default(),
+            available_at: None,
             predefined_combinations: Vec::new(),
             absolute_min_impact: 0.0,
             relative_min_impact: 0.0,
@@ -409,6 +494,7 @@ pub fn search_with_open(
     // travels with the options rather than being re-derived per leaf.
     let mut linear = options.linear.clone();
     linear.available = constrained.clone();
+    linear.available_at = options.available_at.clone();
     // Where each phase shifter sits *before this perimeter acts*, which is what
     // a `relativeToPreviousInstant` range is written against. Measured here,
     // once, on the network the perimeter was handed — a curative one carries
@@ -418,10 +504,11 @@ pub fn search_with_open(
     linear.previous_taps = super::linear::taps_now(crac, network, resolution);
     let options = &SearchOptions { linear, ..options.clone() };
 
+    let available_at = options.available_at.as_deref().unwrap_or(perimeter);
     let offered = |index: usize| -> Option<Effect> {
         let action = crac.network_actions.get(index)?;
         constrained
-            .allows(&action.usage_rules, perimeter, crac)
+            .allows(&action.usage_rules, available_at, crac)
             .then(|| effect_of(action, crac, resolution, network.tap_changers, network.lines.len()))
             .flatten()
     };
@@ -496,7 +583,7 @@ pub fn search_with_open(
     // preventive state and every curative perimeter a single curative one — so
     // the earliest instant present is that instant, and an outage or
     // pulled-forward state riding along does not bring its own allowance.
-    let limits = perimeter
+    let limits = available_at
         .iter()
         .map(|s| s.instant)
         .min()
