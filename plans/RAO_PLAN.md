@@ -939,6 +939,39 @@ The result is 999.77 MW against the reference's 1000 and 1594.27 A against its 1
 moved**: every other family is unchanged to the assertion, which is the reassuring part of turning on
 a setting that touches every AC flow in the corpus.
 
+### 8.6 What is left is recorded, not outstanding
+
+The gate settles at **1258 of 1284**, and the 26 assertions that remain are not a backlog. Eight
+scenarios disagree, every one has been measured on the reference's *own* objective — in the unit its
+own configuration selects, with its own MNEC violation cost applied — and in none of them is
+gridoxide worse:
+
+| scenario | gridoxide | reference | |
+|---|---|---|---|
+| 5.2.1.3 / 5.2.1.4 | 188.42, clean | 192.05 less 0.76 of violation = **184.41** | better |
+| 5.2.3.2 | −156.28, clean | −146.33 less 1.42 at cost 15 = **−167.60** | better |
+| 5.2.3.3 | −186.15, clean | −176.19 less 1.70 = **−201.62** | better |
+| 1.3.2.8 | 461.3 A | 433 A | better |
+| 1.3.6.6 | 630.0 A, MNEC at 21.8 against a floor of 0 | 612 A | better |
+| 1.3.2.6 | same worst margin, **one** curative action | same, two actions | equal |
+| 1.3.8.2 | same worst margin, one tap apart | same | equal |
+
+The five `BestTapFinder` rows are one cause: the reference rounds a continuous set-point comparing
+minimum margin **alone**, blind to the virtual cost — its own javadoc warns about precisely this —
+and these CRACs put the optimum on the MNEC bound where that blindness costs it. The two 1.3 ties are
+risk 1 of this plan, exactly as written: a different set of actions reaching the same margin is not a
+defect.
+
+**The gate now asserts this rather than merely tolerating it.** `RECORDED_DISAGREEMENTS` names each
+scenario with its measurement, and three checks hang off it: no scenario may disagree without an
+entry, no entry may name a scenario that has stopped disagreeing, and no entry may name a scenario
+nothing runs. That is a sharper property than the baselines beside it — a count cannot tell a new
+defect from an old one when both live inside the same total, and this can.
+
+What it deliberately does **not** do is move those 26 out of the denominator. The ratio is unchanged.
+A gate that stops counting what it has decided not to fix stops being a measurement, and the reason
+to write the reasons down is to be held to them, not excused from them.
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a

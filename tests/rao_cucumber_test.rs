@@ -1313,14 +1313,39 @@ fn check(scenario: &Scenario) -> Outcome {
 /// which assertion moved.
 #[test]
 fn the_reference_implementations_own_expectations() {
-    for (file, expected, baseline) in [
-        ("dc_scenarios.feature", 25, BASELINE_MATCHED_DC),
-        ("ac_scenarios.feature", 38, BASELINE_MATCHED_AC),
-        ("ac_scenarios_16nodes.feature", 93, BASELINE_MATCHED_AC16),
-    ] {
+    for (file, expected, baseline) in FILES {
         run_gate(file, expected, baseline);
     }
+
+    // Every recorded reason has to name a scenario that is actually run.
+    // `run_gate` can only notice an entry that has stopped disagreeing in a
+    // file it appears in; one naming nothing at all would sit there forever,
+    // looking like diligence.
+    let mut known: Vec<String> = Vec::new();
+    for (file, _, _) in FILES {
+        let text = std::fs::read_to_string(features_dir().join(file)).expect("feature file");
+        for scenario in parse(&text) {
+            if let Some(id) = scenario.name.split_whitespace().next() {
+                known.push(id.trim_end_matches(':').to_string());
+            }
+        }
+    }
+    let orphans: Vec<&str> = RECORDED_DISAGREEMENTS
+        .iter()
+        .map(|(s, _)| *s)
+        .filter(|s| !known.iter().any(|k| k == s))
+        .collect();
+    assert!(orphans.is_empty(), "RECORDED_DISAGREEMENTS names scenarios nothing runs: {orphans:?}");
 }
+
+/// The vendored feature files, with their scenario counts and recorded
+/// baselines. Scored separately on purpose — a gain in one must not hide a
+/// regression in another.
+const FILES: [(&str, usize, usize); 3] = [
+    ("dc_scenarios.feature", 25, BASELINE_MATCHED_DC),
+    ("ac_scenarios.feature", 38, BASELINE_MATCHED_AC),
+    ("ac_scenarios_16nodes.feature", 93, BASELINE_MATCHED_AC16),
+];
 
 /// Run one vendored feature file and assert on its aggregate.
 ///
@@ -1334,11 +1359,20 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
 
     let (mut matched, mut mismatched, mut unsupported) = (0usize, 0usize, 0usize);
     let mut report = String::new();
+    // Scenarios that disagree without a recorded reason, and recorded reasons
+    // that have stopped applying. Both are failures and neither touches the
+    // ratio: see [`RECORDED_DISAGREEMENTS`].
+    let (mut unexplained, mut stale) = (Vec::new(), Vec::new());
     for scenario in &scenarios {
         let outcome = check(scenario);
         matched += outcome.matched.len();
         mismatched += outcome.mismatched.len();
         unsupported += outcome.unsupported.len();
+        match (recorded_reason(&scenario.name), outcome.mismatched.is_empty()) {
+            (None, false) => unexplained.push(scenario.name.clone()),
+            (Some(_), true) => stale.push(scenario.name.clone()),
+            _ => {}
+        }
         report.push_str(&format!(
             "\n{}  ({} matched, {} mismatched, {} unsupported)\n",
             scenario.name,
@@ -1355,6 +1389,9 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
         for line in &outcome.unsupported {
             report.push_str(&format!("    skip  {line}\n"));
         }
+        if let Some(reason) = recorded_reason(&scenario.name) {
+            report.push_str(&format!("    why   {reason}\n"));
+        }
     }
     let total = matched + mismatched;
     println!(
@@ -1366,6 +1403,79 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
         matched >= baseline,
         "{file}: {matched}/{total} matched, baseline is {baseline} — a drop is a regression:\n{report}"
     );
+    assert!(
+        unexplained.is_empty(),
+        "{file}: {unexplained:?} disagree with the reference and nothing says why. Either that is a \
+         defect, or it is a disagreement worth standing behind — and standing behind one means \
+         measuring both answers on the reference's own objective and adding it to \
+         RECORDED_DISAGREEMENTS with that measurement. Do not add an entry you have not \
+         measured.\n{report}"
+    );
+    assert!(
+        stale.is_empty(),
+        "{file}: {stale:?} are listed in RECORDED_DISAGREEMENTS and no longer disagree. Delete \
+         those entries — a standing excuse for something already fixed will one day excuse a \
+         regression instead."
+    );
+}
+
+/// Where the two implementations disagree **and gridoxide is staying put**.
+///
+/// Every entry has been measured: both answers evaluated on the reference's own
+/// objective, in the unit its own configuration selects, with its own MNEC
+/// violation cost applied. None of them is gridoxide being worse.
+///
+/// The list buys the gate a property a count cannot have — that **no scenario
+/// disagrees for a reason nobody has looked at**. That is sharper than the
+/// baselines beside it, and it is the one that catches a new defect hiding
+/// inside an old total.
+///
+/// These are **not** excused. Their assertions still count as mismatched in the
+/// ratio, exactly as before. Moving them out of the denominator is the one
+/// thing this must never do: a gate that stops counting what it has decided not
+/// to fix stops being a measurement.
+///
+/// Adding an entry means doing the measurement first. An entry without one is a
+/// claim to be better, dressed up as a record of being better.
+const RECORDED_DISAGREEMENTS: &[(&str, &str)] = &[
+    (
+        "1.3.2.6",
+        "same worst margin, reached with one curative action instead of two — the alternative \
+         optimum risk 1 names, and this CRAC has no MNEC to break the tie",
+    ),
+    ("1.3.2.8", "gridoxide 461.3 A against the reference's 433 on the binding CNEC, one tap apart"),
+    (
+        "1.3.6.6",
+        "gridoxide 630.0 A against 612, spending one curative action the reference declines; the \
+         MNEC it moves lands at 21.8 A against a floor of 0, so nothing is violated to get there",
+    ),
+    ("1.3.8.2", "same worst margin, one tap apart on a non-binding CNEC"),
+    (
+        "5.2.1.3",
+        "BestTapFinder: gridoxide's tap -6 scores 188.42 with no MNEC violation; the reference's \
+         -7 scores 192.05 and pays 0.76 of violation, for 184.41",
+    ),
+    ("5.2.1.4", "BestTapFinder: as 5.2.1.3 — 188.42 against 184.41"),
+    (
+        "5.2.3.2",
+        "BestTapFinder: gridoxide's -11 scores -156.28 clean; the reference's -12 scores -146.33 \
+         and pays 1.42 of violation at cost 15, for -167.60",
+    ),
+    (
+        "5.2.3.3",
+        "BestTapFinder: gridoxide's -8 scores -186.15 clean; the reference's -9 scores -176.19 \
+         and pays 1.70 of violation, for -201.62",
+    ),
+];
+
+/// The reason recorded for a scenario, if any.
+///
+/// Matched on the leading identifier, so the feature file's own punctuation —
+/// some scenario names carry a trailing colon and some do not — cannot decide
+/// whether a disagreement counts as explained.
+fn recorded_reason(name: &str) -> Option<&'static str> {
+    let id = name.split_whitespace().next()?.trim_end_matches(':');
+    RECORDED_DISAGREEMENTS.iter().find(|(s, _)| *s == id).map(|(_, why)| *why)
 }
 
 /// How many of the reference's assertions currently hold: **150 of 156**,
