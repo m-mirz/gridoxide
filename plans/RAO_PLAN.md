@@ -9,7 +9,7 @@ and 2 landed 2026-08-18.
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **854 of 884** on
+> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **861 of 884** on
 > TestCase16Nodes.
 >
 > **What is left**, in the order it is worth doing:
@@ -29,10 +29,10 @@ and 2 landed 2026-08-18.
 >    reference iterates. Family 1.2 is 111 of 121.
 > 1d. **What is left is no longer one cause.** 3.2 (9 of 33), 5.2 MNEC (9 of 68) — six of which are
 >    the recorded `BestTapFinder` divergence where gridoxide scores better on the reference's own
->    objective — 1.4 (6 of 9), 1.3 (14 of 458) and 1.2 (10 of 121). The two automaton remainders are
->    a *curative* question rather than an automaton one: on 1.2.2.5 the curative perimeter declines
->    to move a shifter the automaton left at −8, and on 1.2.2.4 the two implementations disagree about
->    how much one phase-shifter tap is worth rather than about which tap to pick.
+>    objective — 1.4 (6 of 9), 1.3 (14 of 458) and 1.2 (3 of 121). The 1.2 remainder is scenario
+>    1.2.2.4 alone, where the two implementations disagree about how much one phase-shifter tap is
+>    worth rather than about which tap to pick: gridoxide needs four taps of `pst_be` to reach the
+>    margin the reference reaches in one, and then agrees with it to two decimals.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
@@ -528,7 +528,7 @@ regression in another:
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 156 | **150** |
 | `ac_scenarios.feature` | 38, on TestCase12Nodes | 244 | **232** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **854** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **861** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -778,6 +778,25 @@ been suspected:
 
 Worth **13** assertions together, 1.2 from 98 of 121 to 111, and the auto perimeter of 1.2.2.5 is now
 exact — tap −8, margins 98.97 against 98.9 and 0.227 against 0.2.
+
+The last of family 1.2 was not the automaton at all, and the diagnosis it replaced said it was the
+curative stop criterion. That was wrong — this configuration sets `curative-min-obj-improvement` to
+10000, which turns the criterion *off*:
+
+26. **A range action whose starting set-point was outside its own range was optimized rather than
+    dropped.** `SL_ep15us11-3case2_withPstCra` declares **four** range actions on one phase shifter
+    and names one of them `useless_pst`: it permits tap 0 and nothing else. By the time the curative
+    perimeter runs, an automaton has put that shifter on −8, so the permission describes positions
+    the machine is not at and no movement can make it true. Kept, it is not inert — it is a second
+    control on a device that already has one, pinned to tap 0 and pulling against the curative action
+    the scenario exists to test, so the perimeter moves nothing and reports that nothing helped. The
+    reference drops such an action from the perimeter outright
+    (`doesPrePerimeterSetpointRespectRange`), which is what a CRAC saying "only at positions it is
+    not at" actually means. Worth **7** assertions: 1.2 to 118 of 121, and 1.2.2.5 to 22 of 22.
+
+    Safe by inspection as well as by the gate: across the whole vendored corpus no injection or HVDC
+    range excludes zero and no absolute PST range excludes its own `initialTap`, so the rule can only
+    bite where an earlier perimeter has moved the device — which is exactly the case it is for.
 
 Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
 objective function` were being skipped, and the quantity they name — the negated worst margin plus

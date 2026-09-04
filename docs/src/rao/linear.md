@@ -289,6 +289,21 @@ Note that at tap 13 the flow has crossed zero and the **lower** bound is now the
 \\(\text{limit} - \vert F \vert\\) would have given the same answer here, because the bounds are
 symmetric; on a one-sided CNEC it would not.
 
+### An action that cannot be where it is
+
+Before any of that, a range action whose **starting** set-point is already outside its own range is
+dropped from the perimeter. A CRAC saying "this device may only be at positions it is not at" is not
+describing a tightly-constrained lever; it is describing no lever, and no movement the optimizer
+chooses can make the statement true.
+
+This only bites when an earlier perimeter has moved the device, and then it matters more than it
+sounds — because several range actions may name the **same** network element. The reference's
+`SL_ep15us11-3case2_withPstCra` declares four on one phase shifter and names one of them
+`useless_pst`, permitting tap 0 and nothing else; an automaton has put that shifter on tap −8 by the
+time the curative perimeter runs. Kept, it is not inert: it becomes a second column driving a device
+that already has one, pinned to a position the machine is not at, and the perimeter moves nothing and
+reports that nothing helped.
+
 ### Three ways to say how far it may move
 
 A range is a pair of bounds and an **anchor**, and the CRAC names the anchor per range:

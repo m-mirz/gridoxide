@@ -1125,3 +1125,58 @@ fn ac_plan(net: &ucte::UcteImport, crac: &Crac) -> gridoxide::rao::Plan {
     let mut solver = IpmSolver::new();
     run(crac, &network, &resolution, &mut solver, &options)
 }
+
+/// A range action whose starting set-point is outside its own range is not
+/// optimized — it is dropped.
+///
+/// The reference's `SL_ep15us11-3case2_withPstCra` declares **four** range
+/// actions on one phase shifter, and names one of them `useless_pst`: it
+/// permits tap 0 and nothing else. By the time the curative perimeter runs, an
+/// automaton has put that shifter on tap −8, so its permission describes
+/// positions the machine is not at and no movement can make that true. The
+/// reference removes it from the perimeter — `doesPrePerimeterSetpointRespectRange`.
+///
+/// Kept, it is not merely inert: it becomes a second control on a device that
+/// already has one, pinned to tap 0 and pulling against the curative action the
+/// scenario is about, so the perimeter moves nothing and reports that nothing
+/// helped. Which is why this asserts the *other* action's answer rather than
+/// the useless one's absence.
+#[test]
+fn a_range_action_that_starts_outside_its_range_is_dropped() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep15us11-3case2_withPstCra.json"),
+    )
+    .expect("crac");
+
+    let useless = crac.range_actions.iter().position(|r| r.id == "useless_pst").expect("useless_pst");
+    let cra = crac.range_actions.iter().position(|r| r.id == "pst_be_cra").expect("pst_be_cra");
+    // Both name the same shifter, which is what makes the useless one harmful
+    // rather than merely pointless.
+    let element_of = |i: usize| match &crac.range_actions[i].kind {
+        RangeActionKind::Pst { element, .. } => element.clone(),
+        _ => panic!("both should be phase shifters"),
+    };
+    assert_eq!(element_of(useless), element_of(cra));
+
+    let plan = ac_plan(&net, &crac);
+    let curative = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find(|p| p.setpoints.iter().any(|s| s.action == cra && s.moved()))
+        .expect("the curative perimeter should move pst_be_cra");
+
+    let tap = curative
+        .setpoints
+        .iter()
+        .find(|s| s.action == cra)
+        .and_then(|s| s.tap)
+        .expect("a tap");
+    assert_eq!(tap, -16, "the reference's answer; -8 is the automaton's, left untouched");
+    assert!(
+        !curative.setpoints.iter().any(|s| s.action == useless),
+        "useless_pst permits only tap 0 and the shifter is at -8, so it should not be optimized"
+    );
+}

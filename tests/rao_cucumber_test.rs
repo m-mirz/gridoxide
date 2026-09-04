@@ -1434,7 +1434,7 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///   the pair then differ by twice the flow.
 const BASELINE_MATCHED_AC: usize = 232;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **854 of 884**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **861 of 884**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1494,12 +1494,23 @@ const BASELINE_MATCHED_AC: usize = 232;
 ///   applied to a network that is not linear, so one shot lands short: tap −7
 ///   on 1.2.2.2 with the watched CNEC still overloaded, where −8 clears it.
 ///
-/// Took 1.2 from 98 of 121 to 111. What is still open, by size: 3.2 (9 of 33),
-/// 5.2 MNEC (9 of 68), 1.4 (6 of 9), 1.3 (14 of 458), 1.2 (10 of 121). Family
-/// 2.6 is complete at 134 of 134 and 2.2 at 63 of 63. Of the remaining tap
-/// disagreements six are the `BestTapFinder` divergence recorded on
-/// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
-const BASELINE_MATCHED_AC16: usize = 854;
+/// Took 1.2 from 98 of 121 to 111.
+///
+/// The last of that family was not the automaton at all: a **range action whose
+/// starting set-point is outside its own range** was optimized rather than
+/// dropped. `SL_ep15us11-3case2_withPstCra` declares four range actions on one
+/// shifter and names one of them `useless_pst`, permitting tap 0 and nothing
+/// else — and by the curative perimeter an automaton has put that shifter on
+/// −8. Kept, it is a second control on a device that already has one, pinned to
+/// a position the machine is not at, and the curative perimeter moves nothing.
+/// Dropping it, as `doesPrePerimeterSetpointRespectRange` does, takes 1.2 to
+/// 118 of 121 and 1.2.2.5 to 22 of 22.
+///
+/// What is still open, by size: 3.2 (9 of 33), 5.2 MNEC (9 of 68), 1.4 (6 of
+/// 9), 1.3 (14 of 458), 1.2 (3 of 121). Families 2.6 and 2.2 are complete. Of
+/// the remaining tap disagreements six are the `BestTapFinder` divergence
+/// recorded on [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
+const BASELINE_MATCHED_AC16: usize = 861;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
