@@ -20,12 +20,13 @@ and 2 landed 2026-08-18, and the optimizer reached agreement with the reference 
 >
 > **What is left**, in the order it is worth doing:
 >
-> 1. **Second preventive: `A(r, s)`, a set-point per range action *per state*.** The pass itself is
->    built and gated — 15 of the reference's own scenarios are vendored and it scores **75 of 108**,
->    from 45 with nothing implemented. What is left is one thing: the reference re-optimizes curative
->    range actions *inside* the second preventive problem, which needs the per-state set-point §7.3
->    declares and nobody built. Five of the six scenarios still failing turn on it — they ask for one
->    PST at two different taps. This is now the largest single item in the plan and it has a gate.
+> 1. **Per-state sensitivities, then `A(r, s)`.** Second preventive is built and gated — 15 of the
+>    reference's own scenarios are vendored and it scores **75 of 108**, from 45 with nothing
+>    implemented. What is left is the per-state set-point §7.3 declares, and §8.7 records an attempt
+>    at it: the columns, the supersede rule, the per-state measurement and the relative-instant row
+>    all work and solve the case they were built for, but they cost more than they gain until
+>    `build_controls` computes a sensitivity **per state** instead of one from the base network.
+>    That is the piece to build first. Both are on a gate now, which is the difference from before.
 > 2. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
 > 3. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
@@ -968,6 +969,42 @@ defect from an old one when both live inside the same total, and this can.
 What it deliberately does **not** do is move those 26 out of the denominator. The ratio is unchanged.
 A gate that stops counting what it has decided not to fix stops being a measurement, and the reason
 to write the reasons down is to be held to them, not excused from them.
+
+### 8.7 `A(r, s)`: attempted, and what it costs
+
+Drafted on branch `rao-a-r-s-wip` (`cdd4b35`) and **not landed**, because it is a net −1 on the gate
+— 74 against a recorded 75 — and a baseline drop is a regression whatever the reason. The branch is
+kept so the working parts are recoverable rather than merely described.
+
+**Four things it establishes, all of them needed and all of them right:**
+
+1. `Control` gains the states it governs and the state it is *decided at*, and a range action gets one
+   column per decision point when a perimeter spans several instants. Single-instant perimeters are
+   untouched, which is every ordinary optimization.
+2. A CNEC's flow row takes **one column per action** — the latest decision reaching it. A curative
+   set-point *supersedes* the preventive one rather than adding to it. Summing both models a machine
+   whose angle is the sum of two decisions, so the optimizer sees twice the authority it has and
+   splits the movement between them.
+3. The measurement has to be per state as well. The LP proposes a set-point per state, and a
+   single-network measurement scores them all the same — so the iteration is told a curative move did
+   nothing, and the extra columns are decoration.
+4. `relativeToPreviousInstant` becomes a **row between two columns**, and comes out of each column's
+   own box. Left in the box it is imposed twice: once correctly against the previous decision and
+   once against the network's starting tap, which is a constraint the CRAC never wrote.
+
+It does what it was built for. Scenario 1.4.1.1.3 goes from three mismatches to one, with `pst_fr` at
+**+5 preventively and −5 after `co1_fr2_fr3_1`** — both exactly the reference's — and 1.4.5.1 closes.
+
+**What defeats it, and it is the next thing to build.** 1.4.1.1.4 regresses by four: its preventive
+column will not move. `build_controls` computes one DC sensitivity from the **base** network, so a
+curative CNEC's sensitivity to a shifter is the intact network's rather than the post-contingency
+one. That was correct as long as a curative perimeter was always optimized on its own
+post-contingency network — a perimeter spanning every state has no single network, so the
+sensitivities must be computed per state too. It is the same shape as the per-state measurement, one
+layer down, and this attempt did not build it.
+
+So the order is: **per-state sensitivities first, then `A(r, s)`.** Attempting the columns without
+them is what this branch records.
 
 ### 8.4 Two independent MILP solvers
 
