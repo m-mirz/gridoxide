@@ -1017,3 +1017,111 @@ fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
         );
     }
 }
+
+
+
+/// An automaton range action stays inside its declared range.
+///
+/// The reference's scenario 1.2.2.4: `pst_fr` sits at tap 5 and may travel ±5
+/// taps *relative to the previous instant*, so the auto perimeter's box is
+/// [0, 10]. An automaton is not exempt from that. Left unclamped, the shift
+/// stops only when it runs out of tap changer — 16 here, six taps past what the
+/// CRAC permits, with every margin downstream correspondingly too good.
+#[test]
+fn an_automaton_may_not_shift_past_its_own_range() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep15us11-3case4.json"),
+    )
+    .expect("crac");
+    let pst = crac.range_actions.iter().position(|r| r.id == "pst_fr").expect("pst_fr");
+    let RangeActionKind::Pst { initial_tap, .. } = &crac.range_actions[pst].kind else {
+        panic!("pst_fr should be a phase shifter");
+    };
+    assert_eq!(*initial_tap, 5);
+    assert_eq!(crac.range_actions[pst].speed, Some(1), "an automaton");
+
+    let plan = ac_plan(&net, &crac);
+    let tap = plan
+        .scenarios
+        .iter()
+        .filter_map(|s| s.automatons.as_ref())
+        .flat_map(|a| a.range_actions.iter())
+        .find(|(i, _, _)| *i == pst)
+        .and_then(|(_, _, tap)| *tap)
+        .expect("the automaton should shift pst_fr");
+    assert!(
+        (0..=10).contains(&tap),
+        "tap {tap} is outside the ±5 the CRAC allows around the previous instant's 5"
+    );
+    assert_eq!(tap, 10, "and it needs all of it");
+}
+
+/// An automaton shifts until the circuits it watches are secure, and no further.
+///
+/// The reference's scenario 1.2.2.2, which is the one that shows why a single
+/// shift is not enough. The set-point is sized from a linear estimate — margin
+/// over sensitivity — and applied to a network that is not linear, so one shot
+/// lands on tap −7 with the watched CNEC still short of its limit. Iterating to
+/// −8 clears it, at a margin of 0.2 A: the reference's own answer, and visibly
+/// the *smallest* set-point that does the job.
+///
+/// Both halves are asserted, because each fails differently. Stopping early
+/// leaves a protection scheme that did not protect; going too far reports a
+/// network healthier than the equipment would actually have left.
+#[test]
+fn an_automaton_stops_at_the_smallest_set_point_that_secures() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep15us11-3case2.json"),
+    )
+    .expect("crac");
+    let pst = crac.range_actions.iter().position(|r| r.id == "pst_be").expect("pst_be");
+
+    let plan = ac_plan(&net, &crac);
+    let automatons = plan
+        .scenarios
+        .iter()
+        .filter_map(|s| s.automatons.as_ref())
+        .find(|a| a.range_actions.iter().any(|(i, _, _)| *i == pst))
+        .expect("the automaton should shift pst_be");
+    let tap = automatons
+        .range_actions
+        .iter()
+        .find(|(i, _, _)| *i == pst)
+        .and_then(|(_, _, tap)| *tap)
+        .expect("a tap");
+
+    assert_eq!(tap, -8, "-7 leaves the watched CNEC overloaded, -9 and beyond overshoot");
+    assert!(
+        automatons.final_margin_mw >= 0.0,
+        "the perimeter should end secure, not {} MW",
+        automatons.final_margin_mw
+    );
+}
+
+/// Build an AC plan the way the reference's `@ac` scenarios are configured.
+fn ac_plan(net: &ucte::UcteImport, crac: &Crac) -> gridoxide::rao::Plan {
+    let resolution = Resolution::with_buses(crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    // `RaoUtil.getFlowUnit`: an AC load flow means an ampere objective, and the
+    // automaton ranks its overloads in the same unit.
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    let mut solver = IpmSolver::new();
+    run(crac, &network, &resolution, &mut solver, &options)
+}

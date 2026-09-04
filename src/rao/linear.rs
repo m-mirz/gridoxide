@@ -1275,7 +1275,7 @@ pub fn taps_now(
 /// shifter may have been moved by this leaf's own set-point action and will be
 /// moved again by every outer iteration; anchoring on that lets the box walk a
 /// width per round until the answer bears no relation to what the CRAC allowed.
-fn tap_bounds(
+pub(super) fn tap_bounds(
     action: &super::crac::RangeAction,
     table: &[(i32, f64)],
     initial_tap: i32,

@@ -9,7 +9,7 @@ and 2 landed 2026-08-18.
 > but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
 > drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
 > external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
-> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **841 of 884** on
+> **150 of 156** DC assertions, **232 of 244** AC ones on TestCase12Nodes, and **854 of 884** on
 > TestCase16Nodes.
 >
 > **What is left**, in the order it is worth doing:
@@ -24,11 +24,15 @@ and 2 landed 2026-08-18.
 >    and 22: a `relativeToPreviousInstant` range read as absolute, and a shifter with no set-point in
 >    a perimeter reported at the file's tap rather than at the one already in force. Worth 45
 >    together; family 1.3 is now 444 of 458 and 2.6 is complete.
-> 1c. **The automaton simulator's own tap sizing.** The new largest, at 23 of 121 — family 1.2, which
->    every plan so far has held out of scope on the grounds that it is a different subsystem. It now
->    is the subsystem. `pst_be` lands on −7 where the reference says −8 on 1.2.2.2, and −6 against −3
->    on 1.2.2.3: the speed-ordered formula shifts each range action toward relieving the worst CNEC
->    and stops somewhere else than an LP would.
+> 1c. ~~**The automaton simulator's own tap sizing.**~~ **Settled**, as §8.3's defects 23 to 25:
+>    measuring in DC while the run measured in AC, no range cap, and a single shift where the
+>    reference iterates. Family 1.2 is 111 of 121.
+> 1d. **What is left is no longer one cause.** 3.2 (9 of 33), 5.2 MNEC (9 of 68) — six of which are
+>    the recorded `BestTapFinder` divergence where gridoxide scores better on the reference's own
+>    objective — 1.4 (6 of 9), 1.3 (14 of 458) and 1.2 (10 of 121). The two automaton remainders are
+>    a *curative* question rather than an automaton one: on 1.2.2.5 the curative perimeter declines
+>    to move a shifter the automaton left at −8, and on 1.2.2.4 the two implementations disagree about
+>    how much one phase-shifter tap is worth rather than about which tap to pick.
 > 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
 >    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
 > 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
@@ -524,7 +528,7 @@ regression in another:
 |---|---|---|---|
 | `dc_scenarios.feature` | 25, across eleven networks | 156 | **150** |
 | `ac_scenarios.feature` | 38, on TestCase12Nodes | 244 | **232** |
-| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **841** |
+| `ac_scenarios_16nodes.feature` | 93, on TestCase16Nodes | 884 | **854** |
 
 The tolerance is the reference's own — `max(5, 1.5%)`, in whichever unit the step is written — rather
 than one invented here. Every margin, every tap, every named action, every action count and every
@@ -742,6 +746,38 @@ actions* but *which tap* — and that was one defect too:
     from the set-points in force *there*, which is what the harness now does. Worth **6**, and worth
     recording because a gate that misreports the thing it is measuring is the one failure a gate
     cannot catch for itself.
+
+That left the automaton simulator as the largest cause — the subsystem every plan so far had held out
+of scope on the grounds that it was a different one. It had three defects, of which only the first had
+been suspected:
+
+23. **The automaton sized its shift in DC while the run measured in AC.** Defect 13 one subsystem
+    later, and the same shape: `simulate` called the DC evaluator unconditionally, so on
+    `co2_be1_be3` it read the overload as −120.5 MW where the AC model the scenario is scored by says
+    −70.8, and asked for roughly twice the travel it needed.
+24. **It ignored the range action's own range.** The shift was capped by the tap changer and by
+    nothing else, so a shifter the CRAC allowed ten taps of travel ran to 16. Fixed by restricting
+    the tap table before the shift is sized, with the anchors defect 21 built — an auto perimeter's
+    previous instant is preventive, and `simulate` already receives the transformers that stage left.
+25. **It shifted once.** The set-point comes from a linear estimate applied to a network that is not
+    linear, so one shot is systematically wrong: tap −7 on 1.2.2.2 with the watched circuit still
+    over its limit, where −8 clears it at a margin of 0.2 A. The reference iterates — re-measure,
+    re-size, shift again — stopping when nothing it watches is overloaded, when the estimate asks for
+    a move back the way it came, or at an iteration guard.
+
+    One deliberate departure, stated because it is a departure. The reference divides by a
+    sensitivity from the same analysis that measures the flow, so its computed set-point is the
+    smallest one that secures the circuit and rounding away costs at most one tap. gridoxide's
+    gradient is the DC phase-shift sensitivity — 5.44 MW per degree against a delivered 8.8 — right
+    in direction and 60% too far in distance, and rounding away compounds that into several taps with
+    nothing downstream to catch it, since this layer has no keep-it-only-if-it-improved filter. So the
+    *specification* is reproduced rather than the arithmetic: the estimate gets into the
+    neighbourhood, and the tap is settled by measuring which position nearest the start secures
+    everything watched. That makes the answer independent of the gradient's accuracy, which is what
+    the reference gets for free by having an exact one.
+
+Worth **13** assertions together, 1.2 from 98 of 121 to 111, and the auto perimeter of 1.2.2.5 is now
+exact — tap −8, margins 98.97 against 98.9 and 0.227 against 0.2.
 
 Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
 objective function` were being skipped, and the quantity they name — the negated worst margin plus

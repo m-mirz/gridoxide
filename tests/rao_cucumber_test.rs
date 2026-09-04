@@ -1434,7 +1434,7 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///   the pair then differ by twice the flow.
 const BASELINE_MATCHED_AC: usize = 232;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **841 of 884**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **854 of 884**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1482,12 +1482,24 @@ const BASELINE_MATCHED_AC: usize = 232;
 ///   move. The reference's `getOptimizedTapOnState` answers for every state
 ///   from the set-points in force there, and now so does this. Worth 6.
 ///
-/// What is still open, by size: 1.2 automatons (23 of 121), 1.3 (14 of 458),
-/// 5.2 MNEC (9 of 68), 3.2 (9 of 33), 1.4 (6 of 9). Family 2.6 is complete at
-/// 134 of 134 and 2.2 at 63 of 63. Of the remaining tap disagreements, six are
-/// the `BestTapFinder` divergence recorded on [`BASELINE_MATCHED_AC`], eight
-/// are the automaton simulator's own sizing, and the rest are one tap apart.
-const BASELINE_MATCHED_AC16: usize = 841;
+/// Then the **automaton simulator**, which that left as the largest cause.
+/// Three things, of which only the first was suspected:
+///
+/// - It sized its shift against **DC** margins while the run measured in AC. On
+///   `co2_be1_be3` the DC overload is −120.5 MW where AC says −70.8, so the
+///   formula asked for roughly twice the travel it needed.
+/// - It ignored the range action's **own range**, stopping only when it ran out
+///   of tap changer — 16 where the CRAC allowed 10.
+/// - It shifted **once**. The set-point is sized from a linear estimate and
+///   applied to a network that is not linear, so one shot lands short: tap −7
+///   on 1.2.2.2 with the watched CNEC still overloaded, where −8 clears it.
+///
+/// Took 1.2 from 98 of 121 to 111. What is still open, by size: 3.2 (9 of 33),
+/// 5.2 MNEC (9 of 68), 1.4 (6 of 9), 1.3 (14 of 458), 1.2 (10 of 121). Family
+/// 2.6 is complete at 134 of 134 and 2.2 at 63 of 63. Of the remaining tap
+/// disagreements six are the `BestTapFinder` divergence recorded on
+/// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
+const BASELINE_MATCHED_AC16: usize = 854;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
