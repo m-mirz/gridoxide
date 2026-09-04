@@ -20,13 +20,13 @@ and 2 landed 2026-08-18, and the optimizer reached agreement with the reference 
 >
 > **What is left**, in the order it is worth doing:
 >
-> 1. **Per-state sensitivities, then `A(r, s)`.** Second preventive is built and gated — 15 of the
->    reference's own scenarios are vendored and it scores **75 of 108**, from 45 with nothing
->    implemented. What is left is the per-state set-point §7.3 declares, and §8.7 records an attempt
->    at it: the columns, the supersede rule, the per-state measurement and the relative-instant row
->    all work and solve the case they were built for, but they cost more than they gain until
->    `build_controls` computes a sensitivity **per state** instead of one from the base network.
->    That is the piece to build first. Both are on a gate now, which is the difference from before.
+> 1. **`A(r, s)`, a set-point per range action per state.** Second preventive is built and gated —
+>    15 of the reference's own scenarios are vendored and it scores **75 of 108**, from 45 with
+>    nothing implemented. Its prerequisite, a linearization per state, is **done** (`28fb146`) and
+>    cost nothing. The columns themselves are drafted twice over in §8.7 and still below the
+>    baseline; the cheapest next step is not more code but a **measurement** — whether the scenario
+>    that blocks them is gridoxide being worse or gridoxide being better, on the reference's own
+>    objective. §8.7 says why that decides the size of what is left.
 > 2. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
 > 3. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
@@ -995,16 +995,27 @@ kept so the working parts are recoverable rather than merely described.
 It does what it was built for. Scenario 1.4.1.1.3 goes from three mismatches to one, with `pst_fr` at
 **+5 preventively and −5 after `co1_fr2_fr3_1`** — both exactly the reference's — and 1.4.5.1 closes.
 
-**What defeats it, and it is the next thing to build.** 1.4.1.1.4 regresses by four: its preventive
-column will not move. `build_controls` computes one DC sensitivity from the **base** network, so a
-curative CNEC's sensitivity to a shifter is the intact network's rather than the post-contingency
-one. That was correct as long as a curative perimeter was always optimized on its own
-post-contingency network — a perimeter spanning every state has no single network, so the
-sensitivities must be computed per state too. It is the same shape as the per-state measurement, one
-layer down, and this attempt did not build it.
+**Per-state sensitivities were the missing prerequisite, and they are now built** (`28fb146`).
+`build_controls` took one DC linearization from the network as handed to it, so an outage or curative
+CNEC was linearized about a point it never occupies. `SensitivityPoints` now builds one factorization
+per contingency the perimeter's CNECs live under — a single-state perimeter still pays for exactly
+one — and the gate is unchanged to the assertion, which is what a fidelity fix under a *uniform*
+approximation should look like.
 
-So the order is: **per-state sensitivities first, then `A(r, s)`.** Attempting the columns without
-them is what this branch records.
+**They were necessary and they were not sufficient.** Rebuilt on top of them (`rao-a-r-s-wip2`,
+`23c7ec7`), together with a fifth fix that is right on its own — `apply` updated a curative control's
+angle but not its tap, and the per-state measurement looks the network step up *by tap*, so a
+curative move was invisible to the measurement that had to see it — `A(r, s)` still does not clear
+the baseline. The pieces oscillate: 75 holding curative range actions, 74 with the columns, 71 with
+the columns and the tap fix. Every individual step is defensible and the aggregate is not, which says
+the model is still missing something rather than mis-tuned.
+
+**Where to look next, in order.** With the tap fix, 1.4.1.1.4 reaches a curative margin of 295.6 A
+where the reference reports 210 — gridoxide *ahead* on the CNEC the scenario is about, not behind.
+That is the shape of a recorded disagreement rather than a defect, and if it survives it belongs in
+`RECORDED_DISAGREEMENTS`; but it has to be measured on the reference's own objective first, and
+nothing has done that yet. Doing that measurement is the cheapest next step, because it decides
+whether the remaining gap is three scenarios or one.
 
 ### 8.4 Two independent MILP solvers
 
