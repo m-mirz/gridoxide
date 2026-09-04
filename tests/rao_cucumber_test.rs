@@ -1313,8 +1313,8 @@ fn check(scenario: &Scenario) -> Outcome {
 /// which assertion moved.
 #[test]
 fn the_reference_implementations_own_expectations() {
-    for (file, expected, baseline) in FILES {
-        run_gate(file, expected, baseline);
+    for (file, expected, baseline, pending) in FILES {
+        run_gate(file, expected, baseline, pending);
     }
 
     // Every recorded reason has to name a scenario that is actually run.
@@ -1322,7 +1322,7 @@ fn the_reference_implementations_own_expectations() {
     // file it appears in; one naming nothing at all would sit there forever,
     // looking like diligence.
     let mut known: Vec<String> = Vec::new();
-    for (file, _, _) in FILES {
+    for (file, _, _, _) in FILES {
         let text = std::fs::read_to_string(features_dir().join(file)).expect("feature file");
         for scenario in parse(&text) {
             if let Some(id) = scenario.name.split_whitespace().next() {
@@ -1341,10 +1341,21 @@ fn the_reference_implementations_own_expectations() {
 /// The vendored feature files, with their scenario counts and recorded
 /// baselines. Scored separately on purpose — a gain in one must not hide a
 /// regression in another.
-const FILES: [(&str, usize, usize); 3] = [
-    ("dc_scenarios.feature", 25, BASELINE_MATCHED_DC),
-    ("ac_scenarios.feature", 38, BASELINE_MATCHED_AC),
-    ("ac_scenarios_16nodes.feature", 93, BASELINE_MATCHED_AC16),
+const FILES: [(&str, usize, usize, Option<&str>); 4] = [
+    ("dc_scenarios.feature", 25, BASELINE_MATCHED_DC, None),
+    ("ac_scenarios.feature", 38, BASELINE_MATCHED_AC, None),
+    ("ac_scenarios_16nodes.feature", 93, BASELINE_MATCHED_AC16, None),
+    (
+        "second_preventive.feature",
+        15,
+        BASELINE_MATCHED_2P,
+        // The fourth field says a whole corpus is allowed to disagree, and why.
+        // It exists so "the capability is not built" cannot be confused with
+        // "nobody has looked", which is the distinction the per-scenario check
+        // beside it enforces everywhere else. Delete it when the capability
+        // lands — leaving it is how a corpus stops being measured.
+        Some("second-preventive optimization is not implemented"),
+    ),
 ];
 
 /// Run one vendored feature file and assert on its aggregate.
@@ -1352,7 +1363,7 @@ const FILES: [(&str, usize, usize); 3] = [
 /// The two files are scored separately on purpose. They exercise different flow
 /// models, and a single total would let a gain in one hide a regression in the
 /// other.
-fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
+fn run_gate(file: &str, expected_scenarios: usize, baseline: usize, pending: Option<&str>) {
     let text = std::fs::read_to_string(features_dir().join(file)).expect("feature file");
     let scenarios = parse(&text);
     assert_eq!(scenarios.len(), expected_scenarios, "in {file}");
@@ -1394,9 +1405,10 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
         }
     }
     let total = matched + mismatched;
+    let note = pending.map_or(String::new(), |why| format!(" — {why}"));
     println!(
         "{report}\n{file}: {matched}/{total} checkable assertions match the reference \
-         ({unsupported} steps unsupported)"
+         ({unsupported} steps unsupported){note}"
     );
 
     assert!(
@@ -1404,7 +1416,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
         "{file}: {matched}/{total} matched, baseline is {baseline} — a drop is a regression:\n{report}"
     );
     assert!(
-        unexplained.is_empty(),
+        unexplained.is_empty() || pending.is_some(),
         "{file}: {unexplained:?} disagree with the reference and nothing says why. Either that is a \
          defect, or it is a disagreement worth standing behind — and standing behind one means \
          measuring both answers on the reference's own objective and adding it to \
@@ -1412,7 +1424,7 @@ fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
          measured.\n{report}"
     );
     assert!(
-        stale.is_empty(),
+        stale.is_empty() || pending.is_some(),
         "{file}: {stale:?} are listed in RECORDED_DISAGREEMENTS and no longer disagree. Delete \
          those entries — a standing excuse for something already fixed will one day excuse a \
          regression instead."
@@ -1671,6 +1683,15 @@ const BASELINE_MATCHED_AC: usize = 238;
 /// disagreements six are the `BestTapFinder` divergence recorded on
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
 const BASELINE_MATCHED_AC16: usize = 870;
+
+/// The 15 second-preventive scenarios: **recorded once the capability exists**.
+///
+/// Set to zero deliberately while it does not. The corpus is here first, which
+/// is the order everything else in this file was built in and the only order
+/// that works: the gate found all twenty-nine defects in §8.3, and building a
+/// capability with nothing to check it against is how the twenty-ninth stayed
+/// hidden for three refuted hypotheses.
+const BASELINE_MATCHED_2P: usize = 0;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
