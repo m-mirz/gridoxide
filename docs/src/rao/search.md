@@ -316,9 +316,41 @@ A_{\text{new}} \;=\; A_{\text{current}} \;+\; \operatorname{sign}\bigl(F(c)\bigr
 \frac{\min\bigl(0,\ m(c)\bigr)}{\sigma}
 \\]
 
-taking \\(c\\) as the worst-overloaded CNEC the action is watching: shift just far enough to clear it,
-capped by the action's own range. \\(\min(0, m)\\) is zero on a healthy CNEC, so a triggered action
-whose CNEC is no longer overloaded moves nothing.
+taking \\(c\\) as the worst-overloaded CNEC the action is watching, ranked in the unit the flow model
+implies — megawatts under DC, amperes under AC, since two CNECs at different voltages order
+differently in the two. \\(\min(0, m)\\) is zero on a healthy CNEC, so a triggered action whose CNEC is
+no longer overloaded moves nothing. The result is capped by the action's own range: an automaton is
+not exempt from the permission a TSO wrote for it, and without the cap it stops only when it runs out
+of tap changer.
+
+### One shot is not enough, and why the answer is measured rather than computed
+
+That formula is a *linear* estimate applied to a network that is not linear, so a single shift is
+systematically wrong in whichever direction the curvature runs. It is not a rounding-error effect: on
+the reference's own scenario 1.2.2.2 one shot lands on tap −7 with the watched circuit still over its
+limit, where −8 clears it. So the shift **iterates** — re-measure, re-size, shift again — and stops on
+whichever comes first:
+
+- nothing it watches is overloaded any more (the goal is a secure perimeter, not the best margin
+  available: an automaton is protection equipment, and it acts until the thing it watches is inside
+  its limit);
+- the estimate asks for a move back the way it came (a scheme does not hunt);
+- an iteration guard.
+
+There is one deliberate departure from the reference here, and it is worth stating plainly. The
+reference divides by a sensitivity taken from the same analysis that measures the flow, so its
+computed set-point is the *smallest* one that secures the circuit and rounding to the next tap away
+from the start costs at most one position. gridoxide's gradient is the DC phase-shift sensitivity,
+and under an AC flow model that is a different number — 5.44 MW per degree against a delivered 8.8 on
+1.2.2.2 — right in direction and 60% too far in distance. Rounding *away* then compounds the error
+into several taps, and nothing downstream can catch it: unlike the search tree, this layer has no
+keep-it-only-if-it-improved filter, so whatever it lands on is the answer.
+
+So gridoxide reproduces the **specification** rather than the arithmetic. "Shift until the circuits
+are secure and no further" is a claim about measured flows, so the estimate is used to get into the
+neighbourhood and the tap is then settled by measuring: the position nearest the starting point that
+secures everything watched wins. That makes the answer independent of how good the gradient was,
+which is the property the reference gets for free by having an exact one.
 
 ## Reading the plan
 

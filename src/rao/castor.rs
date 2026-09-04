@@ -259,7 +259,15 @@ pub fn run(
                 tap_changers: network.tap_changers,
                 base_mva: network.base_mva,
             };
-            simulate(crac, &view, resolution, contingency, &open, &transformers)
+            simulate(
+                crac,
+                &view,
+                resolution,
+                contingency,
+                &open,
+                &transformers,
+                options.linear.flow_model,
+            )
         };
         if let Some(result) = &automatons {
             open = result.open_branches.clone();
