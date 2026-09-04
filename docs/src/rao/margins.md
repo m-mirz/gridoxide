@@ -111,6 +111,22 @@ networks in opposite orders:
 That is why the objective's unit is a setting at all — see
 [the LP's objective unit](./linear.md#the-objective-unit-is-not-cosmetic).
 
+Concretely, the ampere margin is
+
+\\[ m_A(c) \;=\; f^{+}_A \;-\; I \\]
+
+— the limit expressed in amperes less the **current** — and not \\(m_{MW}\\) divided by
+\\(\sqrt{3}\,U\\). For a threshold already written in amperes the two are the same number, because
+the charge above has taken reactive flow and the voltage deviation off the megawatt limit and
+converting back undoes exactly that. For a threshold written in **megawatts** they are not:
+\\(\text{limit} - \vert P \vert\) carries neither effect and \\(I\\) carries both.
+
+The voltage that turns a megawatt limit into amperes is the **network's** nominal, not the CRAC's
+`nominalV`. A CRAC states `nominalV` to say what an *ampere* threshold was written against; a
+megawatt threshold was written against nothing, and the reference reads the CNEC's nominal voltage
+off the network. On a UCTE 380 kV line whose CRAC says 400 that is 150 A on a 2000 MW limit — enough
+to change which remedial action the search takes when the objective is in amperes.
+
 ## A worked margin
 
 Take the network from [the chapter introduction](./index.md#the-worked-example-used-throughout) and

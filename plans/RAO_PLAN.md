@@ -42,8 +42,11 @@ and 2 landed 2026-08-18.
 >    (`relativeToPreviousInstant`)~~ is built: the *bound* chains across perimeters, which is what
 >    that range kind asks for. What is still not here is several states' set-points as variables in
 >    **one** LP, which the CASTOR decomposition does not want anyway.
-> 5. **The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json` that three refuted hypotheses
->    have not explained. See §8.3.
+> 5. ~~**The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json`.~~ **Explained**, as §8.3's
+>    defect 29: an ampere margin was the megawatt margin converted rather than a margin measured in
+>    amperes. Six of the nine remain, and they are a different disagreement — with both tie-lines
+>    open gridoxide computes 1165.5 MW on `FFR2AA1  DDE3AA1  1` where the reference computes 1000,
+>    which is a **flow** disagreement on that topology rather than a margin one.
 >
 > Loop flows and relative margins stay out of scope for the reasons in §11.
 >
@@ -838,6 +841,29 @@ One rule was missing that no perimeter could have supplied, because it is about 
     `leaves` survives the discard, alone among the fields: it counts what the search evaluated on the
     way to deciding, and zeroing it would report that no work was done rather than that the work was
     rejected.
+
+Last of the causes found so far, and the one §8.3 had recorded as unexplained since the AC file was
+added — "**the 9 that differ for a reason nobody has found**", all on `epic5/SL_ep5us1.json`:
+
+29. **An ampere margin was the megawatt margin converted, instead of a margin measured in amperes.**
+    For a threshold written in amperes the two are the same number, because the evaluator's charge has
+    already taken reactive flow and the voltage deviation off the megawatt limit and converting back
+    undoes exactly that. For a threshold written in **megawatts** they are not: `limit − |P|` carries
+    neither effect and the current carries both. The reference computes
+    `limit_in_amperes − I`, and the limit converts at the **network's** nominal voltage — 380 kV on
+    these UCTE nodes, against the 400 the CRAC states, because a CNEC's nominal voltage is read off
+    the network rather than out of the file. Two independent operating points pin it to a tenth of an
+    ampere: 3038.7 − 2167.1 = 871.5 against the reference's 871, and 3038.7 − 1889.5 = 1149.2 against
+    its 1149. The megawatt margin was right all along and matched throughout, which is why this
+    survived: the error was only ever visible in the unit the objective happens to be measured in.
+
+    **It is a wash on the gate and worth landing anyway.** 3.2 gains 3 and 5.2 loses 3, and the three
+    lost are the `BestTapFinder` divergence this plan already records, reaching one scenario further.
+    On 5.2.3.2 the corrected margin is −146.33 A against the reference's −146.3 *at the reference's
+    own tap*; what moved is which tap the search picks, because at −12 an MNEC is violated by 1.4 A
+    and at −11 it is not, so scoring the virtual cost makes −11 better by 4.2 on the reference's own
+    objective. Its `BestTapFinder` compares minimum margin alone and takes −12. A formula validated
+    to three figures against two fixtures is worth more than a flat assertion count.
 
 Last, the gate was made to check something it already knew. 47 steps asserting `the value of the
 objective function` were being skipped, and the quantity they name — the negated worst margin plus

@@ -1394,7 +1394,7 @@ const BASELINE_MATCHED_DC: usize = 150;
 ///
 /// # The one divergence that is not a coin toss
 ///
-/// Three of the MNEC scenarios — 5.2.1.3, 5.2.1.4 here and 5.2.3.3 above —
+/// Four of the MNEC scenarios — 5.2.1.3, 5.2.1.4, 5.2.3.2 here and 5.2.3.3 above —
 /// disagree by exactly **one tap**, always in the direction of the reference
 /// paying an MNEC violation gridoxide declines to pay. On 5.2.1.3 the
 /// reference's tap −7 scores 192.05 MW of margin against a 7.67 MW violation
@@ -1414,8 +1414,19 @@ const BASELINE_MATCHED_DC: usize = 150;
 /// `PstControl::bracketing_taps` always looks, and scores with the penalty
 /// included.
 ///
-/// Matching these four assertions would mean reproducing that rounding, at the
-/// cost of a worse answer. They are left as recorded disagreements.
+/// Matching these assertions would mean reproducing that rounding, at the cost
+/// of a worse answer. They are left as recorded disagreements.
+///
+/// 5.2.3.2 joined them when the **ampere margin** was corrected — an ampere
+/// margin is now the limit in amperes less the current, rather than the
+/// megawatt margin converted, which is exactly the reference's own number
+/// (−146.33 A against its −146.3) at the reference's own tap. That moved the
+/// objective enough to expose the same rounding question one scenario further
+/// on: at tap −12 the worst margin is −146.33 with an MNEC violated by 1.4 A,
+/// at −11 it is −156.28 with none, and scoring the virtual cost makes −11 the
+/// better answer by 4.2. The reference does not score it and takes −12. Three
+/// assertions here, against three gained in 3.2 on the same change.
+
 ///
 /// # What the per-side flow steps bought
 ///

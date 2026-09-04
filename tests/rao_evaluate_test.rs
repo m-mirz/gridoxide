@@ -686,3 +686,96 @@ fn a_dc_far_end_carries_exactly_what_the_near_end_took() {
     }
     assert!(checked > 0, "the CRAC should monitor something");
 }
+
+/// An **ampere** margin is a difference of two ampere quantities, not the
+/// megawatt margin converted.
+///
+/// The distinction is invisible for a threshold already written in amperes,
+/// where the evaluator's charge has taken reactive flow and the voltage
+/// deviation off the megawatt limit and converting back undoes exactly that.
+/// For a threshold written in **megawatts** it is not invisible, because
+/// `limit − |P|` carries neither effect while the current carries both.
+///
+/// The reference's `epic5` fixture puts a 2000 MW threshold on a line whose
+/// nodes are 380 kV in the file and which runs at about 400. Two independent
+/// operating points pin the answer to a tenth of an ampere:
+///
+/// | actions | P (MW) | I (A) | reference margin |
+/// |---|---|---|---|
+/// | none | 1499.8 | 2167.1 | 871 A |
+/// | one | 1308.0 | 1889.5 | 1149 A |
+///
+/// Both are `2000 MW at 380 kV − I` = 3038.7 − I. Converting the megawatt
+/// margin instead gives 722 and 999 — right to within 0.3 MW on the megawatt
+/// assertion in the same scenario, and 150 A adrift here. That 150 A is the
+/// **network's** 380 kV against the CRAC's stated `nominalV` of 400: the
+/// reference reads a CNEC's nominal voltage off the network, and a megawatt
+/// threshold needs no other voltage to be stated in.
+#[test]
+fn an_ampere_margin_is_measured_in_amperes() {
+    let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/rao/features/SL_ep5us1.json"),
+    )
+    .expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let ac = gridoxide::rao::AcOptions { shunts: &net.shunts, ..Default::default() };
+    let result = gridoxide::rao::evaluate_model(
+        &crac,
+        &network,
+        &resolution,
+        &net.initially_open,
+        gridoxide::rao::FlowModel::Ac,
+        &ac,
+    );
+
+    let cnec = result
+        .perimeters
+        .iter()
+        .flat_map(|p| p.cnecs.iter())
+        .find(|c| crac.flow_cnecs[c.cnec].id == "FFR2AA1  DDE3AA1  1 - preventive")
+        .expect("the CRAC's preventive CNEC");
+
+    // The megawatt margin is `limit − |P|` and was right all along.
+    assert!(
+        (cnec.margin_mw - 500.0).abs() < 5.0,
+        "megawatt margin {} MW, reference 500",
+        cnec.margin_mw
+    );
+    // The ampere margin is the limit in amperes less the current.
+    let limit_a = 2000.0 * 1e6 / (3f64.sqrt() * 380e3);
+    assert!(
+        (cnec.margin_a - (limit_a - cnec.current_a)).abs() < 0.5,
+        "ampere margin {} A is not {} - {}",
+        cnec.margin_a,
+        limit_a,
+        cnec.current_a
+    );
+    assert!(
+        (cnec.margin_a - 871.0).abs() < 5.0,
+        "ampere margin {} A, reference 871",
+        cnec.margin_a
+    );
+    // And emphatically not the megawatt margin converted, at either voltage.
+    for v in [380e3, 400e3] {
+        let converted = cnec.margin_mw * 1e6 / (3f64.sqrt() * v);
+        assert!(
+            (cnec.margin_a - converted).abs() > 50.0,
+            "converting the megawatt margin at {v} V gives {converted} A, which is the \
+             reading this test exists to rule out"
+        );
+    }
+}
