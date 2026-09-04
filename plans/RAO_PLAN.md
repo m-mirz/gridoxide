@@ -1,57 +1,51 @@
 # Remedial action optimization in gridoxide
 
-Status: **paused at a working state**, 2026-08-21. Written 2026-08-17 against `0549f7e`; phases 1
-and 2 landed 2026-08-18.
+Status: **closed at a working state**, 2026-09-04. Written 2026-08-17 against `0549f7e`; phases 1
+and 2 landed 2026-08-18, and the optimizer reached agreement with the reference on 2026-09-04.
 
-> **Implementation status.** Phases 1 and 3 (the UCTE and IIDM importers) are done and both gates
-> are met — see §9. Phase 2 is half done: `ratings::BranchLimits` and `types::TapChanger` exist and
-> the CGMES `OperationalLimit` importer converts every declared limit in every conformity fixture,
-> but CGMES tap *tables* are still discarded at import (`cgmes.rs` evaluates the current step and
-> drops the rest). Phases 4 through 9 and phase 12 are done, and phases 10 and 11 with them. §8.3's
-> external Cucumber gate now runs **two** flow models across **three** files and 156 scenarios:
+> **Implementation status.** Phases 1 and 3 (the UCTE and IIDM importers) are done and both gates are
+> met — see §9. Phases 4 through 12 are done. Phase 2 is half done: `ratings::BranchLimits` and
+> `types::TapChanger` exist and the CGMES `OperationalLimit` importer converts every declared limit
+> in every conformity fixture, but CGMES tap *tables* are still discarded at import (`cgmes.rs`
+> evaluates the current step and drops the rest).
+>
+> §8.3's external Cucumber gate runs two flow models across three files and 156 scenarios:
 > **150 of 156** DC assertions, **238 of 244** AC ones on TestCase12Nodes, and **870 of 884** on
-> TestCase16Nodes.
+> TestCase16Nodes — **1258 of 1284**.
+>
+> **Thirteen of the fifteen scenario families match in full.** The 26 assertions that do not are
+> **recorded disagreements, not a backlog**: eight scenarios where gridoxide's answer has been
+> measured on the reference's own objective and is better or equal in every one. §8.6 has the table
+> and the gate asserts it — nothing may disagree without a measurement behind it.
 >
 > **What is left**, in the order it is worth doing:
 >
-> 1. ~~**Action combinations beyond the greedy chain.**~~ ~~**The real cause of families 1.3 and 2.6
->    is unidentified.**~~ **Both are settled.** The combination diagnosis was refuted in
->    `plans/RAO_SEARCH_PLAN.md` §2 — the reference's `SearchTreeBloomer.bloom` is greedy too — and the
->    real cause was §8.3's defect 20: a curative perimeter could not *close* anything. Fixing it took
->    1.3 to 404 of 457 and 2.6 to 130 of 134, and left the residue a different shape: **which tap** a
->    curative perimeter's range actions settle on, not which actions it takes.
-> 1b. ~~**Curative range actions start from the wrong point.**~~ **Settled**, as §8.3's defects 21
->    and 22: a `relativeToPreviousInstant` range read as absolute, and a shifter with no set-point in
->    a perimeter reported at the file's tap rather than at the one already in force. Worth 45
->    together; family 1.3 is now 444 of 458 and 2.6 is complete.
-> 1c. ~~**The automaton simulator's own tap sizing.**~~ **Settled**, as §8.3's defects 23 to 25:
->    measuring in DC while the run measured in AC, no range cap, and a single shift where the
->    reference iterates. Family 1.2 is 111 of 121.
-> 1d. **What is left is no longer one cause.** 3.2 (9 of 33), 5.2 MNEC (9 of 68) — six of which are
->    the recorded `BestTapFinder` divergence where gridoxide scores better on the reference's own
->    objective — and 1.3 (14 of 458). Every other family is complete: 1.2, 1.4, 2.1, 2.2, 2.3, 2.4,
->    2.6, 3.2, 5.1, 5.3, 5.5, 0.1 and 0.2. What remains in 1.3 is one-tap divergences plus 1.3.2.6,
->    where gridoxide reaches the reference's own objective with one fewer action.
-> 2. **Second-preventive optimization.** Its scenarios are excluded from the corpus outright, so the
->    gate is silent on it; the 156 skipped `execution details` steps are its bookkeeping.
-> 3. **Phase 2's other half** — CGMES tap tables, an importer gap rather than an optimizer one.
-> 4. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
->    range actions, costly optimization. ~~`predefined-combinations` and
->    `max-curative-search-tree-depth`~~ are now read and gated; both are inert on the vendored corpus,
->    which is why each needed a test of its own. ~~Multi-perimeter chaining
->    (`relativeToPreviousInstant`)~~ is built: the *bound* chains across perimeters, which is what
->    that range kind asks for. What is still not here is several states' set-points as variables in
->    **one** LP, which the CASTOR decomposition does not want anyway.
-> 5. ~~**The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json`.~~ **Closed.** Three were
->    §8.3's defect 29, the ampere margin; the other six were the slack, §8.5. **Family 3.2 is
->    complete**, and with it every family except 1.3 and 5.2.
+> 1. **Second-preventive optimization.** The largest untouched capability. Its scenarios are excluded
+>    from the corpus outright, so the gate is silent on it and no amount of tuning will move a
+>    number; the 156 skipped `execution details` steps are its bookkeeping.
+> 2. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
+>    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
+> 3. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
+>    range actions, costly optimization.
+> 4. **The skip list**, which is almost entirely item 1. 162 steps are unsupported: 156 are second
+>    preventive's `execution details`, 5 are `the setpoint of RangeAction` — skipped with its reason
+>    printed rather than in silence, see §8.3 — and one is a bare `I launch rao` with nothing to
+>    assert.
 >
 > Loop flows and relative margins stay out of scope for the reasons in §11.
 >
-> The strongest result so far was not planned for. §6.2 justified building two importers as the only
-> route to the external gate; what it did not anticipate is that the two would gate *each other*.
-> Reading one network through both parsers gives bit-identical flows, which neither importer's own
-> comparison could establish.
+> The strongest result was not planned for. §6.2 justified building two importers as the only route
+> to the external gate; what it did not anticipate is that the two would gate *each other*. Reading
+> one network through both parsers gives bit-identical flows, which neither importer's own comparison
+> could establish.
+>
+> The second-strongest is a method rather than a result, and §8.3 is the record of it: **twenty-nine
+> defects, every one internally consistent and externally wrong.** Not one would have been found by
+> reading the code, and several survived a confident diagnosis that had to be withdrawn — the
+> combination-depth theory, three refuted explanations of the `epic5` residual, and a slack
+> hypothesis that refuted itself because the obvious weighting was the wrong one. The gate found
+> them; grouping its output by scenario family, and then by *instant within* a family, is what
+> pointed at each in turn.
 
 ## Context
 

@@ -160,16 +160,23 @@ gridoxide's own `<network>.rao.json` companion.
 
 ## What is validated
 
-22 scenarios from powsybl-open-rao's own Cucumber suite are vendored under
+156 scenarios from powsybl-open-rao's own Cucumber suite are vendored under
 `tests/data/rao/features/`, with the CRACs and parameter files they name. They are the only check in
 this repository that gridoxide did not write for itself: they state margins to the decimal and name
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-138 of 142 checkable assertions match, at the reference's own tolerance of `max(5 MW, 1.5%)` —
-margins, taps, named actions, action counts and security statuses. The four that do not are two
-phase-shifter taps and the margins that follow from them, in scenarios where the reference's own tap
-rounding takes a step that pays an MNEC penalty its rounding does not look at.
+**1258 of 1284 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
+counts, objective values and security statuses, across two flow models and three networks. Thirteen
+of the fifteen scenario families match in full.
+
+The 26 that do not are **recorded disagreements rather than a backlog**. Each has been measured on
+the reference's *own* objective, in the unit its own configuration selects and with its own MNEC
+violation cost applied, and in none of them is gridoxide worse: five are its `BestTapFinder` rounding
+a set-point on minimum margin alone, blind to a virtual cost its own javadoc warns about, and the
+rest are ties reached by a different route. The gate names each one with the measurement behind it
+and refuses to let a scenario disagree without one — see `plans/RAO_PLAN.md` §8.6.
 
 ## What is not here
 
