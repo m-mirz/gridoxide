@@ -160,18 +160,19 @@ gridoxide's own `<network>.rao.json` companion.
 
 ## What is validated
 
-156 scenarios from powsybl-open-rao's own Cucumber suite are vendored under
+171 scenarios from powsybl-open-rao's own Cucumber suite are vendored under
 `tests/data/rao/features/`, with the CRACs and parameter files they name. They are the only check in
 this repository that gridoxide did not write for itself: they state margins to the decimal and name
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1258 of 1284 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1333 of 1392 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
-counts, objective values and security statuses, across two flow models and three networks. Thirteen
-of the fifteen scenario families match in full.
+counts, objective values and security statuses, across two flow models and three networks. Of the 59
+that do not, 33 belong to the second-preventive corpus, which is the one capability still short of
+the reference.
 
-The 26 that do not are **recorded disagreements rather than a backlog**. Each has been measured on
+The other 26 are **recorded disagreements rather than a backlog**. Each has been measured on
 the reference's *own* objective, in the unit its own configuration selects and with its own MNEC
 violation cost applied, and in none of them is gridoxide worse: five are its `BestTapFinder` rounding
 a set-point on minimum margin alone, blind to a virtual cost its own javadoc warns about, and the
@@ -184,7 +185,15 @@ and refuses to let a scenario disagree without one — see `plans/RAO_PLAN.md` �
 - **Costly optimization** — minimizing the price of the actions rather than maximizing margin.
 - **HVDC range actions**, recognised and skipped: gridoxide models a DC network but nothing connects
   it to a range action yet.
-- **Second-preventive optimization** and multi-timestamp (MARMOT) runs.
+- **Multi-timestamp (MARMOT) runs.**
+- **Curative range actions re-optimized inside the second preventive problem.** The second pass
+  itself is here: after the curative stage, the preventive perimeter is optimized again with every
+  CNEC in front of it and the automaton and curative decisions held applied, and the result is kept
+  only if the whole plan it leads to is better. What the reference does and this does not is
+  re-optimize the curative *range* actions inside that same problem — a set-point per action per
+  state — and then keep them instead of re-deriving them afterwards. Those two are one change rather
+  than two, and `plans/RAO_PLAN.md` §8.7 records why adopting either half alone is worse than
+  neither.
 - **Several perimeters' set-points as variables in one LP.** Each perimeter is solved against the
   previous one's fixed decisions, which is the CASTOR decomposition rather than a shortcut past it.
   The `relativeToPreviousInstant` range kind *is* honoured — what chains across perimeters is the

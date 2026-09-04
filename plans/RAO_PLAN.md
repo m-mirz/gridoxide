@@ -1,7 +1,8 @@
 # Remedial action optimization in gridoxide
 
 Status: **closed at a working state**, 2026-09-04. Written 2026-08-17 against `0549f7e`; phases 1
-and 2 landed 2026-08-18, and the optimizer reached agreement with the reference on 2026-09-04.
+and 2 landed 2026-08-18, the optimizer reached agreement with the reference on 2026-09-04, and
+second preventive was built and gated the same day.
 
 > **Implementation status.** Phases 1 and 3 (the UCTE and IIDM importers) are done and both gates are
 > met — see §9. Phases 4 through 12 are done. Phase 2 is half done: `ratings::BranchLimits` and
@@ -13,32 +14,38 @@ and 2 landed 2026-08-18, and the optimizer reached agreement with the reference 
 > **150 of 156** DC assertions, **238 of 244** AC ones on TestCase12Nodes, **870 of 884** on
 > TestCase16Nodes, and **75 of 108** on the second-preventive corpus — **1333 of 1392**.
 >
-> **Thirteen of the fifteen scenario families match in full.** The 26 assertions that do not are
-> **recorded disagreements, not a backlog**: eight scenarios where gridoxide's answer has been
-> measured on the reference's own objective and is better or equal in every one. §8.6 has the table
-> and the gate asserts it — nothing may disagree without a measurement behind it.
+> 59 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> across the three settled files — eight scenarios where gridoxide's answer has been measured on the
+> reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
+> asserts that nothing may disagree without a measurement behind it. **33 are the second-preventive
+> corpus**, which is the one capability still short of the reference and is exempt by name until it
+> is not (§8.7).
 >
-> **What is left**, in the order it is worth doing:
+> **What is left**, in the order it is worth doing — which this session reordered:
 >
-> 1. **`A(r, s)`, a set-point per range action per state.** Second preventive is built and gated —
->    15 of the reference's own scenarios are vendored and it scores **75 of 108**, from 45 with
->    nothing implemented. Its prerequisite, a linearization per state, is **done** (`28fb146`) and
->    cost nothing. The columns themselves are drafted twice over in §8.7 and still below the
->    baseline, and §8.7 now explains why in a way that reorders the work. The reference keeps its
->    curative answer after a second preventive pass **because** its second preventive computed one;
->    the two are a package, and gridoxide's curative *search* is currently better than any curative
->    column its second preventive problem can produce. Six steps toward the reference's architecture
->    cost six drops. So `A(r, s)` and the composition rule come **last**, after the second preventive
->    problem is rich enough to earn them — not first. §8.7 also sizes the gap: **four genuine gaps**,
->    one recorded disagreement where gridoxide is 85 A ahead, two scenarios already reachable.
-> 2. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
+> 1. **`execution details`: the cheapest 171 assertions in the corpus.** Of 177 skipped steps, 171
+>    are that one — `"The RAO only went through first preventive"`, `"Second preventive improved
+>    first preventive results"`, `"First preventive fell back to initial situation"`. When the skip
+>    was written it named a capability that did not exist. It now names three states `castor::run`
+>    already distinguishes: whether it discarded the plan (§8.3's defect 28), whether a second pass
+>    ran and was kept, and whether neither happened. §8.3's rule is that anything the code can answer
+>    belongs in the denominator, and this is the largest such block by a wide margin. Expect the
+>    ratio to fall when it lands; that is the point.
+> 2. **A richer second-preventive problem**, which is the only thing that unlocks the rest. Its
+>    corpus is gated at **75 of 108**, from 45 with nothing implemented, and §8.7 sizes the
+>    remainder: four genuine gaps, one recorded disagreement where gridoxide is 85 A ahead of the
+>    reference on its own objective, and two scenarios the drafted work already reaches.
+> 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
+>    reference keeps its curative answer after a second preventive pass *because* its second
+>    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
+>    currently better than any curative column its second preventive problem can produce. Six steps
+>    toward the reference's architecture cost six drops on the gate. Neither pays until item 2 does.
+>    Four branches hold the drafts: `rao-a-r-s-wip`, `rao-a-r-s-wip2`, and the two commits on top of
+>    it, each with an honest message about what it establishes and what it costs.
+> 4. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
-> 3. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
+> 5. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
 >    range actions, costly optimization.
-> 4. **The skip list**, which is almost entirely item 1. 162 steps are unsupported: 156 are second
->    preventive's `execution details`, 5 are `the setpoint of RangeAction` — skipped with its reason
->    printed rather than in silence, see §8.3 — and one is a bare `I launch rao` with nothing to
->    assert.
 >
 > Loop flows and relative margins stay out of scope for the reasons in §11.
 >
