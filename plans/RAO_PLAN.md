@@ -30,10 +30,12 @@ second preventive was built and gated the same day.
 >    the step reporting a gap §8.7 already records rather than adding one. `Plan::steps` now carries
 >    which optimization steps ran, which is a thing an operator wants and no margin can supply: a
 >    plan and the plan it fell back to have different margins but the same shape.
-> 2. **A richer second-preventive problem**, which is the only thing that unlocks the rest. Its
->    corpus is gated at **75 of 108**, from 45 with nothing implemented, and §8.7 sizes the
->    remainder: four genuine gaps, one recorded disagreement where gridoxide is 85 A ahead of the
->    reference on its own objective, and two scenarios the drafted work already reaches.
+> 2. **One scenario, diagnosed to a mechanism** — 1.4.4.4 for choice. Its corpus is gated at **89 of
+>    123**, and §8.8 records that "a richer second preventive problem" has no referent yet: three
+>    candidate meanings have been measured and all three cost. What the traces show is a second pass
+>    that *works* — on 1.4.4.4 it takes the objective from −242.0 to 638.2 and is kept — and stops
+>    short. That is a search question, not an architecture question, and it wants the method §8.3
+>    used twenty-nine times rather than another structural change.
 > 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
 >    reference keeps its curative answer after a second preventive pass *because* its second
 >    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
@@ -1070,6 +1072,39 @@ are the *last* two steps, not the first, and neither pays until gridoxide's seco
 is rich enough that its curative answer beats a dedicated curative search. Until then the current
 arrangement — hold the curative decisions during the second pass, re-derive them after — is not a
 shortcut. It is the better answer, and 75 of 108 is what it is worth.
+
+### 8.8 "A richer second preventive problem" is not yet a change anyone can name
+
+§8.7 concluded that `A(r, s)` and the composition rule come last, *after* the second preventive
+problem is rich enough to earn them. That is still the right ordering. What the phrase does not have
+is a referent: three candidate meanings have now been measured against the gate and all three cost.
+
+| candidate | second_preventive.feature |
+|---|---|
+| **as built** | **89 of 123** |
+| `A(r, s)` columns, re-measured against the richer gate | 85 |
+| report the second pass's margin over the states it reports, not all of them | 85 |
+| the reference's composition rule, in any of its three partial forms | 66–68 |
+
+The middle row is worth keeping because it looks like an obvious bug and is not. A second preventive
+result reports `final_margin_mw` over **every** state, measured with only the preventive decisions in
+force — the curative ones are held, not yet made. Narrowing it to the states the plan actually
+reports is more defensible on its face and loses four assertions, because the wide reading is what
+makes `security status` honest: a plan whose curative perimeters have not run *is* insecure, and
+saying so is not pessimism.
+
+**What the traces do establish.** On 1.4.4.4 the second pass is not failing to run or failing to
+help — it takes the objective from **−242.0 to 638.2**, against a first pass that was worse than
+doing nothing, and it is kept. It simply stops short of the reference's 795, choosing `pst_fr` at −5
+where the reference takes tap 2 and one fewer action. On 1.4.5.1 the second pass reaches the
+reference's answer on the CNEC the scenario names, to two decimals. These are not architectural
+failures; they are a search settling somewhere else, and no structural change tried so far moves
+them.
+
+**So the next step is not another architectural change.** It is one scenario, diagnosed to a
+mechanism, the way every one of §8.3's twenty-nine defects was found. 1.4.4.4 is the candidate: two
+preventive decisions against the reference's one, on a fixture small enough to reason about, with the
+second pass demonstrably working and demonstrably stopping early.
 
 ### 8.4 Two independent MILP solvers
 
