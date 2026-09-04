@@ -93,6 +93,61 @@ pub struct ScenarioPlan {
 }
 
 /// The complete answer.
+/// Which optimization steps actually ran, and how each turned out.
+///
+/// The reference reports this as a sentence and its Cucumber suite asserts it
+/// 171 times — more than any other single step — because it is the one thing a
+/// margin cannot tell you: whether the answer in front of you is the plan the
+/// optimizer wanted, the plan it fell back to, or the network untouched.
+///
+/// The strings are the reference's own, from `OptimizationStepsExecuted`, and
+/// they are reproduced verbatim rather than paraphrased: they are an interface,
+/// not prose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StepsExecuted {
+    /// One preventive optimization, kept.
+    #[default]
+    FirstPreventiveOnly,
+    /// One preventive optimization, and it lost ground — so the plan was
+    /// thrown away and the untouched network reported. See §8.3's defect 28.
+    FirstPreventiveFellBackToInitial,
+    /// A second preventive pass ran and beat the first.
+    SecondPreventiveImproved,
+    /// A second preventive pass ran and did not beat the first, so the first
+    /// pass's answer stands. Running it and declining it is not a failure —
+    /// it is the check working.
+    SecondPreventiveFellBackToFirst,
+    /// A second preventive pass ran and the finished plan still lost ground to
+    /// doing nothing.
+    SecondPreventiveFellBackToInitial,
+}
+
+impl StepsExecuted {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstPreventiveOnly => "The RAO only went through first preventive",
+            Self::FirstPreventiveFellBackToInitial => {
+                "First preventive fell back to initial situation"
+            }
+            Self::SecondPreventiveImproved => "Second preventive improved first preventive results",
+            Self::SecondPreventiveFellBackToFirst => {
+                "Second preventive fell back to first preventive results"
+            }
+            Self::SecondPreventiveFellBackToInitial => {
+                "Second preventive fell back to initial situation"
+            }
+        }
+    }
+
+    /// The same step, once the plan has been thrown away.
+    fn fell_back(self) -> Self {
+        match self {
+            Self::FirstPreventiveOnly => Self::FirstPreventiveFellBackToInitial,
+            _ => Self::SecondPreventiveFellBackToInitial,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub preventive: PerimeterPlan,
@@ -104,6 +159,8 @@ pub struct Plan {
     /// Worst margin anywhere before and after.
     pub initial_margin_mw: f64,
     pub final_margin_mw: f64,
+    /// Which optimization steps ran, and how each turned out.
+    pub steps: StepsExecuted,
 }
 
 impl Plan {
@@ -203,6 +260,9 @@ pub fn run(
     // Second preventive: optimize the preventive perimeter again, this time
     // able to see what the curative stage could and could not do about the
     // constraints the first pass left it.
+    // Which steps ran, narrowed as each one decides.
+    let mut steps = StepsExecuted::FirstPreventiveOnly;
+
     // The plan as it stands, against doing nothing. Needed twice: to decide
     // whether a cost increase should trigger a second pass, and — at the very
     // end — whether the finished plan is worth keeping at all.
@@ -235,8 +295,13 @@ pub fn run(
         // second preventive that improves its own perimeter and costs a
         // curative one more than it gains is not an improvement, and the first
         // pass is a perfectly good answer to fall back to.
+        // Ran, and not yet kept. Running a second pass and declining it is a
+        // different outcome from never running one, and the reference reports
+        // the difference.
+        steps = StepsExecuted::SecondPreventiveFellBackToFirst;
         let second_plan = perimeter_plan(&second, preventive_states.clone());
         if judge(&second_plan, &after) > first_objective + 1e-6 {
+            steps = StepsExecuted::SecondPreventiveImproved;
             plan_preventive = second_plan;
             scenarios = after;
         }
@@ -271,6 +336,7 @@ pub fn run(
         pulled_forward,
         initial_margin_mw: initial,
         final_margin_mw: final_margin,
+        steps,
     };
 
     // Having done all that, check it was worth doing.
@@ -301,7 +367,7 @@ pub fn run(
     // second preventive pass was worth attempting.
     let after = judge(&plan.preventive, &plan.scenarios);
     if after < before - 1e-6 {
-        return unoptimized(network, &plan, initial);
+        return unoptimized(network, &plan, initial, steps.fell_back());
     }
     plan
 }
@@ -316,7 +382,12 @@ pub fn run(
 /// plan is being told what the RAO decided, not what the equipment will do. No
 /// vendored scenario reaches this path with an automaton present, so the
 /// question has never been put.
-fn unoptimized(network: &Network<'_>, plan: &Plan, initial: f64) -> Plan {
+fn unoptimized(
+    network: &Network<'_>,
+    plan: &Plan,
+    initial: f64,
+    steps: StepsExecuted,
+) -> Plan {
     // `leaves` survives, alone among the fields. It is not a claim about the
     // plan — it is the count of what the search evaluated on the way to
     // deciding, and the search did evaluate them. Zeroing it would report that
@@ -351,6 +422,7 @@ fn unoptimized(network: &Network<'_>, plan: &Plan, initial: f64) -> Plan {
         pulled_forward: plan.pulled_forward.clone(),
         initial_margin_mw: initial,
         final_margin_mw: initial,
+        steps,
     }
 }
 
