@@ -42,11 +42,9 @@ and 2 landed 2026-08-18.
 >    (`relativeToPreviousInstant`)~~ is built: the *bound* chains across perimeters, which is what
 >    that range kind asks for. What is still not here is several states' set-points as variables in
 >    **one** LP, which the CASTOR decomposition does not want anyway.
-> 5. ~~**The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json`.~~ **Explained**, as §8.3's
->    defect 29: an ampere margin was the megawatt margin converted rather than a margin measured in
->    amperes. Six of the nine remain, and they are a different disagreement — with both tie-lines
->    open gridoxide computes 1165.5 MW on `FFR2AA1  DDE3AA1  1` where the reference computes 1000,
->    which is a **flow** disagreement on that topology rather than a margin one.
+> 5. ~~**The AC residual** — the 9 assertions on `epic5/SL_ep5us1.json`.~~ **Both causes now
+>    identified.** Three were §8.3's defect 29. The remaining six are a *flow* disagreement, and it is
+>    **diagnosed and measured but not yet built** — see §8.5, which is the next thing to do here.
 >
 > Loop flows and relative margins stay out of scope for the reasons in §11.
 >
@@ -893,6 +891,45 @@ Two honest caveats, stated now rather than discovered later. First, **the search
 margin is not a bug, and the test assertions must be written to that standard. Second, a mismatch may
 be an importer bug rather than an optimizer bug, which is why §8.2 exists as the independent check on
 the evaluation half.
+
+### 8.5 The slack has to be distributed, and weighted by generation
+
+The last six assertions on `epic5/SL_ep5us1.json` are a flow disagreement, not a margin one, and it
+is worth writing down because the diagnosis is complete and the fix is not.
+
+The scenario opens both of FFR1AA1's branches, and it has only two — `FFR1AA1 FFR2AA1 1` and
+`FFR1AA1 FFR3AA1 1`. That **islands** the node, which carries 2000 MW of generation against 1000 MW
+of load: the main component loses 1000 MW of net injection and something has to make it up. Where
+that 1000 MW appears decides the answer, because gridoxide's slack is **BBE2AA1** — one end of the
+Belgium–France tie — so a single slack pushes its entire make-up straight through France and out over
+the very CNEC being measured.
+
+Measured on `FFR2AA1  DDE3AA1  1`, with the reference at **1000 MW**:
+
+| how the 1000 MW is supplied | flow |
+|---|---|
+| single slack at BBE2AA1, AC | 1165.5 MW |
+| single slack, DC | 1381.0 MW |
+| distributed, weighted by **net injection** (what `distribute_slack` does today) | 1160.8 MW |
+| distributed, weighted by **generation** | **1000.2 MW** |
+
+The ordering is the physics: the nearer the make-up sits to France, the more transits that tie. The
+third row is why the obvious experiment refutes itself — net-injection weights put 40% of the
+make-up back at BBE2AA1 and 30% at FFR3AA1, which is 70% of it inside or adjacent to France, so the
+answer barely moves and slack distribution looks innocent. It is not; the *weighting* was wrong.
+Every vendored configuration says so outright: `"distributedSlack": true` with
+`"balanceType": "PROPORTIONAL_TO_GENERATION_P"`.
+
+Note also that DC and AC disagree by 215 MW on this topology while agreeing to 1.6 MW on the other
+two, which is a second symptom of the same thing.
+
+**What it needs, and why it is not done here.** Generation is not recoverable from the model:
+`Bus::p_spec` is generation *minus* load, `zip_terms` is left empty by the UCTE importer, and
+`UcteImport::p_limits` holds permissible-generation bounds rather than the set-point. So it is an
+importer change (retain per-node generation), a `rao::Network` field beside `shunts`, its use in
+`solve_distributing_slack`, and `distribute_slack` turned **on** for the RAO's AC path — which
+changes every AC scenario's flows and therefore needs a measured pass of its own, not a hurried one.
+The hypothesis is validated to 0.02%; the work is bounded and untouched.
 
 ### 8.4 Two independent MILP solvers
 
