@@ -1290,3 +1290,90 @@ fn a_plan_that_loses_ground_is_discarded() {
         "a discarded plan reports the network it started from"
     );
 }
+
+/// A curative range action's set-point is **not** carried into the second
+/// preventive problem.
+///
+/// The second pass optimizes the preventive perimeter again with every CNEC in
+/// front of it, and it does that in *one* network standing in for every state.
+/// Anything held in that network is therefore held in the preventive and outage
+/// states too, where a curative decision is not in force. For the curative
+/// stage's **switching** that is the price of the approximation: without it the
+/// pass reads overloads the curative stage has already removed, and overspends
+/// preventively to remove them a second time. For a **set-point** it is not a
+/// price, it is a stale iterate — chosen against the first pass's preventive
+/// decisions, which the second pass exists to discard, and recomputed from
+/// scratch by the curative stage the moment the second pass returns.
+///
+/// Held, the two passes settle into a fixed point neither can leave. This is
+/// the reference's own 1.4.4.4. Its curative shifter `pst_be` goes to −16,
+/// which caps the second pass's entire landscape at 553 A, so the pass takes
+/// `close_fr1_fr5` and puts the preventive shifter on its bound for 645 A —
+/// then the curative stage re-derives −16 against those new decisions, and the
+/// answer is self-consistent and 150 A short. Released, the same pass finds
+/// 798 A with **no network action at all**, which is the reference's answer.
+///
+/// Curative redispatch was never held — `second_preventive` takes `buses`
+/// straight from the network — so this is also what makes the shifter agree
+/// with it.
+#[test]
+fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(rao_fixture("features/SL_ep20us5case2.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    // `RaoParameters_maxMargin_ampere_2p_if_cost_increase.json`, in the fields
+    // that change this answer.
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.linear.max_iterations = 10;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition = gridoxide::rao::SecondPreventiveCondition::CostIncrease;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    assert_eq!(
+        plan.steps,
+        gridoxide::rao::StepsExecuted::SecondPreventiveImproved,
+        "the second pass should run and be kept"
+    );
+    // The whole point: the pass reaches the reference's answer with the shifter
+    // alone. Held, it spends `close_fr1_fr5` as well and lands at 638 A.
+    assert!(
+        plan.preventive.network_actions.is_empty(),
+        "the second pass should need no network action, not {:?}",
+        plan.preventive
+            .network_actions
+            .iter()
+            .map(|&a| crac.network_actions[a].id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let pst_fr = crac.range_actions.iter().position(|a| a.id == "pst_fr").expect("pst_fr");
+    let tap = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst_fr)
+        .and_then(|s| s.tap)
+        .expect("pst_fr set-point");
+    assert!(
+        (1..=2).contains(&tap),
+        "pst_fr should end near the reference's tap 2, not {tap}"
+    );
+}

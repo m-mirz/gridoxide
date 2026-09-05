@@ -1744,7 +1744,7 @@ const BASELINE_MATCHED_AC: usize = 276;
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
 const BASELINE_MATCHED_AC16: usize = 963;
 
-/// The 15 second-preventive scenarios: **89 of 123**, from 45 of 108 before the
+/// The 15 second-preventive scenarios: **91 of 123**, from 45 of 108 before the
 /// capability existed.
 ///
 /// 14 of the 15 `execution details` assertions hold. The one that does not is
@@ -1770,11 +1770,22 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// it rather than re-tuned, and 1.4.1.1.3, 1.4.1.2, 1.4.1.5 and 1.4.1.6 turn on
 /// exactly that.
 ///
-/// 1.4.4.4 is the same gap reached from the other side: the reference keeps a
-/// curative action and moves a preventive shifter two taps, where gridoxide
-/// spends a second preventive action instead and lands 150 A short. 1.4.5.1 is
-/// one margin on a DC scenario.
-const BASELINE_MATCHED_2P: usize = 89;
+/// 1.4.4.4 used to be counted with them and was not one of them. It was the
+/// second pass **inheriting a curative set-point**: `pst_be` at −16, chosen
+/// against preventive decisions the second pass was in the act of discarding,
+/// capped its whole landscape at 553 A. Released, the pass finds the
+/// reference's answer with no network action at all, and 1.4.5.1 — the scenario
+/// named for fixing CRA set-points — went from four of five to five of five.
+/// `plans/RAO_PLAN.md` §8.8 has the sweep, and
+/// `the_second_preventive_pass_does_not_inherit_a_curative_set_point` pins it.
+///
+/// The one assertion that change cost is 1.4.1.6's `security status`, and it
+/// was matching by accident: `plan.final_margin_mw` read 41.2 MW there while
+/// the plan's own network measured −32.4 A, because the figure was taken in the
+/// second pass's network with another contingency's curative shifter still in
+/// it. Both numbers now agree, and both disagree with the reference — which is
+/// the honest report of a scenario that was already wrong.
+const BASELINE_MATCHED_2P: usize = 91;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

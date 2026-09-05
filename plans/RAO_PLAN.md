@@ -12,13 +12,13 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
 > **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, and **89 of 123** on the second-preventive corpus — **1503 of 1563**, with
+> TestCase16Nodes, and **91 of 123** on the second-preventive corpus — **1505 of 1563**, with
 > **six** steps left unsupported out of what was 177.
 >
-> 60 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> 58 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
 > reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
-> asserts that nothing may disagree without a measurement behind it. **34 are the second-preventive
+> asserts that nothing may disagree without a measurement behind it. **32 are the second-preventive
 > corpus**, which is the one capability still short of the reference and is exempt by name until it
 > is not (§8.7).
 >
@@ -30,12 +30,11 @@ second preventive was built and gated the same day.
 >    the step reporting a gap §8.7 already records rather than adding one. `Plan::steps` now carries
 >    which optimization steps ran, which is a thing an operator wants and no margin can supply: a
 >    plan and the plan it fell back to have different margins but the same shape.
-> 2. **One scenario, diagnosed to a mechanism** — 1.4.4.4 for choice. Its corpus is gated at **89 of
->    123**, and §8.8 records that "a richer second preventive problem" has no referent yet: three
->    candidate meanings have been measured and all three cost. What the traces show is a second pass
->    that *works* — on 1.4.4.4 it takes the objective from −242.0 to 638.2 and is kept — and stops
->    short. That is a search question, not an architecture question, and it wants the method §8.3
->    used twenty-nine times rather than another structural change.
+> 2. ~~**One scenario, diagnosed to a mechanism** — 1.4.4.4 for choice.~~ **Done**, and it was
+>    defect 30: the second pass **inherited a curative set-point**. Three architectural candidates
+>    had each been measured and each cost (§8.8); diagnosing the one scenario found a nine-line
+>    deletion worth +2, and the corpus is now **91 of 123**. The next one is 1.4.1.6 or 1.4.1.2 by
+>    the same method — not another structural change.
 > 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
 >    reference keeps its curative answer after a second preventive pass *because* its second
 >    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
@@ -55,7 +54,7 @@ second preventive was built and gated the same day.
 > one network through both parsers gives bit-identical flows, which neither importer's own comparison
 > could establish.
 >
-> The second-strongest is a method rather than a result, and §8.3 is the record of it: **twenty-nine
+> The second-strongest is a method rather than a result, and §8.3 is the record of it: **thirty
 > defects, every one internally consistent and externally wrong.** Not one would have been found by
 > reading the code, and several survived a confident diagnosis that had to be withdrawn — the
 > combination-depth theory, three refuted explanations of the `epic5` residual, and a slack
@@ -1039,6 +1038,14 @@ own objective value, and the comparison needs no probe at all. It sizes what is 
 So what remains is **four genuine gaps, not seven**: 1.4.5.1 is fixed by work already drafted,
 1.4.1.1.4 is a recorded disagreement waiting to be written down, and 1.4.1.1.3 is reachable.
 
+**Two of those rows have since moved, and not by `A(r, s)`.** §8.8's defect 30 — the second pass no
+longer inherits a curative set-point — takes 1.4.4.4 from 638.20 to **783.11** against the
+reference's 795, and takes 1.4.5.1 to **−40.54**, closing it completely. The `A(r, s)` column had
+claimed 1.4.5.1 as the case only it could fix; it was not. That is worth reading back onto the rest
+of this section: a row this table calls "a real gap" is evidence that *something* is wrong, not
+evidence about *what*, and the two rows that moved were both fixed by deleting nine lines rather
+than by adding an index.
+
 ### The composition rule, and why adopting it costs
 
 The suspicion above was right about the mechanism and wrong about the remedy, and the reference
@@ -1073,38 +1080,102 @@ is rich enough that its curative answer beats a dedicated curative search. Until
 arrangement — hold the curative decisions during the second pass, re-derive them after — is not a
 shortcut. It is the better answer, and 75 of 108 is what it is worth.
 
-### 8.8 "A richer second preventive problem" is not yet a change anyone can name
+### 8.8 Defect 30: the second pass inherited a curative set-point
 
-§8.7 concluded that `A(r, s)` and the composition rule come last, *after* the second preventive
-problem is rich enough to earn them. That is still the right ordering. What the phrase does not have
-is a referent: three candidate meanings have now been measured against the gate and all three cost.
+"A richer second preventive problem" never had a referent. Three candidate meanings were measured
+against the gate and all three cost:
 
 | candidate | second_preventive.feature |
 |---|---|
-| **as built** | **89 of 123** |
+| as built | 89 of 123 |
 | `A(r, s)` columns, re-measured against the richer gate | 85 |
 | report the second pass's margin over the states it reports, not all of them | 85 |
 | the reference's composition rule, in any of its three partial forms | 66–68 |
+| **releasing the held curative set-point — the change below** | **91** |
 
 The middle row is worth keeping because it looks like an obvious bug and is not. A second preventive
-result reports `final_margin_mw` over **every** state, measured with only the preventive decisions in
-force — the curative ones are held, not yet made. Narrowing it to the states the plan actually
-reports is more defensible on its face and loses four assertions, because the wide reading is what
-makes `security status` honest: a plan whose curative perimeters have not run *is* insecure, and
-saying so is not pessimism.
+result reports `final_margin_mw` over **every** state with only the preventive decisions in force —
+the curative ones are held, not yet made. Narrowing it to the states the plan reports is more
+defensible on its face and loses four assertions, because the wide reading is what makes
+`security status` honest: a plan whose curative perimeters have not run *is* insecure.
 
-**What the traces do establish.** On 1.4.4.4 the second pass is not failing to run or failing to
-help — it takes the objective from **−242.0 to 638.2**, against a first pass that was worse than
-doing nothing, and it is kept. It simply stops short of the reference's 795, choosing `pst_fr` at −5
-where the reference takes tap 2 and one fewer action. On 1.4.5.1 the second pass reaches the
-reference's answer on the CNEC the scenario names, to two decimals. These are not architectural
-failures; they are a search settling somewhere else, and no structural change tried so far moves
-them.
+What broke the deadlock was abandoning architecture and diagnosing **one scenario**, which is how
+every defect in §8.3 was found. 1.4.4.4 was the candidate: two preventive decisions against the
+reference's one, on a fixture with one contingency, seven CNECs, two shifters and five network
+actions.
 
-**So the next step is not another architectural change.** It is one scenario, diagnosed to a
-mechanism, the way every one of §8.3's twenty-nine defects was found. 1.4.4.4 is the candidate: two
-preventive decisions against the reference's one, on a fixture small enough to reason about, with the
-second pass demonstrably working and demonstrably stopping early.
+#### The evaluation was already right, to the decimal
+
+The first question a mismatch has to answer is whether the answer cannot be *found* or cannot be
+*expressed*. Scoring the reference's own plan under gridoxide's evaluation settled it:
+
+| the reference's plan | gridoxide measures | the scenario asserts |
+|---|---|---|
+| `pst_fr` @ 2, preventive network | `FFR4AA1 DDE1AA1 - preventive` **800.43 A** | 800 A |
+| `pst_fr` @ 2 + `open_fr1_fr3` | `FFR1AA1 FFR4AA1 - curative` **794.75 A** | 795 A |
+
+So the whole gap was search. Sweeping `pst_fr` over its permitted range confirms the reference's tap
+is the true optimum rather than a good guess — the preventive CNEC improves monotonically with the
+tap and the curative one degrades, and tap 2 is where they cross.
+
+#### The mechanism
+
+`second_preventive` builds **one** network to stand in for every state, holding the curative stage's
+decisions so the second pass can see past them. It held two kinds of thing: the branches the curative
+stage opened, and the taps it moved. The sweep, run for each:
+
+| `pst_fr` | `pst_be` released | `pst_be` held at −16 |
+|---|---|---|
+| −5 | 744.45 | 501.29 |
+| 1 | **798.37** | 525.08 |
+| 2 | 794.75 | 529.05 |
+| 8 | 536.78 | **552.84** |
+
+Held, the whole landscape is capped at 553 A, and `close_fr1_fr5` — which is worse than doing nothing
+at every tap when `pst_be` is released — becomes the best branch available at 645 A. The pass takes
+it, puts `pst_fr` on its bound, and the curative stage then re-derives `pst_be` at −16 against those
+new decisions. The answer is self-consistent, reproducible, and 150 A short. **The two passes settle
+into a fixed point neither can leave.**
+
+Running the second pass's own `search_with_open` with the set-point released returns no network
+action, `pst_fr` at tap 1, objective 798.37 — the reference's answer.
+
+#### Why holding a switch is right and holding a set-point is not
+
+The asymmetry is the substance of the fix. One network standing in for every state means anything
+held in it is held in the preventive and outage states too, where a curative decision is not in
+force. For **switching** that is the price of the approximation: without it the pass reads overloads
+the curative stage has already removed and overspends preventively to remove them again. A
+**set-point** is different in kind — it is a *stale iterate*, chosen against the first pass's
+preventive decisions, which the second pass exists to discard, and recomputed from scratch by
+`scenarios_after` the moment the second pass returns. Pinning the search to a number that is about to
+be thrown away is what builds the fixed point.
+
+Curative **redispatch** was never held: `second_preventive` takes `buses` from the network untouched.
+The shifter was the odd one out, and the fix makes it agree.
+
+#### What it cost
+
++2 net on the second-preventive corpus, nothing moved on the other three files.
+
+- **1.4.4.4**: 3 → 5. Worst margin 783.11 A against the reference's 795, inside the reference's own
+  `max(5, 1.5%)`. `pst_fr` lands on tap 1 where the reference takes 2 — still one tap apart.
+- **1.4.5.1**, the scenario named *"Fix PST CRA setpoints in global 2nd preventive"*: 4 → **5 of 5**.
+  The holding was causing that mismatch, not serving it.
+- **1.4.1.6**: 6 → 5, and it was matching by accident. Every margin is byte-identical before and
+  after; only `security status` flipped. `plan.final_margin_mw` read **41.2 MW** there while the
+  plan's own network measures **−32.4 A**, because the figure was taken in the second pass's network
+  with another contingency's curative shifter still in it. The two now agree, and both disagree with
+  the reference — the honest report of a scenario that was already wrong.
+
+`the_second_preventive_pass_does_not_inherit_a_curative_set_point` in `tests/rao_castor_test.rs` pins
+it, and fails on the old code with `close_fr1_fr5` named.
+
+#### What is still open
+
+`A(r, s)` and the composition rule are unchanged by this, and item 3 of the status header still
+stands: they come last. The next step is the same method on the next scenario — 1.4.1.6, whose
+preventive shifter sits at −3 against the reference's −7, or 1.4.1.2.
 
 ### 8.4 Two independent MILP solvers
 

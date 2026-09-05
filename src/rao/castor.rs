@@ -766,7 +766,6 @@ fn second_preventive(
     // stage's decisions in force, the preventive stage's *not*. Those are what
     // is being reconsidered.
     let mut open: Vec<usize> = network.initially_open.to_vec();
-    let mut transformers = network.transformers.to_vec();
     for scenario in scenarios {
         for perimeter in &scenario.perimeters {
             for &branch in &perimeter.open_branches {
@@ -778,23 +777,30 @@ fn second_preventive(
     }
     open.sort_unstable();
     open.dedup();
-    // A curative shifter keeps the position the curative stage put it on; a
-    // preventive one goes back to where the file had it, since the second pass
-    // is about to choose again.
-    for scenario in scenarios {
-        for perimeter in &scenario.perimeters {
-            for (i, t) in perimeter.transformers.iter().enumerate() {
-                if network.transformers.get(i).is_some_and(|n| n.tap != t.tap)
-                    && preventive.transformers.get(i).is_some_and(|p| p.tap == network.transformers[i].tap)
-                    && let Some(slot) = transformers.get_mut(i)
-                {
-                    slot.tap = t.tap;
-                }
-            }
-        }
-    }
+    // A curative **shifter**, by contrast, goes back to where the file had it.
+    //
+    // The asymmetry with the switching above is not an oversight. This is one
+    // network standing in for every state, so anything held in it is held in
+    // the preventive and outage states too, where a curative decision is not in
+    // force. For a switch that is the price of letting the second pass see the
+    // curative CNECs at all — without it the pass reads overloads the curative
+    // stage has already removed and overspends preventively to fix them again.
+    // A set-point is different in kind: it is a **stale iterate**. It was
+    // chosen against the first pass's preventive decisions, which this pass
+    // exists to discard, and `scenarios_after` recomputes it from scratch the
+    // moment this pass returns. Pinning the search to a number that is about to
+    // be thrown away is what lets the two passes settle into a fixed point that
+    // neither can leave: 1.4.4.4's curative `pst_be` at −16 caps the second
+    // pass's whole landscape at 553 A, so it takes `close_fr1_fr5` and a
+    // preventive shifter at its bound for 645 A, where releasing the set-point
+    // lets it find 798 A with no network action at all — the reference's own
+    // answer. `plans/RAO_PLAN.md` §8.8 has the measurement.
+    //
+    // Curative redispatch was never held: `buses` comes from `network`
+    // untouched. This makes the shifter agree with it. Nothing but `open` now
+    // separates the second pass's network from the file's, so it is handed the
+    // network itself.
 
-    let view = Network { transformers: &transformers, ..*network };
     // Every CNEC, but still only the preventive perimeter's actions.
     let all = crac.states();
     let preventive_states: Vec<State> = all
@@ -823,7 +829,7 @@ fn second_preventive(
         },
         ..options.clone()
     };
-    let mut result = search_with_open(crac, &view, resolution, &all, solver, &options, &open);
+    let mut result = search_with_open(crac, network, resolution, &all, solver, &options, &open);
 
     // Strip the held decisions back out. They were in force so the second pass
     // could *see* past them; they are not part of its answer, and leaving them
@@ -840,15 +846,8 @@ fn second_preventive(
     }
     result.open_branches.sort_unstable();
     result.open_branches.dedup();
-    for (i, t) in result.transformers.iter_mut().enumerate() {
-        // A shifter the second pass did not itself move goes back to where the
-        // file had it, for the same reason.
-        if transformers.get(i).is_some_and(|held| held.tap == t.tap)
-            && let Some(original) = network.transformers.get(i)
-        {
-            t.tap = original.tap;
-        }
-    }
+    // Nothing to strip from the transformers: the second pass was handed the
+    // file's own, so whatever it returns is its own choice.
     Some(result)
 }
 
