@@ -1744,7 +1744,7 @@ const BASELINE_MATCHED_AC: usize = 276;
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
 const BASELINE_MATCHED_AC16: usize = 963;
 
-/// The 15 second-preventive scenarios: **109 of 123**, from 45 of 108 before the
+/// The 15 second-preventive scenarios: **115 of 123**, from 45 of 108 before the
 /// capability existed.
 ///
 /// 14 of the 15 `execution details` assertions hold. The one that does not is
@@ -1799,9 +1799,15 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// All three are pinned in `tests/rao_castor_test.rs` and all three fail on the
 /// old code.
 ///
-/// # What the 14 that remain are
+/// With those three landed the second preventive problem was finally rich enough
+/// to earn **`A(r, s)`** (§8.11), which §8.7 had ranked last for exactly that
+/// reason and which had cost on all three previous attempts. It carries a column
+/// per range action per state, so the pass can see a curative shifter paying for
+/// a preventive push — worth 6, and it closed 1.4.1.2 completely.
 ///
-/// Four scenarios. **Five** are a curative perimeter that overspends: 1.4.1.5
+/// # What the 8 that remain are
+///
+/// Three scenarios. **Five** are a curative perimeter that overspends: 1.4.1.5
 /// and 1.4.1.6 agree with the reference on every preventive figure and then
 /// spend three curative actions where it spends one, reaching *better* curative
 /// margins than it asks for — 535 A against 86. That is a defect rather than a
@@ -1812,13 +1818,10 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// (−2, and it moves neither scenario), and `A(r, s)` (−4). The overspend is
 /// intrinsic to the curative search in *both* passes; do not re-run those four.
 ///
-/// The other **nine** are 1.4.1.2 and 1.4.1.1.3, which still underspend. §8.10
-/// took 1.4.1.2's shifter from tap 2 to 3 against the reference's 4 and its
-/// worst margin inside tolerance, and what is left there is the second
-/// preventive action the reference also takes — which needs `A(r, s)`, since the
-/// reference reaches tap 4 only because it can re-tune the curative `pst_be` to
-/// −5 in the same problem.
-const BASELINE_MATCHED_2P: usize = 109;
+/// The other **three** are 1.4.1.1.3, which still underspends: it wants a
+/// preventive `pst_be` at −16 and `pst_fr` at 5 where gridoxide leaves the first
+/// alone and puts the second at −5, for 295.6 A against 321. Not yet diagnosed.
+const BASELINE_MATCHED_2P: usize = 115;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

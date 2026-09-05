@@ -12,13 +12,13 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
 > **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, and **109 of 123** on the second-preventive corpus — **1523 of 1563**, with
+> TestCase16Nodes, and **115 of 123** on the second-preventive corpus — **1529 of 1563**, with
 > **six** steps left unsupported out of what was 177.
 >
-> 40 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> 34 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
 > reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
-> asserts that nothing may disagree without a measurement behind it. **14 are the second-preventive
+> asserts that nothing may disagree without a measurement behind it. **8 are the second-preventive
 > corpus**, which is the one capability still short of the reference and is exempt by name until it
 > is not (§8.7).
 >
@@ -49,13 +49,13 @@ second preventive was built and gated the same day.
 >    different defect: **defect 32**, now fixed (§8.10). What is left of 1.4.1.2 is the second
 >    preventive action the reference also takes, and that one *does* need `A(r, s)`: the reference
 >    reaches tap 4 only because it can re-tune the curative `pst_be` to −5 in the same problem.
-> 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
->    reference keeps its curative answer after a second preventive pass *because* its second
->    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
->    currently better than any curative column its second preventive problem can produce. Six steps
->    toward the reference's architecture cost six drops on the gate. Neither pays until item 2 does.
->    Four branches hold the drafts: `rao-a-r-s-wip`, `rao-a-r-s-wip2`, and the two commits on top of
->    it, each with an honest message about what it establishes and what it costs.
+> 3. ~~**`A(r, s)` and the composition rule, together and last.**~~ **`A(r, s)` is done** (§8.11),
+>    and §8.7's ordering was right: it had cost on all three previous attempts and paid **+6** the
+>    moment defects 30, 31 and 32 made the second preventive problem worth solving properly. It is
+>    *not* one change with the composition rule after all — that was measured separately and costs 2
+>    while fixing nothing (§8.9). What is still declared and unbuilt is the **coupling row** a
+>    `relativeToPreviousInstant` curative range needs, without which such a column is declined
+>    rather than mismodelled; 1.4.1.6 is the case.
 > 4. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
 > 5. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
@@ -1412,6 +1412,65 @@ need `A(r, s)`: the reference reaches tap 4 only because it can re-tune the cura
 inside the same problem, and gridoxide's second pass may only use preventive actions. §8.7's order
 finally has its condition — the second preventive problem is now rich enough that the next step is
 the column, not another correction to what it measures.
+
+### 8.11 `A(r, s)`, on the fourth attempt
+
+§8.7 ranked `A(r, s)` last and said why: *"neither pays until the second preventive problem is rich
+enough that its curative answer beats a dedicated curative search."* Three attempts had measured it
+at 74, 71 and 85 against baselines of 75 and 89. With defects 30, 31 and 32 landed the condition was
+finally met, and it pays **+6** — closing 1.4.1.2 completely, at 11 of 11.
+
+It was built fresh rather than rebased. The drafts on `rao-a-r-s-wip2` are 491 lines against a tree
+whose `linear.rs` §8.10 has since restructured, and — more to the point — §8.10 had already
+established the pattern `A(r, s)` needs: `Held`, a statement that *these states see something
+different*. The set-point half is the same shape as the open-set half.
+
+**What it is, in four pieces.**
+
+1. **A column may be scoped to states.** `Control::reported` marks a column the perimeter carries but
+   does not decide, and `build_controls` zeroes its sensitivity outside the states it governs — so a
+   curative shifter cannot pretend to move a preventive flow. No change to `build_program`: the
+   sensitivity vector was already per-CNEC.
+2. **The measurement follows.** `Held::taps` carries the position a scoped column currently sits on,
+   and `held_now` folds the live value in at every scoring call, so the evaluation that judges a
+   proposal sees it — in the curative states, and only there. `apply` correspondingly stops writing a
+   scoped column into the shared transformers.
+3. **A curative column supersedes the preventive one on the same machine.** A shifter is one machine
+   with one angle and the curative decision is the later one; left additive the LP sees twice the
+   authority it has. *The corpus does not distinguish this* — 115 either way — and it is kept
+   because the measurement already supersedes, via `Held::taps`, and an LP that disagrees with its
+   own evaluator about the model is a defect waiting for a fixture.
+4. **The column is not reported.** The curative perimeter that follows decides it properly, in a
+   network where it is the only thing being decided. Reporting both would put two set-points on one
+   action with nothing to tell them apart.
+
+**The one restriction, and it is measured.** A range written `relativeToPreviousInstant` is chained
+to the instant before it, and in this problem that instant is the one being decided: its window is
+relative to another *column*, not to a number. This LP carries one bound pair per column and no row
+coupling two of them. Offering the column anyway anchors the window on the network's starting tap,
+and the curative shifter then spends the pass undoing whatever preventive chose — on 1.4.1.6 that
+took the scenario from **11 of 13 to 0 of 13**, the second pass giving up and falling back to the
+initial situation. Declining such a column is the honest reading until the coupling row exists.
+
+| | second_preventive.feature |
+|---|---|
+| before | 109 |
+| `A(r, s)` for every curative range action | 104 |
+| **`A(r, s)`, declining chained ranges** | **115** |
+
+**What it buys.** 1.4.1.2 goes 5 → **11 of 11**: two preventive actions, `pst_fr` at tap 4, two
+curative, `pst_be` at −5, and all three CNEC margins — 720.98, 724.88 and 730.53 A against asserted
+721, 725 and 731. The mechanism is exactly the one §8.10 diagnosed and could not reach: pushing
+`pst_fr` from 3 to 4 buys 13 A preventively and costs more than that curatively, *until* the curative
+stage moves `pst_be`, which it does the moment the pass is over. The pass can now see that coming.
+
+**A note on the reference's parameter.** OpenRAO gates this on
+`re-optimize-curative-range-actions`, which **no** vendored configuration sets. What the corpus shows
+is that its answers need it regardless — 1.4.1.2's asserted preventive tap of 4 is not reachable
+otherwise — so gridoxide does it whenever a second preventive pass runs. That is a disagreement with
+the reference's stated default and an agreement with its stated answers, and the gate is the arbiter.
+
+`a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem` pins it.
 
 ### 8.4 Two independent MILP solvers
 

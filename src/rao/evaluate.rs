@@ -647,6 +647,14 @@ pub struct Held {
     /// Branches open elsewhere and **not** in [`states`](Self::states) — the
     /// curative stage's closes.
     pub close: Vec<usize>,
+    /// Phase-shifter positions in force in [`states`](Self::states) and not
+    /// elsewhere, as `(branch, tap, angle in the CRAC's degrees)`.
+    ///
+    /// This is the measurement half of `A(r, s)`. A curative shifter the second
+    /// preventive problem carries a column for is *not* in force preventively —
+    /// it has not been decided yet — so writing its tap into the shared
+    /// transformers would move a preventive flow with a curative decision.
+    pub taps: Vec<(usize, i32, f64)>,
     /// The states that see the difference.
     pub states: Vec<State>,
 }
@@ -658,6 +666,28 @@ impl Held {
     /// fixed: the second preventive pass is *choosing* the preventive switching
     /// while this is in force, and each candidate it tries changes what the
     /// curative states inherit.
+    /// `network`'s transformers with this perimeter's held shifter positions in
+    /// force.
+    ///
+    /// The network's own step is preferred over the angle, for the same reason
+    /// `search::apply_taps` prefers it: a tap is a position the machine has and
+    /// the angle is a description of it, and the two disagree in the last digit.
+    pub fn transformers_of(&self, network: &Network<'_>) -> Vec<crate::types::Transformer> {
+        let mut out = network.transformers.to_vec();
+        for &(branch, tap, angle_deg) in &self.taps {
+            let Some(i) = branch.checked_sub(network.lines.len()) else { continue };
+            let from_network =
+                network.tap_changers.get(i).and_then(|c| c.as_ref()).and_then(|c| c.at(tap));
+            let Some(slot) = out.get_mut(i) else { continue };
+            let ratio = slot.tap.norm();
+            slot.tap = match from_network {
+                Some(step) => num_complex::Complex::from_polar(ratio, step.arg()),
+                None => num_complex::Complex::from_polar(ratio, angle_deg.to_radians()),
+            };
+        }
+        out
+    }
+
     pub fn applied_to(&self, open: &[usize]) -> Vec<usize> {
         let mut out: Vec<usize> =
             open.iter().chain(self.open.iter()).copied().filter(|b| !self.close.contains(b)).collect();
@@ -689,7 +719,19 @@ pub fn evaluate_split(
     // The two networks are genuinely different, so both are evaluated and each
     // state's perimeter is taken from the one that describes it.
     let base = evaluate_model(crac, network, resolution, open, model, ac);
-    let other = evaluate_model(crac, network, resolution, &held.applied_to(open), model, ac);
+    // The held states may also see a shifter somewhere else, so they may need a
+    // network of their own rather than only an open set of their own.
+    let transformers;
+    let stepped;
+    let other_network = if held.taps.is_empty() {
+        network
+    } else {
+        transformers = held.transformers_of(network);
+        stepped = Network { transformers: &transformers, ..*network };
+        &stepped
+    };
+    let other =
+        evaluate_model(crac, other_network, resolution, &held.applied_to(open), model, ac);
     let mut perimeters: Vec<PerimeterResult> = Vec::with_capacity(base.perimeters.len());
     for perimeter in base.perimeters {
         if held.states.contains(&perimeter.state)

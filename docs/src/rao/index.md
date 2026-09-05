@@ -166,10 +166,10 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1523 of 1563 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1529 of 1563 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
 counts, objective values, security statuses and **which optimization steps ran**, across two flow
-models and three networks. Of the 40 that do not, 14 belong to the second-preventive corpus, which is
+models and three networks. Of the 34 that do not, 8 belong to the second-preventive corpus, which is
 the one capability still short of the reference.
 
 The other 26 are **recorded disagreements rather than a backlog**. Each has been measured on
@@ -186,14 +186,22 @@ and refuses to let a scenario disagree without one — see `plans/RAO_PLAN.md` �
 - **HVDC range actions**, recognised and skipped: gridoxide models a DC network but nothing connects
   it to a range action yet.
 - **Multi-timestamp (MARMOT) runs.**
-- **Curative range actions re-optimized inside the second preventive problem.** The second pass
-  itself is here: after the curative stage, the preventive perimeter is optimized again with every
-  CNEC in front of it and the automaton and curative *switching* held applied, and the result is kept
-  only if the whole plan it leads to is better. What the reference does and this does not is
-  re-optimize the curative *range* actions inside that same problem — a set-point per action per
-  state — and then keep them instead of re-deriving them afterwards. Those two are one change rather
-  than two, and `plans/RAO_PLAN.md` §8.7 records why adopting either half alone is worse than
-  neither.
+- **A `relativeToPreviousInstant` curative range inside the second preventive problem.** The rest of
+  that problem is here. After the curative stage, the preventive perimeter is optimized again with
+  every CNEC in front of it and the automaton and curative *switching* held applied, and the result
+  is kept only if the whole plan it leads to is better. The curative *range* actions get a column of
+  their own in it — `A(r, s)`, a set-point per action per state — so the pass can see a curative
+  shifter paying for a preventive push; the column is scoped to the states it governs and is not
+  reported, because the curative perimeter that follows decides it properly.
+
+  What that cannot yet express is a range written **relative to the previous instant**, because its
+  window is relative to another *column* rather than to a number, and this LP carries one bound pair
+  per column and no row coupling two of them. Such a column is declined rather than mismodelled —
+  offering it anchors the window on the network's own starting tap, and the curative shifter then
+  spends the pass undoing whatever preventive chose. `plans/RAO_PLAN.md` §8.11 has the measurement.
+
+  What the reference additionally does is *keep* the curative decisions afterwards rather than
+  re-deriving them. That is a separate change, and §8.9 records it costing 2 and fixing nothing.
 
   What that pass holds is exact about two things it used to get wrong, and both were worth more than
   any of the architecture around them. A curative **set-point** is deliberately *not* held: the pass

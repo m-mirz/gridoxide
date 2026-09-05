@@ -1455,9 +1455,13 @@ fn the_second_preventive_pass_holds_a_curative_close() {
 /// apart at the tap the pass was choosing, and they peak at *different* taps:
 /// held in every state the maximum is tap 2, measured per state it is tap 3.
 /// The search was finding the exact optimum of a landscape that was wrong for
-/// half its states. The reference's answer is tap 4 with a second preventive
-/// action, and this gets the shifter to 3 and the worst margin inside the
-/// reference's own tolerance of 721 A.
+/// half its states.
+///
+/// The assertion is **4** rather than 3 because §8.11 landed after this: with
+/// the curative `pst_be` given a column of its own the pass can see it moving to
+/// −5 to pay for a preventive push, and reaches the reference's own tap. Tap 3
+/// was the per-state optimum with that shifter frozen, and both numbers are
+/// gains over the 2 this test was written against.
 #[test]
 fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
@@ -1496,6 +1500,75 @@ fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
         .find(|s| s.action == pst_fr)
         .and_then(|s| s.tap)
         .expect("pst_fr set-point");
-    // 2 while the preventive CNEC was read with the curative branch open.
-    assert_eq!(tap, 3, "pst_fr should reach the per-state optimum");
+    // 2 while the preventive CNEC was read with the curative branch open; 3
+    // once it was not; 4 once §8.11 gave the curative shifter its own column.
+    assert_eq!(tap, 4, "pst_fr should reach the reference's tap");
+}
+
+/// `A(r, s)`: the second preventive problem carries a **column per range action
+/// per state**, so it can see a curative shifter paying for a preventive push.
+///
+/// Without it the pass chooses its preventive set-points as though every
+/// curative shifter were frozen where it stands, which understates what a
+/// preventive move costs. The reference's 1.4.1.2 is the case: pushing `pst_fr`
+/// from tap 3 to 4 buys 13 A on a preventive CNEC and costs more than that on a
+/// curative one — but only until the curative stage moves `pst_be` to −5, which
+/// it does, the moment the pass is over. Seeing that, the pass takes tap 4 and
+/// a second preventive action, and the whole scenario matches.
+///
+/// The column is not the perimeter's to report: `Control::reported` keeps it out
+/// of the set-points, and the curative perimeter that follows decides it
+/// properly in a network where it is the only thing being decided. What is
+/// asserted here is therefore the *preventive* answer the column makes possible.
+#[test]
+fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(rao_fixture("features/SL_ep13us3case1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    // Two preventive decisions where a frozen curative shifter justifies one.
+    assert_eq!(
+        plan.preventive.network_actions.len(),
+        1,
+        "the pass should spend a network action alongside the shifter"
+    );
+    let pst_be = crac.range_actions.iter().position(|a| a.id == "pst_be").expect("pst_be");
+    assert!(
+        !plan.preventive.setpoints.iter().any(|s| s.action == pst_be && s.moved()),
+        "the curative column is not the preventive perimeter's to report"
+    );
+    // The curative perimeter that follows makes the decision the column only
+    // anticipated, and lands where the reference does.
+    let curative = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find_map(|p| p.setpoints.iter().find(|s| s.action == pst_be))
+        .and_then(|s| s.tap)
+        .expect("pst_be set-point after the contingency");
+    assert_eq!(curative, -5, "pst_be should reach the reference's curative tap");
 }

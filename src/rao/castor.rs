@@ -804,6 +804,9 @@ fn second_preventive(
     let held = super::evaluate::Held {
         open: opened,
         close: closed,
+        // Filled in by the LP as it chooses them: a curative shifter's position
+        // is a variable of the second preventive problem, not an input to it.
+        taps: Vec::new(),
         // The states that see it: everything at or after the automatons, which
         // is where a curative decision has been taken. An **outage** state is
         // not one of them — it is over before an automaton fires — and neither
@@ -849,6 +852,13 @@ fn second_preventive(
         .collect();
     let mut linear = options.linear.clone();
     linear.held = Some(held);
+    // The curative shifters get a column of their own here and nowhere else.
+    // The reference gates this on `re-optimize-curative-range-actions`, which no
+    // vendored configuration sets; what the corpus shows is that its answers
+    // need it regardless — 1.4.1.2 asserts a preventive tap of 4 that is only
+    // reachable if the pass can see the curative `pst_be` moving to −5 to pay
+    // for it. See §8.11.
+    linear.a_r_s = true;
     let options = SearchOptions {
         linear,
         available_at: Some(preventive_states),
