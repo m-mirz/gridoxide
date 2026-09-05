@@ -1125,6 +1125,61 @@ fn perimeter_cnecs(
         .collect()
 }
 
+/// The set-point a redispatch action currently sits on, in MW, or `None` when
+/// the network cannot say.
+///
+/// Each element's target is `setpoint × key`, so `setpoint = target / key` and
+/// every element must agree. The target is read as the bus's net injection,
+/// which is the machine's own only when nothing else sits on that bus — so the
+/// agreement is checked rather than assumed, and a disagreement returns `None`.
+/// A key of zero contributes nothing and is skipped: it names an element the
+/// action does not move.
+fn injection_origin(
+    buses: &[crate::types::Bus],
+    base_mva: f64,
+    keys: &[(usize, f64)],
+) -> Option<f64> {
+    let mut agreed: Option<f64> = None;
+    for &(bus, key) in keys {
+        if key.abs() < 1e-9 {
+            continue;
+        }
+        let target = buses.get(bus)?.p_spec * base_mva;
+        let setpoint = target / key;
+        match agreed {
+            None => agreed = Some(setpoint),
+            // Relative, because these are megawatts and a thousand-megawatt
+            // machine does not agree to the same absolute tolerance a
+            // ten-megawatt one does.
+            Some(first) if (setpoint - first).abs() <= 1e-6 * first.abs().max(1.0) => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// The set-point a redispatch range action currently sits on in `network`, MW.
+///
+/// The quantity the reference reports and the one a CRAC's range is stated in:
+/// each element's target is `setpoint × key`, so an action nobody has moved is
+/// already at a non-zero set-point. `None` when `action` is not a redispatch, or
+/// when the network cannot say — see [`injection_origin`].
+pub fn injection_setpoint(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    action: usize,
+) -> Option<f64> {
+    let RangeActionKind::Injection { distribution } = &crac.range_actions.get(action)?.kind else {
+        return None;
+    };
+    let keys: Vec<(usize, f64)> = distribution
+        .iter()
+        .filter_map(|(element, key)| Some((resolution.bus(element)?, *key)))
+        .collect();
+    injection_origin(network.buses, network.base_mva, &keys)
+}
+
 /// Build one control per usable range action, with its sensitivity to each of
 /// `cnecs` — which is the LP's row set, optimized and monitored alike, in the
 /// order the rows will be written.
@@ -1304,16 +1359,58 @@ fn build_controls(
                 if !usable {
                     continue;
                 }
-                let Some(sensitivity_mw) = points.injection(&injections) else { continue };
+                // Per unit **of the set-point**, which is megawatts.
+                //
+                // The pattern above is `key / base_mva` — a per-unit injection
+                // of `key` megawatts — so the response comes back in per-unit
+                // flow, and a row that reads it as MW-per-MW is short by a
+                // factor of `base_mva`: 0.01 where the truth is 1.
+                //
+                // It was invisible for as long as the control was anchored at
+                // zero. An LP told a control is a hundred times weaker than it
+                // is still moves it the right *way*, saturates at its bound,
+                // and hands that to `apply`, which does the arithmetic in MW
+                // and gets the move right; the iterate-and-relinearize loop
+                // then measures the true objective and keeps it. On every
+                // vendored redispatch fixture the answer happens to sit exactly
+                // on the bound, so saturating *was* optimal and the scale never
+                // showed. Anchoring the control where it really starts removes
+                // that accident, which is how this surfaced.
+                let Some(column) = points.injection(&injections) else { continue };
+                let sensitivity_mw: Vec<f64> =
+                    column.iter().map(|s| s * network.base_mva).collect();
                 let (lower, upper) = standard_bounds(action);
-                if !starts_inside_its_range(0.0, lower, upper) {
+                // Where this action's set-point *starts*, which is not zero.
+                //
+                // A redispatch's set-point is an absolute quantity, not a
+                // shift: the reference's own scenario 2.3.1.1.a spells the
+                // model out — "on FFR1AA1 -> setpoint * 1 = 0, on FFR2 ->
+                // setpoint * -1 = 0" — so each element's target **is**
+                // `setpoint × key`, and the range the CRAC declares is stated
+                // in that quantity. Anchoring the control at zero instead
+                // therefore shifts the whole feasible set by the starting
+                // value: on that scenario the CRAC's [−1000, 1000] became
+                // [0, 2000] in the reference's terms, overlapping the truth
+                // only on half its length.
+                //
+                // `setpoint₀ = target₀(e) / key(e)`, and the model says every
+                // element must give the same answer — which is what makes this
+                // recoverable at all, and what makes it **self-checking**. A
+                // bus carrying load as well as the machine gives a target that
+                // is not the machine's, and then the elements disagree; that
+                // disagreement is the signal, and the action falls back to the
+                // shift-from-zero reading rather than quietly using a wrong
+                // origin.
+                let origin = injection_origin(network.buses, network.base_mva, &keys);
+                let start = origin.unwrap_or(0.0);
+                if !starts_inside_its_range(start, lower, upper) {
                     continue;
                 }
                 controls.push(Control {
                     action: index,
                     reported: governs.is_none(),
                     sensitivity: scoped(sensitivity_mw, governs),
-                    current: 0.0,
+                    current: start,
                     lower,
                     upper,
                     penalty: options.injection_penalty,
@@ -1321,7 +1418,7 @@ fn build_controls(
                     injection: Some(InjectionControl {
                         key_sum: keys.iter().map(|(_, k)| *k).sum(),
                         distribution: keys,
-                        applied: 0.0,
+                        applied: start,
                     }),
                 });
             }
