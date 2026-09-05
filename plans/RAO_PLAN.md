@@ -5,10 +5,13 @@ and 2 landed 2026-08-18, the optimizer reached agreement with the reference on 2
 second preventive was built and gated the same day.
 
 > **Implementation status.** Phases 1 and 3 (the UCTE and IIDM importers) are done and both gates are
-> met — see §9. Phases 4 through 12 are done. Phase 2 is half done: `ratings::BranchLimits` and
+> met — see §9. Phases 2 and 4 through 12 are done: `ratings::BranchLimits` and
 > `types::TapChanger` exist and the CGMES `OperationalLimit` importer converts every declared limit
-> in every conformity fixture, but CGMES tap *tables* are still discarded at import (`cgmes.rs`
-> evaluates the current step and drops the rest).
+> in every conformity fixture. **CGMES tap tables are done too**, as phase 2 of
+> `plans/TAP_CONTROL_PLAN.md` rather than of this one: `cgmes.rs::steps_for_end` retains every
+> position of all five changer subtypes, and `tests/cgmes_tap_table_test.rs` gates it on the current
+> position reading back out of the table *bit for bit* against the single-step path it replaces,
+> across eight conformity configurations.
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
 > **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
@@ -60,8 +63,13 @@ second preventive was built and gated the same day.
 >    a column is declined rather than mismodelled; 1.4.1.6 is the case.
 > 3a. **Five assertions remain**, all of them 1.4.1.5 and 1.4.1.6's curative overspend, with four
 >    mechanisms measured and refuted in §8.9. Everything else in the corpus matches in full.
-> 4. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
->    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
+> 4. ~~**Phase 2's other half** — CGMES tap tables.~~ **Done**, and not here: it landed as phase 2 of
+>    `plans/TAP_CONTROL_PLAN.md` (`25bbefa`). What still stops a CGMES network reaching the RAO is a
+>    different gap and a larger one — **branch and bus identity**. `CgmesNetwork` returns buses,
+>    branches, shunts and tap tables but no `branch_ids`, so a CRAC that names its network elements
+>    resolves nothing, and `load_network_for_security` accepts only `.uct` and `.xiidm`. The tap
+>    table was the *modelling* half; this is the *naming* half, and it is what an end-to-end
+>    `gridoxide rao model.zip --crac ...` needs.
 > 5. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
 >    range actions, costly optimization.
 >
@@ -260,8 +268,8 @@ needs the map retained.
 
 **Resolution.** A `TapChanger { position: i32, low: i32, high: i32, neutral: i32, steps: Vec<Complex<f64>> }`
 retained on the transformer, with `set_tap_position` mutating `Transformer::tap` from it. The CGMES
-importer already computes every step for all four `PhaseTapChanger` flavours plus
-`RatioTapChangerTable` — it currently evaluates one and discards the rest. UCTE `##R` gives the
+importer computes every step for all four `PhaseTapChanger` flavours plus `RatioTapChangerTable`.
+*(It retained only the current one when this was written; `steps_for_end` keeps them all now.)* UCTE `##R` gives the
 same thing in five fields (`δu`, `θ`, `n`, `n'`, `SYMM|ASYM`); IIDM gives it as explicit `<step>`
 elements, of which the fixtures contain 2,181.
 
@@ -1545,7 +1553,7 @@ Assert on the objective and on feasibility, never on the argmin.
 | # | Deliverable | Gate |
 |---|---|---|
 | 1 | ✅ **Done.** **UCTE importer** (`src/ucte.rs`, feature `ucte`) | 175 of 176 vendored `.uct` files parse (the 176th is a deliberately malformed fixture pypowsybl rejects too). Against pypowsybl: exact to solver tolerance — <1e-9 pu voltage, <1e-6 deg, <1e-3 MW — on every fixture whose transformers declare no magnetizing admittance, **including a phase shifter at tap 16 of 16 and 400/225 transformers**. Where a magnetizing admittance is declared the gap is ~2e-4 deg / 0.3 MVar and is entirely the crate's π-split-vs-Γ shunt model: zeroing just those fields restores 2e-9 deg / 1.1e-7 MW |
-| 2 | ⏳ **Half done.** `ratings::BranchLimits`, `types::TapChanger`, `set_tap_position`, and the CGMES `OperationalLimit*` importer. **Still open:** retaining CGMES tap *tables* — `cgmes.rs` evaluates the current step and discards the rest, so a CGMES-sourced PST has no `TapChanger` | Limits: every declared `CurrentLimit` is accounted for — 13 → 8 PATL + 5 TATL on the PST fixture, 768 → 398 + 370 on SmallGrid, zero unattached, zero valueless. UCTE taps round-trip through import → `set_position` → re-read |
+| 2 | ✅ **Done.** `ratings::BranchLimits`, `types::TapChanger`, `set_tap_position`, the CGMES `OperationalLimit*` importer, and CGMES tap *tables* — `cgmes.rs::steps_for_end` retains every position of all five changer subtypes. The tables landed as phase 2 of `plans/TAP_CONTROL_PLAN.md`, which is where their gate lives | Limits: every declared `CurrentLimit` is accounted for — 13 → 8 PATL + 5 TATL on the PST fixture, 768 → 398 + 370 on SmallGrid, zero unattached, zero valueless. UCTE taps round-trip through import → `set_position` → re-read. Tap tables: the current position reads back out of the table bit for bit against the single-step path, on eight conformity configurations and ≥20 changers, per-step admittance included |
 | 3 | ✅ **Done.** **IIDM importer** (`src/iidm.rs`, feature `iidm`) — version-tolerant `1_x`, bus-branch *and* node-breaker, both limit spellings, boundary/tie lines | All 51 `.xiidm` fixtures parse across eleven schema versions. Cross-format: reading the same network as `.uct` and as `.xiidm` gives **bit-identical** flows on the twelve-node case (with the PST at neutral and at tap 16) and 6e-12 MW with 400/225 transformers and X-nodes. Against pypowsybl on natively-IIDM fixtures: `nordic32` (52 buses, 80 branches) to 1.2e-3 MVar, node-breaker `voltage_monitoring` to 1.4e-2 MVar |
 | 4 | ✅ **Done.** **CRAC data model and readers** (`src/rao/crac.rs`, `crac_json.rs`, `<network>.rao.json`) | All **428** CRACs in the checkout import, across 24 format versions — including the 98 that are not valid JSON (bare `NaN`). Dropped remedial actions: 4, all of kinds the model does not carry, all reported. Every fixture round-trips through the native format without loss |
 | 5 | ✅ **Done.** **Evaluation kernel** (`src/rao/evaluate.rs`) + `gridoxide security` | §8.2 met for branch outages: every Woodbury-screened flow matches a from-scratch re-solve to <1e-6 MW. Base-case flows are the DC solution exactly. A UCTE and an IIDM copy of one network reach the same verdict. Bus-split screening is not yet exercised — no vendored CRAC contains a switching contingency |
