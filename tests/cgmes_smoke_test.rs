@@ -2,8 +2,8 @@ use gridoxide::cgmes::CimDataset;
 
 /// A minimal, self-contained CGMES fragment (not sourced from any external
 /// file) exercising a scalar field, a cross-reference, and a downcast —
-/// enough to prove the `cimdecoder`/`cimstructs` git dependency resolves,
-/// builds, and decodes correctly. Nothing about conversion correctness yet;
+/// enough to prove the `cimdecoder`/`cimstructs` dependency resolves, builds,
+/// and decodes correctly. Nothing about conversion correctness yet;
 /// see tests/cgmes_microgrid_be_test.rs (Phase 3) for that.
 const FRAGMENT: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"

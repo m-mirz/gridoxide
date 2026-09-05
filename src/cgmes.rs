@@ -1,7 +1,7 @@
 //! CGMES (Common Grid Model Exchange Standard) dataset loading and
-//! conversion, built on cimoxide's `cimdecoder`/`cimstructs` crates — see
-//! `docs/src/reference/provenance.md` for why this is a pinned git
-//! dependency rather than a crates.io one.
+//! conversion, built on cimoxide's `cimoxide-decoder`/`cimoxide-structs`
+//! crates, pulled in under their shorter former names via Cargo's
+//! `package =` key — see `docs/src/reference/provenance.md`.
 //!
 //! Requires the TP profile: `TopologicalNode` is used directly as gridoxide's
 //! `Bus`, so ConnectivityNode/switch-state topology processing is assumed

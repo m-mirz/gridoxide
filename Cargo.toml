@@ -12,6 +12,25 @@ build = "build.rs"
 # already LGPL-2.1-or-later/BSD-3-Clause per vendor/suitesparse/PROVENANCE.md
 # — no new license beyond what's already listed here.)
 license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
+description = "AC power flow and state estimation solver with a sparse Newton-Raphson core"
+repository = "https://github.com/m-mirz/gridoxide"
+documentation = "https://m-mirz.github.io/gridoxide/"
+readme = "README.md"
+keywords = ["power-flow", "state-estimation", "newton-raphson", "sparse", "energy"]
+categories = ["science", "mathematics", "simulation"]
+# Keeps the published .crate to the source needed to *build* gridoxide. The
+# excluded fixtures are only read by `cargo test`, which a crates.io consumer
+# never runs, and two of them (tests/data/CGMES-Test-Configurations,
+# tests/data/benchmark-grids) are git submodules that aren't checked out in the
+# publish workflow at all — see .github/workflows/publish.yml.
+# `vendor/suitesparse/` is deliberately *not* excluded: `--features klu`
+# compiles it from source, so it has to ship (its redistribution terms are
+# covered by the `license` field above and vendor/suitesparse/PROVENANCE.md).
+exclude = [
+    "tests/data/",
+    "docs/book/",
+    "scripts/bench/.case-cache/",
+]
 
 # "rlib" keeps the crate usable as a normal Rust dependency (examples/,
 # tests/) exactly as before; "cdylib" is the loadable-by-Python extension
@@ -34,13 +53,13 @@ rayon = "1.12"
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# Neither crate is published to crates.io, so this pins the `vendor/gridoxide`
-# branch/tag of cimoxide (https://github.com/m-mirz/cimoxide) — a fork of
-# `main` with its normally-gitignored generated sources committed, created
-# specifically to make this dependency possible. See
+# cimoxide (https://github.com/m-mirz/cimoxide) publishes these two as
+# `cimoxide-decoder`/`cimoxide-structs`; `package =` keeps gridoxide's own
+# `use cimdecoder::`/`use cimstructs::` paths unchanged. They were a pinned git
+# dependency until cimoxide's crates.io release — see
 # docs/src/reference/provenance.md.
-cimdecoder = { git = "https://github.com/m-mirz/cimoxide", tag = "v0.1.1-gridoxide.1", optional = true }
-cimstructs = { git = "https://github.com/m-mirz/cimoxide", tag = "v0.1.1-gridoxide.1", optional = true }
+cimdecoder = { package = "cimoxide-decoder", version = "0.3.0", optional = true }
+cimstructs = { package = "cimoxide-structs", version = "0.3.0", optional = true }
 
 [build-dependencies]
 cc = { version = "1.0", optional = true }
@@ -85,8 +104,8 @@ python = ["dep:pyo3"]
 pardiso = ["dep:bindgen"]
 # Builds CGMES (Common Grid Model Exchange Standard) RDF/XML dataset support
 # (src/cgmes.rs), converting a CGMES EQ+SSH+TP+SV profile set into gridoxide's
-# own Bus/Line/Transformer model. Depends on cimoxide's cimdecoder/cimstructs
-# crates via a pinned git tag — they aren't published to crates.io, see
+# own Bus/Line/Transformer model. Depends on cimoxide's decoder/structs crates
+# from crates.io, renamed via `package =` above — see
 # docs/src/reference/provenance.md. Opt-in since most gridoxide users only need
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.

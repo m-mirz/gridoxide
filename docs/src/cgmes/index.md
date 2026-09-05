@@ -5,8 +5,9 @@ JSON format and PGM-JSON, reading CGMES (Common Grid Model Exchange Standard) RD
 61970/61968 interchange format ENTSO-E and TSOs use.
 
 It is built on [cimoxide](https://github.com/m-mirz/cimoxide) — a separate Rust project by the same
-author — for RDF/XML decoding, via a pinned git dependency rather than crates.io (see
-[Provenance and Licensing](../reference/provenance.md) for why). The feature is opt-in since some
+author — for RDF/XML decoding, via its `cimoxide-decoder`/`cimoxide-structs` crates, pulled in under
+their shorter former names (see [Provenance and Licensing](../reference/provenance.md)). The feature
+is opt-in since some
 users only need JSON input and shouldn't pay for `cimdecoder`'s dependency tree or build time.
 
 ```rust

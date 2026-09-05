@@ -1,0 +1,92 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    # Same tag trigger as pypi.yml, so one `v*` tag cuts both the wheels and
+    # the crate. Nothing here depends on that workflow, though: a PyPI failure
+    # shouldn't hold back the crate or vice versa.
+    environment: crate-release
+    permissions:
+      # Required by crates-io-auth-action to mint a short-lived publish token
+      # from this workflow's OIDC identity — the crates.io equivalent of the
+      # PyPI trusted publishing that pypi.yml uses, so no long-lived
+      # CARGO_REGISTRY_TOKEN secret has to live in this repo. Set up under
+      # crates.io > gridoxide > Settings > Trusted Publishing, pointing at
+      # this repo, this workflow file, and the `crate-release` environment above.
+      id-token: write
+      contents: read
+    steps:
+      # No `submodules:` — the two git submodules under tests/data/ hold only
+      # test fixtures, and Cargo.toml's `exclude` keeps that whole directory
+      # out of the packaged .crate anyway.
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-publish-
+
+      # A version published to crates.io can never be replaced, so catch a
+      # mistyped tag here rather than by burning the wrong version number.
+      # Skipped on workflow_dispatch, which has no tag to compare against.
+      - name: Check the tag matches Cargo.toml's version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          manifest="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+          echo "tag v$tag matches Cargo.toml version $manifest"
+
+      # Catches the two ways a .crate can be broken without any local build
+      # noticing: a file the package needs that `exclude` dropped, and a
+      # dependency that resolves locally but not from the registry. Verifies on
+      # default features only, matching build.yml — `klu`/`pardiso` need a C
+      # toolchain, libclang, or a local oneMKL install. That's a limit on what
+      # this job *compiles*, not on what ships: the crate is source-only, so
+      # every feature's source is published either way.
+      - name: Package
+        run: cargo package
+
+      # The `cgmes` feature is the one whose dependencies come from outside
+      # this repo (cimoxide's `cimoxide-decoder`/`cimoxide-structs`), so build
+      # it from the packaged .crate rather than the working tree — that is what
+      # a crates.io consumer actually gets. Pure Rust, so unlike `klu` it needs
+      # nothing extra on the runner.
+      - name: Check the packaged crate builds with --features cgmes
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          tar xzf "target/package/gridoxide-$version.crate" -C target/package
+          cargo build --features cgmes --manifest-path \
+            "target/package/gridoxide-$version/Cargo.toml"
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      # `--no-verify` because the `cargo package` step above already built the
+      # very same .crate; re-verifying would just compile faer twice.
+      - name: Publish
+        run: cargo publish --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
