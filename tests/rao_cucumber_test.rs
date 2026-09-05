@@ -1744,7 +1744,7 @@ const BASELINE_MATCHED_AC: usize = 276;
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
 const BASELINE_MATCHED_AC16: usize = 963;
 
-/// The 15 second-preventive scenarios: **91 of 123**, from 45 of 108 before the
+/// The 15 second-preventive scenarios: **103 of 123**, from 45 of 108 before the
 /// capability existed.
 ///
 /// 14 of the 15 `execution details` assertions hold. The one that does not is
@@ -1770,22 +1770,32 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// it rather than re-tuned, and 1.4.1.1.3, 1.4.1.2, 1.4.1.5 and 1.4.1.6 turn on
 /// exactly that.
 ///
-/// 1.4.4.4 used to be counted with them and was not one of them. It was the
-/// second pass **inheriting a curative set-point**: `pst_be` at −16, chosen
-/// against preventive decisions the second pass was in the act of discarding,
-/// capped its whole landscape at 553 A. Released, the pass finds the
-/// reference's answer with no network action at all, and 1.4.5.1 — the scenario
-/// named for fixing CRA set-points — went from four of five to five of five.
-/// `plans/RAO_PLAN.md` §8.8 has the sweep, and
-/// `the_second_preventive_pass_does_not_inherit_a_curative_set_point` pins it.
+/// Three of them used to be counted with the `A(r, s)` gap and were not it. Both
+/// were found by dropping the architecture question and diagnosing **one
+/// scenario to a mechanism**, which is how every defect in §8.3 was found, and
+/// both were in what the second pass holds from the curative stage:
 ///
-/// The one assertion that change cost is 1.4.1.6's `security status`, and it
-/// was matching by accident: `plan.final_margin_mw` read 41.2 MW there while
-/// the plan's own network measured −32.4 A, because the figure was taken in the
-/// second pass's network with another contingency's curative shifter still in
-/// it. Both numbers now agree, and both disagree with the reference — which is
-/// the honest report of a scenario that was already wrong.
-const BASELINE_MATCHED_2P: usize = 91;
+/// - It **inherited a curative set-point** (§8.8, defect 30). On 1.4.4.4
+///   `pst_be` at −16 — chosen against preventive decisions the second pass was
+///   in the act of discarding — capped its whole landscape at 553 A. Released,
+///   the pass finds the reference's answer with no network action at all, and
+///   1.4.5.1, the scenario named for fixing CRA set-points, closed completely.
+/// - It **dropped a curative close** (§8.9, defect 31). The held set was built
+///   by adding every branch a curative perimeter leaves open, and a close is
+///   invisible to an add-only rule. 1.4.1.5 and 1.4.1.6 both turn on
+///   `close_fr1_fr5`, and without it the second pass maximizes a curve peaking
+///   at −3 where the true one peaks at the shifter's bound of −7. Worth 12.
+///
+/// Both are pinned in `tests/rao_castor_test.rs` and both fail on the old code.
+///
+/// # What the 20 that remain are
+///
+/// Twelve are a **curative perimeter that does not stop**. 1.4.1.5 and 1.4.1.6
+/// now agree with the reference on every preventive figure and spend three
+/// curative actions where it spends one — reaching *better* curative margins
+/// than it asks for, 535 A against 86. The reference stops a curative perimeter
+/// as soon as it beats the preventive one; see §8.9.
+const BASELINE_MATCHED_2P: usize = 103;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

@@ -1377,3 +1377,67 @@ fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
         "pst_fr should end near the reference's tap 2, not {tap}"
     );
 }
+
+/// The second preventive pass holds the curative stage's **closes**, not only
+/// its opens.
+///
+/// `second_preventive` builds one network with the curative decisions in force
+/// so the pass can see past them, and it built that set by *adding* every
+/// branch a curative perimeter leaves open. A close is invisible to an
+/// add-only rule: the branch is simply absent from the set, so the file's own
+/// out-of-service circuit stays out of service and the pass optimizes against
+/// an overload the curative stage has already removed.
+///
+/// The reference's 1.4.1.6 is the case. Its curative `close_fr1_fr5` is worth
+/// 209 A on `FFR2AA1 FFR3AA1 2`, and dropping it makes the second pass maximize
+/// a different curve entirely — one that peaks with the preventive shifter at
+/// −3, where the true one peaks at the shifter's own bound of −7. Both scenarios
+/// that turn on it assert −7.
+#[test]
+fn the_second_preventive_pass_holds_a_curative_close() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(rao_fixture("features/crac_ep20us1case1_6.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    // `RaoParameters_maxMargin_ampere_second_preventive.json`, in the fields
+    // that change this answer.
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let pra = crac.range_actions.iter().position(|a| a.id == "pst_fr_pra").expect("pst_fr_pra");
+    let tap = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pra)
+        .and_then(|s| s.tap)
+        .expect("pst_fr_pra set-point");
+    assert_eq!(tap, -7, "the preventive shifter should reach its own bound");
+    // 43 A in the reference, on `FFR2AA1 DDE3AA1 1 - preventive`. Dropping the
+    // close lands the shifter on −3 and the plan at −32 A.
+    assert!(
+        plan.is_secure(),
+        "the plan should end secure, not {} MW",
+        plan.final_margin_mw
+    );
+}

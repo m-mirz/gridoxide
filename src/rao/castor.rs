@@ -775,6 +775,40 @@ fn second_preventive(
             }
         }
     }
+    // And the curative stage's **closes**, which the loop above cannot see: it
+    // only ever adds, so a branch that stage *shut* stays open in the second
+    // pass's network and the pass optimizes against an overload that is not
+    // there. The reference's 1.4.1.6 turns on exactly this — its curative
+    // `close_fr1_fr5` is dropped, and the second pass then maximizes the wrong
+    // curve, stopping the preventive shifter at −3 where holding the close
+    // takes it to its bound at −7 and the reference's answer.
+    //
+    // A branch the *preventive* stage closed is a different matter and does go
+    // back to open: those are the decisions being reconsidered. The two are
+    // told apart by what each stage was handed — the curative stage closed a
+    // branch when it was open in the network *it* received and is not open in
+    // the one it leaves.
+    let mut shut: Vec<usize> = Vec::new();
+    for scenario in scenarios {
+        let before = scenario
+            .automatons
+            .as_ref()
+            .map_or(&preventive.open_branches, |a| &a.open_branches);
+        if let Some(last) = scenario.perimeters.last() {
+            shut.extend(before.iter().filter(|b| !last.open_branches.contains(b)).copied());
+        }
+    }
+    // One network stands in for every contingency, so two scenarios can
+    // disagree about a branch. An open wins, as it does everywhere else here:
+    // it is the status quo the file states, and holding a branch closed for a
+    // contingency whose curative stage did not close it would invent capacity.
+    open.retain(|b| {
+        !shut.contains(b)
+            || scenarios
+                .iter()
+                .flat_map(|s| s.perimeters.iter())
+                .any(|p| p.open_branches.contains(b))
+    });
     open.sort_unstable();
     open.dedup();
     // A curative **shifter**, by contrast, goes back to where the file had it.

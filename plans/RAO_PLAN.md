@@ -12,13 +12,13 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
 > **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, and **91 of 123** on the second-preventive corpus — **1505 of 1563**, with
+> TestCase16Nodes, and **103 of 123** on the second-preventive corpus — **1517 of 1563**, with
 > **six** steps left unsupported out of what was 177.
 >
-> 58 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> 46 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
 > reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
-> asserts that nothing may disagree without a measurement behind it. **32 are the second-preventive
+> asserts that nothing may disagree without a measurement behind it. **20 are the second-preventive
 > corpus**, which is the one capability still short of the reference and is exempt by name until it
 > is not (§8.7).
 >
@@ -30,11 +30,16 @@ second preventive was built and gated the same day.
 >    the step reporting a gap §8.7 already records rather than adding one. `Plan::steps` now carries
 >    which optimization steps ran, which is a thing an operator wants and no margin can supply: a
 >    plan and the plan it fell back to have different margins but the same shape.
-> 2. ~~**One scenario, diagnosed to a mechanism** — 1.4.4.4 for choice.~~ **Done**, and it was
->    defect 30: the second pass **inherited a curative set-point**. Three architectural candidates
->    had each been measured and each cost (§8.8); diagnosing the one scenario found a nine-line
->    deletion worth +2, and the corpus is now **91 of 123**. The next one is 1.4.1.6 or 1.4.1.2 by
->    the same method — not another structural change.
+> 2. ~~**One scenario, diagnosed to a mechanism.**~~ **Done twice, and it is now the method.** Three
+>    architectural candidates for "a richer second preventive problem" had each been measured and
+>    each cost (§8.8). Diagnosing 1.4.4.4 found defect 30 — the second pass **inherited a curative
+>    set-point** — worth +2 for a nine-line deletion. Diagnosing 1.4.1.6 found defect 31 — it
+>    **dropped a curative close** — worth **+12**. Both were in what the second pass holds from the
+>    curative stage; neither was visible from the architecture. The corpus is now **103 of 123**.
+> 2a. **The curative perimeter does not stop** — twelve of the twenty that remain, and the next
+>    thing to do. §8.9 has the measurement: 1.4.1.5 and 1.4.1.6 now match the reference on every
+>    preventive figure and then spend three curative actions where it spends one, reaching *better*
+>    curative margins than it asks for.
 > 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
 >    reference keeps its curative answer after a second preventive pass *because* its second
 >    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
@@ -54,7 +59,7 @@ second preventive was built and gated the same day.
 > one network through both parsers gives bit-identical flows, which neither importer's own comparison
 > could establish.
 >
-> The second-strongest is a method rather than a result, and §8.3 is the record of it: **thirty
+> The second-strongest is a method rather than a result, and §8.3 is the record of it: **thirty-one
 > defects, every one internally consistent and externally wrong.** Not one would have been found by
 > reading the code, and several survived a confident diagnosis that had to be withdrawn — the
 > combination-depth theory, three refuted explanations of the `epic5` residual, and a slack
@@ -1038,13 +1043,18 @@ own objective value, and the comparison needs no probe at all. It sizes what is 
 So what remains is **four genuine gaps, not seven**: 1.4.5.1 is fixed by work already drafted,
 1.4.1.1.4 is a recorded disagreement waiting to be written down, and 1.4.1.1.3 is reachable.
 
-**Two of those rows have since moved, and not by `A(r, s)`.** §8.8's defect 30 — the second pass no
-longer inherits a curative set-point — takes 1.4.4.4 from 638.20 to **783.11** against the
-reference's 795, and takes 1.4.5.1 to **−40.54**, closing it completely. The `A(r, s)` column had
-claimed 1.4.5.1 as the case only it could fix; it was not. That is worth reading back onto the rest
-of this section: a row this table calls "a real gap" is evidence that *something* is wrong, not
-evidence about *what*, and the two rows that moved were both fixed by deleting nine lines rather
-than by adding an index.
+**Four of those rows have since moved, and none of them by `A(r, s)`.** §8.8's defect 30 — the second
+pass no longer inherits a curative set-point — takes 1.4.4.4 from 638.20 to **783.11** against the
+reference's 795, and takes 1.4.5.1 to **−40.54**, closing it completely. §8.9's defect 31 — the pass
+no longer drops a curative close — takes **1.4.1.5 and 1.4.1.6** to the reference's answer on every
+preventive figure, which this table had called two of its four "real gaps". The `A(r, s)` column had
+claimed 1.4.5.1 as the case only it could fix; it was not, and it did not touch the other three at
+all.
+
+That is worth reading back onto the rest of this section. A row this table calls "a real gap" is
+evidence that *something* is wrong, not evidence about *what* — and of the four, three were fixed by
+deleting nine lines and adding twenty, none of them an LP column. The table sized the remainder
+correctly and mis-attributed all of it.
 
 ### The composition rule, and why adopting it costs
 
@@ -1166,7 +1176,8 @@ The shifter was the odd one out, and the fix makes it agree.
   after; only `security status` flipped. `plan.final_margin_mw` read **41.2 MW** there while the
   plan's own network measures **−32.4 A**, because the figure was taken in the second pass's network
   with another contingency's curative shifter still in it. The two now agree, and both disagree with
-  the reference — the honest report of a scenario that was already wrong.
+  the reference — the honest report of a scenario that was already wrong. **§8.9 then made it
+  right**, and 1.4.1.6 now matches on the security status and on ten assertions besides.
 
 `the_second_preventive_pass_does_not_inherit_a_curative_set_point` in `tests/rao_castor_test.rs` pins
 it, and fails on the old code with `close_fr1_fr5` named.
@@ -1174,8 +1185,77 @@ it, and fails on the old code with `close_fr1_fr5` named.
 #### What is still open
 
 `A(r, s)` and the composition rule are unchanged by this, and item 3 of the status header still
-stands: they come last. The next step is the same method on the next scenario — 1.4.1.6, whose
-preventive shifter sits at −3 against the reference's −7, or 1.4.1.2.
+stands: they come last. §8.9 is the next scenario, by the same method.
+
+### 8.9 Defect 31: the second pass dropped a curative close
+
+1.4.1.6 was the next candidate, and the method transferred without modification. Its preventive
+shifter `pst_fr_pra` sat at −3 against the reference's −7 — the shifter's own absolute bound — and it
+spent three curative actions where the reference spends one.
+
+**The first question again: found, or expressed?** Scoring the reference's plan — `pst_fr_pra` at −7
+preventively, `close_fr1_fr5` curatively, nothing else — under gridoxide's evaluation:
+
+| CNEC | stage | gridoxide | asserted |
+|---|---|---|---|
+| `FFR2AA1 DDE3AA1 1 - preventive` | PRA | **43.45 A** | 43 A |
+| `FFR2AA1 DDE3AA1 1 - outage` | PRA | **385.52 A** | 385 A |
+| `FFR3AA1 FFR5AA1 1 - outage` | PRA | **1148.07 A** | 1148 A |
+| `FFR2AA1 FFR3AA1 2 - curative` | CRA | **86.49 A** | 86 A |
+| `FFR3AA1 FFR5AA1 1 - curative` | CRA | **910.13 A** | 910 A |
+
+Five for five. The evaluation was exact and the gap was search, exactly as on 1.4.4.4 — which is
+itself worth noting: two scenarios in a row where the expensive thing to suspect was already right.
+
+**The mechanism.** Sweeping the preventive shifter over its permitted range, worst margin over every
+CNEC, in the second pass's network with and without the curative close held:
+
+| `pst_fr_pra` | close **dropped** | close **held** |
+|---|---|---|
+| −7 | −122.52 | **19.68** |
+| −6 | −102.56 | 0.41 |
+| −5 | −82.60 | −18.86 |
+| −4 | −62.64 | −38.14 |
+| **−3** | **−42.68** | −57.43 |
+| −2 | −51.32 | −76.71 |
+| 0 | −89.25 | −115.29 |
+
+Two different curves with two different maxima. Dropping the close peaks at **−3**, which is what
+gridoxide chose; holding it peaks at the bound, **−7**, which is what the reference asserts. The
+second pass was maximizing the right objective over the wrong network.
+
+**Why it was dropped.** `second_preventive` builds the held set by *adding* every branch a curative
+perimeter leaves open. A close is invisible to an add-only rule — the branch is simply absent from
+the set, so the file's own out-of-service circuit stays out of service and the pass optimizes against
+an overload the curative stage has already removed. `close_fr1_fr5` is worth 209 A on
+`FFR2AA1 FFR3AA1 2`, and none of it was visible.
+
+A branch the **preventive** stage closed must still go back to open — those are the decisions being
+reconsidered — so the two are told apart by what each stage was handed: the curative stage closed a
+branch when it was open in the network *it* received and is not open in the one it leaves. Where two
+scenarios disagree about a branch, an open wins, as it does everywhere else here.
+
+**+12**, the largest single gain since the corpus was vendored, and nothing moved on the other three
+files. 1.4.1.5 goes 4 → 10 and 1.4.1.6 goes 5 → 11; both now match the reference on `pst_fr_pra` at
+−7, on the worst margin at 43.45 A, and on every preventive and outage figure.
+`the_second_preventive_pass_holds_a_curative_close` pins it.
+
+#### What is left: a curative perimeter that does not stop
+
+The two scenarios keep the same two assertions, and they are the same defect. Both spend **three**
+curative actions where the reference spends one, and both end up *better* than the reference asks:
+
+| | gridoxide | reference |
+|---|---|---|
+| 1.4.1.5, `FFR2AA1 FFR3AA1 2 - curative` | 535.31 | 86 |
+| 1.4.1.5, `FFR3AA1 FFR5AA1 1 - curative` | 963.63 | 910 |
+| 1.4.1.6, `FFR2AA1 FFR3AA1 2 - curative` | 384.99 | 86 |
+
+That is the curative stop criterion: a curative perimeter is not supposed to find the best answer it
+can, but to stop as soon as it beats the preventive one, because a curative action is taken under
+time pressure by someone who did not plan it. `castor::run` implements the rule and these two
+configurations do not trip it. Twelve of the twenty remaining assertions are here, and it is the next
+thing to measure — **not** `A(r, s)`, which item 3 of the status header still ranks last.
 
 ### 8.4 Two independent MILP solvers
 

@@ -166,10 +166,10 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1505 of 1563 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1517 of 1563 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
 counts, objective values, security statuses and **which optimization steps ran**, across two flow
-models and three networks. Of the 58 that do not, 32 belong to the second-preventive corpus, which is
+models and three networks. Of the 46 that do not, 20 belong to the second-preventive corpus, which is
 the one capability still short of the reference.
 
 The other 26 are **recorded disagreements rather than a backlog**. Each has been measured on
@@ -195,12 +195,17 @@ and refuses to let a scenario disagree without one — see `plans/RAO_PLAN.md` �
   than two, and `plans/RAO_PLAN.md` §8.7 records why adopting either half alone is worse than
   neither.
 
-  A curative **set-point** is deliberately not held. The second pass optimizes one network standing
-  in for every state, so anything held in it is held in the preventive and outage states too, where a
-  curative decision is not in force. For a switch that is the price of letting the pass see the
-  curative CNECs at all. For a set-point it is a stale iterate — chosen against preventive decisions
-  the second pass exists to discard, and recomputed the moment it returns — and holding one lets the
-  two passes settle into a fixed point neither can leave. §8.8 has the measurement.
+  What that pass holds is exact about two things it used to get wrong, and both were worth more than
+  any of the architecture around them. A curative **set-point** is deliberately *not* held: the pass
+  optimizes one network standing in for every state, so anything held in it is held in the preventive
+  and outage states too, where a curative decision is not in force. For a switch that is the price of
+  letting the pass see the curative CNECs at all. For a set-point it is a stale iterate — chosen
+  against preventive decisions the second pass exists to discard, and recomputed the moment it
+  returns — and holding one lets the two passes settle into a fixed point neither can leave. A
+  curative **close** *is* held, which took noticing: the held set is built by adding the branches a
+  curative perimeter leaves open, and a close is invisible to an add-only rule, so the second pass
+  optimized against an overload the curative stage had already removed. §8.8 and §8.9 have the
+  measurements.
 - **Several perimeters' set-points as variables in one LP.** Each perimeter is solved against the
   previous one's fixed decisions, which is the CASTOR decomposition rather than a shortcut past it.
   The `relativeToPreviousInstant` range kind *is* honoured — what chains across perimeters is the
