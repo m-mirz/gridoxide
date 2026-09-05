@@ -765,52 +765,57 @@ fn second_preventive(
     // The network the second pass starts from: the automatons' and the curative
     // stage's decisions in force, the preventive stage's *not*. Those are what
     // is being reconsidered.
-    let mut open: Vec<usize> = network.initially_open.to_vec();
-    for scenario in scenarios {
-        for perimeter in &scenario.perimeters {
-            for &branch in &perimeter.open_branches {
-                if !preventive.open_branches.contains(&branch) || network.initially_open.contains(&branch) {
-                    open.push(branch);
-                }
-            }
-        }
-    }
-    // And the curative stage's **closes**, which the loop above cannot see: it
-    // only ever adds, so a branch that stage *shut* stays open in the second
-    // pass's network and the pass optimizes against an overload that is not
-    // there. The reference's 1.4.1.6 turns on exactly this — its curative
-    // `close_fr1_fr5` is dropped, and the second pass then maximizes the wrong
-    // curve, stopping the preventive shifter at −3 where holding the close
-    // takes it to its bound at −7 and the reference's answer.
     //
-    // A branch the *preventive* stage closed is a different matter and does go
-    // back to open: those are the decisions being reconsidered. The two are
-    // told apart by what each stage was handed — the curative stage closed a
-    // branch when it was open in the network *it* received and is not open in
-    // the one it leaves.
-    let mut shut: Vec<usize> = Vec::new();
+    // In force **where they are in force**, though, and not everywhere. This
+    // set governs the auto and curative states only; the preventive and outage
+    // ones keep the file's, because a curative decision has not been taken yet
+    // when they are measured. See [`Held`] and §8.10.
+    // The **delta**, not a set: what the automatons and the curative stage did
+    // to the network the preventive stage handed them. A delta because the set
+    // it applies to is not fixed — this pass is choosing the preventive
+    // switching while the delta is in force, and every candidate it tries
+    // changes what the curative states inherit. Stored as a set, a preventive
+    // action the pass takes would reach the preventive states and not the
+    // curative ones, and the two halves of the problem would describe different
+    // networks.
+    let mut opened: Vec<usize> = Vec::new();
+    let mut closed: Vec<usize> = Vec::new();
     for scenario in scenarios {
-        let before = scenario
-            .automatons
-            .as_ref()
-            .map_or(&preventive.open_branches, |a| &a.open_branches);
-        if let Some(last) = scenario.perimeters.last() {
-            shut.extend(before.iter().filter(|b| !last.open_branches.contains(b)).copied());
-        }
+        // What that scenario ends up with, after its automatons and every
+        // curative perimeter in turn.
+        let after = scenario
+            .perimeters
+            .last()
+            .map(|p| &p.open_branches)
+            .or(scenario.automatons.as_ref().map(|a| &a.open_branches));
+        let Some(after) = after else { continue };
+        opened.extend(after.iter().filter(|b| !preventive.open_branches.contains(b)).copied());
+        closed.extend(preventive.open_branches.iter().filter(|b| !after.contains(b)).copied());
     }
     // One network stands in for every contingency, so two scenarios can
     // disagree about a branch. An open wins, as it does everywhere else here:
     // it is the status quo the file states, and holding a branch closed for a
     // contingency whose curative stage did not close it would invent capacity.
-    open.retain(|b| {
-        !shut.contains(b)
-            || scenarios
-                .iter()
-                .flat_map(|s| s.perimeters.iter())
-                .any(|p| p.open_branches.contains(b))
-    });
-    open.sort_unstable();
-    open.dedup();
+    closed.retain(|b| !opened.contains(b));
+    opened.sort_unstable();
+    opened.dedup();
+    closed.sort_unstable();
+    closed.dedup();
+    let held = super::evaluate::Held {
+        open: opened,
+        close: closed,
+        // The states that see it: everything at or after the automatons, which
+        // is where a curative decision has been taken. An **outage** state is
+        // not one of them — it is over before an automaton fires — and neither
+        // is the preventive state.
+        states: crac
+            .states()
+            .into_iter()
+            .filter(|s| {
+                matches!(crac.instants[s.instant].kind, InstantKind::Auto | InstantKind::Curative)
+            })
+            .collect(),
+    };
     // A curative **shifter**, by contrast, goes back to where the file had it.
     //
     // The asymmetry with the switching above is not an oversight. This is one
@@ -831,9 +836,9 @@ fn second_preventive(
     // answer. `plans/RAO_PLAN.md` §8.8 has the measurement.
     //
     // Curative redispatch was never held: `buses` comes from `network`
-    // untouched. This makes the shifter agree with it. Nothing but `open` now
-    // separates the second pass's network from the file's, so it is handed the
-    // network itself.
+    // untouched. This makes the shifter agree with it. Nothing but the held
+    // switching now separates the second pass's network from the file's, so it
+    // is handed the network itself.
 
     // Every CNEC, but still only the preventive perimeter's actions.
     let all = crac.states();
@@ -842,7 +847,10 @@ fn second_preventive(
         .filter(|s| crac.instants[s.instant].kind == InstantKind::Preventive)
         .cloned()
         .collect();
+    let mut linear = options.linear.clone();
+    linear.held = Some(held);
     let options = SearchOptions {
+        linear,
         available_at: Some(preventive_states),
         // The reference's `hint-from-first-preventive-rao`: offer the first
         // pass's winning set as one candidate, so a second pass that agrees
@@ -863,45 +871,22 @@ fn second_preventive(
         },
         ..options.clone()
     };
-    let mut result = search_with_open(crac, network, resolution, &all, solver, &options, &open);
-
-    // Strip the held decisions back out. They were in force so the second pass
-    // could *see* past them; they are not part of its answer, and leaving them
-    // in would put one contingency's curative switching into the preventive
-    // plan — hence into force for every other contingency, which is the one
-    // thing the perimeter decomposition exists to prevent.
-    let held: Vec<usize> =
-        open.iter().filter(|b| !network.initially_open.contains(b)).copied().collect();
-    result.open_branches.retain(|b| !held.contains(b));
-    for &b in network.initially_open {
-        if !result.open_branches.contains(&b) && !closed_by(crac, resolution, &result, b) {
-            result.open_branches.push(b);
-        }
-    }
-    result.open_branches.sort_unstable();
-    result.open_branches.dedup();
-    // Nothing to strip from the transformers: the second pass was handed the
-    // file's own, so whatever it returns is its own choice.
+    // The search starts from the **file's** open set, not the held one: what it
+    // returns is a preventive answer, and a preventive answer may not contain
+    // one contingency's curative switching — that would put it into force for
+    // every other contingency, which is the one thing the perimeter
+    // decomposition exists to prevent. The held set reaches the measurements
+    // through `LinearOptions::held`, which is where it belongs, so there is
+    // nothing to strip back out afterwards.
+    let result = search_with_open(
+        crac,
+        network,
+        resolution,
+        &all,
+        solver,
+        &options,
+        network.initially_open,
+    );
     Some(result)
 }
 
-/// Whether one of `result`'s own network actions closes `branch`.
-///
-/// Restoring the file's out-of-service circuits after stripping the held set
-/// must not undo a *closing* action the second pass chose for itself.
-fn closed_by(
-    crac: &Crac,
-    resolution: &Resolution,
-    result: &SearchResult,
-    branch: usize,
-) -> bool {
-    result.network_actions.iter().any(|&a| {
-        crac.network_actions[a].elementary.iter().any(|e| match e {
-            super::crac::ElementaryAction::TerminalsConnection { element, connected: true }
-            | super::crac::ElementaryAction::Switch { element, open: false } => {
-                resolution.branch(element) == Some(branch)
-            }
-            _ => false,
-        })
-    })
-}

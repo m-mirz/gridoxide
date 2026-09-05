@@ -80,7 +80,7 @@ use crate::opf::{LinearProgram, OptStatus, Solver};
 use crate::types::Transformer;
 
 use super::crac::{Crac, RangeActionKind, State};
-use super::evaluate::{evaluate_model, FlowModel, Network, Resolution};
+use super::evaluate::{FlowModel, Network, Resolution};
 use super::limits::Budget;
 use super::mnec::{Mnec, NO_CNEC_MARGIN};
 use super::usage::Constrained;
@@ -171,6 +171,14 @@ pub struct LinearOptions {
     /// perimeter, and without this it would help itself to every contingency's
     /// curative shifters.
     pub available_at: Option<Vec<State>>,
+    /// The states of this perimeter that see a **different** network, and what
+    /// is open in them.
+    ///
+    /// Only the second preventive perimeter sets this, and only because it is
+    /// the one perimeter that spans every state at once. See
+    /// [`Held`](super::evaluate::Held) and `plans/RAO_PLAN.md` §8.10. `None`
+    /// everywhere else, which is one network, one open set, and one evaluation.
+    pub held: Option<super::evaluate::Held>,
     /// The tap each phase-shifter range action sat on when this **perimeter**
     /// began, as `(range action index, tap)`.
     ///
@@ -200,6 +208,7 @@ impl Default for LinearOptions {
             available: Constrained::unmeasured(),
             limits: Budget::default(),
             available_at: None,
+            held: None,
             previous_taps: Vec::new(),
         }
     }
@@ -274,9 +283,18 @@ fn evaluate_in(
     view: &Network<'_>,
     resolution: &Resolution,
     model: FlowModel,
+    held: Option<&super::evaluate::Held>,
 ) -> super::evaluate::SecurityResult {
     let ac = super::evaluate::ac_options(view);
-    evaluate_model(crac, view, resolution, view.initially_open, model, &ac)
+    super::evaluate::evaluate_split(
+        crac,
+        view,
+        resolution,
+        view.initially_open,
+        held,
+        model,
+        &ac,
+    )
 }
 
 /// A phase shifter's tap-to-angle table, in the **CRAC's** sign convention.
@@ -606,7 +624,7 @@ fn optimize_within(
 
     let mut best = objective(crac, network, resolution, perimeter, options);
     let initial_objective = best;
-    let initial_margin = margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model);
+    let initial_margin = margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model, options.held.as_ref());
     let mut setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
 
@@ -649,7 +667,7 @@ fn optimize_within(
     for _ in 0..options.max_iterations {
         iterations += 1;
         let (flows, limits) =
-            perimeter_flows(crac, network, resolution, perimeter, &lp_indices, options.flow_model);
+            perimeter_flows(crac, network, resolution, perimeter, &lp_indices, options.flow_model, options.held.as_ref());
         let program = build_program(
             cnec_indices.len(),
             &mnec_indices,
@@ -781,7 +799,7 @@ fn optimize_within(
         // Re-measured in megawatts rather than converted from `best`: the two
         // are minima over the *same* CNECs but not necessarily over the same
         // one, so converting the ampere answer would name a margin no CNEC has.
-        final_margin_mw: margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model),
+        final_margin_mw: margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model, options.held.as_ref()),
         initial_objective,
         final_objective: best,
         iterations,
@@ -1095,7 +1113,7 @@ fn build_controls(
     // uniform error. A perimeter spanning every state has no single network,
     // and there the error stops being uniform: preventive columns are traded
     // against curative CNECs whose response to them is the wrong number.
-    let points = SensitivityPoints::build(network, crac, resolution, cnecs, dc_options)?;
+    let points = SensitivityPoints::build(network, crac, resolution, cnecs, dc_options, options.held.as_ref())?;
 
     let mut controls = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
@@ -1350,13 +1368,26 @@ pub(super) fn tap_bounds(
 /// expensive part is the factorization, and it does not depend on which range
 /// action is being differentiated.
 struct SensitivityPoints {
-    /// `(contingency, branches, sensitivity)`; `None` is the intact network.
-    points: Vec<(Option<usize>, Vec<DcBranch>, DcSensitivity)>,
+    /// `((contingency, held), branches, sensitivity)`; `None` is the intact
+    /// network.
+    ///
+    /// The second element of the key is what makes an **outage** CNEC and a
+    /// **curative** one under the same contingency stop sharing a
+    /// linearization. They do not share a network: the curative stage's
+    /// switching is in force in one and not the other, and a perimeter that
+    /// spans both — which is only ever the second preventive one — was
+    /// differentiating the preventive CNECs against a network with a curative
+    /// branch open in it. See `plans/RAO_PLAN.md` §8.10.
+    points: Vec<SensitivityPoint>,
     /// Which point each CNEC position reads from.
     per_cnec: Vec<usize>,
     /// The branch each CNEC position monitors.
     branches: Vec<usize>,
 }
+
+/// One linearization: the states it serves, the network they see, and the
+/// factorization of it.
+type SensitivityPoint = ((Option<usize>, bool), Vec<DcBranch>, DcSensitivity);
 
 impl SensitivityPoints {
     fn build(
@@ -1365,32 +1396,60 @@ impl SensitivityPoints {
         resolution: &Resolution,
         cnecs: &[usize],
         dc_options: DcOptions,
+        held: Option<&super::evaluate::Held>,
     ) -> Option<Self> {
         let n_branches = network.lines.len() + network.transformers.len();
+        let held = held.filter(|h| !h.states.is_empty());
+        let is_held = |cnec: usize| -> bool {
+            held.is_some_and(|h| h.states.contains(&crac.flow_cnecs[cnec].state))
+        };
         // The contingencies this perimeter's CNECs actually live under, so a
         // perimeter spanning one state pays for one factorization exactly as it
-        // did before.
-        let mut wanted: Vec<Option<usize>> =
-            cnecs.iter().map(|&i| crac.flow_cnecs[i].state.contingency).collect();
+        // did before. Split by whether the curative switching is in force,
+        // which costs a second factorization *only* when a perimeter genuinely
+        // spans both — the second preventive one, and nothing else.
+        let mut wanted: Vec<(Option<usize>, bool)> = cnecs
+            .iter()
+            .map(|&i| (crac.flow_cnecs[i].state.contingency, is_held(i)))
+            .collect();
         wanted.sort_unstable();
         wanted.dedup();
 
         let mut points = Vec::with_capacity(wanted.len());
-        for contingency in wanted {
+        for (contingency, held_here) in wanted {
             let mut lines = network.lines.to_vec();
             let mut transformers = network.transformers.clone();
+            let cut = |branch: usize,
+                           lines: &mut Vec<crate::types::Line>,
+                           transformers: &mut Vec<Transformer>| {
+                if branch < lines.len() {
+                    lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
+                    lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
+                    lines[branch].b_shunt = 0.0;
+                    lines[branch].g_shunt = 0.0;
+                } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
+                    t.from_status = 0;
+                    t.to_status = 0;
+                }
+            };
+            // The open set this point's states actually see. Only stated when
+            // the perimeter is split: everywhere else the caller has already
+            // zeroed the branches it opened, and re-deriving them here would
+            // change a path that is not what §8.10 is about.
+            if let Some(held) = held {
+                let open = if held_here {
+                    held.applied_to(network.initially_open)
+                } else {
+                    network.initially_open.to_vec()
+                };
+                for &branch in &open {
+                    cut(branch, &mut lines, &mut transformers);
+                }
+            }
             if let Some(c) = contingency {
                 for element in &crac.contingencies[c].elements {
                     let Some(branch) = resolution.branch(element) else { continue };
-                    if branch < lines.len() {
-                        lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
-                        lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
-                        lines[branch].b_shunt = 0.0;
-                        lines[branch].g_shunt = 0.0;
-                    } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
-                        t.from_status = 0;
-                        t.to_status = 0;
-                    }
+                    cut(branch, &mut lines, &mut transformers);
                 }
             }
             let branches = dc_branches(&lines, &transformers, dc_options);
@@ -1401,7 +1460,7 @@ impl SensitivityPoints {
             let Some(sensitivity) = DcSensitivity::new(network.buses, &branches, n_branches) else {
                 continue;
             };
-            points.push((contingency, branches, sensitivity));
+            points.push(((contingency, held_here), branches, sensitivity));
         }
         if points.is_empty() {
             return None;
@@ -1409,8 +1468,15 @@ impl SensitivityPoints {
         let per_cnec = cnecs
             .iter()
             .map(|&i| {
-                let want = crac.flow_cnecs[i].state.contingency;
-                points.iter().position(|(c, _, _)| *c == want).unwrap_or(0)
+                let want = (crac.flow_cnecs[i].state.contingency, is_held(i));
+                points
+                    .iter()
+                    .position(|(key, _, _)| *key == want)
+                    // A severed contingency has no point of its own; falling
+                    // back to one that shares its switching beats one that does
+                    // not.
+                    .or_else(|| points.iter().position(|((_, h), _, _)| *h == want.1))
+                    .unwrap_or(0)
             })
             .collect();
         let branches = cnecs
@@ -1577,9 +1643,10 @@ fn margin(
     perimeter: &[State],
     unit: ObjectiveUnit,
     model: FlowModel,
+    held: Option<&super::evaluate::Held>,
 ) -> f64 {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, model);
+    let result = evaluate_in(crac, &view, resolution, model, held);
     margin_of(crac, &result, perimeter, unit)
 }
 
@@ -1622,7 +1689,7 @@ fn objective(
     options: &LinearOptions,
 ) -> f64 {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, options.flow_model);
+    let result = evaluate_in(crac, &view, resolution, options.flow_model, options.held.as_ref());
     let unit = options.objective_unit;
     let margin = margin_of(crac, &result, perimeter, unit);
     let margin = if margin.is_finite() { margin } else { NO_CNEC_MARGIN };
@@ -1637,9 +1704,10 @@ fn perimeter_flows(
     perimeter: &[State],
     cnecs: &[usize],
     model: FlowModel,
+    held: Option<&super::evaluate::Held>,
 ) -> (Vec<f64>, Vec<(f64, f64, f64)>) {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, model);
+    let result = evaluate_in(crac, &view, resolution, model, held);
     cnecs
         .iter()
         .map(|&i| {

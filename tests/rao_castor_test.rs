@@ -1372,10 +1372,10 @@ fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
         .find(|s| s.action == pst_fr)
         .and_then(|s| s.tap)
         .expect("pst_fr set-point");
-    assert!(
-        (1..=2).contains(&tap),
-        "pst_fr should end near the reference's tap 2, not {tap}"
-    );
+    // The reference's own tap. It was 1 until §8.10 gave the second pass a
+    // per-state open set; the last tap of the gap was the preventive CNEC being
+    // read in a network with the curative branch open.
+    assert_eq!(tap, 2, "pst_fr should end on the reference's tap");
 }
 
 /// The second preventive pass holds the curative stage's **closes**, not only
@@ -1440,4 +1440,62 @@ fn the_second_preventive_pass_holds_a_curative_close() {
         "the plan should end secure, not {} MW",
         plan.final_margin_mw
     );
+}
+
+/// The second preventive pass measures each CNEC in the network **its own
+/// state** describes.
+///
+/// The pass spans every state at once and holds the curative stage's switching
+/// so it can see the curative CNECs at all. Held in a single network, that
+/// switching is in force in the preventive and outage states too, where no
+/// curative decision has been taken — and the preventive CNECs are then read
+/// somewhere they do not live.
+///
+/// It is not a rounding error. On this fixture the two landscapes are 77 A
+/// apart at the tap the pass was choosing, and they peak at *different* taps:
+/// held in every state the maximum is tap 2, measured per state it is tap 3.
+/// The search was finding the exact optimum of a landscape that was wrong for
+/// half its states. The reference's answer is tap 4 with a second preventive
+/// action, and this gets the shifter to 3 and the worst margin inside the
+/// reference's own tolerance of 721 A.
+#[test]
+fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(rao_fixture("features/SL_ep13us3case1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let pst_fr = crac.range_actions.iter().position(|a| a.id == "pst_fr").expect("pst_fr");
+    let tap = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst_fr)
+        .and_then(|s| s.tap)
+        .expect("pst_fr set-point");
+    // 2 while the preventive CNEC was read with the curative branch open.
+    assert_eq!(tap, 3, "pst_fr should reach the per-state optimum");
 }

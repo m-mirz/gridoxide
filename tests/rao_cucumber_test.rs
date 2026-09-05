@@ -1744,7 +1744,7 @@ const BASELINE_MATCHED_AC: usize = 276;
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
 const BASELINE_MATCHED_AC16: usize = 963;
 
-/// The 15 second-preventive scenarios: **103 of 123**, from 45 of 108 before the
+/// The 15 second-preventive scenarios: **109 of 123**, from 45 of 108 before the
 /// capability existed.
 ///
 /// 14 of the 15 `execution details` assertions hold. The one that does not is
@@ -1770,10 +1770,11 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// it rather than re-tuned, and 1.4.1.1.3, 1.4.1.2, 1.4.1.5 and 1.4.1.6 turn on
 /// exactly that.
 ///
-/// Three of them used to be counted with the `A(r, s)` gap and were not it. Both
-/// were found by dropping the architecture question and diagnosing **one
-/// scenario to a mechanism**, which is how every defect in §8.3 was found, and
-/// both were in what the second pass holds from the curative stage:
+/// Four scenarios' worth used to be counted with the `A(r, s)` gap and were not
+/// it. All three defects were found by dropping the architecture question and
+/// diagnosing **one scenario to a mechanism**, which is how every defect in §8.3
+/// was found, and all three were in what the second pass holds from the curative
+/// stage:
 ///
 /// - It **inherited a curative set-point** (§8.8, defect 30). On 1.4.4.4
 ///   `pst_be` at −16 — chosen against preventive decisions the second pass was
@@ -1786,31 +1787,38 @@ const BASELINE_MATCHED_AC16: usize = 963;
 ///   `close_fr1_fr5`, and without it the second pass maximizes a curve peaking
 ///   at −3 where the true one peaks at the shifter's bound of −7. Worth 12.
 ///
-/// Both are pinned in `tests/rao_castor_test.rs` and both fail on the old code.
+/// - It held that switching in **one network**, so the preventive and outage
+///   CNECs were read where a curative branch is open and they are not (§8.10,
+///   defect 32). The two landscapes are 77 A apart on 1.4.1.2 and peak at
+///   different taps. `Held` now carries the switching as a *delta* and every
+///   measurement — the objective, the base flows, and the sensitivities, which
+///   stop sharing a linearization between an outage and a curative CNEC under
+///   one contingency — reads a CNEC in its own state's network. Worth 6, and it
+///   closed 1.4.4.4 completely.
 ///
-/// # What the 20 that remain are
+/// All three are pinned in `tests/rao_castor_test.rs` and all three fail on the
+/// old code.
 ///
-/// Five scenarios and two patterns. **Nine** are a curative perimeter that
-/// overspends: 1.4.1.5, 1.4.1.6 and 1.4.4.4 all agree with the reference on the
-/// worst margin and then spend two or three curative actions where it spends
-/// one, reaching *better* curative margins than it asks for — 535 A against 86.
-/// That is a defect rather than a recorded disagreement, because three switching
-/// operations under time pressure to buy margin the plan's worst case cannot use
-/// is worse than one however the margin reads. §8.9 measures and refutes **four**
-/// causes for it — the stop criterion (−36), a capped curative objective (−24),
-/// the composition rule (−2, and it moves neither scenario), and `A(r, s)` (−4).
-/// The overspend is intrinsic to the curative search in *both* passes; do not
-/// re-run those four.
+/// # What the 14 that remain are
 ///
-/// The other **eleven** are 1.4.1.2 and 1.4.1.1.3, which *under*spend and land
-/// behind. That is **defect 32** (§8.10): the second pass holds the curative
-/// switching in *one* network, so it reads the preventive and outage CNECs in a
-/// network where a curative branch is open and they are not. On 1.4.1.2 the two
-/// landscapes are 77 A apart and peak at different taps; on 1.4.4.4 the
-/// per-state maximum is the reference's tap 2 at 794.75 A against its 795.
-/// Fixing it needs a per-state open set inside the LP, which is the largest
-/// structural item left in the module.
-const BASELINE_MATCHED_2P: usize = 103;
+/// Four scenarios. **Five** are a curative perimeter that overspends: 1.4.1.5
+/// and 1.4.1.6 agree with the reference on every preventive figure and then
+/// spend three curative actions where it spends one, reaching *better* curative
+/// margins than it asks for — 535 A against 86. That is a defect rather than a
+/// recorded disagreement, because three switching operations under time pressure
+/// to buy margin the plan's worst case cannot use is worse than one however the
+/// margin reads. §8.9 measures and refutes **four** causes for it: the stop
+/// criterion (−36), a capped curative objective (−24), the composition rule
+/// (−2, and it moves neither scenario), and `A(r, s)` (−4). The overspend is
+/// intrinsic to the curative search in *both* passes; do not re-run those four.
+///
+/// The other **nine** are 1.4.1.2 and 1.4.1.1.3, which still underspend. §8.10
+/// took 1.4.1.2's shifter from tap 2 to 3 against the reference's 4 and its
+/// worst margin inside tolerance, and what is left there is the second
+/// preventive action the reference also takes — which needs `A(r, s)`, since the
+/// reference reaches tap 4 only because it can re-tune the curative `pst_be` to
+/// −5 in the same problem.
+const BASELINE_MATCHED_2P: usize = 109;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

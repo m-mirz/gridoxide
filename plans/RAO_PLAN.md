@@ -12,13 +12,13 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
 > **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, and **103 of 123** on the second-preventive corpus — **1517 of 1563**, with
+> TestCase16Nodes, and **109 of 123** on the second-preventive corpus — **1523 of 1563**, with
 > **six** steps left unsupported out of what was 177.
 >
-> 46 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> 40 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
 > reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
-> asserts that nothing may disagree without a measurement behind it. **20 are the second-preventive
+> asserts that nothing may disagree without a measurement behind it. **14 are the second-preventive
 > corpus**, which is the one capability still short of the reference and is exempt by name until it
 > is not (§8.7).
 >
@@ -34,8 +34,11 @@ second preventive was built and gated the same day.
 >    architectural candidates for "a richer second preventive problem" had each been measured and
 >    each cost (§8.8). Diagnosing 1.4.4.4 found defect 30 — the second pass **inherited a curative
 >    set-point** — worth +2 for a nine-line deletion. Diagnosing 1.4.1.6 found defect 31 — it
->    **dropped a curative close** — worth **+12**. Both were in what the second pass holds from the
->    curative stage; neither was visible from the architecture. The corpus is now **103 of 123**.
+>    **dropped a curative close** — worth **+12**. Diagnosing 1.4.1.2 found defect 32 — it held that
+>    switching in **one network**, so preventive and outage CNECs were measured where a curative
+>    branch is open and they are not — worth **+6**, and it closed 1.4.4.4 completely. All three were
+>    in what the second pass holds from the curative stage; none was visible from the architecture.
+>    The corpus is now **109 of 123**.
 > 2a. **A curative perimeter that overspends** — nine of the twenty that remain, across 1.4.1.5,
 >    1.4.1.6 and 1.4.4.4, which all now match the reference on the worst margin and then spend two or
 >    three curative actions where it spends one. §8.9 measures and **refutes** the two obvious causes:
@@ -43,10 +46,9 @@ second preventive was built and gated the same day.
 >    implemented (−2, and it moves neither scenario). The overspend is intrinsic to the curative
 >    search in *both* passes. Do not re-run those four; read the reference's curative action filter
 >    instead. The other eleven are 1.4.1.2 and 1.4.1.1.3, which *under*spend and land behind — a
->    different defect: §8.10 diagnoses it as **defect 32**, the second pass reading preventive and
->    outage CNECs in a network with the curative switching applied. It misprices the tap on both
->    1.4.1.2 and 1.4.4.4, and fixing it is the largest remaining structural item — a per-state open
->    set threaded through the LP.
+>    different defect: **defect 32**, now fixed (§8.10). What is left of 1.4.1.2 is the second
+>    preventive action the reference also takes, and that one *does* need `A(r, s)`: the reference
+>    reaches tap 4 only because it can re-tune the curative `pst_be` to −5 in the same problem.
 > 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
 >    reference keeps its curative answer after a second preventive pass *because* its second
 >    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
@@ -66,7 +68,7 @@ second preventive was built and gated the same day.
 > one network through both parsers gives bit-identical flows, which neither importer's own comparison
 > could establish.
 >
-> The second-strongest is a method rather than a result, and §8.3 is the record of it: **thirty-one
+> The second-strongest is a method rather than a result, and §8.3 is the record of it: **thirty-two
 > defects, every one internally consistent and externally wrong.** Not one would have been found by
 > reading the code, and several survived a confident diagnosis that had to be withdrawn — the
 > combination-depth theory, three refuted explanations of the `epic5` residual, and a slack
@@ -1373,18 +1375,43 @@ per-state maximum is tap 2 at 794.75 A, which is the reference's tap and its 795
 where the held landscape peaks at tap 1 and gridoxide lands at 783.11. That is four of 1.4.4.4's
 remaining assertions, and one of 1.4.1.2's.
 
-**Why it is not a small change.** `optimize_with_open` expresses an open set by zeroing branches in
-*one* working copy of the network before handing it to the LP, so the open set is a property of the
-problem rather than of a state. Making it per-state means threading it through three places:
-`SensitivityPoints::build`, which already builds a separate DC network per **contingency** and would
-need keying on `(contingency, held-applied)` so an outage and a curative CNEC under the same
-contingency stop sharing a linearization; the base-flow measurement the LP linearizes around; and the
-leaf scoring in `search::leaf`. Correcting the tree's score alone is not enough — on both scenarios
-the choice between adjacent taps is made by the LP, not by the tree.
+#### The fix
 
-`castor::final_assessment` already measures a finished plan per state, correctly, and is the model
-for what this needs. It is the largest remaining structural item in the module, and unlike `A(r, s)`
-it has two scenarios' worth of measured evidence in front of it rather than a declaration in §7.3.
+`evaluate::Held` names the states that see a different network and what differs, and
+`evaluate_split` evaluates both and takes each state's perimeter from the one that describes it.
+Three places carry it:
+
+- **`optimize_with_open`** stops baking the open set into the shared line list when the perimeter is
+  split. It cannot: there is no single set to bake.
+- **`SensitivityPoints`** keys its linearization points on `(contingency, held)` rather than on the
+  contingency alone, so an **outage** CNEC and a **curative** one under the same contingency stop
+  sharing a network. That is the second factorization, and it is paid only by a perimeter that
+  genuinely spans both — the second preventive one, and nothing else.
+- **`objective`, `margin` and `perimeter_flows`** go through `evaluate_split`, so the score the tree
+  ranks by and the base flows the LP linearizes around agree with each other and with the states.
+
+Correcting the tree's score alone would not have done: on both scenarios the choice between adjacent
+taps is made by the LP.
+
+**`Held` is a delta, not a set**, and that is the one thing worth getting right. Stored as a set it
+scores 68 rather than 109 — 35 *below* the baseline — because the second pass is *choosing* the
+preventive switching while the held set is in force, so every candidate it tries changes what the
+curative states inherit. A stored set freezes them at the first pass's answer, and a preventive
+action the pass takes then reaches the preventive states and not the curative ones: the two halves of
+the problem describe different networks. `Held::applied_to` composes the delta with whatever open set
+governs the rest.
+
+**+6, and nothing moved on the other three files.** 1.4.4.4 goes 5 → **9 of 9**, matching the
+reference on the tap, both margins and the worst margin — the per-state maximum is its tap 2 at
+794.75 A against an asserted 795. 1.4.1.2 goes 3 → 5: the shifter moves from tap 2 to 3, its worst
+margin comes inside tolerance, and its curative `pst_be` starts moving (−3, against the reference's
+−5). `the_second_preventive_pass_measures_each_state_in_its_own_network` pins it.
+
+What is left of 1.4.1.2 is the reference's *second* preventive action, and that one genuinely does
+need `A(r, s)`: the reference reaches tap 4 only because it can re-tune the curative `pst_be` to −5
+inside the same problem, and gridoxide's second pass may only use preventive actions. §8.7's order
+finally has its condition — the second preventive problem is now rich enough that the next step is
+the column, not another correction to what it measures.
 
 ### 8.4 Two independent MILP solvers
 

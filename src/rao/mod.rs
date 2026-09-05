@@ -42,8 +42,8 @@ pub use linear::{
     TapModel,
 };
 pub use evaluate::{
-    ac_options, evaluate, evaluate_ac, evaluate_model, evaluate_with, AcOptions, CnecResult,
-    FlowModel,
+    ac_options, evaluate, evaluate_ac, evaluate_model, evaluate_split, evaluate_with, AcOptions,
+    CnecResult, FlowModel, Held,
     Network, PerimeterResult, Resolution, SecurityResult,
 };
 pub use mnec::{Baseline, Mnec, MnecOptions};

@@ -627,6 +627,82 @@ pub fn evaluate(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> 
 }
 
 /// Evaluate with a chosen flow model.
+/// A perimeter whose states do **not** all see the same network.
+///
+/// Ordinarily a perimeter is one network and one open set. The second
+/// preventive perimeter is not: it spans every state at once, and the curative
+/// stage's switching is in force only in the states downstream of its own
+/// contingency. Holding that switching in a single network — which is what
+/// standing one network in for every state amounts to — puts a curative branch
+/// into the preventive and outage states, where it is not in force, and the
+/// preventive CNECs are then measured somewhere they do not live.
+///
+/// `Held` is the correction. It names the states that see a different network
+/// and what is open in them, and every measurement reads a CNEC in the network
+/// its own state describes. See `plans/RAO_PLAN.md` §8.10.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Held {
+    /// Branches open in [`states`](Self::states) and not elsewhere.
+    pub open: Vec<usize>,
+    /// Branches open elsewhere and **not** in [`states`](Self::states) — the
+    /// curative stage's closes.
+    pub close: Vec<usize>,
+    /// The states that see the difference.
+    pub states: Vec<State>,
+}
+
+impl Held {
+    /// The open set of a held state, given the one that governs the rest.
+    ///
+    /// A delta rather than a stored set, because the set it applies to is not
+    /// fixed: the second preventive pass is *choosing* the preventive switching
+    /// while this is in force, and each candidate it tries changes what the
+    /// curative states inherit.
+    pub fn applied_to(&self, open: &[usize]) -> Vec<usize> {
+        let mut out: Vec<usize> =
+            open.iter().chain(self.open.iter()).copied().filter(|b| !self.close.contains(b)).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// Evaluate a perimeter whose states do not all see the same open set.
+///
+/// `open` governs every state; `held`, where given, overrides it for the states
+/// it names. With no `held` this is exactly [`evaluate_model`], and it costs
+/// one evaluation rather than two — which matters under
+/// [`FlowModel::Ac`](FlowModel::Ac), where an evaluation is a Newton-Raphson
+/// solve per state.
+pub fn evaluate_split(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+    held: Option<&Held>,
+    model: FlowModel,
+    ac: &AcOptions<'_>,
+) -> SecurityResult {
+    let Some(held) = held.filter(|h| !h.states.is_empty()) else {
+        return evaluate_model(crac, network, resolution, open, model, ac);
+    };
+    // The two networks are genuinely different, so both are evaluated and each
+    // state's perimeter is taken from the one that describes it.
+    let base = evaluate_model(crac, network, resolution, open, model, ac);
+    let other = evaluate_model(crac, network, resolution, &held.applied_to(open), model, ac);
+    let mut perimeters: Vec<PerimeterResult> = Vec::with_capacity(base.perimeters.len());
+    for perimeter in base.perimeters {
+        if held.states.contains(&perimeter.state)
+            && let Some(from_held) = other.perimeters.iter().find(|p| p.state == perimeter.state)
+        {
+            perimeters.push(from_held.clone());
+            continue;
+        }
+        perimeters.push(perimeter);
+    }
+    SecurityResult { perimeters, skipped: base.skipped }
+}
+
 pub fn evaluate_model(
     crac: &Crac,
     network: &Network<'_>,
