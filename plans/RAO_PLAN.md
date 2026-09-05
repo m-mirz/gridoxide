@@ -1311,16 +1311,35 @@ second pass is a far better problem than it was — but still a cost, and still 
 
 #### Where that leaves it
 
-Four readings measured, four refuted:
+Six readings measured, six refuted — the last three **re-measured after `A(r, s)` landed**, because
+§8.11 established that a refutation is only as good as the rest of the tree at the time:
 
 | reading | result |
 |---|---|
 | the curative stop criterion (`curative-min-obj-improvement` → 0) | −36 on TestCase16Nodes |
-| a curative objective capped at the preventive one | −24 on TestCase16Nodes |
+| a curative objective capped at the preventive one, everywhere | −24 on TestCase16Nodes |
 | the composition rule, properly implemented | −2, and it moves neither scenario |
-| `A(r, s)` (§8.7, measured three times) | −4 |
+| `A(r, s)` (§8.7, measured three times; §8.11 landed it) | fixed 1.4.1.2 and 1.4.1.1.3, **not these two** |
+| carrying the second pass's *own* curative set-point | the 2P column lands on −16 as well |
+| the objective cap applied **only** after a second preventive pass | −3 |
 
 Every experiment was backed out; the tree is byte-identical to the commit.
+
+**The last two are the informative ones.** §8.7 predicted the reference can keep its curative answer
+*because* its second preventive computes one, and `A(r, s)` finally gives gridoxide a curative column
+to keep — so the prediction became testable. It fails: the second pass's own column for `pst_be`
+lands on **−16**, the same place the curative perimeter puts it. The 2P is not declining the move
+either.
+
+And the post-2P cap fails in a way that says where a stop criterion can bite in this optimizer.
+`improved_enough` gates **network actions only**; a leaf's range actions are optimized by the LP
+underneath it with no cap at all. So capping the tree stopped the search from taking
+`close_fr1_fr5` — the one action the reference *does* use, and the one this perimeter genuinely
+needs, since without it the curative CNEC sits at −122 A — while leaving the two range actions the
+reference declines. Exactly backwards, and 1.4.1.5 and 1.4.1.6 each lost `close_fr1_fr5` and a
+matching assertion with it. A cap that could work would have to bound the LP's margin column, not
+the tree's improvement test, and even then the reference's preference for the switch over the
+shifters is unexplained: the configuration penalizes topology *more* (1.0 A against 0.01).
 
 What is now established is sharp, and it is worth more than another guess. The overspend is
 **intrinsic to gridoxide's curative search, in both passes**. It is not composition, not the stop
@@ -1329,10 +1348,13 @@ genuinely improve the curative perimeter's own objective — 86 A to 385 A — a
 because they do. The reference declines a 300 A improvement on its own perimeter, and nothing in the
 configuration, the CRAC, or the four rules above says why.
 
-The next move is therefore **not** another mechanism from this list. For these nine it is reading the
-reference's source for the curative perimeter's action filter, which is the one thing this corpus
-cannot tell us and which four measurements have now failed to infer. The *other* eleven are a
-different defect, and §8.10 diagnoses it.
+These five are what is left of the whole corpus, and the honest conclusion after six refutations is
+that the corpus cannot tell us the rule. Every candidate consistent with 1.4.1.5 and 1.4.1.6 has been
+measured and every one costs elsewhere, which is the signature of a rule that is narrower than
+anything the scenarios distinguish. Reading the reference's own curative perimeter — how it filters
+range actions, and why it prefers a switch to two shifters that improve its objective more — is the
+next step, and it is not a measurement this repository can make. The *other* eleven were a different
+defect: §8.10 and §8.11 closed them.
 
 ### 8.10 Defect 32: the second pass reads preventive CNECs in a curative network
 
