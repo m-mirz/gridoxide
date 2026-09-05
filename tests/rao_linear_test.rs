@@ -16,7 +16,7 @@ use gridoxide::linear::sensitivity::DcSensitivity;
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
 use gridoxide::rao::linear::{phase_shift_sensitivity, LinearOptions, LinearStatus};
-use gridoxide::rao::{crac_json, evaluate, optimize, Network, NetworkMut, Resolution};
+use gridoxide::rao::{crac_json, evaluate, optimize, run, Network, NetworkMut, Resolution, SearchOptions};
 use gridoxide::ucte;
 
 fn ucte_fixture(name: &str) -> PathBuf {
@@ -618,5 +618,80 @@ fn an_ampere_objective_is_reported_in_megawatts_all_the_same() {
         "objective {} should be an ampere figure, margin {} a megawatt one",
         result.final_objective,
         result.final_margin_mw
+    );
+}
+
+/// A redispatch's set-point is **absolute**, and its sensitivity is per
+/// megawatt of it.
+///
+/// Both halves were wrong together, and each hid the other. The control was
+/// anchored at zero, so the CRAC's declared range was read as a range on the
+/// *shift* — on the reference's 2.3.1.1.a that turned `[−1000, 1000]` into
+/// `[0, 2000]` in the reference's own terms. And the sensitivity was the
+/// per-unit response to a per-unit pattern, a hundred times too small at a
+/// 100 MVA base.
+///
+/// An LP told a control is a hundred times weaker than it is still moves it the
+/// right way and saturates at its bound; `apply` then does the arithmetic in MW
+/// and gets the move right, and the iterate-and-relinearize loop keeps it
+/// because the true objective improved. On every vendored fixture the answer
+/// sits exactly on the bound, so saturating *was* optimal — which is why four
+/// scenarios passed for years with a factor of a hundred in the model.
+///
+/// This asserts the model rather than the answer: two nodes, one line, a
+/// generator at each end, and a redispatch whose keys are +1 and −1. The
+/// set-point starts at 1000 because that is what the machines are at, and
+/// moving it to 0 shuts both down — the reference's own words for this case.
+#[test]
+fn a_redispatch_starts_at_the_set_point_its_machines_are_already_on() {
+    let net = ucte::read(ucte_fixture("2Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(rao_fixture("features/crac-93-1-1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+
+    let action = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "redispatchingAction")
+        .expect("the redispatch action");
+    let origin = gridoxide::rao::injection_setpoint(&crac, &network, &resolution, action)
+        .expect("both machines agree on where the action sits");
+    assert!(
+        (origin - 1000.0).abs() < 1e-6,
+        "FFR1AA1 generates 1000 MW on a key of 1, so the set-point starts at 1000, not {origin}"
+    );
+
+    // And the optimizer takes it to zero, which is the whole scenario: the line
+    // carries 1000 MW against a 300 MW threshold, and shutting both machines
+    // down is the only thing that helps.
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let setpoint = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == action)
+        .expect("the action should be used");
+    assert!(
+        setpoint.value.abs() < 1e-3,
+        "the optimizer should shut both machines down, not move to {}",
+        setpoint.value
+    );
+    assert!(
+        (setpoint.initial - 1000.0).abs() < 1e-6,
+        "and it should report where it started, not zero ({})",
+        setpoint.initial
     );
 }

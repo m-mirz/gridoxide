@@ -174,6 +174,9 @@ enum Expect {
     /// remedial action.
     ObjectiveValue { value: f64, stage: Option<Stage> },
     PstTap { action: String, tap: i32, at: Where },
+    /// A redispatch's set-point, in MW. Absolute, not a shift — see
+    /// `linear::injection_origin`.
+    Setpoint { action: String, value: f64, at: Where },
     ActionUsed { action: String, at: Where },
     /// `the remedial action "X" is not used ...` — the negative, and worth
     /// having for exactly the reason it is easy to skip: nothing else in this
@@ -463,22 +466,15 @@ fn expectation(line: &str) -> Expect {
         };
     }
     if line.contains("the setpoint of RangeAction") {
-        // Parsed and deliberately **not** compared: the two sides name
-        // different quantities. gridoxide's `Setpoint::value` for an injection
-        // range action is the *shift* it applies, starting from zero; the
-        // reference's `getOptimizedSetPointOnState` is the generator's
-        // **absolute** target, which it recovers as `targetP / key`. On 2.3.1.4
-        // both actions are used, both are named correctly and the margin is
-        // exact to 500.0 — only the number's origin differs, and gridoxide
-        // cannot produce the reference's without per-generator injections the
-        // bus-aggregating UCTE importer does not keep (`Bus::p_spec` is
-        // generation minus load). Recording it as a failure would cap the ratio
-        // for something that is not wrong, so it is skipped **with its reason
-        // attached** rather than silently.
-        return Expect::Unsupported(format!(
-            "{line}  [not comparable: gridoxide reports the shift, the reference the \
-             generator's absolute target]"
-        ));
+        // Comparable since `linear::injection_origin` landed. Both sides now
+        // name the same quantity: a redispatch's set-point is absolute, and
+        // each element's target is `setpoint × key` — which is the model the
+        // reference's own 2.3.1.1.a spells out, and what the CRAC's declared
+        // range is stated in.
+        return match (quoted(line), number_after_quotes(line)) {
+            (Some(action), Some(value)) => Expect::Setpoint { action, value, at: where_of(line) },
+            _ => Expect::Unsupported(line.to_string()),
+        };
     }
     if line.contains("in network file with PRA is on tap") {
         return match (quoted(line), number_after_quotes(line)) {
@@ -749,6 +745,51 @@ fn pick(
 /// changer for the element, which is the same precedence `linear::tap_table`
 /// uses and for the same reason: the equipment is the authority, the CRAC is a
 /// description of it.
+/// A redispatch's set-point in one perimeter, MW.
+///
+/// The plan's own figure where this perimeter moved it; otherwise where the
+/// action sits untouched, which is what the reference reports for a state that
+/// did not act. The sibling of [`resting_tap`], and needed for the same reason.
+fn setpoint_of(
+    crac: &Crac,
+    plan: &gridoxide::rao::Plan,
+    net: &ucte::UcteImport,
+    action: &str,
+    at: &Where,
+) -> Option<f64> {
+    let index = crac.range_actions.iter().position(|a| a.id == action)?;
+    let from_plan = |setpoints: &[gridoxide::rao::Setpoint]| {
+        setpoints.iter().find(|s| s.action == index).map(|s| s.value)
+    };
+    let moved = match at {
+        Where::Preventive => from_plan(&plan.preventive.setpoints),
+        Where::After { contingency, .. } => plan
+            .scenarios
+            .iter()
+            .filter(|s| crac.contingencies[s.contingency].id == *contingency)
+            .flat_map(|s| s.perimeters.iter())
+            .find_map(|p| from_plan(&p.setpoints)),
+    };
+    if let Some(value) = moved {
+        return Some(value);
+    }
+    let resolution = Resolution::with_buses(crac, &net.branch_ids, &net.node_codes);
+    let view = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    gridoxide::rao::injection_setpoint(crac, &view, &resolution, index)
+}
+
 fn resting_tap(
     crac: &Crac,
     resolution: &Resolution,
@@ -1287,6 +1328,17 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("tap of `{action}` {got:?} (expected {tap}) {at:?}"),
                 );
             }
+            Expect::Setpoint { action, value, at } => {
+                // Like a tap, a set-point exists whether or not this perimeter
+                // moved it: an action left alone is still sitting somewhere,
+                // and the reference answers for every state. Unmoved means the
+                // origin, which is what the LP anchored the control at.
+                let got = setpoint_of(&crac, &plan, &net, action, at);
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!("setpoint of `{action}` {got:?} (expected {value}) {at:?}"),
+                );
+            }
             Expect::ActionUsed { action, at } => {
                 let (used, _) = decisions(at);
                 let got = used.iter().any(|u| u == action);
@@ -1570,7 +1622,14 @@ fn recorded_reason(name: &str) -> Option<&'static str> {
 /// actions reaching the same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
-const BASELINE_MATCHED_DC: usize = 175;
+///
+/// **This file now skips nothing.** The last five were `setpoint of
+/// RangeAction`, recorded as not comparable because gridoxide reported a
+/// redispatch's *shift* where the reference reports the machine's absolute
+/// target. Wiring them up turned out to need §8.12's two defects fixed first,
+/// which is what a skipped assertion is for: it kept the ratio honest until the
+/// thing behind it was.
+const BASELINE_MATCHED_DC: usize = 180;
 
 /// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **276 of 282**.
 ///

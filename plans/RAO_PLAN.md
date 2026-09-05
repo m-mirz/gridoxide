@@ -15,9 +15,9 @@ second preventive was built and gated the same day.
 > across eight conformity configurations.
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
-> **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, and **118 of 123** on the second-preventive corpus — **1532 of 1563**, with
-> **six** steps left unsupported out of what was 177.
+> **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
+> TestCase16Nodes, and **118 of 123** on the second-preventive corpus — **1537 of 1568**, with
+> **one** step left unsupported out of what was 177 — and the DC file skips nothing at all.
 >
 > 31 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
@@ -1546,6 +1546,50 @@ tree at the time, and §8.7's table mis-attributed four gaps for the same reason
 is right for the `initial` baseline it was written for and wrong here: used for this it cost a
 matching assertion on 3.2.1.1, an AC scenario, by reporting 619 MW against 1000. The margin has to
 come from `assess`, which respects `options.linear.flow_model`.
+
+### 8.12 Two defects in redispatch, each hiding the other
+
+The last five skipped assertions in the DC file were all `setpoint of RangeAction`, recorded as *not
+comparable*: gridoxide reported a redispatch's **shift** where the reference reports the machine's
+absolute target. Making them comparable turned out to need two defects fixed, and neither was
+visible on its own.
+
+**A redispatch's set-point is absolute, and the CRAC's range is stated in it.** The reference's own
+2.3.1.1.a spells the model out — *"on FFR1AA1 -> setpoint * 1 = 0, on FFR2 -> setpoint * -1 = 0"* —
+so each element's target **is** `setpoint × key`, and an action nobody has moved already sits at a
+non-zero set-point. gridoxide anchored the control at zero, which turned that scenario's declared
+`[−1000, 1000]` into `[0, 2000]` in the reference's terms: overlapping the truth on half its length,
+forbidding a set-point the CRAC allows and allowing one it forbids.
+
+The origin is recoverable because the model over-determines it — every element must give the same
+`target / key` — and that is what makes it **self-checking**. `injection_origin` reads each element's
+target as its bus's net injection, which is the machine's own only when nothing else sits on that
+bus; when the elements disagree it returns `None` and the action falls back to the old
+shift-from-zero reading rather than quietly using a wrong origin.
+
+**And the sensitivity was a hundred times too small.** The injection pattern is `key / base_mva` — a
+per-unit injection of `key` megawatts — so the response comes back in per-unit flow, and a row
+reading it as MW-per-MW is short by `base_mva`: 0.01 where the truth is 1.
+
+**Why neither showed.** An LP told a control is a hundred times weaker than it is still moves it the
+right *way*. It saturates at its bound, hands that to `apply`, which does the arithmetic in megawatts
+and gets the move right; the iterate-and-relinearize loop then measures the *true* objective and
+keeps it. On every vendored redispatch fixture the answer sits exactly on the bound — shutting both
+machines down is a 1000 MW move against a 1000 MW range — so saturating **was** optimal, and four
+scenarios passed for as long as the corpus has existed with a factor of a hundred in the model.
+
+Anchoring the control where it really starts removes that accident, which is how the scale surfaced:
+fixing the anchor alone dropped the DC file from 175 to **167**, and the two together restored 175
+and then took it to **180 of 186** with nothing skipped.
+
+`a_redispatch_starts_at_the_set_point_its_machines_are_already_on` pins both halves, and fails on
+either alone — reverting the anchor makes it report −999.99, the shift, where the set-point is 0.
+
+**The lesson is about the skip, not the defect.** That assertion was skipped *with its reason
+attached* rather than silently, and the reason named the exact thing that was wrong — "gridoxide
+reports the shift". §8.3's rule is that a skipped assertion flatters the ratio and anything the code
+can answer belongs in the denominator; this is the other half of it. A skip that states what it is
+waiting for is a defect report that has not been read yet.
 
 ### 8.4 Two independent MILP solvers
 

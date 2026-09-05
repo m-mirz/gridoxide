@@ -38,8 +38,8 @@ pub use search::{
     SecondPreventiveCondition,
 };
 pub use linear::{
-    optimize, LinearOptions, LinearResult, LinearStatus, NetworkMut, ObjectiveUnit, Setpoint,
-    TapModel,
+    injection_setpoint, optimize, LinearOptions, LinearResult, LinearStatus, NetworkMut,
+    ObjectiveUnit, Setpoint, TapModel,
 };
 pub use evaluate::{
     ac_options, evaluate, evaluate_ac, evaluate_model, evaluate_split, evaluate_with, AcOptions,
