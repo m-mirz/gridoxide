@@ -1796,8 +1796,11 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// one, reaching *better* curative margins than it asks for — 535 A against 86.
 /// That is a defect rather than a recorded disagreement, because three switching
 /// operations under time pressure to buy margin the plan's worst case cannot use
-/// is worse than one however the margin reads. §8.9 measures and refutes the two
-/// obvious causes, the stop criterion and a capped curative objective.
+/// is worse than one however the margin reads. §8.9 measures and refutes **four**
+/// causes for it — the stop criterion (−36), a capped curative objective (−24),
+/// the composition rule (−2, and it moves neither scenario), and `A(r, s)` (−4).
+/// The overspend is intrinsic to the curative search in *both* passes; do not
+/// re-run those four.
 ///
 /// The other **eleven** are 1.4.1.2 and 1.4.1.1.3, which *under*spend and land
 /// behind the reference. A different defect, and not yet diagnosed.

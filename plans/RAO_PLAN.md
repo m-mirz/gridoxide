@@ -39,10 +39,11 @@ second preventive was built and gated the same day.
 > 2a. **A curative perimeter that overspends** — nine of the twenty that remain, across 1.4.1.5,
 >    1.4.1.6 and 1.4.4.4, which all now match the reference on the worst margin and then spend two or
 >    three curative actions where it spends one. §8.9 measures and **refutes** the two obvious causes:
->    the stop criterion (forcing its improvement to zero costs 36) and a capped curative objective
->    (costs 24). The remaining candidate is the composition rule, which §8.7 priced before defects 30
->    and 31 existed and which is now worth re-measuring. The other eleven are 1.4.1.2 and 1.4.1.1.3,
->    which *under*spend and land behind — a different defect.
+>    the stop criterion (−36), a capped curative objective (−24), and the composition rule properly
+>    implemented (−2, and it moves neither scenario). The overspend is intrinsic to the curative
+>    search in *both* passes. Do not re-run those four; read the reference's curative action filter
+>    instead. The other eleven are 1.4.1.2 and 1.4.1.1.3, which *under*spend and land behind — a
+>    different defect, and the better next target.
 > 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
 >    reference keeps its curative answer after a second preventive pass *because* its second
 >    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
@@ -1087,6 +1088,9 @@ variable in a large linear program. Carrying the second is worth doing only when
 good as the first, and here it is not: the reference can carry its own because its 2P is a far larger
 problem than gridoxide's, with network actions and discrete taps inside it.
 
+**Re-measured on the current tree**, after defects 30 and 31, the composition rule costs **2** rather
+than 7 — and it still fixes nothing. §8.9 has that measurement and the implementation it used.
+
 **So the order is the other way round from what §8.7 assumed.** `A(r, s)` and the composition rule
 are the *last* two steps, not the first, and neither pays until gridoxide's second preventive problem
 is rich enough that its curative answer beats a dedicated curative search. Until then the current
@@ -1283,13 +1287,43 @@ are still optimized at every leaf) it costs **24** on TestCase16Nodes. The refer
 perimeters demonstrably *do* improve past the preventive objective in general, so whatever stops
 this one is narrower than a rule about the objective.
 
-Both experiments were backed out; the tree is byte-identical to the commit. What they establish is
-that the mechanism is **not** in the curative perimeter's own scoring, which is where the wording of
-the scenario points. The remaining candidate is the composition rule — the reference does not
-re-optimize the curative perimeters after a second preventive pass, it carries the first pass's
-decisions — and §8.7 measured that as costing 20 before defects 30 and 31 existed. It is worth
-re-measuring on the current tree, and it is the one place item 3 of the status header and this
-section now agree.
+**And the composition rule is not it.** That was the last standing candidate — the reference does not
+re-optimize the curative perimeters after a second preventive pass, it runs `automatonsOnly` and
+carries the first pass's decisions across as `appliedArasAndCras`. §8.7 priced it at −7 before
+defects 30 and 31 existed, so it was re-measured on the current tree, implemented properly: a
+`carry` argument to `scenarios_after` that re-applies each carried perimeter's network actions and
+set-points to the second pass's network rather than deciding again.
+
+**−2, and it fixes nothing.** 1.4.1.5 and 1.4.1.6 do not move at all, and the reason is decisive:
+gridoxide's *first* curative pass takes the same three actions, so carrying them carries three. The
+cost falls on 1.4.4.4, whose worst margin drops from 783 A to 525 A, and on 1.4.5.1, whose execution
+details flip to "fell back to initial situation". Much narrower than the −7 §8.7 recorded — the
+second pass is a far better problem than it was — but still a cost, and still not the mechanism.
+
+#### Where that leaves it
+
+Four readings measured, four refuted:
+
+| reading | result |
+|---|---|
+| the curative stop criterion (`curative-min-obj-improvement` → 0) | −36 on TestCase16Nodes |
+| a curative objective capped at the preventive one | −24 on TestCase16Nodes |
+| the composition rule, properly implemented | −2, and it moves neither scenario |
+| `A(r, s)` (§8.7, measured three times) | −4 |
+
+Every experiment was backed out; the tree is byte-identical to the commit.
+
+What is now established is sharp, and it is worth more than another guess. The overspend is
+**intrinsic to gridoxide's curative search, in both passes**. It is not composition, not the stop
+criterion, and not the objective the perimeter maximizes. `pst_be` at −16 and `pst_fr_cra` at 1
+genuinely improve the curative perimeter's own objective — 86 A to 385 A — and gridoxide takes them
+because they do. The reference declines a 300 A improvement on its own perimeter, and nothing in the
+configuration, the CRAC, or the four rules above says why.
+
+The next move is therefore **not** another mechanism from this list. It is either 1.4.1.2 and
+1.4.1.1.3 — the *other* eleven, which underspend and land behind, a different defect and possibly an
+easier one — or reading the reference's source for the curative perimeter's action filter, which is
+the one thing this corpus cannot tell us and which four measurements have now failed to infer.
 
 ### 8.4 Two independent MILP solvers
 
