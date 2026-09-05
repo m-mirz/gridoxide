@@ -36,10 +36,13 @@ second preventive was built and gated the same day.
 >    set-point** — worth +2 for a nine-line deletion. Diagnosing 1.4.1.6 found defect 31 — it
 >    **dropped a curative close** — worth **+12**. Both were in what the second pass holds from the
 >    curative stage; neither was visible from the architecture. The corpus is now **103 of 123**.
-> 2a. **The curative perimeter does not stop** — twelve of the twenty that remain, and the next
->    thing to do. §8.9 has the measurement: 1.4.1.5 and 1.4.1.6 now match the reference on every
->    preventive figure and then spend three curative actions where it spends one, reaching *better*
->    curative margins than it asks for.
+> 2a. **A curative perimeter that overspends** — nine of the twenty that remain, across 1.4.1.5,
+>    1.4.1.6 and 1.4.4.4, which all now match the reference on the worst margin and then spend two or
+>    three curative actions where it spends one. §8.9 measures and **refutes** the two obvious causes:
+>    the stop criterion (forcing its improvement to zero costs 36) and a capped curative objective
+>    (costs 24). The remaining candidate is the composition rule, which §8.7 priced before defects 30
+>    and 31 existed and which is now worth re-measuring. The other eleven are 1.4.1.2 and 1.4.1.1.3,
+>    which *under*spend and land behind — a different defect.
 > 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
 >    reference keeps its curative answer after a second preventive pass *because* its second
 >    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
@@ -1240,22 +1243,53 @@ files. 1.4.1.5 goes 4 → 10 and 1.4.1.6 goes 5 → 11; both now match the refer
 −7, on the worst margin at 43.45 A, and on every preventive and outage figure.
 `the_second_preventive_pass_holds_a_curative_close` pins it.
 
-#### What is left: a curative perimeter that does not stop
+#### What is left, and two refutations
 
-The two scenarios keep the same two assertions, and they are the same defect. Both spend **three**
-curative actions where the reference spends one, and both end up *better* than the reference asks:
+The twenty that remain are five scenarios and **two** patterns, not one:
 
-| | gridoxide | reference |
+| scenario | left | pattern |
 |---|---|---|
-| 1.4.1.5, `FFR2AA1 FFR3AA1 2 - curative` | 535.31 | 86 |
-| 1.4.1.5, `FFR3AA1 FFR5AA1 1 - curative` | 963.63 | 910 |
-| 1.4.1.6, `FFR2AA1 FFR3AA1 2 - curative` | 384.99 | 86 |
+| 1.4.1.5 | 3 | 3 curative actions against 1, curative margins **better** (535 A against 86) |
+| 1.4.1.6 | 2 | 3 curative actions against 1, curative margins **better** (385 A against 86) |
+| 1.4.4.4 | 4 | 2 curative actions against 1, curative margin **better** (833 A against 795) |
+| 1.4.1.2 | 8 | **fewer** actions than the reference — 1 against 2 in both instants — and worse: 700.4 A against 721 |
+| 1.4.1.1.3 | 3 | shifters on different taps, worst margin 295.6 A against 321 |
 
-That is the curative stop criterion: a curative perimeter is not supposed to find the best answer it
-can, but to stop as soon as it beats the preventive one, because a curative action is taken under
-time pressure by someone who did not plan it. `castor::run` implements the rule and these two
-configurations do not trip it. Twelve of the twenty remaining assertions are here, and it is the next
-thing to measure — **not** `A(r, s)`, which item 3 of the status header still ranks last.
+The first three overspend and land ahead; the last two underspend and land behind. They are not one
+defect, and the first group is the one with a stated cause: the reference's own comment on 1.4.1.6
+says *"the curative pst is not needed since preventive flow is limiting"*. Its curative perimeter
+takes `close_fr1_fr5` — needed, since without it the curative CNEC is at −122 A — and then stops,
+where gridoxide goes on to spend two range actions lifting a CNEC from 86 A to 385 A that the plan's
+worst margin (43 A, on a *preventive* CNEC, which no curative action can touch) does not benefit
+from. Operationally the reference is right and the margin does not say so: three switching and tap
+operations under time pressure to buy nothing is worse than one, which is exactly what a curative
+stop criterion exists to prevent. **This is a defect, not a recorded disagreement**, and it should
+not be written into §8.6 on the strength of the margin.
+
+Two readings of it have been measured and both are wrong.
+
+**The stop criterion is not it.** `castor::run` already implements "stop once better than preventive
+by `curative-min-obj-improvement`". Forcing that improvement to zero — the reading under which
+1.4.1.6 stops after one action — costs **36** on TestCase16Nodes. And the corpus settles why: 23 of
+the 25 vendored configurations set it to **10000**, which is these fixtures saying *never stop
+early, optimize the curative perimeter fully*. The parameter is read correctly, it matters, and the
+reference honours it here too.
+
+**The capped objective is not it either.** If a curative perimeter could not usefully improve past
+the preventive bottleneck — the literal reading of "preventive flow is limiting" — then no candidate
+beyond `close_fr1_fr5` would score as an improvement and the search would stop on its own, without
+any stop criterion. Implemented as exactly that (an objective cap, not a hard stop, so range actions
+are still optimized at every leaf) it costs **24** on TestCase16Nodes. The reference's curative
+perimeters demonstrably *do* improve past the preventive objective in general, so whatever stops
+this one is narrower than a rule about the objective.
+
+Both experiments were backed out; the tree is byte-identical to the commit. What they establish is
+that the mechanism is **not** in the curative perimeter's own scoring, which is where the wording of
+the scenario points. The remaining candidate is the composition rule — the reference does not
+re-optimize the curative perimeters after a second preventive pass, it carries the first pass's
+decisions — and §8.7 measured that as costing 20 before defects 30 and 31 existed. It is worth
+re-measuring on the current tree, and it is the one place item 3 of the status header and this
+section now agree.
 
 ### 8.4 Two independent MILP solvers
 

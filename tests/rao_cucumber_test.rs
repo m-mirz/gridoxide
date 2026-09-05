@@ -1790,11 +1790,17 @@ const BASELINE_MATCHED_AC16: usize = 963;
 ///
 /// # What the 20 that remain are
 ///
-/// Twelve are a **curative perimeter that does not stop**. 1.4.1.5 and 1.4.1.6
-/// now agree with the reference on every preventive figure and spend three
-/// curative actions where it spends one — reaching *better* curative margins
-/// than it asks for, 535 A against 86. The reference stops a curative perimeter
-/// as soon as it beats the preventive one; see §8.9.
+/// Five scenarios and two patterns. **Nine** are a curative perimeter that
+/// overspends: 1.4.1.5, 1.4.1.6 and 1.4.4.4 all agree with the reference on the
+/// worst margin and then spend two or three curative actions where it spends
+/// one, reaching *better* curative margins than it asks for — 535 A against 86.
+/// That is a defect rather than a recorded disagreement, because three switching
+/// operations under time pressure to buy margin the plan's worst case cannot use
+/// is worse than one however the margin reads. §8.9 measures and refutes the two
+/// obvious causes, the stop criterion and a capped curative objective.
+///
+/// The other **eleven** are 1.4.1.2 and 1.4.1.1.3, which *under*spend and land
+/// behind the reference. A different defect, and not yet diagnosed.
 const BASELINE_MATCHED_2P: usize = 103;
 
 #[test]
