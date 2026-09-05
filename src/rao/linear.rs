@@ -649,7 +649,9 @@ fn optimize_within(
     // Before any control exists, so there is nothing state-dependent to see.
     let mut best = objective(crac, network, resolution, perimeter, &[], options);
     let initial_objective = best;
-    let initial_margin = margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model, options.held.as_ref());
+    // Before any control exists, like `best` above.
+    let initial_margin =
+        margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, &[], options);
     let mut setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
 
@@ -825,7 +827,15 @@ fn optimize_within(
         // Re-measured in megawatts rather than converted from `best`: the two
         // are minima over the *same* CNECs but not necessarily over the same
         // one, so converting the ampere answer would name a margin no CNEC has.
-        final_margin_mw: margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model, options.held.as_ref()),
+        final_margin_mw: margin(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            ObjectiveUnit::Megawatt,
+            &controls,
+            options,
+        ),
         initial_objective,
         final_objective: best,
         iterations,
@@ -1160,43 +1170,53 @@ fn build_controls(
     // only place a column can be scoped to.
     let split = options.held.as_ref().filter(|h| !h.states.is_empty());
 
-    let mut controls = Vec::new();
+    // Which columns to build, as `(range action, the states it governs)`.
+    //
+    // An action gets an unscoped column wherever this perimeter may itself use
+    // it — the ordinary case, and the only one when the perimeter is not split.
+    // When it *is* split, an action available in the held states gets a second
+    // column scoped to them. **A second, not an alternative**: an action a CRAC
+    // allows in both instants is two decisions taken at different times against
+    // different information, which is what `A(r, s)` means, and collapsing them
+    // to one column forces the preventive answer to be the one that is best on
+    // average across every state. The reference's 1.4.1.1.3 is exactly that —
+    // it leaves `pst_fr` at 5 preventively *because* it can put it at −5
+    // curatively, and spends the preventive move on `pst_be` instead.
+    let at = options.available_at.as_deref().unwrap_or(perimeter);
+    let mut wanted: Vec<(usize, Option<&[State]>)> = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
-        let at = options.available_at.as_deref().unwrap_or(perimeter);
-        // The ordinary case first: an action this perimeter may itself use gets
-        // an unscoped column. Otherwise, when the perimeter is split, an action
-        // available in the held states gets one scoped to them — it is not this
-        // perimeter's to decide, but the columns that *are* have to be chosen
-        // knowing it exists.
-        let governs: Option<&[State]> =
-            if options.available.allows(&action.usage_rules, at, crac) {
-                None
-            } else if let Some(held) = split
-                && options.a_r_s
-                && options.available.allows(&action.usage_rules, &held.states, crac)
-                // A range written `relativeToPreviousInstant` is *chained* to
-                // the instant before it, and in this problem that instant is
-                // the one being decided. Its window is therefore relative to
-                // another column rather than to a number, which this LP cannot
-                // say: it carries one bound pair per column and no row coupling
-                // two of them. Offering the column anyway anchors the window on
-                // the network's own starting tap, and the curative shifter then
-                // spends the pass undoing whatever preventive chose — on the
-                // reference's 1.4.1.6 that is the difference between its answer
-                // and a second pass that gives up and falls back to the initial
-                // situation. Declining is the honest reading until the coupling
-                // row exists; see `plans/RAO_PLAN.md` §8.11.
-                && !action.ranges.iter().any(|r| r.kind == RangeKind::RelativeToPreviousInstant)
-            {
-                Some(&held.states)
-            } else {
-                continue;
-            };
         // A usage limit already spent on network actions leaves room for only
         // some of these; `allowed` is the subset being tried.
         if allowed.is_some_and(|a| !a.contains(&index)) {
             continue;
         }
+        if options.available.allows(&action.usage_rules, at, crac) {
+            wanted.push((index, None));
+        }
+        if let Some(held) = split
+            && options.a_r_s
+            && options.available.allows(&action.usage_rules, &held.states, crac)
+            // A range written `relativeToPreviousInstant` is *chained* to the
+            // instant before it, and in this problem that instant is the one
+            // being decided. Its window is therefore relative to another column
+            // rather than to a number, which this LP cannot say: it carries one
+            // bound pair per column and no row coupling two of them. Offering
+            // the column anyway anchors the window on the network's own
+            // starting tap, and the curative shifter then spends the pass
+            // undoing whatever preventive chose — on the reference's 1.4.1.6
+            // that is the difference between its answer and a second pass that
+            // gives up and falls back to the initial situation. Declining is
+            // the honest reading until the coupling row exists; see
+            // `plans/RAO_PLAN.md` §8.11.
+            && !action.ranges.iter().any(|r| r.kind == RangeKind::RelativeToPreviousInstant)
+        {
+            wanted.push((index, Some(&held.states)));
+        }
+    }
+
+    let mut controls = Vec::new();
+    for (index, governs) in wanted {
+        let action = &crac.range_actions[index];
         match &action.kind {
             RangeActionKind::Pst { element, initial_tap, tap_to_angle } => {
                 let Some(branch) = resolution.branch(element) else { continue };
@@ -1757,11 +1777,16 @@ fn margin(
     resolution: &Resolution,
     perimeter: &[State],
     unit: ObjectiveUnit,
-    model: FlowModel,
-    held: Option<&super::evaluate::Held>,
+    controls: &[Control],
+    options: &LinearOptions,
 ) -> f64 {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, model, held);
+    // The same assessment `objective` scores by, held columns and all. Measuring
+    // the reported margin without them and the objective with them would let a
+    // plan report a negative margin for a network its own optimizer called
+    // secure — which is what `is_secure` then reads.
+    let held = held_now(options, controls);
+    let result = evaluate_in(crac, &view, resolution, options.flow_model, held.as_ref());
     margin_of(crac, &result, perimeter, unit)
 }
 
