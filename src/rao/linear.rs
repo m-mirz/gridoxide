@@ -79,7 +79,7 @@ use crate::linear::DcOptions;
 use crate::opf::{LinearProgram, OptStatus, Solver};
 use crate::types::Transformer;
 
-use super::crac::{Crac, RangeActionKind, State};
+use super::crac::{Crac, RangeActionKind, RangeKind, State};
 use super::evaluate::{FlowModel, Network, Resolution};
 use super::limits::Budget;
 use super::mnec::{Mnec, NO_CNEC_MARGIN};
@@ -179,6 +179,17 @@ pub struct LinearOptions {
     /// [`Held`](super::evaluate::Held) and `plans/RAO_PLAN.md` §8.10. `None`
     /// everywhere else, which is one network, one open set, and one evaluation.
     pub held: Option<super::evaluate::Held>,
+    /// Give the held states' own range actions a column of their own —
+    /// `A(r, s)`, a set-point per range action **per state**.
+    ///
+    /// Only meaningful alongside [`held`](Self::held), and only the second
+    /// preventive perimeter sets it. Without it that perimeter chooses its
+    /// preventive set-points as though every curative shifter were frozen where
+    /// it stands, which understates what a preventive move costs: on the
+    /// reference's 1.4.1.2 it stops the preventive shifter at tap 3 because
+    /// pushing to 4 hurts a curative CNEC the curative stage is perfectly able
+    /// to recover — and does recover, the moment the pass is over.
+    pub a_r_s: bool,
     /// The tap each phase-shifter range action sat on when this **perimeter**
     /// began, as `(range action index, tap)`.
     ///
@@ -209,6 +220,7 @@ impl Default for LinearOptions {
             limits: Budget::default(),
             available_at: None,
             held: None,
+            a_r_s: false,
             previous_taps: Vec::new(),
         }
     }
@@ -367,6 +379,18 @@ pub fn phase_shift_sensitivity(
 struct Control {
     /// Index into [`Crac::range_actions`].
     action: usize,
+    /// Whether this column is one the perimeter *reports*.
+    ///
+    /// A perimeter that spans several instants can carry a column for an action
+    /// it is not itself deciding — the second preventive problem needs the
+    /// curative shifters in front of it to choose the preventive ones properly,
+    /// which is `A(r, s)`: a set-point per range action **per state**. Such a
+    /// column is real, it constrains and is constrained, and its value is *not*
+    /// this perimeter's answer: the curative perimeter that follows decides it
+    /// properly, in a network where it is the only thing being decided.
+    /// Reporting both would put two set-points on one action with nothing to
+    /// tell them apart.
+    reported: bool,
     /// Sensitivity of each perimeter CNEC's flow to one unit of this control,
     /// MW per degree (PST) or MW per MW (injection).
     sensitivity: Vec<f64>,
@@ -622,7 +646,8 @@ fn optimize_within(
     let lp_indices: Vec<usize> =
         cnec_indices.iter().chain(mnec_indices.iter()).copied().collect();
 
-    let mut best = objective(crac, network, resolution, perimeter, options);
+    // Before any control exists, so there is nothing state-dependent to see.
+    let mut best = objective(crac, network, resolution, perimeter, &[], options);
     let initial_objective = best;
     let initial_margin = margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model, options.held.as_ref());
     let mut setpoints: Vec<Setpoint> = Vec::new();
@@ -667,7 +692,7 @@ fn optimize_within(
     for _ in 0..options.max_iterations {
         iterations += 1;
         let (flows, limits) =
-            perimeter_flows(crac, network, resolution, perimeter, &lp_indices, options.flow_model, options.held.as_ref());
+            perimeter_flows(crac, network, resolution, perimeter, &lp_indices, &controls, options);
         let program = build_program(
             cnec_indices.len(),
             &mnec_indices,
@@ -711,7 +736,7 @@ fn optimize_within(
         // iteration settling on the wrong side of a kink — see
         // `PstControl::bracketing_taps`.
         apply(crac, network, &mut controls, &proposed);
-        let mut best_here = objective(crac, network, resolution, perimeter, options);
+        let mut best_here = objective(crac, network, resolution, perimeter, &controls, options);
         for k in 0..controls.len() {
             let Some(pst) = controls[k].pst.as_ref() else { continue };
             let target = solution.primal[setpoint_column(k)];
@@ -727,7 +752,7 @@ fn optimize_within(
                 let mut trial = proposed.clone();
                 trial[k] = (angle, Some(tap));
                 apply(crac, network, &mut controls, &trial);
-                let score = objective(crac, network, resolution, perimeter, options);
+                let score = objective(crac, network, resolution, perimeter, &controls, options);
                 if score > best_here + 1e-9 {
                     best_here = score;
                     proposed = trial;
@@ -747,12 +772,13 @@ fn optimize_within(
         }
         apply(crac, network, &mut controls, &proposed);
 
-        let score = objective(crac, network, resolution, perimeter, options);
+        let score = objective(crac, network, resolution, perimeter, &controls, options);
         if score > best + 1e-9 {
             best = score;
             setpoints = controls
                 .iter()
                 .enumerate()
+                .filter(|(_, c)| c.reported)
                 .map(|(k, c)| Setpoint {
                     action: c.action,
                     value: c.current,
@@ -1115,12 +1141,57 @@ fn build_controls(
     // against curative CNECs whose response to them is the wrong number.
     let points = SensitivityPoints::build(network, crac, resolution, cnecs, dc_options, options.held.as_ref())?;
 
+    // Which CNEC rows a column governs, given the states it is available in.
+    // `None` is every row, which is what a single-instant perimeter always
+    // gets. A column scoped to a subset writes zeros elsewhere, so a curative
+    // shifter cannot pretend to move a preventive flow.
+    let scoped = |sensitivity: Vec<f64>, governs: Option<&[State]>| -> Vec<f64> {
+        let Some(governs) = governs else { return sensitivity };
+        sensitivity
+            .into_iter()
+            .enumerate()
+            .map(|(position, value)| {
+                let state = cnecs.get(position).map(|&i| &crac.flow_cnecs[i].state);
+                if state.is_some_and(|s| governs.contains(s)) { value } else { 0.0 }
+            })
+            .collect()
+    };
+    // The states this perimeter sees a *different* network in, which is the
+    // only place a column can be scoped to.
+    let split = options.held.as_ref().filter(|h| !h.states.is_empty());
+
     let mut controls = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
         let at = options.available_at.as_deref().unwrap_or(perimeter);
-        if !options.available.allows(&action.usage_rules, at, crac) {
-            continue;
-        }
+        // The ordinary case first: an action this perimeter may itself use gets
+        // an unscoped column. Otherwise, when the perimeter is split, an action
+        // available in the held states gets one scoped to them — it is not this
+        // perimeter's to decide, but the columns that *are* have to be chosen
+        // knowing it exists.
+        let governs: Option<&[State]> =
+            if options.available.allows(&action.usage_rules, at, crac) {
+                None
+            } else if let Some(held) = split
+                && options.a_r_s
+                && options.available.allows(&action.usage_rules, &held.states, crac)
+                // A range written `relativeToPreviousInstant` is *chained* to
+                // the instant before it, and in this problem that instant is
+                // the one being decided. Its window is therefore relative to
+                // another column rather than to a number, which this LP cannot
+                // say: it carries one bound pair per column and no row coupling
+                // two of them. Offering the column anyway anchors the window on
+                // the network's own starting tap, and the curative shifter then
+                // spends the pass undoing whatever preventive chose — on the
+                // reference's 1.4.1.6 that is the difference between its answer
+                // and a second pass that gives up and falls back to the initial
+                // situation. Declining is the honest reading until the coupling
+                // row exists; see `plans/RAO_PLAN.md` §8.11.
+                && !action.ranges.iter().any(|r| r.kind == RangeKind::RelativeToPreviousInstant)
+            {
+                Some(&held.states)
+            } else {
+                continue;
+            };
         // A usage limit already spent on network actions leaves room for only
         // some of these; `allowed` is the subset being tried.
         if allowed.is_some_and(|a| !a.contains(&index)) {
@@ -1181,7 +1252,8 @@ fn build_controls(
                 }
                 controls.push(Control {
                     action: index,
-                    sensitivity: sensitivity_mw,
+                    reported: governs.is_none(),
+                    sensitivity: scoped(sensitivity_mw, governs),
                     current,
                     lower,
                     upper,
@@ -1219,7 +1291,8 @@ fn build_controls(
                 }
                 controls.push(Control {
                     action: index,
-                    sensitivity: sensitivity_mw,
+                    reported: governs.is_none(),
+                    sensitivity: scoped(sensitivity_mw, governs),
                     current: 0.0,
                     lower,
                     upper,
@@ -1236,6 +1309,40 @@ fn build_controls(
             // connects it to a range action, and a counter trade has no network
             // sensitivity at all.
             RangeActionKind::Hvdc { .. } | RangeActionKind::CounterTrade { .. } => {}
+        }
+    }
+    // A curative column **supersedes** the preventive one on the same machine;
+    // it does not add to it.
+    //
+    // A shifter a CRAC allows in both instants is one machine with one angle,
+    // and the curative decision is the later one: after the contingency the
+    // shifter is wherever the curative stage put it, whatever preventive chose.
+    // Left additive, the LP sees twice the authority it has and splits the
+    // movement between the two columns — and on the reference's 1.4.1.6, where
+    // `pst_fr_pra` and `pst_fr_cra` are two range actions on one shifter, that
+    // is the difference between the reference's answer and a second preventive
+    // pass that gives up and falls back to the initial situation.
+    let superseded: Vec<usize> = controls
+        .iter()
+        .filter(|c| !c.reported)
+        .filter_map(|c| c.pst.as_ref().map(|p| p.branch))
+        .collect();
+    if let Some(held) = split
+        && !superseded.is_empty()
+    {
+        for control in controls.iter_mut().filter(|c| c.reported) {
+            let Some(branch) = control.pst.as_ref().map(|p| p.branch) else { continue };
+            if !superseded.contains(&branch) {
+                continue;
+            }
+            for (position, value) in control.sensitivity.iter_mut().enumerate() {
+                let governed = cnecs
+                    .get(position)
+                    .is_some_and(|&i| held.states.contains(&crac.flow_cnecs[i].state));
+                if governed {
+                    *value = 0.0;
+                }
+            }
         }
     }
     Some(controls)
@@ -1572,6 +1679,7 @@ fn apply(
     let base_mva = network.base_mva;
     for (control, &(value, tap)) in controls.iter_mut().zip(proposed) {
         control.current = value;
+        let reported = control.reported;
         if let Some(injection) = control.injection.as_mut() {
             // Move the *difference*, so trying a proposal and reverting it
             // returns the buses to exactly where they were rather than
@@ -1589,6 +1697,13 @@ fn apply(
         if let Some(pst) = control.pst.as_mut() {
             if let Some(tap) = tap {
                 pst.tap = tap;
+            }
+            // A column this perimeter does not report is not in force in the
+            // network it shares with the preventive states: it belongs to the
+            // held ones, and `held_now` puts it there. Writing it here would
+            // move a preventive flow with a decision nobody has taken.
+            if !reported {
+                continue;
             }
             if let Some(i) = pst.branch.checked_sub(network.lines.len()) {
                 // The **network's** own step is what gets applied, at the tap
@@ -1650,6 +1765,29 @@ fn margin(
     margin_of(crac, &result, perimeter, unit)
 }
 
+/// [`LinearOptions::held`], with every column the perimeter does not report
+/// folded in at the value it currently sits on.
+///
+/// This is what closes the loop on `A(r, s)`: the LP proposes a curative
+/// set-point, and the measurement that scores the proposal has to see it — in
+/// the curative states, and only there.
+fn held_now(
+    options: &LinearOptions,
+    controls: &[Control],
+) -> Option<super::evaluate::Held> {
+    let held = options.held.as_ref()?;
+    if controls.iter().all(|c| c.reported) {
+        return Some(held.clone());
+    }
+    let mut out = held.clone();
+    for control in controls.iter().filter(|c| !c.reported) {
+        if let Some(pst) = &control.pst {
+            out.taps.push((pst.branch, pst.tap, control.current));
+        }
+    }
+    Some(out)
+}
+
 /// The minimum margin over the perimeter's optimized CNECs of an assessment
 /// already made.
 fn margin_of(
@@ -1686,10 +1824,12 @@ fn objective(
     network: &NetworkMut<'_>,
     resolution: &Resolution,
     perimeter: &[State],
+    controls: &[Control],
     options: &LinearOptions,
 ) -> f64 {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, options.flow_model, options.held.as_ref());
+    let held = held_now(options, controls);
+    let result = evaluate_in(crac, &view, resolution, options.flow_model, held.as_ref());
     let unit = options.objective_unit;
     let margin = margin_of(crac, &result, perimeter, unit);
     let margin = if margin.is_finite() { margin } else { NO_CNEC_MARGIN };
@@ -1703,11 +1843,12 @@ fn perimeter_flows(
     resolution: &Resolution,
     perimeter: &[State],
     cnecs: &[usize],
-    model: FlowModel,
-    held: Option<&super::evaluate::Held>,
+    controls: &[Control],
+    options: &LinearOptions,
 ) -> (Vec<f64>, Vec<(f64, f64, f64)>) {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, model, held);
+    let held = held_now(options, controls);
+    let result = evaluate_in(crac, &view, resolution, options.flow_model, held.as_ref());
     cnecs
         .iter()
         .map(|&i| {
