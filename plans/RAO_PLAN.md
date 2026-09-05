@@ -12,13 +12,13 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
 > **175 of 181** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, and **115 of 123** on the second-preventive corpus — **1529 of 1563**, with
+> TestCase16Nodes, and **118 of 123** on the second-preventive corpus — **1532 of 1563**, with
 > **six** steps left unsupported out of what was 177.
 >
-> 34 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> 31 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
 > reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
-> asserts that nothing may disagree without a measurement behind it. **8 are the second-preventive
+> asserts that nothing may disagree without a measurement behind it. **5 are the second-preventive
 > corpus**, which is the one capability still short of the reference and is exempt by name until it
 > is not (§8.7).
 >
@@ -53,9 +53,13 @@ second preventive was built and gated the same day.
 >    and §8.7's ordering was right: it had cost on all three previous attempts and paid **+6** the
 >    moment defects 30, 31 and 32 made the second preventive problem worth solving properly. It is
 >    *not* one change with the composition rule after all — that was measured separately and costs 2
->    while fixing nothing (§8.9). What is still declared and unbuilt is the **coupling row** a
->    `relativeToPreviousInstant` curative range needs, without which such a column is declined
->    rather than mismodelled; 1.4.1.6 is the case.
+>    while fixing nothing (§8.9). Worth **+9** across two steps, closing 1.4.1.2 and 1.4.1.1.3, and
+>    it made §8.8's margin question come out the other way: narrowing the second pass's reported
+>    margin to the states it governs cost 4 then and gains 1 now. What is still declared and unbuilt
+>    is the **coupling row** a `relativeToPreviousInstant` curative range needs, without which such
+>    a column is declined rather than mismodelled; 1.4.1.6 is the case.
+> 3a. **Five assertions remain**, all of them 1.4.1.5 and 1.4.1.6's curative overspend, with four
+>    mechanisms measured and refuted in §8.9. Everything else in the corpus matches in full.
 > 4. **Phase 2's other half** — CGMES tap tables. An importer gap rather than an optimizer one, and
 >    the reason a CGMES-sourced phase shifter has no `TapChanger` today.
 > 5. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
@@ -1471,6 +1475,37 @@ otherwise — so gridoxide does it whenever a second preventive pass runs. That 
 the reference's stated default and an agreement with its stated answers, and the gate is the arbiter.
 
 `a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem` pins it.
+
+#### Two columns, not one or the other
+
+The first cut gave an action *either* an unscoped column or a scoped one, and that is not `A(r, s)`.
+An action a CRAC allows in **both** instants is two decisions taken at different times against
+different information, and collapsing them to one column forces the preventive answer to be the one
+that is best on average across every state. 1.4.1.1.3 is the scenario written for it — *"same case
+as 1.4.1.1.1 with `pst_fr` available in curative"* — and the reference leaves `pst_fr` at 5
+preventively **because** it can put it at −5 curatively, spending the preventive move on `pst_be`
+instead. Offering both columns takes it from 5 of 8 to 8 of 8: 115 → 117.
+
+#### And the margin question, answered the other way round
+
+§8.8 measured narrowing the second pass's reported `final_margin_mw` to the states the perimeter
+governs, and it cost **4**. Re-measured here it **gains 1** — 117 → 118 — and the reversal is not
+noise. The wide reading judges a plan on a curative CNEC read in the *preventive* network, whose
+curative perimeter has not run; that perimeter's own figure is already in the minimum beside it, so
+the reading is counted twice and once wrongly. On 1.4.1.1.3 it reports `FFR1AA1 FFR4AA1 - curative`
+at −75.5 MW where the curative perimeter reaches +222.4, and calls a plan whose worst margin is
++320.9 A insecure.
+
+What changed is that §8.8's measurement was taken while the pass's *answer* was still wrong. The wide
+reading was carrying `security status` on scenarios gridoxide was getting wrong for other reasons,
+and once those were fixed it stopped being a conservative reading and started being an incorrect one.
+That is worth keeping as a caution: a measurement of one change is only as good as the rest of the
+tree at the time, and §8.7's table mis-attributed four gaps for the same reason.
+
+**One trap in it.** `worst_margin` evaluates on the **DC** path whatever the run's flow model, which
+is right for the `initial` baseline it was written for and wrong here: used for this it cost a
+matching assertion on 3.2.1.1, an AC scenario, by reporting 619 MW against 1000. The margin has to
+come from `assess`, which respects `options.linear.flow_model`.
 
 ### 8.4 Two independent MILP solvers
 

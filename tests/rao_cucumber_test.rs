@@ -1744,7 +1744,7 @@ const BASELINE_MATCHED_AC: usize = 276;
 /// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
 const BASELINE_MATCHED_AC16: usize = 963;
 
-/// The 15 second-preventive scenarios: **115 of 123**, from 45 of 108 before the
+/// The 15 second-preventive scenarios: **118 of 123**, from 45 of 108 before the
 /// capability existed.
 ///
 /// 14 of the 15 `execution details` assertions hold. The one that does not is
@@ -1802,12 +1802,24 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// With those three landed the second preventive problem was finally rich enough
 /// to earn **`A(r, s)`** (§8.11), which §8.7 had ranked last for exactly that
 /// reason and which had cost on all three previous attempts. It carries a column
-/// per range action per state, so the pass can see a curative shifter paying for
-/// a preventive push — worth 6, and it closed 1.4.1.2 completely.
+/// per range action per state — including a **second** column for an action a
+/// CRAC allows in both instants, which is what 1.4.1.1.3 turns on — so the pass
+/// can see a curative shifter paying for a preventive push. Worth 9 across two
+/// steps, and it closed 1.4.1.2 and 1.4.1.1.3.
 ///
-/// # What the 8 that remain are
+/// It also settled a question §8.8 had answered the other way. A second
+/// preventive result reported `final_margin_mw` over **every** state with only
+/// the preventive decisions in force, and narrowing it to the states the
+/// perimeter governs cost 4 when it was tried. It now **gains** 1: the wide
+/// reading was carrying `security status` while the pass's own answer was wrong,
+/// and once the answer is right the wide reading is the thing that is wrong —
+/// it judges a plan on a curative CNEC read in a network whose curative
+/// perimeter has not run, when that perimeter's own figure is already in the
+/// minimum beside it.
 ///
-/// Three scenarios. **Five** are a curative perimeter that overspends: 1.4.1.5
+/// # What the 5 that remain are
+///
+/// Two scenarios. **Five** are a curative perimeter that overspends: 1.4.1.5
 /// and 1.4.1.6 agree with the reference on every preventive figure and then
 /// spend three curative actions where it spends one, reaching *better* curative
 /// margins than it asks for — 535 A against 86. That is a defect rather than a
@@ -1818,10 +1830,8 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// (−2, and it moves neither scenario), and `A(r, s)` (−4). The overspend is
 /// intrinsic to the curative search in *both* passes; do not re-run those four.
 ///
-/// The other **three** are 1.4.1.1.3, which still underspends: it wants a
-/// preventive `pst_be` at −16 and `pst_fr` at 5 where gridoxide leaves the first
-/// alone and puts the second at −5, for 295.6 A against 321. Not yet diagnosed.
-const BASELINE_MATCHED_2P: usize = 115;
+/// Nothing else. Every other scenario in the corpus matches in full.
+const BASELINE_MATCHED_2P: usize = 118;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
@@ -1840,5 +1850,57 @@ fn every_scenario_names_inputs_that_exist() {
             );
         }
         assert!(!scenario.expectations.is_empty(), "{}: nothing to check", scenario.name);
+    }
+}
+
+// TEMPORARY PROBE — remove before commit.
+#[test]
+fn probe_1_4_1_1_3() {
+    let net = ucte::read_with(resolve("common/TestCase16Nodes.uct"), &ucte::UcteOptions::default())
+        .expect("network");
+    let (crac, _) = crac_json::read(resolve("epic20/second_preventive_ls_1_3.json")).expect("crac");
+    let config = resolve("epic20/RaoParameters_maxMargin_ampere_second_preventive.json");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let view = Network {
+        generation: &net.generation, buses: &net.buses, lines: &net.lines,
+        transformers: &net.transformers, branch_ids: &net.branch_ids, bus_ids: &net.node_codes,
+        initially_open: &net.initially_open, bus_countries: &net.bus_countries,
+        shunts: &net.shunts, tap_changers: &net.tap_changers, base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &view, &resolution, &mut solver, &options_from(&config));
+    println!("plan.final_margin_mw {:.3}  is_secure {}", plan.final_margin_mw, plan.is_secure());
+    println!("preventive.final_margin_mw {:.3}", plan.preventive.final_margin_mw);
+    // Every CNEC in the network the plan's own preventive decisions produce.
+    let v = Network {
+        transformers: &plan.preventive.transformers,
+        buses: &plan.preventive.buses,
+        ..view
+    };
+    let ac = gridoxide::rao::ac_options(&v);
+    for per in evaluate_model(
+        &crac, &v, &resolution, &plan.preventive.open_branches,
+        gridoxide::rao::FlowModel::Ac, &ac,
+    ).perimeters {
+        for c in &per.cnecs {
+            println!(
+                "    PREVENTIVE-NET {:<52} {:>9.2} MW {:>9.2} A",
+                crac.flow_cnecs[c.cnec].id, c.margin_mw, c.margin_a
+            );
+        }
+    }
+    for sc in &plan.scenarios {
+        if let Some(a) = &sc.automatons {
+            println!("  automatons.final_margin_mw {:.3}", a.final_margin_mw);
+        }
+        for per in &sc.perimeters {
+            println!(
+                "  curative.final_margin_mw {:.3}  actions {:?} taps {:?}",
+                per.final_margin_mw,
+                per.network_actions.iter().map(|&a| crac.network_actions[a].id.as_str()).collect::<Vec<_>>(),
+                per.setpoints.iter().filter(|s| s.moved())
+                    .map(|s| (crac.range_actions[s.action].id.as_str(), s.tap)).collect::<Vec<_>>(),
+            );
+        }
     }
 }

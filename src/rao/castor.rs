@@ -310,8 +310,34 @@ pub fn run(
     // The worst margin after everything, measured once over every state with
     // the preventive decisions in place. Curative decisions apply only in their
     // own scenario, so each scenario's own perimeters carry those figures.
-    let final_margin = plan_preventive
-        .final_margin_mw
+    // The preventive perimeter's margin over **the states it governs**, not over
+    // every state it looked at.
+    //
+    // It looked at all of them — that is what the second pass is for — but a
+    // curative CNEC it read in the preventive network is one whose curative
+    // perimeter has not run yet, and that perimeter's own figure is in the
+    // minimum below. Counting the preventive reading too judges the plan on a
+    // network it never claims to produce. `preventive_states` is the honest set:
+    // the base case, every outage state, and the curative states nothing can act
+    // on, which are pulled forward for exactly this reason.
+    let preventive_view = Network {
+        buses: &plan_preventive.buses,
+        transformers: &plan_preventive.transformers,
+        ..*network
+    };
+    let preventive_margin = assess(
+        crac,
+        &preventive_view,
+        resolution,
+        &plan_preventive.open_branches,
+        options,
+    )
+    .perimeters
+    .iter()
+    .filter(|p| preventive_states.contains(&p.state))
+    .filter_map(|p| p.min_optimized_margin(crac))
+    .fold(f64::INFINITY, f64::min);
+    let final_margin = preventive_margin
         .min(
             scenarios
                 .iter()
