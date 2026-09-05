@@ -116,6 +116,19 @@ fn by_type<'a>(ds: &'a CimDataset, type_name: &str) -> &'a [String] {
     ds.by_type.get(type_name).map(|v| v.as_slice()).unwrap_or(&[])
 }
 
+/// [`by_type`], in an order that is the same on every run.
+///
+/// `CimDataset::merge` iterates a `HashMap` of entries, so `by_type` lists
+/// elements first seen in a merged profile in a randomized order — and a CGMES
+/// import is almost always several profiles merged. Any loop whose *position*
+/// in the output matters therefore has to impose one, or the flat branch index
+/// it produces differs between two runs against the same files.
+fn sorted_mrids(ds: &CimDataset, type_name: &str) -> Vec<String> {
+    let mut v = by_type(ds, type_name).to_vec();
+    v.sort();
+    v
+}
+
 /// `target_value_unit_multiplier`'s URI suffix -> multiplier factor.
 fn unit_multiplier(uri: Option<&str>) -> f64 {
     match uri.and_then(|u| u.rsplit('.').next()) {
@@ -1009,7 +1022,7 @@ fn phase_tap_linear(
 /// return value, which is a raw remap table, not a finished mrid map).
 fn build_ac_bus_skeleton(ds: &CimDataset) -> Result<(Vec<Bus>, HashMap<String, usize>, TerminalIndex), CgmesError> {
     // --- Step 1: buses from TopologicalNode ---
-    let tn_mrids = by_type(ds, "TopologicalNode");
+    let tn_mrids = sorted_mrids(ds, "TopologicalNode");
     if tn_mrids.is_empty() {
         return Err(CgmesError::NoTopologicalNodes);
     }
@@ -1095,6 +1108,29 @@ pub struct CgmesNetwork {
     /// that makes the table trustworthy as a *replacement* for the single-step
     /// path rather than a second opinion about it.
     pub tap_changers: Vec<Option<crate::types::TapChanger>>,
+    /// Parallel to [`buses`](Self::buses): the `TopologicalNode` mRID each bus
+    /// came from.
+    ///
+    /// A three-winding transformer's **star point** is not a node any document
+    /// names, so it gets `{PowerTransformer mRID}_star` — synthesized, and the
+    /// only entry here that is not read straight off the model.
+    pub bus_ids: Vec<String>,
+    /// The identifier of each branch, in the crate-wide flat order: every line
+    /// first, then every transformer.
+    ///
+    /// The mRID of the `ConductingEquipment` the branch came from —
+    /// `ACLineSegment`, `SeriesCompensator`, `EquivalentBranch` or
+    /// `PowerTransformer` — which is what powsybl gives an IIDM element
+    /// converted from CGMES, and therefore what a CRAC written against such a
+    /// network names.
+    ///
+    /// **A three-winding transformer is the exception**, because it becomes
+    /// three branches and one mRID cannot name three things. Each leg carries
+    /// its own `PowerTransformerEnd` mRID instead, so a CRAC naming the
+    /// *transformer* resolves to nothing and says so through
+    /// [`Resolution::unresolved`](crate::rao::Resolution) — which beats
+    /// silently resolving to whichever leg happened to be built first.
+    pub branch_ids: Vec<String>,
     /// The regulating controls acting on those changers, resolved onto
     /// gridoxide's own bus and branch indices. Only enabled, modelled controls
     /// appear; [`tap_report`](Self::tap_report) accounts for the rest.
@@ -1466,10 +1502,16 @@ fn convert_equipment(
     // — mirroring pgm.rs's own from_status/to_status handling for `Line`,
     // needed here because RealGrid genuinely has `Terminal.connected=false`
     // entries (a real de-energized/switched-out snapshot, not a decode gap).
-    /// Returns the index of the pushed line, or `None` when both ends are
-    /// disconnected and nothing was pushed. The index is what lets a caller
-    /// map a `Terminal` onto a branch — see `terminal_branch` below.
-    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) -> Option<usize> {
+    /// `(index, carries through flow)` for the line pushed, or `None` when both
+    /// ends are disconnected and nothing was pushed.
+    ///
+    /// The two halves are separate because a half-open line **is** pushed — as
+    /// a shunt-only self-loop — and so needs an identifier like any other
+    /// branch, but carries no through flow and can therefore never be an area
+    /// boundary, so it is deliberately not mapped from a `Terminal`. Returning
+    /// one `Option` for both conflated "nothing was pushed" with "nothing to
+    /// map", and left every half-open line nameless.
+    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) -> Option<(usize, bool)> {
         match (from_conn, to_conn) {
             (true, true) => {
                 // A jumper exported as a very short `ACLineSegment` would put an
@@ -1480,24 +1522,29 @@ fn convert_equipment(
                 // and exists for exports that are less well behaved.
                 let (r, x) = crate::topology::clamp_branch_impedance(r, x);
                 lines.push(Line { from, to, r, x, b_shunt, g_shunt });
-                Some(lines.len() - 1)
+                Some((lines.len() - 1, true))
             }
             // A half-open line becomes a shunt-only self-loop at the connected
             // end. It carries no through flow, so it can never be an area
-            // boundary and is deliberately not mapped.
+            // boundary and is deliberately not mapped — but it is a branch, and
+            // it is named.
             (true, false) => {
                 lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt });
-                None
+                Some((lines.len() - 1, false))
             }
             (false, true) => {
                 lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt });
-                None
+                Some((lines.len() - 1, false))
             }
             (false, false) => None,
         }
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    // Parallel to `lines`: the equipment mRID each came from. Recorded beside
+    // the push rather than re-derived, because `push_status_aware_line` decides
+    // whether a branch survives at all.
+    let mut line_ids: Vec<String> = Vec::new();
     // Terminal mRID -> (branch index within `lines`, which side it became).
     // Built here because only the conversion knows which branches survived and
     // in what order; `cgmes_control_areas` needs it to turn a `TieFlow`'s
@@ -1505,9 +1552,17 @@ fn convert_equipment(
     let mut line_terminal: HashMap<String, (usize, crate::branch_flow::Terminal)> = HashMap::new();
     let record_line = |terms: &TerminalIndex,
                            line_terminal: &mut HashMap<String, (usize, crate::branch_flow::Terminal)>,
+                           line_ids: &mut Vec<String>,
                            mrid: &str,
-                           pushed: Option<usize>| {
-        let Some(idx) = pushed else { return };
+                           pushed: Option<(usize, bool)>| {
+        let Some((idx, through)) = pushed else { return };
+        if line_ids.len() <= idx {
+            line_ids.resize(idx + 1, String::new());
+        }
+        line_ids[idx] = mrid.to_string();
+        if !through {
+            return;
+        }
         let Some(ts) = terms.by_equipment.get(mrid) else { return };
         for (which, side) in
             [(0, crate::branch_flow::Terminal::From), (1, crate::branch_flow::Terminal::To)]
@@ -1518,7 +1573,17 @@ fn convert_equipment(
         }
     };
 
-    for mrid in by_type(ds, "ACLineSegment") {
+    // Sorted by mRID before conversion, for the reason the transformer loop
+    // below states and by the same remedy: `CimDataset::merge` iterates a
+    // `HashMap` of entries, so `by_type` accumulates in a randomized order for
+    // every element first seen in a merged profile — and a CGMES import is
+    // almost always several files merged. Left alone, the line list, every flat
+    // branch index derived from it, and every identifier those indices are
+    // looked up by came out in a different order on each run of the same
+    // program against the same files. Nothing asserted on a line index, so it
+    // never surfaced; it surfaces the moment a branch has a name.
+    for mrid in sorted_mrids(ds, "ACLineSegment") {
+        let mrid = mrid.as_str();
         let ln: &ACLineSegment = require(ds, mrid, "ACLineSegment", mrid, "(self)")?;
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
@@ -1529,13 +1594,14 @@ fn convert_equipment(
             ln.r.unwrap_or(0.0) / z_base, ln.x.unwrap_or(0.0) / z_base,
             ln.bch.unwrap_or(0.0) / y_base, ln.gch.unwrap_or(0.0) / y_base,
         );
-        record_line(&terms, &mut line_terminal, mrid, pushed);
+        record_line(&terms, &mut line_terminal, &mut line_ids, mrid, pushed);
     }
     // SeriesCompensator: a distinct 2-terminal CIM class from ACLineSegment
     // ("a series capacitor or reactor... without charging susceptance" per
     // its own doc comment) — same conversion, minus the shunt terms (it has
     // no bch/gch fields at all, unlike ACLineSegment).
-    for mrid in by_type(ds, "SeriesCompensator") {
+    for mrid in sorted_mrids(ds, "SeriesCompensator") {
+        let mrid = mrid.as_str();
         let sc: &cimstructs::SeriesCompensator = require(ds, mrid, "SeriesCompensator", mrid, "(self)")?;
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
@@ -1544,14 +1610,15 @@ fn convert_equipment(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
-        record_line(&terms, &mut line_terminal, mrid, pushed);
+        record_line(&terms, &mut line_terminal, &mut line_ids, mrid, pushed);
     }
     // EquivalentBranch: a simplified series-impedance stand-in for a
     // reduced/boundary part of the network (an `EquivalentNetwork`
     // container) — same shape as ACLineSegment, using the primary `r`/`x`
     // (not the `r21`/`x21`/`negative*`/`zero*` directional variants, which
     // FullGrid's own instance leaves equal to `r`/`x` anyway).
-    for mrid in by_type(ds, "EquivalentBranch") {
+    for mrid in sorted_mrids(ds, "EquivalentBranch") {
+        let mrid = mrid.as_str();
         let eb: &cimstructs::EquivalentBranch = require(ds, mrid, "EquivalentBranch", mrid, "(self)")?;
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
@@ -1560,7 +1627,7 @@ fn convert_equipment(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             eb.r.unwrap_or(0.0) / z_base, eb.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
-        record_line(&terms, &mut line_terminal, mrid, pushed);
+        record_line(&terms, &mut line_terminal, &mut line_ids, mrid, pushed);
     }
 
     // --- Steps 5+6: transformers (2- and 3-winding) ---
@@ -1574,7 +1641,14 @@ fn convert_equipment(
         ends_by_pt.entry(pt.mrid.clone()).or_default().push(end);
     }
 
+    // Star points, which are synthesized rather than read: `(bus index, id)`.
+    let mut star_bus_ids: Vec<(usize, String)> = Vec::new();
     let mut transformers: Vec<Transformer> = Vec::new();
+    // Parallel to `transformers`: the mRID each is named by. The
+    // `PowerTransformer` for a two-winding one; the `PowerTransformerEnd` for
+    // each leg of a three-winding one, since one mRID cannot name three
+    // branches. See [`CgmesNetwork::branch_ids`].
+    let mut transformer_ids: Vec<String> = Vec::new();
     let mut tap_changers: Vec<Option<crate::types::TapChanger>> = Vec::new();
     // Parallel to `transformers`: the `PowerTransformerEnd` whose tap changer
     // produced the table, and each end's terminal with the side it became.
@@ -1598,6 +1672,7 @@ fn convert_equipment(
             2 => {
                 let (t, c) = build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?;
                 transformers.push(t);
+                transformer_ids.push(pt_mrid.clone());
                 tap_changers.push(c);
                 changer_end.push(
                     [ends[0], ends[1]]
@@ -1628,6 +1703,7 @@ fn convert_equipment(
                 // first real multi-3-winding-transformer case this
                 // converter was tried against).
                 let star_idx = buses.len();
+                star_bus_ids.push((star_idx, format!("{pt_mrid}_star")));
                 buses.push(Bus {
                     idx: star_idx, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
                     p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY,
@@ -1636,6 +1712,7 @@ fn convert_equipment(
                 for end in &ends {
                     let (t, c) = build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?;
                     transformers.push(t);
+                    transformer_ids.push(end.mrid_str().to_string());
                     tap_changers.push(c);
                     changer_end.push(
                         tap_index.has_changer(end.mrid_str()).then(|| end.mrid_str().to_string()),
@@ -2016,7 +2093,39 @@ fn convert_equipment(
     );
 
     let voltage_control = voltage_control.finish(&buses);
+    // `idx_of` maps a `TopologicalNode` mRID to a bus index, and it is **not**
+    // injective: the skeleton merges galvanically-joined nodes, so several
+    // mRIDs can name one bus. Inverting it therefore has to choose, and the
+    // choice has to be the same on every import — taking whichever the hash
+    // map happened to yield last made two imports of one model disagree about
+    // the name of a merged bus while agreeing about everything else.
+    //
+    // The lowest-sorting of the merged mRIDs wins. A consequence worth stating:
+    // a CRAC naming one of the *other* nodes merged into that bus will not
+    // resolve, because [`crate::rao::Resolution`] is given one name per bus.
+    let mut named: Vec<(&String, usize)> = idx_of.iter().map(|(m, i)| (m, *i)).collect();
+    named.sort();
+    let mut bus_ids: Vec<String> = vec![String::new(); buses.len()];
+    for (mrid, i) in named {
+        if let Some(slot) = bus_ids.get_mut(i)
+            && slot.is_empty()
+        {
+            *slot = mrid.clone();
+        }
+    }
+    for (i, id) in star_bus_ids {
+        if let Some(slot) = bus_ids.get_mut(i) {
+            *slot = id;
+        }
+    }
+    // Lines first, then transformers — the flat order `branch_flow::branch_params`
+    // defines and every index in this crate follows.
+    line_ids.resize(lines.len(), String::new());
+    let branch_ids: Vec<String> =
+        line_ids.into_iter().chain(transformer_ids).collect();
     Ok(CgmesNetwork {
+        bus_ids,
+        branch_ids,
         base_harmonization,
         buses,
         lines,
