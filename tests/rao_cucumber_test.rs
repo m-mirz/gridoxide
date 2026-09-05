@@ -1803,7 +1803,13 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// re-run those four.
 ///
 /// The other **eleven** are 1.4.1.2 and 1.4.1.1.3, which *under*spend and land
-/// behind the reference. A different defect, and not yet diagnosed.
+/// behind. That is **defect 32** (§8.10): the second pass holds the curative
+/// switching in *one* network, so it reads the preventive and outage CNECs in a
+/// network where a curative branch is open and they are not. On 1.4.1.2 the two
+/// landscapes are 77 A apart and peak at different taps; on 1.4.4.4 the
+/// per-state maximum is the reference's tap 2 at 794.75 A against its 795.
+/// Fixing it needs a per-state open set inside the LP, which is the largest
+/// structural item left in the module.
 const BASELINE_MATCHED_2P: usize = 103;
 
 #[test]

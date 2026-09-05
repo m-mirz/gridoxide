@@ -43,7 +43,10 @@ second preventive was built and gated the same day.
 >    implemented (−2, and it moves neither scenario). The overspend is intrinsic to the curative
 >    search in *both* passes. Do not re-run those four; read the reference's curative action filter
 >    instead. The other eleven are 1.4.1.2 and 1.4.1.1.3, which *under*spend and land behind — a
->    different defect, and the better next target.
+>    different defect: §8.10 diagnoses it as **defect 32**, the second pass reading preventive and
+>    outage CNECs in a network with the curative switching applied. It misprices the tap on both
+>    1.4.1.2 and 1.4.4.4, and fixing it is the largest remaining structural item — a per-state open
+>    set threaded through the LP.
 > 3. **`A(r, s)` and the composition rule, together and last.** §8.7 is the record of why. The
 >    reference keeps its curative answer after a second preventive pass *because* its second
 >    preventive computed one — they are one change, not two — and gridoxide's curative **search** is
@@ -1320,10 +1323,68 @@ genuinely improve the curative perimeter's own objective — 86 A to 385 A — a
 because they do. The reference declines a 300 A improvement on its own perimeter, and nothing in the
 configuration, the CRAC, or the four rules above says why.
 
-The next move is therefore **not** another mechanism from this list. It is either 1.4.1.2 and
-1.4.1.1.3 — the *other* eleven, which underspend and land behind, a different defect and possibly an
-easier one — or reading the reference's source for the curative perimeter's action filter, which is
-the one thing this corpus cannot tell us and which four measurements have now failed to infer.
+The next move is therefore **not** another mechanism from this list. For these nine it is reading the
+reference's source for the curative perimeter's action filter, which is the one thing this corpus
+cannot tell us and which four measurements have now failed to infer. The *other* eleven are a
+different defect, and §8.10 diagnoses it.
+
+### 8.10 Defect 32: the second pass reads preventive CNECs in a curative network
+
+1.4.1.2 is the other pattern — gridoxide *under*spends and lands behind, one preventive action
+against two and a worst margin of 700.4 A against 721. It has almost the same CRAC as 1.4.4.4: one
+contingency, `pst_fr` preventive on `[−5, 15]`, `pst_be` curative, `open_fr1_fr3` curative. What
+differs is the preventive threshold, 1400 A rather than 1500.
+
+**The evaluation is exact, for the third scenario running.** The scenario does not say which second
+preventive action the reference takes, so it was found by sweep — `close_de3_de4`:
+
+| CNEC | stage | gridoxide | asserted |
+|---|---|---|---|
+| `FFR4AA1 DDE1AA1 1 - preventive` | PRA | **730.53 A** | 731 A |
+| `FFR1AA1 FFR4AA1 1 - curative` | CRA | **720.98 A** | 721 A |
+| `FFR3AA1 FFR5AA1 1 - curative` | CRA | **724.88 A** | 725 A |
+
+Sweeping the curative `pst_be` at the reference's preventive answer confirms −5 is the true
+crossing: `FFR1AA1 FFR4AA1` rises as the tap falls and `FFR3AA1 FFR5AA1` falls, and they meet at
+720.98 against 724.88. The reference's plan is a genuine global optimum and gridoxide can measure it
+to two decimals.
+
+**The mechanism.** The second pass optimizes one network standing in for every state, with the
+curative switching held — §8.8 argued that holding is the price of letting the pass see the curative
+CNECs at all, and §8.9 made the held set correct. What neither noticed is that holding also puts
+`open_fr1_fr3` into the **preventive and outage** states, where it is not in force, and
+`FFR4AA1 DDE1AA1 - preventive` is exactly the CNEC that flatters. The two landscapes, worst margin
+over every CNEC:
+
+| `pst_fr` | held in every state (what the pass sees) | measured per state (the truth) |
+|---|---|---|
+| 1 | 758.34 | 683.11 |
+| **2** | **777.33** | 700.43 |
+| **3** | 751.75 | **717.75** |
+| 4 | 708.75 | 708.75 |
+
+Two maxima, 77 A apart at tap 2. The pass takes tap 2 because in its network the preventive CNEC
+reads 777 A; measured where it actually lives it reads 700, and tap 3 is the better answer. **The
+search is finding the exact optimum of a landscape that is wrong for half its states.**
+
+**And it is the same defect on 1.4.4.4**, where the numbers land better still. Per state:
+tap 1 → min(783.11, 837.74) = 783.11; **tap 2 → min(800.43, 794.75) = 794.75**; tap 3 → 751.75. The
+per-state maximum is tap 2 at 794.75 A, which is the reference's tap and its 795 A to the decimal —
+where the held landscape peaks at tap 1 and gridoxide lands at 783.11. That is four of 1.4.4.4's
+remaining assertions, and one of 1.4.1.2's.
+
+**Why it is not a small change.** `optimize_with_open` expresses an open set by zeroing branches in
+*one* working copy of the network before handing it to the LP, so the open set is a property of the
+problem rather than of a state. Making it per-state means threading it through three places:
+`SensitivityPoints::build`, which already builds a separate DC network per **contingency** and would
+need keying on `(contingency, held-applied)` so an outage and a curative CNEC under the same
+contingency stop sharing a linearization; the base-flow measurement the LP linearizes around; and the
+leaf scoring in `search::leaf`. Correcting the tree's score alone is not enough — on both scenarios
+the choice between adjacent taps is made by the LP, not by the tree.
+
+`castor::final_assessment` already measures a finished plan per state, correctly, and is the model
+for what this needs. It is the largest remaining structural item in the module, and unlike `A(r, s)`
+it has two scenarios' worth of measured evidence in front of it rather than a declaration in §7.3.
 
 ### 8.4 Two independent MILP solvers
 
