@@ -479,7 +479,14 @@ pub fn search_with_open(
     // re-answered, so an action authorized by an overload keeps its authority
     // even once another action has relieved it — the reference's own scenario
     // 2.4.1.2 is named for that ("no reevaluation"). See `super::usage`.
-    let starting = measure_with(crac, network, resolution, &base_open, options.linear.flow_model);
+    let starting = measure_with(
+        crac,
+        network,
+        resolution,
+        &base_open,
+        options.linear.flow_model,
+        options.linear.held.as_ref(),
+    );
     let branches = crate::linear::btheta::dc_branches(
         network.lines,
         network.transformers,
@@ -575,6 +582,7 @@ pub fn search_with_open(
             available,
             max,
             options.linear.flow_model,
+            options.linear.held.as_ref(),
         ),
         None => available,
     };
@@ -906,9 +914,17 @@ fn optimize_with_open(
     // line list — a line with no admittance carries no flow and contributes
     // nothing, which is exactly what "open" means. Indices are preserved by
     // zeroing rather than deleting.
+    //
+    // Not when the perimeter is **split**, though. There the open set is not
+    // one set: `LinearOptions::held` names states that see a different one, and
+    // baking either into the shared line list would make the other wrong.
+    // `SensitivityPoints::build` opens each point's own branches instead, and
+    // the evaluator has always taken its open set as data rather than from the
+    // lines. See `plans/RAO_PLAN.md` §8.10.
+    let split = options.held.as_ref().is_some_and(|h| !h.states.is_empty());
     let mut lines = network.lines.to_vec();
     let mut transformers = network.transformers.clone();
-    for &branch in open {
+    for &branch in if split { &[][..] } else { open } {
         if branch < lines.len() {
             lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
             lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
@@ -963,9 +979,10 @@ fn measure_with(
     resolution: &Resolution,
     open: &[usize],
     model: super::evaluate::FlowModel,
+    held: Option<&super::evaluate::Held>,
 ) -> super::evaluate::SecurityResult {
     let ac = super::evaluate::ac_options(network);
-    super::evaluate::evaluate_model(crac, network, resolution, open, model, &ac)
+    super::evaluate::evaluate_split(crac, network, resolution, open, held, model, &ac)
 }
 
 /// What the search maximizes, read off an assessment already made: the worst
@@ -1113,6 +1130,7 @@ fn near_most_limiting(
     available: Vec<Candidate>,
     max_boundaries: usize,
     model: super::evaluate::FlowModel,
+    held: Option<&super::evaluate::Held>,
 ) -> Vec<Candidate> {
     if network.bus_countries.is_empty() {
         return available;
@@ -1126,7 +1144,7 @@ fn near_most_limiting(
     // The most limiting element, measured on the network as it stands and with
     // the same flow model the optimizer scores by — the reference locates it
     // from its own optimization result, not from a second opinion.
-    let evaluated = measure_with(crac, network, resolution, open, model);
+    let evaluated = measure_with(crac, network, resolution, open, model, held);
     let worst = evaluated
         .perimeters
         .iter()
