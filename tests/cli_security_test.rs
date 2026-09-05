@@ -129,7 +129,12 @@ fn a_broken_invocation_exits_two_rather_than_one() {
     let crac = data("rao", "crac-for-12nodes.json");
     let out = run(&["security", "network.wat", "--crac", crac.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("expected a .uct or .xiidm"));
+    // Names all three inputs the command takes, CGMES included — a user who
+    // gave the wrong thing should be told what the right things are.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(".uct"), "{stderr}");
+    assert!(stderr.contains(".xiidm"), "{stderr}");
+    assert!(stderr.contains("CGMES"), "{stderr}");
 }
 
 #[test]

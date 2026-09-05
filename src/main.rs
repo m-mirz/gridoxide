@@ -2306,6 +2306,16 @@ struct SecurityNetwork {
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
 fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
     let lower = path.to_ascii_lowercase();
+    // CGMES first, because it is the one input that is not a single file: a
+    // model is a set of profiles, and `path` names either the directory holding
+    // them or one profile whose siblings are the rest — the same convention
+    // `run_solve` uses, and how a conformity configuration is laid out on disk.
+    // Checked before the `.xml` arm below, which would otherwise claim a lone
+    // CGMES profile and hand it to the IIDM reader.
+    #[cfg(feature = "cgmes")]
+    if std::path::Path::new(path).is_dir() || is_cgmes_profile(path) {
+        return load_cgmes_for_security(path);
+    }
     #[cfg(feature = "iidm")]
     if lower.ends_with(".xiidm") || lower.ends_with(".xml") {
         let n = gridoxide::iidm::read(path).map_err(|e| e.to_string())?;
@@ -2350,8 +2360,78 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
         });
     }
     Err(format!(
-        "cannot tell what `{path}` is; expected a .uct or .xiidm file"
+        "cannot tell what `{path}` is; expected a .uct, a .xiidm, or a directory of CGMES profiles"
     ))
+}
+
+/// Whether `path` looks like one file out of a CGMES profile set.
+///
+/// An `.xml` file is either a CGMES profile or an IIDM export, and the two are
+/// told apart by content rather than by name — a CGMES profile declares the CIM
+/// namespace in its first few hundred bytes, an IIDM document declares
+/// `http://www.powsybl.org/schema/iidm`.
+#[cfg(all(feature = "rao", feature = "cgmes", any(feature = "ucte", feature = "iidm")))]
+fn is_cgmes_profile(path: &str) -> bool {
+    if !path.to_ascii_lowercase().ends_with(".xml") {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let head = &text[..text.len().min(4096)];
+    head.contains("iec.ch/TC57") && !head.contains("powsybl.org/schema/iidm")
+}
+
+/// A CGMES model: the profiles beside `path`, converted and named.
+#[cfg(all(feature = "rao", feature = "cgmes", any(feature = "ucte", feature = "iidm")))]
+fn load_cgmes_for_security(path: &str) -> Result<SecurityNetwork, String> {
+    let dir = std::path::Path::new(path);
+    let dir = if dir.is_dir() {
+        dir.to_path_buf()
+    } else {
+        dir.parent().unwrap_or(dir).to_path_buf()
+    };
+    let mut profiles: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "xml"))
+        .collect();
+    profiles.sort();
+    if profiles.is_empty() {
+        return Err(format!("no CGMES profile .xml files in {}", dir.display()));
+    }
+    let refs: Vec<&std::path::Path> = profiles.iter().map(|p| p.as_path()).collect();
+    let ds = gridoxide::cgmes::load_profiles(&refs).map_err(|e| e.to_string())?;
+    let s_base_va = 100e6;
+    let n = gridoxide::cgmes::cgmes_to_network(&ds, s_base_va).map_err(|e| e.to_string())?;
+    let notes = vec![format!(
+        "{} CGMES profile file(s); {} bus(es), {} line(s), {} transformer(s), {} tap table(s)",
+        profiles.len(),
+        n.buses.len(),
+        n.lines.len(),
+        n.transformers.len(),
+        n.tap_changers.iter().filter(|c| c.is_some()).count(),
+    )];
+    Ok(SecurityNetwork {
+        buses: n.buses,
+        lines: n.lines,
+        transformers: n.transformers,
+        branch_ids: n.branch_ids,
+        bus_ids: n.bus_ids,
+        // The CGMES converter folds a disconnected branch into a shunt-only
+        // self-loop rather than keeping it openable, so there is nothing to
+        // seed here — the same position `iidm.rs` is in.
+        initially_open: Vec::new(),
+        // CGMES states geography on `GeographicalRegion`, which the converter
+        // does not resolve onto buses, so the filter that reads this stays off.
+        bus_countries: Vec::new(),
+        tap_changers: n.tap_changers,
+        shunts: n.shunts,
+        // Per-bus generation is not retained separately from net injection, so
+        // a distributed slack weights by net injection here. `plans/RAO_PLAN.md`
+        // §8.5 is why that is worth stating rather than leaving implicit.
+        generation: Vec::new(),
+        base_mva: s_base_va / 1e6,
+        notes,
+    })
 }
 
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]

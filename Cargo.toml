@@ -507,6 +507,11 @@ path = "tests/cgmes_tap_table_test.rs"
 required-features = ["cgmes"]
 
 [[test]]
+name = "cgmes_identity_test"
+path = "tests/cgmes_identity_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_tap_regulation_test"
 path = "tests/cgmes_tap_regulation_test.rs"
 required-features = ["cgmes"]

@@ -5,7 +5,8 @@ and 2 landed 2026-08-18, the optimizer reached agreement with the reference on 2
 second preventive was built and gated the same day.
 
 > **Implementation status.** Phases 1 and 3 (the UCTE and IIDM importers) are done and both gates are
-> met — see §9. Phases 2 and 4 through 12 are done: `ratings::BranchLimits` and
+> met — see §9, and a **CGMES** model is now a third accepted input to `security` and `rao`. Phases 2
+> and 4 through 12 are done: `ratings::BranchLimits` and
 > `types::TapChanger` exist and the CGMES `OperationalLimit` importer converts every declared limit
 > in every conformity fixture. **CGMES tap tables are done too**, as phase 2 of
 > `plans/TAP_CONTROL_PLAN.md` rather than of this one: `cgmes.rs::steps_for_end` retains every
@@ -63,13 +64,22 @@ second preventive was built and gated the same day.
 >    a column is declined rather than mismodelled; 1.4.1.6 is the case.
 > 3a. **Five assertions remain**, all of them 1.4.1.5 and 1.4.1.6's curative overspend, with four
 >    mechanisms measured and refuted in §8.9. Everything else in the corpus matches in full.
-> 4. ~~**Phase 2's other half** — CGMES tap tables.~~ **Done**, and not here: it landed as phase 2 of
->    `plans/TAP_CONTROL_PLAN.md` (`25bbefa`). What still stops a CGMES network reaching the RAO is a
->    different gap and a larger one — **branch and bus identity**. `CgmesNetwork` returns buses,
->    branches, shunts and tap tables but no `branch_ids`, so a CRAC that names its network elements
->    resolves nothing, and `load_network_for_security` accepts only `.uct` and `.xiidm`. The tap
->    table was the *modelling* half; this is the *naming* half, and it is what an end-to-end
->    `gridoxide rao model.zip --crac ...` needs.
+> 4. ~~**Phase 2's other half** — CGMES tap tables.~~ ~~**branch and bus identity**~~ **Both done.**
+>    The tap tables landed as phase 2 of `plans/TAP_CONTROL_PLAN.md` (`25bbefa`); identity and the
+>    CLI wiring landed here. `CgmesNetwork` now carries `branch_ids` and `bus_ids` — the mRID of the
+>    `ConductingEquipment` each branch came from — and `security`/`rao` accept a directory of
+>    profiles. `tests/cgmes_identity_test.rs` runs a `PstRangeAction` on the `PST` conformity
+>    fixture end to end, which is the thing neither half could do alone.
+>
+>    Two ordering defects surfaced on the way, both pre-existing and both invisible until a branch
+>    had a name. `CimDataset::merge` iterates a `HashMap`, so `by_type` lists elements first seen in
+>    a merged profile in a randomized order: the transformer loop had immunised itself by sorting and
+>    said so in a comment, the line loops and the bus skeleton had not, and two imports of one model
+>    genuinely disagreed about which branch was index 4. And a merged bus has several
+>    `TopologicalNode` mRIDs, so inverting the skeleton's map had to choose one — it chose whichever
+>    the hash map yielded last. Both are fixed by imposing an order; the second means a CRAC naming a
+>    node *other* than the lowest-sorting one merged into a bus will not resolve, which is stated
+>    where `bus_ids` is defined.
 > 5. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
 >    range actions, costly optimization.
 >

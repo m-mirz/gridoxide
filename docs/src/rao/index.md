@@ -154,7 +154,16 @@ gridoxide rao tests/data/ucte/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json --depth 2
 ```
 
-Both need `--features rao` plus an importer (`ucte` or `iidm`). The CRAC may be OpenRAO JSON — the
+Both take a UCTE `.uct`, an IIDM `.xiidm`, or a **CGMES** model — for CGMES, the directory holding
+the profile set or any one profile beside the others:
+
+```bash
+gridoxide security path/to/SmallGrid-Merged --crac smallgrid.crac.json
+```
+
+A CRAC names a CGMES element by the mRID of its `ConductingEquipment`, which is what powsybl gives an
+IIDM element converted from CGMES. Both need `--features rao` plus an importer (`ucte`, `iidm` or
+`cgmes`). The CRAC may be OpenRAO JSON — the
 format has 24 versions across the reference checkout's 428 files and the reader spans them — or
 gridoxide's own `<network>.rao.json` companion.
 
