@@ -1098,6 +1098,17 @@ pub struct CgmesNetwork {
     pub lines: Vec<Line>,
     pub transformers: Vec<Transformer>,
     pub shunts: Vec<ShuntAdm>,
+    /// Per-bus active generation, per-unit and **positive** — the participation
+    /// weights a distributed slack shares an imbalance out by.
+    ///
+    /// Summed over the connected `SynchronousMachine`s at each bus, then
+    /// clamped at zero, exactly as `ucte.rs` does it. It matters more than it
+    /// looks: `plans/RAO_PLAN.md` §8.5 measured what happens when a slack is
+    /// weighted by *net injection* instead — on one fixture it pushes an entire
+    /// 1000 MW make-up back through the country that just lost it and over the
+    /// line being measured, 1165 A against a true 1000. An importer that leaves
+    /// this empty gets that weighting.
+    pub generation: Vec<f64>,
     /// Parallel to [`transformers`](Self::transformers): every position of the
     /// tap changer on that transformer, or `None` where it has none.
     ///
@@ -1822,6 +1833,12 @@ fn convert_equipment(
     // differ from the machine's own terminal for remote voltage control) —
     // mirrors pgm.rs's `voltage_regulator` handling, reading CGMES's own
     // fields instead.
+    // Per-bus machine production, accumulated beside the injection it comes
+    // from. Signed here and clamped at the end, which is the same order
+    // `src/ucte.rs:862` does it in: a bus whose machines net out to consumption
+    // has no share of an upward imbalance, but one machine pumping does not
+    // cancel another's participation before the totals are in.
+    let mut generation: Vec<f64> = vec![0.0; buses.len()];
     for mrid in by_type(ds, "SynchronousMachine") {
         let sm: &SynchronousMachine = require(ds, mrid, "SynchronousMachine", mrid, "(self)")?;
         // `Equipment.inService` is independent of terminal connectivity, and a
@@ -1842,6 +1859,9 @@ fn convert_equipment(
                 let q = sm.base.q.unwrap_or(0.0);
                 buses[bus].p_spec += -p * 1e6 / s_base_va;
                 buses[bus].q_spec += q * 1e6 / s_base_va; // no negation — see the Step 3 loads comment
+                if let Some(g) = generation.get_mut(bus) {
+                    *g += -p * 1e6 / s_base_va;
+                }
             }
         }
 
@@ -2092,6 +2112,13 @@ fn convert_equipment(
         s_base_va,
     );
 
+    // A bus whose machines net out to consumption participates in no upward
+    // imbalance, and a negative weight is not a weight.
+    generation.resize(buses.len(), 0.0);
+    for g in &mut generation {
+        *g = g.max(0.0);
+    }
+
     let voltage_control = voltage_control.finish(&buses);
     // `idx_of` maps a `TopologicalNode` mRID to a bus index, and it is **not**
     // injective: the skeleton merges galvanically-joined nodes, so several
@@ -2126,6 +2153,7 @@ fn convert_equipment(
     Ok(CgmesNetwork {
         bus_ids,
         branch_ids,
+        generation,
         base_harmonization,
         buses,
         lines,
