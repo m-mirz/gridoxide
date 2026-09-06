@@ -509,6 +509,11 @@ pub fn search_with_open(
     // the "previous instant" the CRAC means. Every leaf then optimizes against
     // the same box, rather than one that moves with whatever the leaf did.
     linear.previous_taps = super::linear::taps_now(crac, network, resolution);
+    // Cleared, not inherited. `budgeted` fills it per leaf; leaving the
+    // caller's value here would bill the preventive stage's actions to every
+    // curative leaf, which under a cost objective makes every curative
+    // candidate look equally and wrongly expensive.
+    linear.activated = Vec::new();
     let options = &SearchOptions { linear, ..options.clone() };
 
     let available_at = options.available_at.as_deref().unwrap_or(perimeter);
@@ -600,6 +605,9 @@ pub fn search_with_open(
     // so the budget is rebuilt per candidate rather than shared.
     let budgeted = |chosen: &[usize]| LinearOptions {
         limits: limits.remaining(crac, chosen),
+        // The same set, so a leaf cannot be budgeted against one answer and
+        // scored against another. Only a cost objective reads it.
+        activated: chosen.to_vec(),
         ..options.linear.clone()
     };
 
@@ -607,7 +615,8 @@ pub fn search_with_open(
     // from a second one of a network it has already measured — under an AC flow
     // model that is a Newton-Raphson solve per state.
     let initial = worst_of(crac, &starting, perimeter);
-    let untouched = objective_of(crac, &starting, perimeter, &options.linear);
+    // Nothing has been done yet, so nothing has been paid for.
+    let untouched = objective_of(crac, &starting, perimeter, &[], &options.linear);
 
     let reached = |objective: f64| options.stop_at_target.is_some_and(|t| objective >= t);
 
@@ -783,6 +792,15 @@ fn effect_of_chosen(available: &[Candidate], index: usize) -> Option<&Effect> {
 fn improved_enough(current: f64, candidate: f64, options: &SearchOptions) -> bool {
     if candidate <= current + options.absolute_min_impact {
         return false;
+    }
+    // A *relative* threshold is a rule about margins and does not survive the
+    // change of scale. It is stated as a fraction of the current objective; a
+    // margin is tens or hundreds, a cost is hundreds of thousands, so 1% asks
+    // for a 2500-unit gain where it meant 2. Refuse it rather than apply it at
+    // that scale — the absolute threshold above still bites, and under
+    // `MIN_COST` it is the one the configurations actually set.
+    if options.linear.objective_kind.costly().is_some() {
+        return true;
     }
     if options.relative_min_impact > 0.0 {
         let scale = current.abs().max(1.0);
@@ -993,22 +1011,36 @@ pub(super) fn objective_of(
     crac: &Crac,
     result: &super::evaluate::SecurityResult,
     perimeter: &[State],
+    activated: &[usize],
     options: &LinearOptions,
 ) -> f64 {
     let unit = options.objective_unit;
-    let margin = result
-        .perimeters
-        .iter()
-        .filter(|p| perimeter.contains(&p.state))
-        .flat_map(|p| p.cnecs.iter())
-        .filter(|c| crac.flow_cnecs[c.cnec].optimized)
-        .map(|c| match unit {
-            super::linear::ObjectiveUnit::Megawatt => c.margin_mw,
-            super::linear::ObjectiveUnit::Ampere => c.margin_a,
-        })
-        .fold(f64::INFINITY, f64::min);
-    let margin = if margin.is_finite() { margin } else { super::mnec::NO_CNEC_MARGIN };
-    margin - options.mnec.cost(crac, result, perimeter, unit)
+    let score = match options.objective_kind.costly() {
+        // See [`linear::objective`] for why `NO_CNEC_MARGIN` is not reached
+        // here: a sum over no CNECs is zero, not an enormous margin.
+        //
+        // `moved` is empty because this reads an assessment rather than an
+        // optimization — nothing here knows which range actions a plan moved.
+        // The one caller that does care is `castor`'s whole-plan judgement, and
+        // it passes its range-action decisions in `activated`'s company through
+        // the same argument the perimeter plans already carry.
+        Some(costly) => -costly.cost(crac, result, perimeter, unit, activated, &[]),
+        None => {
+            let margin = result
+                .perimeters
+                .iter()
+                .filter(|p| perimeter.contains(&p.state))
+                .flat_map(|p| p.cnecs.iter())
+                .filter(|c| crac.flow_cnecs[c.cnec].optimized)
+                .map(|c| match unit {
+                    super::linear::ObjectiveUnit::Megawatt => c.margin_mw,
+                    super::linear::ObjectiveUnit::Ampere => c.margin_a,
+                })
+                .fold(f64::INFINITY, f64::min);
+            if margin.is_finite() { margin } else { super::mnec::NO_CNEC_MARGIN }
+        }
+    };
+    score - options.mnec.cost(crac, result, perimeter, unit)
 }
 
 /// The worst optimized margin over `perimeter` in an assessment already made —
