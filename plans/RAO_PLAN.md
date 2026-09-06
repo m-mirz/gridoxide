@@ -16,17 +16,16 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **165 of 294** on the
-> costly-optimization one — **1702 of 1862**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **178 of 294** on the
+> costly-optimization one — **1715 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
-> **`min_cost.feature` is a *before* figure, not an achievement.** Its 26 scenarios were vendored
-> with costly optimization unimplemented — `MIN_COST` is read as `MAX_MIN_MARGIN` and the
-> `activation_cost` every one of their CRACs carries is parsed and ignored — because that is the
-> order this plan records as the only one that works. 129 of its assertions differ, and the shape of
-> them says what to build: **71 are the objective function itself**, then 16 worst margins and 29
-> taps chosen to maximize a margin rather than minimize a price.
+> **`min_cost.feature` is half built.** Its 26 scenarios were vendored *before* the capability and
+> scored **165**; the `MIN_COST` objective now exists for **network actions** and it scores 178.
+> That closes the preventive slice completely — 3.4.1.1 through 3.4.1.5 and 3.4.1.2.bis all match in
+> full, which are exactly the scenarios whose CRACs declare no range action, so the search tree
+> decides alone and no MIP is involved. What is left is range actions: §8.13.
 >
 > Of the other four files, 31 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
@@ -1611,6 +1610,83 @@ attached* rather than silently, and the reason named the exact thing that was wr
 reports the shift". §8.3's rule is that a skipped assertion flatters the ratio and anything the code
 can answer belongs in the denominator; this is the other half of it. A skip that states what it is
 waiting for is a defect report that has not been read yet.
+
+### 8.13 The cost objective, for network actions
+
+`MIN_COST` minimizes what a plan costs rather than maximizing what it buys:
+
+\\[
+  \text{cost} \;=\; p \sum_{c} \max(0,\; \tau - m(c)) \;+\; \sum_{a \in A} k(a)
+\\]
+
+with \\(p\\) the violation penalty (1000 in every vendored configuration), \\(\tau\\) the threshold a
+margin must clear, and \\(k(a)\\) what each action in force cost.
+
+**It is a different question, not the same one rescaled.** The reference's 3.4.1.2 is built to show
+it: two network actions both secure the CNEC, one yields a larger margin, and the *other* is chosen
+because it is cheaper. No scaling of a min-margin objective produces that answer.
+
+Two structural consequences drove the implementation.
+
+**It is a sum where max-min-margin is a min.** `margin_of` folds with `f64::min`, so relieving an
+already-comfortable CNEC is worth nothing; here every overloaded CNEC contributes. Hence
+`ObjectiveKind { MaxMargin, MinCost(Costly) }` on `LinearOptions` and a branch in both objective
+functions, rather than another penalty term beside `mnec`.
+
+**It depends on what was *done*, which no margin does.** The evaluation kernel is handed a network,
+and a network does not remember how it got that way. So the action set travels on
+`LinearOptions::activated`, filled by the `budgeted` closure that already builds a per-leaf
+`LinearOptions` for `limits` — one builder, so a leaf cannot be budgeted against one answer and
+scored against another. `search::objective_of` takes it as an **explicit parameter** instead,
+because that layer *can* see the actions and the compiler should force each of its three call sites
+to say which set it means.
+
+#### Three places the negated-cost convention genuinely breaks
+
+gridoxide maximizes everywhere, so a cost is returned negated and the ranking, `improved_enough`,
+`reached` and the LP's `col_cost[mm] = -1.0` all keep working. Three things do not:
+
+1. **`NO_CNEC_MARGIN = 1e9`** is a stand-in for a *minimum* that does not exist. A sum over no CNECs
+   is honestly zero, and substituting 1e9 under the negated convention scores such a perimeter at
+   **+1e9** and lets it beat every real answer. The branch happens *before* the substitution, not
+   after — the single most dangerous line in the change.
+2. **`enforce-curative-security`'s `target.max(0.0)`** means "secure" for a margin and "zero overload
+   *and* nothing spent" for a cost, which no perimeter that has to act can reach. Gated on the
+   objective kind. Security is still enforced under a cost, by the violation term dominating — which
+   is what a penalty of 1000 per unit is for.
+3. **`relative_min_impact`** is a fraction of the current objective. A margin is tens; a cost is
+   hundreds of thousands, so 1% asks for a 2500-unit gain where it meant 2. Refused in cost mode
+   rather than applied at that scale; the absolute threshold still bites, and it is the one these
+   configurations actually set.
+
+And `castor`'s `judge` had to be given the **whole plan's** actions via `activated_by` — preventive,
+automatons and every curative perimeter. It decides whether a second preventive runs, whether it is
+kept, and whether the finished plan is worse than doing nothing. That last guard is the one a cost
+objective needs most: "spend ten and gain nothing" is its characteristic failure, and it is invisible
+if the ten is not counted.
+
+#### What it is worth
+
+**165 → 178.** The preventive slice closes completely: 3.4.1.1 through 3.4.1.5 and 3.4.1.2.bis all
+match in full, which are exactly the scenarios whose CRACs declare **no range action** — the search
+tree decides alone, no MIP is involved, and that is why they were the beachhead.
+
+`a_cost_objective_buys_the_cheapest_answer_not_the_roomiest` pins it against the arithmetic 3.4.1.1's
+own comments state: 250 MW of overload at 1000 a unit is 250000, and the answer costs the 10 that
+`closeBeFr4` costs.
+
+#### What is left, and it is range actions
+
+`3_4_2` and `3_4_3` price a shifter's **movement** and its **activation**, and the two are different
+sizes. Movement has a home already — the LP prices the up/down columns at `control.penalty`
+(`linear.rs`), a tie-break where a real cost belongs — but needs a `variation_cost` field on
+`RangeAction` and a reader that stops dropping `variationCosts`. Activation needs a binary per
+action, hence a MIP, hence `TapModel::Discrete`, which is itself declared and unbuilt. The auto and
+curative scenarios of `3_4_1` spend across instants and are a third thing again.
+
+`Costly::activation` already takes the moved range actions, and `Control` now carries `start` so
+"moved" is answerable — a redispatch's set-point is absolute and starts wherever its machines are
+(§8.12), so it is not "is it non-zero".
 
 ### 8.4 Two independent MILP solvers
 

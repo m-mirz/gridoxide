@@ -20,6 +20,7 @@ pub mod linear;
 pub mod automaton;
 pub mod castor;
 pub mod search;
+pub mod costly;
 pub mod mnec;
 pub mod limits;
 pub mod usage;
@@ -46,6 +47,7 @@ pub use evaluate::{
     CnecResult, FlowModel, Held,
     Network, PerimeterResult, Resolution, SecurityResult,
 };
+pub use costly::{Costly, CostlyOptions};
 pub use mnec::{Baseline, Mnec, MnecOptions};
 pub use limits::{Budget, Limits};
 pub use usage::Constrained;

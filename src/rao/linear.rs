@@ -105,6 +105,40 @@ pub enum ObjectiveUnit {
     Ampere,
 }
 
+/// What the objective **is**, as opposed to what it is measured in.
+///
+/// The reference's `objective-function.type`. [`MaxMargin`](Self::MaxMargin) is
+/// the minimum margin over the optimized CNECs — a quantity to *maximize*, and
+/// a **min**. [`MinCost`](Self::MinCost) is `MIN_COST` — a penalized sum of
+/// every overload plus what the chosen actions cost, a quantity to *minimize*
+/// and a **sum**.
+///
+/// The two are different questions rather than one question in two units, which
+/// is why this is a branch rather than another penalty term: scenario 3.4.1.2
+/// picks a network action that yields a *smaller* margin than its rival because
+/// it costs less, and no scaling of a min-margin objective produces that answer.
+///
+/// gridoxide keeps one internal convention — higher is better — so the cost is
+/// returned negated by [`objective`] and
+/// [`objective_of`](super::search::objective_of). Everything downstream (the
+/// winner ranking, `improved_enough`, `stop_at_target`) is then unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ObjectiveKind {
+    #[default]
+    MaxMargin,
+    MinCost(super::costly::Costly),
+}
+
+impl ObjectiveKind {
+    /// The cost rule, when this is a cost objective.
+    pub fn costly(&self) -> Option<&super::costly::Costly> {
+        match self {
+            ObjectiveKind::MaxMargin => None,
+            ObjectiveKind::MinCost(c) => Some(c),
+        }
+    }
+}
+
 /// How the optimizer should treat a phase shifter's taps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TapModel {
@@ -133,6 +167,8 @@ pub struct LinearOptions {
     pub tap_model: TapModel,
     /// What the minimum margin being maximized is measured in.
     pub objective_unit: ObjectiveUnit,
+    /// Whether the objective is a margin to maximize or a cost to minimize.
+    pub objective_kind: ObjectiveKind,
     /// Which flow model the optimizer *measures* with.
     ///
     /// Sensitivities stay DC either way — they are cheap, exact for the linear
@@ -179,6 +215,19 @@ pub struct LinearOptions {
     /// [`Held`](super::evaluate::Held) and `plans/RAO_PLAN.md` §8.10. `None`
     /// everywhere else, which is one network, one open set, and one evaluation.
     pub held: Option<super::evaluate::Held>,
+    /// The network actions in force at this leaf, indexing
+    /// [`Crac::network_actions`].
+    ///
+    /// Only a cost objective reads it, and only because a cost depends on what
+    /// was *done* where a margin depends only on what the network *is*. It is
+    /// the second per-leaf field, beside [`limits`](Self::limits), and is filled
+    /// by the same `budgeted` closure in [`search`](super::search) that fills
+    /// that one — so a leaf cannot be scored against one action set and
+    /// budgeted against another.
+    ///
+    /// Empty is the honest default: a caller invoking [`optimize`] directly has
+    /// taken no network action.
+    pub activated: Vec<usize>,
     /// Give the held states' own range actions a column of their own —
     /// `A(r, s)`, a set-point per range action **per state**.
     ///
@@ -214,12 +263,14 @@ impl Default for LinearOptions {
             sensitivity_threshold: 1e-6,
             tap_model: TapModel::Continuous,
             objective_unit: ObjectiveUnit::Megawatt,
+            objective_kind: ObjectiveKind::MaxMargin,
             flow_model: FlowModel::Dc,
             mnec: Mnec::default(),
             available: Constrained::unmeasured(),
             limits: Budget::default(),
             available_at: None,
             held: None,
+            activated: Vec::new(),
             a_r_s: false,
             previous_taps: Vec::new(),
         }
@@ -396,6 +447,14 @@ struct Control {
     sensitivity: Vec<f64>,
     /// Current set-point, in the control's own unit.
     current: f64,
+    /// Where this control was when the perimeter was handed to the optimizer.
+    ///
+    /// `current` moves as the iteration proposes and applies; this does not. A
+    /// cost objective needs it to tell a control that *moved* from one that was
+    /// merely offered — and for a redispatch the distinction is not "is it
+    /// non-zero", because its set-point is absolute and starts wherever its
+    /// machines already are (see `injection_origin`).
+    start: f64,
     lower: f64,
     upper: f64,
     /// Objective penalty per unit moved.
@@ -1330,6 +1389,7 @@ fn build_controls(
                     reported: governs.is_none(),
                     sensitivity: scoped(sensitivity_mw, governs),
                     current,
+                    start: current,
                     lower,
                     upper,
                     penalty: options.pst_penalty,
@@ -1411,6 +1471,7 @@ fn build_controls(
                     reported: governs.is_none(),
                     sensitivity: scoped(sensitivity_mw, governs),
                     current: start,
+                    start,
                     lower,
                     upper,
                     penalty: options.injection_penalty,
@@ -1887,6 +1948,22 @@ fn margin(
     margin_of(crac, &result, perimeter, unit)
 }
 
+/// The range actions a set of controls has actually moved, indexing
+/// [`Crac::range_actions`].
+///
+/// What a cost objective bills for. A control that sits where it started cost
+/// nothing to *not* activate, so the comparison is against
+/// [`Control::start`](Control) rather than against zero — a redispatch's
+/// set-point is absolute and starts wherever its machines already are, which is
+/// the whole point of `injection_origin`.
+fn moved_range_actions(controls: &[Control]) -> Vec<usize> {
+    controls
+        .iter()
+        .filter(|c| (c.current - c.start).abs() > 1e-9)
+        .map(|c| c.action)
+        .collect()
+}
+
 /// [`LinearOptions::held`], with every column the perimeter does not report
 /// folded in at the value it currently sits on.
 ///
@@ -1953,9 +2030,26 @@ fn objective(
     let held = held_now(options, controls);
     let result = evaluate_in(crac, &view, resolution, options.flow_model, held.as_ref());
     let unit = options.objective_unit;
-    let margin = margin_of(crac, &result, perimeter, unit);
-    let margin = if margin.is_finite() { margin } else { NO_CNEC_MARGIN };
-    margin - options.mnec.cost(crac, &result, perimeter, unit)
+    let score = match options.objective_kind.costly() {
+        // A cost, negated so that higher stays better. `NO_CNEC_MARGIN` is
+        // deliberately **not** reached on this path: it is a stand-in for a
+        // *minimum* that does not exist, and a sum over no CNECs is honestly
+        // zero. Substituting 1e9 here would score a perimeter with nothing to
+        // optimize at +1e9 and let it beat every real answer.
+        Some(costly) => -costly.cost(
+            crac,
+            &result,
+            perimeter,
+            unit,
+            &options.activated,
+            &moved_range_actions(controls),
+        ),
+        None => {
+            let margin = margin_of(crac, &result, perimeter, unit);
+            if margin.is_finite() { margin } else { NO_CNEC_MARGIN }
+        }
+    };
+    score - options.mnec.cost(crac, &result, perimeter, unit)
 }
 
 /// Flows on the perimeter's CNEC branches, MW, at the current operating point.

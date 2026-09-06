@@ -70,9 +70,10 @@ use std::path::{Path, PathBuf};
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
 use gridoxide::rao::evaluate::{evaluate_model, FlowModel};
-use gridoxide::rao::linear::ObjectiveUnit;
+use gridoxide::rao::linear::{ObjectiveKind, ObjectiveUnit};
 use gridoxide::rao::{
-    crac_json, run, Network, Resolution, SearchOptions, SecondPreventiveCondition,
+    crac_json, run, Costly, CostlyOptions, Network, Resolution, SearchOptions,
+    SecondPreventiveCondition,
 };
 use gridoxide::ucte;
 use serde_json::Value;
@@ -617,6 +618,25 @@ fn options_from(config: &Path) -> SearchOptions {
         options.stop_at_target = Some(0.0);
     }
 
+    // `MIN_COST`: minimize what the plan costs rather than maximize what it
+    // buys. Read here rather than left to fall through, which is what happened
+    // before this and is how a costly configuration was silently answered in
+    // the wrong currency.
+    if doc.pointer("/objective-function/type").and_then(|v| v.as_str()) == Some("MIN_COST") {
+        let mut costly = CostlyOptions::default();
+        if let Some(c) = doc.pointer(
+            "/extensions/open-rao-search-tree-parameters/costly-min-margin-parameters",
+        ) {
+            if let Some(v) = c.get("shifted-violation-penalty").and_then(Value::as_f64) {
+                costly.violation_penalty = v;
+            }
+            if let Some(v) = c.get("shifted-violation-threshold").and_then(Value::as_f64) {
+                costly.violation_threshold = v;
+            }
+        }
+        options.linear.objective_kind = ObjectiveKind::MinCost(Costly { options: costly });
+    }
+
     // The two knobs live under the search-tree extension, not beside the
     // thresholds above.
     if let Some(topology) = doc.pointer(
@@ -1088,6 +1108,50 @@ fn check(scenario: &Scenario) -> Outcome {
         ObjectiveUnit::Ampere => MarginUnit::Ampere,
         ObjectiveUnit::Megawatt => MarginUnit::Megawatt,
     };
+    // What the plan has spent by a given stage, as `(network actions, range
+    // actions moved)`. Only a cost objective reads it.
+    //
+    // Cumulative, because activation is: an action taken preventively is still
+    // in force after the contingency, and the reference's `getCost(instant)`
+    // prices everything activated up to that instant.
+    let spent_by = |stage: Option<Stage>| -> (Vec<usize>, Vec<usize>) {
+        let (mut actions, mut moved): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        fn take(
+            p: &gridoxide::rao::PerimeterPlan,
+            actions: &mut Vec<usize>,
+            moved: &mut Vec<usize>,
+        ) {
+            actions.extend(&p.network_actions);
+            moved.extend(p.setpoints.iter().filter(|s| s.moved()).map(|s| s.action));
+        }
+        if stage.is_none() {
+            return (actions, moved);
+        }
+        take(&plan.preventive, &mut actions, &mut moved);
+        for scenario in &plan.scenarios {
+            // An `AutomatonResult` is not a `PerimeterPlan` — it reports the
+            // range actions that moved as `(index, set-point, tap)` rather than
+            // as `Setpoint`s — so it is read directly rather than through
+            // `take`.
+            if matches!(stage, Some(Stage::Ara) | Some(Stage::Cra))
+                && let Some(a) = &scenario.automatons
+            {
+                actions.extend(&a.network_actions);
+                moved.extend(a.range_actions.iter().map(|(i, _, _)| *i));
+            }
+            if stage == Some(Stage::Cra) {
+                for perimeter in &scenario.perimeters {
+                    take(perimeter, &mut actions, &mut moved);
+                }
+            }
+        }
+        actions.sort_unstable();
+        actions.dedup();
+        moved.sort_unstable();
+        moved.dedup();
+        (actions, moved)
+    };
+
     let cost_at = |stage: Option<Stage>| -> Option<f64> {
         let read = |cnec: &FlowCnec| -> Option<f64> {
             let margin = match stage {
@@ -1104,12 +1168,6 @@ fn check(scenario: &Scenario) -> Outcome {
             };
             margin.map(|m| m.in_unit(objective_unit))
         };
-        let worst = crac
-            .flow_cnecs
-            .iter()
-            .filter(|c| c.optimized)
-            .filter_map(read)
-            .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))?;
         let mnec = search_options.linear.mnec.options;
         let violated: f64 = if mnec.enabled {
             crac.flow_cnecs
@@ -1125,6 +1183,38 @@ fn check(scenario: &Scenario) -> Outcome {
         } else {
             0.0
         };
+        // Under `MIN_COST` the functional half is a **sum** of penalized
+        // overloads plus what the plan spent, not the negated worst margin —
+        // and the two are not a rescaling of each other, which is why this
+        // branches rather than adjusting a coefficient.
+        if let Some(costly) = search_options.linear.objective_kind.costly() {
+            let overload: f64 = crac
+                .flow_cnecs
+                .iter()
+                .filter(|c| c.optimized)
+                .filter_map(&read)
+                .map(|m| (costly.options.violation_threshold - m).max(0.0))
+                .sum();
+            let (actions, moved) = spent_by(stage);
+            let spent: f64 = actions
+                .iter()
+                .filter_map(|&i| crac.network_actions.get(i))
+                .filter_map(|a| a.activation_cost)
+                .chain(
+                    moved
+                        .iter()
+                        .filter_map(|&i| crac.range_actions.get(i))
+                        .filter_map(|a| a.activation_cost),
+                )
+                .sum();
+            return Some(violated + costly.options.violation_penalty * overload + spent);
+        }
+        let worst = crac
+            .flow_cnecs
+            .iter()
+            .filter(|c| c.optimized)
+            .filter_map(read)
+            .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))?;
         Some(violated - worst)
     };
 
@@ -1488,7 +1578,7 @@ const FILES: [(&str, usize, usize, Option<&str>); 5] = [
         // so these configurations are read as max-min-margin and every
         // objective-function assertion is answered in the wrong currency.
         Some(
-            "costly optimization is not implemented — `MIN_COST` is read as `MAX_MIN_MARGIN`,              and `activation_cost` is parsed but never used",
+            "costly optimization is built for network actions only — a range action's `variationCosts` are dropped by the reader and its activation needs a binary, so `3_4_2` and `3_4_3` are still answered in the wrong currency",
         ),
     ),
 ];
@@ -1926,8 +2016,23 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// Nothing else. Every other scenario in the corpus matches in full.
 const BASELINE_MATCHED_2P: usize = 118;
 
-/// The 26 costly-optimization scenarios: the number this corpus scores with the
-/// capability **not built**.
+/// The 26 costly-optimization scenarios: **178 of 294**, from 165 with the
+/// objective unbuilt.
+///
+/// The `MIN_COST` objective is now real for **network actions**, which closes
+/// the preventive slice completely: 3.4.1.1 through 3.4.1.5 and 3.4.1.2.bis all
+/// match in full. Those are the scenarios whose CRACs declare no range action at
+/// all, so the search tree decides alone and no MIP is involved — which is why
+/// they were the beachhead.
+///
+/// What remains is range actions. `3_4_2` and `3_4_3` price a shifter's
+/// movement (`variationCosts`, which the reader drops and the model has no field
+/// for) and its activation (a binary per action, hence a MIP, hence
+/// `TapModel::Discrete`), and the auto and curative scenarios of `3_4_1` spend
+/// across instants. See `plans/RAO_PLAN.md` §8.13.
+///
+/// The rest of this note is the original *before* comment, kept because the
+/// order it describes is the point:
 ///
 /// Vendored first on purpose. `plans/RAO_PLAN.md` records the order as the only
 /// one that works — the second-preventive corpus was vendored before anything
@@ -1941,7 +2046,7 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// `activation_cost` these CRACs carry on every action is parsed by
 /// `crac_json.rs` and read by nothing. What passes here passes because a
 /// margin-maximizing answer happens to coincide with a cost-minimizing one.
-const BASELINE_MATCHED_MIN_COST: usize = 165;
+const BASELINE_MATCHED_MIN_COST: usize = 178;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

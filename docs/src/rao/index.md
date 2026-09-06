@@ -175,7 +175,7 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1702 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1715 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
 counts, set-points, objective values, security statuses and **which optimization steps ran**, across
 two flow models and three networks. **Nothing is skipped**: every step the corpus states is checked,
@@ -198,7 +198,12 @@ and refuses to let a scenario disagree without one — see `plans/RAO_PLAN.md` �
 ## What is not here
 
 - **Loop flows and relative margins.**
-- **Costly optimization** — minimizing the price of the actions rather than maximizing margin.
+- **A range action's cost.** Costly optimization — `MIN_COST`, minimizing the price of the plan
+  rather than maximizing the margin it buys — is here for **network actions**, and it is a different
+  question rather than the same one rescaled: the reference's own scenario 3.4.1.2 picks an action
+  that yields a *smaller* margin because it costs less. What is not here is what a **range** action
+  costs. Its per-unit movement price (`variationCosts`) is dropped by the CRAC reader, and its
+  activation needs a binary per action, hence a MIP, hence `TapModel::Discrete`.
 - **HVDC range actions**, recognised and skipped: gridoxide models a DC network but nothing connects
   it to a range action yet.
 - **Multi-timestamp (MARMOT) runs.**

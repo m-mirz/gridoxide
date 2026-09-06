@@ -695,3 +695,85 @@ fn a_redispatch_starts_at_the_set_point_its_machines_are_already_on() {
         setpoint.initial
     );
 }
+
+/// The cost objective, against the arithmetic the reference's own scenario
+/// spells out.
+///
+/// 3.4.1.1 is two nodes joined by four parallel lines, three of them open, and
+/// three network actions that each close one — priced at 100, 500 and 10. Its
+/// comments state the sums: *"Overload penalty (250 * 1000)"* for the untouched
+/// network, and *"Activation of closeBeFr4 (10)"* for the answer.
+///
+/// So this asserts the two numbers the scenario asserts, and one thing it
+/// cannot: that the **cheapest** action is chosen. All three close a line and
+/// all three relieve the overload, so a margin objective would rank them by the
+/// margin each buys and a cost objective ranks them by price — which is the
+/// distinction the whole feature exists to draw.
+#[test]
+fn a_cost_objective_buys_the_cheapest_answer_not_the_roomiest() {
+    use gridoxide::rao::{Costly, CostlyOptions};
+    use gridoxide::rao::linear::ObjectiveKind;
+
+    let net = ucte::read(ucte_fixture("2Nodes4ParallelLines.uct")).expect("network");
+    let (crac, _) = crac_json::read(rao_fixture("features/crac-92-1-1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+
+    // The three actions and their stated prices, so the assertion below is
+    // about *which* is cheapest rather than about a name.
+    let priced: Vec<(&str, f64)> = crac
+        .network_actions
+        .iter()
+        .map(|a| (a.id.as_str(), a.activation_cost.expect("every action is priced")))
+        .collect();
+    assert_eq!(priced.len(), 3, "the fixture declares three actions");
+    let cheapest = priced
+        .iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id.to_string())
+        .expect("a cheapest");
+    assert_eq!(cheapest, "closeBeFr4", "10 is the lowest of 100, 500 and 10");
+
+    let mut options = SearchOptions::default();
+    options.linear.objective_kind =
+        ObjectiveKind::MinCost(Costly { options: CostlyOptions::default() });
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let used: Vec<&str> = plan
+        .preventive
+        .network_actions
+        .iter()
+        .map(|&i| crac.network_actions[i].id.as_str())
+        .collect();
+    assert_eq!(used, vec![cheapest.as_str()], "the cheapest action, and only it");
+
+    // And the two figures the scenario states. `CostlyOptions::default()` is
+    // the vendored configurations' own 1000.0 per unit of overload.
+    let costly = Costly { options: CostlyOptions::default() };
+    let untouched = evaluate(&crac, &network, &resolution);
+    let states = crac.states();
+    assert!(
+        (costly.violation(&crac, &untouched, &states, gridoxide::rao::ObjectiveUnit::Megawatt)
+            - 250_000.0)
+            .abs()
+            < 500.0,
+        "the untouched network is 250 MW overloaded, which at 1000 a unit is 250000"
+    );
+    assert!(
+        (costly.activation(&crac, &plan.preventive.network_actions, &[]) - 10.0).abs() < 1e-9,
+        "and the answer costs exactly what closeBeFr4 costs"
+    );
+}

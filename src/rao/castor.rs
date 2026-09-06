@@ -268,12 +268,21 @@ pub fn run(
     // end — whether the finished plan is worth keeping at all.
     let all_states = crac.states();
     let untouched = assess(crac, network, resolution, network.initially_open, options);
-    let before = objective_of(crac, &untouched, &all_states, &options.linear);
+    // Doing nothing costs nothing.
+    let before = objective_of(crac, &untouched, &all_states, &[], &options.linear);
+    // The **whole plan's** actions, not none of them. Under a cost objective
+    // this is the difference between weighing a plan and weighing it as though
+    // it were free — and this judgement decides whether a second preventive
+    // pass runs, whether it is kept, and whether the finished plan is worse
+    // than doing nothing. That last guard is the one a cost objective needs
+    // most: "spend ten and gain nothing" is its characteristic failure, and it
+    // is invisible if the ten is not counted.
     let judge = |p: &PerimeterPlan, s: &[ScenarioPlan]| {
         objective_of(
             crac,
             &final_assessment(crac, network, resolution, p, s, options),
             &all_states,
+            &activated_by(p, s),
             &options.linear,
         )
     };
@@ -622,7 +631,15 @@ fn scenarios_after(
         let target = preventive.final_objective + options.curative_min_obj_improvement;
         // `enforce-curative-security` additionally demands a secure perimeter,
         // which can only make the target harder to reach.
-        if options.enforce_curative_security { target.max(0.0) } else { target }
+        //
+        // Only under a **margin** objective, where "objective ≥ 0" is exactly
+        // what secure means. Under a cost it means zero overload *and* zero
+        // spent, which no perimeter that has to act can reach, so the clamp
+        // would set an unreachable target and stop the curative stage from ever
+        // stopping. Security is still enforced there — by the violation term
+        // dominating the cost, which is what a penalty of 1000 per unit is for.
+        let costly = options.linear.objective_kind.costly().is_some();
+        if options.enforce_curative_security && !costly { target.max(0.0) } else { target }
     });
     // A curative perimeter gets its own depth where the configuration states
     // one. The reference keeps `max-preventive-search-tree-depth` and
@@ -725,6 +742,27 @@ fn scenarios_after(
         scenarios.push(ScenarioPlan { contingency, automatons, perimeters });
     }
     scenarios
+}
+
+/// Every network action a plan puts in force, anywhere in it.
+///
+/// Preventive, each contingency's automatons, and each curative perimeter —
+/// deduplicated, because one action available in two instants is one activation
+/// and should be billed once. Only a cost objective reads this; a margin does
+/// not care how the network came to be the way it is.
+fn activated_by(preventive: &PerimeterPlan, scenarios: &[ScenarioPlan]) -> Vec<usize> {
+    let mut all: Vec<usize> = preventive.network_actions.clone();
+    for scenario in scenarios {
+        if let Some(automatons) = &scenario.automatons {
+            all.extend(&automatons.network_actions);
+        }
+        for perimeter in &scenario.perimeters {
+            all.extend(&perimeter.network_actions);
+        }
+    }
+    all.sort_unstable();
+    all.dedup();
+    all
 }
 
 /// One perimeter's answer, as the plan reports it.
