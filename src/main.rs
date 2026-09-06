@@ -2425,10 +2425,7 @@ fn load_cgmes_for_security(path: &str) -> Result<SecurityNetwork, String> {
         bus_countries: Vec::new(),
         tap_changers: n.tap_changers,
         shunts: n.shunts,
-        // Per-bus generation is not retained separately from net injection, so
-        // a distributed slack weights by net injection here. `plans/RAO_PLAN.md`
-        // §8.5 is why that is worth stating rather than leaving implicit.
-        generation: Vec::new(),
+        generation: n.generation,
         base_mva: s_base_va / 1e6,
         notes,
     })

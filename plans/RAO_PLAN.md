@@ -72,6 +72,13 @@ second preventive was built and gated the same day.
 >    profiles. `tests/cgmes_identity_test.rs` runs a `PstRangeAction` on the `PST` conformity
 >    fixture end to end, which is the thing neither half could do alone.
 >
+>    **And its slack weighting is right.** A CGMES model reaching the RAO was handed no generation,
+>    so the AC distributed slack weighted by *net injection* — the reading §8.5 measured at 1165 A
+>    against a true 1000 and named as the one that looks innocent. `CgmesNetwork::generation` now
+>    sums the connected `SynchronousMachine` production per bus and clamps at zero, mirroring
+>    `ucte.rs`. Gated structurally, since no CGMES CRAC exists to score against: parallel to the
+>    buses, never negative, and never exceeding what the document itself declares.
+>
 >    Two ordering defects surfaced on the way, both pre-existing and both invisible until a branch
 >    had a name. `CimDataset::merge` iterates a `HashMap`, so `by_type` lists elements first seen in
 >    a merged profile in a randomized order: the transformer loop had immunised itself by sorting and

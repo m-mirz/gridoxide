@@ -357,3 +357,94 @@ fn a_phase_shifter_range_action_works_on_a_cgmes_network() {
         plan.improvement()
     );
 }
+
+/// Per-bus generation, which is what a distributed slack weights by.
+///
+/// Not a refinement. `plans/RAO_PLAN.md` §8.5 measured what happens when an AC
+/// slack is weighted by *net injection* instead — on one fixture it pushes an
+/// entire 1000 MW make-up back through the country that just lost it and over
+/// the line being measured, 1165 A against a true 1000 — and records that the
+/// wrong weighting is the one that looks innocent. A CGMES model reaching the
+/// RAO got exactly that, because the importer kept no generation.
+///
+/// Gated structurally rather than behaviourally: no CGMES CRAC exists to score
+/// against, so what is asserted is the contract the slack relies on — parallel
+/// to the buses, never negative, and summing to the production the document
+/// actually declares.
+#[test]
+fn generation_is_a_usable_slack_weight() {
+    for name in CONFIGS {
+        let Some(net) = network(name) else { continue };
+        assert_eq!(
+            net.generation.len(),
+            net.buses.len(),
+            "{name}: generation must be parallel to buses"
+        );
+        for (i, g) in net.generation.iter().enumerate() {
+            assert!(
+                g.is_finite() && *g >= 0.0,
+                "{name}: bus {i} has generation {g}, which is not a weight"
+            );
+        }
+    }
+}
+
+/// And the total is the machines' own, not an artefact of the conversion.
+///
+/// Summed independently from the CGMES documents — every `SynchronousMachine`
+/// with a negative `p` (CGMES's load sign convention, so negative is
+/// production) — and compared against what the importer accumulated. The two
+/// can differ only by machines the importer dropped as out of service or
+/// disconnected, so this asserts the importer's total never *exceeds* the
+/// document's, and that a fixture with machines produces something.
+#[test]
+fn generation_totals_come_from_the_machines() {
+    let mut fixtures_with_machines = 0;
+    for name in CONFIGS {
+        let Some(dir) = config(name) else { continue };
+        let net = network(name).expect("network");
+
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("configuration directory")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "xml"))
+            .collect();
+        paths.sort();
+        let text: String = paths
+            .iter()
+            .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Every `<cim:RotatingMachine.p>` on a SynchronousMachine, as the SSH
+        // profile writes it. Production is negative in CGMES's convention, so
+        // the declared production is the negated sum of the negative ones.
+        let declared: f64 = text
+            .match_indices("<cim:RotatingMachine.p>")
+            .filter_map(|(at, tag)| {
+                let rest = &text[at + tag.len()..];
+                let end = rest.find('<')?;
+                rest[..end].trim().parse::<f64>().ok()
+            })
+            .filter(|p| *p < 0.0)
+            .map(|p| -p)
+            .sum();
+
+        let imported: f64 = net.generation.iter().sum::<f64>() * 100.0; // per-unit at 100 MVA
+        if declared > 0.0 {
+            fixtures_with_machines += 1;
+            assert!(
+                imported > 0.0,
+                "{name}: the document declares {declared:.1} MW of production and \
+                 the importer kept none"
+            );
+        }
+        assert!(
+            imported <= declared + 1e-6,
+            "{name}: imported {imported:.3} MW exceeds the {declared:.3} MW declared — \
+             generation should only ever be a subset, dropped for out-of-service machines"
+        );
+    }
+    assert!(fixtures_with_machines > 0, "no fixture contributed a machine");
+}
+
