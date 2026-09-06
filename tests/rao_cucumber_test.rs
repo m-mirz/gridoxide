@@ -1454,7 +1454,7 @@ fn the_reference_implementations_own_expectations() {
 /// The vendored feature files, with their scenario counts and recorded
 /// baselines. Scored separately on purpose — a gain in one must not hide a
 /// regression in another.
-const FILES: [(&str, usize, usize, Option<&str>); 4] = [
+const FILES: [(&str, usize, usize, Option<&str>); 5] = [
     ("dc_scenarios.feature", 25, BASELINE_MATCHED_DC, None),
     ("ac_scenarios.feature", 38, BASELINE_MATCHED_AC, None),
     ("ac_scenarios_16nodes.feature", 93, BASELINE_MATCHED_AC16, None),
@@ -1477,6 +1477,18 @@ const FILES: [(&str, usize, usize, Option<&str>); 4] = [
             "1.4.1.5 and 1.4.1.6 spend three curative actions where the reference spends one, \
              reaching better curative margins than it asks for; §8.9 measures and refutes six \
              mechanisms for it",
+        ),
+    ),
+    (
+        "min_cost.feature",
+        26,
+        BASELINE_MATCHED_MIN_COST,
+        // Vendored before the capability exists, deliberately. `MIN_COST` is
+        // not implemented at all: `options_from` recognises only `SECURE_FLOW`,
+        // so these configurations are read as max-min-margin and every
+        // objective-function assertion is answered in the wrong currency.
+        Some(
+            "costly optimization is not implemented — `MIN_COST` is read as `MAX_MIN_MARGIN`,              and `activation_cost` is parsed but never used",
         ),
     ),
 ];
@@ -1913,6 +1925,23 @@ const BASELINE_MATCHED_AC16: usize = 963;
 ///
 /// Nothing else. Every other scenario in the corpus matches in full.
 const BASELINE_MATCHED_2P: usize = 118;
+
+/// The 26 costly-optimization scenarios: the number this corpus scores with the
+/// capability **not built**.
+///
+/// Vendored first on purpose. `plans/RAO_PLAN.md` records the order as the only
+/// one that works — the second-preventive corpus was vendored before anything
+/// implemented it, scored 45 of 108, and the gate then found every defect in it
+/// one scenario at a time. A corpus vendored after the fact only ever confirms
+/// what its author already believed.
+///
+/// So this is a *before* figure, and it is low for a stated reason:
+/// `objective-function.type: MIN_COST` has no representation anywhere in
+/// `src/rao/`, `options_from` reads it as max-min-margin, and the
+/// `activation_cost` these CRACs carry on every action is parsed by
+/// `crac_json.rs` and read by nothing. What passes here passes because a
+/// margin-maximizing answer happens to coincide with a cost-minimizing one.
+const BASELINE_MATCHED_MIN_COST: usize = 165;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {

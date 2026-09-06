@@ -12,8 +12,9 @@
 #
 # The selection is every scenario in that suite that is `@ac` and `@rao`, uses a
 # JSON CRAC and this network, and needs none of loop flows, relative margins,
-# costly optimization, HVDC, second-preventive or MARMOT — the features
-# `src/rao/` does not implement. That is 93.
+# costly optimization, HVDC, second-preventive or MARMOT. That is 93. Two of
+# those exclusions now have corpora of their own — `second_preventive.feature`
+# and `min_cost.feature`.
 #
 # Each scenario's `Scenario:` line names the file it came from. Steps are
 # unmodified, including the file paths: the harness resolves them by basename

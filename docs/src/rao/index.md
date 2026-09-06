@@ -175,11 +175,17 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1537 of 1568 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1702 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
 counts, set-points, objective values, security statuses and **which optimization steps ran**, across
 two flow models and three networks. **Nothing is skipped**: every step the corpus states is checked,
-so the ratio is the whole of it rather than the part that was convenient. Of the 31 that do not, 5 belong to the second-preventive corpus, which is
+so the ratio is the whole of it rather than the part that was convenient.
+
+One of the five files is a **starting point rather than a score**. `min_cost.feature`'s 26
+costly-optimization scenarios were vendored *before* that capability exists — `MIN_COST` is currently
+read as `MAX_MIN_MARGIN` — because that is the order the rest of this was built in and the only one
+that works: the second-preventive corpus was vendored first too, scored 45 of 108 with nothing
+implemented, and the gate then found every defect in it one scenario at a time. Of the 31 that do not, 5 belong to the second-preventive corpus, which is
 the one capability still short of the reference.
 
 The other 26 are **recorded disagreements rather than a backlog**. Each has been measured on

@@ -14,13 +14,21 @@ second preventive was built and gated the same day.
 > position reading back out of the table *bit for bit* against the single-step path it replaces,
 > across eight conformity configurations.
 >
-> §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
+> §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, and **118 of 123** on the second-preventive corpus — **1537 of 1568**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **165 of 294** on the
+> costly-optimization one — **1702 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
-> 31 assertions do not match, and they are two different things. **26 are recorded disagreements**
+> **`min_cost.feature` is a *before* figure, not an achievement.** Its 26 scenarios were vendored
+> with costly optimization unimplemented — `MIN_COST` is read as `MAX_MIN_MARGIN` and the
+> `activation_cost` every one of their CRACs carries is parsed and ignored — because that is the
+> order this plan records as the only one that works. 129 of its assertions differ, and the shape of
+> them says what to build: **71 are the objective function itself**, then 16 worst margins and 29
+> taps chosen to maximize a margin rather than minimize a price.
+>
+> Of the other four files, 31 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
 > reference's own objective and is better or equal in every one; §8.6 has the table, and the gate
 > asserts that nothing may disagree without a measurement behind it. **5 are the second-preventive
@@ -88,8 +96,13 @@ second preventive was built and gated the same day.
 >    the hash map yielded last. Both are fixed by imposing an order; the second means a CRAC naming a
 >    node *other* than the lowest-sorting one merged into a bus will not resolve, which is stated
 >    where `bus_ids` is defined.
-> 5. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
->    range actions, costly optimization.
+> 5. **Costly optimization** — the corpus is vendored and scored (see above); the objective is next.
+>    `activation_cost` is already parsed on both action kinds and read by nothing, and `MIN_COST` is
+>    a *sum* over overloads where max-min-margin is a *min*, so it needs its own branch rather than a
+>    penalty on the existing one. The first slice needs no MIP: 3.4.1.1–3.4.1.5 have zero range
+>    actions, so only the search tree decides.
+> 6. **Declared and unbuilt**, each with a comment where it would go: `TapModel::Discrete`, HVDC
+>    range actions.
 >
 > Loop flows and relative margins stay out of scope for the reasons in §11.
 >

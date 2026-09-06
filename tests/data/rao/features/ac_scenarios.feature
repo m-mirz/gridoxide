@@ -13,8 +13,9 @@
 #
 # The selection is every scenario in that suite that is `@ac` and `@rao`, uses a
 # JSON CRAC and the TestCase12Nodes network, and needs none of loop flows,
-# relative margins, costly optimization, HVDC, second-preventive or MARMOT — the
-# features `src/rao/` does not implement. That is 38.
+# relative margins, costly optimization, HVDC, second-preventive or MARMOT. That
+# is 38. Two of those exclusions now have corpora of their own —
+# `second_preventive.feature` and `min_cost.feature`.
 #
 # These run the AC flow model (`evaluate::evaluate_ac`): every one of their
 # configurations sets `"dc": false`, and most of their expectations are written

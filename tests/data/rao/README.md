@@ -34,23 +34,35 @@ screening-versus-resolve comparison proves two of gridoxide's own paths agree.
 These state margins to the decimal and name which remedial actions should be
 used, and their authors wrote them to judge a different implementation.
 
-The selection is every scenario in that suite that is `@dc` and `@rao` (and not
-`@ac`), uses a JSON CRAC, and needs none of loop flows, relative margins, costly
-optimization, HVDC, second-preventive or MARMOT — the features `src/rao/` does
-not implement. That is 25 of roughly 500, across eleven networks.
+**Five corpora, 197 scenarios, 1702 of 1862 checkable assertions.** Each file
+states its own selection in its header; the split is by what the scenarios
+exercise rather than by where they came from upstream.
 
-**138 of 142 checkable assertions match**, at the reference's own tolerance
-(`max(5 MW, 1.5%)`, from its `RaoSteps.flowMegawattTolerance`). The four that do
-not are two phase-shifter taps in the MNEC scenarios 5.2.1.3 and 5.2.1.4, and
-the two margins that follow from them: the reference's own tap rounding declines
-to reconsider a tap that pays an MNEC penalty, and gridoxide's answer scores
-better on the reference's objective than the reference's does. See
-`BASELINE_MATCHED_AC` in `tests/rao_cucumber_test.rs` for the arithmetic.
+| File | Scenarios | Score | Covers |
+|---|---|---|---|
+| `dc_scenarios.feature` | 25 | 180 / 186 | `@dc`, eleven networks |
+| `ac_scenarios.feature` | 38 | 276 / 282 | `@ac` on TestCase12Nodes |
+| `ac_scenarios_16nodes.feature` | 93 | 963 / 977 | `@ac` on TestCase16Nodes |
+| `second_preventive.feature` | 15 | 118 / 123 | the second preventive pass |
+| `min_cost.feature` | 26 | 165 / 294 | costly optimization (`MIN_COST`) |
 
-Getting there took thirteen fixes, listed in `tests/rao_cucumber_test.rs`. Two
-worth knowing about when adding scenarios: `Given network file is "..." for
-CORE CC` is **not** decoration — it rewrites every voltage level (380 kV to 400,
-220 to 225), and since the nominal voltage is the per-unit base that moves every
+The first three exclude the features that have a corpus of their own, which is
+why the other two exist. `min_cost.feature` is the odd one: it was vendored
+**before** the capability, so its score is a recorded *before* figure rather
+than an achievement — the order `plans/RAO_PLAN.md` records as the only one that
+works, and the one that found every defect in the second-preventive corpus.
+
+Tolerance is the reference's own, `max(5, 1.5%)` in whichever unit the step is
+written (`RaoSteps.flowMegawattTolerance`). Of the 160 assertions that differ,
+**26 are recorded disagreements** — measured on OpenRAO's own objective, with
+gridoxide never worse — and the gate refuses to let a scenario disagree without
+one; see `RECORDED_DISAGREEMENTS` in `tests/rao_cucumber_test.rs`.
+
+Getting here took **thirty-two defects**, every one internally consistent and
+externally wrong, all listed in `plans/RAO_PLAN.md` §8.3 and §8.8–§8.12. Two
+worth knowing when adding scenarios: `Given network file is "..." for CORE CC`
+is **not** decoration — it rewrites every voltage level (380 kV to 400, 220 to
+225), and since the nominal voltage is the per-unit base that moves every
 susceptance by 11%. And `the initial margin on cnec` is a different step from
 `the margin on cnec ... after PRA`; reading them as one compares the optimized
 answer against the starting point.
@@ -58,9 +70,10 @@ answer against the starting point.
 Steps are unmodified, including the file paths — the harness resolves them by
 basename, so the text stays as its authors wrote it.
 
-Not every step is checkable. Those that are not are **printed as skipped**
-rather than dropped, so the list can be shrunk deliberately: what remains is
-second-preventive bookkeeping (`the execution details should be`), per-side
-flows the result does not carry, and assertions against a written-out network
-file. Skipped steps are excluded from both halves of the ratio — counting them
-as passes would flatter it and counting them as failures would be a lie.
+**Nothing is skipped.** Every step the corpus states is checked, so the ratio is
+the whole of it rather than the part that was convenient. It was not always so,
+and the last one to go was worth the trouble: five `setpoint of RangeAction`
+steps sat skipped as "not comparable", and wiring them up uncovered two defects
+in redispatch, one a hundredfold sensitivity error that had passed for years
+(§8.12). A skip that states what it is waiting for is a defect report nobody has
+read yet.
