@@ -335,6 +335,14 @@ fn parse(text: &str) -> Vec<Scenario> {
             scenario.config = quoted(line).unwrap_or_default();
         } else if line.contains("launch rao with a time limit of") {
             scenario.time_limit = number_after_quotes(line);
+        } else if line.contains("I launch rao") {
+            // Recognised and handled by doing nothing: `check` launches
+            // unconditionally, so the step needs no state. Recognising it
+            // matters because **Gherkin's keywords are prose** — a step is
+            // identified by its text, and `Then I launch rao` is the same step
+            // as `When I launch rao`. 0.2.1.2.1 writes `Then` where every other
+            // scenario writes `When`, and matching on the keyword filed it as
+            // an expectation nobody could check.
         } else if line.starts_with("Then") {
             scenario.expectations.push(expectation(line));
         }
@@ -1457,9 +1465,19 @@ const FILES: [(&str, usize, usize, Option<&str>); 4] = [
         // The fourth field says a whole corpus is allowed to disagree, and why.
         // It exists so "the capability is partly built" cannot be confused with
         // "nobody has looked", which is the distinction the per-scenario check
-        // beside it enforces everywhere else. Delete it when the six scenarios
+        // beside it enforces everywhere else. Delete it when the two scenarios
         // below are settled — leaving it is how a corpus stops being measured.
-        Some("second preventive holds curative range actions rather than re-optimizing them"),
+        //
+        // The reason it used to give — that the second pass held curative range
+        // actions rather than re-optimizing them — stopped being true when
+        // §8.11 gave them columns of their own. What is left is narrower and
+        // worth naming precisely, because a stale exemption is how a corpus
+        // stops being measured just as surely as a missing one.
+        Some(
+            "1.4.1.5 and 1.4.1.6 spend three curative actions where the reference spends one, \
+             reaching better curative margins than it asks for; §8.9 measures and refutes six \
+             mechanisms for it",
+        ),
     ),
 ];
 

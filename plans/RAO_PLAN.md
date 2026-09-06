@@ -17,7 +17,8 @@ second preventive was built and gated the same day.
 > §8.3's external Cucumber gate runs two flow models across four files and 171 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
 > TestCase16Nodes, and **118 of 123** on the second-preventive corpus — **1537 of 1568**, with
-> **one** step left unsupported out of what was 177 — and the DC file skips nothing at all.
+> **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
+> checked — the ratio is the whole of it.
 >
 > 31 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the

@@ -177,8 +177,9 @@ implementation.
 
 **1537 of 1568 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
-counts, objective values, security statuses and **which optimization steps ran**, across two flow
-models and three networks. Of the 31 that do not, 5 belong to the second-preventive corpus, which is
+counts, set-points, objective values, security statuses and **which optimization steps ran**, across
+two flow models and three networks. **Nothing is skipped**: every step the corpus states is checked,
+so the ratio is the whole of it rather than the part that was convenient. Of the 31 that do not, 5 belong to the second-preventive corpus, which is
 the one capability still short of the reference.
 
 The other 26 are **recorded disagreements rather than a backlog**. Each has been measured on
