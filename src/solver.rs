@@ -107,6 +107,112 @@ pub enum JacobianBackend {
     Pardiso,
 }
 
+/// Which method [`crate::run_power_flow`] uses.
+///
+/// The two linear methods are genuinely different algorithms, not two
+/// spellings of one — see `docs/src/powerflow/dc.md` and
+/// `linear_impedance.md`. Both are direct solves, so neither consults
+/// [`PowerFlowOptions::tol`] or `max_iter`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PowerFlowMethod {
+    /// The full nonlinear solve. Everything else in this crate's history.
+    #[default]
+    NewtonRaphson,
+    /// Real Bθ: active power only, `|V| = 1`, resistance discarded. One
+    /// factorization, no iterations. See
+    /// [`linear::btheta::dc_power_flow`](crate::linear::btheta::dc_power_flow).
+    Dc,
+    /// Complex constant-admittance: every load replaced by the admittance
+    /// drawing its rated power at `|V| = 1`. Mathematically
+    /// power-grid-model's `CalculationMethod.linear`. See
+    /// [`linear::impedance::linear_power_flow`](crate::linear::impedance::linear_power_flow).
+    LinearImpedance,
+}
+
+/// Where [`PowerFlowMethod::NewtonRaphson`] starts from. Ignored by the
+/// direct methods, which have no starting point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PowerFlowInit {
+    /// `|V| = 1`, `θ = 0`, untouched.
+    Flat,
+    /// One constant-admittance solve, via `network::linear_initial_guess`.
+    ///
+    /// The default because it is what this crate has always done — see
+    /// [`crate::run_power_flow_analysis_from_ybus`], which calls it
+    /// unconditionally — and because it is power-grid-model's only
+    /// robustness mechanism, needed where weak sources meet large transformer
+    /// phase shifts and flat-start Newton diverges.
+    #[default]
+    LinearImpedance,
+    /// One DC solve, seeding angles and **only** angles — bus types,
+    /// injections and magnitudes are all restored afterwards, since
+    /// `linear::btheta::dc_power_flow` is a solver rather than an
+    /// initializer and would otherwise pre-empt Newton's own classification
+    /// pass. DC has no magnitude information to offer in any case, beyond the
+    /// flat `|V| = 1` it assumes. This is powsybl's
+    /// `DcValueVoltageInitializer`.
+    ///
+    /// Opt-in rather than default only because `LinearImpedance` is the
+    /// long-standing behavior, not because it is weaker. Measured on the
+    /// committed PGM fixtures
+    /// (`tests/power_flow_methods_test.rs::both_warm_starts_rescue_a_case_flat_start_cannot_solve`):
+    /// on `distribution-case`, where a flat start does *not* converge inside
+    /// 20 iterations, DC init converges in 5 against `LinearImpedance`'s 4.
+    /// Both rescue the case; neither dominates.
+    ///
+    /// The one thing DC init cannot do is supply voltage magnitudes — it has
+    /// none to give beyond the flat 1 p.u. it assumes — so on networks whose
+    /// magnitudes stray far from nominal, `LinearImpedance` starts with
+    /// strictly more information.
+    Dc,
+}
+
+/// Everything [`crate::run_power_flow`] needs to know.
+///
+/// The pre-existing entry points — [`newton_raphson`],
+/// [`newton_raphson_with_backend`], [`PersistentSolver::solve`],
+/// [`newton_raphson_enforcing_q_limits`] — keep their positional parameters
+/// and are unaffected by this type. It exists so that adding a fifth or sixth
+/// knob does not mean a fifth or sixth positional argument, following
+/// `se::nr::SeOptions`.
+#[derive(Clone, Copy, Debug)]
+pub struct PowerFlowOptions {
+    /// Convergence tolerance on the maximum P/Q mismatch. Newton only.
+    pub tol: f64,
+    /// Newton only.
+    pub max_iter: usize,
+    /// Which sparse-LU backend solves the Jacobian. Newton only: the direct
+    /// methods each own their factorization type.
+    pub backend: JacobianBackend,
+    pub method: PowerFlowMethod,
+    pub init: PowerFlowInit,
+    /// Routes Newton through [`newton_raphson_enforcing_q_limits_with_stats`].
+    pub enforce_q_limits: bool,
+    /// Outer-loop cap for `enforce_q_limits`; ignored when it is false.
+    pub max_outer_iter: usize,
+    /// Susceptance choice and transformer-ratio handling for
+    /// [`PowerFlowMethod::Dc`] and for [`PowerFlowInit::Dc`].
+    pub dc: crate::linear::DcOptions,
+}
+
+impl Default for PowerFlowOptions {
+    fn default() -> Self {
+        Self {
+            // The values `run_power_flow_analysis_from_ybus` has always
+            // hard-coded, so the default options reproduce today's behavior
+            // exactly.
+            tol: 1e-6,
+            max_iter: 20,
+            backend: JacobianBackend::Scalar,
+            method: PowerFlowMethod::default(),
+            init: PowerFlowInit::default(),
+            enforce_q_limits: false,
+            max_outer_iter: 10,
+            dc: crate::linear::DcOptions::default(),
+        }
+    }
+}
+
 /// How a Newton-Raphson solve terminated, plus the per-iteration convergence
 /// trace it used to print to stdout.
 ///
@@ -394,10 +500,16 @@ pub fn newton_raphson_with_backend(
 /// reset.
 pub struct PersistentSolver {
     backend: JacobianBackend,
-    /// Backend-independent: the Jacobian sparsity pattern and per-nonzero
-    /// recipe depend only on topology and bus types, so one cache serves
-    /// whichever backend is selected. Invalidated by `reset` alongside the
-    /// symbolic factorization, under the identical validity condition.
+    /// Backend-independent, so one cache serves whichever backend is
+    /// selected.
+    ///
+    /// Its *sparsity pattern* depends only on topology and bus types — but the
+    /// per-nonzero recipe does not: [`JacobianPattern`]'s entries carry the
+    /// Y-bus admittance `y` they were analyzed against, and `fill` reads it
+    /// every iteration. So this is valid only while the Y-bus **values** are
+    /// unchanged too, which is automatic for an ordinary batch (every scenario
+    /// shares one Y-bus) and is not automatic for a contingency sweep (each
+    /// outage has its own). See [`invalidate_admittances`](Self::invalidate_admittances).
     jacobian: Option<JacobianPattern>,
     scalar: Option<RealSparseSystem>,
     block: Option<BlockSymbolic>,
@@ -477,6 +589,31 @@ impl PersistentSolver {
     /// Discards any cached symbolic factorization. Call this before the
     /// next `solve()` if the topology (not just bus values) has changed
     /// since the last call.
+    /// Invalidates the cached Jacobian recipe while **keeping** every
+    /// backend's symbolic factorization.
+    ///
+    /// The right call when the Y-bus's *values* changed but its sparsity
+    /// pattern did not — which is exactly a branch contingency built by
+    /// [`network::build_ybus_with_outages`](crate::network::build_ybus_with_outages),
+    /// where the outaged branch keeps its structural entries at zero. The
+    /// symbolic factorization depends only on the `(row, col)` pairs
+    /// `JacobianPattern::to_triplets` emits, and those are unchanged, so it
+    /// stays valid; the entries' cached admittances do not, and must be
+    /// re-analyzed.
+    ///
+    /// Re-analysis is O(nonzeros) against the symbolic factorization's
+    /// fill-reducing ordering and elimination-tree work, which is the
+    /// expensive half — measured at ~45% of solve time on a 9,241-bus case.
+    /// Keeping that is what makes an N-1 sweep cheaper than a sequence of
+    /// independent solves.
+    ///
+    /// Use [`reset`](Self::reset) instead when the pattern itself changed:
+    /// a different bus-type assignment, or a topology whose branches were
+    /// genuinely dropped rather than zeroed.
+    pub fn invalidate_admittances(&mut self) {
+        self.jacobian = None;
+    }
+
     pub fn reset(&mut self) {
         self.jacobian = None;
         self.scalar = None;

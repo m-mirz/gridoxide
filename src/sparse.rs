@@ -4,6 +4,16 @@
 //! matrix non-Hermitian) complex solve and a real solve are provided, since
 //! Newton-Raphson needs the latter for its Jacobian and the linear
 //! initial-guess warm start needs the former for the Y-bus.
+//!
+//! Each of the two arithmetics comes in a *pattern-fixed* flavour, which
+//! recomputes numeric values on every solve ([`RealSparseSystem`]), and a
+//! *fully-fixed* flavour, which factorizes once and then only moves the
+//! right-hand side ([`ComplexSparseSystem`], [`RealFactorization`]). Which one
+//! a caller wants is decided by whether its matrix changes between solves, not
+//! by how often it solves.
+//!
+//! No `faer` type appears in any signature here: keeping the backend behind
+//! this module is what lets it be swapped without touching the power-flow math.
 
 use num_complex::Complex;
 use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat, Triplet};
@@ -180,9 +190,144 @@ impl ComplexSparseSystem {
     }
 }
 
+/// A real sparse system whose sparsity *pattern* and *values* are both fixed
+/// across repeated solves, so the whole factorization — not merely the
+/// symbolic half — is computed once and reused.
+///
+/// This is the real-arithmetic twin of [`ComplexSparseSystem`], and it exists
+/// for the same reason that type does: the DC (Bθ) susceptance matrix
+/// (`linear::btheta`) depends only on the topology, so a DC solve, a PTDF
+/// column and a LODF column are all just different right-hand sides against
+/// one factorization.
+///
+/// [`RealSparseSystem`] cannot serve that. Its contract — the one
+/// [`solver::LinearSolver`](crate::solver::LinearSolver) codifies — is
+/// "pattern fixed, values change every call", so it numerically refactorizes
+/// on every `factor_and_solve`. That is exactly right for Newton-Raphson,
+/// whose Jacobian really does change every iteration, and exactly wrong for
+/// PTDF, which would pay a fresh factorization once per bus.
+pub struct RealFactorization {
+    n: usize,
+    lu: Lu<usize, f64>,
+}
+
+impl RealFactorization {
+    /// Factorizes once. Returns `None` if the matrix is singular or malformed.
+    pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        let triplets: Vec<Triplet<usize, usize, f64>> =
+            entries.iter().map(|&(r, c, v)| Triplet::new(r, c, v)).collect();
+        let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).ok()?;
+        Some(Self { n, lu: mat.sp_lu().ok()? })
+    }
+
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Solves `A x = b` against the cached factorization.
+    ///
+    /// Singularity is checked on the result rather than reported by `faer`,
+    /// which returns NaN-poisoned values instead of an error — the same
+    /// contract [`solve_complex`] documents.
+    pub fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        let mut out = vec![0.0; self.n];
+        self.solve_into(rhs, &mut out).then_some(out)
+    }
+
+    /// The body of [`solve`](Self::solve), writing into a caller-owned buffer
+    /// rather than allocating.
+    ///
+    /// Private because nothing needs the buffer-reusing form yet: the
+    /// sensitivity accessors in `linear::sensitivity` each return an owned
+    /// `Vec` anyway, and one allocation per column is nowhere near the cost of
+    /// the triangular solve beside it. Worth making public if a caller ever
+    /// does want to hoist that allocation out of a loop.
+    ///
+    /// Returns `false` (leaving `out` in an unspecified state) if the matrix
+    /// is singular at these values.
+    fn solve_into(&self, rhs: &[f64], out: &mut [f64]) -> bool {
+        debug_assert_eq!(rhs.len(), self.n);
+        debug_assert_eq!(out.len(), self.n);
+        let b = Col::<f64>::from_fn(self.n, |i| rhs[i]);
+        let x = self.lu.solve(&b);
+        if (0..self.n).any(|i| !x[i].is_finite()) {
+            return false;
+        }
+        for i in 0..self.n {
+            out[i] = x[i];
+        }
+        true
+    }
+}
+
+/// Solves a small dense `A x = b` by Gaussian elimination with partial
+/// pivoting. Returns `None` if `A` is singular — no pivot clears a small
+/// absolute threshold.
+///
+/// Deliberately dense and deliberately unsophisticated: both callers pass a
+/// matrix whose order is a handful, where a sparse factorization's setup
+/// would cost more than the whole solve. `dc::solve_dc_network` uses it for
+/// the HVDC Newton step, and `linear::sensitivity` for the `k × k`
+/// generalized-LODF system over an outage set of `k` branches. It lives here
+/// rather than in either of those because it is a numeric utility with no
+/// power-system content, and because a reader looking for the crate's linear
+/// algebra looks here.
+///
+/// The absolute pivot threshold is meaningful for both callers: their
+/// matrices are O(1)-scaled (a Jacobian in per-unit, and `I - Ψ` whose
+/// entries are transfer fractions), so "no pivot above 1e-12" really does mean
+/// structurally singular rather than merely badly scaled.
+pub(crate) fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for col in 0..n {
+        let pivot_row = (col..n).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+        if a[pivot_row][col].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(col, pivot_row);
+        b.swap(col, pivot_row);
+        for row in (col + 1)..n {
+            let factor = a[row][col] / a[col][col];
+            if factor == 0.0 {
+                continue;
+            }
+            for k in col..n {
+                a[row][k] -= factor * a[col][k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for row in (0..n).rev() {
+        let sum: f64 = (row + 1..n).map(|k| a[row][k] * x[k]).sum();
+        x[row] = (b[row] - sum) / a[row][row];
+    }
+    Some(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solve_dense_matches_a_hand_solution() {
+        // [[2,1],[1,3]] x = [5,10] => x = [1,3]
+        let x = solve_dense(vec![vec![2.0, 1.0], vec![1.0, 3.0]], vec![5.0, 10.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12, "{x:?}");
+    }
+
+    /// Partial pivoting must handle a zero leading pivot rather than dividing
+    /// by it.
+    #[test]
+    fn solve_dense_pivots_past_a_zero_diagonal() {
+        let x = solve_dense(vec![vec![0.0, 2.0], vec![1.0, 1.0]], vec![4.0, 3.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12, "{x:?}");
+    }
+
+    #[test]
+    fn solve_dense_singular_returns_none() {
+        assert!(solve_dense(vec![vec![1.0, 1.0], vec![2.0, 2.0]], vec![1.0, 2.0]).is_none());
+    }
 
     #[test]
     fn solve_complex_simple_system() {
@@ -240,6 +385,57 @@ mod tests {
         // factor_and_solve time.
         if let Some(sys) = sys {
             assert!(sys.factor_and_solve(&entries, &[1.0, 2.0]).is_none());
+        }
+    }
+
+    /// The whole point of the type: one factorization, many right-hand sides.
+    /// Solving the two unit vectors recovers the inverse column by column, so
+    /// this doubles as a check that the cached `Lu` is genuinely reusable
+    /// rather than consumed by the first solve.
+    #[test]
+    fn real_factorization_reuses_one_factorization_across_right_hand_sides() {
+        // [[2, 1], [1, 3]], det = 5, inverse = [[0.6, -0.2], [-0.2, 0.4]].
+        let entries = vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)];
+        let sys = RealFactorization::new(2, &entries).unwrap();
+        assert_eq!(sys.n(), 2);
+
+        let x = sys.solve(&[5.0, 10.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12, "got {}", x[0]);
+        assert!((x[1] - 3.0).abs() < 1e-12, "got {}", x[1]);
+
+        let c0 = sys.solve(&[1.0, 0.0]).unwrap();
+        assert!((c0[0] - 0.6).abs() < 1e-12 && (c0[1] + 0.2).abs() < 1e-12, "{c0:?}");
+        let c1 = sys.solve(&[0.0, 1.0]).unwrap();
+        assert!((c1[0] + 0.2).abs() < 1e-12 && (c1[1] - 0.4).abs() < 1e-12, "{c1:?}");
+    }
+
+    #[test]
+    fn real_factorization_solve_into_matches_solve() {
+        let entries = vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)];
+        let sys = RealFactorization::new(2, &entries).unwrap();
+        let mut out = vec![0.0; 2];
+        assert!(sys.solve_into(&[5.0, 10.0], &mut out));
+        assert_eq!(out, sys.solve(&[5.0, 10.0]).unwrap());
+    }
+
+    /// Duplicate `(row, col)` triplets sum, matching `solve_complex`'s
+    /// documented `+=` semantics — the B-matrix assembly in `linear::btheta`
+    /// relies on this, since parallel branches each stamp their own entry.
+    #[test]
+    fn real_factorization_duplicate_entries_sum() {
+        let entries = vec![(0, 0, 1.0), (0, 0, 1.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)];
+        let sys = RealFactorization::new(2, &entries).unwrap();
+        let x = sys.solve(&[5.0, 10.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12, "{x:?}");
+    }
+
+    #[test]
+    fn real_factorization_singular_returns_none() {
+        let entries = vec![(0, 0, 1.0), (0, 1, 1.0), (1, 0, 2.0), (1, 1, 2.0)];
+        // As above, `new` may or may not detect this; if it does not, the
+        // finiteness check on the solve must.
+        if let Some(sys) = RealFactorization::new(2, &entries) {
+            assert!(sys.solve(&[1.0, 2.0]).is_none());
         }
     }
 }

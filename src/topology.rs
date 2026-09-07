@@ -64,7 +64,7 @@ pub const IDEAL_CONNECTION_Y: num_complex::Complex<f64> = num_complex::Complex::
 /// The impedance corresponding to [`IDEAL_CONNECTION_Y`]: `3.54e-6` p.u.
 ///
 /// What a branch caught by [`ZERO_IMPEDANCE_THRESHOLD`] is raised *to*.
-fn ideal_connection_z() -> f64 {
+pub(crate) fn ideal_connection_z() -> f64 {
     1.0 / (IDEAL_CONNECTION_Y.re.powi(2) + IDEAL_CONNECTION_Y.im.powi(2)).sqrt()
 }
 
