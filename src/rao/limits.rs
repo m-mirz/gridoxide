@@ -249,6 +249,7 @@ mod tests {
             operator: Some(tso.into()),
             speed: None,
             activation_cost: None,
+            variation_cost: None,
             group: None,
             kind: RangeActionKind::Pst {
                 element: id.into(),

@@ -455,6 +455,10 @@ struct Control {
     /// non-zero", because its set-point is absolute and starts wherever its
     /// machines already are (see `injection_origin`).
     start: f64,
+    /// The tap it started on, for a phase shifter. A variation cost is stated
+    /// per **tap**, so the distance a cost objective bills for is counted in
+    /// taps rather than in the set-point's own degrees.
+    start_tap: Option<i32>,
     lower: f64,
     upper: f64,
     /// Objective penalty per unit moved.
@@ -1390,6 +1394,7 @@ fn build_controls(
                     sensitivity: scoped(sensitivity_mw, governs),
                     current,
                     start: current,
+                    start_tap: Some(tap),
                     lower,
                     upper,
                     penalty: options.pst_penalty,
@@ -1472,6 +1477,7 @@ fn build_controls(
                     sensitivity: scoped(sensitivity_mw, governs),
                     current: start,
                     start,
+                    start_tap: None,
                     lower,
                     upper,
                     penalty: options.injection_penalty,
@@ -1956,11 +1962,19 @@ fn margin(
 /// [`Control::start`](Control) rather than against zero — a redispatch's
 /// set-point is absolute and starts wherever its machines already are, which is
 /// the whole point of `injection_origin`.
-fn moved_range_actions(controls: &[Control]) -> Vec<usize> {
+fn moved_range_actions(controls: &[Control]) -> Vec<(usize, f64)> {
     controls
         .iter()
         .filter(|c| (c.current - c.start).abs() > 1e-9)
-        .map(|c| c.action)
+        .map(|c| {
+            // Taps for a shifter, set-point units for anything else — the unit
+            // the CRAC states the price in. See [`Costly::activation`].
+            let distance = match (&c.pst, c.start_tap) {
+                (Some(pst), Some(start)) => f64::from(pst.tap - start),
+                _ => c.current - c.start,
+            };
+            (c.action, distance)
+        })
         .collect()
 }
 

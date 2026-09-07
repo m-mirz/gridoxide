@@ -384,6 +384,19 @@ pub struct RangeAction {
     pub speed: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<f64>,
+    /// What *moving* it costs, per unit of set-point, up and down separately.
+    ///
+    /// Distinct from [`activation_cost`](Self::activation_cost), which is paid
+    /// once for using the action at all: a shifter with an activation cost of 5
+    /// and a variation cost of 10 costs 55 to move five taps and 105 to move
+    /// ten, which is what makes a cost objective stop at the tap that secures
+    /// the network rather than the tap that maximizes the margin — the
+    /// reference's own scenario 3.4.2.1.
+    ///
+    /// Up and down are separate because a CRAC may price them so; every
+    /// vendored one states them equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variation_cost: Option<VariationCost>,
     /// Actions sharing a group id must move together — aligned phase shifters
     /// on parallel circuits, typically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -391,6 +404,17 @@ pub struct RangeAction {
     pub kind: RangeActionKind,
     pub ranges: Vec<Range>,
     pub usage_rules: Vec<UsageRule>,
+}
+
+/// What a range action charges per unit of movement, by direction.
+///
+/// The units are the set-point's: degrees for a phase shifter's angle, MW for a
+/// redispatch. A CRAC states them per *tap* for a shifter, so the reader
+/// converts — see `crac_json`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VariationCost {
+    pub up: f64,
+    pub down: f64,
 }
 
 /// Caps on how many remedial actions may be used in one state.
