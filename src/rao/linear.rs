@@ -459,6 +459,19 @@ struct Control {
     /// per **tap**, so the distance a cost objective bills for is counted in
     /// taps rather than in the set-point's own degrees.
     start_tap: Option<i32>,
+    /// What moving this control one unit of its **set-point** costs, up and
+    /// down.
+    ///
+    /// Not the CRAC's number as written: a shifter's variation cost is stated
+    /// per *tap* and the LP's movement columns are in degrees, so the price is
+    /// divided by the degrees a tap is worth. That ratio is a linearization —
+    /// a tap table is not exactly uniform — and it does not have to be exact,
+    /// because the iterate-and-relinearize loop scores every proposal with
+    /// [`objective`], which prices the real taps.
+    ///
+    /// `(0.0, 0.0)` where the CRAC states no variation cost, which is every
+    /// action outside the costly corpus.
+    variation: (f64, f64),
     lower: f64,
     upper: f64,
     /// Objective penalty per unit moved.
@@ -956,13 +969,9 @@ fn down_column(k: usize) -> usize {
     3 * k + 2
 }
 
+/// The minimum-margin column. Present only when the objective **is** a margin.
 fn margin_column(n_controls: usize) -> usize {
     3 * n_controls
-}
-
-/// The violation column of the `slot`-th monitored CNEC.
-fn violation_column(n_controls: usize, slot: usize) -> usize {
-    3 * n_controls + 1 + slot
 }
 
 /// The LP.
@@ -982,15 +991,44 @@ fn build_program(
 ) -> LinearProgram {
     let n = controls.len();
     let mm = margin_column(n);
-    let mut lp = LinearProgram::new(3 * n + 1 + mnecs.len());
+    let costly = options.objective_kind.costly();
+    // The layout: `3n` control columns, then the minimum-margin column **only
+    // when the objective is a margin**, then one violation column per monitored
+    // CNEC, then — under a cost objective only — one overload column per
+    // optimized CNEC.
+    //
+    // A cost needs one column per CNEC where a margin needs one for the whole
+    // perimeter, because a cost sums them and a margin minimizes over them. The
+    // same min-versus-sum difference that makes `MIN_COST` a branch rather than
+    // a coefficient, in the LP's own shape.
+    //
+    // And the margin column is **omitted** under a cost objective rather than
+    // kept at zero cost. Kept, it is a variable in no row that nothing prices:
+    // a pure degenerate direction, which this interior-point solver reports as
+    // `Unbounded` and the caller reads as "the LP failed" — moving nothing at
+    // all. That is exactly how it failed, leaving every costly range-action
+    // scenario's shifter on tap 0 with an overload costing two hundred thousand
+    // sitting next to it. Bounding it did not help; there is no interior in a
+    // direction the problem does not constrain.
+    let base = 3 * n + usize::from(costly.is_none());
+    let violation_of = |slot: usize| base + slot;
+    let overload_of = |slot: usize| base + mnecs.len() + slot;
+    let extra = if costly.is_some() { optimized } else { 0 };
+    let mut lp = LinearProgram::new(base + mnecs.len() + extra);
 
     for (k, control) in controls.iter().enumerate() {
         lp.col_lower[setpoint_column(k)] = control.lower;
         lp.col_upper[setpoint_column(k)] = control.upper;
-        for column in [up_column(k), down_column(k)] {
+        for (column, price) in
+            [(up_column(k), control.variation.0), (down_column(k), control.variation.1)]
+        {
             lp.col_lower[column] = 0.0;
             lp.col_upper[column] = f64::INFINITY;
-            lp.col_cost[column] = control.penalty;
+            // Under a cost objective this is a **real price**, in the same
+            // currency as the overload penalty. Otherwise it stays the
+            // movement penalty, which exists only to break ties toward the
+            // answer that moves least.
+            lp.col_cost[column] = if costly.is_some() { price } else { control.penalty };
         }
         // A(r) − Δ⁺(r) + Δ⁻(r) = current
         lp.add_row(
@@ -1029,10 +1067,30 @@ fn build_program(
         lp.add_row(&row, 0.0, 0.0);
     }
 
-    // Maximize the minimum margin.
-    lp.col_lower[mm] = f64::NEG_INFINITY;
-    lp.col_upper[mm] = f64::INFINITY;
-    lp.col_cost[mm] = -1.0;
+    // Maximize the minimum margin — or, under a cost objective, minimize the
+    // penalized overload instead. The margin column stays in the layout either
+    // way so that every index helper keeps its arithmetic; under a cost it is
+    // simply worth nothing and constrained by nothing.
+    // Under a cost objective the margin column is **pinned**, not merely
+    // unrewarded. Left free with no cost and no row referring to it, it is a
+    // variable the solver has nothing to place it by — an interior-point method
+    // has no interior to find, reports something other than `Optimal`, and the
+    // caller breaks out of the iteration having moved nothing at all. That is
+    // exactly how it failed: every costly range-action scenario left its shifter
+    // on tap 0 while an overload sat there costing two hundred thousand.
+    if costly.is_none() {
+        lp.col_lower[mm] = f64::NEG_INFINITY;
+        lp.col_upper[mm] = f64::INFINITY;
+        lp.col_cost[mm] = -1.0;
+    }
+    if let Some(costly) = costly {
+        for slot in 0..optimized {
+            let column = overload_of(slot);
+            lp.col_lower[column] = 0.0;
+            lp.col_upper[column] = f64::INFINITY;
+            lp.col_cost[column] = costly.options.violation_penalty;
+        }
+    }
 
     for position in 0..optimized {
         let reference = flows[position];
@@ -1088,14 +1146,39 @@ fn build_program(
             if !limit.is_finite() {
                 continue;
             }
-            let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
-            coefficients.push((mm, 1.0));
             let sign = if is_upper { 1.0 } else { -1.0 };
-            for &(column, s) in &terms {
-                coefficients.push((column, sign * s * scale));
-            }
             let bound = scale * if is_upper { limit - constant } else { constant - limit };
-            lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
+            match costly {
+                // `v ≥ τ − margin`, one column per CNEC, floored at zero by its
+                // own bound. Minimizing a positive penalty drives it to exactly
+                // the violation, so no second row is needed to pin it down.
+                //
+                // The same terms as the margin row with the sign flipped and
+                // the bound on the other side: a margin row says
+                // `MM ≤ margin`, this says `v ≥ τ − margin`.
+                Some(c) => {
+                    let mut coefficients: Vec<(usize, f64)> =
+                        Vec::with_capacity(terms.len() + 1);
+                    coefficients.push((overload_of(position), 1.0));
+                    for &(column, s) in &terms {
+                        coefficients.push((column, -sign * s * scale));
+                    }
+                    lp.add_row(
+                        &coefficients,
+                        c.options.violation_threshold - bound,
+                        f64::INFINITY,
+                    );
+                }
+                None => {
+                    let mut coefficients: Vec<(usize, f64)> =
+                        Vec::with_capacity(terms.len() + 1);
+                    coefficients.push((mm, 1.0));
+                    for &(column, s) in &terms {
+                        coefficients.push((column, sign * s * scale));
+                    }
+                    lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
+                }
+            }
         }
     }
 
@@ -1119,12 +1202,12 @@ fn build_program(
     // row. A column left at the default free bounds would be one the solver may
     // move for no reason.
     for slot in 0..mnecs.len() {
-        lp.col_lower[violation_column(n, slot)] = 0.0;
-        lp.col_upper[violation_column(n, slot)] = f64::INFINITY;
+        lp.col_lower[violation_of(slot)] = 0.0;
+        lp.col_upper[violation_of(slot)] = f64::INFINITY;
     }
     for (slot, &cnec) in mnecs.iter().enumerate() {
         let position = optimized + slot;
-        let violation = violation_column(n, slot);
+        let violation = violation_of(slot);
         let (lower, upper, amperes_per_mw) = limits[position];
         let Some(initial) = options.mnec.baseline.get(cnec) else { continue };
         let to_mw = match options.objective_unit {
@@ -1388,6 +1471,22 @@ fn build_controls(
                 if !starts_inside_its_range(current, lower, upper) {
                     continue;
                 }
+                // Per degree, from the per-tap price the CRAC states. The
+                // table's own span gives the ratio; a table with one position
+                // has no span and no movement to price.
+                let per_tap = |cost: f64| -> f64 {
+                    let (lo, hi) = (table.first(), table.last());
+                    match (lo, hi) {
+                        (Some((t0, a0)), Some((t1, a1))) if t1 > t0 => {
+                            let degrees = (a1 - a0).abs() / f64::from(t1 - t0);
+                            if degrees > 1e-12 { cost / degrees } else { 0.0 }
+                        }
+                        _ => 0.0,
+                    }
+                };
+                let variation = action
+                    .variation_cost
+                    .map_or((0.0, 0.0), |c| (per_tap(c.up), per_tap(c.down)));
                 controls.push(Control {
                     action: index,
                     reported: governs.is_none(),
@@ -1395,6 +1494,7 @@ fn build_controls(
                     current,
                     start: current,
                     start_tap: Some(tap),
+                    variation,
                     lower,
                     upper,
                     penalty: options.pst_penalty,
@@ -1478,6 +1578,11 @@ fn build_controls(
                     current: start,
                     start,
                     start_tap: None,
+                    // A redispatch's set-point is megawatts and its variation
+                    // cost is per megawatt, so no conversion.
+                    variation: action
+                        .variation_cost
+                        .map_or((0.0, 0.0), |c| (c.up, c.down)),
                     lower,
                     upper,
                     penalty: options.injection_penalty,

@@ -984,8 +984,37 @@ fn check(scenario: &Scenario) -> Outcome {
     // harness that scored the answer under a different slack from the one that
     // produced it would be marking its own homework wrong.
     let ac_options = gridoxide::rao::ac_options(&view);
-    let mut solver = IpmSolver::new();
-    let plan = run(&crac, &view, &resolution, &mut solver, &search_options);
+    // A cost objective's LP is a different problem class — one violation column
+    // per CNEC, priced against movement, where a margin objective has a single
+    // column to maximize — and gridoxide's barrier method is **not robust on
+    // it**. It reports `Unbounded` for problems whose objective is bounded
+    // below by zero with every column bounded below, the caller reads that as
+    // "the LP failed" and moves nothing, and a shifter sits on tap 0 beside a
+    // two-hundred-thousand overload. HiGHS solves them: `min_cost.feature`
+    // scores 221 against the barrier method's 177.
+    //
+    // Faithful as well as expedient — the reference's own costly configurations
+    // name a simplex-family solver for exactly these problems
+    // (`"linear-optimization-solver": {"solver": "CBC"}`).
+    //
+    // Only for `MIN_COST`. Switching every scenario to HiGHS costs 6 on
+    // `ac_scenarios_16nodes.feature`, which is a question about tap rounding and
+    // not one to settle by changing solver underneath it.
+    let mut ipm = IpmSolver::new();
+    #[cfg(feature = "opf-highs")]
+    let mut highs = search_options
+        .linear
+        .objective_kind
+        .costly()
+        .and_then(|_| gridoxide::opf::highs::HighsSolver::new().ok());
+    #[cfg(feature = "opf-highs")]
+    let solver: &mut dyn gridoxide::opf::Solver = match highs.as_mut() {
+        Some(h) => h,
+        None => &mut ipm,
+    };
+    #[cfg(not(feature = "opf-highs"))]
+    let solver: &mut dyn gridoxide::opf::Solver = &mut ipm;
+    let plan = run(&crac, &view, &resolution, solver, &search_options);
 
     // Per-CNEC margins with the preventive decisions in force — what the
     // reference calls "after PRA".
@@ -1602,7 +1631,7 @@ const FILES: [(&str, usize, usize, Option<&str>); 5] = [
         // so these configurations are read as max-min-margin and every
         // objective-function assertion is answered in the wrong currency.
         Some(
-            "a range action's cost is priced but not optimized against: the LP still maximizes the minimum margin, so `3_4_2` and `3_4_3` report the right price for the wrong tap",
+            "a range action's activation cost needs a binary per action, hence a MIP, hence `TapModel::Discrete`; and the cost LP is only reached when a solver that can take it is built, so a no-HiGHS build still answers `MIN_COST` by margin",
         ),
     ),
 ];
@@ -2070,7 +2099,23 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// `activation_cost` these CRACs carry on every action is parsed by
 /// `crac_json.rs` and read by nothing. What passes here passes because a
 /// margin-maximizing answer happens to coincide with a cost-minimizing one.
-const BASELINE_MATCHED_MIN_COST: usize = 180;
+#[cfg(feature = "opf-highs")]
+const BASELINE_MATCHED_MIN_COST: usize = 221;
+
+/// Without HiGHS, the same corpus scores **177**.
+///
+/// Not a build flag changing a number by rounding — it changes which answers are
+/// reachable. A cost objective's LP is one violation column per CNEC priced
+/// against movement, and the barrier method reports `Unbounded` on problems
+/// whose objective is bounded below by zero with every column bounded below.
+/// The caller reads that as "the LP failed" and moves nothing, so a shifter sits
+/// on tap 0 beside the overload it was meant to clear.
+///
+/// Recorded as its own baseline rather than hidden behind a feature gate,
+/// because a build that cannot solve these should say so rather than quietly
+/// score lower.
+#[cfg(not(feature = "opf-highs"))]
+const BASELINE_MATCHED_MIN_COST: usize = 177;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
@@ -2089,57 +2134,5 @@ fn every_scenario_names_inputs_that_exist() {
             );
         }
         assert!(!scenario.expectations.is_empty(), "{}: nothing to check", scenario.name);
-    }
-}
-
-// TEMPORARY PROBE — remove before commit.
-#[test]
-fn probe_1_4_1_1_3() {
-    let net = ucte::read_with(resolve("common/TestCase16Nodes.uct"), &ucte::UcteOptions::default())
-        .expect("network");
-    let (crac, _) = crac_json::read(resolve("epic20/second_preventive_ls_1_3.json")).expect("crac");
-    let config = resolve("epic20/RaoParameters_maxMargin_ampere_second_preventive.json");
-    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
-    let view = Network {
-        generation: &net.generation, buses: &net.buses, lines: &net.lines,
-        transformers: &net.transformers, branch_ids: &net.branch_ids, bus_ids: &net.node_codes,
-        initially_open: &net.initially_open, bus_countries: &net.bus_countries,
-        shunts: &net.shunts, tap_changers: &net.tap_changers, base_mva: net.base_mva,
-    };
-    let mut solver = IpmSolver::new();
-    let plan = run(&crac, &view, &resolution, &mut solver, &options_from(&config));
-    println!("plan.final_margin_mw {:.3}  is_secure {}", plan.final_margin_mw, plan.is_secure());
-    println!("preventive.final_margin_mw {:.3}", plan.preventive.final_margin_mw);
-    // Every CNEC in the network the plan's own preventive decisions produce.
-    let v = Network {
-        transformers: &plan.preventive.transformers,
-        buses: &plan.preventive.buses,
-        ..view
-    };
-    let ac = gridoxide::rao::ac_options(&v);
-    for per in evaluate_model(
-        &crac, &v, &resolution, &plan.preventive.open_branches,
-        gridoxide::rao::FlowModel::Ac, &ac,
-    ).perimeters {
-        for c in &per.cnecs {
-            println!(
-                "    PREVENTIVE-NET {:<52} {:>9.2} MW {:>9.2} A",
-                crac.flow_cnecs[c.cnec].id, c.margin_mw, c.margin_a
-            );
-        }
-    }
-    for sc in &plan.scenarios {
-        if let Some(a) = &sc.automatons {
-            println!("  automatons.final_margin_mw {:.3}", a.final_margin_mw);
-        }
-        for per in &sc.perimeters {
-            println!(
-                "  curative.final_margin_mw {:.3}  actions {:?} taps {:?}",
-                per.final_margin_mw,
-                per.network_actions.iter().map(|&a| crac.network_actions[a].id.as_str()).collect::<Vec<_>>(),
-                per.setpoints.iter().filter(|s| s.moved())
-                    .map(|s| (crac.range_actions[s.action].id.as_str(), s.tap)).collect::<Vec<_>>(),
-            );
-        }
     }
 }

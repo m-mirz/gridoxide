@@ -16,16 +16,21 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **178 of 294** on the
-> costly-optimization one — **1715 of 1862**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **221 of 294** on the
+> costly-optimization one — **1758 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
-> **`min_cost.feature` is half built.** Its 26 scenarios were vendored *before* the capability and
-> scored **165**; the `MIN_COST` objective now exists for **network actions** and it scores 178.
-> That closes the preventive slice completely — 3.4.1.1 through 3.4.1.5 and 3.4.1.2.bis all match in
-> full, which are exactly the scenarios whose CRACs declare no range action, so the search tree
-> decides alone and no MIP is involved. What is left is range actions: §8.13.
+> **`min_cost.feature` is most of the way built.** Its 26 scenarios were vendored *before* the
+> capability and scored **165**; the `MIN_COST` objective reached the search tree and scored 178
+> (§8.13), and reaching the LP as well — per-CNEC violation columns and movement at its real
+> variation cost — takes it to **221** (§8.14). The preventive slice closes completely, and so do
+> the shifter-movement scenarios. What is left is the *activation* of a range action, which needs a
+> binary per action, hence a MIP, hence `TapModel::Discrete`.
+>
+> That figure is **solver-dependent by construction**: 221 with `opf-highs`, 177 without, because
+> the barrier method reports `Unbounded` on these cost LPs and the reference's own costly
+> configurations name `"solver": "CBC"`. The gate's baseline is cfg-gated to say so.
 >
 > Of the other four files, 31 assertions do not match, and they are two different things. **26 are recorded disagreements**
 > across the three settled files — eight scenarios where gridoxide's answer has been measured on the
@@ -1687,6 +1692,63 @@ curative scenarios of `3_4_1` spend across instants and are a third thing again.
 `Costly::activation` already takes the moved range actions, and `Control` now carries `start` so
 "moved" is answerable — a redispatch's set-point is absolute and starts wherever its machines are
 (§8.12), so it is not "is it non-zero".
+
+### 8.14 The cost objective, inside the LP
+
+§8.13 gave the *search tree* a cost to rank leaves by, which is enough when the CRAC declares no
+range action. It is not enough when it does: the LP still maximized the minimum margin and priced
+movement at `control.penalty`, a tie-break. So the tree chose a shifter for the right reason and
+then the LP moved it to the wrong tap — a plan whose cost the tree correctly reported and never
+influenced.
+
+Making the LP minimize cost is two changes to the program, and they are the two halves of the
+formula.
+
+**Per-CNEC violation columns in place of the single margin column.** Max-min-margin needs exactly one
+column, `mm`, held below every CNEC's margin and maximized. A cost is a **sum**, so it needs one
+column per CNEC — \\(v_c \ge \tau - m(c)\\), \\(v_c \ge 0\\), priced at \\(-p\\) — and the `mm`
+column ceases to exist rather than being priced at zero. That last point is not tidiness; see below.
+
+**Movement priced at the real variation cost.** The up and down columns of each range action already
+exist and already carry a price. Under `MIN_COST` that price stops being `control.penalty` and
+becomes the CRAC's `variationCosts`, per tap in the direction travelled. `Control::start` and
+`start_tap` were added so "how far did it move" is answerable from the solution — a redispatch's
+set-point is absolute and starts wherever its machines already are (§8.12), so distance is measured
+from the start, not from zero.
+
+#### The barrier method reports `Unbounded` on a problem bounded below by zero
+
+The first working formulation kept `mm` as a free column priced at zero, on the reasoning that a
+column in no row and worth nothing costs nothing. `IpmSolver` returned `Unbounded` — on an LP whose
+objective is a sum of non-negative terms and every column bounded below.
+
+It is not wrong about its own arithmetic. A free column absent from every row is a direction along
+which the objective is exactly flat, and a primal-dual interior point method that steps along it
+never separates "flat forever" from "improving forever". Pinning it to `[0, 0]` made it worse — a
+degenerate box has no interior, which is the one thing a barrier needs. `[-1, 1]` fixed most of it.
+Deleting the column fixed all but one scenario.
+
+The remaining answer is not a formulation fix. The reference's own costly configurations name
+`"solver": "CBC"` for exactly these problems, and a simplex method has no difficulty here at all. So
+`MIN_COST` selects HiGHS when it is built, and the gate says so out loud:
+`BASELINE_MATCHED_MIN_COST` is **221 with `opf-highs` and 177 without**, cfg-gated, because the flag
+changes which answers are *reachable* rather than rounding the ones that are. Every other feature
+file keeps the barrier method — switching all of them to HiGHS costs 6 assertions on
+`ac_scenarios_16nodes.feature`, so this is a per-objective choice, not a better default.
+
+A build without HiGHS still answers a `MIN_COST` run; it answers it by margin, which is the honest
+degradation and is what the 177 measures.
+
+#### What it is worth
+
+**178 → 221.** The formulation is validated by where the gains land: 3.4.3.4 goes 4 → 14 and 3.4.3.2
+4 → 11, both shifter-movement scenarios that the tree could rank and the LP could not solve. 3.4.2.1
+closes completely, which is the scenario that pins the *unit* — activation 5 plus five taps at 10 is
+55, where pricing per degree would give 24.5.
+
+What still does not match is activation of a range action: it needs a binary per action, hence a MIP,
+hence `TapModel::Discrete`, which remains declared and unbuilt. That is the whole of the remaining
+`3_4_2`/`3_4_3` gap.
 
 ### 8.4 Two independent MILP solvers
 
