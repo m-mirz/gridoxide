@@ -317,6 +317,7 @@ fn a_phase_shifter_range_action_works_on_a_cgmes_network() {
             }],
             speed: None,
             activation_cost: None,
+            variation_cost: None,
             group: None,
         }],
         usage_limits: Vec::new(),

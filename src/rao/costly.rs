@@ -103,14 +103,21 @@ impl Costly {
         self.options.violation_penalty * total
     }
 
-    /// What the actions in force cost to activate.
+    /// What the actions in force cost: activation once, plus movement by the
+    /// distance travelled.
     ///
-    /// `activated` indexes [`Crac::network_actions`], `moved` indexes
-    /// [`Crac::range_actions`]. An action whose CRAC states no cost is **free**,
-    /// not unknown: `activationCost` is optional in the format, and the
-    /// reference treats its absence as zero rather than refusing to price the
-    /// plan.
-    pub fn activation(&self, crac: &Crac, activated: &[usize], moved: &[usize]) -> f64 {
+    /// `activated` indexes [`Crac::network_actions`]. `moved` is
+    /// `(range action, distance)` — **in the unit that action's variation cost
+    /// is stated in**, which for a phase shifter is *taps*, not degrees. The
+    /// reference's 3.4.2.1 pins that: an activation cost of 5 and a variation
+    /// cost of 10 make five taps cost 55, where per-degree would make it 24.5.
+    ///
+    /// A distance of zero still pays the activation: an action chosen and then
+    /// left where it stood is a decision someone has to carry out. An action the
+    /// CRAC prices at nothing is **free**, not unknown — the field is optional
+    /// in the format, and the reference reads its absence as zero rather than
+    /// refusing to price the plan.
+    pub fn activation(&self, crac: &Crac, activated: &[usize], moved: &[(usize, f64)]) -> f64 {
         let network: f64 = activated
             .iter()
             .filter_map(|&i| crac.network_actions.get(i))
@@ -118,8 +125,15 @@ impl Costly {
             .sum();
         let range: f64 = moved
             .iter()
-            .filter_map(|&i| crac.range_actions.get(i))
-            .filter_map(|a| a.activation_cost)
+            .filter_map(|&(i, distance)| Some((crac.range_actions.get(i)?, distance)))
+            .map(|(a, distance)| {
+                // Direction is the sign of the movement; the two prices are
+                // separate because a CRAC may state them so.
+                let variation = a.variation_cost.map_or(0.0, |c| {
+                    if distance >= 0.0 { c.up * distance } else { c.down * -distance }
+                });
+                a.activation_cost.unwrap_or(0.0) + variation
+            })
             .sum();
         network + range
     }
@@ -132,7 +146,7 @@ impl Costly {
         perimeter: &[State],
         unit: ObjectiveUnit,
         activated: &[usize],
-        moved: &[usize],
+        moved: &[(usize, f64)],
     ) -> f64 {
         self.violation(crac, result, perimeter, unit)
             + self.activation(crac, activated, moved)

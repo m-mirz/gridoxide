@@ -713,6 +713,18 @@ fn read_range_action(
         operator: text(v, "operator"),
         speed: integer(v, "speed"),
         activation_cost: number(v, "activationCost"),
+        // `variationCosts: {up, down}`. Stated **per tap** for a phase shifter,
+        // which the reference's own 3.4.2.1 fixes: an activation cost of 5 and
+        // a variation cost of 10 make five taps cost 55, and its scenario text
+        // for 3.4.2.2 says "5 per tap" outright. So this is not converted to the
+        // set-point's own unit here — `Costly` measures movement in taps to
+        // match.
+        variation_cost: v.get("variationCosts").and_then(|c| {
+            Some(super::crac::VariationCost {
+                up: number(c, "up")?,
+                down: number(c, "down")?,
+            })
+        }),
         group: text(v, "groupId"),
         kind,
         ranges,

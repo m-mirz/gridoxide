@@ -1114,16 +1114,35 @@ fn check(scenario: &Scenario) -> Outcome {
     // Cumulative, because activation is: an action taken preventively is still
     // in force after the contingency, and the reference's `getCost(instant)`
     // prices everything activated up to that instant.
-    let spent_by = |stage: Option<Stage>| -> (Vec<usize>, Vec<usize>) {
-        let (mut actions, mut moved): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
-        fn take(
-            p: &gridoxide::rao::PerimeterPlan,
-            actions: &mut Vec<usize>,
-            moved: &mut Vec<usize>,
-        ) {
+    // Distance is in **taps** for a shifter, which is the unit its variation
+    // cost is stated in — see `Costly::activation`. A `Setpoint` carries the
+    // angle it started from rather than the tap, so the tap is recovered from
+    // the action's own table.
+    let tap_of = |action: usize, angle: f64| -> Option<i32> {
+        let gridoxide::rao::RangeActionKind::Pst { tap_to_angle, .. } =
+            &crac.range_actions.get(action)?.kind
+        else {
+            return None;
+        };
+        tap_to_angle
+            .iter()
+            .min_by(|a, b| (a.1 - angle).abs().total_cmp(&(b.1 - angle).abs()))
+            .map(|(t, _)| *t)
+    };
+    let spent_by = |stage: Option<Stage>| -> (Vec<usize>, Vec<(usize, f64)>) {
+        let (mut actions, mut moved): (Vec<usize>, Vec<(usize, f64)>) = (Vec::new(), Vec::new());
+        let take = |p: &gridoxide::rao::PerimeterPlan,
+                    actions: &mut Vec<usize>,
+                    moved: &mut Vec<(usize, f64)>| {
             actions.extend(&p.network_actions);
-            moved.extend(p.setpoints.iter().filter(|s| s.moved()).map(|s| s.action));
-        }
+            for setpoint in p.setpoints.iter().filter(|s| s.moved()) {
+                let distance = match (setpoint.tap, tap_of(setpoint.action, setpoint.initial)) {
+                    (Some(now), Some(was)) => f64::from(now - was),
+                    _ => setpoint.value - setpoint.initial,
+                };
+                moved.push((setpoint.action, distance));
+            }
+        };
         if stage.is_none() {
             return (actions, moved);
         }
@@ -1137,7 +1156,19 @@ fn check(scenario: &Scenario) -> Outcome {
                 && let Some(a) = &scenario.automatons
             {
                 actions.extend(&a.network_actions);
-                moved.extend(a.range_actions.iter().map(|(i, _, _)| *i));
+                // An `AutomatonResult` reports where a range action ended, not
+                // where it began, so the distance is measured from the CRAC's
+                // own `initialTap` — the only starting point it states.
+                for &(action, value, tap) in &a.range_actions {
+                    let distance = match (tap, crac.range_actions.get(action).map(|r| &r.kind)) {
+                        (
+                            Some(now),
+                            Some(gridoxide::rao::RangeActionKind::Pst { initial_tap, .. }),
+                        ) => f64::from(now - initial_tap),
+                        _ => value,
+                    };
+                    moved.push((action, distance));
+                }
             }
             if stage == Some(Stage::Cra) {
                 for perimeter in &scenario.perimeters {
@@ -1147,8 +1178,8 @@ fn check(scenario: &Scenario) -> Outcome {
         }
         actions.sort_unstable();
         actions.dedup();
-        moved.sort_unstable();
-        moved.dedup();
+        moved.sort_by_key(|m| m.0);
+        moved.dedup_by_key(|m| m.0);
         (actions, moved)
     };
 
@@ -1195,18 +1226,11 @@ fn check(scenario: &Scenario) -> Outcome {
                 .filter_map(&read)
                 .map(|m| (costly.options.violation_threshold - m).max(0.0))
                 .sum();
+            // Priced by the library rather than a fourth reimplementation of it.
+            // What this file still computes for itself is the *overload*, which
+            // is the part worth an independent opinion.
             let (actions, moved) = spent_by(stage);
-            let spent: f64 = actions
-                .iter()
-                .filter_map(|&i| crac.network_actions.get(i))
-                .filter_map(|a| a.activation_cost)
-                .chain(
-                    moved
-                        .iter()
-                        .filter_map(|&i| crac.range_actions.get(i))
-                        .filter_map(|a| a.activation_cost),
-                )
-                .sum();
+            let spent = costly.activation(&crac, &actions, &moved);
             return Some(violated + costly.options.violation_penalty * overload + spent);
         }
         let worst = crac
@@ -1578,7 +1602,7 @@ const FILES: [(&str, usize, usize, Option<&str>); 5] = [
         // so these configurations are read as max-min-margin and every
         // objective-function assertion is answered in the wrong currency.
         Some(
-            "costly optimization is built for network actions only — a range action's `variationCosts` are dropped by the reader and its activation needs a binary, so `3_4_2` and `3_4_3` are still answered in the wrong currency",
+            "a range action's cost is priced but not optimized against: the LP still maximizes the minimum margin, so `3_4_2` and `3_4_3` report the right price for the wrong tap",
         ),
     ),
 ];
@@ -2046,7 +2070,7 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// `activation_cost` these CRACs carry on every action is parsed by
 /// `crac_json.rs` and read by nothing. What passes here passes because a
 /// margin-maximizing answer happens to coincide with a cost-minimizing one.
-const BASELINE_MATCHED_MIN_COST: usize = 178;
+const BASELINE_MATCHED_MIN_COST: usize = 180;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
