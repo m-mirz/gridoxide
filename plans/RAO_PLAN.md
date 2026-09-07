@@ -1750,6 +1750,47 @@ What still does not match is activation of a range action: it needs a binary per
 hence `TapModel::Discrete`, which remains declared and unbuilt. That is the whole of the remaining
 `3_4_2`/`3_4_3` gap.
 
+### 8.15 Two measured mechanisms behind the remaining 73, not yet fixed
+
+`min_cost.feature` sits at 221 of 294. The 73 that do not match were grouped by mechanism rather
+than by scenario, and a per-state probe of every scenario's overloads settles two of them. Neither
+is implemented yet; this section is the measurement, so the fix does not have to re-derive it.
+
+**Activation is per *state*, not per action.** 3.4.1.7 activates `closeBeFr4` after `coBeFr2` and
+again after `coBeFr3`, and the reference's own comment prices it
+"activation of closeBeFr4 after coBeFr2 (850) + activation of closeBeFr4 after coBeFr3 (850)" —
+**1700**. gridoxide reports 850, because `castor::activated_by` and the gate's own `spent_by` both
+end in `sort_unstable(); dedup()`. 3.4.1.8 says the same thing with a preventive action in front of
+it: 325 + 850 + 850 = 2025 against gridoxide's 1175. The same applies to `moved`, which is deduped
+by range action — 3.4.2.3 moves one PST preventively *and* curatively and owes two activations.
+
+**The violation term is a maximum across perimeters, not a sum.** The probe's per-state overloads
+against the reference's stated figures:
+
+| scenario | per-state overloads (initial) | reference | gridoxide |
+|---|---|---|---|
+| 3.4.1.6 | 100, 600 | 600000 | 700000 |
+| 3.4.1.7 | 0, 100, 100 | 100000 | 200000 |
+| 3.4.1.8 | 33.3, 240, 240 | 240000 | 513333 |
+| 3.4.1.10 | 100, 650, 700 | 700000 | 1450000 |
+| 3.4.1.11 | 25, 0, 50, 0, 75, 100, 75, 75, 100 | 100000 | 500000 |
+| 3.4.1.12 | 25, 0, 50, 0, 75, 100, 150, 125, 117.1 | 150000 | 642140 |
+
+Every reference figure is the **worst** state, every gridoxide figure the sum. It holds after PRA
+too: 3.4.1.8's (0, 73.33, 73.33) is the reference's 73658 = 325 + 73333, where gridoxide sums to
+146992. So the costly objective reuses the aggregation the max-min-margin one needs — `Math::max`
+over per-perimeter functional costs — while the **activation** term accumulates across all of them.
+
+Sum *within* a perimeter is unchanged and is not in question: it is what the LP minimizes and what
+took 3.4.3.4 from 4 to 14 (§8.14). The base case and its outage states are one perimeter; every
+other state is its own.
+
+**What this corpus cannot settle.** Every min-cost scenario it ships has exactly **one** overloaded
+CNEC per state, so "sum within a perimeter, max across them" and a plain worst-margin-over-everything
+rule reproduce all 294 assertions identically. The first is the reading to implement — the second
+would need a second, contradictory definition of the same cost for the LP to keep working — but the
+gate does not distinguish them, and saying so is part of the measurement.
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a
