@@ -16,8 +16,8 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **277 of 294** on the
-> costly-optimization one — **1814 of 1862**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **286 of 294** on the
+> costly-optimization one — **1823 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
@@ -29,10 +29,12 @@ second preventive was built and gated the same day.
 > the coupling row that makes a curative set-point mean "further than preventive went" — takes it to
 > **272** (§8.17), with two defects in that same machinery — a `start` that did not survive
 > relinearization, and a rounding step that pulled a coupled column apart — taking it to **277**
-> (§8.18). Of the 17 that remain, 6 are gridoxide answering **more cheaply** than the reference asks
-> and awaiting a §8.6 measurement; 11 are one curative-perimeter defect shared with §8.9.
+> (§8.18), and dropping the curative stop target under a cost — where it compares two quantities
+> that are not the same thing — takes it to **286** (§8.19). Of the 8 that remain, 6 are gridoxide
+> answering **more cheaply** than the reference asks and awaiting a §8.6 measurement; 2 are the one
+> remaining defect, 3.4.1.12.
 >
-> That figure is **solver-dependent by construction**: 277 with `opf-highs`, 211 without, because
+> That figure is **solver-dependent by construction**: 286 with `opf-highs`, 220 without, because
 > the barrier method reports `Unbounded` on these cost LPs and the reference's own costly
 > configurations name `"solver": "CBC"`. The gate's baseline is cfg-gated to say so.
 >
@@ -2047,6 +2049,63 @@ is not yet that measurement.
   rather than a disagreement. §8.9's 1.4.1.5 is its likeliest relative — both are a curative
   perimeter deciding to act differently from the reference — and reading OpenRAO's curative filter
   is the step neither has had yet.
+
+### 8.19 A curative perimeter has no target under a cost
+
+3.4.1.11 is the sharpest diagnostic in the corpus, because it agrees with the reference on
+**everything** up to the last step: the initial cost, the preventive action, the cost after PRA, four
+automaton decisions, the cost after ARA — all exact. Then the reference spends `closeBeFr8` in the
+curative perimeters of `coBeFr4` and `coBeFr5`, ending at 54090, and gridoxide declined both and
+ended at 52620.
+
+Cheaper, and wrong. The arithmetic says why: the worst violation is 52.5 MW either way and the
+reference pays 735 twice to relieve a perimeter that is **not** the worst one. Under §8.15's
+max-across-perimeters rule that raises the reported cost by exactly 1470 and buys nothing *globally*
+— and it is still right, because a curative perimeter is optimized on its own cost, where 735 buys
+more than 0.735 MW of relief. gridoxide was not declining a bad action; it was never considering one.
+
+#### The target compares two things that are not the same quantity
+
+`scenarios_after` gives every curative perimeter `stop_at_target = preventive.final_objective +
+curative_min_obj_improvement` — search until you beat preventive by this much, then stop. The
+reasoning is operational rather than mathematical, and it is the reference's own: curative actions
+are carried out under time pressure by people who did not plan them, so an extra 40 A bought by a
+third switching operation is not worth having.
+
+Under a **margin** that sentence means something, because both sides are margins on one scale — the
+worst over the preventive perimeter against the worst over this one.
+
+Under a **cost** they are not the same quantity at all. The preventive perimeter's cost carries
+whatever violation it could not clear, 52500 here; a single-state curative perimeter's carries only
+its own, a hundred times smaller. So the target is met **before the perimeter has done anything**,
+every curative perimeter stops at once, and the plan declines actions that pay for themselves several
+times over.
+
+A costly curative perimeter therefore has no target: it minimizes its own cost and stops when it
+cannot do better. That is not the weaker rule it looks like — security is enforced there by the
+violation penalty, and 1000 a megawatt dominates every activation these CRACs price. It is the same
+observation as §8.13's third broken convention (`relative_min_impact` is a fraction of an objective
+whose scale changed) and §8.13's second (`enforce-curative-security`'s `target.max(0.0)` means
+something different under a cost), and it is the third and last place the negated-cost convention
+turns out to carry a unit with it.
+
+**277 → 286.** 3.4.1.11 closes completely — 21 of 21.
+
+#### What the 8 that remain are
+
+- **3.4.1.12** (2) is the one remaining **defect**: gridoxide reaches 104090 where the reference
+  reaches 70756.67, and a worst margin of −100 against −66.67. Both plans leave the network insecure
+  and gridoxide's is the more expensive, which is the one shape that cannot be argued with. It is
+  3.4.1.11's own twin — same network family, same actions, a curative overload instead of an
+  auto one — so the difference between the two is where the mechanism is.
+- **3.4.3.5** (4) secures for **135** where the reference spends 145, declining `closeBeFr4` after
+  `coBeFr2`, and its after-PRA cost matches the reference to 1e-7 — so the flow models agree and the
+  difference is one curative decision on a state that is already secure at margin 5.74.
+- **3.4.2.4** (2) reaches 214762 against 282717 by moving its free PST to −16 instead of −3.
+
+The last two are recorded-disagreement candidates under §8.6 and **neither is exempt until measured**
+as one. "It looks cheaper" is not the measurement; scoring both plans under the same evaluation is,
+and §8.6's rule is that the entry comes after the measurement rather than instead of it.
 
 ### 8.4 Two independent MILP solvers
 

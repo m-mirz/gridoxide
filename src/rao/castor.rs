@@ -628,31 +628,55 @@ fn scenarios_after(
     };
     let carried_open = preventive.open_branches.clone();
     let carried_transformers = preventive.transformers.clone();
-    let curative_target = options.stop_at_target.unwrap_or_else(|| {
-        let target = preventive.final_objective + options.curative_min_obj_improvement;
-        // `enforce-curative-security` additionally demands a secure perimeter,
-        // which can only make the target harder to reach.
-        //
-        // Only under a **margin** objective, where "objective ≥ 0" is exactly
-        // what secure means. Under a cost it means zero overload *and* zero
-        // spent, which no perimeter that has to act can reach, so the clamp
-        // would set an unreachable target and stop the curative stage from ever
-        // stopping. Security is still enforced there — by the violation term
-        // dominating the cost, which is what a penalty of 1000 per unit is for.
-        let costly = options.linear.objective_kind.costly().is_some();
-        if options.enforce_curative_security && !costly { target.max(0.0) } else { target }
-    });
+    let costly_objective = options.linear.objective_kind.costly().is_some();
+    // What a curative perimeter is searching *for*, or `None` when it is simply
+    // minimizing its own cost.
+    //
+    // Under a **margin** objective there is a target and it means something:
+    // `preventive.final_objective` is the worst margin over the preventive
+    // perimeter and a curative perimeter's is the worst margin over its own —
+    // both megawatts on one scale — so "beat it by `curative-min-obj-improvement`
+    // and stop" is a sentence about margins. The reasoning behind it is
+    // operational rather than mathematical: curative actions are carried out
+    // under time pressure by people who did not plan them, so an extra 40 A
+    // bought by a third switching operation is not worth having.
+    //
+    // Under a **cost** objective the two are not the same quantity at all. The
+    // preventive perimeter's cost carries whatever violation it could not clear
+    // — 52500 on the reference's 3.4.1.11 — while a single-state curative
+    // perimeter's carries only its own, a hundred times smaller. The target is
+    // then met before the perimeter has done anything, every curative perimeter
+    // stops at once, and the plan declines actions that pay for themselves
+    // several times over: on 3.4.1.11 the reference spends 735 twice on
+    // `closeBeFr8` and gridoxide spent nothing, having "reached" a target that
+    // was never about it.
+    //
+    // So a costly curative perimeter minimizes its own cost and stops when it
+    // cannot do better. That is not the weaker rule it looks like — security is
+    // enforced there by the violation penalty, and 1000 a megawatt dominates
+    // every activation these CRACs price.
+    let curative_target = if costly_objective {
+        options.stop_at_target
+    } else {
+        Some(options.stop_at_target.unwrap_or_else(|| {
+            let target = preventive.final_objective + options.curative_min_obj_improvement;
+            // `enforce-curative-security` additionally demands a secure
+            // perimeter, which can only make the target harder to reach.
+            if options.enforce_curative_security { target.max(0.0) } else { target }
+        }))
+    };
+    let options = &SearchOptions {
+        stop_at_target: curative_target,
+        max_depth: options.curative_max_depth.unwrap_or(options.max_depth),
+        ..options.clone()
+    };
+
     // A curative perimeter gets its own depth where the configuration states
     // one. The reference keeps `max-preventive-search-tree-depth` and
     // `max-curative-search-tree-depth` apart because they answer different
     // questions — how much may be planned, against how much may be carried out
     // under time pressure — and this is the only layer that knows which
     // perimeter it is about to search.
-    let options = &SearchOptions {
-        stop_at_target: Some(curative_target),
-        max_depth: options.curative_max_depth.unwrap_or(options.max_depth),
-        ..options.clone()
-    };
 
     let mut scenarios = Vec::new();
     for (contingency, _) in crac.contingencies.iter().enumerate() {

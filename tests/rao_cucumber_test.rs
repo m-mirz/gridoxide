@@ -2084,7 +2084,7 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// Nothing else. Every other scenario in the corpus matches in full.
 const BASELINE_MATCHED_2P: usize = 118;
 
-/// The 26 costly-optimization scenarios: **277 of 294**, from 165 with the
+/// The 26 costly-optimization scenarios: **286 of 294**, from 165 with the
 /// objective unbuilt, 178 once the search tree could rank by cost (§8.13), 221
 /// once the LP could minimize it (§8.14), 252 once the cost was *aggregated* the
 /// way the reference aggregates it (§8.15), and 272 once a range action's
@@ -2092,7 +2092,10 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// set-point mean "further than preventive went" (§8.17) — and 277 once two
 /// defects in that same machinery were found: a `start` that did not survive
 /// relinearization, and a rounding step that pulled a coupled column apart
-/// (§8.18).
+/// (§8.18) — and 286 once the curative stop target was dropped under a cost,
+/// where it compares a whole preventive perimeter's violation against a single
+/// curative state's and is therefore met before that state has done anything
+/// (§8.19).
 ///
 /// That last step was two corrections and no new capability, which is why it was
 /// worth 31:
@@ -2107,9 +2110,9 @@ const BASELINE_MATCHED_2P: usize = 118;
 ///   3.4.1.11 pins it: nine states carrying 500 units of overload between them,
 ///   and the cost it states is 100000.
 ///
-/// # What the 17 that remain are
+/// # What the 8 that remain are
 ///
-/// Three families, and two of them are gridoxide answering more cheaply than
+/// Three scenarios, and two of them are gridoxide answering more cheaply than
 /// the reference asks:
 ///
 /// - **3.4.3.5** (4) secures the network for **135** where the reference spends
@@ -2118,9 +2121,12 @@ const BASELINE_MATCHED_2P: usize = 118;
 ///   rather than a defect. A recorded-disagreement candidate under §8.6 and
 ///   **not exempt until measured** as one. (3.4.2.5, 3.4.2.7 and 3.4.3.3, which
 ///   used to sit here, close in full under §8.17 and §8.18.)
-/// - **3.4.1.11 and 3.4.1.12** decline `closeBeFr8` in the curative perimeters
-///   of `coBeFr4` and `coBeFr5`. Untouched by §8.16 and §8.17, and still the
-///   likeliest relative of §8.9's 1.4.1.5.
+/// - **3.4.1.12** (2) is the one remaining **defect**: 104090 against the
+///   reference's 70756.67 and a worst margin of −100 against −66.67. Both plans
+///   leave the network insecure and gridoxide's is the more expensive, which is
+///   the one shape that cannot be argued with. Its twin 3.4.1.11 closes
+///   completely under §8.19, so the difference between the two is where the
+///   mechanism is.
 /// - **3.4.2.2** picks `pstBeFr2` where the reference picks `pstBeFr3`, to the
 ///   same tap.
 /// - **3.4.2.4** reaches a *cheaper* answer than the reference asks for
@@ -2147,9 +2153,9 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// `crac_json.rs` and read by nothing. What passes here passes because a
 /// margin-maximizing answer happens to coincide with a cost-minimizing one.
 #[cfg(feature = "opf-highs")]
-const BASELINE_MATCHED_MIN_COST: usize = 277;
+const BASELINE_MATCHED_MIN_COST: usize = 286;
 
-/// Without HiGHS, the same corpus scores **211**.
+/// Without HiGHS, the same corpus scores **220**.
 ///
 /// Not a build flag changing a number by rounding — it changes which answers are
 /// reachable. A cost objective's LP is one violation column per CNEC priced
@@ -2162,7 +2168,7 @@ const BASELINE_MATCHED_MIN_COST: usize = 277;
 /// because a build that cannot solve these should say so rather than quietly
 /// score lower.
 #[cfg(not(feature = "opf-highs"))]
-const BASELINE_MATCHED_MIN_COST: usize = 211;
+const BASELINE_MATCHED_MIN_COST: usize = 220;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
