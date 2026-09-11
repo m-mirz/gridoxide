@@ -36,7 +36,7 @@
 //! honest, positive costs; the sign flip belongs to the caller, and is written
 //! once in each of the two places that compute an objective.
 
-use super::crac::{Crac, State};
+use super::crac::{Crac, InstantKind, State};
 use super::evaluate::SecurityResult;
 use super::linear::ObjectiveUnit;
 
@@ -74,11 +74,35 @@ pub struct Costly {
 }
 
 impl Costly {
-    /// The penalized overload over the perimeter's **optimized** CNECs.
+    /// The penalized overload over `perimeter`'s **optimized** CNECs: a sum
+    /// within each optimization perimeter, and the **worst** of those.
     ///
-    /// A sum. A CNEC clearing the threshold contributes nothing rather than a
-    /// negative amount — an unused margin is not a credit, and treating it as
-    /// one would let a comfortable CNEC pay for an overloaded one.
+    /// Within a perimeter it is a sum. A CNEC clearing the threshold
+    /// contributes nothing rather than a negative amount — an unused margin is
+    /// not a credit, and treating it as one would let a comfortable CNEC pay
+    /// for an overloaded one. That sum is the objective's whole point and is
+    /// what the LP minimizes.
+    ///
+    /// **Across perimeters it is a maximum**, which is the part that is not
+    /// obvious. Each perimeter is optimized on its own network by its own
+    /// actions, and the reference combines their functional costs the way it
+    /// combines margins — a max over the per-perimeter results, the costly
+    /// objective reusing the aggregation the max-min-margin one needs. Summing
+    /// instead reports a plan as five times worse for having five
+    /// contingencies: the reference's 3.4.1.11 spreads 500 units of overload
+    /// across nine states and states its cost as **100**, the worst single one.
+    ///
+    /// A "perimeter" here is the reference's. The base case and its outage
+    /// states are optimized together and count as one; every other state is its
+    /// own, which is what makes each contingency's auto and curative instants
+    /// separate buckets rather than one per contingency.
+    ///
+    /// One thing the vendored corpus cannot settle: every min-cost scenario in
+    /// it has exactly **one** overloaded CNEC per state, so a plain
+    /// worst-margin-over-everything rule reproduces all 294 assertions just as
+    /// well. The sum-within-perimeter reading is the one chosen, because it is
+    /// what the LP and the search demonstrably need and two unrelated
+    /// definitions of one cost would be worse than one imperfectly pinned.
     pub fn violation(
         &self,
         crac: &Crac,
@@ -86,20 +110,39 @@ impl Costly {
         perimeter: &[State],
         unit: ObjectiveUnit,
     ) -> f64 {
-        let total: f64 = result
-            .perimeters
-            .iter()
-            .filter(|p| perimeter.contains(&p.state))
-            .flat_map(|p| p.cnecs.iter())
-            .filter(|c| crac.flow_cnecs[c.cnec].optimized)
-            .map(|c| {
-                let margin = match unit {
-                    ObjectiveUnit::Megawatt => c.margin_mw,
-                    ObjectiveUnit::Ampere => c.margin_a,
-                };
-                (self.options.violation_threshold - margin).max(0.0)
-            })
-            .sum();
+        // `None` rather than 0.0 so a perimeter list with no states at all is
+        // distinguishable from one whose states are all comfortable. Both
+        // answer zero here, but folding a max from 0.0 would silently floor a
+        // future threshold that makes a *negative* contribution meaningful.
+        let mut preventive: Option<f64> = None;
+        let mut worst: Option<f64> = None;
+        for p in result.perimeters.iter().filter(|p| perimeter.contains(&p.state)) {
+            let total: f64 = p
+                .cnecs
+                .iter()
+                .filter(|c| crac.flow_cnecs[c.cnec].optimized)
+                .map(|c| {
+                    let margin = match unit {
+                        ObjectiveUnit::Megawatt => c.margin_mw,
+                        ObjectiveUnit::Ampere => c.margin_a,
+                    };
+                    (self.options.violation_threshold - margin).max(0.0)
+                })
+                .sum();
+            match crac.instants[p.state.instant].kind {
+                InstantKind::Preventive | InstantKind::Outage => {
+                    preventive = Some(preventive.unwrap_or(0.0) + total);
+                }
+                InstantKind::Auto | InstantKind::Curative => {
+                    worst = Some(worst.map_or(total, |w: f64| w.max(total)));
+                }
+            }
+        }
+        let total = match (preventive, worst) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => 0.0,
+        };
         self.options.violation_penalty * total
     }
 

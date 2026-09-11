@@ -746,10 +746,10 @@ fn scenarios_after(
 
 /// Every network action a plan puts in force, anywhere in it.
 ///
-/// Preventive, each contingency's automatons, and each curative perimeter —
-/// deduplicated, because one action available in two instants is one activation
-/// and should be billed once. Only a cost objective reads this; a margin does
-/// not care how the network came to be the way it is.
+/// Preventive, each contingency's automatons, and each curative perimeter, with
+/// **repeats kept**: activation is billed per state, so the same action taken
+/// after two contingencies is two activations. Only a cost objective reads
+/// this; a margin does not care how the network came to be the way it is.
 fn activated_by(preventive: &PerimeterPlan, scenarios: &[ScenarioPlan]) -> Vec<usize> {
     let mut all: Vec<usize> = preventive.network_actions.clone();
     for scenario in scenarios {
@@ -760,8 +760,13 @@ fn activated_by(preventive: &PerimeterPlan, scenarios: &[ScenarioPlan]) -> Vec<u
             all.extend(&perimeter.network_actions);
         }
     }
+    // Sorted for a stable answer, **not** deduped: activation is charged per
+    // state, so one action taken after two contingencies is paid for twice.
+    // The reference's 3.4.1.7 prices exactly that — `closeBeFr4` after
+    // `coBeFr2` and again after `coBeFr3`, 850 + 850 — and deduping here
+    // reports a plan at half what it costs, which is the one error a cost
+    // objective must not make.
     all.sort_unstable();
-    all.dedup();
     all
 }
 
