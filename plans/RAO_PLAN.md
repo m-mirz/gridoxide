@@ -16,19 +16,21 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **221 of 294** on the
-> costly-optimization one — **1758 of 1862**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **252 of 294** on the
+> costly-optimization one — **1789 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
 > **`min_cost.feature` is most of the way built.** Its 26 scenarios were vendored *before* the
 > capability and scored **165**; the `MIN_COST` objective reached the search tree and scored 178
-> (§8.13), and reaching the LP as well — per-CNEC violation columns and movement at its real
-> variation cost — takes it to **221** (§8.14). The preventive slice closes completely, and so do
-> the shifter-movement scenarios. What is left is the *activation* of a range action, which needs a
-> binary per action, hence a MIP, hence `TapModel::Discrete`.
+> (§8.13), reaching the LP as well took it to **221** (§8.14), and aggregating the cost the way the
+> reference aggregates it — activation billed per state, violation maxed across perimeters — takes
+> it to **252** (§8.15). The preventive slice closes completely, and so do the shifter-movement
+> scenarios. What is left is the *activation* of a range action, which needs a binary per action,
+> hence a MIP, hence `TapModel::Discrete`, and one pre-existing second-preventive fallback that
+> costs four scenarios.
 >
-> That figure is **solver-dependent by construction**: 221 with `opf-highs`, 177 without, because
+> That figure is **solver-dependent by construction**: 252 with `opf-highs`, 205 without, because
 > the barrier method reports `Unbounded` on these cost LPs and the reference's own costly
 > configurations name `"solver": "CBC"`. The gate's baseline is cfg-gated to say so.
 >
@@ -1750,24 +1752,29 @@ What still does not match is activation of a range action: it needs a binary per
 hence `TapModel::Discrete`, which remains declared and unbuilt. That is the whole of the remaining
 `3_4_2`/`3_4_3` gap.
 
-### 8.15 Two measured mechanisms behind the remaining 73, not yet fixed
+### 8.15 How the cost is aggregated across perimeters
 
-`min_cost.feature` sits at 221 of 294. The 73 that do not match were grouped by mechanism rather
-than by scenario, and a per-state probe of every scenario's overloads settles two of them. Neither
-is implemented yet; this section is the measurement, so the fix does not have to re-derive it.
+`min_cost.feature` sat at 221 of 294 after §8.14. The 73 that missed were grouped by mechanism
+rather than by scenario, and a per-state probe of every scenario's overloads settled two of them.
+Both were errors in how an already-correct cost was *added up*, not in what it could express, which
+is why they were worth **31 assertions between them and no new capability**.
 
-**Activation is per *state*, not per action.** 3.4.1.7 activates `closeBeFr4` after `coBeFr2` and
-again after `coBeFr3`, and the reference's own comment prices it
+**Activation is billed per state, not per action.** 3.4.1.7 activates `closeBeFr4` after `coBeFr2`
+and again after `coBeFr3`, and the reference's own comment prices it
 "activation of closeBeFr4 after coBeFr2 (850) + activation of closeBeFr4 after coBeFr3 (850)" —
-**1700**. gridoxide reports 850, because `castor::activated_by` and the gate's own `spent_by` both
-end in `sort_unstable(); dedup()`. 3.4.1.8 says the same thing with a preventive action in front of
-it: 325 + 850 + 850 = 2025 against gridoxide's 1175. The same applies to `moved`, which is deduped
-by range action — 3.4.2.3 moves one PST preventively *and* curatively and owes two activations.
+**1700**. gridoxide reported 850, because `castor::activated_by` and the gate's own `spent_by` both
+ended in `sort_unstable(); dedup()`. 3.4.1.8 says the same with a preventive action in front:
+325 + 850 + 850 = 2025 against 1175. The same applied to `moved`, deduped by range action, where
+3.4.2.3 moves one PST preventively *and* curatively and owes two activations plus both distances.
+
+The fix is deleting two `dedup()` calls, which is a good illustration of how the corpus earns its
+keep: nothing about the code looked wrong, and the arithmetic in a feature file's comment is what
+said it was.
 
 **The violation term is a maximum across perimeters, not a sum.** The probe's per-state overloads
 against the reference's stated figures:
 
-| scenario | per-state overloads (initial) | reference | gridoxide |
+| scenario | per-state overloads (initial) | reference | gridoxide was |
 |---|---|---|---|
 | 3.4.1.6 | 100, 600 | 600000 | 700000 |
 | 3.4.1.7 | 0, 100, 100 | 100000 | 200000 |
@@ -1776,20 +1783,47 @@ against the reference's stated figures:
 | 3.4.1.11 | 25, 0, 50, 0, 75, 100, 75, 75, 100 | 100000 | 500000 |
 | 3.4.1.12 | 25, 0, 50, 0, 75, 100, 150, 125, 117.1 | 150000 | 642140 |
 
-Every reference figure is the **worst** state, every gridoxide figure the sum. It holds after PRA
-too: 3.4.1.8's (0, 73.33, 73.33) is the reference's 73658 = 325 + 73333, where gridoxide sums to
-146992. So the costly objective reuses the aggregation the max-min-margin one needs — `Math::max`
-over per-perimeter functional costs — while the **activation** term accumulates across all of them.
+Every reference figure is the **worst** state; every gridoxide figure was the sum. It holds after PRA
+too — 3.4.1.8's (0, 73.33, 73.33) is the reference's 73658 = 325 + 73333 against a summed 146992. So
+the costly objective reuses the aggregation the max-min-margin one needs, a max over per-perimeter
+functional costs, while the **activation** term accumulates across all of them.
 
-Sum *within* a perimeter is unchanged and is not in question: it is what the LP minimizes and what
-took 3.4.3.4 from 4 to 14 (§8.14). The base case and its outage states are one perimeter; every
-other state is its own.
+Summing *within* a perimeter is unchanged and was never in question: it is what the LP minimizes and
+what took 3.4.3.4 from 4 to 14 (§8.14). The base case and its outage states are one perimeter; every
+other state is its own, which is what makes a contingency's auto and curative instants separate
+buckets rather than one bucket per contingency.
 
-**What this corpus cannot settle.** Every min-cost scenario it ships has exactly **one** overloaded
+`Costly::violation` now does the grouping, so every caller gets it — the LP's leaf scoring,
+`search::objective_of`, and `castor`'s whole-plan judgement alike. The gate keeps computing the
+overload itself, grouping from the CRAC rather than reading `Costly`, so the aggregation stays a
+second opinion rather than an echo.
+
+**What the corpus cannot settle.** Every min-cost scenario it ships has exactly **one** overloaded
 CNEC per state, so "sum within a perimeter, max across them" and a plain worst-margin-over-everything
-rule reproduce all 294 assertions identically. The first is the reading to implement — the second
-would need a second, contradictory definition of the same cost for the LP to keep working — but the
-gate does not distinguish them, and saying so is part of the measurement.
+rule reproduce all 294 assertions identically. The first is implemented because it is what the LP and
+the search demonstrably need and because two unrelated definitions of one cost would be worse than
+one imperfectly pinned — but the gate does not distinguish them, and saying so is part of the
+measurement.
+
+#### What it is worth, and what the remaining 42 are
+
+**221 → 252**, with the other four feature files unchanged to the assertion. Four families remain,
+and none of them is the aggregation:
+
+1. **3.4.2.5, 3.4.2.7, 3.4.3.3, 3.4.3.5** fall back to the first preventive result where the
+   reference keeps the second. This is the largest family and is **pre-existing** — measured on both
+   sides of this change, which strictly improved all four. The wrong preventive taps and curative
+   margins listed under each are consequences of that one decision, not separate defects.
+2. **3.4.1.11 and 3.4.1.12** decline `closeBeFr8` in the curative perimeters of `coBeFr4` and
+   `coBeFr5`. Plausibly the same curative-perimeter stop rule §8.9 is still chasing for 1.4.1.5.
+3. **3.4.2.2** picks `pstBeFr2` where the reference picks `pstBeFr3`, to the same tap — two shifters
+   priced alike, so a tie-break rather than a worse answer.
+4. **3.4.2.4** reaches a **cheaper** answer than the reference asks for — 214762 against 282717, by
+   moving its free PST to −16 instead of −3. That is a recorded-disagreement candidate under §8.6's
+   rule rather than a defect, but it has not been measured as one yet and is not exempt until it is.
+
+The capability still missing is a range action's **activation** cost, which needs a binary per
+action, hence a MIP, hence `TapModel::Discrete`.
 
 ### 8.4 Two independent MILP solvers
 

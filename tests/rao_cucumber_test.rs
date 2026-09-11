@@ -1205,10 +1205,13 @@ fn check(scenario: &Scenario) -> Outcome {
                 }
             }
         }
+        // Sorted for a stable answer and **not** deduped: the reference bills an
+        // activation per state, so `closeBeFr4` taken after `coBeFr2` and again
+        // after `coBeFr3` costs 850 twice (3.4.1.7's own comment says so), and a
+        // PST moved preventively and again curatively owes two activations plus
+        // both distances (3.4.2.3).
         actions.sort_unstable();
-        actions.dedup();
-        moved.sort_by_key(|m| m.0);
-        moved.dedup_by_key(|m| m.0);
+        moved.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         (actions, moved)
     };
 
@@ -1248,13 +1251,25 @@ fn check(scenario: &Scenario) -> Outcome {
         // and the two are not a rescaling of each other, which is why this
         // branches rather than adjusting a coefficient.
         if let Some(costly) = search_options.linear.objective_kind.costly() {
-            let overload: f64 = crac
-                .flow_cnecs
-                .iter()
-                .filter(|c| c.optimized)
-                .filter_map(&read)
-                .map(|m| (costly.options.violation_threshold - m).max(0.0))
-                .sum();
+            // Summed **within** an optimization perimeter and maxed across
+            // them: the base case and its outage states are one perimeter, and
+            // every other state is its own. 3.4.1.11 is what pins it — nine
+            // states carrying 500 units of overload between them, and the cost
+            // the reference states is 100000, the worst single perimeter.
+            //
+            // Grouped from the CRAC here rather than read off `Costly`, so the
+            // aggregation stays a second opinion and not an echo.
+            let mut buckets: HashMap<Option<State>, f64> = HashMap::new();
+            for cnec in crac.flow_cnecs.iter().filter(|c| c.optimized) {
+                let Some(margin) = read(cnec) else { continue };
+                let bucket = match crac.instants[cnec.state.instant].kind {
+                    InstantKind::Preventive | InstantKind::Outage => None,
+                    InstantKind::Auto | InstantKind::Curative => Some(cnec.state.clone()),
+                };
+                *buckets.entry(bucket).or_default() +=
+                    (costly.options.violation_threshold - margin).max(0.0);
+            }
+            let overload = buckets.values().copied().fold(0.0, f64::max);
             // Priced by the library rather than a fourth reimplementation of it.
             // What this file still computes for itself is the *overload*, which
             // is the part worth an independent opinion.
@@ -2069,20 +2084,43 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// Nothing else. Every other scenario in the corpus matches in full.
 const BASELINE_MATCHED_2P: usize = 118;
 
-/// The 26 costly-optimization scenarios: **178 of 294**, from 165 with the
-/// objective unbuilt.
+/// The 26 costly-optimization scenarios: **252 of 294**, from 165 with the
+/// objective unbuilt, 178 once the search tree could rank by cost (§8.13), 221
+/// once the LP could minimize it (§8.14), and 252 once the cost was *aggregated*
+/// the way the reference aggregates it (§8.15).
 ///
-/// The `MIN_COST` objective is now real for **network actions**, which closes
-/// the preventive slice completely: 3.4.1.1 through 3.4.1.5 and 3.4.1.2.bis all
-/// match in full. Those are the scenarios whose CRACs declare no range action at
-/// all, so the search tree decides alone and no MIP is involved — which is why
-/// they were the beachhead.
+/// That last step was two corrections and no new capability, which is why it was
+/// worth 31:
 ///
-/// What remains is range actions. `3_4_2` and `3_4_3` price a shifter's
-/// movement (`variationCosts`, which the reader drops and the model has no field
-/// for) and its activation (a binary per action, hence a MIP, hence
-/// `TapModel::Discrete`), and the auto and curative scenarios of `3_4_1` spend
-/// across instants. See `plans/RAO_PLAN.md` §8.13.
+/// - **Activation is billed per state, not per action.** One action taken after
+///   two contingencies is two activations. Both `castor::activated_by` and this
+///   file's own `spent_by` used to end in `dedup()`, reporting 3.4.1.7's plan at
+///   850 where its own comment prices it at 850 + 850.
+/// - **The violation term maxes across perimeters.** Summed *within* a
+///   perimeter — that is the objective's whole point and what the LP minimizes —
+///   and maxed across them, base case and outage states counting as one.
+///   3.4.1.11 pins it: nine states carrying 500 units of overload between them,
+///   and the cost it states is 100000.
+///
+/// # What the 42 that remain are
+///
+/// Four families, and none of them is the aggregation:
+///
+/// - **3.4.2.5, 3.4.2.7, 3.4.3.3, 3.4.3.5** fall back to the first preventive
+///   result where the reference keeps the second. Pre-existing — measured
+///   before and after §8.15's change, which strictly improved all four — and the
+///   wrong taps and margins under each are consequences of the one decision.
+/// - **3.4.1.11 and 3.4.1.12** decline `closeBeFr8` in the curative perimeters
+///   of `coBeFr4` and `coBeFr5`.
+/// - **3.4.2.2** picks `pstBeFr2` where the reference picks `pstBeFr3`, to the
+///   same tap.
+/// - **3.4.2.4** reaches a *cheaper* answer than the reference asks for
+///   (214762 against 282717) by moving its free PST to −16 instead of −3. A
+///   recorded-disagreement candidate rather than a defect, but not yet measured
+///   as one.
+///
+/// A range action's **activation** cost still needs a binary per action, hence a
+/// MIP, hence `TapModel::Discrete`. See `plans/RAO_PLAN.md` §8.13 through §8.15.
 ///
 /// The rest of this note is the original *before* comment, kept because the
 /// order it describes is the point:
@@ -2100,9 +2138,9 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// `crac_json.rs` and read by nothing. What passes here passes because a
 /// margin-maximizing answer happens to coincide with a cost-minimizing one.
 #[cfg(feature = "opf-highs")]
-const BASELINE_MATCHED_MIN_COST: usize = 221;
+const BASELINE_MATCHED_MIN_COST: usize = 252;
 
-/// Without HiGHS, the same corpus scores **177**.
+/// Without HiGHS, the same corpus scores **205**.
 ///
 /// Not a build flag changing a number by rounding — it changes which answers are
 /// reachable. A cost objective's LP is one violation column per CNEC priced
@@ -2115,7 +2153,7 @@ const BASELINE_MATCHED_MIN_COST: usize = 221;
 /// because a build that cannot solve these should say so rather than quietly
 /// score lower.
 #[cfg(not(feature = "opf-highs"))]
-const BASELINE_MATCHED_MIN_COST: usize = 177;
+const BASELINE_MATCHED_MIN_COST: usize = 205;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
