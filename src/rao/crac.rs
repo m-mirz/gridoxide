@@ -408,9 +408,13 @@ pub struct RangeAction {
 
 /// What a range action charges per unit of movement, by direction.
 ///
-/// The units are the set-point's: degrees for a phase shifter's angle, MW for a
-/// redispatch. A CRAC states them per *tap* for a shifter, so the reader
-/// converts — see `crac_json`.
+/// **Per tap** for a phase shifter, and MW for a redispatch — the unit the CRAC
+/// states, carried through unconverted, with [`Costly::activation`] measuring
+/// movement in taps to match. The reference's 3.4.2.1 is what fixes it: an
+/// activation cost of 5 and a variation cost of 10 make five taps cost 55, where
+/// reading the number per degree would give 24.5.
+///
+/// [`Costly::activation`]: super::costly::Costly::activation
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VariationCost {
     pub up: f64,

@@ -2107,9 +2107,13 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// Four families, and none of them is the aggregation:
 ///
 /// - **3.4.2.5, 3.4.2.7, 3.4.3.3, 3.4.3.5** fall back to the first preventive
-///   result where the reference keeps the second. Pre-existing — measured
-///   before and after §8.15's change, which strictly improved all four — and the
-///   wrong taps and margins under each are consequences of the one decision.
+///   result where the reference keeps the second. §8.16 measures them and the
+///   answer is that they are not a second-preventive defect at all: the second
+///   pass never finds the better plan, because the entire difference is one
+///   range action *activation* (20 on 3.4.3.3, with six taps moved either way)
+///   and a per-activation cost needs a binary. Same capability as the rest of
+///   `3_4_2`/`3_4_3`, seen where its absence changes a decision rather than a
+///   figure.
 /// - **3.4.1.11 and 3.4.1.12** decline `closeBeFr8` in the curative perimeters
 ///   of `coBeFr4` and `coBeFr5`.
 /// - **3.4.2.2** picks `pstBeFr2` where the reference picks `pstBeFr3`, to the

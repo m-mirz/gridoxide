@@ -616,7 +616,7 @@ pub fn search_with_open(
     // model that is a Newton-Raphson solve per state.
     let initial = worst_of(crac, &starting, perimeter);
     // Nothing has been done yet, so nothing has been paid for.
-    let untouched = objective_of(crac, &starting, perimeter, &[], &options.linear);
+    let untouched = objective_of(crac, &starting, perimeter, &[], &[], &options.linear);
 
     let reached = |objective: f64| options.stop_at_target.is_some_and(|t| objective >= t);
 
@@ -1012,6 +1012,7 @@ pub(super) fn objective_of(
     result: &super::evaluate::SecurityResult,
     perimeter: &[State],
     activated: &[usize],
+    moved: &[(usize, f64)],
     options: &LinearOptions,
 ) -> f64 {
     let unit = options.objective_unit;
@@ -1019,12 +1020,13 @@ pub(super) fn objective_of(
         // See [`linear::objective`] for why `NO_CNEC_MARGIN` is not reached
         // here: a sum over no CNECs is zero, not an enormous margin.
         //
-        // `moved` is empty because this reads an assessment rather than an
-        // optimization — nothing here knows which range actions a plan moved.
-        // The one caller that does care is `castor`'s whole-plan judgement, and
-        // it passes its range-action decisions in `activated`'s company through
-        // the same argument the perimeter plans already carry.
-        Some(costly) => -costly.cost(crac, result, perimeter, unit, activated, &[]),
+        // Both what was activated and what moved, because this reads an
+        // assessment rather than an optimization and a network does not
+        // remember how it got that way. Explicit parameters rather than
+        // defaults, so the compiler makes every call site say which plan it
+        // means — passing `&[]` for `moved` prices every shifter at zero, and
+        // 3.4.3.3 is decided by exactly one activation plus one tap.
+        Some(costly) => -costly.cost(crac, result, perimeter, unit, activated, moved),
         None => {
             let margin = result
                 .perimeters

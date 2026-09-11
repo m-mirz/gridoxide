@@ -1825,6 +1825,69 @@ and none of them is the aggregation:
 The capability still missing is a range action's **activation** cost, which needs a binary per
 action, hence a MIP, hence `TapModel::Discrete`.
 
+### 8.16 The second-preventive fallback family is not a second-preventive defect
+
+Four min-cost scenarios — 3.4.2.5, 3.4.2.7, 3.4.3.3, 3.4.3.5 — report
+`"Second preventive fell back to first preventive results"` where the reference reports
+`"improved"`. They are the largest remaining family, and the corpus ships them as a controlled
+experiment: 3.4.2.6/3.4.2.7, 3.4.3.2/3.4.3.3 and 3.4.3.4/3.4.3.5 are matched pairs on the same
+network and the same CRAC, whose configurations differ in **one field** —
+`second-preventive-rao.execution-condition`, `DISABLED` against `POSSIBLE_CURATIVE_IMPROVEMENT`. The
+non-2P twin of each pair matches in full.
+
+Probing the keep decision found a real defect first, and then a more interesting answer.
+
+#### The defect: the whole-plan judgement priced every shifter at zero
+
+`search::objective_of` hard-coded `&[]` for the moved range actions, with a comment claiming that
+`castor`'s whole-plan judgement passed its own "in `activated`'s company". It did not — there was no
+parameter to pass them in. So `judge`, which decides whether a second preventive pass runs, whether
+it is kept, and whether the finished plan beats doing nothing, counted network-action activations and
+treated every tap as free. On 3.4.3.3 it valued both plans at 10, the cost of one `closeBeFr3`,
+against a true 140 and 120.
+
+`moved_by` is the companion to `activated_by` that was missing, and `objective_of` now takes the
+movements as an explicit parameter beside the activations — explicit so the compiler makes each of
+its three call sites say which plan it means. With it, `judge` values the first plan at exactly
+**140**, which is the figure the reference states for the non-2P twin of the same case.
+
+That fix changes no gate assertion, because in all four scenarios the two plans were mispriced
+*equally*. It is committed anyway, with four unit tests, because the next capability is priced
+through this path and a judge that cannot see a tap would silently undo it.
+
+#### The answer: it is the range-action activation cost, which needs the MIP
+
+With pricing correct the second pass still returns the same preventive answer as the first. It is not
+declining a better plan — it never finds one. The reason is arithmetic the scenario comments state
+outright:
+
+| | 3.4.3.3 as the reference solves it | as gridoxide solves it |
+|---|---|---|
+| preventive | `pstBeFr4` to −6: 20 + 6 x 15 = 110 | `pstBeFr4` to −5: 20 + 5 x 15 = 95 |
+| curative | `closeBeFr3`: 10 | `closeBeFr3` 10, `pstBeFr4` −5 → −6: 20 + 1 x 15 = 45 |
+| total | **120** | **140** |
+
+Six taps are moved either way. The entire difference is **one activation of `pstBeFr4`** — 20 —
+bought by doing the whole movement preventively instead of splitting it. The LP that chooses the
+preventive set-point prices movement, and `A(r, s)` (§8.11) already gives the held curative states
+their own column, so both plans are available to it and both cost it 90 in variation. What it cannot
+express is the 20, because a *per-activation* cost needs a binary per action per state.
+
+The other three decompose identically. 3.4.2.5: 107.5 against 87.5, nine taps either way, difference
+one activation of 20 — and its scenario text says "moved to tap −9 straight from preventive
+optimization **to cut curative activation costs**". 3.4.3.5: 200 against 145, of which 40 is two
+curative activations. 3.4.2.7: 130 against 70.
+
+So this family is not a fifth mechanism. It is the **same** missing capability §8.13 named — a
+binary per range action, hence a MIP, hence `TapModel::Discrete` — seen from the side where its
+absence changes a *decision* rather than a reported figure. Every one of these configurations sets
+`pst-model: APPROXIMATED_INTEGERS` and `solver: CBC`, which is the reference saying the same thing.
+
+That consolidates the remaining min-cost gap considerably: of the 42 unmatched assertions, the four
+2P scenarios (~26) and the bulk of `3_4_2`/`3_4_3` are one build, not several investigations. The
+in-house `opf::bnb::BranchAndBound` (phase 10) and the HiGHS MIP backend (phase 6) both exist and are
+gated against each other; what is missing is the modelling layer between them and `linear.rs`.
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a
