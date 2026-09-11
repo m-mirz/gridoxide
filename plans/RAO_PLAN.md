@@ -16,8 +16,8 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **272 of 294** on the
-> costly-optimization one — **1809 of 1862**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **277 of 294** on the
+> costly-optimization one — **1814 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
@@ -27,10 +27,12 @@ second preventive was built and gated the same day.
 > reference aggregates it — activation billed per state, violation maxed across perimeters — takes
 > it to **252** (§8.15), and pricing a range action's *activation* — a binary per action, a MIP, and
 > the coupling row that makes a curative set-point mean "further than preventive went" — takes it to
-> **272** (§8.17). What is left is `A(r, s)` in full: one set-point per range action **per state**
-> rather than one per held set, which is §7.3 and costs two scenarios a single tap.
+> **272** (§8.17), with two defects in that same machinery — a `start` that did not survive
+> relinearization, and a rounding step that pulled a coupled column apart — taking it to **277**
+> (§8.18). Of the 17 that remain, 6 are gridoxide answering **more cheaply** than the reference asks
+> and awaiting a §8.6 measurement; 11 are one curative-perimeter defect shared with §8.9.
 >
-> That figure is **solver-dependent by construction**: 272 with `opf-highs`, 211 without, because
+> That figure is **solver-dependent by construction**: 277 with `opf-highs`, 211 without, because
 > the barrier method reports `Unbounded` on these cost LPs and the reference's own costly
 > configurations name `"solver": "CBC"`. The gate's baseline is cfg-gated to say so.
 >
@@ -1978,6 +1980,73 @@ defensible one.
 - **3.4.2.4** (2) reaches a *cheaper* answer than the reference asks for, 214762 against 282717. A
   recorded-disagreement candidate under §8.6's rule, not yet measured as one, and not exempt until
   it is.
+
+### 8.18 Where a plan *began*, and what rounding does to a coupled column
+
+§8.17 predicted that the last two second-preventive scenarios needed `A(r, s)` in full — one
+set-point per range action per **state** rather than one per held set. Probing them first, as §8.6's
+method requires, refuted that and found two different defects, both in the machinery §8.17 had just
+built. The prediction is recorded here as wrong because it was written down: 3.4.2.7 and 3.4.3.5 both
+close without any change to how many columns a held set gets.
+
+#### `start` does not survive relinearization
+
+The outer loop relinearizes by calling `build_controls` again around the new operating point, and a
+freshly built [`Control`] reads `start` off the **live network**. So after one round every control
+believed it had started wherever the last round left it.
+
+For a margin that is harmless — nothing is billed. For a cost it is not: `start` is what makes "has
+this action been used in this perimeter" answerable. Reset each round, the activation binary asks
+only "does it move *again*", so a shifter already at tap −7 is charged a fresh 20 to reach −7.1 and
+nothing at all to stay, and a plan that got there in one move is indistinguishable from one that took
+three. On 3.4.3.5 the second round spent a 20-unit activation to buy **four hundredths of a degree**,
+and preferred that to spending the same distance preventively where the activation was already paid
+for.
+
+Two lines: carry `start` and `start_tap` across the rebuild. Sensitivities and `current` are what a
+new linearization point changes; where the perimeter began is not.
+
+With that, the LP converges on the reference's own answer — both columns at −2.3807, the curative one
+moving nothing.
+
+#### And then rounding pulled them apart again
+
+It still reported tap −6. The LP's answer is continuous and gets rounded to a real tap, and the step
+that stops the iteration settling on the wrong side of a kink tries the *other* bracketing tap **one
+control at a time**.
+
+That is right for independent columns and wrong for coupled ones. Under a cost objective
+`A(r, s) − A(r) = Δ`, so a curative column sitting where preventive sits is not making a decision —
+it is inheriting one. Moving preventive alone turns that inheritance into a curative move *back*,
+which costs a whole second activation. From [−6, −6] the single-control trials reach [−7, −6] and
+[−6, −7], each worth less than doing nothing, and never [−7, −7], which is the plan the reference
+asks for and the one the LP itself had just proposed.
+
+So a trial now moves a column and everything anchored on it **together**, where the two were left
+together. Worth 5, and it closes 3.4.2.7 outright.
+
+#### What it is worth, and what the 17 that remain are
+
+**272 → 277** (211 without HiGHS, unchanged — none of this is reachable without a MIP), the other
+four files unchanged to the assertion. Gate: **1814 of 1862**.
+
+Two of the three remaining families are now **gridoxide answering more cheaply than the reference
+asks**:
+
+- **3.4.3.5** (4) secures the network for **135** where the reference spends 145, by declining
+  `closeBeFr4` after `coBeFr2`. Its margin is smaller — 5.74 against 21.8 — and under `MIN_COST`
+  that is not a defect but the objective working: a margin bought and not needed is money spent.
+- **3.4.2.4** (2) reaches 214762 against 282717 by moving its free PST to −16 instead of −3.
+
+Both are recorded-disagreement candidates under §8.6's rule and **neither is exempt until measured**
+as one: the rule is that a disagreement must have a measurement behind it, and "it looks cheaper"
+is not yet that measurement.
+
+- **3.4.1.11 and 3.4.1.12** (11) still decline `closeBeFr8` in the curative perimeters of `coBeFr4`
+  and `coBeFr5`. Untouched by §8.15 through §8.18, and the one remaining family that is a defect
+  rather than a disagreement. §8.9's 1.4.1.5 is its likeliest relative — both are a curative
+  perimeter deciding to act differently from the reference — and reading OpenRAO's curative filter
+  is the step neither has had yet.
 
 ### 8.4 Two independent MILP solvers
 

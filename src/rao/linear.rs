@@ -817,6 +817,7 @@ fn optimize_within(
             break;
         }
 
+
         // Read the new set-points, round a phase shifter to a real tap, and
         // apply. Rounding *before* measuring is the point: the margin that
         // matters is the one at a tap the operator can actually select.
@@ -846,6 +847,9 @@ fn optimize_within(
         // `PstControl::bracketing_taps`.
         apply(crac, network, &mut controls, &proposed);
         let mut best_here = objective(crac, network, resolution, perimeter, &controls, options);
+        // Only a cost objective couples the columns; under a margin the held
+        // column is anchored on the network and moves on its own.
+        let coupled = options.objective_kind.costly().is_some();
         for k in 0..controls.len() {
             let Some(pst) = controls[k].pst.as_ref() else { continue };
             let target = solution.primal[setpoint_column(k)];
@@ -860,6 +864,26 @@ fn optimize_within(
                 };
                 let mut trial = proposed.clone();
                 trial[k] = (angle, Some(tap));
+                // A column anchored on this one travels **with** it, when the
+                // two are where the LP left them together.
+                //
+                // `A(r, s)` is coupled to its preventive column under a cost
+                // objective (`A(r, s) − A(r) = Δ`), so a curative shifter that
+                // matched preventive is not making a decision — it is inheriting
+                // one, and moving preventive alone silently turns that into a
+                // curative move back, which costs a whole second activation.
+                // The reference's 3.4.3.5 is decided here: the LP's own answer
+                // puts both columns at −2.38, and the only rounding that reaches
+                // the plan it asks for moves both to tap −7 at once. Trying one
+                // control at a time can reach [−7, −6] and [−6, −7], each of
+                // which is worse than doing nothing, and never [−7, −7].
+                if coupled {
+                    for j in 0..trial.len() {
+                        if anchor_of(&controls, j) == Some(k) && proposed[j].1 == proposed[k].1 {
+                            trial[j] = (angle, Some(tap));
+                        }
+                    }
+                }
                 apply(crac, network, &mut controls, &trial);
                 let score = objective(crac, network, resolution, perimeter, &controls, options);
                 if score > best_here + 1e-9 {
@@ -896,10 +920,24 @@ fn optimize_within(
                 })
                 .collect();
             // Relinearize around the new point.
-            if let Some(rebuilt) =
+            //
+            // Sensitivities and `current` are what the new point changes. Where
+            // the perimeter *began* is not: `build_controls` reads `start` off
+            // the live network, so a rebuilt control believes it started
+            // wherever the last round left it. Carrying `start` and `start_tap`
+            // across is what keeps "has this action been used in this perimeter"
+            // answerable at all — without it the cost of a plan is the cost of
+            // its last round, a shifter that reached tap −7 in one move is
+            // indistinguishable from one that took three, and each round is free
+            // to buy a fraction of a degree with a fresh activation.
+            if let Some(mut rebuilt) =
                 build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options, allowed)
             {
                 if rebuilt.len() == controls.len() {
+                    for (new, old) in rebuilt.iter_mut().zip(&controls) {
+                        new.start = old.start;
+                        new.start_tap = old.start_tap;
+                    }
                     controls = rebuilt;
                 }
             }
@@ -1127,6 +1165,28 @@ fn build_program(
                 row.push((setpoint_column(p), -1.0));
                 0.0
             }
+            // `start`, not `current`, under a cost objective — and the
+            // difference is the whole of what the outer iteration does to this
+            // problem.
+            //
+            // `current` is where the shifter stands *now*, which after the first
+            // relinearization is wherever the last round left it. Anchored
+            // there, Δ is the movement this round proposes and the activation
+            // binary asks "does it move **again**" — so a shifter already at tap
+            // −7 is charged another 20 to reach −7.1 and nothing at all to stay,
+            // and a plan that got there in one move is indistinguishable from one
+            // that got there in three. On the reference's 3.4.3.5 that is a
+            // second round paying a 20-unit activation to buy four hundredths of
+            // a degree, and preferring it to spending the same distance
+            // preventively where the activation was already paid for.
+            //
+            // Anchored on `start`, Δ is the total movement over the perimeter and
+            // `y` asks "was this action used here at all", which is what the CRAC
+            // prices and what [`moved_range_actions`] bills. The flow rows are
+            // untouched either way: they use the set-point column directly, with
+            // their constant built from `current`, so the linearization still
+            // happens where the network actually is.
+            None if costly.is_some() => control.start,
             None => control.current,
         };
         lp.add_row(&row, anchor, anchor);
