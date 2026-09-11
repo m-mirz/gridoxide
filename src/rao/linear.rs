@@ -76,7 +76,7 @@
 use crate::linear::btheta::{dc_branches, dc_power_flow, DcBranch};
 use crate::linear::sensitivity::DcSensitivity;
 use crate::linear::DcOptions;
-use crate::opf::{LinearProgram, OptStatus, Solver};
+use crate::opf::{LinearProgram, OpfError, OptStatus, Solver};
 use crate::types::Transformer;
 
 use super::crac::{Crac, RangeActionKind, RangeKind, State};
@@ -472,6 +472,16 @@ struct Control {
     /// `(0.0, 0.0)` where the CRAC states no variation cost, which is every
     /// action outside the costly corpus.
     variation: (f64, f64),
+    /// What using this action at all costs, whatever distance it then travels.
+    ///
+    /// Unlike [`variation`](Self::variation) this cannot be a column price: it
+    /// is paid once for any non-zero movement and not at all for none, which is
+    /// a step, not a slope. It becomes a binary and a big-M row in
+    /// [`build_program`], and only when a MIP backend is in hand.
+    ///
+    /// `None` where the CRAC prices no activation — and the field is optional in
+    /// the format, so absent means **free**, not unknown.
+    activation: Option<f64>,
     lower: f64,
     upper: f64,
     /// Objective penalty per unit moved.
@@ -767,19 +777,40 @@ fn optimize_within(
     let starting_taps: Vec<Option<i32>> =
         controls.iter().map(|c| c.pst.as_ref().map(|p| p.tap)).collect();
 
+    // Whether to price activation with a binary, which needs a backend that can
+    // honour integrality. Asked of the solver rather than configured, because
+    // the answer is a property of the build: `IpmSolver` refuses a program with
+    // integral columns rather than returning the relaxation, precisely so a
+    // caller can discover at this boundary that it needs the MIP. The first
+    // refusal turns this off for the rest of the loop, and the iteration
+    // continues on the LP — a cost objective without activation pricing, which
+    // is what a build with no MIP backend can honestly answer.
+    let mut binaries = options.objective_kind.costly().is_some()
+        && controls.iter().any(|c| c.activation.is_some_and(|k| k > 0.0));
+
     for _ in 0..options.max_iterations {
         iterations += 1;
         let (flows, limits) =
             perimeter_flows(crac, network, resolution, perimeter, &lp_indices, &controls, options);
-        let program = build_program(
-            cnec_indices.len(),
-            &mnec_indices,
-            &flows,
-            &limits,
-            &controls,
-            options,
-        );
-        let Ok(solution) = solver.solve(&program) else {
+        let build = |binaries| {
+            build_program(
+                cnec_indices.len(),
+                &mnec_indices,
+                &flows,
+                &limits,
+                &controls,
+                options,
+                binaries,
+            )
+        };
+        let solved = match solver.solve(&build(binaries)) {
+            Err(OpfError::IntegralityUnsupported { .. }) if binaries => {
+                binaries = false;
+                solver.solve(&build(false))
+            }
+            other => other,
+        };
+        let Ok(solution) = solved else {
             break;
         };
         if solution.status != OptStatus::Optimal {
@@ -988,10 +1019,19 @@ fn build_program(
     limits: &[(f64, f64, f64)],
     controls: &[Control],
     options: &LinearOptions,
+    binaries: bool,
 ) -> LinearProgram {
     let n = controls.len();
     let mm = margin_column(n);
     let costly = options.objective_kind.costly();
+    // Which controls get an activation binary: the ones a cost objective prices
+    // for being used at all. `None` for the rest, so the layout stays dense —
+    // an action the CRAC prices at nothing needs no column and no big-M row.
+    let activation: Vec<Option<f64>> = controls
+        .iter()
+        .map(|c| binaries.then_some(c.activation).flatten().filter(|k| *k > 0.0))
+        .collect();
+    let n_binary = activation.iter().filter(|a| a.is_some()).count();
     // The layout: `3n` control columns, then the minimum-margin column **only
     // when the objective is a margin**, then one violation column per monitored
     // CNEC, then — under a cost objective only — one overload column per
@@ -1014,7 +1054,19 @@ fn build_program(
     let violation_of = |slot: usize| base + slot;
     let overload_of = |slot: usize| base + mnecs.len() + slot;
     let extra = if costly.is_some() { optimized } else { 0 };
-    let mut lp = LinearProgram::new(base + mnecs.len() + extra);
+    // The activation binaries come last, one per priced control, in control
+    // order. `slot` counts only the controls that have one.
+    let binary_base = base + mnecs.len() + extra;
+    let mut binary_of: Vec<Option<usize>> = Vec::with_capacity(n);
+    let mut next = binary_base;
+    for a in &activation {
+        binary_of.push(a.is_some().then(|| {
+            let column = next;
+            next += 1;
+            column
+        }));
+    }
+    let mut lp = LinearProgram::new(binary_base + n_binary);
 
     for (k, control) in controls.iter().enumerate() {
         lp.col_lower[setpoint_column(k)] = control.lower;
@@ -1030,12 +1082,88 @@ fn build_program(
             // answer that moves least.
             lp.col_cost[column] = if costly.is_some() { price } else { control.penalty };
         }
-        // A(r) − Δ⁺(r) + Δ⁻(r) = current
-        lp.add_row(
-            &[(setpoint_column(k), 1.0), (up_column(k), -1.0), (down_column(k), 1.0)],
-            control.current,
-            control.current,
-        );
+        // What this control's movement is measured **from**.
+        //
+        // For a control the perimeter decides, that is where the shifter
+        // actually stands: `A(r) − Δ⁺(r) + Δ⁻(r) = current`.
+        //
+        // For an `A(r, s)` column — a held state's copy of an action this
+        // problem is also deciding preventively — it is the **preventive
+        // column**, not the network:
+        //
+        //     A(r, s) − A(r) − Δ⁺(r, s) + Δ⁻(r, s) = 0
+        //
+        // because the curative shifter inherits whatever preventive chose and
+        // only pays for moving further. Measured from the network instead, a
+        // curative column is billed the whole distance from the starting tap
+        // however much preventive already travelled — and that inverts the
+        // comparison the second preventive pass exists to make. On the
+        // reference's 3.4.3.3, doing all six taps preventively is billed 220
+        // (six taps twice, two activations) against 205 for splitting them five
+        // and one, so the pass "improves" its way to the more expensive answer;
+        // read relative, it is 110 against 130 and the right plan wins.
+        //
+        // This is the coupling row §8.11 said the LP could not state. That was
+        // true of a *bound* — a window relative to another column, which needs
+        // per-column bounds this program does not have — and not of a row, which
+        // takes whatever coefficients it is given.
+        //
+        // Under a **margin** objective the anchor stays the network, and that is
+        // not an oversight. There the up/down columns carry `control.penalty`, a
+        // tie-break that exists to stop the optimizer moving a shifter by a
+        // rounding error's worth for no gain — it is not a price and does not
+        // claim to be one. Re-anchoring it costs three assertions on
+        // `second_preventive.feature`, which §8.11 tuned against 1.4.1.6. Under
+        // a cost objective the same columns carry the CRAC's real money, and
+        // then the relative reading is the only defensible one.
+        let previous = costly.is_some().then(|| anchor_of(controls, k)).flatten();
+        let mut row = vec![
+            (setpoint_column(k), 1.0),
+            (up_column(k), -1.0),
+            (down_column(k), 1.0),
+        ];
+        let anchor = match previous {
+            Some(p) => {
+                row.push((setpoint_column(p), -1.0));
+                0.0
+            }
+            None => control.current,
+        };
+        lp.add_row(&row, anchor, anchor);
+
+        // What it costs to use this action **at all**, as against how far it
+        // then travels. The two are different sizes and the reference states
+        // them separately: 3.4.3.2 pays 20 to pick `pstBeFr4` up and 15 a tap
+        // to move it, so five taps in one state cost 95 and splitting the same
+        // five taps across two states costs 20 more.
+        //
+        // A cost paid once for any non-zero movement is not linear in the
+        // movement, so it needs a variable that is 0 or 1 and nothing between:
+        //
+        //     Δ⁺(r) + Δ⁻(r) ≤ M · y(r),    y(r) ∈ {0, 1}
+        //
+        // with `M` the widest the set-point can travel inside its own box. The
+        // binary is priced and the movement columns are not re-priced, so an
+        // action that moves pays `activation + variation · distance` and one
+        // that stays put pays nothing: at optimum `y` is 0 whenever it can be,
+        // because it costs something and buys only the right to move.
+        //
+        // `M` is `upper − lower` rather than anything tighter. A tighter bound
+        // would have to know which direction the solver will choose, and a big-M
+        // that is too small silently forbids a legal move — the one failure mode
+        // here that produces a plausible wrong answer rather than an obvious
+        // one. These boxes are a shifter's tap range, so the slack costs
+        // nothing that matters.
+        if let (Some(column), Some(cost)) = (binary_of[k], activation[k]) {
+            lp.set_binary(column);
+            lp.col_cost[column] = cost;
+            let big_m = control.upper - control.lower;
+            lp.add_row(
+                &[(up_column(k), 1.0), (down_column(k), 1.0), (column, -big_m)],
+                f64::NEG_INFINITY,
+                0.0,
+            );
+        }
     }
 
     // The network must still balance after any redispatch:
@@ -1495,6 +1623,7 @@ fn build_controls(
                     start: current,
                     start_tap: Some(tap),
                     variation,
+                    activation: action.activation_cost,
                     lower,
                     upper,
                     penalty: options.pst_penalty,
@@ -1583,6 +1712,7 @@ fn build_controls(
                     variation: action
                         .variation_cost
                         .map_or((0.0, 0.0), |c| (c.up, c.down)),
+                    activation: action.activation_cost,
                     lower,
                     upper,
                     penalty: options.injection_penalty,
@@ -2059,6 +2189,26 @@ fn margin(
     margin_of(crac, &result, perimeter, unit)
 }
 
+/// What control `k`'s movement is measured **from**, when that is another
+/// column rather than the network.
+///
+/// An `A(r, s)` column — a held state's copy of an action the same problem is
+/// deciding preventively — inherits whatever preventive chose and pays only for
+/// moving further. Everything else is measured from where it actually stands.
+///
+/// One function because two places need the answer and they must not drift: the
+/// LP's movement row ([`build_program`]) and the pricing that scores what the LP
+/// proposed ([`moved_range_actions`]). Anchored differently, the optimizer would
+/// choose against one rule and be billed against another — which is how a plan
+/// that saves an activation gets scored as though it did not.
+fn anchor_of(controls: &[Control], k: usize) -> Option<usize> {
+    let control = &controls[k];
+    if control.reported {
+        return None;
+    }
+    controls[..k].iter().position(|c| c.action == control.action && c.reported)
+}
+
 /// The range actions a set of controls has actually moved, indexing
 /// [`Crac::range_actions`].
 ///
@@ -2067,18 +2217,31 @@ fn margin(
 /// [`Control::start`](Control) rather than against zero — a redispatch's
 /// set-point is absolute and starts wherever its machines already are, which is
 /// the whole point of `injection_origin`.
+///
+/// Except for an `A(r, s)` column, which is measured against its preventive
+/// companion instead: see [`anchor_of`]. A curative shifter that ends where
+/// preventive already put it has not moved and owes nothing, and billing it the
+/// whole distance from the starting tap is what made the second preventive pass
+/// prefer splitting a movement across two states to doing it once.
 fn moved_range_actions(controls: &[Control]) -> Vec<(usize, f64)> {
     controls
         .iter()
-        .filter(|c| (c.current - c.start).abs() > 1e-9)
-        .map(|c| {
+        .enumerate()
+        .filter_map(|(k, c)| {
+            let (from, from_tap) = match anchor_of(controls, k) {
+                Some(p) => (controls[p].current, controls[p].pst.as_ref().map(|x| x.tap)),
+                None => (c.start, c.start_tap),
+            };
+            if (c.current - from).abs() <= 1e-9 {
+                return None;
+            }
             // Taps for a shifter, set-point units for anything else — the unit
             // the CRAC states the price in. See [`Costly::activation`].
-            let distance = match (&c.pst, c.start_tap) {
+            let distance = match (&c.pst, from_tap) {
                 (Some(pst), Some(start)) => f64::from(pst.tap - start),
-                _ => c.current - c.start,
+                _ => c.current - from,
             };
-            (c.action, distance)
+            Some((c.action, distance))
         })
         .collect()
 }
