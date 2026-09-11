@@ -16,8 +16,8 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **252 of 294** on the
-> costly-optimization one — **1789 of 1862**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **272 of 294** on the
+> costly-optimization one — **1809 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
@@ -25,12 +25,12 @@ second preventive was built and gated the same day.
 > capability and scored **165**; the `MIN_COST` objective reached the search tree and scored 178
 > (§8.13), reaching the LP as well took it to **221** (§8.14), and aggregating the cost the way the
 > reference aggregates it — activation billed per state, violation maxed across perimeters — takes
-> it to **252** (§8.15). The preventive slice closes completely, and so do the shifter-movement
-> scenarios. What is left is the *activation* of a range action, which needs a binary per action,
-> hence a MIP, hence `TapModel::Discrete`, and one pre-existing second-preventive fallback that
-> costs four scenarios.
+> it to **252** (§8.15), and pricing a range action's *activation* — a binary per action, a MIP, and
+> the coupling row that makes a curative set-point mean "further than preventive went" — takes it to
+> **272** (§8.17). What is left is `A(r, s)` in full: one set-point per range action **per state**
+> rather than one per held set, which is §7.3 and costs two scenarios a single tap.
 >
-> That figure is **solver-dependent by construction**: 252 with `opf-highs`, 205 without, because
+> That figure is **solver-dependent by construction**: 272 with `opf-highs`, 211 without, because
 > the barrier method reports `Unbounded` on these cost LPs and the reference's own costly
 > configurations name `"solver": "CBC"`. The gate's baseline is cfg-gated to say so.
 >
@@ -1887,6 +1887,97 @@ That consolidates the remaining min-cost gap considerably: of the 42 unmatched a
 2P scenarios (~26) and the bulk of `3_4_2`/`3_4_3` are one build, not several investigations. The
 in-house `opf::bnb::BranchAndBound` (phase 10) and the HiGHS MIP backend (phase 6) both exist and are
 gated against each other; what is missing is the modelling layer between them and `linear.rs`.
+
+### 8.17 The activation binary, and the row that makes it mean anything
+
+§8.16 localized the whole second-preventive family to one missing thing: a range action's cost of
+being *used at all*, as against how far it then travels. This builds it, and the build turned out to
+be two changes rather than one — the binary is the obvious half and the smaller half.
+
+#### The binary
+
+A cost paid once for any non-zero movement is a step, not a slope, so it cannot be a column price:
+
+\\[
+  \Delta^+(r) + \Delta^-(r) \;\le\; M \cdot y(r), \qquad y(r) \in \\{0, 1\\}
+\\]
+
+with `y` priced at the CRAC's `activationCost` and `M` the width of the set-point's own box. `M` is
+`upper − lower` rather than anything tighter, deliberately: a tighter bound would have to know which
+direction the solver will pick, and a big-M that is too small silently forbids a legal move — the one
+failure mode here that produces a plausible wrong answer rather than an obvious one.
+
+Whether to emit them at all is **asked of the solver, not configured**. `IpmSolver` refuses a program
+with integral columns rather than returning the relaxation, and its own comment says why: "Refusing
+is what lets a caller discover, at the boundary, that it needs the MIP backend." So the iteration
+builds the MIP, and one `IntegralityUnsupported` turns binaries off for the rest of the loop and
+continues on the LP. A build without HiGHS still answers a `MIN_COST` run; it answers it without
+activation pricing, which is the honest degradation and what the 211 measures.
+
+On its own this was worth **3**.
+
+#### The row: what an `A(r, s)` column's movement is measured from
+
+The three assertions were a disappointment against 26 predicted, and the reason is worth more than
+the binary was.
+
+`A(r, s)` gives a held curative state its own set-point column beside the preventive one (§8.11). Its
+movement row read `A(r, s) − Δ⁺ + Δ⁻ = current` — the same form as every other column, measuring from
+where the shifter stands in the network. But a curative shifter **inherits whatever preventive
+chose** and pays only for moving further. Measured from the network, it is billed the whole distance
+from the starting tap however far preventive already travelled, and on 3.4.3.3 that inverts the
+comparison the second preventive pass exists to make:
+
+| plan | billed from the network | billed from preventive | truth |
+|---|---|---|---|
+| all six taps preventively | 220 — six taps twice, two activations | **110** | 110 |
+| five preventive, one curative | **205** | 130 | 130 |
+
+So the pass "improved" its way to the more expensive answer. The fix is to anchor the row on the
+preventive column instead:
+
+\\[
+  A(r, s) - A(r) - \Delta^+(r, s) + \Delta^-(r, s) = 0
+\\]
+
+This is the coupling row §8.11 said the LP could not state. That was true of a **bound** — a window
+relative to another column, which needs per-column bounds this program does not have — and untrue of
+a **row**, which takes whatever coefficients it is given. Worth **6**.
+
+#### The same rule in the second place that needed it
+
+Still three scenarios landed exactly one tap short, which is the shape of an optimizer choosing
+against one rule and being scored against another. It was: `moved_range_actions`, which prices what
+the LP proposed, still measured every column against `Control::start`. The LP had learned the
+relative reading and the scorer had not.
+
+`anchor_of` now states the rule once and both call it. That is the whole of the fix and it was worth
+**11** — more than the binary and the row together, and a fair reminder that in this optimizer the
+expensive defects are the ones where two honest pieces of code disagree quietly.
+
+Under a **margin** objective the anchor stays the network, and that is not an oversight: there the
+up/down columns carry `control.penalty`, a tie-break that exists to stop a shifter moving by a
+rounding error's worth for no gain. It is not a price and does not claim to be one, and re-anchoring
+it costs three assertions on `second_preventive.feature` — measured, not assumed. Under a cost
+objective the same columns carry the CRAC's real money and the relative reading is the only
+defensible one.
+
+#### What it is worth, and what the 22 that remain are
+
+**252 → 272** (211 without HiGHS, from 205), the other four files unchanged to the assertion. Gate:
+**1809 of 1862**. 3.4.2.5 and 3.4.3.3 close completely, and 3.4.2.2 closed on the binary alone.
+
+- **3.4.1.11 and 3.4.1.12** (11) decline `closeBeFr8` in the curative perimeters of `coBeFr4` and
+  `coBeFr5`. Untouched by any of this, and still the likeliest relative of §8.9's 1.4.1.5.
+- **3.4.2.7 and 3.4.3.5** (9) now keep the second preventive pass and land **one tap short** of the
+  reference, each then spending a curative activation the extra tap would have saved. Both are cases
+  where one held column has to serve *several* held states — three curative instants in 3.4.2.7, two
+  contingencies in 3.4.3.5 — and `wanted` pushes a single column governing all of them. That is
+  `A(r, s)` still being `A(r, held-set)`: the genuine per-state set-point of §7.3, and the next
+  thing to build here.
+- **3.4.2.4** (2) reaches a *cheaper* answer than the reference asks for, 214762 against 282717. A
+  recorded-disagreement candidate under §8.6's rule, not yet measured as one, and not exempt until
+  it is.
 
 ### 8.4 Two independent MILP solvers
 

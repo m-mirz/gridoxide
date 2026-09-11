@@ -2084,10 +2084,12 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// Nothing else. Every other scenario in the corpus matches in full.
 const BASELINE_MATCHED_2P: usize = 118;
 
-/// The 26 costly-optimization scenarios: **252 of 294**, from 165 with the
+/// The 26 costly-optimization scenarios: **272 of 294**, from 165 with the
 /// objective unbuilt, 178 once the search tree could rank by cost (§8.13), 221
-/// once the LP could minimize it (§8.14), and 252 once the cost was *aggregated*
-/// the way the reference aggregates it (§8.15).
+/// once the LP could minimize it (§8.14), 252 once the cost was *aggregated* the
+/// way the reference aggregates it (§8.15), and 272 once a range action's
+/// *activation* was priced — a binary, a MIP, and the row that makes a curative
+/// set-point mean "further than preventive went" (§8.17).
 ///
 /// That last step was two corrections and no new capability, which is why it was
 /// worth 31:
@@ -2106,16 +2108,16 @@ const BASELINE_MATCHED_2P: usize = 118;
 ///
 /// Four families, and none of them is the aggregation:
 ///
-/// - **3.4.2.5, 3.4.2.7, 3.4.3.3, 3.4.3.5** fall back to the first preventive
-///   result where the reference keeps the second. §8.16 measures them and the
-///   answer is that they are not a second-preventive defect at all: the second
-///   pass never finds the better plan, because the entire difference is one
-///   range action *activation* (20 on 3.4.3.3, with six taps moved either way)
-///   and a per-activation cost needs a binary. Same capability as the rest of
-///   `3_4_2`/`3_4_3`, seen where its absence changes a decision rather than a
-///   figure.
+/// - **3.4.2.7 and 3.4.3.5** keep the second preventive pass and land **one tap
+///   short**, then spend a curative activation the extra tap would have saved.
+///   Both are cases where one held column serves *several* held states — three
+///   curative instants in 3.4.2.7, two contingencies in 3.4.3.5 — so this is
+///   `A(r, s)` still being `A(r, held-set)`. The genuine per-state set-point of
+///   §7.3 is what closes them. (3.4.2.5 and 3.4.3.3, which used to be in this
+///   family, close in full under §8.17.)
 /// - **3.4.1.11 and 3.4.1.12** decline `closeBeFr8` in the curative perimeters
-///   of `coBeFr4` and `coBeFr5`.
+///   of `coBeFr4` and `coBeFr5`. Untouched by §8.16 and §8.17, and still the
+///   likeliest relative of §8.9's 1.4.1.5.
 /// - **3.4.2.2** picks `pstBeFr2` where the reference picks `pstBeFr3`, to the
 ///   same tap.
 /// - **3.4.2.4** reaches a *cheaper* answer than the reference asks for
@@ -2142,9 +2144,9 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// `crac_json.rs` and read by nothing. What passes here passes because a
 /// margin-maximizing answer happens to coincide with a cost-minimizing one.
 #[cfg(feature = "opf-highs")]
-const BASELINE_MATCHED_MIN_COST: usize = 252;
+const BASELINE_MATCHED_MIN_COST: usize = 272;
 
-/// Without HiGHS, the same corpus scores **205**.
+/// Without HiGHS, the same corpus scores **211**.
 ///
 /// Not a build flag changing a number by rounding — it changes which answers are
 /// reachable. A cost objective's LP is one violation column per CNEC priced
@@ -2157,7 +2159,7 @@ const BASELINE_MATCHED_MIN_COST: usize = 252;
 /// because a build that cannot solve these should say so rather than quietly
 /// score lower.
 #[cfg(not(feature = "opf-highs"))]
-const BASELINE_MATCHED_MIN_COST: usize = 205;
+const BASELINE_MATCHED_MIN_COST: usize = 211;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
