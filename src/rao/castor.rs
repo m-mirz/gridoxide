@@ -34,7 +34,7 @@
 
 use crate::opf::Solver;
 
-use super::crac::{Crac, InstantKind, State};
+use super::crac::{Crac, InstantKind, RangeActionKind, State};
 use super::evaluate::{evaluate_model, evaluate_with, Network, PerimeterResult, Resolution, SecurityResult};
 use super::linear::Setpoint;
 use super::automaton::{simulate, AutomatonResult};
@@ -269,7 +269,7 @@ pub fn run(
     let all_states = crac.states();
     let untouched = assess(crac, network, resolution, network.initially_open, options);
     // Doing nothing costs nothing.
-    let before = objective_of(crac, &untouched, &all_states, &[], &options.linear);
+    let before = objective_of(crac, &untouched, &all_states, &[], &[], &options.linear);
     // The **whole plan's** actions, not none of them. Under a cost objective
     // this is the difference between weighing a plan and weighing it as though
     // it were free — and this judgement decides whether a second preventive
@@ -283,6 +283,7 @@ pub fn run(
             &final_assessment(crac, network, resolution, p, s, options),
             &all_states,
             &activated_by(p, s),
+            &moved_by(crac, p, s),
             &options.linear,
         )
     };
@@ -770,6 +771,77 @@ fn activated_by(preventive: &PerimeterPlan, scenarios: &[ScenarioPlan]) -> Vec<u
     all
 }
 
+/// Every range-action movement a plan makes, anywhere in it, as
+/// `(range action, distance)`.
+///
+/// The companion to [`activated_by`], and needed for the same reason: a cost
+/// counts what was *done*, and a plan that moves a shifter six taps has spent
+/// something no margin records. Without it the whole-plan judgement prices the
+/// network actions and treats every shifter as free, which is not a rounding —
+/// the reference's 3.4.3.3 turns on a difference of exactly one activation plus
+/// one tap, and a judge that sees neither declines the better plan.
+///
+/// Distance is in **taps** for a phase shifter, the unit `variationCosts` is
+/// stated in (see [`Costly::activation`](super::costly::Costly::activation)).
+/// A [`Setpoint`] carries the angle it started from rather than the tap, so the
+/// starting tap is recovered from the action's own table — the same table the
+/// optimizer used on the way in.
+///
+/// Repeats are kept, exactly as in `activated_by`: a shifter moved preventively
+/// and again curatively is two activations and two distances. 3.4.3.2 prices
+/// that at 20 + 5 x 15 preventively and 20 + 1 x 15 curatively, and says so.
+fn moved_by(
+    crac: &Crac,
+    preventive: &PerimeterPlan,
+    scenarios: &[ScenarioPlan],
+) -> Vec<(usize, f64)> {
+    // The tap whose angle is nearest `angle`, or `None` for an action whose
+    // set-point is not a tap at all — a redispatch travels in MW and its
+    // distance is the set-point difference.
+    let tap_at = |action: usize, angle: f64| -> Option<i32> {
+        let RangeActionKind::Pst { tap_to_angle, .. } = &crac.range_actions.get(action)?.kind
+        else {
+            return None;
+        };
+        tap_to_angle
+            .iter()
+            .min_by(|a, b| (a.1 - angle).abs().total_cmp(&(b.1 - angle).abs()))
+            .map(|(t, _)| *t)
+    };
+    let take = |all: &mut Vec<(usize, f64)>, plan: &PerimeterPlan| {
+        for s in plan.setpoints.iter().filter(|s| s.moved()) {
+            let distance = match (s.tap, tap_at(s.action, s.initial)) {
+                (Some(now), Some(was)) => f64::from(now - was),
+                _ => s.value - s.initial,
+            };
+            all.push((s.action, distance));
+        }
+    };
+    let mut all: Vec<(usize, f64)> = Vec::new();
+    take(&mut all, preventive);
+    for scenario in scenarios {
+        if let Some(automatons) = &scenario.automatons {
+            // An `AutomatonResult` reports where a range action ended, not where
+            // it began, so the distance is measured from the CRAC's own
+            // `initialTap` — the only starting point it states.
+            for &(action, value, tap) in &automatons.range_actions {
+                let distance = match (tap, crac.range_actions.get(action).map(|r| &r.kind)) {
+                    (Some(now), Some(RangeActionKind::Pst { initial_tap, .. })) => {
+                        f64::from(now - initial_tap)
+                    }
+                    _ => value,
+                };
+                all.push((action, distance));
+            }
+        }
+        for perimeter in &scenario.perimeters {
+            take(&mut all, perimeter);
+        }
+    }
+    all.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    all
+}
+
 /// One perimeter's answer, as the plan reports it.
 fn perimeter_plan(result: &SearchResult, states: Vec<State>) -> PerimeterPlan {
     PerimeterPlan {
@@ -969,3 +1041,126 @@ fn second_preventive(
     Some(result)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rao::costly::Costly;
+
+    /// A shifter whose taps are 0.5 degrees apart, priced at 15 a tap with 20 to
+    /// activate — the reference's 3.4.3.2 numbers.
+    fn pst_crac() -> Crac {
+        Crac {
+            range_actions: vec![crate::rao::crac::RangeAction {
+                id: "pstBeFr4".into(),
+                name: None,
+                operator: None,
+                speed: None,
+                activation_cost: Some(20.0),
+                variation_cost: Some(crate::rao::crac::VariationCost { up: 15.0, down: 15.0 }),
+                group: None,
+                kind: RangeActionKind::Pst {
+                    element: "BBE2AA1  BBE3AA1  1".into(),
+                    initial_tap: 0,
+                    tap_to_angle: (-16..=16).map(|t| (t, f64::from(t) * 0.5)).collect(),
+                },
+                ranges: Vec::new(),
+                usage_rules: Vec::new(),
+            }],
+            ..Crac::default()
+        }
+    }
+
+    fn plan(setpoints: Vec<Setpoint>) -> PerimeterPlan {
+        PerimeterPlan {
+            states: Vec::new(),
+            network_actions: Vec::new(),
+            setpoints,
+            initial_margin_mw: 0.0,
+            final_margin_mw: 0.0,
+            leaves: 0,
+            open_branches: Vec::new(),
+            buses: Vec::new(),
+            transformers: Vec::new(),
+        }
+    }
+
+    /// A movement is measured in **taps**, not degrees.
+    ///
+    /// The distinction is not cosmetic: five taps of 0.5 degrees is a distance
+    /// of 5 to a CRAC that prices `variationCosts` per tap and 2.5 to one that
+    /// reads degrees, and the reference's 3.4.2.1 is built to tell them apart.
+    #[test]
+    fn a_shifter_movement_is_measured_in_taps() {
+        let crac = pst_crac();
+        let preventive =
+            plan(vec![Setpoint { action: 0, value: -2.5, initial: 0.0, tap: Some(-5) }]);
+        assert_eq!(moved_by(&crac, &preventive, &[]), vec![(0, -5.0)]);
+    }
+
+    /// A shifter moved preventively and again curatively is **two** activations
+    /// and two distances, not one of each.
+    ///
+    /// This is the whole of the reference's 3.4.3.2 arithmetic: 20 + 5 x 15
+    /// preventively and 20 + 1 x 15 curatively, reaching tap −6 for 140. A plan
+    /// that reached −6 preventively in one move would cost 20 + 6 x 15 = 110,
+    /// and the 30 between them is what its second-preventive twin 3.4.3.3 is
+    /// built to find.
+    #[test]
+    fn moving_one_shifter_in_two_states_is_billed_twice() {
+        let crac = pst_crac();
+        let preventive =
+            plan(vec![Setpoint { action: 0, value: -2.5, initial: 0.0, tap: Some(-5) }]);
+        let scenario = ScenarioPlan {
+            contingency: 0,
+            automatons: None,
+            perimeters: vec![plan(vec![Setpoint {
+                action: 0,
+                value: -3.0,
+                initial: -2.5,
+                tap: Some(-6),
+            }])],
+        };
+        let moved = moved_by(&crac, &preventive, std::slice::from_ref(&scenario));
+        assert_eq!(moved, vec![(0, -5.0), (0, -1.0)]);
+
+        // Priced, which is the thing the whole-plan judgement was getting wrong:
+        // two activations at 20 plus six taps at 15.
+        let costly = Costly::default();
+        assert_eq!(costly.activation(&crac, &[], &moved), 2.0 * 20.0 + 6.0 * 15.0);
+
+        // And the one-move plan that 3.4.3.3 asks for is 30 cheaper, which is
+        // exactly the margin the second preventive pass has to see.
+        let straight = plan(vec![Setpoint { action: 0, value: -3.0, initial: 0.0, tap: Some(-6) }]);
+        let once = moved_by(&crac, &straight, &[]);
+        assert_eq!(costly.activation(&crac, &[], &once), 20.0 + 6.0 * 15.0);
+    }
+
+    /// A shifter that never moved is not billed. "Used" means *moved*, and a
+    /// tap assertion has an answer even when the answer is "where it was".
+    #[test]
+    fn a_shifter_left_where_it_stood_costs_nothing() {
+        let crac = pst_crac();
+        let still = plan(vec![Setpoint { action: 0, value: 0.0, initial: 0.0, tap: Some(0) }]);
+        assert!(moved_by(&crac, &still, &[]).is_empty());
+    }
+
+    /// An `AutomatonResult` reports where a range action **ended**, not where it
+    /// began, so its distance is measured from the CRAC's own `initialTap` —
+    /// the only starting point it states.
+    #[test]
+    fn an_automaton_movement_is_measured_from_the_crac_s_initial_tap() {
+        let crac = pst_crac();
+        let scenario = ScenarioPlan {
+            contingency: 0,
+            automatons: Some(AutomatonResult {
+                network_actions: Vec::new(),
+                range_actions: vec![(0, -1.5, Some(-3))],
+                ..AutomatonResult::default()
+            }),
+            perimeters: Vec::new(),
+        };
+        let moved = moved_by(&crac, &plan(Vec::new()), std::slice::from_ref(&scenario));
+        assert_eq!(moved, vec![(0, -3.0)]);
+    }
+}
