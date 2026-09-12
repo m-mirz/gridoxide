@@ -356,10 +356,20 @@ struct RawInjection {
 #[derive(Clone, Debug)]
 struct RawShunt {
     at: NodeKey,
-    /// Susceptance and conductance in siemens, already multiplied by the
-    /// section count.
+    /// Susceptance and conductance in siemens, **already multiplied by
+    /// [`sections`](Self::sections)** — which is now true. It was a claim this
+    /// struct made and the parser did not honour: `shuntLinearModel` added one
+    /// section's worth and nothing multiplied it.
     g: f64,
     b: f64,
+    /// `sectionCount`, from the parent `<shunt>` element. The per-section values
+    /// arrive later, on the `<shuntLinearModel>` child, so the count has to be
+    /// carried rather than applied on the spot.
+    ///
+    /// Every `sectionCount` in the tree is `1`, so no fixture can tell the two
+    /// readings apart — which is exactly how the comment above survived being
+    /// false.
+    sections: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +516,14 @@ struct Collected {
     /// than threaded through `open`/`close`, which already carry five pieces of
     /// parser state.
     open_area: Option<RawArea>,
+    /// Whether a `<reactiveCapabilityCurve>` is open, so its `<point>` children
+    /// attach to the generator being read. Kept here for the same reason
+    /// `open_area` is: `open`/`close` already carry five pieces of parser state.
+    in_curve: bool,
+    /// How many generators took their reactive limits from the **envelope** of a
+    /// capability curve rather than from a stated pair. Reported, because it is
+    /// an outer approximation — see the `reactiveCapabilityCurve` arm.
+    curve_envelopes: usize,
     /// Declared nodes, in declaration order, so bus labels are stable.
     nodes: Vec<NodeKey>,
     switches: Vec<RawSwitch>,
@@ -715,7 +733,21 @@ fn open(
                 transformer,
             });
         }
-        "generator" | "vscConverterStation" => {
+        // An HVDC converter station is **not** a generator, and sharing this arm
+        // with one made it a generator producing nothing: a VSC station states no
+        // `targetP`, so `p` came out zero and the HVDC transfer vanished without
+        // a word. `docs/src/import/iidm.md` said it was "counted and then
+        // skipped"; now it is.
+        //
+        // Modelling it properly means reaching `src/dc.rs`, which is a real DC
+        // network and is currently only wired to CGMES. No IIDM fixture in the
+        // tree has an `hvdcLine` or a converter station, so that is work with no
+        // gate behind it — and until there is one, counting the element is the
+        // honest answer and a silently wrong injection is not.
+        "vscConverterStation" | "lccConverterStation" | "hvdcLine" => {
+            *c.unknown.entry(name.to_string()).or_insert(0) += 1;
+        }
+        "generator" => {
             let Some(at) = attrs.terminal("", level.as_deref()) else { return };
             c.declare(&at);
             let p = attrs.number("targetP").unwrap_or(0.0);
@@ -824,13 +856,18 @@ fn open(
         "shunt" => {
             let Some(at) = attrs.terminal("", level.as_deref()) else { return };
             c.declare(&at);
-            c.shunts.push(RawShunt { at, g: 0.0, b: 0.0 });
+            // `sectionCount` is on this element; the per-section admittance is on
+            // the `shuntLinearModel` child below. Defaulting to one section is
+            // what a document that omits it means.
+            let sections = attrs.number("sectionCount").unwrap_or(1.0);
+            c.shunts.push(RawShunt { at, g: 0.0, b: 0.0, sections });
         }
         "shuntLinearModel" => {
-            // Applies to the shunt currently being read.
+            // Applies to the shunt currently being read, scaled by how many of
+            // its sections are actually in service.
             if let Some(last) = c.shunts.last_mut() {
-                last.g += attrs.or_zero("gPerSection");
-                last.b += attrs.or_zero("bPerSection");
+                last.g += attrs.or_zero("gPerSection") * last.sections;
+                last.b += attrs.or_zero("bPerSection") * last.sections;
             }
         }
         "ratioTapChanger" | "phaseTapChanger" => {
@@ -896,9 +933,61 @@ fn open(
                 });
             }
         }
+        // A generator's reactive capability, stated as a pair.
+        //
+        // Read onto the injection currently being built, the way
+        // `shuntLinearModel` attaches to the shunt above. It used to sit in the
+        // no-op list below as an element "with nothing to contribute", which
+        // left every IIDM generator at ±infinity — so `outerloop::ReactiveLimits`
+        // and `gridoxide solve --enforce-q-limits` had nothing to enforce, and
+        // one network read as `.uct` and as `.xiidm` disagreed about its own
+        // machines. `TestCase12Nodes` is that network, and states ±9000 here.
+        "minMaxReactiveLimits" => {
+            if let Some(last) = c.injections.last_mut() {
+                if let Some(q) = attrs.number("minQ") {
+                    last.q_min = q;
+                }
+                if let Some(q) = attrs.number("maxQ") {
+                    last.q_max = q;
+                }
+            }
+        }
+        // The same capability stated as a curve of `(p, minQ, maxQ)` points.
+        //
+        // `types::Bus` carries one pair, not a function of P, so this takes the
+        // curve's **envelope** — the widest limit it ever allows. That is an
+        // outer approximation: it never forbids a reactive output the machine
+        // can actually produce, and it may permit one it cannot at the P it
+        // happens to be dispatched to. Reported rather than silently taken,
+        // because the alternative it replaces — no limit at all — is a worse
+        // approximation of the same kind, and because `network_one_voltage_level`
+        // has a genuinely varying curve (−59.3 at P=0, −54.55 at P=70) where
+        // `voltage_monitoring`'s is flat.
+        //
+        // The sentinels are inverted on purpose: a curve with no points leaves
+        // them infinite, and `convert` writes a limit only when it is finite, so
+        // an empty curve falls back to unbounded rather than to nonsense.
+        "reactiveCapabilityCurve" => {
+            c.in_curve = true;
+            c.curve_envelopes += 1;
+            if let Some(last) = c.injections.last_mut() {
+                last.q_min = f64::INFINITY;
+                last.q_max = f64::NEG_INFINITY;
+            }
+        }
+        "point" if c.in_curve => {
+            if let Some(last) = c.injections.last_mut() {
+                if let Some(q) = attrs.number("minQ") {
+                    last.q_min = last.q_min.min(q);
+                }
+                if let Some(q) = attrs.number("maxQ") {
+                    last.q_max = last.q_max.max(q);
+                }
+            }
+        }
         // Structural or presentational elements with nothing to contribute.
         "substation" | "busBreakerTopology" | "nodeBreakerTopology"
-        | "minMaxReactiveLimits" | "reactiveCapabilityCurve" | "point" | "property"
+        | "point" | "property"
         | "extension" | "terminalRef" => {}
         other => {
             *c.unknown.entry(other.to_string()).or_insert(0) += 1;
@@ -921,6 +1010,7 @@ fn close(
             }
         }
         "voltageLevel" => *level = None,
+        "reactiveCapabilityCurve" => c.in_curve = false,
         "line" | "twoWindingsTransformer" | "danglingLine" | "boundaryLine" => {
             if let Some(b) = branch.take() {
                 c.branches.push(b);
@@ -1256,6 +1346,13 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     if asymmetric > 0 {
         notes.push(format!(
             "{asymmetric} line(s) declare asymmetric shunts; summed into one pi-model term"
+        ));
+    }
+    if c.curve_envelopes > 0 {
+        notes.push(format!(
+            "{} generator(s) state reactive limits as a capability curve; the envelope was taken, \
+             which is an outer approximation of a P-dependent limit",
+            c.curve_envelopes
         ));
     }
     let mut unknown: Vec<(&String, &usize)> = c.unknown.iter().collect();
