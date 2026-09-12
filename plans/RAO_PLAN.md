@@ -2185,6 +2185,64 @@ The two that remain are now in `RECORDED_DISAGREEMENTS`, measured:
 
 Their assertions still count as mismatched, which is the point of that list: 288 of 294, not 294.
 
+### 8.21 `TapModel::Discrete` has no gate, and now that is measured rather than assumed
+
+Phase 10 has said since it landed that `TapModel::Discrete` "remains declared and unbuilt with no
+gate to validate it against". That was an inference from the optimizer matching at 138/142 with the
+continuous model. With the corpus now at five files and 1862 assertions it can be checked directly,
+and it holds — more strongly than the original claim.
+
+**`pst-model` is read by nothing.** `LinearOptions::tap_model` is constructed as `Continuous` and
+`options_from` never touches it, so every vendored configuration is optimized continuously and its
+answer rounded to a real tap afterwards. That is the same shape of gap `activation_cost` was before
+§8.13: a field the reader parses and the optimizer ignores. It is recorded here rather than quietly
+left, because the next person to look will otherwise rediscover it.
+
+**What the corpus says about it.** Of 37 vendored configurations, **32 say `CONTINUOUS` and 5 say
+`APPROXIMATED_INTEGERS`**, and those five govern **24 scenarios**:
+
+| config | scenarios | where |
+|---|---|---|
+| `RaoParameters_maxMargin_ampere_mip` | 8 | 2.2.1.5.1–7 and 1.3.6.7, TestCase16Nodes |
+| `RaoParameters_dc_minObjective_discretePst` | 8 | `3_4_2` and `3_4_3` |
+| `RaoParameters_dc_minObjective_discretePst_2P` | 4 | the same, with a second pass |
+| `RaoParameters_ep15us11-5-3-3` | 4 | 1.2.4.3.1–3 and 1.2.4.5 |
+
+The 16-node family is the decisive one, because the reference built it as a **controlled pair**:
+2.2.1.5.1 through 2.2.1.5.6 are each labelled "copy of 2.6.2.x with MIP for PSTs", the same scenario
+on the same network with the tap model as the only difference.
+
+**Every one of those 24 matches in full**, except the two that are recorded disagreements where
+gridoxide answers more cheaply (3.4.2.4 and 3.4.3.5, §8.20). Both halves of every controlled pair
+agree, with one implementation of taps between them.
+
+So continuous-plus-rounding reaches the reference's discrete answer everywhere the reference asked
+for a discrete answer. Building the integer tap could therefore win **nothing** here and could only
+lose: it is a different optimizer over 24 scenarios currently at 100%, justified by a configuration
+field rather than by a disagreement. That is the definition of a change this gate cannot validate,
+and the rule for those is the same one §8.6 states for disagreements — the measurement comes first.
+
+It should be built when something asks for it: a CRAC whose tap table is nonuniform enough that the
+rounding lands wrong, or a scenario the corpus does not have. Until then `pst-model` should be
+**read and reported** rather than silently ignored, so a configuration asking for a model gridoxide
+does not implement says so.
+
+#### What is actually left, across all 1862 assertions
+
+Twelve scenarios, 37 assertions, and the split is the whole story:
+
+| scenarios | assertions | what |
+|---|---|---|
+| 1.3.2.6, 1.3.2.8, 1.3.6.6, 1.3.8.2 | 14 | recorded disagreements, §8.6 |
+| 5.2.1.3, 5.2.1.4, 5.2.3.2, 5.2.3.3 | 12 | recorded disagreements, `BestTapFinder` |
+| 3.4.2.4, 3.4.3.5 | 6 | recorded disagreements, §8.20 |
+| **1.4.1.5, 1.4.1.6** | **5** | **the one open defect**, §8.9, seven mechanisms refuted |
+
+**31 of 37 are measured disagreements and 5 are one defect.** Nothing in the corpus is unexplained,
+nothing is skipped, and no capability the corpus exercises is missing. The next real step is not in
+this repository: it is reading OpenRAO's curative perimeter to find why it declines a 300 A
+improvement on its own objective.
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a
