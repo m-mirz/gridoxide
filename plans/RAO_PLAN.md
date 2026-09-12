@@ -1363,8 +1363,8 @@ second pass is a far better problem than it was — but still a cost, and still 
 
 #### Where that leaves it
 
-Six readings measured, six refuted — the last three **re-measured after `A(r, s)` landed**, because
-§8.11 established that a refutation is only as good as the rest of the tree at the time:
+Seven readings measured, seven refuted — three of them **re-measured after `A(r, s)` landed**,
+because §8.11 established that a refutation is only as good as the rest of the tree at the time:
 
 | reading | result |
 |---|---|
@@ -1374,8 +1374,22 @@ Six readings measured, six refuted — the last three **re-measured after `A(r, 
 | `A(r, s)` (§8.7, measured three times; §8.11 landed it) | fixed 1.4.1.2 and 1.4.1.1.3, **not these two** |
 | carrying the second pass's *own* curative set-point | the 2P column lands on −16 as well |
 | the objective cap applied **only** after a second preventive pass | −3 |
+| the cap on the **LP's margin column** rather than the tree's improvement test | −26 on TestCase16Nodes, −1 here, and it moves neither scenario |
 
 Every experiment was backed out; the tree is byte-identical to the commit.
+
+**The seventh was this section's own suggestion, and it is wrong too.** The paragraph below predicted
+that "a cap that could work would have to bound the LP's margin column, not the tree's improvement
+test", on the reasoning that `improved_enough` gates network actions only — so capping the tree
+blocks the switch the reference *does* take while leaving the shifter moves it declines, and the
+other half would do the opposite. Implemented as `LinearOptions::margin_cap`, a ceiling on `mm` set
+to the preventive perimeter's own margin for every curative perimeter, it costs **26** on
+TestCase16Nodes and **1** here, and 1.4.1.5 and 1.4.1.6 do not move at all.
+
+That it does not move them is the informative part. The two shifter moves gridoxide takes are not the
+LP chasing margin past a point where it stops mattering: they survive a hard ceiling at exactly that
+point. So the overspend is not the LP's objective either, and the "capped objective" family — three
+variants now, on the tree, after a second pass, and in the LP — is exhausted.
 
 **The last two are the informative ones.** §8.7 predicted the reference can keep its curative answer
 *because* its second preventive computes one, and `A(r, s)` finally gives gridoxide a curative column
@@ -1400,7 +1414,7 @@ genuinely improve the curative perimeter's own objective — 86 A to 385 A — a
 because they do. The reference declines a 300 A improvement on its own perimeter, and nothing in the
 configuration, the CRAC, or the four rules above says why.
 
-These five are what is left of the whole corpus, and the honest conclusion after six refutations is
+These five are what is left of the whole corpus, and the honest conclusion after seven refutations is
 that the corpus cannot tell us the rule. Every candidate consistent with 1.4.1.5 and 1.4.1.6 has been
 measured and every one costs elsewhere, which is the signature of a rule that is narrower than
 anything the scenarios distinguish. Reading the reference's own curative perimeter — how it filters

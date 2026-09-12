@@ -2126,10 +2126,14 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// re-measured after `A(r, s)` landed: the stop criterion (−36), a capped
 /// curative objective (−24), the composition rule (−2), `A(r, s)` itself (it
 /// closed 1.4.1.2 and 1.4.1.1.3 and not these), carrying the second pass's own
-/// curative set-point (its column lands on −16 too), and the cap applied only
-/// after a second preventive pass (−3, and it drops the one action the
-/// reference *does* use). Do not re-run those six; the corpus cannot tell us the
-/// rule, and reading the reference's curative perimeter is the next step.
+/// curative set-point (its column lands on −16 too), the cap applied only after
+/// a second preventive pass (−3, and it drops the one action the reference
+/// *does* use), and the cap on the **LP's margin column** rather than the
+/// tree's — §8.9's own suggested seventh, which costs 26 on TestCase16Nodes and
+/// 1 here and moves neither scenario, so the two shifter moves survive a hard
+/// ceiling at the point past which margin stops mattering. Do not re-run those
+/// seven; the corpus cannot tell us the rule, and reading the reference's
+/// curative perimeter is the next step.
 ///
 /// Nothing else. Every other scenario in the corpus matches in full.
 const BASELINE_MATCHED_2P: usize = 118;
