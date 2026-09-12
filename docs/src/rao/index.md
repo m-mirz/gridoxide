@@ -152,7 +152,20 @@ gridoxide security tests/data/ucte/3nodes_pst.uct \
 # What should we do about it?
 gridoxide rao tests/data/ucte/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json --depth 2
+
+# ... under the reference's own settings, rather than gridoxide's defaults.
+gridoxide rao tests/data/ucte/3nodes_pst.uct \
+    --crac docs/examples/pst-worked-example.crac.json \
+    --parameters RaoParameters.json
 ```
+
+`--parameters` reads OpenRAO's own `RaoParameters` document: the objective (including `MIN_COST`),
+the flow model, MNEC handling, the second-preventive execution condition, the curative stop
+criterion and the search thresholds. Without it a run is max-min-margin on DC with no MNECs and no
+second pass, which is a fraction of what the optimizer does — and until §8.24 that was the *only*
+thing the binary could be asked for, so the gate validated behaviour no user could reach. Settings
+the file states and gridoxide does not read are ignored rather than refused, and
+`src/rao/parameters.rs` lists which and why.
 
 Both take a UCTE `.uct`, an IIDM `.xiidm`, or a **CGMES** model — for CGMES, the directory holding
 the profile set or any one profile beside the others:
@@ -169,43 +182,67 @@ gridoxide's own `<network>.rao.json` companion.
 
 ## What is validated
 
-171 scenarios from powsybl-open-rao's own Cucumber suite are vendored under
+197 scenarios from powsybl-open-rao's own Cucumber suite are vendored under
 `tests/data/rao/features/`, with the CRACs and parameter files they name. They are the only check in
 this repository that gridoxide did not write for itself: they state margins to the decimal and name
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1715 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1825 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
 counts, set-points, objective values, security statuses and **which optimization steps ran**, across
 two flow models and three networks. **Nothing is skipped**: every step the corpus states is checked,
 so the ratio is the whole of it rather than the part that was convenient.
 
-One of the five files is a **starting point rather than a score**. `min_cost.feature`'s 26
-costly-optimization scenarios were vendored *before* that capability exists — `MIN_COST` is currently
-read as `MAX_MIN_MARGIN` — because that is the order the rest of this was built in and the only one
-that works: the second-preventive corpus was vendored first too, scored 45 of 108 with nothing
-implemented, and the gate then found every defect in it one scenario at a time. Of the 31 that do not, 5 belong to the second-preventive corpus, which is
-the one capability still short of the reference.
+| file | | |
+|---|---|---|
+| `dc_scenarios.feature` | 180 of 186 | |
+| `ac_scenarios.feature` | 276 of 282 | TestCase12Nodes |
+| `ac_scenarios_16nodes.feature` | 963 of 977 | TestCase16Nodes |
+| `second_preventive.feature` | 118 of 123 | |
+| `min_cost.feature` | 288 of 294 | costly optimization |
 
-The other 26 are **recorded disagreements rather than a backlog**. Each has been measured on
-the reference's *own* objective, in the unit its own configuration selects and with its own MNEC
-violation cost applied, and in none of them is gridoxide worse: five are its `BestTapFinder` rounding
-a set-point on minimum margin alone, blind to a virtual cost its own javadoc warns about, and the
-rest are ties reached by a different route. The gate names each one with the measurement behind it
-and refuses to let a scenario disagree without one — see `plans/RAO_PLAN.md` §8.6.
+Two of the five were vendored **before** the capability they test existed, which is the order the
+rest of this was built in and the only one that works. The second-preventive corpus scored 45 of 108
+with nothing implemented; the costly one scored 165. In both cases the gate then found every defect
+one scenario at a time, and a corpus vendored after the fact only ever confirms what its author
+already believed.
+
+Of the 37 assertions that do not match, **32 are recorded disagreements rather than a backlog**, in
+twelve scenarios. Each has been measured on the reference's *own* objective, in the unit its own
+configuration selects and with its own MNEC violation cost applied, and in none of them is gridoxide
+worse: some are its `BestTapFinder` rounding a set-point on minimum margin alone, blind to a virtual
+cost its own javadoc warns about; two are gridoxide securing the network more cheaply than the
+reference asks under `MIN_COST`, which is the objective working rather than a defect; the rest are
+ties reached by a different route. The gate names each with the measurement behind it and refuses to
+let a scenario disagree without one — see `plans/RAO_PLAN.md` §8.6.
+
+**The remaining 5 are one open defect**, in 1.4.1.5 and 1.4.1.6: a curative perimeter that spends
+three actions where the reference spends one, reaching better curative margins than it asks for.
+Seven mechanisms have been implemented, measured and refuted for it (§8.9), each costing elsewhere,
+which is the signature of a rule narrower than anything these scenarios distinguish. The next step is
+reading the reference's own curative perimeter, and that is not a measurement this repository can
+make.
 
 ## What is not here
 
 - **Loop flows and relative margins.**
-- **A range action's cost.** Costly optimization — `MIN_COST`, minimizing the price of the plan
-  rather than maximizing the margin it buys — is here for **network actions**, and it is a different
-  question rather than the same one rescaled: the reference's own scenario 3.4.1.2 picks an action
-  that yields a *smaller* margin because it costs less. What is not here is what a **range** action
-  costs. Its per-unit movement price (`variationCosts`) is dropped by the CRAC reader, and its
-  activation needs a binary per action, hence a MIP, hence `TapModel::Discrete`.
-- **HVDC range actions**, recognised and skipped: gridoxide models a DC network but nothing connects
-  it to a range action yet.
+- **HVDC and counter-trade range actions**, recognised and skipped. gridoxide models a DC network
+  but nothing connects it to a range action yet; a counter trade has no network sensitivity at all,
+  which is why the reference leaves it out of its own LP too. Neither appears in any CRAC the
+  vendored corpus loads, so building either would be building blind.
+- **Angle and voltage CNECs**, counted rather than modelled — the same boundary the reference draws,
+  which checks them in a separate monitoring pass after the fact. gridoxide has copied the exclusion
+  from the LP and **not** that monitoring pass, so a CRAC leaning on them is not fully answered. One
+  consequence is worth stating because nothing else does: a usage rule conditioned on an angle or
+  voltage constraint names a CNEC that is never evaluated, so it can never fire. That is
+  conservative — the action is not offered rather than offered freely — but it is a silence, not a
+  decision the optimizer makes.
+- **An integer tap.** `pst-model: APPROXIMATED_INTEGERS` is read by nothing and `TapModel::Discrete`
+  is declared and unbuilt — measured rather than assumed. Of 37 vendored configurations 5 ask for it,
+  governing 24 scenarios, and the reference built eight of them as controlled pairs ("copy of 2.6.2.x
+  with MIP for PSTs"). All 24 match with the continuous model and rounding, so building the integer
+  tap could win nothing here and could only lose. `plans/RAO_PLAN.md` §8.21.
 - **Multi-timestamp (MARMOT) runs.**
 - **A `relativeToPreviousInstant` curative range inside the second preventive problem.** The rest of
   that problem is here. After the curative stage, the preventive perimeter is optimized again with

@@ -2342,6 +2342,48 @@ The honest summary is that this is **dead weight on the gate and a removed limit
 CRAC**, and it is recorded as both rather than as progress. `second_preventive.feature` stays at 118
 of 123; the gate total stays at **1825 of 1862**.
 
+### 8.24 The gate could ask for things the binary could not
+
+`gridoxide rao` built `SearchOptions { max_depth, ..Default::default() }` and hardcoded
+`IpmSolver`. It read **no configuration at all** — so `MIN_COST`, MNECs, the second-preventive
+execution condition, the curative stop criterion, `enforce-curative-security`, the minimum-impact
+thresholds and the choice between DC and AC were reachable only from the Cucumber harness.
+
+The gate validated 1825 assertions' worth of behaviour that no user could ask for. That is a
+different kind of gap from the ones this section usually records — nothing is wrong with an answer —
+but it is the one that decides whether any of the rest is usable.
+
+The reading already existed and was already validated: `options_from` in the harness parses 21 keys
+and every gate run exercises it. Moving it to `src/rao/parameters.rs` and having the harness call it
+is what keeps it validated — if the reading drifts, 1862 assertions say so — and the move is
+measurably inert: all five files scored identically before and after.
+
+**One thing deliberately did not move.** The harness clamps search depth to 3, with its own stated
+reason: a bound in name only would have this corpus evaluate every combination of actions it
+declares, which is a time budget rather than a setting. The library honours what the document says
+and the clamp stays in the harness. Moved along with the rest, `--parameters` would have silently
+capped a user's depth at 3 — a setting read, acknowledged and then ignored, which is worse than one
+not read at all.
+
+The solver now follows the objective, as the harness's does: a cost LP is unbounded under an
+interior-point method (§8.14), so `MIN_COST` takes HiGHS where `opf-highs` is built and **says so**
+when it cannot, rather than answering by margin without a word.
+
+And `run_rao` discarded the `CracReport` with `?.0`. A remedial action the reader could not resolve
+was simply absent from the search while every margin still looked exactly as trustworthy — the one
+failure a study cannot detect from its own output. Dropped actions, unreadable elementary actions and
+usage rules, and the counted angle and voltage CNECs are now reported.
+
+`tests/cli_rao_test.rs` pins it on the reference's own 3.4.1.1, which is built so the two objectives
+cannot agree — three actions each secure the network and the cheapest buys the least room. The test
+asserts both halves, because asserting only the costly answer would pass if the flag did nothing and
+the default happened to pick it:
+
+| | actions | worst margin |
+|---|---|---|
+| default | `closeBeFr2`, `closeBeFr3` | 416.7 MW |
+| `--parameters` | `closeBeFr4` | **250.0 MW**, which is what the scenario asserts |
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a
