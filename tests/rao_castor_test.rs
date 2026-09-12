@@ -1572,3 +1572,86 @@ fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
         .expect("pst_be set-point after the contingency");
     assert_eq!(curative, -5, "pst_be should reach the reference's curative tap");
 }
+
+/// A **chained** curative range, and the preventive answer it governs.
+///
+/// This is the reference's 1.4.1.1.4, whose own title says what it is for:
+/// "Pst_fr limits relative to previous instant are the most impacting w.r.t
+/// relative to initial network". `pst_fr` is available preventively and
+/// curatively on one machine, with an absolute window about its initial tap
+/// **and** a `relativeToPreviousInstant` window of ±4. The reference's answer is
+/// preventive tap 1 and curative tap −3 — exactly four apart, so the chained
+/// window is binding and is what decides the preventive tap.
+///
+/// # Why this test exists separately from the gate
+///
+/// The Cucumber gate cannot protect this scenario. `run_gate` asserts only
+/// `matched >= baseline`, and `second_preventive.feature` carries a `pending`
+/// string that disables the per-scenario check — so losing five assertions here
+/// while gaining five on 1.4.1.6 passes silently, and the two are exactly the
+/// scenarios a change to chained ranges touches. Written before any such change,
+/// this turns that trade into a red test.
+///
+/// `src/rao/linear.rs` currently declines to give a chained range an `A(r, s)`
+/// column at all, and this scenario passes *because of* that: the second
+/// preventive pass chooses as though the curative shifter were frozen, and the
+/// curative perimeter afterwards gets its ±4 box measured from the tap the
+/// preventive stage actually left. Any change that offers the column must keep
+/// this answer.
+#[test]
+fn a_chained_curative_range_governs_the_preventive_tap() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(rao_fixture("features/second_preventive_ls_1_4.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let pst_fr = crac.range_actions.iter().position(|a| a.id == "pst_fr").expect("pst_fr");
+    let preventive = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst_fr)
+        .and_then(|s| s.tap)
+        .expect("a preventive set-point for pst_fr");
+    let curative = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find_map(|p| p.setpoints.iter().find(|s| s.action == pst_fr))
+        .and_then(|s| s.tap)
+        .expect("a curative set-point for pst_fr");
+
+    assert_eq!(preventive, 1, "preventive tap, the reference's own answer");
+    assert_eq!(curative, -3, "curative tap, the reference's own answer");
+    // The point of the scenario: the two are exactly the chained window apart,
+    // so a change that widens or loses that window shows up here as a different
+    // preventive tap rather than as a plausible one.
+    assert_eq!(
+        preventive - curative,
+        4,
+        "the ±4 `relativeToPreviousInstant` window is what makes this scenario"
+    );
+}
