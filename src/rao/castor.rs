@@ -330,38 +330,26 @@ pub fn run(
     // network it never claims to produce. `preventive_states` is the honest set:
     // the base case, every outage state, and the curative states nothing can act
     // on, which are pulled forward for exactly this reason.
-    let preventive_view = Network {
-        buses: &plan_preventive.buses,
-        transformers: &plan_preventive.transformers,
-        ..*network
-    };
-    let preventive_margin = assess(
-        crac,
-        &preventive_view,
-        resolution,
-        &plan_preventive.open_branches,
-        options,
-    )
-    .perimeters
-    .iter()
-    .filter(|p| preventive_states.contains(&p.state))
-    .filter_map(|p| p.min_optimized_margin(crac))
-    .fold(f64::INFINITY, f64::min);
-    let final_margin = preventive_margin
-        .min(
-            scenarios
-                .iter()
-                .flat_map(|s| s.perimeters.iter())
-                .map(|p| p.final_margin_mw)
-                .fold(f64::INFINITY, f64::min),
-        )
-        .min(
-            scenarios
-                .iter()
-                .filter_map(|s| s.automatons.as_ref())
-                .map(|a| a.final_margin_mw)
-                .fold(f64::INFINITY, f64::min),
-        );
+    // Measured through [`final_assessment`], which is the one place that knows
+    // **which network each state is actually in**: its own curative perimeter's
+    // where it has one, its contingency's automatons' where it does not, and the
+    // preventive one otherwise.
+    //
+    // Assembled by hand here before, as the preventive reading over the states
+    // the preventive perimeter governs, folded together with each perimeter's own
+    // reported figure. That is right for every state except one kind: a curative
+    // state **pulled forward** because no curative action can reach it, in a
+    // contingency that nonetheless has a forced automaton. The pull-forward rule
+    // puts it in `preventive_states`, so it was read in the preventive network —
+    // as though its automaton never fired. On the reference's 3.4.1.12 that is
+    // `coBeFr3`, and it is the difference between the −66.67 the reference
+    // reports and a −100 that describes no network this plan produces.
+    let final_margin =
+        final_assessment(crac, network, resolution, &plan_preventive, &scenarios, options)
+            .perimeters
+            .iter()
+            .filter_map(|p| p.min_optimized_margin(crac))
+            .fold(f64::INFINITY, f64::min);
     plan_preventive.states = preventive_states;
     pulled_forward.sort_unstable();
     pulled_forward.dedup();
@@ -545,11 +533,32 @@ fn final_assessment(
                 transformers: &automatons.transformers,
                 ..*network
             };
+            // Every state of this contingency **at or after** the automatons,
+            // not only the auto ones.
+            //
+            // What the automatons leave behind stays behind: a curative instant
+            // of the same contingency sees that network too, unless a curative
+            // perimeter of its own has already claimed it — and those are taken
+            // first, just above, precisely so this can be the wider net.
+            //
+            // A contingency may have a forced automaton and nothing to decide
+            // curatively at all, and then it gets no curative perimeter. Claimed
+            // only for its auto states, its curative CNECs fall through to the
+            // preventive network at the end of this function and are read as
+            // though the automaton never fired. The reference's 3.4.1.12 is that
+            // case by construction — `coBeFr3` is "forced ARA and no CRA" in its
+            // own description — and it is the difference between a worst margin
+            // of −66.67 and one of −100.
             let auto_states: Vec<State> = crac
                 .states()
                 .into_iter()
                 .filter(|s| s.contingency == Some(scenario.contingency))
-                .filter(|s| crac.instants[s.instant].kind == InstantKind::Auto)
+                .filter(|s| {
+                    matches!(
+                        crac.instants[s.instant].kind,
+                        InstantKind::Auto | InstantKind::Curative
+                    )
+                })
                 .collect();
             take(
                 assess(crac, &net, resolution, &automatons.open_branches, options),
