@@ -449,3 +449,127 @@ fn generation_totals_come_from_the_machines() {
     assert!(fixtures_with_machines > 0, "no fixture contributed a machine");
 }
 
+
+/// A merged bus answers to **every** `TopologicalNode` mRID that went into it.
+///
+/// The skeleton merges galvanically-joined nodes, so one bus can carry several
+/// mRIDs while `bus_ids` has to name it with one — a network has one node where
+/// the documents have several. Which of them a CRAC uses is its author's
+/// business: they are all names for the same node in the model both were written
+/// against.
+///
+/// Two of the conformity configurations have real merged buses — FullGrid has
+/// two (one of four nodes) and SmallGrid one of **five** — so this is measured
+/// rather than imagined, which is why it was worth building at all.
+///
+/// The test is a *pair*: the same CRAC against `with_buses` and against
+/// `with_bus_aliases`. Asserting only that the alias resolves would pass just as
+/// well if every name resolved for some unrelated reason, and the point is the
+/// difference.
+#[test]
+fn a_crac_may_name_any_node_merged_into_a_bus() {
+    use gridoxide::rao::crac::{Crac, Range, RangeAction, RangeActionKind, RangeKind};
+    use gridoxide::rao::Resolution;
+
+    let mut checked = 0;
+    for name in CONFIGS {
+        let Some(net) = network(name) else { continue };
+        let mut by_bus: std::collections::BTreeMap<usize, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for (id, i) in &net.bus_aliases {
+            by_bus.entry(*i).or_default().push(id.as_str());
+        }
+        for (bus, ids) in by_bus.iter().filter(|(_, v)| v.len() > 1) {
+            // Every name that is not the one `bus_ids` chose.
+            for alias in ids.iter().filter(|id| **id != net.bus_ids[*bus]) {
+                let crac = Crac {
+                    range_actions: vec![RangeAction {
+                        id: "redispatch".into(),
+                        name: None,
+                        operator: None,
+                        speed: None,
+                        activation_cost: None,
+                        variation_cost: None,
+                        group: None,
+                        kind: RangeActionKind::Injection {
+                            distribution: vec![((*alias).to_string(), 1.0)],
+                        },
+                        ranges: vec![Range {
+                            kind: RangeKind::Absolute,
+                            min: Some(-100.0),
+                            max: Some(100.0),
+                        }],
+                        usage_rules: Vec::new(),
+                    }],
+                    ..Crac::default()
+                };
+
+                // Without the aliases the name is simply not in the network.
+                let blind = Resolution::with_buses(&crac, &net.branch_ids, &net.bus_ids);
+                assert_eq!(
+                    blind.bus(alias),
+                    None,
+                    "{name}: {alias} should be unresolvable without aliases — if it is not, \
+                     this test is no longer measuring anything"
+                );
+                assert_eq!(blind.unresolved, vec![(*alias).to_string()], "{name}");
+
+                // With them it resolves, and to the same bus the canonical name
+                // does — the whole claim, since a name that resolved to the
+                // wrong bus would be worse than one that did not resolve.
+                let seeing = Resolution::with_bus_aliases(
+                    &crac,
+                    &net.branch_ids,
+                    &net.bus_ids,
+                    &net.bus_aliases,
+                );
+                assert_eq!(seeing.bus(alias), Some(*bus), "{name}: {alias}");
+                assert!(seeing.is_complete(), "{name}: {alias}");
+                checked += 1;
+            }
+        }
+    }
+    assert!(
+        checked >= 6,
+        "expected several merged nodes across the conformity set, checked {checked}"
+    );
+}
+
+/// `bus_aliases` names every bus the documents name, and does it the same way
+/// twice.
+///
+/// The exception is a three-winding transformer's **star point**, which no
+/// document names — it is synthesized as `{PowerTransformer mRID}_star` — so
+/// nothing can name it in a CRAC and it has no alias. MiniGrid is the case:
+/// 15 buses, 13 aliased.
+#[test]
+fn bus_aliases_cover_every_named_bus_and_are_ordered() {
+    let mut checked = 0;
+    for name in CONFIGS {
+        let Some(net) = network(name) else { continue };
+        let mut sorted = net.bus_aliases.clone();
+        sorted.sort();
+        assert_eq!(net.bus_aliases, sorted, "{name}: aliases must be sorted by mRID");
+
+        let aliased: std::collections::BTreeSet<usize> =
+            net.bus_aliases.iter().map(|(_, i)| *i).collect();
+        for (i, id) in net.bus_ids.iter().enumerate() {
+            if id.ends_with("_star") {
+                assert!(!aliased.contains(&i), "{name}: a star point has no document name");
+                continue;
+            }
+            assert!(aliased.contains(&i), "{name}: bus {i} ({id}) has no alias entry");
+            // The canonical name is itself one of the aliases, so the relation
+            // is whole rather than a correction to `bus_ids`.
+            assert!(
+                net.bus_aliases.iter().any(|(a, j)| a == id && *j == i),
+                "{name}: {id} should appear among its own bus's aliases"
+            );
+        }
+        for (_, i) in &net.bus_aliases {
+            assert!(*i < net.buses.len(), "{name}: alias points past the bus list");
+        }
+        checked += 1;
+    }
+    assert!(checked >= 4, "expected several configurations, checked {checked}");
+}

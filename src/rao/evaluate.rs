@@ -86,6 +86,32 @@ impl Resolution {
     /// `<node>_generator`, and a CRAC written against that network uses the
     /// name powsybl gave it rather than the node code the file contains.
     pub fn with_buses(crac: &Crac, branch_ids: &[String], bus_ids: &[String]) -> Self {
+        Self::with_bus_aliases(crac, branch_ids, bus_ids, &[])
+    }
+
+    /// Resolve against branches, buses, and **other names those buses answer
+    /// to**.
+    ///
+    /// A bus has one index and may have several names. CGMES is where this
+    /// stops being hypothetical: the skeleton merges galvanically-joined
+    /// `TopologicalNode`s, so one bus can carry several mRIDs, and
+    /// [`bus_ids`](crate::cgmes::CgmesNetwork::bus_ids) has to pick one because
+    /// the network has one node. A CRAC written against the same model is under
+    /// no obligation to pick the same one — which document named the node is the
+    /// author's business — and before this it simply failed to resolve, silently
+    /// dropping a redispatch from the optimization while every margin still
+    /// looked right.
+    ///
+    /// `aliases` is `(name, bus index)` and may include the canonical name; a
+    /// name in `bus_ids` always wins, so the two can overlap without the caller
+    /// having to subtract one from the other. Where two aliases claim one name
+    /// the first wins, which is why the importer sorts them.
+    pub fn with_bus_aliases(
+        crac: &Crac,
+        branch_ids: &[String],
+        bus_ids: &[String],
+        aliases: &[(String, usize)],
+    ) -> Self {
         let mut exact: HashMap<&str, usize> = HashMap::with_capacity(branch_ids.len());
         let mut trimmed: HashMap<&str, usize> = HashMap::with_capacity(branch_ids.len());
         for (i, id) in branch_ids.iter().enumerate() {
@@ -93,11 +119,19 @@ impl Resolution {
             trimmed.entry(id.trim()).or_insert(i);
         }
 
-        let mut bus_exact: HashMap<&str, usize> = HashMap::with_capacity(bus_ids.len());
-        let mut bus_trimmed: HashMap<&str, usize> = HashMap::with_capacity(bus_ids.len());
+        let mut bus_exact: HashMap<&str, usize> =
+            HashMap::with_capacity(bus_ids.len() + aliases.len());
+        let mut bus_trimmed: HashMap<&str, usize> =
+            HashMap::with_capacity(bus_ids.len() + aliases.len());
         for (i, id) in bus_ids.iter().enumerate() {
             bus_exact.entry(id.as_str()).or_insert(i);
             bus_trimmed.entry(id.trim()).or_insert(i);
+        }
+        // After the canonical names, so `or_insert` gives those precedence and
+        // an alias only ever answers a question nothing else could.
+        for (id, i) in aliases {
+            bus_exact.entry(id.as_str()).or_insert(*i);
+            bus_trimmed.entry(id.trim()).or_insert(*i);
         }
         let find_bus = |element: &str| -> Option<usize> {
             if let Some(&i) = bus_exact.get(element).or_else(|| bus_trimmed.get(element.trim())) {
