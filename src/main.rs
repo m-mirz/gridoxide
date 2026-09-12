@@ -92,12 +92,18 @@ usage:
                                 gridoxide's own <network>.rao.json companion.
                                 Exits 0 when every margin is non-negative and 1
                                 when any is not, so it can gate a pipeline.
-  gridoxide rao <network> --crac <crac.json> [--depth N] [--validate-ac] [--json]
+  gridoxide rao <network> --crac <crac.json> [--parameters <p.json>]
+                         [--depth N] [--validate-ac] [--json]
                                 optimize remedial actions: search over the
                                 network actions the CRAC permits, re-optimizing
                                 the range actions at every candidate, and report
                                 what to do in each state. --depth bounds how
                                 many network actions may be stacked (default 2).
+                                --parameters reads OpenRAO's own RaoParameters
+                                document: objective (including MIN_COST), flow
+                                model, MNECs, second preventive and the search
+                                thresholds. --depth wins over the file where
+                                both are given.
                                 Exits 0 when every perimeter ends secure.
   gridoxide switches <profile.xml>... [--retain none|busbar_adjacent|all]
                      [--open <mrid>] [--solve]
@@ -2502,7 +2508,16 @@ fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
         .to_string())
 }
 
-/// `gridoxide rao <network> --crac <crac.json> [--depth N] [--json]`
+/// Counts by name, in a stable order — a `HashMap`'s iteration order is
+/// unspecified, and a warning list that reorders between runs is a diff nobody
+/// can read.
+fn sorted_counts(counts: &std::collections::HashMap<String, usize>) -> Vec<(&String, &usize)> {
+    let mut out: Vec<(&String, &usize)> = counts.iter().collect();
+    out.sort();
+    out
+}
+
+/// `gridoxide rao <network> --crac <crac.json> [--parameters p.json] [--depth N] [--json]`
 ///
 /// Each state the CRAC defines is optimized independently: the actions
 /// available there are searched, and the range actions re-optimized under each
@@ -2515,19 +2530,27 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     use gridoxide::rao::{crac_json, Network, Resolution, SearchOptions};
 
     let crac_path = flag_value(flags, "--crac")?.ok_or("rao needs --crac <crac.json>")?;
-    let depth = match flag_value(flags, "--depth")? {
+    let depth_flag = flag_value(flags, "--depth")?;
+    let depth_given = depth_flag.is_some();
+    let depth = match depth_flag {
         Some(value) => value.parse::<usize>().map_err(|_| format!("bad --depth `{value}`"))?,
         None => 2,
     };
+    let parameters_path = flag_value(flags, "--parameters")?;
     let as_json = flags.iter().any(|f| f == "--json");
     let validate_ac = flags.iter().any(|f| f == "--validate-ac");
 
     let network = load_network_for_security(path)?;
     let text = std::fs::read_to_string(&crac_path)
         .map_err(|e| format!("reading {crac_path}: {e}"))?;
-    let crac = match gridoxide::rao::Crac::from_json(&text) {
-        Ok(crac) => crac,
-        Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?.0,
+    // The reader's report travels with the CRAC. Dropping it — which this used
+    // to do, with `?.0` — means a remedial action the reader could not resolve
+    // is simply absent from the optimization while every margin still looks
+    // right, which is the one failure mode a study cannot detect from its own
+    // output.
+    let (crac, report) = match gridoxide::rao::Crac::from_json(&text) {
+        Ok(crac) => (crac, crac_json::CracReport::default()),
+        Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?,
     };
 
     let resolution = Resolution::with_bus_aliases(
@@ -2549,10 +2572,54 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         tap_changers: &network.tap_changers,
         base_mva: network.base_mva,
     };
-    let options = SearchOptions { max_depth: depth, ..Default::default() };
+    // The reference states a run's configuration as a `RaoParameters` document,
+    // and every scenario in the vendored corpus names one. Without it the only
+    // reachable run was max-min-margin, DC, no MNECs, no second preventive —
+    // a fraction of what the gate validates.
+    //
+    // `--depth` still wins where it is given, because a flag the user typed
+    // should beat a file they pointed at.
+    let options = match parameters_path {
+        Some(path) => {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("reading {path}: {e}"))?;
+            let mut options = gridoxide::rao::parameters::from_json(&text);
+            if depth_given {
+                options.max_depth = depth;
+            }
+            options
+        }
+        None => SearchOptions { max_depth: depth, ..Default::default() },
+    };
 
-    let mut solver = IpmSolver::new();
-    let plan = gridoxide::rao::run(&crac, &view, &resolution, &mut solver, &options);
+    // A cost objective's LP is one violation column per CNEC priced against
+    // movement, and an interior-point method reports `Unbounded` on it
+    // (`plans/RAO_PLAN.md` §8.14) — so a `MIN_COST` run needs a simplex or MIP
+    // backend. Say so rather than answering by margin without a word.
+    let costly = options.linear.objective_kind.costly().is_some();
+    #[cfg(feature = "opf-highs")]
+    let mut highs =
+        costly.then(|| gridoxide::opf::highs::HighsSolver::new().ok()).flatten();
+    let mut ipm = IpmSolver::new();
+    #[cfg(feature = "opf-highs")]
+    let have_mip = highs.is_some();
+    #[cfg(not(feature = "opf-highs"))]
+    let have_mip = false;
+    #[cfg(feature = "opf-highs")]
+    let solver: &mut dyn gridoxide::opf::Solver = match highs.as_mut() {
+        Some(h) => h,
+        None => &mut ipm,
+    };
+    #[cfg(not(feature = "opf-highs"))]
+    let solver: &mut dyn gridoxide::opf::Solver = &mut ipm;
+    if costly && !have_mip && !as_json {
+        println!(
+            "warning: the configuration asks for MIN_COST, which needs a MIP backend; \
+             without one this run answers by margin"
+        );
+    }
+
+    let plan = gridoxide::rao::run(&crac, &view, &resolution, solver, &options);
 
     // The search ran on DC. Asking AC whether it agrees is a separate stage
     // that never changes the plan — it only decides whether to believe it.
@@ -2571,6 +2638,35 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         return Ok(plan.is_secure() && validation.as_ref().is_none_or(|v| v.is_accepted()));
     }
 
+    if let Some(version) = &report.version {
+        println!("crac format version {version}");
+    }
+    // What the reader could not use. Reported for the same reason
+    // `resolution.unresolved` is: a remedial action that never reached the
+    // search leaves every margin looking exactly as trustworthy as it would if
+    // the action had been considered and declined.
+    if !report.dropped_actions.is_empty() {
+        println!(
+            "warning: {} remedial action(s) dropped by the reader: {}",
+            report.dropped_actions.len(),
+            report.dropped_actions.join(", ")
+        );
+    }
+    for (name, count) in sorted_counts(&report.unknown_actions) {
+        println!("warning: {count} unreadable elementary action(s) of kind `{name}`");
+    }
+    for (name, count) in sorted_counts(&report.unknown_usage_rules) {
+        println!("warning: {count} unreadable usage rule(s) of kind `{name}`");
+    }
+    // Counted, not modelled — the same boundary the reference draws, which
+    // checks them in a separate monitoring pass. Stated so a CRAC that leans on
+    // them is not read as fully optimized.
+    if report.angle_cnecs + report.voltage_cnecs > 0 {
+        println!(
+            "note: {} angle and {} voltage CNEC(s) are counted, not optimized",
+            report.angle_cnecs, report.voltage_cnecs
+        );
+    }
     if !resolution.is_complete() {
         println!(
             "warning: {} element(s) not found in the network: {}",

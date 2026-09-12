@@ -261,6 +261,11 @@ path = "tests/cli_security_test.rs"
 required-features = ["rao", "ucte", "iidm"]
 
 [[test]]
+name = "cli_rao_test"
+path = "tests/cli_rao_test.rs"
+required-features = ["rao", "ucte", "iidm"]
+
+[[test]]
 name = "rao_cucumber_test"
 path = "tests/rao_cucumber_test.rs"
 required-features = ["rao", "ucte"]
