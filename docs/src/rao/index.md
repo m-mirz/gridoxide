@@ -215,11 +215,13 @@ and refuses to let a scenario disagree without one — see `plans/RAO_PLAN.md` �
   shifter paying for a preventive push; the column is scoped to the states it governs and is not
   reported, because the curative perimeter that follows decides it properly.
 
-  What that cannot yet express is a range written **relative to the previous instant**, because its
-  window is relative to another *column* rather than to a number, and this LP carries one bound pair
-  per column and no row coupling two of them. Such a column is declined rather than mismodelled —
-  offering it anchors the window on the network's own starting tap, and the curative shifter then
-  spends the pass undoing whatever preventive chose. `plans/RAO_PLAN.md` §8.11 has the measurement.
+  A range written **relative to the previous instant** is expressed too, as of §8.23, and the way it
+  had to be is the interesting part: its window is relative to another *column* — the preventive
+  set-point the same problem is deciding — so it is stated as a **row**, `min ≤ A(r,s) − A(r) ≤ max`,
+  rather than as the column's own bounds. §8.11 declined such a column on the grounds that the LP
+  carries one bound pair per column and no row coupling two of them, which was true of a bound and
+  not of a row. It changes no answer in the vendored corpus; what it removes is a case where the
+  second pass could not see a curative shifter at all.
 
   What the reference additionally does is *keep* the curative decisions afterwards rather than
   re-deriving them. That is a separate change, and §8.9 records it costing 2 and fixing nothing.

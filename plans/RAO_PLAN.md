@@ -2283,6 +2283,65 @@ MiniGrid is that case: 15 buses, 13 aliased.
 Wired through `gridoxide security` and `gridoxide rao`; every other importer passes an empty list,
 where a bus has exactly one name and the question does not arise.
 
+### 8.23 The coupling row §8.11 named, built — and worth nothing on this corpus
+
+§8.11 declined to give an `A(r, s)` column to a range action whose range is written
+`relativeToPreviousInstant`, and stated the blocker precisely: such a window is relative to another
+**column** — the preventive set-point this same problem is deciding — and *"this LP carries one bound
+pair per column and no row coupling two of them"*. Offering the column anyway anchors the window on
+the network's own tap, which took `second_preventive.feature` from 115 to 104 and 1.4.1.6 from 11 of
+13 to **0 of 13**.
+
+That statement was about a **bound**, and §8.17 has since added a row coupling two columns for the
+movement definition. So the window is expressible: `min ≤ A(r,s) − A(r) ≤ max` is a row.
+
+It is now built, and **it changes no answer on this corpus**. The per-scenario report is byte-identical
+with the column offered and with it declined.
+
+#### Two things the design got wrong before the code was written, and one it got right
+
+**The anchor is the machine, not the range action.** The plan said to reuse `anchor_of`. That is
+wrong, and wrong in the silent direction: `crac_ep20us1case1_6.json` — the CRAC the restriction was
+tuned against — states the two permissions on one shifter as `pst_fr_pra` (preventive, absolute) and
+`pst_fr_cra` (curative, chained), **two range actions with no index in common**. `anchor_of` keys on
+the action, would have found nothing, and the column would have been offered with no window: the
+104-assertion regression, arrived at by a route nothing would have flagged. `previous_instant_of`
+keys on `PstControl::branch` instead, which is how the supersession block twenty lines away already
+treats the same pair.
+
+**It must search every control, not the ones before it.** `anchor_of` scans `controls[..k]` because a
+cost anchor precedes its dependent. Here it does not: `build_controls` walks `crac.range_actions` in
+declaration order and that CRAC declares `pst_fr_cra` *before* `pst_fr_pra`. A probe confirms the row
+landing as "col 1 anchored on col 2".
+
+**The tap table is what the window must be read from.** Not a step size. The probe's own output makes
+the case: a ±4-tap window comes out as `[−1.5583, +1.5575]` degrees — not symmetric, because the
+table is not uniform, and descending in angle as the tap rises, so the *lowest* admissible tap
+supplies the row's *upper* bound. `chained_window` takes min and max over the admissible taps, and a
+unit test asserts the asymmetry rather than trusting it.
+
+Rounding needed a filter of its own. The bracketing-tap trial rounds one column at a time and §8.18's
+coupled-move rule is cost-gated, so independent rounding could separate the pair by more than the
+window allows and hand `objective` a plan the CRAC forbids. `chained_taps_hold` rejects those, in
+**taps** — exact, where the row is a linearization.
+
+#### Why this is kept, when §8.21 declined `TapModel::Discrete` on the same evidence
+
+Both are capabilities the corpus cannot distinguish. The distinction is what the alternative is
+known to be worth:
+
+- Continuous-plus-rounding **reaches the reference's discrete answer**, proven on 24 scenarios
+  including six controlled pairs. There is positive evidence the integer tap is redundant, and
+  building it would swap a working mechanism for a different one over scenarios already at 100%.
+- Declining a chained column means the second preventive pass **cannot see that shifter at all**, and
+  §8.11 measured what seeing curative shifters is worth: `A(r, s)` closed 1.4.1.2 from 5 to 11. So
+  the capability class is known-valuable and the decline was a hole in it. That no *chained* scenario
+  needs the hole filled is a fact about this corpus, not about the capability.
+
+The honest summary is that this is **dead weight on the gate and a removed limitation for a user's
+CRAC**, and it is recorded as both rather than as progress. `second_preventive.feature` stays at 118
+of 123; the gate total stays at **1825 of 1862**.
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a

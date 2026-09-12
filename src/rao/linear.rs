@@ -79,7 +79,7 @@ use crate::linear::DcOptions;
 use crate::opf::{LinearProgram, OpfError, OptStatus, Solver};
 use crate::types::Transformer;
 
-use super::crac::{Crac, RangeActionKind, RangeKind, State};
+use super::crac::{Crac, RangeActionKind, State};
 use super::evaluate::{FlowModel, Network, Resolution};
 use super::limits::Budget;
 use super::mnec::{Mnec, NO_CNEC_MARGIN};
@@ -495,6 +495,15 @@ struct Control {
     /// `(0.0, 0.0)` where the CRAC states no variation cost, which is every
     /// action outside the costly corpus.
     variation: (f64, f64),
+    /// A `relativeToPreviousInstant` window this column states as a **row**
+    /// rather than as its own bounds, in **taps**, about the previous instant's
+    /// position.
+    ///
+    /// `None` on every column whose previous instant is a number — which is
+    /// every column but one: an `A(r, s)` column in the second preventive
+    /// problem, whose previous instant is another column of that same problem.
+    /// See [`tap_bounds_split`] and [`previous_instant_of`].
+    chained: Option<ChainedWindow>,
     /// What using this action at all costs, whatever distance it then travels.
     ///
     /// Unlike [`variation`](Self::variation) this cannot be a column price: it
@@ -907,6 +916,11 @@ fn optimize_within(
                         }
                     }
                 }
+                // A trial that breaks a chained window is not a worse answer,
+                // it is not an answer: the CRAC does not permit it.
+                if !chained_taps_hold(&controls, &trial) {
+                    continue;
+                }
                 apply(crac, network, &mut controls, &trial);
                 let score = objective(crac, network, resolution, perimeter, &controls, options);
                 if score > best_here + 1e-9 {
@@ -1213,6 +1227,30 @@ fn build_program(
             None => control.current,
         };
         lp.add_row(&row, anchor, anchor);
+
+        // The `relativeToPreviousInstant` window, as a **row**:
+        //
+        //     min ≤ A(r, s) − A(r) ≤ max
+        //
+        // §8.11 declined this column because its window is relative to another
+        // column rather than to a number, and "this LP carries one bound pair
+        // per column and no row coupling two of them". That was true of a
+        // *bound*; §8.17's movement row had already shown a row can name two
+        // columns, and this is the same observation applied to the constraint
+        // the decline was actually about.
+        //
+        // **Not** gated on the objective kind, unlike the movement row above.
+        // That gate is about pricing, where two readings of a penalty are each
+        // defensible. This is a permission the CRAC states, and the alternatives
+        // are declining the column or ignoring a limit the file wrote down. It
+        // would also be dead code: no `min_cost.feature` CRAC carries a chained
+        // range, and the corpus that does has no second preventive pass.
+        if let (Some(window), Some(p)) = (control.chained, previous_instant_of(controls, k))
+            && let Some(pst) = controls[p].pst.as_ref()
+        {
+            let (lo, hi) = chained_window(pst, window);
+            lp.add_row(&[(setpoint_column(k), 1.0), (setpoint_column(p), -1.0)], lo, hi);
+        }
 
         // What it costs to use this action **at all**, as against how far it
         // then travels. The two are different sizes and the reference states
@@ -1608,23 +1646,28 @@ fn build_controls(
         if let Some(held) = split
             && options.a_r_s
             && options.available.allows(&action.usage_rules, &held.states, crac)
-            // A range written `relativeToPreviousInstant` is *chained* to the
-            // instant before it, and in this problem that instant is the one
-            // being decided. Its window is therefore relative to another column
-            // rather than to a number, which this LP cannot say: it carries one
-            // bound pair per column and no row coupling two of them. Offering
-            // the column anyway anchors the window on the network's own
-            // starting tap, and the curative shifter then spends the pass
-            // undoing whatever preventive chose — on the reference's 1.4.1.6
-            // that is the difference between its answer and a second pass that
-            // gives up and falls back to the initial situation. Declining is
-            // the honest reading until the coupling row exists; see
-            // `plans/RAO_PLAN.md` §8.11.
-            && !action.ranges.iter().any(|r| r.kind == RangeKind::RelativeToPreviousInstant)
+            // A range written `relativeToPreviousInstant` used to be declined
+            // here. Its window is relative to another *column* — the preventive
+            // set-point this same problem is deciding — and §8.11 read that as
+            // beyond the LP, "one bound pair per column and no row coupling two
+            // of them". True of a bound, and the window is now stated as a row
+            // instead: see `tap_bounds_split` and the chained row in
+            // `build_program`.
         {
             wanted.push((index, Some(&held.states)));
         }
     }
+
+    // The machines this problem decides preventively. A curative column on one of
+    // them has its previous instant *in this LP* rather than in the network.
+    let preventive_branches: Vec<usize> = wanted
+        .iter()
+        .filter(|(_, governs)| governs.is_none())
+        .filter_map(|(index, _)| match &crac.range_actions[*index].kind {
+            RangeActionKind::Pst { element, .. } => resolution.branch(element),
+            _ => None,
+        })
+        .collect();
 
     let mut controls = Vec::new();
     for (index, governs) in wanted {
@@ -1678,7 +1721,15 @@ fn build_controls(
                     .iter()
                     .find(|(i, _)| *i == index)
                     .map_or(*initial_tap, |(_, t)| *t);
-                let (lower, upper) = tap_bounds(action, &table, *initial_tap, previous_tap);
+                // Chain the window onto the preventive column only when this
+                // problem actually contains one for the same **machine**. It is
+                // a property of the shifter, not of the range action: 1.4.1.6
+                // states the two permissions as `pst_fr_pra` and `pst_fr_cra`,
+                // two CRAC actions with no index in common, and the supersession
+                // block below already treats them as one.
+                let chain = governs.is_some() && preventive_branches.contains(&branch);
+                let ((lower, upper), chained) =
+                    tap_bounds_split(action, &table, *initial_tap, previous_tap, chain);
                 if !starts_inside_its_range(current, lower, upper) {
                     continue;
                 }
@@ -1706,6 +1757,7 @@ fn build_controls(
                     start: current,
                     start_tap: Some(tap),
                     variation,
+                    chained,
                     activation: action.activation_cost,
                     lower,
                     upper,
@@ -1795,6 +1847,7 @@ fn build_controls(
                     variation: action
                         .variation_cost
                         .map_or((0.0, 0.0), |c| (c.up, c.down)),
+                    chained: None,
                     activation: action.activation_cost,
                     lower,
                     upper,
@@ -1929,8 +1982,58 @@ pub(super) fn tap_bounds(
     initial_tap: i32,
     previous_tap: i32,
 ) -> (f64, f64) {
+    tap_bounds_split(action, table, initial_tap, previous_tap, false).0
+}
+
+/// The same, with the option of holding a `relativeToPreviousInstant` window
+/// **back** from the bound so a caller can state it as a row instead.
+///
+/// `chain = false` is [`tap_bounds`] exactly: every range folds into one tap
+/// interval, a chained one anchored on `previous_tap`, and the second element is
+/// `None`. That is the right reading everywhere the previous instant is a
+/// *number* — a curative perimeter solved after the preventive one, which is
+/// every perimeter but one.
+///
+/// `chain = true` is for the second preventive problem, where the previous
+/// instant is **being decided in the same LP**. There the window is relative to
+/// another column, and §8.11 declined the whole column rather than mis-state it,
+/// on the grounds that "this LP carries one bound pair per column and no row
+/// coupling two of them". That was true of a *bound*. So the chained ranges come
+/// back separately, in taps, for [`build_program`] to emit as a row; the
+/// absolute and `relativeToInitialNetwork` ranges still become the bound.
+///
+/// One flag rather than two functions, so "nothing changes unless chaining" is
+/// checkable by reading the call sites: `chain` is only ever `true` on the new
+/// path.
+/// A `relativeToPreviousInstant` window in **taps**, `(min, max)`, either side
+/// open where the CRAC states only one.
+pub(super) type ChainedWindow = (Option<i32>, Option<i32>);
+
+pub(super) fn tap_bounds_split(
+    action: &super::crac::RangeAction,
+    table: &[(i32, f64)],
+    initial_tap: i32,
+    previous_tap: i32,
+    chain: bool,
+) -> ((f64, f64), Option<ChainedWindow>) {
     let (mut low, mut high) = (i32::MIN, i32::MAX);
+    // The chained window, intersected across however many chained ranges the
+    // action declares — tightest wins, exactly as the tap interval does.
+    let (mut chained_min, mut chained_max) = (None::<i32>, None::<i32>);
+    let mut chained_any = false;
     for range in &action.ranges {
+        if chain && range.kind == super::crac::RangeKind::RelativeToPreviousInstant {
+            chained_any = true;
+            if let Some(m) = range.min {
+                let m = m as i32;
+                chained_min = Some(chained_min.map_or(m, |c: i32| c.max(m)));
+            }
+            if let Some(m) = range.max {
+                let m = m as i32;
+                chained_max = Some(chained_max.map_or(m, |c: i32| c.min(m)));
+            }
+            continue;
+        }
         let anchor = match range.kind {
             super::crac::RangeKind::RelativeToInitialNetwork => initial_tap,
             super::crac::RangeKind::RelativeToPreviousInstant => previous_tap,
@@ -1960,13 +2063,19 @@ pub(super) fn tap_bounds(
     if angles.is_empty() {
         let all: Vec<f64> = table.iter().map(|(_, a)| *a).collect();
         return (
-            all.iter().copied().fold(f64::INFINITY, f64::min),
-            all.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            (
+                all.iter().copied().fold(f64::INFINITY, f64::min),
+                all.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ),
+            chained_any.then_some((chained_min, chained_max)),
         );
     }
     (
-        angles.iter().copied().fold(f64::INFINITY, f64::min),
-        angles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        (
+            angles.iter().copied().fold(f64::INFINITY, f64::min),
+            angles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ),
+        chained_any.then_some((chained_min, chained_max)),
     )
 }
 
@@ -2292,6 +2401,95 @@ fn anchor_of(controls: &[Control], k: usize) -> Option<usize> {
     controls[..k].iter().position(|c| c.action == control.action && c.reported)
 }
 
+/// Whether a proposal keeps every chained column inside the window its CRAC
+/// states, counted in **taps**.
+///
+/// Exact where the LP's row is a linearization: the row is what the optimizer
+/// chooses against, and this is what its answer is checked against, in the unit
+/// the CRAC wrote the window in.
+///
+/// It is needed because rounding is per column. The LP may leave the anchor
+/// between taps 1 and 2 and the chained column between −3 and −2, and rounding
+/// each to its own nearest tap can separate them by more than the window allows
+/// — handing `objective` a pair the CRAC forbids, and letting the pass judge a
+/// preventive tap against a curative capability that does not exist.
+///
+/// Deliberately separate from the `coupled` rule in the rounding loop, which is
+/// cost-gated and encodes *inheritance* — a curative column matching preventive
+/// is not making a decision. This encodes *permission*. They answer different
+/// questions and should not be merged.
+fn chained_taps_hold(controls: &[Control], proposed: &[(f64, Option<i32>)]) -> bool {
+    for (k, control) in controls.iter().enumerate() {
+        let Some(window) = control.chained else { continue };
+        let Some(p) = previous_instant_of(controls, k) else { continue };
+        let (Some(here), Some(there)) = (proposed[k].1, proposed[p].1) else { continue };
+        let delta = here - there;
+        if window.0.is_some_and(|m| delta < m) || window.1.is_some_and(|m| delta > m) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The column this one's `relativeToPreviousInstant` window is measured from:
+/// the preventive decision on the **same machine**, whatever range action
+/// happens to declare it.
+///
+/// Deliberately not [`anchor_of`], and the difference is not cosmetic. That one
+/// answers *what does this column's movement cost measure from*, and keys on the
+/// range action because a cost is billed per action. This answers *what is this
+/// column's previous instant*, and an instant is a property of the machine: the
+/// reference's 1.4.1.6 states the preventive and curative permissions on one
+/// shifter as `pst_fr_pra` and `pst_fr_cra`, two actions with no index in
+/// common. Keyed on the action, this would find nothing on exactly the scenario
+/// it exists for, and the column would then be offered with no window at all —
+/// which is the regression §8.11 measured, arrived at silently.
+///
+/// Searches **all** of `controls`, not `controls[..k]`. `build_controls` walks
+/// `crac.range_actions` in declaration order, and 1.4.1.6 declares the curative
+/// action before the preventive one.
+fn previous_instant_of(controls: &[Control], k: usize) -> Option<usize> {
+    let control = &controls[k];
+    if control.reported || control.chained.is_none() {
+        return None;
+    }
+    let branch = control.pst.as_ref()?.branch;
+    controls
+        .iter()
+        .position(|c| c.reported && c.pst.as_ref().is_some_and(|p| p.branch == branch))
+}
+
+/// A chained tap window as an angle window **relative to where the anchor
+/// currently sits**, read off that machine's own table.
+///
+/// Min and max over the admissible taps rather than `steps × step_size`, for the
+/// same reason [`tap_bounds`] does it: a tap table is neither uniform nor
+/// necessarily monotone in angle, and `CRAC_ANGLE_SIGN` means these tables run
+/// *downward* on the vendored fixtures. Multiplying a step size would get the
+/// sign right by luck and the width wrong by construction.
+///
+/// It is a linearization, exact only while the anchor sits on `anchor.tap`, and
+/// the outer loop re-derives it every iteration because `build_program` runs
+/// every iteration. What it cannot do is produce an illegal *reported* plan: an
+/// `A(r, s)` column is never reported, and the curative perimeter that follows
+/// re-decides it against the exact integer bound.
+fn chained_window(anchor: &PstControl, window: ChainedWindow) -> (f64, f64) {
+    let base = anchor.angle_at(anchor.tap).unwrap_or(0.0);
+    let low = window.0.map_or(i32::MIN, |m| anchor.tap.saturating_add(m));
+    let high = window.1.map_or(i32::MAX, |m| anchor.tap.saturating_add(m));
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(t, a) in &anchor.tap_to_angle {
+        if t >= low && t <= high {
+            lo = lo.min(a - base);
+            hi = hi.max(a - base);
+        }
+    }
+    // No admissible tap: the window and the table do not overlap, which a CRAC
+    // can state. Pinning the column to the anchor is the honest reading — it may
+    // not move relative to the previous instant at all.
+    if lo > hi { (0.0, 0.0) } else { (lo, hi) }
+}
+
 /// The range actions a set of controls has actually moved, indexing
 /// [`Crac::range_actions`].
 ///
@@ -2449,4 +2647,106 @@ fn perimeter_flows(
 pub fn base_flows(network: &Network<'_>) -> Vec<f64> {
     let mut buses = network.buses.to_vec();
     dc_power_flow(&mut buses, network.lines, network.transformers, DcOptions::default()).branch_p
+}
+
+#[cfg(test)]
+mod chained_tests {
+    use super::*;
+
+    /// A shifter whose steps are **not** uniform, which is the case that decides
+    /// how this must be computed.
+    fn pst(tap: i32) -> PstControl {
+        PstControl {
+            branch: 0,
+            // Widening steps, and *descending* in angle as the tap rises — the
+            // sign `CRAC_ANGLE_SIGN` produces on the vendored fixtures.
+            tap_to_angle: (-8..=8).map(|t| (t, -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01))).collect(),
+            tap,
+        }
+    }
+
+    /// The window comes from the table, not from a step size.
+    ///
+    /// A ±2-tap window about tap 3 spans taps 1 to 5, whose angles are not
+    /// symmetric about tap 3's — so `±2 × step` would get the width wrong in
+    /// both directions and the sign right only by luck.
+    #[test]
+    fn a_chained_window_is_read_off_the_tap_table() {
+        let anchor = pst(3);
+        let (lo, hi) = chained_window(&anchor, (Some(-2), Some(2)));
+        let at = |t: i32| -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01);
+        assert!((lo - (at(5) - at(3))).abs() < 1e-12, "lo was {lo}");
+        assert!((hi - (at(1) - at(3))).abs() < 1e-12, "hi was {hi}");
+        assert!(
+            (lo.abs() - hi.abs()).abs() > 1e-6,
+            "this table is nonuniform, so the window must not come out symmetric: {lo} .. {hi}"
+        );
+    }
+
+    /// A one-sided window is one-sided, and the open side reaches the table's end
+    /// rather than wrapping or vanishing.
+    ///
+    /// Note which end is which. The window is stated in **taps** and the row is
+    /// in **degrees**, and these tables descend in angle as the tap rises — so
+    /// the lowest admissible tap supplies the row's *upper* bound. Getting that
+    /// backwards is the failure mode that would silently let a curative shifter
+    /// move the wrong way, and asserting it here is cheaper than finding it in a
+    /// margin.
+    #[test]
+    fn a_one_sided_chained_window_stays_one_sided() {
+        let anchor = pst(0);
+        // Bounded one tap above, unbounded below: taps −8 through 1.
+        let (lo, hi) = chained_window(&anchor, (None, Some(1)));
+        let at = |t: i32| -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01);
+        assert!((lo - (at(1) - at(0))).abs() < 1e-12, "lo was {lo}");
+        assert!(
+            (hi - (at(-8) - at(0))).abs() < 1e-12,
+            "the open side should reach the table's end, was {hi}"
+        );
+    }
+
+    /// A window the table cannot satisfy pins the column to its anchor rather
+    /// than inverting. A CRAC can state one; an inverted row cannot be solved.
+    #[test]
+    fn an_unsatisfiable_chained_window_pins_rather_than_inverts() {
+        let anchor = pst(8);
+        let (lo, hi) = chained_window(&anchor, (Some(4), Some(6)));
+        assert_eq!((lo, hi), (0.0, 0.0));
+    }
+
+    /// The rounding filter counts taps, which is the unit the CRAC states.
+    #[test]
+    fn the_rounding_filter_rejects_a_pair_outside_the_window() {
+        let mut anchor = control();
+        anchor.reported = true;
+        anchor.pst = Some(pst(0));
+        let mut chained = control();
+        chained.reported = false;
+        chained.chained = Some((Some(-2), Some(2)));
+        chained.pst = Some(pst(0));
+        let controls = vec![anchor, chained];
+        // Anchor at tap 1, chained at tap -1: two apart, allowed.
+        assert!(chained_taps_hold(&controls, &[(0.0, Some(1)), (0.0, Some(-1))]));
+        // Three apart: not.
+        assert!(!chained_taps_hold(&controls, &[(0.0, Some(1)), (0.0, Some(-2))]));
+    }
+
+    fn control() -> Control {
+        Control {
+            action: 0,
+            reported: true,
+            sensitivity: Vec::new(),
+            current: 0.0,
+            start: 0.0,
+            start_tap: Some(0),
+            variation: (0.0, 0.0),
+            chained: None,
+            activation: None,
+            lower: -10.0,
+            upper: 10.0,
+            penalty: 0.0,
+            pst: None,
+            injection: None,
+        }
+    }
 }
