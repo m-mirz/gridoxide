@@ -16,8 +16,8 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **286 of 294** on the
-> costly-optimization one — **1823 of 1862**, with
+> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **288 of 294** on the
+> costly-optimization one — **1825 of 1862**, with
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
@@ -30,11 +30,14 @@ second preventive was built and gated the same day.
 > **272** (§8.17), with two defects in that same machinery — a `start` that did not survive
 > relinearization, and a rounding step that pulled a coupled column apart — taking it to **277**
 > (§8.18), and dropping the curative stop target under a cost — where it compares two quantities
-> that are not the same thing — takes it to **286** (§8.19). Of the 8 that remain, 6 are gridoxide
-> answering **more cheaply** than the reference asks and awaiting a §8.6 measurement; 2 are the one
-> remaining defect, 3.4.1.12.
+> that are not the same thing — takes it to **286** (§8.19). 3.4.1.12, the last defect, was a
+> curative state of a contingency with a forced automaton and no curative action, read in a network
+> where its automaton never fired — in the optimizer *and* in the gate — and closing it gives
+> **288** (§8.20). All 6 that remain are gridoxide answering **more cheaply** than the reference
+> asks, measured and recorded under §8.6; the corpus's blanket exemption is gone with the last
+> defect.
 >
-> That figure is **solver-dependent by construction**: 286 with `opf-highs`, 220 without, because
+> That figure is **solver-dependent by construction**: 288 with `opf-highs`, 222 without, because
 > the barrier method reports `Unbounded` on these cost LPs and the reference's own costly
 > configurations name `"solver": "CBC"`. The gate's baseline is cfg-gated to say so.
 >
@@ -2106,6 +2109,67 @@ turns out to carry a unit with it.
 The last two are recorded-disagreement candidates under §8.6 and **neither is exempt until measured**
 as one. "It looks cheaper" is not the measurement; scoring both plans under the same evaluation is,
 and §8.6's rule is that the entry comes after the measurement rather than instead of it.
+
+### 8.20 A state read in a network the plan never produces
+
+3.4.1.12 was the last defect in the costly corpus, and it was one mistake made twice — once in the
+optimizer and once in the gate that measures it, which is the pair the project's two-implementations
+rule is meant to catch and here very nearly did not, because both made it the same way.
+
+The scenario builds the case deliberately. Its four contingencies are "no ARA and no CRA", "forced
+ARA and no CRA", "no ARA and available CRA", "forced ARA and available CRA", and the second of those
+is the interesting one: `coBeFr3` has a **forced automaton and nothing to decide curatively**. So
+`scenarios_after` builds it no curative perimeter — there is nothing to search — and its curative
+CNEC then has to be read somewhere.
+
+Both readers fell back to the **preventive** network, where `closeBeFr7` has not fired. That reads
+the overload at 100 MW instead of the 66.67 the automaton leaves, 100 is then the worst perimeter
+under §8.15's max rule, and it is the whole of the gap: a cost of 104090 against 70756.67 and a
+worst margin of −100 against −66.67.
+
+Three one-line corrections, all of them the same sentence — *what the automatons leave behind stays
+behind*:
+
+- **`final_assessment`** let the automaton network govern only that contingency's `Auto` states. It
+  now governs every state of the contingency at or after them, curative included. Curative perimeters
+  are taken first, so the wider claim only ever picks up what nothing else wanted.
+- **`castor`'s final margin** was assembled by hand — the preventive reading over the states the
+  preventive perimeter governs, folded with each perimeter's own figure. That is right for every
+  state except a curative one **pulled forward** because no curative action can reach it, in a
+  contingency that nonetheless has an automaton: the pull-forward rule puts it in
+  `preventive_states`, so it was read preventively. It now comes from `final_assessment`, which is
+  the one place that knows which network each state is in, and the hand-assembly is gone.
+- **The gate's `margins_at(Stage::Cra)`** used the last curative perimeter *else preventive*, with
+  the same hole in the middle. Now: last curative perimeter, else the automatons, else preventive.
+
+**286 → 288**, the other four files unchanged to the assertion. Gate: **1825 of 1862**.
+
+#### The corpus now has no defects left, and the exemption goes with them
+
+`min_cost.feature` carried a blanket exemption — the `FILES` entry's fourth field, which says a whole
+corpus may disagree and why. It was honest while the capability was missing. It stopped being honest
+when 3.4.1.12 closed, and a stale exemption is how a corpus stops being measured just as surely as a
+missing one.
+
+So it is **cfg-gated**, which is the same distinction the baseline already makes and for the same
+reason. With a MIP backend there is no exemption and the per-scenario rule applies here as
+everywhere: every scenario that disagrees must name a measurement. Without one, seven scenarios
+disagree because the build cannot pose an activation binary at all — a capability it does not have
+rather than an answer it disputes, and asking it to stand behind an answer it never computed would be
+the wrong question.
+
+The two that remain are now in `RECORDED_DISAGREEMENTS`, measured:
+
+- **3.4.2.4** — the final answer is *identical* and matches: secure, worst margin 11.73, cost 0 after
+  CRA. The difference is the preventive step, and this PST is **free**, so under `MIN_COST` the only
+  term its tap moves is the violation: gridoxide's −16 leaves 214762 where the reference's −3 leaves
+  282717.
+- **3.4.3.5** — gridoxide secures for **135** where the reference spends 145, declining `closeBeFr4`
+  after `coBeFr2` on a state already secure at 5.74 MW. The after-PRA cost agrees to 1e-7
+  (4386.911874 against 4386.91), so the flow models agree and the whole difference is one curative
+  activation the objective does not ask for.
+
+Their assertions still count as mismatched, which is the point of that list: 288 of 294, not 294.
 
 ### 8.4 Two independent MILP solvers
 

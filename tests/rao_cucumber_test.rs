@@ -1024,15 +1024,32 @@ fn check(scenario: &Scenario) -> Outcome {
         let mut out = HashMap::new();
         for scenario in &plan.scenarios {
             let contingency = Some(scenario.contingency);
+            // The automatons, as the stage a curative perimeter inherits.
+            let after_automatons = || {
+                scenario
+                    .automatons
+                    .as_ref()
+                    .map(|a| (&a.open_branches, &a.transformers, &plan.preventive.buses))
+            };
             let (open, transformers, buses) = match stage {
+                // Last curative perimeter, else the automatons, **else**
+                // preventive — and the middle step is the one that matters.
+                //
+                // A contingency can have a forced automaton and no curative
+                // action at all, and then `scenarios_after` builds it no curative
+                // perimeter: there is nothing to decide. Falling straight back to
+                // preventive measures its curative CNECs in a network where its
+                // automaton never fired, which is not a stage that exists. On the
+                // reference's 3.4.1.12 that is `coBeFr3` — "forced ARA and no
+                // CRA" in its own description — read at 100 MW of overload
+                // instead of the 66.67 `closeBeFr7` leaves, and 100 is then the
+                // worst perimeter and the whole after-CRA cost.
                 Stage::Cra => scenario
                     .perimeters
                     .last()
-                    .map(|p| (&p.open_branches, &p.transformers, &p.buses)),
-                Stage::Ara => scenario
-                    .automatons
-                    .as_ref()
-                    .map(|a| (&a.open_branches, &a.transformers, &plan.preventive.buses)),
+                    .map(|p| (&p.open_branches, &p.transformers, &p.buses))
+                    .or_else(after_automatons),
+                Stage::Ara => after_automatons(),
                 Stage::Pra => None,
             }
             .unwrap_or((
@@ -1641,15 +1658,34 @@ const FILES: [(&str, usize, usize, Option<&str>); 5] = [
         "min_cost.feature",
         26,
         BASELINE_MATCHED_MIN_COST,
-        // Vendored before the capability exists, deliberately. `MIN_COST` is
-        // not implemented at all: `options_from` recognises only `SECURE_FLOW`,
-        // so these configurations are read as max-min-margin and every
-        // objective-function assertion is answered in the wrong currency.
-        Some(
-            "a range action's activation cost needs a binary per action, hence a MIP, hence `TapModel::Discrete`; and the cost LP is only reached when a solver that can take it is built, so a no-HiGHS build still answers `MIN_COST` by margin",
-        ),
+        MIN_COST_PENDING,
     ),
 ];
+
+/// Whether this corpus is still allowed to disagree wholesale, and why.
+///
+/// **With a MIP backend: it is not.** The blanket exemption was honest for as
+/// long as the capability was missing, and it stopped being honest when 3.4.1.12
+/// closed. A stale exemption is how a corpus stops being measured just as surely
+/// as a missing one, so it is gone, and the per-scenario rule now applies here
+/// like everywhere else: the two scenarios that still disagree are in
+/// [`RECORDED_DISAGREEMENTS`] with their measurements, and their assertions
+/// still count as mismatched.
+#[cfg(feature = "opf-highs")]
+const MIN_COST_PENDING: Option<&str> = None;
+
+/// **Without one: it is**, and this is not the same kind of statement.
+///
+/// A build with no MIP backend cannot pose the activation binary at all, so it
+/// cannot reach the plans these seven scenarios are scored against. That is a
+/// capability this build does not have, not an answer it disagrees about, and
+/// asking it for a per-scenario measurement would be asking it to stand behind
+/// an answer it never computed.
+#[cfg(not(feature = "opf-highs"))]
+const MIN_COST_PENDING: Option<&str> = Some(
+    "a range action's activation cost is a binary per action, so the cost LP is only reachable \
+     with a MIP backend; without one this build answers `MIN_COST` by margin",
+);
 
 /// Run one vendored feature file and assert on its aggregate.
 ///
@@ -1770,6 +1806,20 @@ const RECORDED_DISAGREEMENTS: &[(&str, &str)] = &[
         "5.2.3.3",
         "BestTapFinder: gridoxide's -8 scores -186.15 clean; the reference's -9 scores -176.19 \
          and pays 1.70 of violation, for -201.62",
+    ),
+    (
+        "3.4.2.4",
+        "same final answer — secure, worst margin 11.73, cost 0 after CRA, all matching — reached \
+         through a cheaper preventive step: this PST is free, so under MIN_COST the only term its \
+         tap moves is the violation, and gridoxide's -16 leaves 214762 where the reference's -3 \
+         leaves 282717",
+    ),
+    (
+        "3.4.3.5",
+        "gridoxide secures the network for 135 where the reference spends 145, declining \
+         `closeBeFr4` after `coBeFr2` on a state already secure at 5.74 MW; the after-PRA cost \
+         agrees to 1e-7 (4386.911874 against 4386.91), so the flow models agree and the whole \
+         difference is one curative activation the objective does not ask for",
     ),
 ];
 
@@ -2084,7 +2134,7 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// Nothing else. Every other scenario in the corpus matches in full.
 const BASELINE_MATCHED_2P: usize = 118;
 
-/// The 26 costly-optimization scenarios: **286 of 294**, from 165 with the
+/// The 26 costly-optimization scenarios: **288 of 294**, from 165 with the
 /// objective unbuilt, 178 once the search tree could rank by cost (§8.13), 221
 /// once the LP could minimize it (§8.14), 252 once the cost was *aggregated* the
 /// way the reference aggregates it (§8.15), and 272 once a range action's
@@ -2095,7 +2145,10 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// (§8.18) — and 286 once the curative stop target was dropped under a cost,
 /// where it compares a whole preventive perimeter's violation against a single
 /// curative state's and is therefore met before that state has done anything
-/// (§8.19).
+/// (§8.19) — and 288 once the last defect went: a curative state of a
+/// contingency with a forced automaton and nothing to decide curatively, read
+/// in a network where its automaton never fired, in the optimizer *and* here
+/// (§8.20).
 ///
 /// That last step was two corrections and no new capability, which is why it was
 /// worth 31:
@@ -2110,32 +2163,23 @@ const BASELINE_MATCHED_2P: usize = 118;
 ///   3.4.1.11 pins it: nine states carrying 500 units of overload between them,
 ///   and the cost it states is 100000.
 ///
-/// # What the 8 that remain are
+/// # What the 6 that remain are
 ///
-/// Three scenarios, and two of them are gridoxide answering more cheaply than
-/// the reference asks:
+/// Two scenarios, and **both are gridoxide answering more cheaply** than the
+/// reference asks. Both are measured and in `RECORDED_DISAGREEMENTS`, and both
+/// still count as mismatched here — which is why this is 288 and not 294:
 ///
-/// - **3.4.3.5** (4) secures the network for **135** where the reference spends
-///   145, declining `closeBeFr4` after `coBeFr2` and reaching a smaller margin
-///   — 5.74 against 21.8 — which under `MIN_COST` is the objective working
-///   rather than a defect. A recorded-disagreement candidate under §8.6 and
-///   **not exempt until measured** as one. (3.4.2.5, 3.4.2.7 and 3.4.3.3, which
-///   used to sit here, close in full under §8.17 and §8.18.)
-/// - **3.4.1.12** (2) is the one remaining **defect**: 104090 against the
-///   reference's 70756.67 and a worst margin of −100 against −66.67. Both plans
-///   leave the network insecure and gridoxide's is the more expensive, which is
-///   the one shape that cannot be argued with. Its twin 3.4.1.11 closes
-///   completely under §8.19, so the difference between the two is where the
-///   mechanism is.
-/// - **3.4.2.2** picks `pstBeFr2` where the reference picks `pstBeFr3`, to the
-///   same tap.
-/// - **3.4.2.4** reaches a *cheaper* answer than the reference asks for
-///   (214762 against 282717) by moving its free PST to −16 instead of −3. A
-///   recorded-disagreement candidate rather than a defect, but not yet measured
-///   as one.
+/// - **3.4.3.5** (4) secures for **135** where the reference spends 145,
+///   declining `closeBeFr4` after `coBeFr2` on a state already secure at 5.74
+///   MW. Its after-PRA cost agrees to 1e-7, so the flow models agree and the
+///   whole difference is one curative activation the objective does not ask for.
+/// - **3.4.2.4** (2) reaches the *same* final answer — secure, worst margin
+///   11.73, cost 0 after CRA, all matching — through a cheaper preventive step.
+///   That PST is free, so under `MIN_COST` the only term its tap moves is the
+///   violation: −16 leaves 214762 where the reference's −3 leaves 282717.
 ///
-/// A range action's **activation** cost still needs a binary per action, hence a
-/// MIP, hence `TapModel::Discrete`. See `plans/RAO_PLAN.md` §8.13 through §8.15.
+/// The corpus's blanket exemption went with the last defect and is now cfg-gated
+/// — see [`MIN_COST_PENDING`]. See `plans/RAO_PLAN.md` §8.13 through §8.20.
 ///
 /// The rest of this note is the original *before* comment, kept because the
 /// order it describes is the point:
@@ -2153,9 +2197,9 @@ const BASELINE_MATCHED_2P: usize = 118;
 /// `crac_json.rs` and read by nothing. What passes here passes because a
 /// margin-maximizing answer happens to coincide with a cost-minimizing one.
 #[cfg(feature = "opf-highs")]
-const BASELINE_MATCHED_MIN_COST: usize = 286;
+const BASELINE_MATCHED_MIN_COST: usize = 288;
 
-/// Without HiGHS, the same corpus scores **220**.
+/// Without HiGHS, the same corpus scores **222**.
 ///
 /// Not a build flag changing a number by rounding — it changes which answers are
 /// reachable. A cost objective's LP is one violation column per CNEC priced
@@ -2168,7 +2212,7 @@ const BASELINE_MATCHED_MIN_COST: usize = 286;
 /// because a build that cannot solve these should say so rather than quietly
 /// score lower.
 #[cfg(not(feature = "opf-highs"))]
-const BASELINE_MATCHED_MIN_COST: usize = 220;
+const BASELINE_MATCHED_MIN_COST: usize = 222;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
