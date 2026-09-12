@@ -788,3 +788,117 @@ fn a_stated_interchange_target_is_read_and_reached() {
         net.areas.targets[driven] * net.base_mva
     );
 }
+
+/// The two formats must agree about the **machines**, not only the flows.
+///
+/// `TestCase12Nodes` exists as both `.uct` and `.xiidm` and `cross_check` above
+/// asserts their solved flows are bit-identical. That check passed for months
+/// while the two disagreed completely about reactive capability: UCTE read its
+/// own limits (`ucte.rs`), and IIDM hardcoded every generator to ±infinity,
+/// listing `minMaxReactiveLimits` among elements "with nothing to contribute"
+/// while the document states ±9000 Mvar on every machine.
+///
+/// The flow gate could not see it, and that is the point of this one: plain
+/// `newton_raphson` ignores `q_min`/`q_max`, so the disagreement was invisible
+/// until someone asked for `outerloop::ReactiveLimits` — at which point one
+/// network answered two ways depending on which file it was read from.
+#[test]
+fn the_two_formats_agree_about_reactive_limits() {
+    let u = gridoxide::ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("ucte import");
+    let i = iidm::read(fixture("TestCase12Nodes.xiidm")).expect("iidm import");
+    assert_eq!(u.buses.len(), i.buses.len());
+
+    let mut bounded = 0;
+    for (n, (ub, ib)) in u.buses.iter().zip(&i.buses).enumerate() {
+        // Per unit on each importer's own base, which is the same here.
+        assert!(
+            (ub.q_min - ib.q_min).abs() < 1e-9,
+            "bus {n}: q_min {} (UCTE) against {} (IIDM)",
+            ub.q_min,
+            ib.q_min
+        );
+        assert!(
+            (ub.q_max - ib.q_max).abs() < 1e-9,
+            "bus {n}: q_max {} (UCTE) against {} (IIDM)",
+            ub.q_max,
+            ib.q_max
+        );
+        if ib.q_min.is_finite() && ib.q_max.is_finite() {
+            bounded += 1;
+        }
+    }
+    // Not vacuous: the document states a pair on every generator, so agreeing
+    // at "both unbounded" would be the old bug passing its own test.
+    assert!(bounded >= 5, "expected bounded machines, found {bounded}");
+}
+
+/// A capability curve becomes its envelope, and says so.
+///
+/// `types::Bus` carries one reactive pair, not a function of P. Taking the
+/// widest limit the curve ever allows is an outer approximation — it never
+/// forbids an output the machine can produce — and it replaces no limit at all,
+/// which was a worse approximation of the same kind. The note is what keeps it
+/// honest.
+#[test]
+fn a_capability_curve_becomes_its_envelope_and_is_reported() {
+    let net = iidm::read(fixture("network_one_voltage_level.xiidm")).expect("iidm import");
+    assert!(
+        net.notes.iter().any(|n| n.contains("capability curve")),
+        "the envelope approximation must be reported, notes were {:?}",
+        net.notes
+    );
+    // `network_one_voltage_level` states a genuinely varying curve — minQ -59.3
+    // at P=0 and -54.55 at P=70 — so the envelope is the wider of the two.
+    let bounded: Vec<(f64, f64)> = net
+        .buses
+        .iter()
+        .filter(|b| b.q_min.is_finite() && b.q_max.is_finite())
+        .map(|b| (b.q_min, b.q_max))
+        .collect();
+    assert!(!bounded.is_empty(), "a curve should bound at least one bus");
+    for (lo, hi) in bounded {
+        assert!(lo < hi, "an envelope must not be inverted: {lo} .. {hi}");
+    }
+}
+
+/// A shunt's admittance is per **section**, and the count multiplies it.
+///
+/// `RawShunt`'s own doc comment claimed the stored value was "already
+/// multiplied by the section count" while the parser added one section's worth
+/// and stopped. No fixture could see it: every `sectionCount` in the tree is
+/// `1`, which is precisely how a false invariant survives in a comment.
+///
+/// So this asserts the arithmetic against a document written for it rather than
+/// against a fixture, and says plainly that the committed tree cannot tell the
+/// two readings apart.
+#[test]
+fn a_shunt_is_scaled_by_its_section_count() {
+    let doc = |sections: u32| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_5" id="n" caseDate="2020-01-01T00:00:00.000Z" forecastDistance="0" sourceFormat="test">
+  <iidm:substation id="S" country="FR">
+    <iidm:voltageLevel id="VL" nominalV="400.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B"/></iidm:busBreakerTopology>
+      <iidm:generator id="G" voltageRegulatorOn="true" targetP="10.0" targetV="400.0" targetQ="0.0" bus="B" connectableBus="B">
+        <iidm:minMaxReactiveLimits minQ="-100.0" maxQ="100.0"/>
+      </iidm:generator>
+      <iidm:load id="L" p0="10.0" q0="0.0" bus="B" connectableBus="B"/>
+      <iidm:shunt id="SH" sectionCount="{sections}" bus="B" connectableBus="B">
+        <iidm:shuntLinearModel bPerSection="0.001" gPerSection="0.0" maximumSectionCount="4"/>
+      </iidm:shunt>
+    </iidm:voltageLevel>
+  </iidm:substation>
+</iidm:network>"#
+        )
+    };
+    let one = iidm::parse(&doc(1)).expect("one section");
+    let three = iidm::parse(&doc(3)).expect("three sections");
+    assert_eq!(one.shunts.len(), 1);
+    assert_eq!(three.shunts.len(), 1);
+    let ratio = three.shunts[0].y.im / one.shunts[0].y.im;
+    assert!(
+        (ratio - 3.0).abs() < 1e-9,
+        "three sections must be three times one, got {ratio}"
+    );
+}
