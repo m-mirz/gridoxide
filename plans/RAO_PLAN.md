@@ -1415,7 +1415,9 @@ because they do. The reference declines a 300 A improvement on its own perimeter
 configuration, the CRAC, or the four rules above says why.
 
 These five are what is left of the whole corpus, and the honest conclusion after seven refutations is
-that the corpus cannot tell us the rule. Every candidate consistent with 1.4.1.5 and 1.4.1.6 has been
+that the corpus cannot tell us the rule. **§8.25 found it by reading the reference instead**, and in
+doing so retired the claim below that this repository could not: the checkout is at
+`references/powsybl-open-rao`. Every candidate consistent with 1.4.1.5 and 1.4.1.6 has been
 measured and every one costs elsewhere, which is the signature of a rule that is narrower than
 anything the scenarios distinguish. Reading the reference's own curative perimeter — how it filters
 range actions, and why it prefers a switch to two shifters that improve its objective more — is the
@@ -2383,6 +2385,86 @@ the default happened to pick it:
 |---|---|---|
 | default | `closeBeFr2`, `closeBeFr3` | 416.7 MW |
 | `--parameters` | `closeBeFr4` | **250.0 MW**, which is what the scenario asserts |
+
+### 8.25 The eighth mechanism, found by reading the reference — and half-built
+
+§8.9 measured and refuted seven readings of the 1.4.1.5/1.4.1.6 overspend and concluded that
+"reading the reference's own curative perimeter is the next step, and **it is not a measurement this
+repository can make**".
+
+That last clause was false. `references/powsybl-open-rao` is a full checkout — gitignored, which is
+why `git` shows nothing and why a search that stopped short of it found nothing. The claim was
+repeated twice without being checked, and it is the reason seven mechanisms were guessed at rather
+than read.
+
+#### What the source says
+
+`CastorSecondPreventive.java` composes the final plan after a kept second preventive pass, and the
+rule is a **split by action kind**:
+
+- The applied set handed *into* the second pass carries network actions for auto **and** curative
+  perimeters, and range actions for **auto only** (`:287-294`). Curative range actions are
+  deliberately dropped.
+- The final plan is `appliedArasAndCras.copyCurative()` — the first pass's curative *network*
+  actions — **plus** `secondPreventiveRaoResult.perimeterResult().getActivatedRangeActions(state)`,
+  the second pass's own per-state range answers (`:192-200`).
+
+There is no dedicated curative range-action search after a second preventive pass. The curative
+set-points are whatever the **global** problem decided.
+
+That is the mechanism, and it is a difference of *objective*. A curative perimeter's own objective is
+its own worst margin, and lifting a curative CNEC is worth a great deal to it. The second pass's is
+the whole plan's worst margin, where lifting a curative CNEC above the **preventive** bottleneck is
+worth nothing. On 1.4.1.5 the plan's worst margin is 43 A on a preventive CNEC, and gridoxide's two
+extra shifter moves buy 285 A no state can use.
+
+**gridoxide's second pass already reaches the reference's answer.** Probing its `A(r, s)` columns on
+1.4.1.5, the winning leaf is `pst_be = 0`, `pst_fr_cra` tracking preventive — exactly the reference's
+plan. `scenarios_after` then re-runs the whole curative stage and overrules it.
+
+This also corrects §8.9's fifth refutation, which records the second pass's own column for `pst_be`
+as landing "on −16 as well". On the current tree it lands on **0**; −16 appears only in leaves that
+lose. `A(r, s)`, §8.17 and §8.18 have all landed since, so that reading is stale — and it is why the
+most promising lead looked dead.
+
+#### Built, measured, backed out
+
+Implemented as: surface the `A(r, s)` answers (`LinearResult::held_setpoints`, threaded through
+`SearchResult`), apply them to each curative perimeter's network, withhold those actions from the
+curative search (`LinearOptions::decided`), and report them so they still count as used.
+
+| | second_preventive | min_cost |
+|---|---|---|
+| before | **118** | 288 |
+| after | **117** | 288 |
+
+It takes 1.4.1.5 and 1.4.1.6 from **three curative actions to two** — real movement toward the
+reference's one — and costs one assertion on 1.4.1.6, a margin that had been passing inside the
+`max(5, 1.5%)` tolerance by 1 A and now falls outside it. Net −1, so it is backed out; the tree is
+byte-identical to the commit.
+
+Two implementation gaps explain the remaining action, and both are structural rather than
+incidental:
+
+1. **`A(r, s)` is `A(r, held-set)`.** gridoxide builds one column for *all* held states; the
+   reference reads `getActivatedRangeActions(state)` per state. With one contingency and one curative
+   instant the two coincide, which is why 1.4.1.5 moved at all — and 3.4.2.7's three curative instants
+   and 3.4.3.5's two contingencies are where they part company. §8.17 predicted this mattered for a
+   different reason and was wrong; it matters here.
+2. **The network actions must be carried, not re-searched.** The reference keeps the *first* curative
+   pass's network actions. gridoxide re-searches them against a network whose range actions are now
+   pinned, which is a different problem from the one the reference solves.
+
+One instructive error along the way: the first implementation compared a transformer's own angle
+against a CRAC set-point, which are opposite conventions (`CRAC_ANGLE_SIGN`), so every decided
+set-point read as "moved". That showed as a 22-assertion collapse on `min_cost.feature` and looked
+exactly like the hypothesis failing. It was not — it was the bug — and `min_cost` returned to 288 the
+moment it was fixed. A mechanism should not be judged on a buggy implementation of it, and this one
+nearly was.
+
+**So this is not an eighth refutation.** The mechanism is confirmed from the source and partially
+confirmed by measurement; what is missing is per-state `A(r, s)` and the carry of curative network
+actions. That is the first thing here in a long while with a known answer rather than a hypothesis.
 
 ### 8.4 Two independent MILP solvers
 
