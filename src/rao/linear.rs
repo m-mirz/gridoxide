@@ -140,14 +140,37 @@ impl ObjectiveKind {
 }
 
 /// How the optimizer should treat a phase shifter's taps.
+///
+/// **Only [`Continuous`](Self::Continuous) is implemented**, and nothing reads
+/// this field: `options_from` does not set it and [`build_program`] does not
+/// branch on it. It is kept because the reference's `pst-model` names both, and
+/// because naming the gap is better than leaving the reader to find it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TapModel {
     /// Optimize the angle continuously, then round to the nearest tap and
-    /// re-evaluate. Needs only an LP, so it runs on the in-house solver.
+    /// re-evaluate — with the bracketing tap on the other side tried too, so the
+    /// iteration cannot settle on the wrong side of a kink. Needs only an LP, so
+    /// it runs on the in-house solver.
     #[default]
     Continuous,
-    /// Optimize the tap itself as an integer variable. Needs a MIP backend —
-    /// [`IpmSolver`](crate::opf::ipm) refuses, by design.
+    /// Optimize the tap itself as an integer variable. **Declared, not built**:
+    /// selecting it today behaves exactly as [`Continuous`](Self::Continuous).
+    ///
+    /// Not an oversight, and §8.21 is the measurement rather than the excuse. Of
+    /// 37 vendored configurations 5 ask for `APPROXIMATED_INTEGERS`, governing 24
+    /// scenarios — and the reference built eight of them as a **controlled
+    /// pair**, 2.2.1.5.1 through 2.2.1.5.6 each labelled "copy of 2.6.2.x with
+    /// MIP for PSTs": the same scenario on the same network with the tap model as
+    /// the only difference. All 24 match in full bar the two where gridoxide
+    /// answers more cheaply, so both halves of every pair agree with one
+    /// implementation of taps between them.
+    ///
+    /// Continuous-plus-rounding therefore reaches the reference's discrete answer
+    /// everywhere the reference asked for a discrete answer. Building the integer
+    /// tap could win nothing against this corpus and could only lose, which makes
+    /// it a change the gate cannot validate — and §8.6's rule for those is that
+    /// the measurement comes first. It wants a case the corpus does not have: a
+    /// tap table nonuniform enough that the rounding lands wrong.
     Discrete,
 }
 
