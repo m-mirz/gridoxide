@@ -145,9 +145,15 @@ network defines no areas, shares the same `ActivePowerDistribution` engine for t
 itself, and reuses `DistributedSlackContextData` for its bookkeeping. Distributed slack is
 literally the degenerate case.
 
-gridoxide does not implement area interchange control. What it would need is not a new algorithm
-but three additions: an area assignment per bus, a scheduled interchange per area, and a
-per-area mismatch computed from tie-line flows in place of the slack deviation used here. The
-per-island normalization already in `outerloop::DistributedSlack` is the same shape that
-generalizes to per-area — islands and areas are both just partitions of the bus set with their
-own balance target.
+gridoxide implements it too, as `outerloop::AreaInterchange` — and the relationship powsybl's code
+implies is an assertion here rather than a remark: one area with a zero target reproduces distributed
+slack's per-bus shifts and solved voltages exactly. The three additions it needed were the ones this
+paragraph predicted when it still read "gridoxide does not implement area interchange control": an
+area assignment per bus, a scheduled interchange per area, and a per-area mismatch computed from
+tie-line flows in place of the slack deviation used here.
+
+What the prediction missed is that the problem is **over-determined by exactly one**. Both ends of a
+tie are measured *into* the branch, so a set of agreed net positions sums to the tie losses rather
+than to zero; the knobs are one schedule per area and the conditions wanted are that many plus the
+slack on its own schedule. So the slack's own area is the dependent one: its target is not enforced,
+it absorbs the losses, and the report names it. See [Area Interchange Control](./area_interchange.md).
