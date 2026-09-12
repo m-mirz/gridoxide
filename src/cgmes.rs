@@ -1126,6 +1126,24 @@ pub struct CgmesNetwork {
     /// names, so it gets `{PowerTransformer mRID}_star` — synthesized, and the
     /// only entry here that is not read straight off the model.
     pub bus_ids: Vec<String>,
+    /// Every `TopologicalNode` mRID and the bus it belongs to, sorted by mRID.
+    ///
+    /// [`bus_ids`](Self::bus_ids) has to pick **one** name per bus, because a
+    /// network has one node where the documents may have several: the skeleton
+    /// merges galvanically-joined nodes, so the mRID → bus map is not injective
+    /// and inverting it has to choose. This is the map uninverted, and it is
+    /// what lets a CRAC naming one of the *other* merged nodes resolve anyway —
+    /// which document named the node is the CRAC author's business, not the
+    /// importer's.
+    ///
+    /// Includes the mRID that won, so this is the whole relation rather than a
+    /// correction to it; [`Resolution`](crate::rao::Resolution) lets a canonical
+    /// name win over an alias, so the overlap is harmless and the invariant is
+    /// easier to state.
+    ///
+    /// A three-winding transformer's synthesized star point is **not** here: no
+    /// document names it, so nothing can name it in a CRAC.
+    pub bus_aliases: Vec<(String, usize)>,
     /// The identifier of each branch, in the crate-wide flat order: every line
     /// first, then every transformer.
     ///
@@ -2127,11 +2145,14 @@ fn convert_equipment(
     // map happened to yield last made two imports of one model disagree about
     // the name of a merged bus while agreeing about everything else.
     //
-    // The lowest-sorting of the merged mRIDs wins. A consequence worth stating:
-    // a CRAC naming one of the *other* nodes merged into that bus will not
-    // resolve, because [`crate::rao::Resolution`] is given one name per bus.
+    // The lowest-sorting of the merged mRIDs wins, and the rest are kept in
+    // [`bus_aliases`](CgmesNetwork::bus_aliases) so a CRAC naming any of them
+    // still resolves — one name per bus is what the *network* needs, not what
+    // the documents are entitled to say.
     let mut named: Vec<(&String, usize)> = idx_of.iter().map(|(m, i)| (m, *i)).collect();
     named.sort();
+    let bus_aliases: Vec<(String, usize)> =
+        named.iter().map(|(m, i)| ((*m).clone(), *i)).collect();
     let mut bus_ids: Vec<String> = vec![String::new(); buses.len()];
     for (mrid, i) in named {
         if let Some(slot) = bus_ids.get_mut(i)
@@ -2152,6 +2173,7 @@ fn convert_equipment(
         line_ids.into_iter().chain(transformer_ids).collect();
     Ok(CgmesNetwork {
         bus_ids,
+        bus_aliases,
         branch_ids,
         generation,
         base_harmonization,

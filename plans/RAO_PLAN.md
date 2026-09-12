@@ -2243,6 +2243,46 @@ nothing is skipped, and no capability the corpus exercises is missing. The next 
 this repository: it is reading OpenRAO's curative perimeter to find why it declines a 300 A
 improvement on its own objective.
 
+### 8.22 A bus has one index and may have several names
+
+`96fb338` recorded a limitation where `bus_ids` is defined: the CGMES skeleton merges
+galvanically-joined `TopologicalNode`s, so the mRID → bus map is not injective, and inverting it to
+name each bus has to **choose**. The lowest-sorting mRID wins, deterministically — and a CRAC naming
+any of the others did not resolve.
+
+That is not a naming quibble. `Resolution` drops an unresolved element into `unresolved` and carries
+on, so a redispatch whose generator is named by the "wrong" node is silently absent from the
+optimization while every margin still looks right. Risk 6 in §10 is about exactly this class.
+
+The fix is to stop treating one name per bus as a property of the model rather than of the data
+structure. `CgmesNetwork::bus_aliases` is the map uninverted — every mRID and the bus it belongs to,
+sorted — and `Resolution::with_bus_aliases` takes it alongside `bus_ids`. A canonical name always
+wins, because the aliases are inserted second under `or_insert`, so the two may overlap and the
+caller does not have to subtract one from the other. `bus_aliases` therefore carries the whole
+relation, including the mRID that won, which is an easier invariant to state than a correction to
+`bus_ids` would be.
+
+**It was ranked last in the plan because "no fixture demands it, so it would be built blind."** That
+turned out to be wrong, and checking took one probe: **FullGrid has two merged buses, one of four
+nodes, and SmallGrid has one of five.** Svedala, MiniGrid, PowerFlow and the PST configuration have
+none. So the conformity set does exercise it, and the test is measured rather than imagined.
+
+`a_crac_may_name_any_node_merged_into_a_bus` is deliberately a **pair**: the same CRAC resolved
+without the aliases and with them. Asserting only that the alias resolves would pass equally well if
+every name resolved for some unrelated reason; asserting that it is `None` first, and
+`unresolved` names it, is what makes the second half mean something. It also checks the alias lands
+on the *same* bus as the canonical name — a name resolving to the wrong bus would be worse than one
+not resolving at all. Eight merged nodes across the set are checked.
+
+`bus_aliases_cover_every_named_bus_and_are_ordered` pins the other half: every bus has an entry, the
+list is sorted (the CGMES import's determinism is a property this crate has had to fix once already),
+and the one exception is a three-winding transformer's **star point** — synthesized as
+`{PowerTransformer mRID}_star` because no document names it, so nothing can name it in a CRAC either.
+MiniGrid is that case: 15 buses, 13 aliased.
+
+Wired through `gridoxide security` and `gridoxide rao`; every other importer passes an empty list,
+where a bus has exactly one name and the question does not arise.
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a

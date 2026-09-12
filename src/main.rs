@@ -2203,8 +2203,12 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
         Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?,
     };
 
-    let resolution =
-        Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
+    let resolution = Resolution::with_bus_aliases(
+        &crac,
+        &network.branch_ids,
+        &network.bus_ids,
+        &network.bus_aliases,
+    );
     let view = Network {
         generation: &network.generation,
         buses: &network.buses,
@@ -2285,6 +2289,11 @@ struct SecurityNetwork {
     branch_ids: Vec<String>,
     /// Bus labels, so a redispatch's generators and loads resolve.
     bus_ids: Vec<String>,
+    /// Other names those buses answer to, as `(name, bus)`. Only CGMES has any:
+    /// its skeleton merges galvanically-joined `TopologicalNode`s, so one bus
+    /// can carry several mRIDs and a CRAC may name whichever its author had.
+    /// Empty for every other importer, where a bus has exactly one name.
+    bus_aliases: Vec<(String, usize)>,
     /// Branches the file says are out of service.
     initially_open: Vec<usize>,
     /// ISO country per bus, for the search's "skip actions far from the most
@@ -2320,6 +2329,8 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
     if lower.ends_with(".xiidm") || lower.ends_with(".xml") {
         let n = gridoxide::iidm::read(path).map_err(|e| e.to_string())?;
         return Ok(SecurityNetwork {
+            // One name per bus in this format; nothing to alias.
+            bus_aliases: Vec::new(),
             buses: n.buses,
             lines: n.lines,
             transformers: n.transformers,
@@ -2345,6 +2356,8 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
     if lower.ends_with(".uct") || lower.ends_with(".ucte") {
         let n = gridoxide::ucte::read(path).map_err(|e| e.to_string())?;
         return Ok(SecurityNetwork {
+            // One name per bus in this format; nothing to alias.
+            bus_aliases: Vec::new(),
             buses: n.buses,
             lines: n.lines,
             transformers: n.transformers,
@@ -2415,6 +2428,7 @@ fn load_cgmes_for_security(path: &str) -> Result<SecurityNetwork, String> {
         lines: n.lines,
         transformers: n.transformers,
         branch_ids: n.branch_ids,
+        bus_aliases: n.bus_aliases,
         bus_ids: n.bus_ids,
         // The CGMES converter folds a disconnected branch into a shunt-only
         // self-loop rather than keeping it openable, so there is nothing to
@@ -2516,8 +2530,12 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
         Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?.0,
     };
 
-    let resolution =
-        Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
+    let resolution = Resolution::with_bus_aliases(
+        &crac,
+        &network.branch_ids,
+        &network.bus_ids,
+        &network.bus_aliases,
+    );
     let view = Network {
         generation: &network.generation,
         buses: &network.buses,
