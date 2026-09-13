@@ -2464,8 +2464,28 @@ had been passing by accident: `FFR3AA1 FFR5AA1 1 - curative` was 922.69 against 
 inside the `max(5, 1.5%)` tolerance by a single ampere, and is now 863.35.
 
 That residual is a different question from this one — not *which* answer the curative stage keeps,
-but why the second pass moves a column that cannot improve its own objective. The corpus's exemption
-is narrowed to name it.
+but why the second pass moves a column past the point where it can help. The corpus's exemption is
+narrowed to name it.
+
+#### What was checked for 1.4.1.6, and matches
+
+Four things were read against the reference and are **not** the difference. Recorded so the next
+attempt does not spend the time again:
+
+| | |
+|---|---|
+| **The curative close is held.** | Probing the second pass's `Held`: `close = [8]`, which is `close_fr1_fr5`. Defect 31's fix is working, and the curative CNEC is not being read in a network where the close never happened. |
+| **The penalty means the same thing.** | `AbstractCoreProblemFiller.getRangeActionPenaltyCost` returns `getPstRAMinImpactThreshold()` — the reference uses that parameter as the per-unit cost on the movement columns, exactly as `LinearOptions::pst_penalty` does. gridoxide's reading of the key is right and the penalty is not the divergence. |
+| **The absolute/relative split is the same shape.** | `getMinAndMaxAbsoluteAndRelativeSetpoints` returns `[minAbsolute, maxAbsolute, minRelative, maxRelative]` — independent confirmation of §8.23's `tap_bounds_split`, arrived at before this source was read. |
+| **Supersession on one machine is the same rule.** | `addImpactOfRangeActionOnCnec` walks the states before a CNEC **curative-first** and adds a range action's impact only for the latest one on a given network element, skipping the rest (`alreadyConsideredAction`). That is §8.11's third piece. |
+
+So the question is narrower than it was, and it is about the LP rather than the composition: probing the
+second pass's leaves, the curative CNEC **does** bind at the linearization point of at least one leaf
+(−225 A against a preventive −118), so the LP has a real reason to lift it. What is unexplained is why
+it keeps lifting past the point where the preventive CNEC takes over as the binding one — where the
+movement buys nothing and costs `pst_penalty` — and why neither that penalty nor the iteration's
+accept-if-better test pulls it back. The likely shape is that the curative column rides along with a
+preventive move that *does* improve the objective, and is never tested on its own.
 
 #### The first attempt, and what it cost to not judge it on a bug
 
