@@ -902,3 +902,47 @@ fn a_shunt_is_scaled_by_its_section_count() {
         "three sections must be three times one, got {ratio}"
     );
 }
+
+/// An HVDC converter station is counted and skipped, not quietly turned into a
+/// generator that produces nothing.
+///
+/// It used to share the `generator` match arm. A VSC station states no
+/// `targetP`, so it became a generator with `p = 0` and the HVDC transfer
+/// vanished without a word — while `docs/src/import/iidm.md` said it was
+/// "counted and then skipped". The document was right about what should happen
+/// and wrong about what did.
+///
+/// No fixture in the tree contains one, which is why this is written against a
+/// document rather than a fixture, and why the fix is to *report* rather than to
+/// model: reaching `src/dc.rs`, which is a real DC network, is work with no gate
+/// behind it until a fixture calls for it.
+#[test]
+fn an_hvdc_converter_station_is_counted_rather_than_mistaken_for_a_generator() {
+    let doc = r#"<?xml version="1.0" encoding="UTF-8"?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_5" id="n" caseDate="2020-01-01T00:00:00.000Z" forecastDistance="0" sourceFormat="test">
+  <iidm:substation id="S" country="FR">
+    <iidm:voltageLevel id="VL" nominalV="400.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B"/></iidm:busBreakerTopology>
+      <iidm:generator id="G" voltageRegulatorOn="true" targetP="50.0" targetV="400.0" targetQ="0.0" bus="B" connectableBus="B">
+        <iidm:minMaxReactiveLimits minQ="-100.0" maxQ="100.0"/>
+      </iidm:generator>
+      <iidm:load id="L" p0="50.0" q0="0.0" bus="B" connectableBus="B"/>
+      <iidm:vscConverterStation id="VSC" voltageRegulatorOn="false" lossFactor="1.1" reactivePowerSetpoint="0.0" bus="B" connectableBus="B"/>
+    </iidm:voltageLevel>
+  </iidm:substation>
+</iidm:network>"#;
+    let net = iidm::parse(doc).expect("iidm import");
+
+    // Reported, so a study knows the transfer is missing.
+    assert!(
+        net.notes.iter().any(|n| n.contains("vscConverterStation")),
+        "the station must be named in notes, which were {:?}",
+        net.notes
+    );
+    // And not present as an injection: `injections` keeps every generator and
+    // load by its own id, so a station converted to a generator would show here.
+    assert!(
+        !net.injections.iter().any(|i| i.id == "VSC"),
+        "a converter station is not a generator"
+    );
+}
