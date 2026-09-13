@@ -2427,33 +2427,56 @@ as landing "on −16 as well". On the current tree it lands on **0**; −16 appe
 lose. `A(r, s)`, §8.17 and §8.18 have all landed since, so that reading is stale — and it is why the
 most promising lead looked dead.
 
-#### Built, measured, backed out
+#### Built — and it closes 1.4.1.5
+
+The composition is now implemented: the `A(r, s)` answers are surfaced
+(`LinearResult::held_setpoints`, threaded through `SearchResult`), applied to each curative
+perimeter's network, withheld from the curative search (`LinearOptions::decided`), and reported so
+they still count as used.
+
+**118 → 120**, with every other file unchanged to the assertion. **1.4.1.5 closes completely, 13 of
+13** — including the two margins that were the whole of the defect: 86.49 A against an asserted 86,
+and 910.13 against 910.
+
+Two details decided it, and the first attempt got both wrong.
+
+**Only what the pass actually *moved*.** `getActivatedRangeActions` is the reference's own word and
+it is load-bearing. A held column that did not move sits at the CRAC's `initialTap`, not where the
+preventive stage left the machine — so applying its absolute value as a curative decision *invents*
+one. On 1.4.1.5 that was a twelve-tap move against a preventive answer of −7, and it was the entire
+second curative action the rule was supposed to remove. An action the pass left alone is simply
+absent: the curative state inherits whatever preventive chose.
+
+**And a chained column moves because preventive moved.** §8.23's coupling row makes it follow, so
+`moved()` is true even when the curative state is deciding nothing. The second condition is the one
+that means something: does it end somewhere other than where preventive left the machine? A column
+tracking preventive is inheriting a decision, not making one — the same distinction §8.18 draws when
+it rounds coupled columns together.
+
+#### What is left, and it is one scenario
+
+1.4.1.6 is 1.4.1.5 *with a `relativeToPreviousInstant` range added to the CRA*, and it is the only
+scenario in the corpus still short. It spends two curative actions: `close_fr1_fr5`, and a chained
+`pst_fr_cra` the second pass pushes to tap **1** — the upper edge of its ±8 window about preventive's
+−7. The plan's worst margin is 43 A on a preventive CNEC, so the move buys nothing any state can use,
+and `pst_penalty` at 0.01 a degree is not enough to hold it still. It also costs one assertion that
+had been passing by accident: `FFR3AA1 FFR5AA1 1 - curative` was 922.69 against an asserted 910,
+inside the `max(5, 1.5%)` tolerance by a single ampere, and is now 863.35.
+
+That residual is a different question from this one — not *which* answer the curative stage keeps,
+but why the second pass moves a column that cannot improve its own objective. The corpus's exemption
+is narrowed to name it.
+
+#### The first attempt, and what it cost to not judge it on a bug
 
 Implemented as: surface the `A(r, s)` answers (`LinearResult::held_setpoints`, threaded through
 `SearchResult`), apply them to each curative perimeter's network, withhold those actions from the
 curative search (`LinearOptions::decided`), and report them so they still count as used.
 
-| | second_preventive | min_cost |
-|---|---|---|
-| before | **118** | 288 |
-| after | **117** | 288 |
-
-It takes 1.4.1.5 and 1.4.1.6 from **three curative actions to two** — real movement toward the
-reference's one — and costs one assertion on 1.4.1.6, a margin that had been passing inside the
-`max(5, 1.5%)` tolerance by 1 A and now falls outside it. Net −1, so it is backed out; the tree is
-byte-identical to the commit.
-
-Two implementation gaps explain the remaining action, and both are structural rather than
-incidental:
-
-1. **`A(r, s)` is `A(r, held-set)`.** gridoxide builds one column for *all* held states; the
-   reference reads `getActivatedRangeActions(state)` per state. With one contingency and one curative
-   instant the two coincide, which is why 1.4.1.5 moved at all — and 3.4.2.7's three curative instants
-   and 3.4.3.5's two contingencies are where they part company. §8.17 predicted this mattered for a
-   different reason and was wrong; it matters here.
-2. **The network actions must be carried, not re-searched.** The reference keeps the *first* curative
-   pass's network actions. gridoxide re-searches them against a network whose range actions are now
-   pinned, which is a different problem from the one the reference solves.
+An intermediate version applied *every* held column rather than only the activated ones, and scored
+117 — worse than doing nothing. It is recorded because the difference between it and the final
+version is one `filter`, and because a rule that is 90% right can measure worse than one that is
+absent.
 
 One instructive error along the way: the first implementation compared a transformer's own angle
 against a CRAC set-point, which are opposite conventions (`CRAC_ANGLE_SIGN`), so every decided
@@ -2462,9 +2485,12 @@ exactly like the hypothesis failing. It was not — it was the bug — and `min_
 moment it was fixed. A mechanism should not be judged on a buggy implementation of it, and this one
 nearly was.
 
-**So this is not an eighth refutation.** The mechanism is confirmed from the source and partially
-confirmed by measurement; what is missing is per-state `A(r, s)` and the carry of curative network
-actions. That is the first thing here in a long while with a known answer rather than a hypothesis.
+**So this is not an eighth refutation — it is the answer.** Seven mechanisms were guessed at and
+measured; the eighth was read, and it closes the scenario seven guesses could not. Two things that
+looked structurally necessary turned out not to be: per-state `A(r, s)` (one column for the held set
+is enough where the reference reads one per state, because a column that does not move is never
+applied) and the carry of curative network actions (re-searching them reaches the same answer here).
+Both may still matter on a CRAC this corpus does not contain.
 
 ### 8.4 Two independent MILP solvers
 

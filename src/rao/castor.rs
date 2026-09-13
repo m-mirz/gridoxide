@@ -255,7 +255,7 @@ pub fn run(
     //
     // Under `SECURE_FLOW` the target is 0 for every perimeter, so whatever the
     // caller set stands.
-    let mut scenarios = scenarios_after(crac, network, resolution, solver, options, &preventive);
+    let mut scenarios = scenarios_after(crac, network, resolution, solver, options, &preventive, &[]);
 
     // Second preventive: optimize the preventive perimeter again, this time
     // able to see what the curative stage could and could not do about the
@@ -299,7 +299,12 @@ pub fn run(
         &scenarios,
         first_objective < before - 1e-6,
     ) {
-        let after = scenarios_after(crac, network, resolution, solver, options, &second);
+        // The curative range actions are **not** searched again. The second
+        // pass has just decided them on the whole plan's objective, and that is
+        // the judgement the reference keeps — see §8.25.
+        let after = scenarios_after(
+            crac, network, resolution, solver, options, &second, &second.held_setpoints,
+        );
         // Kept only if the whole plan it leads to is better, measured the same
         // way `postCheckResults` measures the plan against doing nothing. A
         // second preventive that improves its own perimeter and costs a
@@ -629,6 +634,7 @@ fn scenarios_after(
     solver: &mut dyn Solver,
     options: &SearchOptions,
     preventive: &SearchResult,
+    decided: &[Setpoint],
 ) -> Vec<ScenarioPlan> {
     let states = crac.states();
     let actionable = |state: &State| -> bool {
@@ -637,6 +643,89 @@ fn scenarios_after(
     };
     let carried_open = preventive.open_branches.clone();
     let carried_transformers = preventive.transformers.clone();
+    // The branch each decided action sits on, and the tap the perimeter it
+    // governs should start from.
+    let branch_of = |action: usize| -> Option<usize> {
+        let RangeActionKind::Pst { element, .. } = &crac.range_actions[action].kind else {
+            return None;
+        };
+        resolution.branch(element)
+    };
+    // Only what the second pass actually **moved**. `getActivatedRangeActions`
+    // is the reference's own word for it, and the distinction is load-bearing: a
+    // held column that did not move is sitting at the CRAC's `initialTap`, not at
+    // where the preventive stage left the machine. Applying its absolute value as
+    // a curative decision invents a move — on 1.4.1.5 a twelve-tap one, against a
+    // preventive answer of −7 — and that spurious move was the whole of the
+    // second curative action this rule was supposed to remove.
+    //
+    // An action the second pass left alone is simply absent from the plan: the
+    // curative state inherits whatever preventive chose, which is what "not
+    // activated" means.
+    // Two conditions, and the second is what a *chained* column needs.
+    //
+    // `moved()` is the reference's own `getActivatedRangeActions`: did this pass
+    // move the column at all. That alone is enough for an absolute range — on
+    // 1.4.1.5 `pst_fr_cra` sits untouched at its `initialTap`, and applying that
+    // absolute value would invent a twelve-tap curative move against a preventive
+    // answer of −7.
+    //
+    // A `relativeToPreviousInstant` column moves *because preventive moved*
+    // (§8.23's coupling row makes it follow), so `moved()` is true even when the
+    // curative state is doing nothing of its own. The second condition asks the
+    // question that actually matters: does it end somewhere other than where
+    // preventive left the machine? A column that tracks preventive exactly is
+    // inheriting a decision, not making one — the same distinction §8.18 draws
+    // when it rounds coupled columns together. 1.4.1.6 is 1.4.1.5 with exactly
+    // that range added, and it is the whole difference between them.
+    let preventive_tap = |action: usize| -> Option<i32> {
+        let branch = branch_of(action)?;
+        preventive
+            .setpoints
+            .iter()
+            .filter(|p| branch_of(p.action) == Some(branch))
+            .find_map(|p| p.tap)
+    };
+    let activated: Vec<&Setpoint> = decided
+        .iter()
+        .filter(|s| s.moved())
+        .filter(|s| match (s.tap, preventive_tap(s.action)) {
+            (Some(here), Some(there)) => here != there,
+            _ => true,
+        })
+        .collect();
+    let decided_taps: Vec<(usize, i32, f64)> = activated
+        .iter()
+        .filter_map(|s| Some((branch_of(s.action)?, s.tap?, s.value)))
+        .collect();
+    // Where each shifter stood before the decision, as the **CRAC's** angle for
+    // the tap the preventive stage left it on — not the transformer's own angle,
+    // which is in the opposite convention (`CRAC_ANGLE_SIGN`) and would make
+    // every comparison read "moved".
+    //
+    // Taken from the preventive perimeter's report for the same *machine*,
+    // whatever range action names it there: 1.4.1.5 states the two permissions
+    // as `pst_fr_pra` and `pst_fr_cra`, two actions on one shifter, the same
+    // identity §8.23 needed.
+    let before_decided: Vec<(usize, f64)> = activated
+        .iter()
+        .filter_map(|s| {
+            let RangeActionKind::Pst { tap_to_angle, initial_tap, .. } =
+                &crac.range_actions[s.action].kind
+            else {
+                return None;
+            };
+            let branch = branch_of(s.action)?;
+            let tap = preventive
+                .setpoints
+                .iter()
+                .filter(|p| branch_of(p.action) == Some(branch))
+                .find_map(|p| p.tap)
+                .unwrap_or(*initial_tap);
+            let angle = tap_to_angle.iter().find(|(t, _)| *t == tap).map(|(_, a)| *a)?;
+            Some((s.action, angle))
+        })
+        .collect();
     let costly_objective = options.linear.objective_kind.costly().is_some();
     // What a curative perimeter is searching *for*, or `None` when it is simply
     // minimizing its own cost.
@@ -677,6 +766,10 @@ fn scenarios_after(
     let options = &SearchOptions {
         stop_at_target: curative_target,
         max_depth: options.curative_max_depth.unwrap_or(options.max_depth),
+        linear: super::linear::LinearOptions {
+            decided: decided.iter().map(|s| s.action).collect(),
+            ..options.linear.clone()
+        },
         ..options.clone()
     };
 
@@ -731,6 +824,18 @@ fn scenarios_after(
             open = result.open_branches.clone();
             transformers = result.transformers.clone();
         }
+        // Then the decisions an upstream stage already made for these states —
+        // after the automatons, because a curative decision comes after them,
+        // and before the search, because the search must see the network its own
+        // answer will be measured in.
+        if !decided_taps.is_empty() {
+            super::search::apply_taps(
+                &mut transformers,
+                network.tap_changers,
+                network.lines.len(),
+                &decided_taps,
+            );
+        }
         if curative_instants.is_empty() && automatons.is_none() {
             continue;
         }
@@ -750,9 +855,21 @@ fn scenarios_after(
                 tap_changers: network.tap_changers,
                 base_mva: network.base_mva,
             };
-            let result = curative_search(
+            let mut result = curative_search(
                 crac, &view, resolution, &[state.clone()], solver, options, &open,
             );
+            // The upstream decisions are this perimeter's too, and have to be
+            // *reported* as such: withholding them from the search stops the
+            // perimeter overruling the second pass, and must not also make the
+            // plan claim the shifter never moved.
+            for setpoint in &activated {
+                let Some((_, initial)) =
+                    before_decided.iter().find(|(a, _)| *a == setpoint.action)
+                else {
+                    continue;
+                };
+                result.setpoints.push(Setpoint { initial: *initial, ..(*setpoint).clone() });
+            }
             // The result's own set, not a union with what went in. A union
             // would be safe only while a perimeter could never *close*
             // anything: `result.open_branches` starts from `open` and the

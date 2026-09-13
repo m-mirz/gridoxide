@@ -1486,9 +1486,10 @@ const FILES: [(&str, usize, usize, Option<&str>); 5] = [
         // worth naming precisely, because a stale exemption is how a corpus
         // stops being measured just as surely as a missing one.
         Some(
-            "1.4.1.5 and 1.4.1.6 spend three curative actions where the reference spends one, \
-             reaching better curative margins than it asks for; §8.9 measures and refutes six \
-             mechanisms for it",
+            "1.4.1.6 spends two curative actions where the reference spends one: its second \
+             preventive pass pushes a chained curative column to the edge of its window for no \
+             gain the plan's worst margin can use. §8.25 closed 1.4.1.5, which was the same \
+             scenario without that range",
         ),
     ),
     (
@@ -1973,7 +1974,7 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// curative perimeter is the next step.
 ///
 /// Nothing else. Every other scenario in the corpus matches in full.
-const BASELINE_MATCHED_2P: usize = 118;
+const BASELINE_MATCHED_2P: usize = 120;
 
 /// The 26 costly-optimization scenarios: **288 of 294**, from 165 with the
 /// objective unbuilt, 178 once the search tree could rank by cost (§8.13), 221

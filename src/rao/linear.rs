@@ -238,6 +238,16 @@ pub struct LinearOptions {
     /// [`Held`](super::evaluate::Held) and `plans/RAO_PLAN.md` §8.10. `None`
     /// everywhere else, which is one network, one open set, and one evaluation.
     pub held: Option<super::evaluate::Held>,
+    /// Range actions an upstream stage has already decided, which this perimeter
+    /// must leave alone. Indices into [`Crac::range_actions`].
+    ///
+    /// The one caller is the curative stage after a kept second preventive pass:
+    /// that pass decided these on the whole plan's objective, and searching them
+    /// again here would overrule it with this perimeter's own — which values a
+    /// curative margin the plan's worst case cannot use (§8.25). The set-points
+    /// are applied to the network separately; this only stops the action being
+    /// offered again.
+    pub decided: Vec<usize>,
     /// The network actions in force at this leaf, indexing
     /// [`Crac::network_actions`].
     ///
@@ -293,6 +303,7 @@ impl Default for LinearOptions {
             limits: Budget::default(),
             available_at: None,
             held: None,
+            decided: Vec::new(),
             activated: Vec::new(),
             a_r_s: false,
             previous_taps: Vec::new(),
@@ -334,6 +345,16 @@ pub enum LinearStatus {
 pub struct LinearResult {
     pub status: LinearStatus,
     pub setpoints: Vec<Setpoint>,
+    /// The `A(r, s)` columns' own answers — set-points this perimeter carried
+    /// for states it does **not** report.
+    ///
+    /// Empty everywhere but the second preventive problem. There they are the
+    /// answer to "where should the curative shifter go, judged on the whole
+    /// plan", which is the judgement the reference keeps: `CastorSecondPreventive`
+    /// composes its final plan from the first curative pass's *network* actions
+    /// and the second pass's *range* set-points, and runs no curative
+    /// range-action search afterwards. See `plans/RAO_PLAN.md` §8.25.
+    pub held_setpoints: Vec<Setpoint>,
     /// Minimum margin over the perimeter's optimized CNECs, **MW**, before and
     /// after — whatever unit the objective was maximized in.
     pub initial_margin_mw: f64,
@@ -771,6 +792,7 @@ fn optimize_within(
     let initial_margin =
         margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, &[], options);
     let mut setpoints: Vec<Setpoint> = Vec::new();
+    let mut held_setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
 
     // Nothing to constrain in either direction. A perimeter with *only*
@@ -781,6 +803,7 @@ fn optimize_within(
         return LinearResult {
             status: LinearStatus::NoImprovement,
             setpoints,
+            held_setpoints,
             initial_margin_mw: initial_margin,
             final_margin_mw: initial_margin,
             initial_objective,
@@ -797,6 +820,7 @@ fn optimize_within(
             return LinearResult {
                 status: LinearStatus::NoImprovement,
                 setpoints,
+                held_setpoints,
                 initial_margin_mw: initial_margin,
                 final_margin_mw: initial_margin,
                 initial_objective,
@@ -956,6 +980,19 @@ fn optimize_within(
                     tap: c.pst.as_ref().map(|p| p.tap),
                 })
                 .collect();
+            // The other half: what this perimeter decided for states it carries
+            // but does not report. See [`LinearResult::held_setpoints`].
+            held_setpoints = controls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.reported)
+                .map(|(k, c)| Setpoint {
+                    action: c.action,
+                    value: c.current,
+                    initial: starting[k],
+                    tap: c.pst.as_ref().map(|p| p.tap),
+                })
+                .collect();
             // Relinearize around the new point.
             //
             // Sensitivities and `current` are what the new point changes. Where
@@ -1005,6 +1042,7 @@ fn optimize_within(
             LinearStatus::NoImprovement
         },
         setpoints,
+        held_setpoints,
         initial_margin_mw: initial_margin,
         // Re-measured in megawatts rather than converted from `best`: the two
         // are minima over the *same* CNECs but not necessarily over the same
@@ -1638,6 +1676,9 @@ fn build_controls(
         // A usage limit already spent on network actions leaves room for only
         // some of these; `allowed` is the subset being tried.
         if allowed.is_some_and(|a| !a.contains(&index)) {
+            continue;
+        }
+        if options.decided.contains(&index) {
             continue;
         }
         if options.available.allows(&action.usage_rules, at, crac) {
