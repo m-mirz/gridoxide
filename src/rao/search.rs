@@ -235,6 +235,9 @@ pub struct SearchResult {
     pub network_actions: Vec<usize>,
     /// Range-action set-points at the winning leaf.
     pub setpoints: Vec<Setpoint>,
+    /// The winning leaf's `A(r, s)` answers for states this perimeter carries
+    /// but does not report — empty outside the second preventive problem.
+    pub held_setpoints: Vec<Setpoint>,
     pub initial_margin_mw: f64,
     pub final_margin_mw: f64,
     /// The winning leaf's objective — the minimum margin in
@@ -632,6 +635,7 @@ pub fn search_with_open(
         return SearchResult {
             network_actions: Vec::new(),
             setpoints: Vec::new(),
+            held_setpoints: Vec::new(),
             initial_margin_mw: initial,
             final_margin_mw: initial,
             final_objective: untouched,
@@ -758,6 +762,7 @@ pub fn search_with_open(
     SearchResult {
         network_actions: chosen,
         setpoints: best.setpoints,
+        held_setpoints: best.held_setpoints,
         initial_margin_mw: initial,
         // Megawatts, whatever the objective was maximized in — the search
         // reports a margin, it does not report its own scoring function.
@@ -854,9 +859,9 @@ fn leaf(
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
-    let (objective, margin_mw, setpoints) =
+    let (objective, margin_mw, setpoints, held_setpoints) =
         optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, applied.open);
-    Evaluated { objective, margin_mw, setpoints, transformers, buses }
+    Evaluated { objective, margin_mw, setpoints, held_setpoints, transformers, buses }
 }
 
 /// One leaf's outcome.
@@ -868,6 +873,7 @@ struct Evaluated {
     objective: f64,
     margin_mw: f64,
     setpoints: Vec<Setpoint>,
+    held_setpoints: Vec<Setpoint>,
     transformers: Vec<crate::types::Transformer>,
     buses: Vec<crate::types::Bus>,
 }
@@ -890,7 +896,7 @@ struct Applied<'a> {
 /// `linear::apply`'s rule, and powsybl's: a `PstRangeAction` converts a
 /// set-point to a position and lets the equipment decide the angle. The CRAC's
 /// angle is the fallback for a shifter the network does not describe.
-fn apply_taps(
+pub(super) fn apply_taps(
     transformers: &mut [crate::types::Transformer],
     tap_changers: &[Option<crate::types::TapChanger>],
     lines: usize,
@@ -923,10 +929,10 @@ fn optimize_with_open(
     solver: &mut dyn Solver,
     options: &LinearOptions,
     open: &[usize],
-) -> (f64, f64, Vec<Setpoint>) {
+) -> (f64, f64, Vec<Setpoint>, Vec<Setpoint>) {
     if open.is_empty() {
         let result = optimize(crac, network, resolution, perimeter, solver, options);
-        return (result.final_objective, result.final_margin_mw, result.setpoints);
+        return (result.final_objective, result.final_margin_mw, result.setpoints, result.held_setpoints);
     }
     // Opening a branch is expressed by removing it from the working copy's
     // line list — a line with no admittance carries no flow and contributes
@@ -987,7 +993,7 @@ fn optimize_with_open(
     for (a, b) in network.transformers.iter_mut().zip(transformers.iter()) {
         a.tap = b.tap;
     }
-    (result.final_objective, result.final_margin_mw, result.setpoints)
+    (result.final_objective, result.final_margin_mw, result.setpoints, result.held_setpoints)
 }
 
 /// Evaluate with the given flow model, taking the AC options from the network.
