@@ -2371,6 +2371,20 @@ fn starts_inside_its_range(current: f64, lower: f64, upper: f64) -> bool {
     current >= lower - 1e-6 && current <= upper + 1e-6
 }
 
+/// The window a **standard** range action may move in, MW.
+///
+/// Unlike [`tap_bounds`] this ignores [`RangeKind`](super::crac::RangeKind)
+/// entirely: every range is read as absolute, so a `relativeToInitialNetwork` or
+/// `relativeToPreviousInstant` window on a redispatch is anchored on nothing
+/// rather than on the set-point it names.
+///
+/// That is a **known inconsistency between two readings of one field**, recorded
+/// rather than fixed. Every `injectionRangeActions` range in the vendored corpus
+/// states no `rangeType` at all, so nothing pins what the anchors should be —
+/// a redispatch's "previous instant" is a megawatt set-point read off the
+/// machines (`injection_origin`), not a tap, and building that blind is the
+/// thing §8.21 declined to do for `TapModel::Discrete`. Naming it here is the
+/// alternative to leaving the next reader to find it.
 fn standard_bounds(action: &super::crac::RangeAction) -> (f64, f64) {
     let mut low = f64::NEG_INFINITY;
     let mut high = f64::INFINITY;

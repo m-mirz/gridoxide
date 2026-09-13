@@ -300,6 +300,16 @@ fn triggered(rules: &[UsageRule], state: &State, violations: &[Violated]) -> boo
     for rule in rules.iter().filter(|r| r.covers(state)) {
         match rule {
             UsageRule::OnInstant { .. } | UsageRule::OnContingencyState { .. } => return true,
+            // Agrees with `usage::Constrained::activates` — which additionally
+            // refuses a non-preventive rule whose CNEC belongs to another
+            // contingency — but only because `violations` is **state-local**:
+            // `violated` filters to this state's own perimeter, so a rule naming
+            // another contingency's CNEC finds nothing to match. The scoping is
+            // enforced by the data rather than by the test.
+            //
+            // Stated because it is the kind of agreement that stops being true
+            // quietly. If `violations` ever widens to more than one state, this
+            // arm needs the contingency check `usage.rs` has.
             UsageRule::OnConstraint { cnec, .. } => {
                 conditional = true;
                 if violations.iter().any(|v| v.cnec == *cnec) {
