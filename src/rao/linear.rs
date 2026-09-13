@@ -956,6 +956,73 @@ fn optimize_within(
             }
         }
 
+        // Then the candidate the trial above never offers: **not moving at all**.
+        //
+        // The bracketing trial asks which of two adjacent taps is better. It
+        // cannot ask whether the column should have moved, and the LP does not
+        // either: a column that rides along with another whose movement *does*
+        // improve the objective costs only `pst_penalty`, which at 0.01 a degree
+        // is a tie-break rather than a brake. So a shifter can end far from where
+        // it started having bought nothing — on the reference's 1.4.1.6 a curative
+        // column pushed to the edge of its window while the plan's worst margin
+        // sits on a preventive CNEC it cannot touch.
+        //
+        // Reverted only when the objective is **no worse**, which is exactly what
+        // the movement penalty is supposed to express: among answers that are
+        // equally good, prefer the one that moves least. A revert that costs
+        // margin is not taken.
+        for k in 0..controls.len() {
+            if controls[k].pst.is_none() {
+                continue;
+            }
+            // Where "not moving" actually *is*.
+            //
+            // For most columns it is where the perimeter found the shifter. For
+            // a **chained** one it is wherever its anchor ended up: its window is
+            // stated about the previous instant, so once preventive has moved,
+            // the starting tap may be outside what the CRAC allows — on 1.4.1.6
+            // preventive goes to −7 and the ±8 window is [−15, 1], which the
+            // starting tap of 5 is not in. Offering that as the do-nothing
+            // candidate offers an illegal plan, `chained_taps_hold` rejects it,
+            // and the column stays where the LP put it for want of anywhere to
+            // go back to. Tracking the anchor is what "this state decides
+            // nothing" means for a chained column.
+            let (rest_angle, rest_tap) = match previous_instant_of(&controls, k) {
+                Some(p) => (
+                    controls[k]
+                        .pst
+                        .as_ref()
+                        .and_then(|c| proposed[p].1.and_then(|t| c.angle_at(t)))
+                        .unwrap_or(proposed[p].0),
+                    proposed[p].1,
+                ),
+                None => (starting[k], starting_taps[k]),
+            };
+            if proposed[k].1 == rest_tap {
+                continue;
+            }
+            let mut trial = proposed.clone();
+            trial[k] = (rest_angle, rest_tap);
+            if coupled {
+                for j in 0..trial.len() {
+                    if anchor_of(&controls, j) == Some(k) && proposed[j].1 == proposed[k].1 {
+                        trial[j] = (rest_angle, rest_tap);
+                    }
+                }
+            }
+            if !chained_taps_hold(&controls, &trial) {
+                continue;
+            }
+            apply(crac, network, &mut controls, &trial);
+            let score = objective(crac, network, resolution, perimeter, &controls, options);
+            if score >= best_here - 1e-9 {
+                best_here = best_here.max(score);
+                proposed = trial;
+            } else {
+                apply(crac, network, &mut controls, &proposed);
+            }
+        }
+
         let moved = proposed
             .iter()
             .zip(&previous)

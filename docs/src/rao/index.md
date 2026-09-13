@@ -188,7 +188,7 @@ this repository that gridoxide did not write for itself: they state margins to t
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-**1825 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+**1830 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
 whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
 counts, set-points, objective values, security statuses and **which optimization steps ran**, across
 two flow models and three networks. **Nothing is skipped**: every step the corpus states is checked,
@@ -199,7 +199,7 @@ so the ratio is the whole of it rather than the part that was convenient.
 | `dc_scenarios.feature` | 180 of 186 | |
 | `ac_scenarios.feature` | 276 of 282 | TestCase12Nodes |
 | `ac_scenarios_16nodes.feature` | 963 of 977 | TestCase16Nodes |
-| `second_preventive.feature` | 118 of 123 | |
+| `second_preventive.feature` | **123 of 123** | |
 | `min_cost.feature` | 288 of 294 | costly optimization |
 
 Two of the five were vendored **before** the capability they test existed, which is the order the
@@ -208,8 +208,8 @@ with nothing implemented; the costly one scored 165. In both cases the gate then
 one scenario at a time, and a corpus vendored after the fact only ever confirms what its author
 already believed.
 
-Of the 37 assertions that do not match, **32 are recorded disagreements rather than a backlog**, in
-twelve scenarios. Each has been measured on the reference's *own* objective, in the unit its own
+All 32 assertions that do not match are **recorded disagreements rather than a backlog**, in ten
+scenarios. There is no open defect left in the corpus. Each has been measured on the reference's *own* objective, in the unit its own
 configuration selects and with its own MNEC violation cost applied, and in none of them is gridoxide
 worse: some are its `BestTapFinder` rounding a set-point on minimum margin alone, blind to a virtual
 cost its own javadoc warns about; two are gridoxide securing the network more cheaply than the
@@ -217,12 +217,10 @@ reference asks under `MIN_COST`, which is the objective working rather than a de
 ties reached by a different route. The gate names each with the measurement behind it and refuses to
 let a scenario disagree without one — see `plans/RAO_PLAN.md` §8.6.
 
-**The remaining 5 are one open defect**, in 1.4.1.5 and 1.4.1.6: a curative perimeter that spends
-three actions where the reference spends one, reaching better curative margins than it asks for.
-Seven mechanisms have been implemented, measured and refuted for it (§8.9), each costing elsewhere,
-which is the signature of a rule narrower than anything these scenarios distinguish. The next step is
-reading the reference's own curative perimeter, and that is not a measurement this repository can
-make.
+The last open defect — 1.4.1.5 and 1.4.1.6, a curative perimeter spending three actions where the
+reference spends one — closed in §8.25. Seven mechanisms had been implemented, measured and refuted
+for it; the eighth was **read** out of the reference's own source rather than guessed, which took a
+morning where the seven had taken weeks. `second_preventive.feature` went 118 → 123.
 
 ## What is not here
 

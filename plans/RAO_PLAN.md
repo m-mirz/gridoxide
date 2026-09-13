@@ -16,8 +16,10 @@ second preventive was built and gated the same day.
 >
 > §8.3's external Cucumber gate runs two flow models across five files and 197 scenarios:
 > **180 of 186** DC assertions, **276 of 282** AC ones on TestCase12Nodes, **963 of 977** on
-> TestCase16Nodes, **118 of 123** on the second-preventive corpus and **288 of 294** on the
-> costly-optimization one — **1825 of 1862**, with
+> TestCase16Nodes, **123 of 123** on the second-preventive corpus and **288 of 294** on the
+> costly-optimization one — **1830 of 1862**, and every one of the 32 that differ is a **recorded
+> disagreement** measured on the reference's own objective. There is no open defect left in the
+> corpus. With
 > **nothing** left unsupported out of what was 177. Every step in the vendored corpus is now
 > checked — the ratio is the whole of it.
 >
@@ -2453,9 +2455,53 @@ that means something: does it end somewhere other than where preventive left the
 tracking preventive is inheriting a decision, not making one — the same distinction §8.18 draws when
 it rounds coupled columns together.
 
-#### What is left, and it is one scenario
+#### And the candidate the rounding step never offered
 
-1.4.1.6 is 1.4.1.5 *with a `relativeToPreviousInstant` range added to the CRA*, and it is the only
+1.4.1.6's residual came down to a question the optimizer could not ask. The bracketing trial offers a
+column its *other adjacent tap*; it cannot offer **not moving at all**, and neither can the LP, where
+a column that rides along with another whose movement does improve the objective costs only
+`pst_penalty` — 0.01 a degree, a tie-break rather than a brake. So a shifter can end far from where it
+started having bought nothing.
+
+The trial now offers that candidate, taken when the objective is **no worse** — which is exactly what
+the movement penalty is meant to express: among equally good answers, prefer the one that moves least.
+A revert that costs margin is not taken.
+
+**Where "not moving" is** turned out to be the whole of it, and the first attempt put it in the wrong
+place. For most columns it is where the perimeter found the shifter. For a **chained** one it is
+wherever its anchor ended up: the window is stated about the previous instant, so once preventive has
+moved, the starting tap can be outside what the CRAC allows. On 1.4.1.6 preventive goes to −7 and the
+±8 window is [−15, 1] — the starting tap of 5 is **not in it**. Offering that as the do-nothing
+candidate offers an illegal plan, `chained_taps_hold` rejects it, and the column stays where the LP
+put it for want of anywhere to go back to. Resting on the anchor is what "this state decides nothing"
+means for a chained column, and it scored 120 → **123**.
+
+That measurement is also why the first version of this change scored exactly nothing: reverting to the
+starting tap was refused on every chained column, silently, and looked like a hypothesis failing.
+
+#### `second_preventive.feature` is closed, and so is the corpus
+
+**123 of 123.** The file scored 45 of 108 when it was vendored with nothing implemented. Its blanket
+exemption is gone — the field is `None` rather than a stale reason, and the per-scenario guard is live
+again for all fifteen.
+
+With it, **every remaining mismatch in the whole corpus is a recorded disagreement**:
+
+| file | | |
+|---|---|---|
+| `dc_scenarios.feature` | 180 / 186 | 6 recorded |
+| `ac_scenarios.feature` | 276 / 282 | 6 recorded |
+| `ac_scenarios_16nodes.feature` | 963 / 977 | 14 recorded |
+| `second_preventive.feature` | **123 / 123** | — |
+| `min_cost.feature` | 288 / 294 | 6 recorded |
+| | **1830 / 1862** | **32 recorded, 0 defects** |
+
+Each of the 32 has been measured on the reference's own objective and in none of them is gridoxide
+worse. There is no open defect left in the corpus.
+
+#### The former residual, kept because the reasoning survives
+
+1.4.1.6 is 1.4.1.5 *with a `relativeToPreviousInstant` range added to the CRA*, and it was the only
 scenario in the corpus still short. It spends two curative actions: `close_fr1_fr5`, and a chained
 `pst_fr_cra` the second pass pushes to tap **1** — the upper edge of its ±8 window about preventive's
 −7. The plan's worst margin is 43 A on a preventive CNEC, so the move buys nothing any state can use,

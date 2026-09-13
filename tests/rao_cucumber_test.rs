@@ -1485,12 +1485,11 @@ const FILES: [(&str, usize, usize, Option<&str>); 5] = [
         // §8.11 gave them columns of their own. What is left is narrower and
         // worth naming precisely, because a stale exemption is how a corpus
         // stops being measured just as surely as a missing one.
-        Some(
-            "1.4.1.6 spends two curative actions where the reference spends one: its second \
-             preventive pass pushes a chained curative column to the edge of its window for no \
-             gain the plan's worst margin can use. §8.25 closed 1.4.1.5, which was the same \
-             scenario without that range",
-        ),
+        // No exemption. This corpus scored 45 of 108 when it was vendored with
+        // nothing implemented, and it is now **123 of 123** — every scenario,
+        // every assertion. The field is `None` rather than a stale reason, and
+        // the per-scenario guard beside it is live again for all 15.
+        None,
     ),
     (
         "min_cost.feature",
@@ -1974,7 +1973,7 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// curative perimeter is the next step.
 ///
 /// Nothing else. Every other scenario in the corpus matches in full.
-const BASELINE_MATCHED_2P: usize = 120;
+const BASELINE_MATCHED_2P: usize = 123;
 
 /// The 26 costly-optimization scenarios: **288 of 294**, from 165 with the
 /// objective unbuilt, 178 once the search tree could rank by cost (§8.13), 221
