@@ -1416,15 +1416,21 @@ genuinely improve the curative perimeter's own objective — 86 A to 385 A — a
 because they do. The reference declines a 300 A improvement on its own perimeter, and nothing in the
 configuration, the CRAC, or the four rules above says why.
 
-These five are what is left of the whole corpus, and the honest conclusion after seven refutations is
-that the corpus cannot tell us the rule. **§8.25 found it by reading the reference instead**, and in
-doing so retired the claim below that this repository could not: the checkout is at
-`references/powsybl-open-rao`. Every candidate consistent with 1.4.1.5 and 1.4.1.6 has been
-measured and every one costs elsewhere, which is the signature of a rule that is narrower than
-anything the scenarios distinguish. Reading the reference's own curative perimeter — how it filters
-range actions, and why it prefers a switch to two shifters that improve its objective more — is the
-next step, and it is not a measurement this repository can make. The *other* eleven were a different
-defect: §8.10 and §8.11 closed them.
+These five were what was left of the whole corpus, and the conclusion after seven refutations was that
+the corpus cannot tell us the rule. That much was right. What followed it was not:
+
+> Reading the reference's own curative perimeter ... is the next step, and **it is not a measurement
+> this repository can make**.
+
+`references/powsybl-open-rao` is a full checkout. It is gitignored — which is why `git` shows nothing
+and why a search that stopped short of it found nothing — and the claim was then repeated twice more
+without being checked. Seven mechanisms were guessed at and measured over weeks; the eighth was read
+in a morning (§8.25), and the five closed. **The lesson is not about this defect.** A sentence
+asserting that something cannot be measured should carry the measurement that established it, exactly
+as a recorded disagreement must (§8.6) — otherwise it is a guess with the authority of a finding, and
+it stops the next person from looking.
+
+The *other* eleven were a different defect: §8.10 and §8.11 closed them.
 
 ### 8.10 Defect 32: the second pass reads preventive CNECs in a curative network
 
@@ -2557,6 +2563,48 @@ looked structurally necessary turned out not to be: per-state `A(r, s)` (one col
 is enough where the reference reads one per state, because a column that does not move is never
 applied) and the carry of curative network actions (re-searching them reaches the same answer here).
 Both may still matter on a CRAC this corpus does not contain.
+
+### 8.26 Two implementations of one rule, and only one of them read it
+
+`OnFlowConstraintInCountry` had two implementations in this crate and they disagreed.
+`usage::Constrained::activates` checks the contingency, the instant, and that the overloaded CNEC's
+branch is **in the named country**. `automaton::triggered` did this:
+
+```rust
+UsageRule::OnFlowConstraintInCountry { .. } => {
+    if !violations.is_empty() { return true; }
+}
+```
+
+The country was not read at all, so an automaton scoped to Belgium operated because something in
+France was over its threshold — and `watched_cnecs` then handed it every violated CNEC in the
+network. The reference settles which of the two is right without ambiguity: `AutomatonSimulator` and
+the search both filter through one `RaoUtil.canRemedialActionBeUsed`, and its
+`isUsageRuleActivated` does the country test.
+
+**No vendored CRAC exercises it.** The corpus has exactly two country-scoped rules, both preventive
+and both on `pst_be`, so they take the `usage.rs` path. The gate is unchanged at 1830 and cannot see
+this either way, which is why it is asserted in unit tests instead — including that a tie line counts
+for both of its countries, since that is why the field is a list.
+
+This is the same shape as §8.22's IIDM reactive limits and §8.18's anchor: **two parts of the
+codebase that should agree and do not**, found by asking where the codebase answers one question
+twice. That question has now produced four defects — the cross-format reactive limits, the
+LP-versus-pricing anchor, the gate-versus-optimizer automaton network, and this — and it is a more
+productive thing to ask than "what is missing".
+
+#### And a claim that should have carried a measurement
+
+§8.9 ended with "reading the reference's own curative perimeter ... is not a measurement this
+repository can make". `references/powsybl-open-rao` is a full checkout; it is gitignored, so `git`
+shows nothing, and the claim was repeated three times without being checked. Seven mechanisms were
+guessed at over weeks; the eighth was read in a morning.
+
+The correction is recorded in §8.9 itself rather than only here, because that is where the next
+person will look. The general form is worth stating: **a sentence asserting that something cannot be
+measured should carry the measurement that established it**, exactly as §8.6 requires of a recorded
+disagreement. Without one it is a guess wearing the authority of a finding, and its effect is to stop
+anyone looking again.
 
 ### 8.4 Two independent MILP solvers
 

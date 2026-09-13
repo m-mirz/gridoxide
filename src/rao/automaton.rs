@@ -295,20 +295,26 @@ fn covers(rules: &[UsageRule], state: &State) -> bool {
 /// equipment operates on the contingency itself. An `OnConstraint` rule names
 /// the CNEC it watches and fires only while that CNEC is over its threshold,
 /// which is what makes the order of firing matter.
-fn triggered(rules: &[UsageRule], state: &State, violations: &[String]) -> bool {
+fn triggered(rules: &[UsageRule], state: &State, violations: &[Violated]) -> bool {
     let mut conditional = false;
     for rule in rules.iter().filter(|r| r.covers(state)) {
         match rule {
             UsageRule::OnInstant { .. } | UsageRule::OnContingencyState { .. } => return true,
             UsageRule::OnConstraint { cnec, .. } => {
                 conditional = true;
-                if violations.iter().any(|v| v == cnec) {
+                if violations.iter().any(|v| v.cnec == *cnec) {
                     return true;
                 }
             }
-            UsageRule::OnFlowConstraintInCountry { .. } => {
+            // The country is part of the condition, not decoration. Firing on
+            // any violation anywhere is what this used to do, and it made an
+            // automaton scoped to one country answer for every other.
+            UsageRule::OnFlowConstraintInCountry { country, .. } => {
                 conditional = true;
-                if !violations.is_empty() {
+                if violations
+                    .iter()
+                    .any(|v| v.countries.iter().any(|c| c.eq_ignore_ascii_case(country)))
+                {
                     return true;
                 }
             }
@@ -324,16 +330,27 @@ fn triggered(rules: &[UsageRule], state: &State, violations: &[String]) -> bool 
 ///
 /// An unconditional rule watches everything, since it fires on the contingency
 /// rather than on a constraint.
-fn watched_cnecs(rules: &[UsageRule], state: &State, violations: &[String]) -> Vec<String> {
+fn watched_cnecs(rules: &[UsageRule], state: &State, violations: &[Violated]) -> Vec<String> {
     let mut named = Vec::new();
     for rule in rules.iter().filter(|r| r.covers(state)) {
         match rule {
             UsageRule::OnConstraint { cnec, .. } => {
-                if violations.iter().any(|v| v == cnec) {
+                if violations.iter().any(|v| v.cnec == *cnec) {
                     named.push(cnec.clone());
                 }
             }
-            _ => return violations.to_vec(),
+            // Scoped to the country too: an action authorized by an overload in
+            // Belgium watches Belgium's CNECs, not everything that happens to be
+            // over its threshold.
+            UsageRule::OnFlowConstraintInCountry { country, .. } => {
+                named.extend(
+                    violations
+                        .iter()
+                        .filter(|v| v.countries.iter().any(|c| c.eq_ignore_ascii_case(country)))
+                        .map(|v| v.cnec.clone()),
+                );
+            }
+            _ => return violations.iter().map(|v| v.cnec.clone()).collect(),
         }
     }
     named
@@ -725,7 +742,7 @@ fn violated(
     open: &[usize],
     transformers: &[Transformer],
     model: FlowModel,
-) -> Vec<String> {
+) -> Vec<Violated> {
     let view = Network {
         generation: network.generation,
         buses: network.buses,
@@ -739,13 +756,40 @@ fn violated(
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
+    // The countries each violated branch touches, so a rule scoped to one can
+    // be honoured rather than ignored. Derived from the network, because a CRAC
+    // does not say where its elements are — the same source
+    // `usage::branch_countries` reads for the search.
+    let branches = crate::linear::btheta::dc_branches(
+        view.lines,
+        view.transformers,
+        crate::linear::DcOptions::default(),
+    );
+    let countries = super::usage::branch_countries(crac, &view, resolution, &branches);
     measure(crac, &view, resolution, open, model)
         .perimeters
         .iter()
         .filter(|p| p.state == *state)
         .flat_map(|p| p.violations())
-        .map(|c| crac.flow_cnecs[c.cnec].id.clone())
+        .map(|c| Violated {
+            cnec: crac.flow_cnecs[c.cnec].id.clone(),
+            countries: countries.get(&c.branch).cloned().unwrap_or_default(),
+        })
         .collect()
+}
+
+/// A CNEC over its threshold, and the countries its branch touches.
+///
+/// The second half exists because `OnFlowConstraintInCountry` is a rule about
+/// *where* the overload is. Carrying only the id made that rule unanswerable
+/// here, and it was answered "yes" unconditionally: an automaton scoped to
+/// Belgium fired because something in France was overloaded. `usage.rs` has
+/// always done the test properly for the search, and the reference runs both
+/// paths through one `RaoUtil.canRemedialActionBeUsed`.
+#[derive(Clone, Debug)]
+struct Violated {
+    cnec: String,
+    countries: Vec<String>,
 }
 
 fn margin(
@@ -776,4 +820,70 @@ fn margin(
         .find(|p| p.state == *state)
         .and_then(|p| p.min_margin())
         .unwrap_or(f64::INFINITY)
+}
+
+#[cfg(test)]
+mod country_tests {
+    use super::*;
+    use crate::rao::crac::UsageRule;
+
+    fn violated(cnec: &str, countries: &[&str]) -> Violated {
+        Violated {
+            cnec: cnec.into(),
+            countries: countries.iter().map(|c| (*c).to_string()).collect(),
+        }
+    }
+
+    fn in_country(country: &str) -> UsageRule {
+        UsageRule::OnFlowConstraintInCountry {
+            instant: 0,
+            country: country.into(),
+            contingency: None,
+        }
+    }
+
+    const AUTO: State = State { instant: 0, contingency: Some(0) };
+
+    /// A rule scoped to a country is a rule **about where the overload is**.
+    ///
+    /// This path used to fire on any violation anywhere, so an automaton scoped
+    /// to Belgium operated because something in France was over its threshold.
+    /// `usage.rs` has always done the test properly for the search — the two
+    /// were one rule with two implementations, one of them ignoring half the
+    /// condition — and the reference runs both paths through a single
+    /// `RaoUtil.canRemedialActionBeUsed`.
+    ///
+    /// No vendored CRAC has a country-scoped rule on an automaton, so the gate
+    /// cannot see this. It is asserted here instead rather than left to be
+    /// discovered by whoever first writes one.
+    #[test]
+    fn a_country_scoped_automaton_ignores_an_overload_elsewhere() {
+        let rules = [in_country("BE")];
+        let elsewhere = [violated("fr-cnec", &["FR"])];
+        assert!(
+            !triggered(&rules, &AUTO, &elsewhere),
+            "an overload in France must not operate equipment scoped to Belgium"
+        );
+        let here = [violated("be-cnec", &["BE"])];
+        assert!(triggered(&rules, &AUTO, &here), "an overload in Belgium must");
+    }
+
+    /// A cross-border branch counts for both ends, which is why the country is
+    /// a list rather than a value.
+    #[test]
+    fn a_tie_line_counts_for_both_countries() {
+        let tie = [violated("be-fr", &["BE", "FR"])];
+        assert!(triggered(&[in_country("BE")], &AUTO, &tie));
+        assert!(triggered(&[in_country("FR")], &AUTO, &tie));
+        assert!(!triggered(&[in_country("DE")], &AUTO, &tie));
+    }
+
+    /// And what it watches is scoped too: an action authorized by an overload in
+    /// Belgium watches Belgium's CNECs, not everything over its threshold.
+    #[test]
+    fn what_a_country_scoped_rule_watches_is_scoped_too() {
+        let rules = [in_country("BE")];
+        let violations = [violated("be-cnec", &["BE"]), violated("fr-cnec", &["FR"])];
+        assert_eq!(watched_cnecs(&rules, &AUTO, &violations), vec!["be-cnec".to_string()]);
+    }
 }

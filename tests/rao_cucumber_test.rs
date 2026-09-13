@@ -1951,28 +1951,35 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// perimeter has not run, when that perimeter's own figure is already in the
 /// minimum beside it.
 ///
-/// # What the 5 that remain are
+/// # Closed, at 123 of 123
 ///
-/// Two scenarios. **Five** are a curative perimeter that overspends: 1.4.1.5
-/// and 1.4.1.6 agree with the reference on every preventive figure and then
-/// spend three curative actions where it spends one, reaching *better* curative
-/// margins than it asks for — 535 A against 86. That is a defect rather than a
-/// recorded disagreement, because three switching operations under time pressure
-/// to buy margin the plan's worst case cannot use is worse than one however the
-/// margin reads. §8.9 measures and refutes **six** causes for it, three of them
-/// re-measured after `A(r, s)` landed: the stop criterion (−36), a capped
-/// curative objective (−24), the composition rule (−2), `A(r, s)` itself (it
-/// closed 1.4.1.2 and 1.4.1.1.3 and not these), carrying the second pass's own
-/// curative set-point (its column lands on −16 too), the cap applied only after
-/// a second preventive pass (−3, and it drops the one action the reference
-/// *does* use), and the cap on the **LP's margin column** rather than the
-/// tree's — §8.9's own suggested seventh, which costs 26 on TestCase16Nodes and
-/// 1 here and moves neither scenario, so the two shifter moves survive a hard
-/// ceiling at the point past which margin stops mattering. Do not re-run those
-/// seven; the corpus cannot tell us the rule, and reading the reference's
-/// curative perimeter is the next step.
+/// The file scored **45 of 108** when it was vendored with nothing implemented,
+/// which is the order this was built in and the only one that works: vendor the
+/// corpus first, then let it find the defects one scenario at a time.
 ///
-/// Nothing else. Every other scenario in the corpus matches in full.
+/// The last two, 1.4.1.5 and 1.4.1.6, spent three curative actions where the
+/// reference spends one. **Seven** mechanisms were implemented, measured and
+/// refuted for them — the stop criterion, a capped curative objective, the
+/// composition rule, `A(r, s)`, carrying the second pass's own curative
+/// set-point, the cap applied only after a second pass, and a ceiling on the
+/// LP's own margin column. Every one cost elsewhere.
+///
+/// The eighth was **read** rather than guessed, out of
+/// `references/powsybl-open-rao` (§8.25): after a kept second preventive pass
+/// the reference composes its plan from the first curative pass's *network*
+/// actions plus the second pass's own *range* set-points, and runs no curative
+/// range-action search afterwards. The two differ in objective — a curative
+/// perimeter maximizes its own worst margin, the second pass the whole plan's —
+/// and on 1.4.1.5 that is 285 A of curative margin the plan's 43 A preventive
+/// bottleneck cannot use.
+///
+/// §8.26 closed the rest: the rounding step could offer a column its other
+/// adjacent tap but never *not moving at all*, and for a chained column "not
+/// moving" is where its anchor ended up rather than where it started.
+///
+/// The claim that preceded all this — that reading the reference "is not a
+/// measurement this repository can make" — was false, and had been repeated
+/// three times without being checked.
 const BASELINE_MATCHED_2P: usize = 123;
 
 /// The 26 costly-optimization scenarios: **288 of 294**, from 165 with the
