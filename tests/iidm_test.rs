@@ -946,3 +946,65 @@ fn an_hvdc_converter_station_is_counted_rather_than_mistaken_for_a_generator() {
         "a converter station is not a generator"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cross-consistency: the two importers, on everything but the flows
+// ---------------------------------------------------------------------------
+
+/// The flow gate compares what the two formats *solve to*. This compares what
+/// they *say*, which is where a disagreement hides: a field no solve reads is
+/// invisible to a margin and decisive to whatever does read it.
+///
+/// `the_two_formats_agree_about_reactive_limits` is this question asked once and
+/// answered no — IIDM had every generator at ±infinity while UCTE read the
+/// document. This asks the rest of it.
+#[test]
+fn the_two_formats_agree_about_everything_a_solve_does_not_read() {
+    for stem in ["TestCase12Nodes", "TestCase12NodesDifferentPstTap"] {
+        let u = gridoxide::ucte::read(ucte_fixture(&format!("{stem}.uct"))).expect("ucte");
+        let i = iidm::read(fixture(&format!("{stem}.xiidm"))).expect("iidm");
+        assert_eq!(u.buses.len(), i.buses.len(), "{stem}");
+        assert_eq!(u.n_branches(), i.n_branches(), "{stem}");
+
+        // Bus type. A bus that regulates in one format and does not in the other
+        // is a different network, and the flows can still agree because the
+        // solved voltage happens to match the target.
+        for (n, (ub, ib)) in u.buses.iter().zip(&i.buses).enumerate() {
+            assert_eq!(ub.bus_type, ib.bus_type, "{stem} bus {n}: bus type");
+        }
+
+        // Branch limits. UCTE states one rating per branch, IIDM one per
+        // terminal; the comparison is against whichever side IIDM gives, since a
+        // single-sided document cannot disagree about a side it never names.
+        let mut compared = 0;
+        for b in 0..u.n_branches() {
+            let (Some(un), Some(inn)) = (u.limits.get(b), i.limits.get(b)) else { continue };
+            let Some(upatl) = un.patl_a else { continue };
+            for side in inn {
+                let Some(ipatl) = side.patl_a else { continue };
+                assert!(
+                    (upatl - ipatl).abs() < 1e-6 * upatl.abs().max(1.0),
+                    "{stem} branch {b} ({}): PATL {upatl} A (UCTE) against {ipatl} A (IIDM)",
+                    u.branch_ids[b]
+                );
+                compared += 1;
+            }
+        }
+        assert!(compared > 0, "{stem}: no limits compared, the check is vacuous");
+        eprintln!("SWEEP {stem}: {} buses, {} branches, {compared} limits, {} tap changers",
+            u.buses.len(), u.n_branches(),
+            u.tap_changers.iter().filter(|t| t.is_some()).count());
+
+        // Tap changers, where both formats describe the same shifter.
+        for (t, (ut, it)) in u.tap_changers.iter().zip(&i.tap_changers).enumerate() {
+            match (ut, it) {
+                (Some(a), Some(b)) => assert_eq!(
+                    a.position, b.position,
+                    "{stem} transformer {t}: tap position"
+                ),
+                (None, None) => {}
+                _ => panic!("{stem} transformer {t}: one format has a tap changer and the other does not"),
+            }
+        }
+    }
+}

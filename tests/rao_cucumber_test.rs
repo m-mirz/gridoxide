@@ -1069,6 +1069,45 @@ fn check(scenario: &Scenario) -> Outcome {
         (actions, moved)
     };
 
+    // Two implementations of "what did this plan spend", asserted equal.
+    //
+    // `spent_by` above is this file's own reading of the plan; `Plan::spent` is
+    // the library's, and `castor`'s whole-plan judgement prices with it. If they
+    // drift, every cost figure below is measured against one of them and decided
+    // by the other — and they *were* changed together once, when §8.15 removed a
+    // `dedup()` from each.
+    //
+    // Checked only under a cost objective, which is the only place either is
+    // read, and at the stage that covers the whole plan.
+    if search_options.linear.objective_kind.costly().is_some() {
+        let (mine_actions, mine_moved) = spent_by(Some(Stage::Cra));
+        let (theirs_actions, mut theirs_moved) = plan.spent(&crac);
+        assert_eq!(
+            mine_actions, theirs_actions,
+            "{}: the gate and the library disagree about which network actions the plan spent",
+            scenario.name
+        );
+        theirs_moved.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        assert_eq!(
+            mine_moved.len(),
+            theirs_moved.len(),
+            "{}: the gate and the library disagree about how many range-action movements the \
+             plan spent — {mine_moved:?} against {theirs_moved:?}",
+            scenario.name
+        );
+        for (mine, theirs) in mine_moved.iter().zip(&theirs_moved) {
+            assert_eq!(mine.0, theirs.0, "{}: different range action", scenario.name);
+            assert!(
+                (mine.1 - theirs.1).abs() < 1e-9,
+                "{}: `{}` moved {} by one reading and {} by the other",
+                scenario.name,
+                crac.range_actions[mine.0].id,
+                mine.1,
+                theirs.1
+            );
+        }
+    }
+
     let cost_at = |stage: Option<Stage>| -> Option<f64> {
         let read = |cnec: &FlowCnec| -> Option<f64> {
             let margin = match stage {

@@ -177,6 +177,23 @@ impl Plan {
         std::iter::once(&self.preventive)
             .chain(self.scenarios.iter().flat_map(|s| s.perimeters.iter()))
     }
+
+    /// What this plan spends, as `(network actions, range actions moved)` —
+    /// the two lists [`Costly::activation`](super::costly::Costly::activation)
+    /// prices.
+    ///
+    /// Repeats are kept in both: activation is billed per **state**, so one
+    /// action taken after two contingencies is two activations, and a shifter
+    /// moved preventively and again curatively is two movements. Distance is in
+    /// taps for a phase shifter, the unit `variationCosts` is stated in.
+    ///
+    /// Exposed because the gate computes the same thing independently, and two
+    /// implementations of one question should be asserted equal rather than
+    /// trusted to stay so. They were changed together once — §8.15 removed a
+    /// `dedup()` from each — which is exactly the situation in which they drift.
+    pub fn spent(&self, crac: &Crac) -> (Vec<usize>, Vec<(usize, f64)>) {
+        (activated_by(&self.preventive, &self.scenarios), moved_by(crac, &self.preventive, &self.scenarios))
+    }
 }
 
 /// Run the whole optimization.

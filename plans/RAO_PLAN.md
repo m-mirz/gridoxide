@@ -2606,6 +2606,31 @@ measured should carry the measurement that established it**, exactly as §8.6 re
 disagreement. Without one it is a guess wearing the authority of a finding, and its effect is to stop
 anyone looking again.
 
+### 8.27 The sweep: where does this codebase answer one question twice?
+
+Four defects this cycle came from the same question, asked by accident each time — the cross-format
+reactive limits (§8.22), the LP-versus-pricing anchor (§8.18), the gate-versus-optimizer automaton
+network (§8.20), and the country filter (§8.26). None was found by looking for missing features. All
+four were **two parts of the codebase answering one question differently**, with the gate blind to
+three of them.
+
+So it was asked deliberately. Four places were checked; one was already known, one is a real
+inconsistency, and two agree — which is worth as much, because agreement that is measured is
+agreement that can be asserted.
+
+| pair | verdict |
+|---|---|
+| UCTE against IIDM on **bus type, branch limits, tap position** | **Agree.** 12 buses, 16 branches, 31 limit comparisons and a tap changer per fixture, on two networks. Now a standing test — the flow gate compares what the formats *solve to*, and this compares what they *say*, which is where a field no solve reads can hide. |
+| `usage::Constrained` against `automaton::triggered` on `OnConstraint` | **Agree, but only because of the data.** `usage.rs` refuses a non-preventive rule whose CNEC belongs to another contingency; the automaton has no such test and does not need one, because `violated` filters to the state's own perimeter so no other contingency's CNEC is ever in the list. Stated in the code: if `violations` widens, that arm needs the check. |
+| `standard_bounds` against `tap_bounds` on `RangeKind` | **A real inconsistency, unexercised.** `tap_bounds` anchors `relativeToInitialNetwork` and `relativeToPreviousInstant`; `standard_bounds` ignores the kind entirely, so the same field means two things depending on whether the action is a shifter or a redispatch. Every `injectionRangeActions` range in the corpus states no `rangeType` at all, so nothing pins what a redispatch's anchors should be — a "previous instant" there is a megawatt set-point read off the machines, not a tap. Recorded rather than built blind, which is §8.21's rule. |
+| the gate's `spent_by` against `Plan::spent` | **Agree, and now asserted.** Both answer "what did this plan spend"; the gate prices its own reading and `castor`'s whole-plan judgement prices the library's. 36 network activations and 20 movements across 25 costly scenarios, checked element by element on every run. They were changed together once — §8.15 removed a `dedup()` from each — which is precisely the situation in which two implementations drift, and the assertion is cheaper than the next investigation. |
+
+**The method generalizes past this file.** The question is not "what is missing" — that list is long,
+mostly deliberate, and mostly ungated. It is "what does this answer twice", because a second
+implementation is a free oracle: it needs no fixture, no reference, and no new corpus, and it fails
+loudly the moment the two stop agreeing. Three of the four defects it found were invisible to 1862
+assertions.
+
 ### 8.4 Two independent MILP solvers
 
 The pattern the crate has now run twice: `ipm` versus `highs` on 300 randomized convex QPs caught a
