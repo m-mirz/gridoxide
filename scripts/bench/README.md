@@ -113,6 +113,14 @@ VIRTUAL_ENV=.venv-case-suite .venv-case-suite/bin/maturin develop --release --fe
 .venv-case-suite/bin/python3 scripts/bench/run_case_suite.py --python .venv-case-suite/bin/python3
 ```
 
+**`pip install power-grid-model` currently does not work for this benchmark.** The latest PyPI release
+(1.12.110 as of this writing) predates the `voltage_regulator` component `matpower_to_pgm.py` emits for every
+generator, so PGM fails immediately on all 12 cases with `PowerGridSerializationError: Cannot find component
+with name: voltage_regulator!` — not a convergence failure, a hard incompatibility. Build PGM from its `main`
+branch instead (Python >=3.12, a C++23 compiler — gcc>=14 or clang>=18, see that repo's
+`docs/advanced_documentation/build-guide.md`): `CC=gcc-14 CXX=g++-14 uv build --wheel -o dist && .venv-case-suite/bin/pip
+install dist/*.whl`. See "PGM convergence re-check" below.
+
 Loops all 12 cases, converting each MATPOWER `.m` to PGM JSON on first use (cached in
 `scripts/bench/.case-cache/`, gitignored). A case that fails to convert or diverges gets an explicit
 `FAILED (...)` cell with the tool's real exception. `--repeat` sets timed solves per case (default 10),
@@ -212,11 +220,47 @@ Two fixes came out of building this table:
   still doesn't converge either way) and the full `cargo test --features cgmes` suite passes identically
   without it, so it was removed outright.
 
-PGM's numbers needed a workaround to obtain at all: once the converter began writing real `q_min`/`q_max` onto
-`voltage_regulator`, all 12 inputs tripped PGM's `ExperimentalFeature` error through the public
-`calculate_power_flow` (version 1.13.120 never wired `experimental_features` through the public wrapper).
-`bench_pgm.py` calls the private `_calculate_power_flow` with `experimental_features="enabled"`, confirmed to
-reproduce the same converged voltages the public API gave before Q-limits existed.
+PGM's numbers needed a workaround to obtain at all on version 1.13.120: once the converter began writing real
+`q_min`/`q_max` onto `voltage_regulator`, all 12 inputs tripped PGM's `ExperimentalFeature` error through the
+public `calculate_power_flow` (that version never wired `experimental_features` through the public wrapper), so
+`bench_pgm.py` called the private `_calculate_power_flow` with `experimental_features="enabled"` instead,
+confirmed to reproduce the same converged voltages the public API gave before Q-limits existed. **This
+workaround is gone as of this table's re-check below**: PGM's `main` branch has since stabilized q-limit
+handling ("Activate q-limit handling, remove experimental feature"), so `bench_pgm.py` now calls the public
+`calculate_power_flow` directly.
+
+### PGM convergence re-check
+
+Re-ran gridoxide + PGM on all 12 cases to check whether PGM's convergence picture had changed. It has not:
+**PGM still converges on only 2 of 12 cases** (`case14`, `case_illinois200`), diverging on the same set of
+real transmission-topology cases (RTE, PEGASE, `case118`, `case300`) as the table above. Two things did
+change, though:
+
+- The PyPI release (1.12.110) can no longer run this benchmark at all — see the setup note above. These
+  numbers are from a `power-grid-model` `main`-branch source build (reported version `1.13`).
+- The failure *mode* shifted on five cases. `case1354pegase`, `case2869pegase`, `case3120sp`, `case6495rte`,
+  `case6515rte` were `SparseMatrixError` (raised during construction, footnote²) in the table above; on the
+  current build they instead run the full 20 iterations and raise `IterationDiverge` (footnote¹).
+  `case9241pegase` is unchanged (`SparseMatrixError`). `case118`, `case300`, `case1888rte`, `case2848rte` are
+  unchanged (`IterationDiverge`).
+
+| case | buses | PGM (current `main`) |
+|---|---|---|
+| case14 | 15 | 0.283 ms |
+| case118 | 119 | FAILED¹ |
+| case_illinois200 | 201 | 0.623 ms |
+| case300 | 301 | FAILED¹ |
+| case1354pegase | 1355 | FAILED¹ (was FAILED²) |
+| case1888rte | 1889 | FAILED¹ |
+| case2848rte | 2849 | FAILED¹ |
+| case2869pegase | 2870 | FAILED¹ (was FAILED²) |
+| case3120sp | 3121 | FAILED¹ (was FAILED²) |
+| case6495rte | 6496 | FAILED¹ (was FAILED²) |
+| case6515rte | 6516 | FAILED¹ (was FAILED²) |
+| case9241pegase | 9242 | FAILED² |
+
+Only the PGM column was re-measured (gridoxide's own numbers on this run agreed with the table above to within
+run-to-run noise); the other five tools weren't reinstalled for this check, so their columns above still stand.
 
 ### Accuracy results
 
