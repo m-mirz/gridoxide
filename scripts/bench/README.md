@@ -262,6 +262,53 @@ change, though:
 Only the PGM column was re-measured (gridoxide's own numbers on this run agreed with the table above to within
 run-to-run noise); the other five tools weren't reinstalled for this check, so their columns above still stand.
 
+### PGM root cause: a premature Q-limit check, not inherent difficulty
+
+Dug into *why* PGM fails on these cases, rather than just re-measuring that it does. The short version: it
+isn't that these cases are hard — gridoxide, lightsim2grid, pypowsybl and pandapower all solve most of them
+fine — it's a specific bug in when PGM decides a generator has hit its reactive-power limit.
+
+**PGM's `NewtonRaphsonPFSolver` checks `voltage_regulator.q_min`/`q_max` after a fixed 2 iterations**
+(`newton_raphson_pf_solver.hpp`'s `limit_check_at_iteration`, marked with the PGM authors' own
+`// TODO: maybe consider making this a parameter in the future`), using whatever voltage estimate exists at
+that point — nowhere near converged for a case with real transmission-scale coupling. On `case118` this made
+essentially every generator on one side of the network look like it needed its lower Q limit simultaneously,
+forcing a premature PV→PQ switch for all of them at once. Two failure modes follow from that:
+
+1. **A small case still "converges", but to the wrong answer.** Verified directly: patching PGM to delay the
+   check (see below) and re-solving `case118` without any other change moves the converged voltage profile from
+   `u_pu` 0.365-1.10 (real answer, `u_pu` 0.943-1.05, has zero buses below 0.9 p.u.) to matching gridoxide's own
+   0.943-1.05 answer almost exactly. The original code doesn't error here — it silently reports a spurious,
+   non-physical low-voltage root as a converged power flow. This is worse than `IterationDiverge`.
+2. **A large case with many generators hits `SparseMatrixError`.** On `case300`, the premature check switches
+   65 of roughly 69 generators to PQ in one shot (confirmed by instrumenting `enforce_q_limits`), which produces
+   a singular Jacobian on the next factorization.
+
+**A prototype fix** (not upstreamed — `power-grid-model`'s `claude/sharp-shannon-ihicfh` branch, commit
+`b1eca74`, local only, see that repo) replaces the fixed iteration count with a check gated on the actual
+per-iteration voltage deviation dropping below a threshold, so it reflects how settled the unconstrained problem
+actually is rather than an arbitrary count, and keeps re-checking every iteration afterward (a bus whose
+violation only shows up once the rest of the system has moved further still gets caught). Getting there also
+needed a minimal step-damping stopgap (a global adaptive scale plus a per-bus absolute cap on the Newton step),
+since PGM's Newton-Raphson applies the full, undamped step with no line search — without damping, `case118`
+diverges outright once the switch happens (raw per-iteration corrections reaching thousands of p.u. at
+individual buses).
+
+**Net effect on this suite: `case118` now converges to the correct answer** (previously `FAILED¹`); `case14`
+and `case_illinois200` are unaffected. The other 9 cases still fail, but now cleanly (`IterationDiverge`, not
+`SparseMatrixError` or a silent wrong answer) — for a distinct, unresolved reason: the step-damping stopgap
+isn't strong enough for larger/stiffer topologies. `case300`'s *unconstrained* solve (no Q-limits at all) never
+gets its deviation below the check threshold within 100 iterations, plateauing around 0.2-0.4 instead of
+shrinking — confirmed independently that this isn't inherent to the problem, since gridoxide converges on the
+same `case300` input easily, with or without Q-limits enforced. A real fix for the remaining cases needs
+residual/mismatch-based backtracking (Armijo-style: after each trial step, actually re-evaluate the P/Q
+mismatch and only accept it if it improves) rather than the voltage-deviation heuristic used here. Two dead
+ends worth recording so they aren't retried: a looser damping margin either fell into a stable shrink/grow
+2-cycle or let the damping sit at 1.0 without ever converging; a periodic full-step (undamped) probe to recover
+speed faster "converged" `case118` in 20 iterations but to the same wrong low-voltage root described above — a
+large step can jump to a different, non-physical root of the power-flow equations, so any speed-up here has to
+stay gradual.
+
 ### Accuracy results
 
 A MATPOWER `.m` file is power-flow *input*, not a solved snapshot — but it fully specifies the *equations*,
