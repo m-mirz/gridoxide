@@ -22,10 +22,14 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::batch::{uniform_load_scaling, BatchSolver, BusOverride, Scenario};
-use crate::network::{build_ybus, linear_initial_guess, stamp_shunts, YBusSparse};
+use crate::linear::{
+    dc_branches, dc_power_flow, linear_power_flow, DcApproximation, DcIslandStatus, DcOptions,
+    DcSensitivity, DcSolution, LinearIslandStatus,
+};
+use crate::network::{build_ybus, linear_initial_guess, stamp_shunts, ShuntAdm, YBusSparse};
 use crate::pgm::PgmInput;
-use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, SolveStatus};
-use crate::types::Bus;
+use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, PowerFlowMethod, SolveStatus};
+use crate::types::{Bus, Line, Transformer};
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
     cgmes_resolve_dc_converters, cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
@@ -52,6 +56,28 @@ fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
         )),
         other => Err(PyValueError::new_err(format!(
             "unknown backend '{other}', expected 'scalar', 'block', 'klu', 'klu_native', or 'pardiso'"
+        ))),
+    }
+}
+
+fn parse_method(name: &str) -> PyResult<PowerFlowMethod> {
+    match name {
+        "newton_raphson" => Ok(PowerFlowMethod::NewtonRaphson),
+        "dc" => Ok(PowerFlowMethod::Dc),
+        "linear_impedance" => Ok(PowerFlowMethod::LinearImpedance),
+        other => Err(PyValueError::new_err(format!(
+            "unknown method '{other}', expected 'newton_raphson', 'dc', or 'linear_impedance'"
+        ))),
+    }
+}
+
+fn parse_dc_approximation(name: &str) -> PyResult<DcApproximation> {
+    match name {
+        "ignore_r" => Ok(DcApproximation::IgnoreR),
+        "ignore_g" => Ok(DcApproximation::IgnoreG),
+        other => Err(PyValueError::new_err(format!(
+            "unknown dc_approximation '{other}', expected 'ignore_r' (b = 1/x) or \
+             'ignore_g' (b = x/(r²+x²))"
         ))),
     }
 }
@@ -119,8 +145,25 @@ struct PowerFlowModel {
     buses_template: Vec<Bus>,
     buses: Vec<Bus>,
     ybus: YBusSparse,
+    /// Kept alongside the Y-bus because the DC method is formulated per
+    /// branch — it needs each branch's own `x` and `tap`, which the Y-bus has
+    /// already summed away — and because the sensitivity factors need them
+    /// too. Newton and the constant-admittance method use only `ybus`.
+    lines: Vec<Line>,
+    transformers: Vec<Transformer>,
+    /// Kept for the same reason as the branch lists: a contingency sweep
+    /// rebuilds the Y-bus per scenario and has to re-stamp them.
+    shunts: Vec<ShuntAdm>,
     solver: PersistentSolver,
     backend: JacobianBackend,
+    method: PowerFlowMethod,
+    dc_opts: DcOptions,
+    /// The last DC solve's result, cleared whenever a non-DC `solve()` runs so
+    /// the accessors cannot serve a stale answer from a previous method.
+    dc_solution: Option<DcSolution>,
+    /// Built on first use and reused, since it holds one factorization per
+    /// island. Invalidated by `reset()` along with the Newton factorization.
+    sensitivity: Option<DcSensitivity>,
     /// Thread count paired with the `BatchSolver` built for it. Cached so
     /// repeated `solve_batch` calls at one thread count reuse a single rayon
     /// pool instead of respawning workers per call.
@@ -148,8 +191,26 @@ impl PowerFlowModel {
     /// `s_base_va`/`freq_hz` match
     /// `pgm::pgm_to_buses_and_branches`'s own defaults used elsewhere in
     /// this project (1e6 VA, 50 Hz) unless overridden.
+    ///
+    /// `method` is `"newton_raphson"` (default), `"dc"` (real Bθ) or
+    /// `"linear_impedance"` (the complex constant-admittance linearization,
+    /// power-grid-model's `CalculationMethod.linear`). `tol`/`max_iter`/
+    /// `backend` apply to Newton only — the other two are direct solves.
+    /// `dc_approximation` is `"ignore_r"` (default, `b = 1/x`) or
+    /// `"ignore_g"` (`b = x/(r²+x²)`); it also governs the sensitivity
+    /// factors, which are available whatever `method` is set to.
     #[staticmethod]
-    #[pyo3(signature = (path, backend="scalar", tol=1e-6, max_iter=20, s_base_va=1e6, freq_hz=50.0))]
+    #[pyo3(signature = (
+        path,
+        backend="scalar",
+        tol=1e-6,
+        max_iter=20,
+        s_base_va=1e6,
+        freq_hz=50.0,
+        method="newton_raphson",
+        dc_approximation="ignore_r",
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn from_pgm_json(
         path: &str,
         backend: &str,
@@ -157,6 +218,8 @@ impl PowerFlowModel {
         max_iter: usize,
         s_base_va: f64,
         freq_hz: f64,
+        method: &str,
+        dc_approximation: &str,
     ) -> PyResult<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
@@ -177,8 +240,18 @@ impl PowerFlowModel {
             buses: buses_template.clone(),
             buses_template,
             ybus,
+            lines,
+            transformers,
+            shunts,
             solver: PersistentSolver::new(backend),
             backend,
+            method: parse_method(method)?,
+            dc_opts: DcOptions {
+                approximation: parse_dc_approximation(dc_approximation)?,
+                ..DcOptions::default()
+            },
+            dc_solution: None,
+            sensitivity: None,
             batch: None,
             tol,
             max_iter,
@@ -201,13 +274,23 @@ impl PowerFlowModel {
     /// `docs/src/reference/provenance.md` for why that dependency is opt-in.
     #[cfg(feature = "cgmes")]
     #[staticmethod]
-    #[pyo3(signature = (paths, backend="scalar", tol=1e-6, max_iter=20, s_base_va=100e6))]
+    #[pyo3(signature = (
+        paths,
+        backend="scalar",
+        tol=1e-6,
+        max_iter=20,
+        s_base_va=100e6,
+        method="newton_raphson",
+        dc_approximation="ignore_r",
+    ))]
     fn from_cgmes(
         paths: Vec<String>,
         backend: &str,
         tol: f64,
         max_iter: usize,
         s_base_va: f64,
+        method: &str,
+        dc_approximation: &str,
     ) -> PyResult<Self> {
         let path_refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
         let ds = load_profiles(&path_refs)
@@ -226,8 +309,18 @@ impl PowerFlowModel {
             buses: buses_template.clone(),
             buses_template,
             ybus,
+            lines,
+            transformers,
+            shunts,
             solver: PersistentSolver::new(backend),
             backend,
+            method: parse_method(method)?,
+            dc_opts: DcOptions {
+                approximation: parse_dc_approximation(dc_approximation)?,
+                ..DcOptions::default()
+            },
+            dc_solution: None,
+            sensitivity: None,
             batch: None,
             tol,
             max_iter,
@@ -272,6 +365,12 @@ impl PowerFlowModel {
     /// genuinely failed — didn't converge within `max_iter` iterations, or
     /// hit a singular Jacobian.
     fn solve(&mut self) -> PyResult<()> {
+        match self.method {
+            PowerFlowMethod::Dc => return self.solve_dc(),
+            PowerFlowMethod::LinearImpedance => return self.solve_linear_impedance(),
+            PowerFlowMethod::NewtonRaphson => {}
+        }
+        self.dc_solution = None;
         self.buses = self.buses_template.clone();
         linear_initial_guess(&mut self.buses, &self.ybus);
         let islands = self.solver.solve(&mut self.buses, &self.ybus, self.tol, self.max_iter);
@@ -294,8 +393,278 @@ impl PowerFlowModel {
     /// `solve()` if the topology (not just bus values) has changed since
     /// this model was constructed or last reset. See
     /// `solver::PersistentSolver::reset`'s doc comment.
+    ///
+    /// Also drops the cached DC sensitivity factorization, for the same
+    /// reason: it is built from the topology and would otherwise answer for
+    /// a network that no longer exists.
     fn reset(&mut self) {
         self.solver.reset();
+        self.sensitivity = None;
+    }
+
+    /// Runs the DC (Bθ) solve. Reached through `solve()` when the model was
+    /// built with `method="dc"`; exposed directly so a model built for
+    /// Newton can take a DC reading without being rebuilt.
+    ///
+    /// Raises `RuntimeError` only if some island's reduced susceptance matrix
+    /// was singular. An island with no reference bus is *not* an error — its
+    /// buses are pinned to zero, the same non-error treatment `solve()` gives
+    /// a sourceless component.
+    fn solve_dc(&mut self) -> PyResult<()> {
+        self.buses = self.buses_template.clone();
+        let solution =
+            dc_power_flow(&mut self.buses, &self.lines, &self.transformers, self.dc_opts);
+        let singular: Vec<&[usize]> = solution
+            .islands
+            .iter()
+            .filter(|i| i.status == DcIslandStatus::Singular)
+            .map(|i| i.bus_indices.as_slice())
+            .collect();
+        if !singular.is_empty() {
+            return Err(PyRuntimeError::new_err(format!(
+                "DC susceptance matrix is singular (component(s) with buses {singular:?})"
+            )));
+        }
+        self.dc_solution = Some(solution);
+        Ok(())
+    }
+
+    /// Runs the constant-admittance linearization (power-grid-model's
+    /// `CalculationMethod.linear`). Reached through `solve()` when the model
+    /// was built with `method="linear_impedance"`.
+    fn solve_linear_impedance(&mut self) -> PyResult<()> {
+        self.dc_solution = None;
+        self.buses = self.buses_template.clone();
+        let report = linear_power_flow(&mut self.buses, &self.ybus);
+        let singular: Vec<&[usize]> = report
+            .islands
+            .iter()
+            .filter(|i| i.status == LinearIslandStatus::Singular)
+            .map(|i| i.bus_indices.as_slice())
+            .collect();
+        if !singular.is_empty() {
+            return Err(PyRuntimeError::new_err(format!(
+                "linearized system is singular (component(s) with buses {singular:?})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Active power entering each branch at its `from` terminal, per-unit,
+    /// indexed by the flat branch index (lines first, then transformers).
+    ///
+    /// Only available after a DC solve — the other methods produce complex
+    /// flows, which `branch_flow::terminal_flow` computes from the solved
+    /// voltages rather than returning here.
+    fn branch_flow_p(&self) -> PyResult<Vec<f64>> {
+        Ok(self.require_dc()?.branch_p.clone())
+    }
+
+    /// Per-island `(bus_indices, slack_pickup)` from the last DC solve, with
+    /// pickup in per-unit. DC is lossless, so an island's pickup is exactly
+    /// the negation of everything else it contains.
+    fn dc_slack_pickup(&self) -> PyResult<Vec<(Vec<usize>, f64)>> {
+        Ok(self
+            .require_dc()?
+            .islands
+            .iter()
+            .map(|i| (i.bus_indices.clone(), i.slack_pickup))
+            .collect())
+    }
+
+    /// `max |Σ(flows out of bus) − P_bus|` over the last DC solve. Round-off
+    /// (~1e-15) on a healthy network; a large value means `B` was
+    /// ill-conditioned, most often from clamped zero-impedance branches.
+    fn dc_max_residual(&self) -> PyResult<f64> {
+        Ok(self.require_dc()?.max_residual)
+    }
+
+    /// `∂P_branch/∂P_bus` over every branch, for injection at `bus` with this
+    /// island's reference absorbing it. `None` if `bus` sits in an island
+    /// with no reference bus.
+    ///
+    /// Independent of `method`: the factors come from the topology, not from
+    /// any particular solve. The factorization behind them is built on first
+    /// use and reused until `reset()`.
+    fn ptdf_column(&mut self, bus: usize) -> PyResult<Option<Vec<f64>>> {
+        if bus >= self.buses.len() {
+            return Err(PyValueError::new_err(format!(
+                "bus {bus} is out of range (0..{})",
+                self.buses.len()
+            )));
+        }
+        Ok(self.require_sensitivity()?.ptdf_column(bus))
+    }
+
+    /// `∂P_branch/∂P_bus` over every bus, for one branch — one solve rather
+    /// than one per bus, since the reduced susceptance matrix is symmetric.
+    fn ptdf_row(&mut self, branch: usize) -> PyResult<Option<Vec<f64>>> {
+        self.check_branch(branch)?;
+        Ok(self.require_sensitivity()?.ptdf_row(branch))
+    }
+
+    /// The fraction of `branch`'s pre-outage flow that lands on each other
+    /// branch when it trips. `None` if the branch is radial — removing it
+    /// islands the network, so no redistribution factors exist.
+    fn lodf_column(&mut self, branch: usize) -> PyResult<Option<Vec<f64>>> {
+        self.check_branch(branch)?;
+        Ok(self.require_sensitivity()?.lodf_column(branch))
+    }
+
+    /// Whether removing `branch` would disconnect the network.
+    fn is_radial(&mut self, branch: usize) -> PyResult<bool> {
+        self.check_branch(branch)?;
+        Ok(self.require_sensitivity()?.is_radial(branch))
+    }
+
+    /// Branch flows after `branch` trips, given the flows before it did — the
+    /// N-1 screening primitive, one solve and no re-solve of the network.
+    ///
+    /// `base_flows` defaults to the last DC solve's own flows, so the common
+    /// case is `model.solve(); model.outage_flows(7)`. Pass an explicit vector
+    /// to screen a contingency against some other operating point.
+    ///
+    /// `None` if the branch is radial: removing it islands the network, so its
+    /// power has nowhere to redistribute to.
+    #[pyo3(signature = (branch, base_flows=None))]
+    fn outage_flows(
+        &mut self,
+        branch: usize,
+        base_flows: Option<Vec<f64>>,
+    ) -> PyResult<Option<Vec<f64>>> {
+        self.check_branch(branch)?;
+        let base = match base_flows {
+            Some(f) => f,
+            None => self.require_dc()?.branch_p.clone(),
+        };
+        let n = self.lines.len() + self.transformers.len();
+        if base.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "base_flows has {} entries, expected one per branch ({n})",
+                base.len()
+            )));
+        }
+        Ok(self.require_sensitivity()?.outage_flows(&base, branch))
+    }
+
+    /// Branch flows after **every** branch in `branches` trips at once — the
+    /// N-2/N-k generalization of `outage_flows`.
+    ///
+    /// Not obtainable by applying `outage_flows` repeatedly: each single-branch
+    /// factor was computed on the intact network, so chaining them ignores how
+    /// the outages interact. One `k × k` solve on top of `k` triangular solves
+    /// gives the exact answer.
+    ///
+    /// `None` if removing the whole set would disconnect the network (see
+    /// `is_breaking_set`), or if an index is repeated or out of range. An empty
+    /// set returns the base flows unchanged.
+    #[pyo3(signature = (branches, base_flows=None))]
+    fn multi_outage_flows(
+        &mut self,
+        branches: Vec<usize>,
+        base_flows: Option<Vec<f64>>,
+    ) -> PyResult<Option<Vec<f64>>> {
+        for &b in &branches {
+            self.check_branch(b)?;
+        }
+        let base = match base_flows {
+            Some(f) => f,
+            None => self.require_dc()?.branch_p.clone(),
+        };
+        let n = self.lines.len() + self.transformers.len();
+        if base.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "base_flows has {} entries, expected one per branch ({n})",
+                base.len()
+            )));
+        }
+        Ok(self.require_sensitivity()?.multi_outage_flows(&base, &branches))
+    }
+
+    /// Runs an AC N-1/N-k contingency sweep: one entry in `contingencies` per
+    /// scenario, each a list of flat branch indices to take out of service.
+    ///
+    /// Returns `(status, voltage_mag, voltage_ang)` per scenario, in order.
+    /// `status` is `"converged"`, `"max_iterations"` or `"singular"` — a
+    /// contingency that leaves an unsolvable network is a screening result, not
+    /// an error, so it does not raise.
+    ///
+    /// The symbolic factorization is shared across every contingency that
+    /// leaves the network connected; those that sever it fall back to a full
+    /// rebuild, and their orphaned buses come back pinned to zero rather than
+    /// as a spurious singular solve.
+    #[pyo3(signature = (contingencies, threads=None))]
+    fn solve_contingencies(
+        &mut self,
+        contingencies: Vec<Vec<usize>>,
+        threads: Option<usize>,
+    ) -> PyResult<Vec<(String, Vec<f64>, Vec<f64>)>> {
+        let scenarios: Vec<Scenario> = contingencies
+            .into_iter()
+            .map(|branch_outages| Scenario { bus_overrides: Vec::new(), branch_outages })
+            .collect();
+        let batch = match threads {
+            Some(t) => BatchSolver::with_threads(self.backend, t.max(1))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+            None => BatchSolver::new(self.backend),
+        };
+        let reports = batch
+            .solve_contingencies(
+                &self.buses_template,
+                &self.lines,
+                &self.transformers,
+                &self.shunts,
+                &scenarios,
+                self.tol,
+                self.max_iter,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(reports
+            .into_iter()
+            .map(|r| {
+                let status = match r.stats.status {
+                    SolveStatus::Converged => "converged",
+                    SolveStatus::MaxIterationsReached => "max_iterations",
+                    SolveStatus::Singular => "singular",
+                };
+                let vm = r.buses.iter().map(|b| b.voltage_mag).collect();
+                let va = r.buses.iter().map(|b| b.voltage_ang).collect();
+                (status.to_string(), vm, va)
+            })
+            .collect())
+    }
+
+    /// Whether removing every branch in `branches` at once would disconnect the
+    /// network — the multi-branch analogue of `is_radial`.
+    fn is_breaking_set(&mut self, branches: Vec<usize>) -> PyResult<bool> {
+        for &b in &branches {
+            self.check_branch(b)?;
+        }
+        Ok(self.require_sensitivity()?.is_breaking_set(&branches))
+    }
+
+    /// Branch-flow response to an arbitrary per-bus injection pattern, in
+    /// per-unit. The primitive `ptdf_column` is a special case of; within
+    /// each island whatever does not sum to zero is absorbed at its
+    /// reference.
+    fn transfer_factors(&mut self, injections: Vec<f64>) -> PyResult<Vec<f64>> {
+        if injections.len() != self.buses.len() {
+            return Err(PyValueError::new_err(format!(
+                "injections has {} entries, expected one per bus ({})",
+                injections.len(),
+                self.buses.len()
+            )));
+        }
+        self.require_sensitivity()?
+            .transfer_factors(&injections)
+            .ok_or_else(|| PyRuntimeError::new_err("the reduced susceptance matrix is singular"))
+    }
+
+    /// Total branch count (lines plus transformers) — the length of every
+    /// branch-indexed vector this class returns.
+    #[getter]
+    fn n_branches(&self) -> usize {
+        self.lines.len() + self.transformers.len()
     }
 
     /// Solves many injection scenarios over this model's topology in
@@ -456,9 +825,50 @@ impl PowerFlowModel {
     }
 }
 
-/// Not `#[pymethods]` — internal helper shared by `solve_batch` and
-/// `solve_batch_scaled`, deliberately not exposed to Python.
+/// Not `#[pymethods]` — internal helpers, deliberately not exposed to Python.
 impl PowerFlowModel {
+    /// The last DC solve's result, or a `RuntimeError` naming what to call.
+    fn require_dc(&self) -> PyResult<&DcSolution> {
+        self.dc_solution.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "no DC result available — build the model with method=\"dc\" and call solve(), \
+                 or call solve_dc() directly",
+            )
+        })
+    }
+
+    /// The sensitivity factors, building and caching them on first use.
+    ///
+    /// Deliberately independent of any solve: PTDF and LODF are properties of
+    /// the topology, so a model built for Newton can be asked for them
+    /// without running a DC solve first.
+    fn require_sensitivity(&mut self) -> PyResult<&DcSensitivity> {
+        if self.sensitivity.is_none() {
+            let branches = dc_branches(&self.lines, &self.transformers, self.dc_opts);
+            let n_branches = self.lines.len() + self.transformers.len();
+            self.sensitivity =
+                Some(DcSensitivity::new(&self.buses_template, &branches, n_branches).ok_or_else(
+                    || {
+                        PyRuntimeError::new_err(
+                            "the reduced susceptance matrix is singular, so no sensitivity \
+                             factors exist for this network",
+                        )
+                    },
+                )?);
+        }
+        Ok(self.sensitivity.as_ref().expect("just populated"))
+    }
+
+    fn check_branch(&self, branch: usize) -> PyResult<()> {
+        let n = self.lines.len() + self.transformers.len();
+        if branch >= n {
+            return Err(PyValueError::new_err(format!(
+                "branch {branch} is out of range (0..{n})"
+            )));
+        }
+        Ok(())
+    }
+
     fn run_batch(
         &mut self,
         scenarios: Vec<Scenario>,

@@ -721,3 +721,213 @@ same problem. `bench_se.rs` also synthesizes bus-injection measurements (11,189 
 document's 9,318), and an injection row is a full Y-bus row rather than a two-bus branch row, so its gain
 matrix is substantially denser. The emitted document drops them because PGM has no counterpart sensor.
 **Compare numbers within one harness, never across the two.**
+
+## 8. DC (Bθ) power flow and sensitivity factors
+
+`examples/bench_dc.rs`, on the MATPOWER cases from §4, converted the same way:
+
+```bash
+python scripts/bench/matpower_to_pgm.py tests/data/benchmark-grids/matpower/case9241pegase.m /tmp/case9241pegase.json
+cargo build --release --example bench_dc
+./target/release/examples/bench_dc /tmp/case9241pegase.json 20 solve
+./target/release/examples/bench_dc /tmp/case1354pegase.json 5 ptdf   # or lodf
+```
+
+### Timing results
+
+`solve` is one full `dc_power_flow` per repeat — branch reduction, island partition, one
+factorization per island, back-substitution and branch flows. The AC column is
+`examples/bench_network.rs` in `warm` mode with the `scalar` backend, i.e. the *fastest* AC
+configuration, so the ratio is a conservative statement of what DC buys.
+
+| Case | Buses | Branches | DC solve | AC solve (warm, scalar) | Speedup |
+|---|---|---|---|---|---|
+| case118 | 119 | 187 | 0.046 ms | 0.197 ms | 4.3x |
+| case1354pegase | 1,355 | 1,992 | 1.268 ms | 8.550 ms | 6.7x |
+| case9241pegase | 9,242 | 16,050 | 13.40 ms | 106.4 ms | 7.9x |
+
+The gap widens with size, which is what the two methods' structure predicts: DC pays one
+factorization while AC pays one *per iteration* (4–5 of them here), and the per-iteration Jacobian
+refill grows with the network too.
+
+Sensitivity sweeps produce every column once — `ptdf` over every bus, `lodf` over every branch —
+against a single factorization built in `DcSensitivity::new`:
+
+| Case | PTDF sweep | per column | LODF sweep | per column |
+|---|---|---|---|---|
+| case118 | 0.389 ms (119 cols) | 3.3 µs | 0.609 ms (177 cols) | 3.4 µs |
+| case1354pegase | 30.5 ms (1,355 cols) | 23.3 µs | 45.5 ms (1,430 cols) | 31.8 µs |
+| case9241pegase | — | — | 2,848 ms (14,384 cols) | 198 µs |
+
+The case9241pegase LODF sweep produces 14,384 columns from 16,050 branches; the remaining 1,666
+are radial or carry no DC flow, and return `None` without a back-substitution.
+
+The per-column figure is the one worth quoting, and it is the entire argument for
+`sparse::RealFactorization`: these are `n` triangular solves against **one** factorization. Routing
+them through `solver::LinearSolver`, whose contract refactorizes on every call, would have made a
+PTDF sweep `n` factorizations rather than one — at case1354pegase that is the difference between
+22.5 µs and something on the order of a full DC solve, per column.
+
+Note that neither sweep materializes a dense matrix. At case9241pegase a dense PTDF is 1.19 GB and
+a dense LODF 2.06 GB; the column API exists so that cost is optional.
+
+`linear::batch::DcBatchSolver` runs many bus-injection scenarios against **one** numeric
+factorization for the whole batch — `B` depends only on topology, so a scenario changes nothing but
+the right-hand side. `./target/release/examples/bench_dc <case> 2000 batch`:
+
+| Case | Independent solve | Batched, per scenario | Speedup |
+|---|---|---|---|
+| case118 | 0.046 ms | 0.0051 ms | 9.0x |
+| case1354pegase | 1.268 ms | 0.0373 ms | 34x |
+| case9241pegase | 13.40 ms | 0.2423 ms | 55x |
+
+The ratio grows with size because the factorization is what gets hoisted, and it is the part that
+scales worst. This is a stronger guarantee than `batch::BatchSolver` can offer on the AC side, which
+reuses only the *symbolic* half — Newton's Jacobian changes numerically at every iteration of every
+scenario, so the numeric factorization cannot be shared.
+
+N-2 screening via `DcSensitivity::multi_outage_flows`, over every pair drawn from the first 200
+branches (`./target/release/examples/bench_dc <case> 200 n2`). Removing `k` branches is a rank-`k`
+update, so each pair costs `k` triangular solves plus one `k × k` dense solve — never a
+refactorization:
+
+| Case | Pairs screened | Solvable | per solvable pair | Full DC re-solve | Speedup |
+|---|---|---|---|---|---|
+| case118 | 17,391 | 15,502 | 0.0050 ms | 0.046 ms | 9.2x |
+| case1354pegase | 19,900 | 9,017 | 0.0966 ms | 1.268 ms | 13x |
+| case9241pegase | 19,900 | 18,432 | 0.3955 ms | 13.40 ms | 34x |
+
+The unsolvable pairs are *breaking sets* — removing both branches disconnects the network, so no
+post-outage flow exists and `multi_outage_flows` returns `None` without a solve. They are the case
+single-branch screening misses entirely: two parallel lines are each individually non-radial, but
+together they may be the only path.
+
+### Accuracy results
+
+DC has no convergence tolerance — it is a direct solve — so the meaningful quantity is the
+factorization residual `max |Σ(flows out of bus) − P_bus|`, reported as
+`DcSolution::max_residual`:
+
+| Case | Buses | max residual (p.u.) |
+|---|---|---|
+| case118 | 119 | 1.3e-12 |
+| case1354pegase | 1,355 | 2.8e-10 |
+| case9241pegase | 9,242 | 1.3e-9 |
+
+All round-off, growing with problem size as expected. Two observations from this run worth
+recording:
+
+- **case9241pegase contains 16 branches with negative reactance** — series capacitors, which
+  `dc_power_flow` reports through `DcSolution::negative_reactance_branches` rather than passing over
+  in silence. They make `B` indefinite without making it singular. This is the case that justifies
+  `dc_branches` guarding the PGM-link sign on the *exact admittance constant* rather than on
+  `x < 0` generally: a blanket clamp would have silently corrupted 16 real branches here.
+- **Residual is the early-warning signal for clamped zero-impedance branches.** A clamped branch
+  carries `b ≈ 2.8e5` against ordinary branches' `b ≈ 5–50`, spreading `B`'s condition number by
+  four orders of magnitude — and unlike Newton, DC has no iterative refinement to hide that behind.
+  On `tests/data/pgm/powerflow/link/dummy-test`, which is full of them, the residual still comes in
+  under 1e-9 (asserted in `tests/dc_powerflow_test.rs`).
+
+### Cross-validation against MATPOWER's own DC formulation
+
+`check_dc_matpower.py` rebuilds the DC system straight from each `.m` file following `makeBdc.m`
+and `dcpf.m`, then pushes *both* angle vectors through the same `Pf = (Bf·Va + Pfinj)·baseMVA` so
+the comparison lands on branch flows in MW and needs no mapping between MATPOWER's branch rows and
+gridoxide's flat branch index. No second tool is used as a reference — this is the same
+self-contained approach as `check_matpower_residual.py`, and it is what the in-repo oracle
+(`dc_flows_match_the_lossless_ac_limit`, which checks DC against gridoxide's *own* AC branch-flow
+code) structurally cannot provide.
+
+```bash
+python scripts/bench/check_dc_matpower.py --all --zero-phase-shifts --ignore-gs
+```
+
+| Case | Buses | Branches | max Δangle | max Δflow | peak flow |
+|---|---|---|---|---|---|
+| case14 | 14 | 20 | 2.2e-14° | 2.1e-13 MW | 147.8 MW |
+| case118 | 118 | 186 | 4.0e-13° | 4.4e-12 MW | 450.0 MW |
+| case_illinois200 | 200 | 245 | 3.8e-13° | 4.0e-12 MW | 371.8 MW |
+| case300 | 300 | 411 | 1.6e-13° | 5.7e-12 MW | 1292.0 MW |
+| case1354pegase | 1,354 | 1,991 | 2.3e-12° | 3.0e-10 MW | 1504.8 MW |
+| case1888rte | 1,888 | 2,531 | 1.2e-11° | 2.9e-10 MW | 1456.7 MW |
+| case2848rte | 2,848 | 3,776 | 2.1e-12° | 7.1e-11 MW | 1442.0 MW |
+| case2869pegase | 2,869 | 4,582 | 6.8e-12° | 1.8e-10 MW | 1585.6 MW |
+| case3120sp | 3,120 | 3,693 | 1.8e-11° | 5.1e-10 MW | 850.2 MW |
+| case6495rte | 6,495 | 9,019 | 6.9e-12° | 3.7e-10 MW | 1527.0 MW |
+| case6515rte | 6,515 | 9,037 | 1.4e-11° | 3.1e-10 MW | 1519.5 MW |
+| case9241pegase | 9,241 | 16,049 | 1.6e-10° | 1.1e-9 MW | 1947.1 MW |
+
+**Exact agreement on all twelve** — the worst disagreement across the suite is 1.1e-9 MW against
+peak flows of ~1,900 MW, i.e. round-off. gridoxide's Bθ is the same formulation MATPOWER computes,
+including the phase-shift and transformer-ratio conventions.
+
+The two flags each isolate one known, documented model difference, and both leave a real
+discrepancy visible when omitted:
+
+- **`--ignore-gs`.** MATPOWER folds bus shunt conductance into `Pbus` as a constant real load at
+  |V| = 1; gridoxide's DC deliberately ignores all shunts (`docs/src/powerflow/dc.md`, Scope).
+  Without the flag, exactly the three cases with nonzero `ΣGs` disagree and no others — case300
+  (ΣGs = 1.3 MW) by 1.30 MW, case2869pegase (9.9) by 2.45 MW, case9241pegase (56.9) by 13.2 MW.
+  That one-to-one correspondence is what identifies the gap as *this* modeling choice rather than a
+  solver error, and it quantifies what adopting MATPOWER's convention would be worth.
+- **`--zero-phase-shifts`.** `gridoxide.matpower` rounds `angle` to the nearest 60-degree clock
+  position, which for every shift in these cases means dropping it. Without the flag the
+  disagreement reaches **5.1e4 MW** on case1888rte — and its max Δangle comes out at 9.92°, which is
+  that case's known 9.95-degree shifter. This is the same conversion loss `check_matpower_residual.py`
+  documents for AC, and it bites far harder here, because a phase shift enters the DC right-hand
+  side directly rather than as a second-order term. It is a limitation of the PGM conversion, not of
+  the DC solver: `tests/dc_powerflow_test.rs` exercises phase shifters natively and matches the AC
+  limit to 1e-6.
+
+## 9. AC N-1 contingency screening
+
+`examples/bench_contingency.rs`, sweeping single-branch outages through
+`batch::BatchSolver::solve_contingencies` and comparing against solving each outaged network
+independently — the same work with no factorization reuse, which is what a naive contingency loop
+does.
+
+```bash
+cargo build --release --example bench_contingency
+./target/release/examples/bench_contingency /tmp/case9241pegase.json 60 klu_native
+```
+
+### Timing results
+
+**Both sides run single-threaded**, so this isolates factorization reuse from parallelism; the
+`solve_contingencies` sweep parallelizes on top of what is shown here.
+
+| Case | Outages swept | Severing | Batched | Independent | Speedup |
+|---|---|---|---|---|---|
+| case118 | 187 (all) | 10 | 0.198 ms/outage | 0.393 ms/outage | 1.98x |
+| case1354pegase | 200 | 65 | 4.823 ms/outage | 10.008 ms/outage | 2.08x |
+| case9241pegase | 60 | 2 | 42.17 ms/outage | 114.50 ms/outage | 2.72x |
+
+The ~2x floor is what the repo's own "symbolic factorization is ~45% of solve time" figure predicts,
+and the ratio grows with size because that share does. The reuse here is narrower than an ordinary
+batch's: each outage has its own Y-bus, so the Jacobian's cached per-nonzero recipe must be
+re-analyzed every scenario (O(nonzeros), `PersistentSolver::invalidate_admittances`). What survives
+is the symbolic factorization — the fill-reducing ordering and elimination structure — because
+`network::build_ybus_with_outages` keeps the outaged branch's structural entries and so leaves the
+sparsity pattern bit-for-bit intact.
+
+The **severing** column counts contingencies that disconnect the network. Those cannot use that
+trick, because `connected_components` reads the same structural entries and cannot tell a zeroed one
+from a live one; they are detected up front with `network::structural_component_count` and fall back
+to a full rebuild with a fresh factorization. That fallback is what lets an islanded contingency come
+back as an honest `IslandStatus::NoReferenceBus` rather than a singular solve — and note it is not
+rare: 65 of case1354pegase's first 200 branches sever something.
+
+### Accuracy results
+
+`tests/ac_contingency_test.rs` checks every single-branch contingency on both committed PGM fixtures
+against a direct solve of the network built without that branch — same status, and voltages agreeing
+to the solver's own `1e-6` tolerance. It runs at one thread as well as four: a single worker means
+every scenario shares one `PersistentSolver`, which is the sharpest test of the cache-reuse claim,
+and it is the configuration that caught the one real bug in this work (a `JacobianPattern` carried
+across contingencies silently solves the *previous* outage's network, because the pattern caches the
+admittance each entry was analyzed against).
+
+Cross-tool comparison against another package's contingency module is not covered. The direct-solve
+oracle above is stronger for the question that matters here — whether the fast path equals the slow
+one — but it says nothing about agreeing with, say, lightsim2grid's `SecurityAnalysis` on the same
+case.

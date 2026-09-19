@@ -38,6 +38,14 @@ See [Building and Running](docs/src/getting_started/building.md) and
 - **Newton-Raphson AC power flow**, symmetric and asymmetric, with a sparse Jacobian and symbolic
   factorization reused across both NR iterations and repeated solves
   (`solver::PersistentSolver`) — see [Backends and Factorization Reuse](docs/src/solvers/backends.md).
+- **Two linear power flows**, both first-class modes rather than internal warm starts:
+  [DC (Bθ)](docs/src/powerflow/dc.md) — real, lossless, one factorization and no iterations, with
+  phase shifters, both of powsybl's susceptance variants, and
+  [PTDF/LODF sensitivity factors](docs/src/powerflow/dc.md#sensitivity-factors-ptdf-and-lodf) for
+  contingency screening — and [the constant-admittance
+  linearization](docs/src/powerflow/linear_impedance.md), which keeps resistance and produces
+  voltage magnitudes (power-grid-model's `CalculationMethod.linear`). Either can also warm-start
+  Newton.
 - **Weighted-least-squares state estimation** — recovers the most likely grid state from noisy,
   redundant, partial measurements, with [observability analysis and bad-data
   detection](docs/src/state_estimation/diagnostics.md) and zero injections enforced as hard
@@ -54,7 +62,12 @@ See [Building and Running](docs/src/getting_started/building.md) and
   [reactive power limits](docs/src/powerflow/q_limits.md) (PV→PQ switching),
   [zero-impedance branches](docs/src/powerflow/zero_impedance_branches.md), and
   [multi-island solves](docs/src/powerflow/multi_island.md) with a per-island status report.
-- **Batched solving** over one shared topology, parallel across cores via rayon (`batch::BatchSolver`).
+- **Batched solving and N-1/N-k contingency screening** over one shared topology, parallel across
+  cores via rayon. AC contingencies keep the symbolic factorization across a whole outage sweep
+  (`batch::BatchSolver::solve_contingencies`, 2.0–2.7x single-threaded before parallelism); in DC a
+  whole batch shares a *single* numeric factorization (`linear::batch::DcBatchSolver`, 9–55x per
+  scenario), and outages need no re-solve at all — N-1 via `DcSensitivity::outage_flows`, N-k via
+  the generalized `multi_outage_flows`.
 
 [Feature Comparison](docs/src/reference/feature_comparison.md) is a detailed survey against five
 other power flow tools, including the gaps gridoxide hasn't closed.

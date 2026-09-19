@@ -2,18 +2,24 @@
 //!
 //! Invoked with no arguments it runs the bundled power-flow demo, which is what
 //! it has always done. `estimate <path>` runs state estimation over a PGM
-//! document containing sensors.
+//! document containing sensors, and `dc <path>` runs a DC (Bθ) power flow over
+//! one.
 //!
-//! Argument handling is deliberately hand-rolled: two modes and one path do not
-//! justify a dependency, and the crate otherwise has none for this.
+//! Argument handling is deliberately hand-rolled: a few modes and one path do
+//! not justify a dependency, and the crate otherwise has none for this.
 
 use std::fs;
 use std::path::PathBuf;
 
 use gridoxide::json::NetworkData;
+use gridoxide::linear::{
+    dc_branches, dc_power_flow, DcApproximation, DcOptions, DcSensitivity,
+};
 use gridoxide::measurement::measurements_from_pgm;
 use gridoxide::network::{build_ybus, stamp_shunts};
-use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network, PgmInput};
+use gridoxide::pgm::{
+    node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches, pgm_to_network, PgmInput,
+};
 use gridoxide::run_power_flow_analysis;
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
@@ -31,6 +37,15 @@ usage:
                                 containing sym_voltage_sensor/sym_power_sensor.
                                 The default method is Newton-Raphson; the flag
                                 selects the faster, less exact linearized one.
+  gridoxide dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]
+                                run a DC (Bθ) power flow over a PGM JSON
+                                document, printing bus angles, branch flows and
+                                per-island slack pickup.
+                                --ignore-g uses b = x/(r²+x²) instead of the
+                                default b = 1/x; --ptdf/--lodf additionally
+                                print one sensitivity column. Bus and branch
+                                arguments are gridoxide's own 0-based indices,
+                                as printed by the tables above them.
 ";
 
 fn main() {
@@ -51,6 +66,18 @@ fn main() {
             }
             None => {
                 eprintln!("error: estimate needs a path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("dc") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_dc(path, &args[2..]) {
+                    eprintln!("error: {message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("error: dc needs a path\n\n{USAGE}");
                 std::process::exit(2);
             }
         },
@@ -227,6 +254,142 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
         }
     } else {
         println!("  not rejected at 5%");
+    }
+
+    Ok(())
+}
+
+/// Parses `--flag <value>` out of the trailing argument list.
+///
+/// Returns `Ok(None)` when the flag is absent, so a missing flag and a
+/// malformed one stay distinguishable.
+fn flag_value(args: &[String], flag: &str) -> Result<Option<String>, String> {
+    match args.iter().position(|a| a == flag) {
+        None => Ok(None),
+        Some(i) => args
+            .get(i + 1)
+            .cloned()
+            .ok_or_else(|| format!("{flag} needs a value"))
+            .map(Some),
+    }
+}
+
+fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
+    let value: usize =
+        raw.parse().map_err(|_| format!("{flag}: {raw:?} is not a non-negative integer"))?;
+    if value >= limit {
+        return Err(format!("{flag}: {value} is out of range (0..{limit})"));
+    }
+    Ok(value)
+}
+
+/// Runs a DC power flow over the PGM document at `path` and prints it.
+///
+/// Reports the same three things the solver produces — angles, branch flows,
+/// per-island slack pickup — plus the residual, which on a healthy network is
+/// round-off and on an ill-conditioned one is the first sign of it.
+fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
+    let s_base_va = 1e6;
+    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let input: PgmInput =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let (mut buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+
+    let approximation = if flags.iter().any(|a| a == "--ignore-g") {
+        DcApproximation::IgnoreG
+    } else {
+        DcApproximation::IgnoreR
+    };
+    let opts = DcOptions { approximation, ..DcOptions::default() };
+
+    let n_branches = lines.len() + transformers.len();
+    let solution = dc_power_flow(&mut buses, &lines, &transformers, opts);
+
+    println!(
+        "{} bus(es), {} branch(es), b = {}",
+        buses.len(),
+        n_branches,
+        match approximation {
+            DcApproximation::IgnoreR => "1/x",
+            DcApproximation::IgnoreG => "x/(r²+x²)",
+        }
+    );
+
+    for (i, island) in solution.islands.iter().enumerate() {
+        println!(
+            "  island {i}: {} bus(es), status = {:?}, slack pickup = {:.6} p.u. ({:.3} MW)",
+            island.bus_indices.len(),
+            island.status,
+            island.slack_pickup,
+            island.slack_pickup * s_base_va / 1e6,
+        );
+    }
+    if !solution.negative_reactance_branches.is_empty() {
+        println!(
+            "  note: {} branch(es) have negative susceptance (series capacitors); B is indefinite",
+            solution.negative_reactance_branches.len()
+        );
+    }
+    if !solution.ignored_branches.is_empty() {
+        println!(
+            "  note: {} branch(es) carry no DC flow (open terminal, self-loop, or no susceptance)",
+            solution.ignored_branches.len()
+        );
+    }
+    println!("  max residual = {:.3e} p.u.", solution.max_residual);
+
+    println!("\nbus angles:");
+    for bus in &buses {
+        println!(
+            "  Bus {:>4}: {:>10.5} rad = {:>9.4}°",
+            bus.idx,
+            bus.voltage_ang,
+            bus.voltage_ang.to_degrees()
+        );
+    }
+
+    println!("\nbranch flows (at the from terminal):");
+    for (i, p) in solution.branch_p.iter().enumerate() {
+        println!("  Branch {i:>4}: {:>12.6} p.u. = {:>10.3} MW", p, p * s_base_va / 1e6);
+    }
+
+    let ptdf = flag_value(flags, "--ptdf")?;
+    let lodf = flag_value(flags, "--lodf")?;
+    if ptdf.is_none() && lodf.is_none() {
+        return Ok(());
+    }
+
+    let branches = dc_branches(&lines, &transformers, opts);
+    let sensitivity = DcSensitivity::new(&buses, &branches, n_branches)
+        .ok_or("the reduced susceptance matrix is singular, so no sensitivities exist")?;
+
+    if let Some(raw) = ptdf {
+        let bus = parse_index(&raw, "--ptdf", buses.len())?;
+        match sensitivity.ptdf_column(bus) {
+            Some(column) => {
+                println!("\nPTDF column for bus {bus} (∂P_branch / ∂P_bus):");
+                for (k, v) in column.iter().enumerate() {
+                    println!("  Branch {k:>4}: {v:>12.6}");
+                }
+            }
+            None => println!("\nbus {bus} is in an island with no reference, so it has no PTDF"),
+        }
+    }
+
+    if let Some(raw) = lodf {
+        let branch = parse_index(&raw, "--lodf", n_branches)?;
+        match sensitivity.lodf_column(branch) {
+            Some(column) => {
+                println!("\nLODF column for branch {branch} (fraction of its flow picked up):");
+                for (k, v) in column.iter().enumerate() {
+                    println!("  Branch {k:>4}: {v:>12.6}");
+                }
+            }
+            None => println!(
+                "\nbranch {branch} is radial: removing it islands the network, so no \
+                 redistribution factors exist"
+            ),
+        }
     }
 
     Ok(())
