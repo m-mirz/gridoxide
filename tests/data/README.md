@@ -8,7 +8,7 @@ need them opt in explicitly.
 |---|---|---|
 | `CGMES-Test-Configurations/` | submodule | ~158 MB |
 | `benchmark-grids/` | submodule | ~5 MB |
-| `pgm/` | committed | ~1 MB |
+| `pgm/` | committed | ~3.5 MB |
 
 
 ## Submodules
