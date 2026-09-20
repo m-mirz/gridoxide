@@ -16,6 +16,10 @@
 - [Ideal Switches and Zero-Impedance Branches](./powerflow/zero_impedance_branches.md)
 - [Multi-Island Power Flow](./powerflow/multi_island.md)
 
+# Sensitivity Analysis
+
+- [AC Sensitivity Analysis](./sensitivity/ac.md)
+
 # Short Circuit
 
 - [The Short-Circuit Problem](./short_circuit/index.md)

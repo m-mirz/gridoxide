@@ -250,6 +250,29 @@ impl RealFactorization {
         self.solve_into(rhs, &mut out).then_some(out)
     }
 
+    /// Solves `Aᵀ x = b` against the *same* cached factorization.
+    ///
+    /// No second factorization is involved: an `LU = PAQ` decomposition solves
+    /// the transposed system by running the same triangular factors in the
+    /// opposite order, which is what `faer`'s `solve_transpose_in_place` does.
+    ///
+    /// This is what makes an adjoint sensitivity affordable. A forward
+    /// sensitivity answers "how does everything respond to *this* variable" in
+    /// one solve against `A`; the adjoint answers "how does *this* quantity
+    /// respond to everything" in one solve against `Aᵀ`. Both directions are
+    /// useful and neither is derivable from the other cheaply, so
+    /// `ac_sensitivity` offers both — see `linear::sensitivity`'s
+    /// `ptdf_column`/`ptdf_row` pair for the same duality on the DC side.
+    pub fn solve_transpose(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        debug_assert_eq!(rhs.len(), self.n);
+        let mut b = Col::<f64>::from_fn(self.n, |i| rhs[i]);
+        self.lu.solve_transpose_in_place(b.as_mut());
+        if (0..self.n).any(|i| !b[i].is_finite()) {
+            return None;
+        }
+        Some((0..self.n).map(|i| b[i]).collect())
+    }
+
     /// The body of [`solve`](Self::solve), writing into a caller-owned buffer
     /// rather than allocating.
     ///
@@ -443,6 +466,36 @@ mod tests {
         let sys = RealFactorization::new(2, &entries).unwrap();
         let x = sys.solve(&[5.0, 10.0]).unwrap();
         assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12, "{x:?}");
+    }
+
+    /// The transposed solve must use the *same* factorization and still give
+    /// the answer a separately-factorized `Aᵀ` would. Checked on a
+    /// deliberately asymmetric matrix, since on a symmetric one the two
+    /// directions agree for the wrong reason.
+    #[test]
+    fn real_factorization_solve_transpose_matches_an_explicit_transpose() {
+        let entries = vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 5.0), (1, 1, 3.0)];
+        let transposed: Vec<(usize, usize, f64)> =
+            entries.iter().map(|&(r, c, v)| (c, r, v)).collect();
+
+        let a = RealFactorization::new(2, &entries).unwrap();
+        let at = RealFactorization::new(2, &transposed).unwrap();
+
+        for rhs in [[1.0, 0.0], [0.0, 1.0], [3.0, -7.0]] {
+            let via_transpose = a.solve_transpose(&rhs).unwrap();
+            let via_explicit = at.solve(&rhs).unwrap();
+            for i in 0..2 {
+                assert!(
+                    (via_transpose[i] - via_explicit[i]).abs() < 1e-12,
+                    "rhs {rhs:?}: {via_transpose:?} vs {via_explicit:?}"
+                );
+            }
+        }
+
+        // And it is genuinely the transpose, not the same solve twice.
+        let forward = a.solve(&[1.0, 0.0]).unwrap();
+        let adjoint = a.solve_transpose(&[1.0, 0.0]).unwrap();
+        assert!((forward[1] - adjoint[1]).abs() > 1e-6, "{forward:?} vs {adjoint:?}");
     }
 
     #[test]
