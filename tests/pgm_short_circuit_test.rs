@@ -203,6 +203,61 @@ fn check_scenario(
             }
         }
     }
+
+    // Shunts follow the sources' rule: an inactive one has no result, and
+    // power-grid-model's record for it must then be the de-energized kind.
+    for sh_out in &expected.shunt {
+        let Some(got) = report.shunts.iter().find(|s| s.id == sh_out.id) else {
+            assert_eq!(
+                sh_out.energized,
+                Some(0),
+                "{fixture}[{scenario}]: shunt {} has no result but is reported energized",
+                sh_out.id
+            );
+            continue;
+        };
+        for p in 0..3 {
+            let what = format!("{fixture}[{scenario}] shunt {} phase {p}", sh_out.id);
+            if let Some(i) = sh_out.i {
+                close(got.i[p], i[p], rtol, &format!("{what} i"));
+            }
+            if let (Some(ang), Some(mag)) = (sh_out.i_angle, sh_out.i) {
+                close_angle(got.i_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_angle"));
+            }
+        }
+    }
+
+    // Lines, transformers and links share one record shape and one id space.
+    // A fully open branch yields no result, as an inactive appliance does.
+    for br_out in expected.line.iter().chain(&expected.transformer).chain(&expected.link) {
+        let Some(got) = report.branches.iter().find(|b| b.id == br_out.id) else {
+            assert_eq!(
+                br_out.energized,
+                Some(0),
+                "{fixture}[{scenario}]: branch {} has no result but is reported energized",
+                br_out.id
+            );
+            continue;
+        };
+        if let Some(e) = br_out.energized {
+            assert_eq!(got.energized, e == 1, "{fixture}[{scenario}] branch {} energized", br_out.id);
+        }
+        for p in 0..3 {
+            let what = format!("{fixture}[{scenario}] branch {} phase {p}", br_out.id);
+            if let Some(i) = br_out.i_from {
+                close(got.i_from[p], i[p], rtol, &format!("{what} i_from"));
+            }
+            if let (Some(ang), Some(mag)) = (br_out.i_from_angle, br_out.i_from) {
+                close_angle(got.i_from_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_from_angle"));
+            }
+            if let Some(i) = br_out.i_to {
+                close(got.i_to[p], i[p], rtol, &format!("{what} i_to"));
+            }
+            if let (Some(ang), Some(mag)) = (br_out.i_to_angle, br_out.i_to) {
+                close_angle(got.i_to_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_to_angle"));
+            }
+        }
+    }
 }
 
 /// Runs one fixture directory, over its batch scenarios if it has them and its
@@ -229,9 +284,14 @@ fn run_fixture_inner(name: &str, rtol: f64, angle_tol: f64) {
             serde_json::from_str(&std::fs::read_to_string(dir.join("sc_output_batch.json")).unwrap())
                 .unwrap();
 
-        for (i, (scenario, expected_scenario)) in update["data"]
-            .as_array()
-            .unwrap()
+        let scenarios = update["data"].as_array().unwrap();
+        // `zip` below would silently stop at the shorter of the two.
+        assert_eq!(
+            scenarios.len(),
+            expected.data.len(),
+            "{name}: update and expected-output batches differ in length"
+        );
+        for (i, (scenario, expected_scenario)) in scenarios
             .iter()
             .zip(&expected.data)
             .enumerate()

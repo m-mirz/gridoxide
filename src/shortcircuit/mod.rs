@@ -58,7 +58,7 @@ use num_complex::Complex;
 pub use fortescue::SequenceValue;
 pub use solver::{
     short_circuit, BranchResult, FaultResult, NodeResult, ShortCircuitError,
-    ShortCircuitReport, SourceResult,
+    ShortCircuitReport, ShuntResult, SourceResult,
 };
 
 /// The nominal phase angles, in the order power-grid-model's own

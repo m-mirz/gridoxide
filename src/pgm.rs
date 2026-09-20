@@ -648,6 +648,10 @@ pub struct PgmScOutputData {
     pub line: Vec<PgmScBranchOutput>,
     #[serde(default)]
     pub transformer: Vec<PgmScBranchOutput>,
+    #[serde(default)]
+    pub link: Vec<PgmScBranchOutput>,
+    #[serde(default)]
+    pub shunt: Vec<PgmScApplianceOutput>,
 }
 
 // Every quantity is optional: power-grid-model's fixtures assert only the
@@ -1605,6 +1609,18 @@ pub struct ScNetwork3Ph {
     pub transformers: Vec<Transformer3PhSeq>,
     pub shunts: Vec<ShuntAdm3Ph>,
     pub sources: Vec<ScSource>,
+    /// The PGM id behind each branch, in the flat order the report uses: the
+    /// lines that yield a branch, then the transformers, then the links. A
+    /// fully open line or link yields no branch and has no entry, which is why
+    /// this cannot be derived from document position.
+    pub branch_ids: Vec<u64>,
+    /// Whether each branch's `[from, to]` terminal is closed, parallel to
+    /// `branch_ids`. A line with one live terminal has already collapsed to a
+    /// self-loop on that terminal's node, which carries its current at `from`
+    /// either way; this says which PGM terminal that current belongs to.
+    pub branch_closed: Vec<[bool; 2]>,
+    /// The PGM id of each entry of `shunts`.
+    pub shunt_ids: Vec<u64>,
     /// Node id → physical node index.
     pub node_idx: HashMap<u64, usize>,
     /// Per physical node, its rated line-to-line voltage — needed to convert
@@ -1651,6 +1667,27 @@ pub fn pgm_to_3ph_sc_network(
     let mut transformers = pgm_transformers_3ph(input, &node_idx, s_base_va);
     let shunts = pgm_shunts_3ph(input, &node_idx, s_base_va);
 
+    // The ids behind those, replaying the rules the conversions above apply —
+    // the same approach `pgm_3ph_maps` takes, and checked against the lengths
+    // below so the two cannot drift apart silently.
+    let mut branch_ids = Vec::new();
+    let mut branch_closed = Vec::new();
+    for ln in &input.data.line {
+        if !matches!((ln.from_status, ln.to_status), (1, 1) | (1, 0) | (0, 1)) {
+            continue;
+        }
+        branch_ids.push(ln.id);
+        branch_closed.push([ln.from_status != 0, ln.to_status != 0]);
+    }
+    assert_eq!(branch_ids.len(), lines.len(), "line ids out of step with pgm_lines_3ph");
+    for t in &input.data.transformer {
+        branch_ids.push(t.id);
+        branch_closed.push([t.from_status != 0, t.to_status != 0]);
+    }
+    let shunt_ids: Vec<u64> =
+        input.data.shunt.iter().filter(|s| s.status != 0).map(|s| s.id).collect();
+    assert_eq!(shunt_ids.len(), shunts.len(), "shunt ids out of step with pgm_shunts_3ph");
+
     // Links, appended after the transformers. An ideal connection looks the
     // same to all three sequences — it is a plain series admittance with no
     // shunt, no tap and no phase shift — so the sequence parameters are just
@@ -1672,6 +1709,8 @@ pub fn pgm_to_3ph_sc_network(
             lk.from_status,
             lk.to_status,
         );
+        branch_ids.push(lk.id);
+        branch_closed.push([lk.from_status != 0, lk.to_status != 0]);
         transformers.push(Transformer3PhSeq {
             from: node_idx[&lk.from_node],
             to: node_idx[&lk.to_node],
@@ -1712,6 +1751,9 @@ pub fn pgm_to_3ph_sc_network(
         transformers,
         shunts,
         sources,
+        branch_ids,
+        branch_closed,
+        shunt_ids,
         node_idx,
         u_rated,
         s_base_va,

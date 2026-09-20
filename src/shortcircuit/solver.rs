@@ -94,6 +94,12 @@ pub struct FaultResult {
 /// One branch's terminal currents.
 #[derive(Clone, Debug)]
 pub struct BranchResult {
+    /// The PGM `line`, `transformer` or `link` id.
+    pub id: u64,
+    /// Whether a closed terminal connects the branch to an energized node —
+    /// power-grid-model's definition, under which a de-energized branch still
+    /// has a record, with zero currents.
+    pub energized: bool,
     pub i_from: [f64; 3],
     pub i_from_angle: [f64; 3],
     pub i_to: [f64; 3],
@@ -108,6 +114,14 @@ pub struct SourceResult {
     pub i_angle: [f64; 3],
 }
 
+/// One active shunt's current, flowing from its node into the shunt.
+#[derive(Clone, Debug)]
+pub struct ShuntResult {
+    pub id: u64,
+    pub i: [f64; 3],
+    pub i_angle: [f64; 3],
+}
+
 /// Everything a short-circuit calculation produces.
 #[derive(Clone, Debug)]
 pub struct ShortCircuitReport {
@@ -115,10 +129,12 @@ pub struct ShortCircuitReport {
     pub nodes: Vec<NodeResult>,
     /// In the order the faults were supplied.
     pub faults: Vec<FaultResult>,
-    /// Lines first, then transformers — the flat branch order the rest of the
-    /// crate uses.
+    /// Lines first, then transformers, then links — the flat order of
+    /// [`ScNetwork3Ph::branch_ids`]. Fully open branches are absent.
     pub branches: Vec<BranchResult>,
     pub sources: Vec<SourceResult>,
+    /// Active shunts only, in the order of [`ScNetwork3Ph::shunt_ids`].
+    pub shunts: Vec<ShuntResult>,
     /// Complex per-phase node voltages, per unit, kept so callers can derive
     /// their own quantities (and so [`super::fortescue`] can project them)
     /// without re-deriving them from magnitude and angle.
@@ -641,16 +657,36 @@ fn assemble_report(
         })
         .collect();
 
-    let branches = branch_currents(net, &u_bus, sqrt3);
+    let branches = branch_currents(net, &u_bus, energized, sqrt3);
 
-    ShortCircuitReport { nodes, faults: fault_results, branches, sources, u_bus }
+    // power-grid-model reports the current *into* the shunt, `Y·u` — its
+    // solver computes the injection `-Y·u` and flips it back on output.
+    let shunts = net
+        .shunts
+        .iter()
+        .zip(&net.shunt_ids)
+        .map(|(sh, &id)| {
+            let y = seq_to_phase_shunt(sh.y1, sh.y0);
+            let u = &u_bus[sh.at];
+            let i: [Complex<f64>; 3] =
+                [0, 1, 2].map(|p| (0..3).map(|q| y[p][q] * u[q]).sum());
+            let base = i_base(net.u_rated[sh.at]);
+            ShuntResult {
+                id,
+                i: [0, 1, 2].map(|p| i[p].norm() * base),
+                i_angle: [0, 1, 2].map(|p| i[p].arg()),
+            }
+        })
+        .collect();
+
+    ShortCircuitReport { nodes, faults: fault_results, branches, sources, shunts, u_bus }
 }
 
-/// Terminal currents for every branch, lines first then transformers — the
-/// same flat order `branch_flow::branch_params` uses.
+/// Terminal currents for every branch, in [`ScNetwork3Ph::branch_ids`] order.
 fn branch_currents(
     net: &ScNetwork3Ph,
     u_bus: &[[Complex<f64>; 3]],
+    energized: &[bool],
     sqrt3: f64,
 ) -> Vec<BranchResult> {
     let mut out = Vec::with_capacity(net.lines.len() + net.transformers.len());
@@ -659,6 +695,8 @@ fn branch_currents(
                     to: usize,
                     blocks: [[[Complex<f64>; 3]; 3]; 4],
                     out: &mut Vec<BranchResult>| {
+        let id = net.branch_ids[out.len()];
+        let [from_closed, to_closed] = net.branch_closed[out.len()];
         let [yff, yft, ytf, ytt] = blocks;
         let mut i_from = [ZERO; 3];
         let mut i_to = [ZERO; 3];
@@ -668,15 +706,33 @@ fn branch_currents(
                 i_to[p] += ytf[p][q] * u_bus[from][q] + ytt[p][q] * u_bus[to][q];
             }
         }
+        // A self-loop puts its whole shunt on the `from` block. That is right
+        // for the Y-bus either way, but a line genuinely wired into itself with
+        // both terminals closed carries no series current (both ends sit at one
+        // voltage), so each terminal draws half the shunt current — which is
+        // what power-grid-model reports.
+        if from == to && from_closed && to_closed {
+            i_from = i_from.map(|i| i / 2.0);
+            i_to = i_from;
+        }
         // Each terminal is referred to its own node's base.
         let base_from = net.s_base_va / (sqrt3 * net.u_rated[from]);
         let base_to = net.s_base_va / (sqrt3 * net.u_rated[to]);
-        out.push(BranchResult {
+        let mut r = BranchResult {
+            id,
+            energized: (from_closed && energized[from]) || (to_closed && energized[to]),
             i_from: [0, 1, 2].map(|p| i_from[p].norm() * base_from),
             i_from_angle: [0, 1, 2].map(|p| i_from[p].arg()),
             i_to: [0, 1, 2].map(|p| i_to[p].norm() * base_to),
             i_to_angle: [0, 1, 2].map(|p| i_to[p].arg()),
-        });
+        };
+        // A half-open line's self-loop carries its current at `from`, but
+        // power-grid-model reports it at whichever terminal is the live one.
+        if from == to && !from_closed {
+            std::mem::swap(&mut r.i_from, &mut r.i_to);
+            std::mem::swap(&mut r.i_from_angle, &mut r.i_to_angle);
+        }
+        out.push(r);
     };
 
     for ln in &net.lines {
