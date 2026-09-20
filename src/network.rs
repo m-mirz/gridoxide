@@ -3,6 +3,7 @@ use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, 
 use super::sparse;
 
 /// A lumped shunt admittance to be added to the Y-bus diagonal at bus `at`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShuntAdm {
     pub at: usize,
     pub y: Complex<f64>,
@@ -131,8 +132,15 @@ pub fn connected_components(ybus: &YBusSparse) -> Vec<Vec<usize>> {
         visited[start] = true;
         while let Some(i) = stack.pop() {
             members.push(i);
-            for &(j, _) in ybus.row(i) {
-                if j != i && !visited[j] {
+            for &(j, y) in ybus.row(i) {
+                // A structurally-present but numerically *zero* entry does not
+                // connect anything. `build_ybus` stamps one for every
+                // transformer regardless of terminal status, and
+                // `build_ybus_with_outages` does the same deliberately, so
+                // ignoring the value here would call an out-of-service branch a
+                // connection — and leave the bus behind it with an all-zero
+                // Jacobian row inside somebody else's island.
+                if j != i && y != Complex::new(0.0, 0.0) && !visited[j] {
                     visited[j] = true;
                     stack.push(j);
                 }
@@ -177,10 +185,19 @@ pub(crate) fn classify(buses: &[Bus], components: &[Vec<usize>]) -> Vec<Classifi
     components
         .iter()
         .map(|members| {
+            // A de-energized bus is `Slack` at `V = 0` — a placeholder, not a
+            // reference (see `mark_unreferenced_islands`). Counting one as a
+            // reference leaves the component "solvable" with nothing to solve
+            // against, and a neighbouring `PQ` bus then gets an identically
+            // zero angle equation: `H_ii = −Q_i − V_i²B_ii`, whose two terms
+            // cancel exactly when the only neighbour sits at zero volts. That
+            // is a structurally singular row, and it is how this surfaced —
+            // Svedala's node-breaker import produces such pairs, because the
+            // finer partition stops merging a dead node into a live one.
             let slack_indices: Vec<usize> = members
                 .iter()
                 .copied()
-                .filter(|&i| buses[i].bus_type == BusType::Slack)
+                .filter(|&i| buses[i].bus_type == BusType::Slack && buses[i].voltage_mag != 0.0)
                 .collect();
             let verdict = match slack_indices.len() {
                 0 => Verdict::NoReferenceBus,
@@ -809,6 +826,73 @@ pub fn power_injections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bus_at(idx: usize, bus_type: BusType, voltage_mag: f64) -> Bus {
+        Bus {
+            idx,
+            bus_type,
+            voltage_mag,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            q_min: 0.0,
+            q_max: 0.0,
+            u_rated: 0.0,
+            zip_terms: Vec::new(),
+        }
+    }
+
+    /// A de-energized bus is `Slack` at `V = 0` — a placeholder, not a
+    /// reference. Counting one as a reference leaves a component nominally
+    /// solvable with nothing to solve against, and the neighbouring `PQ` bus
+    /// gets an identically zero angle row: `H_ii = −Q_i − V_i²B_ii`, whose
+    /// terms cancel exactly when the only neighbour sits at zero volts.
+    ///
+    /// This is not hypothetical. It made Svedala's node-breaker import report
+    /// `Singular`, and SmallGrid's fail under `RetainAll` — which looked like
+    /// the switch-count ceiling `NODE_BREAKER_PLAN.md` §4.1 predicts, and was
+    /// not.
+    #[test]
+    fn a_de_energized_placeholder_is_not_a_reference_bus() {
+        let buses = vec![
+            bus_at(0, BusType::Slack, 0.0), // de-energized placeholder
+            bus_at(1, BusType::PQ, 1.0),
+            bus_at(2, BusType::Slack, 1.05), // a real reference
+            bus_at(3, BusType::PQ, 1.0),
+        ];
+        let components = vec![vec![0, 1], vec![2, 3]];
+        let classified = classify(&buses, &components);
+
+        assert!(
+            matches!(classified[0].verdict, Verdict::NoReferenceBus),
+            "a component whose only slack sits at V = 0 has no reference"
+        );
+        assert!(classified[0].slack_indices.is_empty());
+        assert!(matches!(classified[1].verdict, Verdict::Solvable));
+        assert_eq!(classified[1].slack_indices, vec![2]);
+
+        // ...and the unreferenced one is then pinned, so its PQ bus stops
+        // being an unknown at all.
+        let mut buses = buses;
+        mark_unreferenced_islands(&mut buses, &classified);
+        assert_eq!(buses[1].bus_type, BusType::Slack);
+        assert_eq!(buses[1].voltage_mag, 0.0);
+        assert_eq!(buses[3].bus_type, BusType::PQ, "the referenced island is untouched");
+    }
+
+    /// A real reference alongside a placeholder still counts: the component is
+    /// solvable, and only the placeholder is disregarded.
+    #[test]
+    fn a_real_reference_beside_a_placeholder_still_counts() {
+        let buses = vec![
+            bus_at(0, BusType::Slack, 0.0),
+            bus_at(1, BusType::Slack, 1.05),
+            bus_at(2, BusType::PQ, 1.0),
+        ];
+        let classified = classify(&buses, &[vec![0, 1, 2]]);
+        assert!(matches!(classified[0].verdict, Verdict::Solvable));
+        assert_eq!(classified[0].slack_indices, vec![1]);
+    }
 
     /// A transformer whose nameplate ratio differs from its nodes' rating
     /// ratio has a real off-nominal ratio, even at nominal tap.

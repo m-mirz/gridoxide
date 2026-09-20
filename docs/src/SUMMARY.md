@@ -31,6 +31,7 @@
 # CGMES Data Model
 
 - [Reading CGMES Input](./cgmes/index.md)
+- [Node-Breaker Topology](./cgmes/node_breaker.md)
 - [StaticVarCompensator](./cgmes/static_var_compensator.md)
 - [Line Shunt Conductance (`ACLineSegment.gch`)](./cgmes/shunt_conductance.md)
 - [PhaseTapChangerLinear](./cgmes/phase_tap_changer_linear.md)

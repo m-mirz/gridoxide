@@ -316,11 +316,7 @@ pub fn estimate(
     let phase_is_measured = rows
         .iter()
         .any(|r| matches!(r.kind, RowKind::Voltage { angle: Some(_), .. }));
-    let reference = net
-        .source_branches
-        .iter()
-        .position(|feeding| !feeding.is_empty())
-        .unwrap_or(0);
+    let reference = net.reference_bus(buses);
 
     let mut v: Vec<Complex<f64>> = buses
         .iter()
