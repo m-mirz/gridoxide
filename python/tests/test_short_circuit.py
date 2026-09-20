@@ -112,3 +112,32 @@ def test_rejects_an_unknown_scaling():
 def test_reports_a_missing_file_clearly():
     with pytest.raises(RuntimeError, match="reading"):
         gridoxide.short_circuit(os.path.join(FIXTURES, "no-such-fixture", "input.json"))
+
+
+def test_branch_currents_account_for_the_fault_current():
+    """The faulted node hangs off one line, so that line has to deliver the
+    whole fault current into it."""
+    result = gridoxide.short_circuit(fixture("three_phase_c_maximum"))
+
+    assert {b.id for b in result.branches} == {6, 7, 8}
+    assert all(b.energized for b in result.branches)
+
+    # Line 8 runs node 2 → node 3, and the fault sits on node 3.
+    line = next(b for b in result.branches if b.id == 8)
+    fault = result.faults[0]
+    for phase in range(3):
+        assert line.i_to[phase] == pytest.approx(fault.i_f[phase], rel=1e-9)
+    # Its other end carries a different current: the line's own shunt draws
+    # the difference.
+    assert line.i_from[0] != pytest.approx(line.i_to[0], rel=1e-6)
+
+
+def test_shunt_current_needs_a_zero_sequence_fault():
+    """The fixture's shunt is zero-sequence only (`b1 = 0`, `b0 = 5`), so a
+    balanced fault leaves it carrying nothing and a grounded one does not."""
+    balanced = gridoxide.short_circuit(fixture("three_phase_c_maximum"))
+    grounded = gridoxide.short_circuit(fixture("single_phase_to_ground_c_maximum"))
+
+    assert [s.id for s in balanced.shunts] == [9]
+    assert balanced.shunts[0].i[0] == pytest.approx(0.0, abs=1e-9)
+    assert grounded.shunts[0].i[0] > 1.0

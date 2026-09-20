@@ -36,13 +36,17 @@ fn reports_fault_current_sources_and_voltages() {
     for section in [
         "fault currents (A):",
         "source contributions (A):",
+        "branch currents (A):",
+        "shunt currents (A):",
         "node voltages (p.u.):",
         "symmetrical components of node voltage (p.u.):",
     ] {
         assert!(text.contains(section), "missing {section:?} in:\n{text}");
     }
     // Every node and both sources reported, by their document ids.
-    for id_line in ["fault     10:", "source     4:", "node      3 :"] {
+    for id_line in
+        ["fault     10:", "source     4:", "node      3 :", "branch     8  from:", "shunt      9:"]
+    {
         assert!(text.contains(id_line), "missing {id_line:?} in:\n{text}");
     }
 }

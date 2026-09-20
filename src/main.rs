@@ -332,9 +332,10 @@ fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
 
 /// Runs an IEC 60909 short-circuit calculation over the PGM document at `path`.
 ///
-/// Prints the three things a protection study actually reads off: what each
-/// fault draws, what each source contributes to it, and how far the voltage
-/// collapses across the rest of the network while it does.
+/// Prints what a protection study actually reads off: what each fault draws,
+/// what each source contributes to it, what the branches and shunts between
+/// them carry, and how far the voltage collapses across the rest of the
+/// network while it does.
 fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
@@ -391,6 +392,42 @@ fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
             "  source {:>5}: a = {:>12.2}, b = {:>12.2}, c = {:>12.2}",
             source.id, source.i[0], source.i[1], source.i[2]
         );
+    }
+
+    // Terminal currents, both ends: what the branch nearest a fault carries is
+    // what protection has to clear, and the two ends differ by whatever the
+    // branch's own shunt draws.
+    if !report.branches.is_empty() {
+        println!("\nbranch currents (A):");
+        // By document id, as the node table is: the report's own order is
+        // lines, then transformers, then links, which is gridoxide's business
+        // rather than the reader's.
+        let mut by_id: Vec<_> = report.branches.iter().collect();
+        by_id.sort_by_key(|b| b.id);
+        for branch in by_id {
+            let mark = if branch.energized { ' ' } else { '*' };
+            println!(
+                "  branch {:>5}{mark} from: a = {:>12.2}, b = {:>12.2}, c = {:>12.2}",
+                branch.id, branch.i_from[0], branch.i_from[1], branch.i_from[2]
+            );
+            println!(
+                "  branch {:>5}{mark}   to: a = {:>12.2}, b = {:>12.2}, c = {:>12.2}",
+                branch.id, branch.i_to[0], branch.i_to[1], branch.i_to[2]
+            );
+        }
+        if report.branches.iter().any(|b| !b.energized) {
+            println!("  (* = de-energized)");
+        }
+    }
+
+    if !report.shunts.is_empty() {
+        println!("\nshunt currents (A):");
+        for shunt in &report.shunts {
+            println!(
+                "  shunt {:>6}: a = {:>12.2}, b = {:>12.2}, c = {:>12.2}",
+                shunt.id, shunt.i[0], shunt.i[1], shunt.i[2]
+            );
+        }
     }
 
     println!("\nnode voltages (p.u.):");

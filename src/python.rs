@@ -1440,6 +1440,45 @@ struct ShortCircuitSource {
     i_angle: [f64; 3],
 }
 
+/// One branch's terminal currents — a `line`, `transformer` or `link`.
+#[pyclass]
+struct ShortCircuitBranch {
+    /// The document's own `line`, `transformer` or `link` id.
+    #[pyo3(get)]
+    id: u64,
+    /// Whether a closed terminal connects this branch to an energized node.
+    /// A de-energized branch is still reported, carrying zero current.
+    #[pyo3(get)]
+    energized: bool,
+    /// Per-phase current magnitude at the `from` terminal, amperes, referred
+    /// to that terminal's own node base — so the two ends of a transformer are
+    /// on different bases, as power-grid-model reports them.
+    #[pyo3(get)]
+    i_from: [f64; 3],
+    #[pyo3(get)]
+    i_from_angle: [f64; 3],
+    /// Per-phase current magnitude at the `to` terminal, amperes.
+    #[pyo3(get)]
+    i_to: [f64; 3],
+    #[pyo3(get)]
+    i_to_angle: [f64; 3],
+}
+
+/// One shunt's current, flowing from its node into the shunt.
+///
+/// Inactive shunts have no entry: IEC 60909 keeps shunt admittances, unlike
+/// loads and generation, so a shunt that is switched on is part of the network
+/// the fault sees.
+#[pyclass]
+struct ShortCircuitShunt {
+    #[pyo3(get)]
+    id: u64,
+    #[pyo3(get)]
+    i: [f64; 3],
+    #[pyo3(get)]
+    i_angle: [f64; 3],
+}
+
 /// The result of [`short_circuit`].
 #[pyclass]
 struct ShortCircuitResult {
@@ -1449,6 +1488,12 @@ struct ShortCircuitResult {
     faults: Vec<Py<ShortCircuitFault>>,
     #[pyo3(get)]
     sources: Vec<Py<ShortCircuitSource>>,
+    /// Lines, then transformers, then links. Fully open branches are absent.
+    #[pyo3(get)]
+    branches: Vec<Py<ShortCircuitBranch>>,
+    /// Active shunts only.
+    #[pyo3(get)]
+    shunts: Vec<Py<ShortCircuitShunt>>,
 }
 
 /// Runs an IEC 60909 short-circuit calculation over a PGM-format JSON file.
@@ -1539,7 +1584,31 @@ fn short_circuit(
         })
         .collect::<PyResult<Vec<_>>>()?;
 
-    Ok(ShortCircuitResult { nodes, faults, sources })
+    let branches = report
+        .branches
+        .iter()
+        .map(|b| {
+            Py::new(
+                py,
+                ShortCircuitBranch {
+                    id: b.id,
+                    energized: b.energized,
+                    i_from: b.i_from,
+                    i_from_angle: b.i_from_angle,
+                    i_to: b.i_to,
+                    i_to_angle: b.i_to_angle,
+                },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let shunts = report
+        .shunts
+        .iter()
+        .map(|s| Py::new(py, ShortCircuitShunt { id: s.id, i: s.i, i_angle: s.i_angle }))
+        .collect::<PyResult<Vec<_>>>()?;
+
+    Ok(ShortCircuitResult { nodes, faults, sources, branches, shunts })
 }
 
 #[pymodule]
@@ -1552,6 +1621,8 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShortCircuitNode>()?;
     m.add_class::<ShortCircuitFault>()?;
     m.add_class::<ShortCircuitSource>()?;
+    m.add_class::<ShortCircuitBranch>()?;
+    m.add_class::<ShortCircuitShunt>()?;
     m.add_function(wrap_pyfunction!(short_circuit, m)?)?;
     Ok(())
 }

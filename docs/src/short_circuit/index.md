@@ -142,6 +142,9 @@ let (net, report) = short_circuit_from_pgm(&input, 1e6, 50.0, opts)?;
 for fault in &report.faults {
     println!("fault {}: {:.1} A on phase a", fault.id, fault.i_f[0]);
 }
+for branch in &report.branches {
+    println!("branch {}: {:.1} A into its `to` end", branch.id, branch.i_to[0]);
+}
 ```
 
 From Python:
@@ -152,7 +155,18 @@ import gridoxide
 result = gridoxide.short_circuit("network.json", scaling="max")
 for fault in result.faults:
     print(fault.id, fault.i_f)
+for branch in result.branches:
+    print(branch.id, branch.i_from, branch.i_to)
 ```
+
+The report covers five component kinds: `nodes` (voltages, and their
+symmetrical components), `faults`, `sources`, `branches` — lines, transformers
+and links alike, with per-phase currents at both terminals, each on its own
+node's base — and `shunts`. Branch currents are what a protection study grades
+against; a fault current alone says what the fault draws, not what any
+particular breaker sees. Fully open branches and inactive shunts have no
+entry, and a branch that no closed terminal connects to an energized node is
+reported de-energized, carrying zero.
 
 The fault itself is declared in the input document, as power-grid-model's `fault` component: a
 node, a fault type, an optional phase, and an optional fault impedance. **A `fault` with no
