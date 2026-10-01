@@ -24,7 +24,6 @@
 
 #![cfg(all(feature = "opf", feature = "opf-highs"))]
 
-use std::path::PathBuf;
 
 use gridoxide::linear::DcApproximation;
 use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
@@ -33,6 +32,8 @@ use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::opf::model::OpfData;
 use gridoxide::opf::{LinearProgram, OptStatus, Solution, Solver};
 use gridoxide::pgm::PgmInput;
+
+mod pglib;
 
 /// Relative bound on the objective.
 ///
@@ -59,7 +60,7 @@ const CASES: &[&str] = &[
 ];
 
 fn dc_opf(name: &str, options: DcOpfOptions) -> DcOpf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib-opf");
+    let dir = pglib::dir();
     let input: PgmInput =
         serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap())
             .unwrap();

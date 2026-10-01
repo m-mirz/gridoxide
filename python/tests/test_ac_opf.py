@@ -12,20 +12,15 @@ import os
 import pytest
 
 import gridoxide
+from _pglib import fixtures
 
 pytestmark = pytest.mark.skipif(
     not hasattr(gridoxide, "ac_opf"),
     reason="built without the opf feature, so there is no solver",
 )
 
-FIXTURES = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "tests",
-    "data",
-    "pglib-opf",
-)
-
-# pglib's published AC objectives, $/h — see tests/data/pglib-opf/README.md.
+# pglib's published AC objectives, $/h — see
+# tests/data/benchmark-grids/pglib/BASELINE.md.
 PUBLISHED = {
     "pglib_opf_case3_lmbd": 5812.6,
     "pglib_opf_case5_pjm": 17552.0,
@@ -36,7 +31,7 @@ PUBLISHED = {
 
 
 def case(name):
-    return os.path.join(FIXTURES, f"{name}.json")
+    return os.path.join(fixtures(), f"{name}.json")
 
 
 @pytest.fixture(scope="module")
@@ -93,7 +88,7 @@ def test_branch_limits_can_be_relaxed():
 def test_the_companion_document_can_be_given_explicitly():
     explicit = gridoxide.ac_opf(
         case("pglib_opf_case5_pjm"),
-        data_path=os.path.join(FIXTURES, "pglib_opf_case5_pjm.opf.json"),
+        data_path=os.path.join(fixtures(), "pglib_opf_case5_pjm.opf.json"),
     )
     implicit = gridoxide.ac_opf(case("pglib_opf_case5_pjm"))
     assert explicit.objective == pytest.approx(implicit.objective, rel=1e-12)

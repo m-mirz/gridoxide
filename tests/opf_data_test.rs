@@ -1,4 +1,4 @@
-//! The OPF data layer, against the committed pglib-opf fixtures.
+//! The OPF data layer, against the pglib-opf fixtures.
 //!
 //! `src/opf/model.rs`'s own tests cover parsing and unit conversion on
 //! hand-written input. What is checked here is that the *real* documents —
@@ -13,11 +13,12 @@
 //! keyed half would not notice the ids drifting apart.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use gridoxide::opf::model::{CostCurve, OpfData};
 
-/// Every case vendored in `tests/data/pglib-opf/`, with the counts pglib's own
+mod pglib;
+
+/// Every case `tests/data/pglib_opf.py` converts, with the counts pglib's own
 /// documentation states for it. Hard-coding these is the point: they come from
 /// the upstream description, not from what our converter happened to produce,
 /// so a conversion that silently dropped a component fails here.
@@ -30,20 +31,14 @@ const CASES: &[(&str, usize, usize)] = &[
     ("pglib_opf_case118_ieee", 118, 186),
 ];
 
-fn fixture(name: &str, suffix: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf")
-        .join(format!("{name}{suffix}"))
-}
-
 fn load(name: &str) -> OpfData {
-    let text = std::fs::read_to_string(fixture(name, ".opf.json"))
+    let text = std::fs::read_to_string(pglib::path(name, ".opf.json"))
         .unwrap_or_else(|e| panic!("reading {name}.opf.json: {e}"));
     OpfData::from_json(&text).unwrap_or_else(|e| panic!("parsing {name}.opf.json: {e}"))
 }
 
 fn network(name: &str) -> serde_json::Value {
-    let text = std::fs::read_to_string(fixture(name, ".json"))
+    let text = std::fs::read_to_string(pglib::path(name, ".json"))
         .unwrap_or_else(|e| panic!("reading {name}.json: {e}"));
     serde_json::from_str(&text).unwrap()
 }

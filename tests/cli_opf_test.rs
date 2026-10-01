@@ -8,10 +8,10 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+mod pglib;
+
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf")
-        .join(format!("{name}.json"))
+    pglib::path(name, ".json")
 }
 
 fn run(args: &[&str]) -> Output {
@@ -51,8 +51,8 @@ fn a_congested_case_reports_the_spread_and_what_binds() {
     assert!(text.contains("spread:"), "{text}");
     assert!(text.contains("binding branch limits:"), "{text}");
     assert!(text.contains("to relieve"), "{text}");
-    // The published objective for this case is 1.7480e4 — see the fixture
-    // README. Checked loosely here; the tight comparison lives in
+    // The published objective for this case is 1.7480e4 — see pglib's
+    // BASELINE.md. Checked loosely here; the tight comparison lives in
     // `opf_dc_test.rs`.
     assert!(text.contains("total cost: 17479."), "{text}");
 }
@@ -76,8 +76,7 @@ fn generators_at_a_limit_are_marked() {
 
 #[test]
 fn the_companion_document_can_be_given_explicitly() {
-    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf/pglib_opf_case5_pjm.opf.json");
+    let data = pglib::path("pglib_opf_case5_pjm", ".opf.json");
     let explicit = stdout_of(&opf("pglib_opf_case5_pjm", &["--data", data.to_str().unwrap()]));
     let implicit = stdout_of(&opf("pglib_opf_case5_pjm", &[]));
     assert_eq!(explicit, implicit);

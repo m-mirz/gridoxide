@@ -296,7 +296,7 @@ impl OpfData {
     /// real and easily-missed situation: it makes every congestion constraint
     /// vacuous and every locational marginal price identical, which looks like
     /// a working OPF right up until someone reads the prices. See
-    /// `tests/data/pglib-opf/README.md`.
+    /// `tests/data/pglib_opf.py`.
     pub fn binding_capable_branches(&self) -> usize {
         self.branch_limit.iter().filter(|b| !b.unlimited).count()
     }

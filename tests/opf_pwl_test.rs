@@ -33,7 +33,6 @@
 #![cfg(feature = "opf")]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use gridoxide::linear::btheta::DcBranch;
 use gridoxide::linear::DcApproximation;
@@ -44,8 +43,10 @@ use gridoxide::opf::model::{CostCurve, OpfData};
 use gridoxide::opf::{OptStatus, Solver};
 use gridoxide::pgm::PgmInput;
 
+mod pglib;
+
 fn documents(name: &str) -> (PgmInput, OpfData) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib-opf");
+    let dir = pglib::dir();
     (
         serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap())
             .unwrap(),

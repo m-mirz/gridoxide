@@ -25,7 +25,6 @@
 
 #![cfg(feature = "opf")]
 
-use std::path::PathBuf;
 
 use gridoxide::network::power_injections;
 use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
@@ -34,7 +33,9 @@ use gridoxide::opf::nlp::NonlinearProblem;
 use gridoxide::opf::OptStatus;
 use gridoxide::pgm::PgmInput;
 
-/// pglib-opf's published AC objectives, $/h — see `tests/data/pglib-opf/README.md`.
+mod pglib;
+
+/// pglib-opf's published AC objectives, $/h — see `tests/data/benchmark-grids/pglib/BASELINE.md`.
 const PUBLISHED_AC: &[(&str, f64)] = &[
     ("pglib_opf_case3_lmbd", 5.8126e+03),
     ("pglib_opf_case5_pjm", 1.7552e+04),
@@ -44,7 +45,7 @@ const PUBLISHED_AC: &[(&str, f64)] = &[
 ];
 
 fn build(name: &str, options: AcOpfOptions) -> AcOpf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib-opf");
+    let dir = pglib::dir();
     let input: PgmInput =
         serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap())
             .unwrap();
@@ -319,8 +320,7 @@ fn every_starting_point_reaches_the_same_optimum() {
                 let mut options = AcOpfOptions::default();
                 options.nlp.initial_barrier = barrier;
                 let mut opf_network = {
-                    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("tests/data/pglib-opf");
+                    let dir = pglib::dir();
                     let input: PgmInput = serde_json::from_str(
                         &std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap(),
                     )
@@ -380,7 +380,7 @@ fn the_locational_marginal_price_is_the_cost_of_one_more_megawatt() {
 
     let delta_mw = 1.0;
     let mut perturbed_network = {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib-opf");
+        let dir = pglib::dir();
         let input: PgmInput = serde_json::from_str(
             &std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap(),
         )
@@ -424,7 +424,7 @@ fn ac_and_dc_prices_agree_to_within_losses() {
     use gridoxide::opf::Solver;
 
     let name = "pglib_opf_case5_pjm";
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib-opf");
+    let dir = pglib::dir();
     let data = OpfData::from_json(
         &std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap(),
     )

@@ -14,20 +14,15 @@ import os
 import pytest
 
 import gridoxide
+from _pglib import fixtures
 
 pytestmark = pytest.mark.skipif(
     not hasattr(gridoxide, "dc_opf"),
     reason="built without the opf-highs feature, so there is no solver",
 )
 
-FIXTURES = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "tests",
-    "data",
-    "pglib-opf",
-)
-
-# pglib's published DC objectives, $/h — see tests/data/pglib-opf/README.md.
+# pglib's published DC objectives, $/h — see
+# tests/data/benchmark-grids/pglib/BASELINE.md.
 PUBLISHED = {
     "pglib_opf_case3_lmbd": 5695.9,
     "pglib_opf_case5_pjm": 17480.0,
@@ -38,7 +33,7 @@ PUBLISHED = {
 
 
 def case(name):
-    return os.path.join(FIXTURES, f"{name}.json")
+    return os.path.join(fixtures(), f"{name}.json")
 
 
 @pytest.fixture(scope="module")
@@ -113,7 +108,7 @@ def test_dispatch_respects_the_generator_limits(congested):
     assumed, so this checks the limits reached the solver."""
     import json
 
-    with open(os.path.join(FIXTURES, "pglib_opf_case5_pjm.opf.json")) as f:
+    with open(os.path.join(fixtures(), "pglib_opf_case5_pjm.opf.json")) as f:
         data = json.load(f)
     limits = {g["index"]: (g["p_min"], g["p_max"]) for g in data["generator"]}
 
@@ -133,7 +128,7 @@ def test_shedding_can_be_disabled():
 def test_the_companion_document_can_be_given_explicitly():
     explicit = gridoxide.dc_opf(
         case("pglib_opf_case5_pjm"),
-        data_path=os.path.join(FIXTURES, "pglib_opf_case5_pjm.opf.json"),
+        data_path=os.path.join(fixtures(), "pglib_opf_case5_pjm.opf.json"),
     )
     implicit = gridoxide.dc_opf(case("pglib_opf_case5_pjm"))
     assert explicit.objective == pytest.approx(implicit.objective, rel=1e-12)

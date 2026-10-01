@@ -16,6 +16,16 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    # The OPF tests and tests/injection_hessian_test.rs read the pglib-opf
+    # cases from benchmark-grids and convert them with numpy
+    # (tests/data/pglib_opf.py). CGMES-Test-Configurations stays unfetched.
+    - name: Fetch benchmark-grids
+      run: git submodule update --init --depth 1 tests/data/benchmark-grids
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install numpy
+      run: pip install numpy
     - name: Build
       run: cargo build --verbose
     # No `--features klu`: this doesn't build/run the FFI-backed `Klu`

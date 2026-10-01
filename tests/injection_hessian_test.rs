@@ -32,6 +32,8 @@ use gridoxide::network::{build_ybus, power_injections, YBusSparse};
 use gridoxide::types::{Bus, BusType, Line, Transformer};
 use num_complex::Complex;
 
+mod pglib;
+
 fn bus(idx: usize, bus_type: BusType, voltage_mag: f64, voltage_ang: f64) -> Bus {
     Bus {
         idx,
@@ -361,9 +363,7 @@ fn the_hessian_adds_no_fill_beyond_the_jacobian() {
 /// solver without strengthening the test, and would make this fail for reasons
 /// having nothing to do with derivatives.
 fn pglib(name: &str) -> (Vec<Bus>, YBusSparse) {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf")
-        .join(format!("{name}.json"));
+    let path = pglib::path(name, ".json");
     let input: PgmInput = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let (mut buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e8, 50.0);
 

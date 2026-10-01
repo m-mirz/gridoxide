@@ -1,17 +1,10 @@
-"""The MATPOWER converter's OPF half, and a guard against committed drift.
+"""The MATPOWER converter's OPF half, on the pglib-opf cases the OPF tests use.
 
-`tests/data/pglib-opf/` holds both the upstream `.m` files and the documents
-this converter produces from them. That is convenient for the Rust tests — they
-read JSON, not MATLAB — but it means two representations of the same data live
-side by side and can drift apart silently.
-
-So the first test here regenerates every committed document and compares. If
-the converter changes and the fixtures are not refreshed, this fails and says
-which file.
+The documents are converted fresh for the session (see `_pglib.py`), so what
+is checked here is the converter against the raw `.m`, not a committed copy.
 """
 
 import json
-import os
 import tempfile
 from pathlib import Path
 
@@ -26,28 +19,9 @@ from gridoxide.matpower import (  # noqa: E402
     load_mpc,
 )
 
-FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "data" / "pglib-opf"
-CASES = sorted(p.stem for p in FIXTURES.glob("*.m"))
+from _pglib import CASES as PGLIB_CASES, PIECEWISE, fixtures  # noqa: E402
 
-
-def test_there_are_fixtures_to_check():
-    assert CASES, f"no .m cases found under {FIXTURES}"
-
-
-@pytest.mark.parametrize("case", CASES)
-def test_committed_documents_match_a_fresh_conversion(case):
-    """The drift guard. Regenerate and compare, byte-equivalent after parsing."""
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        convert(FIXTURES / f"{case}.m", tmp / f"{case}.json")
-
-        for suffix in (".json", ".opf.json"):
-            fresh = json.loads((tmp / f"{case}{suffix}").read_text())
-            committed = json.loads((FIXTURES / f"{case}{suffix}").read_text())
-            assert fresh == committed, (
-                f"{case}{suffix} is stale — regenerate with "
-                f"`python -m gridoxide.matpower {case}.m {case}.json`"
-            )
+CASES = sorted(PGLIB_CASES + [PIECEWISE])
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -65,10 +39,10 @@ def test_cost_curves_are_transcribed_faithfully(case):
     piecewise costs went unexercised for exactly that reason, and both OPF
     formulations silently ignored them as a result.
     """
-    mpc = load_mpc(FIXTURES / f"{case}.m")
+    mpc = load_mpc(fixtures() / f"{case}.m")
     gencost = np.atleast_2d(mpc["gencost"])
     gen = np.atleast_2d(mpc["gen"])
-    opf = json.loads((FIXTURES / f"{case}.opf.json").read_text())
+    opf = json.loads((fixtures() / f"{case}.opf.json").read_text())
 
     by_index = {g["index"]: g for g in opf["generator"]}
     checked = 0
@@ -107,9 +81,9 @@ def test_generator_limits_come_from_the_right_columns(case):
     """`Pmax`/`Pmin` are columns 8 and 9, `Qmax`/`Qmin` are 3 and 4 — adjacent
     to `Pg`/`Qg`, which are the *current* output rather than a limit, and easy
     to take by mistake."""
-    mpc = load_mpc(FIXTURES / f"{case}.m")
+    mpc = load_mpc(fixtures() / f"{case}.m")
     gen = np.atleast_2d(mpc["gen"])
-    opf = json.loads((FIXTURES / f"{case}.opf.json").read_text())
+    opf = json.loads((fixtures() / f"{case}.opf.json").read_text())
 
     by_index = {g["index"]: g for g in opf["generator"]}
     for row in range(len(gen)):
@@ -124,8 +98,8 @@ def test_generator_limits_come_from_the_right_columns(case):
 @pytest.mark.parametrize("case", CASES)
 def test_every_pglib_branch_carries_a_rating(case):
     """The property that makes these fixtures usable for OPF at all — see
-    `tests/data/pglib-opf/README.md`."""
-    opf = json.loads((FIXTURES / f"{case}.opf.json").read_text())
+    `tests/data/pglib_opf.py`."""
+    opf = json.loads((fixtures() / f"{case}.opf.json").read_text())
     unlimited = [b for b in opf["branch_limit"] if b["unlimited"]]
     assert not unlimited, f"{case}: {len(unlimited)} unrated branches"
     assert all(b["rate_a"] > 0.0 for b in opf["branch_limit"])
@@ -158,7 +132,7 @@ def test_a_case_without_ratings_is_marked_unlimited_not_dropped():
 def test_piecewise_costs_are_read_as_point_pairs():
     """The converter's model-1 path on a minimal synthetic case.
 
-    `case5_pjm_pwl.m` now covers it on a realistic network too, but this stays:
+    `case5_pjm_pwl` now covers it on a realistic network too, but this stays:
     it pins the raw `x, y, x, y` unpacking against a curve small enough to read
     at a glance, which is the part a realistic fixture makes harder to see.
 

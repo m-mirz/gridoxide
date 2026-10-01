@@ -30,7 +30,6 @@
 
 #![cfg(feature = "opf-ipopt")]
 
-use std::path::PathBuf;
 
 use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
 use gridoxide::opf::ipopt::{self, IpoptOptions};
@@ -38,6 +37,8 @@ use gridoxide::opf::model::OpfData;
 use gridoxide::opf::nlp::{self, NlpOptions, NonlinearProblem};
 use gridoxide::opf::OptStatus;
 use gridoxide::pgm::PgmInput;
+
+mod pglib;
 
 const PUBLISHED_AC: &[(&str, f64)] = &[
     ("pglib_opf_case3_lmbd", 5.8126e+03),
@@ -48,7 +49,7 @@ const PUBLISHED_AC: &[(&str, f64)] = &[
 ];
 
 fn ac_opf(name: &str) -> AcOpf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib-opf");
+    let dir = pglib::dir();
     let input: PgmInput =
         serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap())
             .unwrap();

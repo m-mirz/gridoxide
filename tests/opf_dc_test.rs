@@ -10,10 +10,10 @@
 //!
 //! The third gate exists because pglib publishes a **DC** column beside the AC
 //! one. An earlier draft of the plan claimed otherwise and concluded this
-//! phase would ship with no external number; see `tests/data/pglib-opf/README.md`.
+//! phase would ship with no external number; see
+//! `tests/data/benchmark-grids/pglib/BASELINE.md`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use gridoxide::linear::DcApproximation;
 use gridoxide::linear::btheta::DcBranch;
@@ -23,7 +23,9 @@ use gridoxide::opf::model::{CostCurve, OpfData};
 use gridoxide::opf::{OptStatus, Solver};
 use gridoxide::pgm::PgmInput;
 
-/// pglib's published DC-OPF objectives, $/h — see the fixture README.
+mod pglib;
+
+/// pglib's published DC-OPF objectives, $/h — see `tests/data/benchmark-grids/pglib/BASELINE.md`.
 const PUBLISHED_DC: &[(&str, f64)] = &[
     ("pglib_opf_case3_lmbd", 5.6959e+03),
     ("pglib_opf_case5_pjm", 1.7480e+04),
@@ -31,12 +33,6 @@ const PUBLISHED_DC: &[(&str, f64)] = &[
     ("pglib_opf_case30_ieee", 7.4728e+03),
     ("pglib_opf_case118_ieee", 9.3101e+04),
 ];
-
-fn fixture(name: &str, suffix: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf")
-        .join(format!("{name}{suffix}"))
-}
 
 /// The in-house interior-point method — the default backend, and the one that
 /// needs no system install, so these tests run everywhere.
@@ -49,8 +45,8 @@ fn solver() -> IpmSolver {
 }
 
 fn load_documents(name: &str) -> (PgmInput, OpfData) {
-    let network_text = std::fs::read_to_string(fixture(name, ".json")).unwrap();
-    let opf_text = std::fs::read_to_string(fixture(name, ".opf.json")).unwrap();
+    let network_text = std::fs::read_to_string(pglib::path(name, ".json")).unwrap();
+    let opf_text = std::fs::read_to_string(pglib::path(name, ".opf.json")).unwrap();
     (
         serde_json::from_str(&network_text).unwrap(),
         OpfData::from_json(&opf_text).unwrap(),
