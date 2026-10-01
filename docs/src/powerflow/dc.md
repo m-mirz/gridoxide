@@ -172,7 +172,14 @@ assumption it rests on, and this test measures both sides of that.
 Because DC is *exactly* linear, the derivative of a branch flow with respect to a bus
 injection is not a local slope that drifts as the operating point moves — it is a
 constant, and the true global answer. That is what makes these factors worth
-precomputing, and why they exist for DC and not for AC.
+precomputing, and it is the property AC sensitivities do not have.
+
+gridoxide computes those too — see [AC Sensitivity Analysis](../sensitivity/ac.md) — but
+they are local derivatives, valid near the operating point they were taken at and
+requiring a fresh factorization whenever it moves. What they buy in exchange is
+everything DC discards: voltage magnitudes, reactive flows, losses. The two are
+complements rather than competitors, and the vocabulary below (a *column* per variable,
+a *row* per monitored branch) is deliberately shared between them.
 
 **PTDF** answers *if I inject one more unit at bus \\(j\\) and let the reference absorb
 it, how much shows up on branch \\(k\\)?* **LODF** answers *if branch \\(l\\) trips, what
