@@ -1,0 +1,51 @@
+# Package config for an installed gridoxide C ABI.
+#
+# After `cmake --install`, a consuming project does:
+#
+#   find_package(gridoxide REQUIRED)
+#   target_link_libraries(my_app PRIVATE gridoxide::gridoxide)
+#
+# The installed tree carries the headers and the library but not cargo, which
+# is the point: a consumer of a release needs no Rust toolchain.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set_and_check(GRIDOXIDE_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+
+find_library(GRIDOXIDE_LIBRARY
+    NAMES gridoxide
+    PATHS "@PACKAGE_CMAKE_INSTALL_LIBDIR@"
+    NO_DEFAULT_PATH)
+if(NOT GRIDOXIDE_LIBRARY)
+    set(gridoxide_FOUND FALSE)
+    set(gridoxide_NOT_FOUND_MESSAGE
+        "gridoxide's library was not found under @PACKAGE_CMAKE_INSTALL_LIBDIR@")
+    return()
+endif()
+
+if(NOT TARGET gridoxide::gridoxide)
+    add_library(gridoxide::gridoxide UNKNOWN IMPORTED)
+    set_target_properties(gridoxide::gridoxide PROPERTIES
+        IMPORTED_LOCATION "${GRIDOXIDE_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${GRIDOXIDE_INCLUDE_DIR}"
+        INTERFACE_COMPILE_FEATURES "cxx_std_17")
+
+    # A Rust staticlib brings no runtime of its own; a consumer must name
+    # these or meet a wall of undefined libstd symbols.
+    if(UNIX AND NOT APPLE)
+        set_property(TARGET gridoxide::gridoxide APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES pthread dl m)
+    elseif(APPLE)
+        set_property(TARGET gridoxide::gridoxide APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES m)
+        set_property(TARGET gridoxide::gridoxide APPEND PROPERTY
+            INTERFACE_LINK_OPTIONS "-framework;CoreFoundation;-framework;Security")
+    elseif(WIN32)
+        set_property(TARGET gridoxide::gridoxide APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES ws2_32 userenv bcrypt ntdll)
+    endif()
+endif()
+
+check_required_components(gridoxide)
