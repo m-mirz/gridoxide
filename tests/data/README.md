@@ -10,16 +10,23 @@ need them opt in explicitly.
 | `benchmark-grids/` | submodule | ~5 MB |
 | `pgm/` | committed | ~3.5 MB |
 
+The OPF tests use the pglib-opf cases in `benchmark-grids/pglib/`. The Rust
+tests read JSON rather than MATLAB, so `pglib_opf.py` converts them with
+`python/gridoxide/matpower.py` on first use, into `target/tmp/`. That needs a
+Python with numpy: `python3`, or whatever `PYTHON` names. The script's
+docstring explains why these cases and not `benchmark-grids/matpower/`.
+
 
 ## Submodules
 
 - **`CGMES-Test-Configurations/`** — ENTSO-E conformance models (MicroGrid and
   friends) used by the `--features cgmes` tests. See below.
 - **`benchmark-grids/`** — MATPOWER cases up to `case9241pegase`, used by the
-  benchmark suite in `scripts/bench/`. See that directory's `README.md`.
+  benchmark suite in `scripts/bench/`, and the pglib-opf cases the OPF tests
+  and `injection_hessian_test.rs` need. See that directory's `README.md`.
 
-Neither is initialized by a plain `git clone`, and neither is fetched in default
-CI. Pull one in when you need it:
+Neither is initialized by a plain `git clone`. CI fetches `benchmark-grids/`
+but not `CGMES-Test-Configurations/`. Pull one in when you need it:
 
 ```bash
 git submodule update --init tests/data/CGMES-Test-Configurations

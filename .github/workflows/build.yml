@@ -16,6 +16,16 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    # The OPF tests and tests/injection_hessian_test.rs read the pglib-opf
+    # cases from benchmark-grids and convert them with numpy
+    # (tests/data/pglib_opf.py). CGMES-Test-Configurations stays unfetched.
+    - name: Fetch benchmark-grids
+      run: git submodule update --init --depth 1 tests/data/benchmark-grids
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install numpy
+      run: pip install numpy
     - name: Build
       run: cargo build --verbose
     # No `--features klu`: this doesn't build/run the FFI-backed `Klu`
@@ -34,3 +44,21 @@ jobs:
     # docs/src/solvers/backends.md).
     - name: Run tests
       run: cargo test --verbose
+    # `opf` *is* built and tested here, unlike the backends above, because it
+    # needs nothing installed: the interior-point QP solver in `src/opf/ipm.rs`
+    # is pure Rust on this crate's own sparse factorization. That was the point
+    # of writing it — before it existed the only backend was `opf-highs`, which
+    # links a system HiGHS no runner has, so the entire OPF surface (DC-OPF,
+    # the CLI subcommand, the Python binding) was invisible to CI.
+    #
+    # Still not built here: `opf-highs` itself, and with it
+    # `tests/opf_cross_test.rs`, which holds the two backends against each
+    # other. That gate runs where HiGHS is installed. Losing it in CI is the
+    # accepted cost of not making a system library a CI dependency — what CI
+    # does cover is the analytic battery in `tests/opf_ipm_test.rs` and the
+    # published pglib objectives in `tests/opf_dc_test.rs`, neither of which
+    # needs a second solver.
+    - name: Build and test the optimization layer
+      run: |
+        cargo build --verbose --features opf
+        cargo test --verbose --features opf

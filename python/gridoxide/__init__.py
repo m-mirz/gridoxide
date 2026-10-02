@@ -25,3 +25,18 @@ __all__ = [
     "StateEstimationModel",
     "short_circuit",
 ]
+
+# The optimal power flow entry points need the `opf` feature compiled in, so
+# they are not present in every build. Exported when they are, absent when they
+# are not — `hasattr(gridoxide, "dc_opf")` is the check, and importing
+# gridoxide never fails for want of a solver.
+#
+# The feature itself needs nothing installed: the solvers behind both of these
+# are gridoxide's own, pure Rust. Only the optional `opf-highs` reference
+# backend needs a system library.
+try:
+    from ._gridoxide import ac_opf, dc_opf  # noqa: F401
+except ImportError:  # pragma: no cover - depends on build features
+    pass
+else:
+    __all__ += ["ac_opf", "dc_opf"]

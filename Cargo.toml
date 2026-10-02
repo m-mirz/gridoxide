@@ -110,6 +110,107 @@ pardiso = ["dep:bindgen"]
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]
+# The optimization layer, complete and self-contained: `opf::LinearProgram`,
+# `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs), DC-OPF
+# (src/opf/dc.rs), and the in-house primal-dual interior-point QP solver
+# (src/opf/ipm.rs) that answers them. Pure Rust on this crate's own sparse
+# factorization — no system libraries, no C toolchain, nothing to install — so
+# unlike `klu`/`pardiso`/`opf-highs` this one *is* built and tested in CI.
+#
+# This is what `gridoxide opf` and the Python `dc_opf` need. `opf-highs` below
+# is an optional second backend, not a requirement.
+opf = []
+# Builds the HiGHS backend for `opf` (src/opf/highs.rs). Like `pardiso`,
+# nothing is vendored or compiled from source: this links a *system* HiGHS
+# install and generates FFI bindings via `bindgen` against that install's own
+# `highs_c_api.h`, so nothing HiGHS-derived is redistributed and
+# `Cargo.toml`'s `license` field doesn't change (HiGHS is MIT in any case).
+#
+# Needs `libclang` (for `bindgen`) plus a local HiGHS with its development
+# files — on Debian/Ubuntu that is `apt install libhighs-dev`. The install is
+# found at `/usr` by default; set `HIGHS_ROOT` for anything else.
+#
+# Not built or tested in CI, since no runner has HiGHS installed — the same
+# local/manual-verification-only position `pardiso` is in. Unlike `pardiso`,
+# nothing depends on it: `opf`'s own interior-point solver is the default
+# backend, and this one is the *reference* the two are cross-checked against in
+# tests/opf_cross_test.rs. On a convex problem the optimum is unique, so a
+# disagreement between them is a bug in one — which is a sharper signal than
+# either could produce alone, and worth keeping the feature for even though it
+# is no longer needed to solve anything.
+opf-highs = ["opf", "dep:bindgen"]
+# Builds the IPOPT backend for `opf`'s *nonlinear* solver (src/opf/ipopt.rs) —
+# the AC-OPF counterpart of what `opf-highs` is for DC. Same arrangement again:
+# nothing vendored, nothing compiled from source, bindings generated via
+# `bindgen` against a *system* IPOPT's own `IpStdCInterface.h`.
+#
+# That arrangement is what keeps IPOPT's EPL-2.0 licence off this crate's
+# `license` field. Nothing IPOPT-derived is redistributed here; the feature
+# links a library the user installed, exactly as `pardiso` links a
+# separately-licensed oneMKL. Enabling it in a *distributed binary* is the
+# user's licensing decision, not this crate's.
+#
+# Needs `libclang` (for `bindgen`) plus a local IPOPT with its development
+# files — on Debian/Ubuntu that is `apt install coinor-libipopt-dev`. Found at
+# `/usr` by default; set `IPOPT_ROOT` for anything else.
+#
+# Not built or tested in CI, and nothing depends on it: `opf::nlp` is the
+# default nonlinear solver and this is the *reference* the two are
+# cross-checked against, the same role `opf-highs` plays for `opf::ipm`. On a
+# nonconvex problem the two need not agree — they may find different local
+# optima — which makes the comparison weaker than the convex one and worth
+# reading carefully rather than as a pass/fail.
+opf-ipopt = ["opf", "dep:bindgen"]
+
+[[test]]
+name = "cli_opf_test"
+path = "tests/cli_opf_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_dc_test"
+path = "tests/opf_dc_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_data_test"
+path = "tests/opf_data_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_ipm_test"
+path = "tests/opf_ipm_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_ipopt_test"
+path = "tests/opf_ipopt_test.rs"
+required-features = ["opf-ipopt"]
+
+[[test]]
+name = "opf_pwl_test"
+path = "tests/opf_pwl_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_ac_test"
+path = "tests/opf_ac_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_nlp_test"
+path = "tests/opf_nlp_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_cross_test"
+path = "tests/opf_cross_test.rs"
+required-features = ["opf-highs"]
+
+[[test]]
+name = "opf_highs_test"
+path = "tests/opf_highs_test.rs"
+required-features = ["opf-highs"]
 
 [[test]]
 name = "klu_jacobian_test"

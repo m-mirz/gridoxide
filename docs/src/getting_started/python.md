@@ -134,6 +134,91 @@ column — a slack bus's injection, or reactive power where the voltage is held 
 correct derivative, not a gap. And a line has no tap, so its `d_transformer_ratio` and
 `d_phase_shift` entries are zero rather than an error.
 
+### DC optimal power flow
+
+`dc_opf` answers *what should each generator produce, so demand is met at least cost without
+overloading anything*. A plain function rather than a class: each solve builds its own program,
+so there is nothing worth keeping between calls.
+
+**Only present when the extension was built with the `opf` feature.** That feature needs nothing
+installed — the solver is gridoxide's own interior-point method, pure Rust — so enabling it costs
+only build time. Importing `gridoxide` never fails for want of a solver; `dc_opf` is simply
+absent, so `hasattr(gridoxide, "dc_opf")` is the check.
+
+```python
+import gridoxide
+
+result = gridoxide.dc_opf("grid.json")
+
+print(result.objective)                       # total cost, $/h
+for index, mw in zip(result.generator_index, result.dispatch):
+    print(index, mw)
+
+# The price spread between buses *is* the congestion.
+spread = max(result.lmp) - min(result.lmp)
+for b in result.binding:
+    print(f"branch {b.branch} at {b.flow:.1f}/{b.rate:.1f} MW, "
+          f"worth {abs(b.price):.2f} $/MWh to relieve")
+```
+
+- `dc_opf(path, data_path=None, shed_price=10000.0, allow_shedding=True,
+  dc_approximation="ignore_g", solver="ipm", freq_hz=50.0)` — costs and limits come from a companion OPF
+  document, defaulting to `path` with its extension replaced by `.opf.json`, which is the pair
+  `gridoxide-matpower` writes. Raises if no optimal dispatch exists.
+- `solver` is `"ipm"` (default), the built-in interior-point method, or `"highs"`, available only
+  when the extension was also built with `opf-highs` (which links a local HiGHS). The two are
+  cross-checked against each other, so this picks a dependency rather than an answer — see
+  [Optimal Power Flow](../opf/index.md#why-keep-both).
+- `dc_approximation` defaults to `"ignore_g"` (`b = x/(r²+x²)`), the *opposite* of
+  `PowerFlowModel.from_pgm_json`'s default and deliberately so — each matches what its own
+  field's reference tools compute. The choice moves which branch binds, so it is not cosmetic;
+  see [Optimal Power Flow](../opf/index.md#which-susceptance--and-why-it-is-not-a-detail).
+- `result.objective` — total cost, $/h.
+- `result.dispatch` / `result.generator_index` — MW per generator, and the source case's own
+  generator index for each, so results match back to the case file.
+- `result.lmp` — **locational marginal price** per bus, $/MWh: the cost of serving one more MW
+  there. Uniform when nothing is congested.
+- `result.flows`, `result.angles` — per branch and per bus.
+
+### AC optimal power flow
+
+`ac_opf` solves the full problem `dc_opf` linearizes — real voltage magnitudes, reactive power
+and losses, optimizing generator active *and* reactive output together.
+
+```python
+r = gridoxide.ac_opf("grid.json")
+
+print(f"{r.objective:.2f} $/h in {r.iterations} iterations")
+print(f"largest violation: {r.violation:.2e} pu")
+print(f"voltage range: {min(r.magnitudes):.4f} - {max(r.magnitudes):.4f} pu")
+
+for index, p, q in zip(r.generator_index, r.p_gen, r.q_gen):
+    print(f"generator {index}: {p:8.2f} MW  {q:8.2f} MVAr")
+```
+
+- `ac_opf(path, data_path=None, enforce_limits=True, max_iterations=300, tolerance=1e-8,
+  freq_hz=50.0)` — the companion document supplies costs, branch ratings *and* per-bus voltage
+  limits. Raises if no first-order point is reached.
+- `result.p_gen` / `result.q_gen` — MW and MVAr per generator.
+- `result.magnitudes`, `result.angles` — per-unit and radians, per bus.
+- `result.lmp_p`, `result.lmp_q` — active and reactive prices, $/MWh and $/MVArh.
+- `result.flows` — `(P, Q)` entering each branch at its from-terminal.
+- `result.violation` — **part of the answer, not diagnostics.** AC-OPF is nonconvex, so the
+  objective is a *local* optimum and a lower cost at an infeasible point is not a better one.
+  Reported so a caller can tell the two apart; see
+  [Optimal Power Flow](../opf/index.md#ac-opf).
+- `result.shed` — MW of unserved demand per load. All zero on a case that can be served; with
+  `allow_shedding=False` such a case raises instead, which is sometimes the answer wanted.
+- `result.binding` — the branches at their limit, each with `branch`, `flow`, `rate` and
+  `price`.
+
+Costs, limits and ratings are not in the PGM network document — it has nowhere to put them — so
+`gridoxide-matpower` writes both files from a MATPOWER case:
+
+```bash
+python -m gridoxide.matpower case14.m case14.json    # also writes case14.opf.json
+```
+
 ### Short-circuit calculation
 
 `short_circuit` is a plain function, not a class: it is a single direct solve with nothing worth

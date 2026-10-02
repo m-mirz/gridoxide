@@ -13,6 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # test_matpower_opf.py converts the pglib-opf cases in benchmark-grids.
+      - name: Fetch benchmark-grids
+        run: git submodule update --init --depth 1 tests/data/benchmark-grids
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
