@@ -1,7 +1,6 @@
 //! Remedial action optimization.
 //!
-//! See `plans/RAO_PLAN.md` for what this is and how it is meant to be built,
-//! and `docs/src/rao/` for the mathematics.
+//! See `docs/src/rao/` for the mathematics.
 //!
 //! The layers, outermost first: [`castor`] decides which perimeters there are
 //! and in what order, [`mod@search`] chooses the network actions of one

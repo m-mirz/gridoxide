@@ -1,4 +1,4 @@
-//! AC re-validation of a DC-chosen plan — phase 11 of `plans/RAO_PLAN.md`.
+//! AC re-validation of a DC-chosen plan.
 //!
 //! The search runs on a linear, lossless model because that is what makes it
 //! finish. This stage asks whether the plan it produced survives contact with

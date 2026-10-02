@@ -1,4 +1,4 @@
-//! Integrality on the LP boundary — phase 6 of `plans/RAO_PLAN.md`.
+//! Integrality on the LP boundary.
 //!
 //! `LinearProgram` could not express an integer until now, so nothing above the
 //! solver boundary could ask a discrete question. The remedial-action work needs
@@ -343,7 +343,8 @@ fn a_node_budget_is_reported_rather_than_silently_passed_off_as_optimal() {
     assert!(solver.nodes() <= 1);
 }
 
-/// §8.4's cross-check, the third instance of it in this crate.
+/// Two independent MILP solvers held against each other, the third such
+/// cross-check in this crate.
 ///
 /// For a MILP the comparison is stronger than the nonconvex NLP case and weaker
 /// than the convex QP one: the optimal *objective* is unique, so a disagreement

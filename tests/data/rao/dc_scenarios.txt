@@ -1,4 +1,4 @@
-# The DC half of the external gate of `plans/RAO_PLAN.md` §8.3: scenario ids
+# The DC half of the external gate: scenario ids
 # from powsybl-open-rao's own Cucumber suite, read from
 # tests/data/benchmark-grids/powsybl-open-rao/features/ by
 # tests/rao_cucumber_test.rs.

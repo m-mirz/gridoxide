@@ -239,8 +239,7 @@ them as the older snapshot.
    Cucumber suite, so 156 of its own scenarios are vendored verbatim and scored — 138/142 DC and
    192/203 plus 727/883 AC assertions, with 108 scenarios matching completely. Nineteen real defects
    were found by it, every one internally consistent and externally wrong. See
-   `plans/RAO_PLAN.md` §8.3 for the list and [The Remedial Action Problem](../rao/index.md) for the
-   mathematics.
+   [The Remedial Action Problem](../rao/index.md) for the mathematics.
 
    Still absent: action combinations beyond the greedy chain (the structural one — the reference
    blooms *combinations* at each depth where this search extends a single best chain),

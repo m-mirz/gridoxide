@@ -1,4 +1,4 @@
-//! The linear optimization of range actions — phase 7 of `plans/RAO_PLAN.md`.
+//! The linear optimization of range actions.
 //!
 //! The load-bearing test here is `phase_shift_sensitivity_matches_a_finite_
 //! difference`. Everything else in this layer is bookkeeping around one

@@ -1,4 +1,4 @@
-//! Perimeters, in order — phase 9 of `plans/RAO_PLAN.md`.
+//! Perimeters, in order.
 //!
 //! [`search`](gridoxide::rao::search) answers one perimeter. This layer decides
 //! which perimeters there are and in what order, which is the difference

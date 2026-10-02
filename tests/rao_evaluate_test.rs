@@ -1,4 +1,4 @@
-//! Evaluating a CRAC against a network — phase 5 of `plans/RAO_PLAN.md`.
+//! Evaluating a CRAC against a network.
 //!
 //! This is the half of a remedial action optimization that does not optimize,
 //! and it is a deliverable on its own: gridoxide could run a contingency

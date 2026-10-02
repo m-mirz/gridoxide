@@ -1,4 +1,4 @@
-//! The CRAC data layer — phase 4 of `plans/RAO_PLAN.md`.
+//! The CRAC data layer.
 //!
 //! Two things are being checked here, and they pull in opposite directions.
 //!

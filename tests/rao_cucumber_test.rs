@@ -1,5 +1,5 @@
 //! gridoxide against powsybl-open-rao's own Cucumber expectations — the
-//! external gate of `plans/RAO_PLAN.md` §8.3.
+//! external gate of remedial action optimization.
 //!
 //! Every other check in this repository is one gridoxide wrote for itself. A
 //! finite-differenced derivative proves a derivative; a screening-versus-resolve
@@ -59,8 +59,8 @@
 //!
 //! # What a failure means
 //!
-//! Not necessarily a bug. These are two heuristic search trees, and the plan's
-//! §8.3 says so: agreement on the *objective* is meaningful, a different set of
+//! Not necessarily a bug. These are two heuristic search trees, so agreement
+//! on the *objective* is meaningful, and a different set of
 //! actions reaching the same margin is not a defect. So the harness reports
 //! every assertion — matched and unmatched — rather than stopping at the first,
 //! and the test asserts on the aggregate. A regression shows up as a count.
@@ -1102,8 +1102,8 @@ fn run_gate(file: &str, scenarios: &[Scenario], expected_scenarios: usize, basel
 /// `BestTapFinder` divergence described on [`BASELINE_MATCHED_AC`].
 ///
 /// It is a recorded number rather than an assertion of perfection. These are
-/// two heuristic search trees and §8.3 says up front that a different set of
-/// actions reaching the same margin is not a defect; a scenario added later may
+/// two heuristic search trees, and a different set of actions reaching the
+/// same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
 const BASELINE_MATCHED_DC: usize = 138;

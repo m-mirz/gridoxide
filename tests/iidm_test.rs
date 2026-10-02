@@ -1,4 +1,4 @@
-//! PowSyBl IIDM import — phase 3 of `plans/RAO_PLAN.md`.
+//! PowSyBl IIDM import.
 //!
 //! Two gates, and the first is the stronger one.
 //!

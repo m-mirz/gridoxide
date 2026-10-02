@@ -1,4 +1,4 @@
-//! CGMES `OperationalLimit` import — phase 2 of `plans/RAO_PLAN.md`.
+//! CGMES `OperationalLimit` import.
 //!
 //! Before this, a CGMES network reached gridoxide with **no ratings at all**:
 //! `cgmes_to_buses_and_branches` produced impedances and nothing else, so "is

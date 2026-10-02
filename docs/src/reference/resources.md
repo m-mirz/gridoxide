@@ -228,7 +228,7 @@ There is **no textbook** for this one, which is worth knowing before looking for
 defined by regulation and by implementation rather than by a literature: the ENTSO-E **CACM**
 Regulation and its capacity-calculation methodologies, the CORE and Nordic CCR methodology documents,
 and [OpenRAO's own documentation](https://powsybl.readthedocs.io/projects/openrao/) — which is the
-reference `plans/RAO_PLAN.md` §8.3 is gated against. Kirschen & Strbac and Conejo & Baringo above
+reference gridoxide's remedial action optimization is gated against. Kirschen & Strbac and Conejo & Baringo above
 give the economic and operational framing; the mechanics come from the methodologies.
 
 ---

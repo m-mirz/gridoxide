@@ -149,7 +149,7 @@ ucte = []
 # Costs one dependency (`quick-xml`) and no system library, so like `ucte` and
 # `opf` it is built and tested in CI.
 iidm = ["dep:quick-xml"]
-# The remedial-action layer (src/rao/) — see plans/RAO_PLAN.md. At present the
+# The remedial-action layer (src/rao/). At present the
 # CRAC data model and its readers; the optimizer follows.
 #
 # Depends on `opf` for the `LinearProgram`/`Solver` boundary the range-action

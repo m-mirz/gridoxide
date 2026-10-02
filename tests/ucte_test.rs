@@ -1,4 +1,4 @@
-//! UCTE-DEF import — the phase-1 gate of `plans/RAO_PLAN.md`.
+//! UCTE-DEF import.
 //!
 //! The interesting assertions here are the ones that compare against
 //! **pypowsybl** (`tests/data/ucte/*.pypowsybl.json`, produced by

@@ -1,4 +1,4 @@
-//! The search tree over network actions — phase 8 of `plans/RAO_PLAN.md`.
+//! The search tree over network actions.
 //!
 //! A range action has a degree of freedom and can be optimized by an LP; a
 //! network action is taken or not, with no gradient between the two. So the
