@@ -122,25 +122,17 @@ To pick up a newer cimoxide schema or generator change:
 The CGMES conformance fixtures under `tests/data/cgmes/` are referenced via a git submodule rather
 than committed, because of their own licensing — see `tests/data/cgmes/README.md`.
 
-The UCTE-DEF fixtures under `tests/data/ucte/` **are** committed, and they are one of the two places
-in this repository where third-party source files are vendored rather than referenced. They come
-verbatim from [powsybl-open-rao](https://github.com/powsybl/powsybl-open-rao) and carry its
-**MPL-2.0** licence, not this crate's Apache-2.0. The same applies to
-`tests/data/iidm/`, where five files are copied verbatim from the same source and three are
-pypowsybl conversions of the UCTE ones — derived works, so MPL-2.0 too.
+The UCTE, IIDM and CRAC files the importer and remedial-action tests read, and the Cucumber suite
+of the external gate, come from [powsybl-open-rao](https://github.com/powsybl/powsybl-open-rao) and
+carry its **MPL-2.0** licence. They are not in this repository. They live in the `benchmark-grids`
+submodule under `powsybl-open-rao/`, pinned to an upstream commit, with that repository's
+`PROVENANCE.md` giving the upstream path of each part. `tests/data/openrao-fixtures.txt` names the
+files the tests use outside the gate, and `tests/data/rao/*.txt` select the gate's scenarios by id.
 
-The other place is `tests/data/rao/`: five CRAC files from the same source, and under
-`tests/data/rao/features/` the Cucumber scenarios of the external gate together with the CRACs and
-`RaoParameters` files they name. All MPL-2.0, all verbatim, and `tests/data/rao/README.md` says which
-is which and why each was chosen.
-
-That is deliberate and it is safe: MPL-2.0 is a *per-file* copyleft. It attaches to the files it
-covers and does not reach the code that reads them, so vendoring these files alongside an
-Apache-2.0 crate creates no obligation on `src/ucte.rs` or `src/rao/` — provided the files stay
-unmodified, stay identifiable, and keep their licence. All three hold: they sit in their own
-directories with a README naming the origin and the licence, and nothing edits them. `Cargo.toml`'s `license` field is
-therefore unchanged, since it describes the code this crate distributes as a library and these are
-test data.
+What this repository does keep is its own work: those scenario lists, and the pypowsybl reference
+solutions under `tests/data/ucte/` and `tests/data/iidm/`, which gridoxide generated with
+`scripts/bench/{ucte,iidm}_reference.py`. MPL-2.0 is a per-file copyleft and does not reach the
+code that reads the files, so `Cargo.toml`'s `license` field is unaffected either way.
 
 Worth separating from that: `src/ucte.rs` itself is **not** a translation of powsybl-open-rao or of
 powsybl-core's `ucte-network` module. The column positions and the tap-changer formulae in it were

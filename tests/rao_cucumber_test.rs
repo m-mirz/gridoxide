@@ -6,10 +6,11 @@
 //! comparison proves two of gridoxide's own paths agree. Neither says whether
 //! the answers are *right* in the sense an operator cares about.
 //!
-//! These do. `tests/data/rao/features/dc_scenarios.feature` holds eight
-//! scenarios copied verbatim from the reference implementation's test suite,
-//! written by its authors against inputs it ships, stating margins to the
-//! decimal and naming which remedial actions should be used.
+//! These do. `tests/data/rao/*.txt` select scenarios from the reference
+//! implementation's own Cucumber suite, read unmodified from
+//! `tests/data/benchmark-grids/powsybl-open-rao/features/` — written by its
+//! authors against inputs it ships, stating margins to the decimal and naming
+//! which remedial actions should be used.
 //!
 //! # The tolerance is theirs, not ours
 //!
@@ -75,8 +76,37 @@ use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
 use serde_json::Value;
 
-fn features_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao/features")
+mod openrao;
+
+/// Every scenario in the reference's suite, by id. Ids are unique across it.
+fn all_scenarios() -> HashMap<String, Scenario> {
+    fn walk(dir: &Path, out: &mut HashMap<String, Scenario>) {
+        for entry in std::fs::read_dir(dir).expect("features dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "feature") {
+                let text = std::fs::read_to_string(&path).expect("feature file");
+                for scenario in parse(&text) {
+                    let previous = out.insert(scenario.name.clone(), scenario);
+                    assert!(previous.is_none(), "a scenario id repeats in {}", path.display());
+                }
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(&openrao::path("features"), &mut out);
+    out
+}
+
+/// The scenarios a gate selects, in the order its list names them.
+fn selected(list: &str, all: &HashMap<String, Scenario>) -> Vec<Scenario> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(list);
+    let text = std::fs::read_to_string(&path).expect("scenario list");
+    text.lines()
+        .filter_map(|l| l.split('#').next().unwrap().split_whitespace().next())
+        .map(|id| all.get(id).unwrap_or_else(|| panic!("{list}: no scenario {id}")).clone())
+        .collect()
 }
 
 /// The reference's own tolerance, from `RaoSteps.flowMegawattTolerance`.
@@ -227,7 +257,7 @@ fn parse(text: &str) -> Vec<Scenario> {
                 scenarios.push(s);
             }
             current = Some(Scenario {
-                name: rest.split_whitespace().next().unwrap_or("?").to_string(),
+                name: rest.split_whitespace().next().unwrap_or("?").trim_end_matches(':').to_string(),
                 ..Default::default()
             });
             continue;
@@ -381,17 +411,15 @@ fn expectation(line: &str) -> Expect {
 // Running one scenario
 // ---------------------------------------------------------------------------
 
-/// Resolve a path from the feature file by its basename.
+/// Resolve a step's path the way the reference's `CommonTestData` does:
+/// networks under `files/cases/`, CRACs under `files/crac/`, parameters under
+/// `files/configurations/`.
 ///
-/// The steps keep the reference's own layout (`epic4/SL_ep4us2_4MR_MW.json`)
-/// so the text stays verbatim; the files are vendored flat.
-fn resolve(reference: &str) -> PathBuf {
-    let name = reference.rsplit('/').next().unwrap_or(reference);
-    let flat = features_dir().join(name);
-    if flat.exists() {
-        return flat;
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+/// Not by basename. The same name can mean different files: `TestCase12Nodes.uct`
+/// in the suite is not byte-identical to the one in the reference's `commons`
+/// module.
+fn resolve(kind: &str, reference: &str) -> PathBuf {
+    openrao::root().join("files").join(kind).join(reference)
 }
 
 /// Map the reference's `RaoParameters` onto [`SearchOptions`].
@@ -625,14 +653,14 @@ fn check(scenario: &Scenario) -> Outcome {
     } else {
         ucte::UcteOptions::default()
     };
-    let net = ucte::read_with(resolve(&scenario.network), &options).expect("network");
-    let (crac, _) = crac_json::read(resolve(&scenario.crac)).expect("crac");
-    let search_options = options_from(&resolve(&scenario.config));
+    let net = ucte::read_with(resolve("cases", &scenario.network), &options).expect("network");
+    let (crac, _) = crac_json::read(resolve("crac", &scenario.crac)).expect("crac");
+    let search_options = options_from(&resolve("configurations", &scenario.config));
     // The search stays on DC whatever the model: it is what makes the tree
     // finish, and phase 11's whole argument is that AC is where the answer gets
     // *checked*. What the model changes here is every margin the scenario
     // asserts on.
-    let model = flow_model_from(&resolve(&scenario.config));
+    let model = flow_model_from(&resolve("configurations", &scenario.config));
     let ac_options = AcOptions { shunts: &net.shunts, ..Default::default() };
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let view = Network {
@@ -1011,28 +1039,27 @@ fn check(scenario: &Scenario) -> Outcome {
 /// which assertion moved.
 #[test]
 fn the_reference_implementations_own_expectations() {
+    let all = all_scenarios();
     for (file, expected, baseline) in [
-        ("dc_scenarios.feature", 25, BASELINE_MATCHED_DC),
-        ("ac_scenarios.feature", 38, BASELINE_MATCHED_AC),
-        ("ac_scenarios_16nodes.feature", 93, BASELINE_MATCHED_AC16),
+        ("dc_scenarios.txt", 25, BASELINE_MATCHED_DC),
+        ("ac_scenarios.txt", 38, BASELINE_MATCHED_AC),
+        ("ac_scenarios_16nodes.txt", 93, BASELINE_MATCHED_AC16),
     ] {
-        run_gate(file, expected, baseline);
+        run_gate(file, &selected(file, &all), expected, baseline);
     }
 }
 
-/// Run one vendored feature file and assert on its aggregate.
+/// Run one gate's scenarios and assert on their aggregate.
 ///
 /// The two files are scored separately on purpose. They exercise different flow
 /// models, and a single total would let a gain in one hide a regression in the
 /// other.
-fn run_gate(file: &str, expected_scenarios: usize, baseline: usize) {
-    let text = std::fs::read_to_string(features_dir().join(file)).expect("feature file");
-    let scenarios = parse(&text);
+fn run_gate(file: &str, scenarios: &[Scenario], expected_scenarios: usize, baseline: usize) {
     assert_eq!(scenarios.len(), expected_scenarios, "in {file}");
 
     let (mut matched, mut mismatched, mut unsupported) = (0usize, 0usize, 0usize);
     let mut report = String::new();
-    for scenario in &scenarios {
+    for scenario in scenarios {
         let outcome = check(scenario);
         matched += outcome.matched.len();
         mismatched += outcome.mismatched.len();
@@ -1153,18 +1180,23 @@ const BASELINE_MATCHED_AC16: usize = 727;
 fn every_scenario_names_inputs_that_exist() {
     // A scenario whose fixture is missing would otherwise be silently skipped,
     // and the gate would pass by testing nothing.
-    let text = std::fs::read_to_string(features_dir().join("dc_scenarios.feature"))
-        .expect("feature file");
-    for scenario in parse(&text) {
-        for reference in [&scenario.network, &scenario.crac, &scenario.config] {
-            assert!(!reference.is_empty(), "{}: a Given step is missing", scenario.name);
-            assert!(
-                resolve(reference).exists(),
-                "{}: `{reference}` resolves to {} which does not exist",
-                scenario.name,
-                resolve(reference).display()
-            );
+    let all = all_scenarios();
+    for list in ["dc_scenarios.txt", "ac_scenarios.txt", "ac_scenarios_16nodes.txt"] {
+        for scenario in selected(list, &all) {
+            for (kind, reference) in [
+                ("cases", &scenario.network),
+                ("crac", &scenario.crac),
+                ("configurations", &scenario.config),
+            ] {
+                assert!(!reference.is_empty(), "{}: a Given step is missing", scenario.name);
+                assert!(
+                    resolve(kind, reference).exists(),
+                    "{}: `{reference}` resolves to {} which does not exist",
+                    scenario.name,
+                    resolve(kind, reference).display()
+                );
+            }
+            assert!(!scenario.expectations.is_empty(), "{}: nothing to check", scenario.name);
         }
-        assert!(!scenario.expectations.is_empty(), "{}: nothing to check", scenario.name);
     }
 }

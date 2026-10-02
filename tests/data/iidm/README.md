@@ -1,13 +1,11 @@
 # IIDM fixtures
 
-Eight `.xiidm` networks and a pypowsybl reference solution for each.
-
-**Licence.** All of these derive from [powsybl-open-rao][rao] test resources and
-are covered by the **Mozilla Public License 2.0**, not gridoxide's Apache-2.0 —
-five are copied verbatim and three are pypowsybl conversions of the `.uct` files
-in `../ucte/`, which makes them derived works under the same licence. MPL-2.0 is
-a per-file copyleft, so they stay MPL-2.0 where they sit. See
-`docs/src/reference/provenance.md`.
+Eight `.xiidm` networks, all from or derived from [powsybl-open-rao][rao] test
+resources (MPL-2.0). They live in the `benchmark-grids` submodule, not here:
+five are upstream files, three are pypowsybl conversions of its UCTE files kept
+under `powsybl-open-rao/converted/`. `../openrao-fixtures.txt` maps each name
+below to its path there. This directory holds gridoxide's own pypowsybl
+reference solution for each.
 
 [rao]: https://github.com/powsybl/powsybl-open-rao
 
@@ -20,12 +18,9 @@ through two parsers that share no code — fixed-column text and XML — and be
 required to agree. The UCTE side is itself checked against pypowsybl, so
 agreement here pins both importers at once.
 
-Regenerate them with:
-
-```python
-import pypowsybl as pp
-pp.network.load("../ucte/TestCase12Nodes.uct").save("TestCase12Nodes.xiidm", format="XIIDM")
-```
+They were produced with
+`pp.network.load("TestCase12Nodes.uct").save("TestCase12Nodes.xiidm", format="XIIDM")`;
+benchmark-grids' `PROVENANCE.md` records how.
 
 ## The native five
 

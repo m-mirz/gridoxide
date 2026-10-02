@@ -11,7 +11,7 @@ Usage (from the repo root, with a venv that has pypowsybl):
     .venv-pypowsybl/bin/python scripts/bench/ucte_reference.py
 
 It rewrites `tests/data/ucte/<case>.pypowsybl.json` for every `.uct` fixture
-beside it. Re-run it when a fixture is added, and commit the result: the Rust
+listed in `tests/data/openrao-fixtures.txt`. Re-run it when a fixture is added, and commit the result: the Rust
 test reads the JSON, so the suite itself needs neither Python nor pypowsybl.
 
 Two settings matter and both are deliberate:
@@ -35,7 +35,22 @@ import sys
 import pypowsybl as pp
 import pypowsybl.loadflow as lf
 
-FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "tests" / "data" / "ucte"
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+FIXTURES = ROOT / "tests" / "data" / "ucte"
+OPENRAO = ROOT / "tests" / "data" / "benchmark-grids" / "powsybl-open-rao"
+
+
+def listed(extension):
+    """The `.{extension}` files in tests/data/openrao-fixtures.txt, as paths
+    into the benchmark-grids submodule, sorted by name."""
+    found = []
+    for line in (ROOT / "tests" / "data" / "openrao-fixtures.txt").read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        name, relative = line.split()[:2]
+        if name.endswith("." + extension):
+            found.append((name, OPENRAO / relative))
+    return sorted(found)
 
 
 def gridoxide_slack(path):
@@ -123,19 +138,19 @@ def reference(path):
 
 
 def main():
-    cases = sorted(FIXTURES.glob("*.uct"))
+    cases = listed("uct")
     if not cases:
-        sys.exit(f"no .uct fixtures under {FIXTURES}")
-    for case in cases:
+        sys.exit("no .uct fixtures listed in tests/data/openrao-fixtures.txt")
+    for name, case in cases:
         try:
             document = reference(case)
         except Exception as error:  # a deliberately malformed fixture
-            print(f"  skip {case.name}: {error}")
+            print(f"  skip {name}: {error}")
             continue
-        out = case.with_suffix(".pypowsybl.json")
+        out = FIXTURES / pathlib.Path(name).with_suffix(".pypowsybl.json")
         out.write_text(json.dumps(document, indent=1) + "\n")
         print(
-            f"  {case.name}: {document['status']}, slack {document['slack']}, "
+            f"  {name}: {document['status']}, slack {document['slack']}, "
             f"{len(document['buses'])} buses, {len(document['branches'])} branches"
         )
 

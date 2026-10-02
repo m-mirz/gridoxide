@@ -7,12 +7,10 @@
 //! 1 insecure, 2 the invocation was wrong. Conflating the last two is how a
 //! study silently passes because the CRAC failed to load.
 
-use std::path::{Path, PathBuf};
+
 use std::process::{Command, Output};
 
-fn data(sub: &str, name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(sub).join(name)
-}
+mod openrao;
 
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_gridoxide")).args(args).output().expect("run gridoxide")
@@ -24,8 +22,8 @@ fn stdout(output: &Output) -> String {
 
 #[test]
 fn an_insecure_network_reports_its_overloads_and_exits_one() {
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-for-12nodes.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&["security", network.to_str().unwrap(), "--crac", crac.to_str().unwrap()]);
     let text = stdout(&out);
 
@@ -40,8 +38,8 @@ fn an_insecure_network_reports_its_overloads_and_exits_one() {
 
 #[test]
 fn the_json_form_is_machine_readable() {
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-for-12nodes.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&[
         "security",
         network.to_str().unwrap(),
@@ -70,8 +68,8 @@ fn a_secure_network_exits_zero() {
     // Same network, but with every threshold relaxed far beyond any flow. This
     // is the case that distinguishes "found no violations" from "found no
     // CNECs", which would otherwise both print nothing and exit 0.
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let source = std::fs::read_to_string(data("rao", "crac-for-12nodes.json")).expect("crac");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let source = std::fs::read_to_string(openrao::fixture("crac-for-12nodes.json")).expect("crac");
     let (crac, _) = gridoxide::rao::crac_json::parse(&source).expect("parse");
     let mut relaxed = crac.clone();
     for cnec in &mut relaxed.flow_cnecs {
@@ -97,8 +95,8 @@ fn a_secure_network_exits_zero() {
 fn the_native_companion_document_is_accepted_too() {
     // `--crac` takes either format; the native one is tried first so that a
     // malformed companion reports its own error rather than "not a CRAC".
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let source = std::fs::read_to_string(data("rao", "crac-for-12nodes.json")).expect("crac");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let source = std::fs::read_to_string(openrao::fixture("crac-for-12nodes.json")).expect("crac");
     let (crac, _) = gridoxide::rao::crac_json::parse(&source).expect("parse");
     let path = std::env::temp_dir().join("gridoxide-security-native.rao.json");
     std::fs::write(&path, crac.to_json().expect("serialize")).expect("write");
@@ -115,7 +113,7 @@ fn the_native_companion_document_is_accepted_too() {
 
 #[test]
 fn a_broken_invocation_exits_two_rather_than_one() {
-    let network = data("ucte", "TestCase12Nodes.uct");
+    let network = openrao::fixture("TestCase12Nodes.uct");
 
     // No --crac at all.
     let out = run(&["security", network.to_str().unwrap()]);
@@ -126,7 +124,7 @@ fn a_broken_invocation_exits_two_rather_than_one() {
     assert_eq!(out.status.code(), Some(2));
 
     // A network whose format cannot be told.
-    let crac = data("rao", "crac-for-12nodes.json");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&["security", "network.wat", "--crac", crac.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("expected a .uct or .xiidm"));
@@ -134,8 +132,8 @@ fn a_broken_invocation_exits_two_rather_than_one() {
 
 #[test]
 fn an_unresolvable_element_is_warned_about_rather_than_ignored() {
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let source = std::fs::read_to_string(data("rao", "crac-for-12nodes.json")).expect("crac");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let source = std::fs::read_to_string(openrao::fixture("crac-for-12nodes.json")).expect("crac");
     let (mut crac, _) = gridoxide::rao::crac_json::parse(&source).expect("parse");
     crac.flow_cnecs[0].network_element = "NO SUCH BRANCH".into();
     let path = std::env::temp_dir().join("gridoxide-security-unresolved.rao.json");
@@ -151,8 +149,8 @@ fn an_unresolvable_element_is_warned_about_rather_than_ignored() {
 
 #[test]
 fn iidm_networks_work_as_well_as_ucte() {
-    let network = data("iidm", "TestCase12Nodes.xiidm");
-    let crac = data("rao", "crac-for-12nodes.json");
+    let network = openrao::fixture("TestCase12Nodes.xiidm");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&[
         "security",
         network.to_str().unwrap(),
@@ -166,7 +164,7 @@ fn iidm_networks_work_as_well_as_ucte() {
 
     // And it must reach the same verdict as the UCTE form of the same network,
     // since the two importers agree on the flows.
-    let ucte = data("ucte", "TestCase12Nodes.uct");
+    let ucte = openrao::fixture("TestCase12Nodes.uct");
     let other = run(&["security", ucte.to_str().unwrap(), "--crac", crac.to_str().unwrap(), "--json"]);
     let expected: serde_json::Value = serde_json::from_str(&stdout(&other)).expect("json");
     assert_eq!(doc["secure"], expected["secure"]);
@@ -181,8 +179,8 @@ fn iidm_networks_work_as_well_as_ucte() {
 
 #[test]
 fn the_rao_command_reports_what_to_do() {
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-topology-helps.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-topology-helps.json");
     let out = run(&["rao", network.to_str().unwrap(), "--crac", crac.to_str().unwrap()]);
     let text = stdout(&out);
     assert!(text.contains("APPLY"), "no action recommended:\n{text}");
@@ -203,8 +201,8 @@ fn the_rao_command_reports_what_to_do() {
 
 #[test]
 fn the_rao_command_emits_json() {
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-for-12nodes.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&[
         "rao",
         network.to_str().unwrap(),
@@ -239,8 +237,8 @@ fn the_rao_command_emits_json() {
 
 #[test]
 fn the_rao_depth_flag_is_honoured_and_validated() {
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-topology-helps.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-topology-helps.json");
 
     let out = run(&[
         "rao",
@@ -279,8 +277,8 @@ fn the_rao_depth_flag_is_honoured_and_validated() {
 fn ac_validation_is_absent_unless_asked_for() {
     // A consumer that never asked should not have to distinguish "AC said
     // nothing" from "AC was never run", so the key is missing rather than null.
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-for-12nodes.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&[
         "rao",
         network.to_str().unwrap(),
@@ -296,8 +294,8 @@ fn ac_validation_is_absent_unless_asked_for() {
 
 #[test]
 fn ac_validation_reports_both_models_per_perimeter() {
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-for-12nodes.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&[
         "rao",
         network.to_str().unwrap(),
@@ -329,8 +327,8 @@ fn a_rejected_plan_exits_one_even_when_the_search_called_it_secure() {
     // The exit code is what a script acts on. A plan the DC search liked and
     // the AC check rejected has to be reported as a failure, or the second
     // stage is decoration.
-    let network = data("ucte", "TestCase12Nodes.uct");
-    let crac = data("rao", "crac-for-12nodes.json");
+    let network = openrao::fixture("TestCase12Nodes.uct");
+    let crac = openrao::fixture("crac-for-12nodes.json");
     let out = run(&[
         "rao",
         network.to_str().unwrap(),

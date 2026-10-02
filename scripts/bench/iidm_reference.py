@@ -8,7 +8,7 @@ that has pypowsybl:
     .venv-pypowsybl/bin/python scripts/bench/iidm_reference.py
 
 It rewrites `tests/data/iidm/<case>.pypowsybl.json` for every `.xiidm` fixture
-beside it; commit the result, since the Rust suite reads the JSON and needs
+listed in `tests/data/openrao-fixtures.txt`; commit the result, since the Rust suite reads the JSON and needs
 neither Python nor pypowsybl.
 
 Unlike the UCTE script this does **not** force a slack bus. IIDM carries no
@@ -34,7 +34,22 @@ import sys
 import pypowsybl as pp
 import pypowsybl.loadflow as lf
 
-FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "tests" / "data" / "iidm"
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+FIXTURES = ROOT / "tests" / "data" / "iidm"
+OPENRAO = ROOT / "tests" / "data" / "benchmark-grids" / "powsybl-open-rao"
+
+
+def listed(extension):
+    """The `.{extension}` files in tests/data/openrao-fixtures.txt, as paths
+    into the benchmark-grids submodule, sorted by name."""
+    found = []
+    for line in (ROOT / "tests" / "data" / "openrao-fixtures.txt").read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        name, relative = line.split()[:2]
+        if name.endswith("." + extension):
+            found.append((name, OPENRAO / relative))
+    return sorted(found)
 
 
 def clean(x):
@@ -77,18 +92,19 @@ def reference(path):
 
 
 def main():
-    cases = sorted(FIXTURES.glob("*.xiidm"))
+    cases = listed("xiidm")
     if not cases:
-        sys.exit(f"no .xiidm fixtures under {FIXTURES}")
-    for case in cases:
+        sys.exit("no .xiidm fixtures listed in tests/data/openrao-fixtures.txt")
+    for name, case in cases:
         try:
             document = reference(case)
         except Exception as error:
-            print(f"  skip {case.name}: {error}")
+            print(f"  skip {name}: {error}")
             continue
-        case.with_suffix(".pypowsybl.json").write_text(json.dumps(document, indent=1) + "\n")
+        out = FIXTURES / pathlib.Path(name).with_suffix(".pypowsybl.json")
+        out.write_text(json.dumps(document, indent=1) + "\n")
         print(
-            f"  {case.name}: {document['status']}, "
+            f"  {name}: {document['status']}, "
             f"{len(document['buses'])} buses, {len(document['branches'])} branches"
         )
 

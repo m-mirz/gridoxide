@@ -15,12 +15,14 @@ use gridoxide::rao::validate::{validate, ValidationOptions, Verdict};
 use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
 
+mod openrao;
+
 fn ucte_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    openrao::fixture(name)
 }
 
 fn rao_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(name)
+    openrao::fixture(name)
 }
 
 struct Case {

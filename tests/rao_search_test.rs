@@ -14,12 +14,14 @@ use gridoxide::rao::linear::LinearOptions;
 use gridoxide::rao::{crac_json, evaluate_with, search, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
 
+mod openrao;
+
 fn ucte_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    openrao::fixture(name)
 }
 
 fn rao_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(name)
+    openrao::fixture(name)
 }
 
 struct Case {
@@ -500,8 +502,7 @@ fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
 
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep16us3case2.json"),
+        openrao::path("files/crac/epic16/SL_ep16us3case2.json"),
     )
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);

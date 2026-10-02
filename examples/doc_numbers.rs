@@ -8,7 +8,7 @@
 //!
 //! ```bash
 //! cargo run --release --features ucte,rao --example doc_numbers \
-//!     tests/data/ucte/3nodes_pst.uct
+//!     tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct
 //! ```
 //!
 //! See `docs/examples/README.md`.
@@ -22,9 +22,10 @@ use gridoxide::ucte;
 const RAD_PER_DEG: f64 = std::f64::consts::PI / 180.0;
 
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "tests/data/ucte/3nodes_pst.uct".to_string());
+    let path = std::env::args().nth(1).unwrap_or_else(|| {
+        "tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct"
+            .to_string()
+    });
     let net = ucte::read(&path).expect("network");
     let name = |i: usize| net.branch_ids.get(i).map(String::as_str).unwrap_or("?");
 

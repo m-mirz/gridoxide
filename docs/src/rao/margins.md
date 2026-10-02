@@ -174,7 +174,7 @@ m = \min(700 - 814.0,\ \ 814.0 + 700) = \min(-114.0,\ 1514.0) = -114.0\ \text{MW
 which is what the evaluator reports:
 
 ```console
-$ gridoxide security tests/data/ucte/3nodes_pst.uct \
+$ gridoxide security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
       --crac docs/examples/pst-worked-example.crac.json
 
 preventive / base case: 1 monitored, worst margin -114.0 MW

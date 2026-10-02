@@ -12,9 +12,12 @@ than representative, and each is sized so that a reader with a calculator can fo
 | `one-node-slg.json` | [A Fault Current, by Hand](../src/short_circuit/worked_example.md) | One 10 kV node, one source with `z01_ratio: 3`, a line-to-ground fault through 0.1 + j0.1 Ω. |
 | `one-node-2ph.json` | same | The same system with a two-phase fault, to show the zero-sequence component vanishing. |
 | `two-bus-lmp.json` + `.opf.json` | [Two Buses, One Congested Line](../src/opf/worked_example.md) | Two buses, a cheap and an expensive generator, one line whose rating decides whether the prices separate. |
-| `pst-worked-example.crac.json` | [the remedial-action chapter](../src/rao/index.md) | A one-CNEC, one-phase-shifter CRAC for `tests/data/ucte/3nodes_pst.uct`. |
+| `pst-worked-example.crac.json` | [the remedial-action chapter](../src/rao/index.md) | A one-CNEC, one-phase-shifter CRAC for `tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct`. |
 
 ## Reproducing
+
+The remedial-action network comes from the `benchmark-grids` submodule
+(`git submodule update --init tests/data/benchmark-grids`).
 
 ```bash
 cargo build --release --features rao,ucte,opf
@@ -22,9 +25,9 @@ cargo build --release --features rao,ucte,opf
 ./target/release/gridoxide short-circuit docs/examples/one-node-slg.json --scaling max
 ./target/release/gridoxide short-circuit docs/examples/one-node-2ph.json --scaling max
 ./target/release/gridoxide opf docs/examples/two-bus-lmp.json
-./target/release/gridoxide security tests/data/ucte/3nodes_pst.uct \
+./target/release/gridoxide security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json
-./target/release/gridoxide rao tests/data/ucte/3nodes_pst.uct \
+./target/release/gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json
 ```
 
@@ -32,7 +35,7 @@ cargo build --release --features rao,ucte,opf
 susceptances and the phase-shift distribution factors the remedial-action pages derive by hand:
 
 ```bash
-cargo run --release --features ucte,rao --example doc_numbers tests/data/ucte/3nodes_pst.uct
+cargo run --release --features ucte,rao --example doc_numbers tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct
 ```
 
 The `two-bus-lmp.opf.json` companion is committed with `rate_a: 60.0`, the congested case. Set it to

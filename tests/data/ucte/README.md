@@ -1,15 +1,11 @@
 # UCTE-DEF fixtures
 
-Six network files taken verbatim from [powsybl-open-rao][rao]'s own test
-resources, plus a pypowsybl reference solution for each.
+The UCTE networks the tests read come from [powsybl-open-rao][rao]'s test
+resources (MPL-2.0) and live in the `benchmark-grids` submodule, not here.
+`../openrao-fixtures.txt` maps each name below to its path there. This
+directory holds gridoxide's own pypowsybl reference solution for six of them.
 
 [rao]: https://github.com/powsybl/powsybl-open-rao
-
-**Licence.** These `.uct` files are part of powsybl-open-rao and are covered by
-the **Mozilla Public License 2.0**, not by gridoxide's Apache-2.0. MPL-2.0 is a
-per-file copyleft: the files stay MPL-2.0 where they sit, which is why they are
-kept in their own directory and unmodified. See
-`docs/src/reference/provenance.md`.
 
 ## Why these six
 

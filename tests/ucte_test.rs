@@ -17,7 +17,14 @@ use gridoxide::solver::{PowerFlowMethod, PowerFlowOptions, SolveStatus};
 use gridoxide::types::BusType;
 use gridoxide::ucte;
 
+mod openrao;
+
 fn fixture(name: &str) -> PathBuf {
+    openrao::fixture(name)
+}
+
+/// pypowsybl's solution for a fixture, written by `scripts/bench/ucte_reference.py`.
+fn reference_file(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
 }
 
@@ -28,7 +35,7 @@ struct Reference {
 }
 
 fn reference(name: &str) -> Reference {
-    let text = std::fs::read_to_string(fixture(name)).expect("reference fixture");
+    let text = std::fs::read_to_string(reference_file(name)).expect("reference fixture");
     let doc: serde_json::Value = serde_json::from_str(&text).expect("reference json");
     let mut buses = HashMap::new();
     for (k, v) in doc["buses"].as_object().expect("buses") {

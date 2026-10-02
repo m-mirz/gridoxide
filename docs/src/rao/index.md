@@ -108,9 +108,10 @@ a Newton-Raphson solve per outer iteration.
 
 ## The worked example used throughout
 
-The next three pages share one network, `tests/data/ucte/3nodes_pst.uct` — five buses, three
-countries, six branches, one phase shifter — small enough that every number on them can be checked
-with a calculator.
+The next three pages share one network, OpenRAO's `3nodes_pst.uct` — five buses, three countries,
+six branches, one phase shifter — small enough that every number on them can be checked with a
+calculator. It is read from the `benchmark-grids` submodule, at
+`tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct`.
 
 ```text
                  ┌─── FFR1AA1 ───┐
@@ -146,11 +147,11 @@ worth asking on its own:
 
 ```bash
 # Where does it hurt?
-gridoxide security tests/data/ucte/3nodes_pst.uct \
+gridoxide security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json
 
 # What should we do about it?
-gridoxide rao tests/data/ucte/3nodes_pst.uct \
+gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json --depth 2
 ```
 
@@ -160,8 +161,8 @@ gridoxide's own `<network>.rao.json` companion.
 
 ## What is validated
 
-22 scenarios from powsybl-open-rao's own Cucumber suite are vendored under
-`tests/data/rao/features/`, with the CRACs and parameter files they name. They are the only check in
+22 scenarios from powsybl-open-rao's own Cucumber suite, read from the `benchmark-grids` submodule
+and selected by `tests/data/rao/dc_scenarios.txt`, are the gate here. They are the only check in
 this repository that gridoxide did not write for itself: they state margins to the decimal and name
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.

@@ -22,12 +22,19 @@ use gridoxide::iidm;
 use gridoxide::solver::{PowerFlowMethod, PowerFlowOptions, SolveStatus};
 use gridoxide::topology::bus_view::RetentionPolicy;
 
+mod openrao;
+
 fn fixture(name: &str) -> PathBuf {
+    openrao::fixture(name)
+}
+
+/// pypowsybl's solution for a fixture, written by `scripts/bench/iidm_reference.py`.
+fn reference_file(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/iidm").join(name)
 }
 
 fn ucte_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    openrao::fixture(name)
 }
 
 /// `(label -> (|V| pu, angle deg), element id -> [p1, q1, p2, q2] MW/MVar)`.
@@ -168,7 +175,7 @@ fn ucte_and_iidm_agree_across_voltage_levels_and_boundary_nodes() {
 // ---------------------------------------------------------------------------
 
 fn reference(name: &str) -> Solved {
-    let text = std::fs::read_to_string(fixture(name)).expect("reference fixture");
+    let text = std::fs::read_to_string(reference_file(name)).expect("reference fixture");
     let doc: serde_json::Value = serde_json::from_str(&text).expect("reference json");
     let buses = doc["buses"]
         .as_object()
@@ -243,11 +250,8 @@ fn every_vendored_version_parses() {
     // pinned to one version reads a fifth of the available material and breaks
     // on the next powsybl release.
     let mut seen: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(fixture("")).expect("fixture dir") {
-        let path = entry.expect("entry").path();
-        if path.extension().is_none_or(|e| e != "xiidm") {
-            continue;
-        }
+    for name in openrao::names_with_extension("xiidm") {
+        let path = fixture(name);
         let net = iidm::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(!net.buses.is_empty(), "{} produced no buses", path.display());
         if let Some(v) = net.version.clone() {

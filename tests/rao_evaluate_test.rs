@@ -17,12 +17,19 @@ use gridoxide::rao::crac::*;
 use gridoxide::rao::{crac_json, evaluate, Network, Resolution};
 use gridoxide::ucte;
 
+mod openrao;
+
 fn ucte_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    openrao::fixture(name)
 }
 
 fn rao_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(name)
+    openrao::fixture(name)
+}
+
+/// pypowsybl's solution for a UCTE fixture, written by `scripts/bench/ucte_reference.py`.
+fn reference_file(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
 }
 
 struct Case {
@@ -399,7 +406,7 @@ fn a_severing_contingency_is_flagged_rather_than_silently_wrong() {
 
 /// `(p1, q1, p2, q2)` per branch id, from the vendored pypowsybl solution.
 fn reference_flows(name: &str) -> std::collections::HashMap<String, [f64; 4]> {
-    let text = std::fs::read_to_string(ucte_fixture(name)).expect("reference");
+    let text = std::fs::read_to_string(reference_file(name)).expect("reference");
     let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
     doc["branches"]
         .as_object()
@@ -414,7 +421,7 @@ fn reference_flows(name: &str) -> std::collections::HashMap<String, [f64; 4]> {
 
 /// Solved voltage magnitude, per unit, per node code.
 fn reference_voltages(name: &str) -> std::collections::HashMap<String, f64> {
-    let text = std::fs::read_to_string(ucte_fixture(name)).expect("reference");
+    let text = std::fs::read_to_string(reference_file(name)).expect("reference");
     let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
     doc["buses"]
         .as_object()

@@ -266,8 +266,8 @@ whose CNEC is no longer overloaded moves nothing.
 ## Reading the plan
 
 ```console
-$ gridoxide rao tests/data/ucte/TestCase12Nodes.uct \
-      --crac tests/data/rao/crac-for-12nodes.json --depth 2
+$ gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/modules/commons/src/test/resources/TestCase12Nodes.uct \
+      --crac tests/data/benchmark-grids/powsybl-open-rao/files/crac/epic15/jsonCrac_ep15us11-4case1.json --depth 2
 
 preventive perimeter (2 state(s)): -182.3 -> -82.9 MW (+99.4), 3 leaf/leaves
   APPLY  Open line NL1-NL2

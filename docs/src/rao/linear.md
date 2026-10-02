@@ -292,7 +292,7 @@ symmetric; on a one-sided CNEC it would not.
 ### What the code does
 
 ```console
-$ gridoxide rao tests/data/ucte/3nodes_pst.uct \
+$ gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
       --crac docs/examples/pst-worked-example.crac.json
 
 preventive perimeter (1 state(s)): -114.0 -> 689.7 MW (+803.7), 0 leaf/leaves

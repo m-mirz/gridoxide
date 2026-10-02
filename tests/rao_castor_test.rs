@@ -19,12 +19,14 @@ use gridoxide::rao::crac::*;
 use gridoxide::rao::{crac_json, evaluate_with, run, Network, Resolution, SearchOptions};
 use gridoxide::ucte;
 
+mod openrao;
+
 fn ucte_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    openrao::fixture(name)
 }
 
 fn rao_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(name)
+    openrao::fixture(name)
 }
 
 struct Case {
@@ -486,8 +488,7 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
 
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep19us3case1.json"),
+        openrao::path("files/crac/epic19/SL_ep19us3case1.json"),
     )
     .expect("crac");
 
@@ -568,8 +569,7 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
 fn a_curative_perimeter_stops_once_it_is_better_than_preventive() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep13us11case1.json"),
+        openrao::path("files/crac/epic13/SL_ep13us11case1.json"),
     )
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
@@ -645,8 +645,7 @@ fn automatons_are_simulated_rather_than_chosen() {
 
     let net = ucte::read(ucte_fixture("TestCase8Nodes_15_11_6_1.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/crac_15_11_6_1.json"),
+        openrao::path("files/crac/epic15/crac_15_11_6_1.json"),
     )
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
@@ -724,8 +723,7 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
 
     let net = ucte::read(ucte_fixture("TestCase12Nodes_15_11_5_1.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/crac_15_11_5_1.json"),
+        openrao::path("files/crac/epic15/crac_15_11_5_1.json"),
     )
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);

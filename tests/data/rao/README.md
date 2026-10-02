@@ -1,13 +1,17 @@
-# CRAC fixtures
+# CRAC fixtures and the external gate
 
-Five OpenRAO JSON CRACs, taken verbatim from [powsybl-open-rao][rao] test
-resources and covered by its **MPL-2.0** licence, not gridoxide's Apache-2.0 —
-see `docs/src/reference/provenance.md`.
+Nothing from [powsybl-open-rao][rao] is stored here. Its CRACs and Cucumber
+suite (MPL-2.0) live in the `benchmark-grids` submodule under
+`powsybl-open-rao/`; `../openrao-fixtures.txt` maps the CRAC names below to
+their paths there. What this directory holds is gridoxide's selection of the
+suite's scenarios: `dc_scenarios.txt`, `ac_scenarios.txt` and
+`ac_scenarios_16nodes.txt`.
 
 [rao]: https://github.com/powsybl/powsybl-open-rao
 
 The format has **24 versions** across the reference checkout's 428 CRAC files,
-and it renamed things between them. These five are chosen to span that:
+and it renamed things between them. These five, which `tests/rao_crac_test.rs`
+reads, are chosen to span that:
 
 | File | Format version | What it is there to catch |
 |---|---|---|
@@ -23,10 +27,11 @@ checkout do. `crac_json::parse` neutralises those literals — outside strings
 only — on a retry, which is the difference between reading a third of the corpus
 and reading all of it.
 
-## `features/` — the external gate
+## The external gate
 
-Scenarios copied verbatim from powsybl-open-rao's own Cucumber suite, together
-with the CRACs and `RaoParameters` files they name. Also MPL-2.0.
+Scenarios from powsybl-open-rao's own Cucumber suite, which
+`tests/rao_cucumber_test.rs` reads unmodified from the submodule and selects by
+the ids in the three `.txt` files.
 
 They are the only check in this repository that gridoxide did not write for
 itself. A finite-differenced derivative proves a derivative; a
@@ -55,8 +60,11 @@ susceptance by 11%. And `the initial margin on cnec` is a different step from
 `the margin on cnec ... after PRA`; reading them as one compares the optimized
 answer against the starting point.
 
-Steps are unmodified, including the file paths — the harness resolves them by
-basename, so the text stays as its authors wrote it.
+Step paths resolve the way the reference's own `CommonTestData` resolves them:
+networks under `files/cases/`, CRACs under `files/crac/`, parameters under
+`files/configurations/`. Not by basename, since one name can mean two files:
+the suite's `common/TestCase12Nodes.uct` differs from the `commons` module's
+copy by one column's alignment.
 
 Not every step is checkable. Those that are not are **printed as skipped**
 rather than dropped, so the list can be shrunk deliberately: what remains is

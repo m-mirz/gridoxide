@@ -19,12 +19,14 @@ use gridoxide::rao::linear::{phase_shift_sensitivity, LinearOptions, LinearStatu
 use gridoxide::rao::{crac_json, evaluate, optimize, Network, NetworkMut, Resolution};
 use gridoxide::ucte;
 
+mod openrao;
+
 fn ucte_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    openrao::fixture(name)
 }
 
 fn rao_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(name)
+    openrao::fixture(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -509,12 +511,6 @@ fn usage_rules_decide_which_perimeter_an_action_reaches() {
 // The objective's unit
 // ---------------------------------------------------------------------------
 
-fn features_fixture(name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/rao/features")
-        .join(name)
-}
-
 #[test]
 fn the_objective_unit_changes_what_the_optimizer_maximizes() {
     // `RaoUtil.getFlowUnit`: megawatts for a DC load flow, amperes for an AC
@@ -528,7 +524,7 @@ fn the_objective_unit_changes_what_the_optimizer_maximizes() {
     // makes the two units disagree; a CRAC that says 400 everywhere would make
     // the ampere objective a constant rescaling of the megawatt one.
     let (crac, _) =
-        crac_json::read(features_fixture("SL_ep15us3case1.json")).expect("crac");
+        crac_json::read(openrao::path("files/crac/epic15/SL_ep15us3case1.json")).expect("crac");
     let resolution = Resolution::new(&crac, &net.branch_ids);
 
     let view = Network {

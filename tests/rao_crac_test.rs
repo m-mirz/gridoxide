@@ -17,8 +17,10 @@ use std::path::PathBuf;
 use gridoxide::rao::crac::*;
 use gridoxide::rao::crac_json;
 
+mod openrao;
+
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(name)
+    openrao::fixture(name)
 }
 
 fn read(name: &str) -> (Crac, crac_json::CracReport) {
@@ -27,15 +29,7 @@ fn read(name: &str) -> (Crac, crac_json::CracReport) {
 }
 
 fn all_fixtures() -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(fixture(""))
-        .expect("fixture dir")
-        .filter_map(|e| {
-            let p = e.ok()?.path();
-            (p.extension()? == "json").then(|| p.file_name()?.to_str().map(str::to_string))?
-        })
-        .collect();
-    names.sort();
-    names
+    openrao::names_with_extension("json").into_iter().map(str::to_string).collect()
 }
 
 // ---------------------------------------------------------------------------

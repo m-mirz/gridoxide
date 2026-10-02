@@ -1,0 +1,42 @@
+# The powsybl-open-rao files the importer and RAO tests use outside the
+# Cucumber gate, by the name the tests ask for, and their path relative to
+# tests/data/benchmark-grids/powsybl-open-rao/ (see that repository's
+# PROVENANCE.md). Two CRACs go by a descriptive name here rather than their
+# upstream one.
+#
+# Read by tests/openrao/mod.rs, and by scripts/bench/ucte_reference.py and
+# iidm_reference.py, which write each network's pypowsybl reference solution to
+# tests/data/ucte/ or tests/data/iidm/ as <name>.pypowsybl.json.
+
+2Nodes.uct                                   files/cases/epic93/2Nodes.uct
+2Nodes_load.uct                              files/cases/epic93/2Nodes_load.uct
+3Nodes.uct                                   files/cases/epic93/3Nodes.uct
+3nodes_pst.uct                               files/cases/flowbased_computation/3nodes_pst.uct
+4Nodes.uct                                   files/cases/epic93/4Nodes.uct
+TestCase12Nodes.uct                          modules/commons/src/test/resources/TestCase12Nodes.uct
+TestCase12Nodes2PSTs.uct                     files/cases/common/TestCase12Nodes2PSTs.uct
+TestCase12NodesDifferentPstTap.uct           files/cases/epic13/TestCase12NodesDifferentPstTap.uct
+TestCase12Nodes_15_11_5_1.uct                files/cases/epic15/TestCase12Nodes_15_11_5_1.uct
+TestCase12Nodes_15_11_5_3_2.uct              files/cases/epic15/TestCase12Nodes_15_11_5_3_2.uct
+TestCase12Nodes_with_2_voltage_levels_1.uct  files/cases/epic15/TestCase12Nodes_with_2_voltage_levels_1.uct
+TestCase12Nodes_wrong.uct                    modules/data/crac/crac-io/crac-io-network/src/test/resources/TestCase12Nodes_wrong.uct
+TestCase16Nodes.uct                          files/cases/common/TestCase16Nodes.uct
+TestCase16Nodes_with_different_imax.uct      files/cases/epic13/TestCase16Nodes_with_different_imax.uct
+TestCase8Nodes_15_11_6_1.uct                 files/cases/epic15/TestCase8Nodes_15_11_6_1.uct
+TestCase_severalVoltageLevels_Xnodes.uct     modules/data/crac/crac-io/crac-io-commons/src/test/resources/TestCase_severalVoltageLevels_Xnodes.uct
+US4-3-TestCase12Nodes-diverging.uct          files/cases/epic4/US4-3-TestCase12Nodes-diverging.uct
+TestCase12Nodes.xiidm                        converted/TestCase12Nodes.xiidm
+TestCase12NodesDifferentPstTap.xiidm         converted/TestCase12NodesDifferentPstTap.xiidm
+TestCase2Nodes.xiidm                         modules/data/crac/crac-impl/src/test/resources/TestCase2Nodes.xiidm
+TestCase_severalVoltageLevels_Xnodes.xiidm   converted/TestCase_severalVoltageLevels_Xnodes.xiidm
+network_one_voltage_level.xiidm              modules/data/crac/crac-io/crac-io-network/src/test/resources/network_one_voltage_level.xiidm
+network_with_dangling_lines.xiidm            modules/data/crac/crac-io/crac-io-commons/src/test/resources/network_with_dangling_lines.xiidm
+nordic32.xiidm                               files/cases/epic12/nordic32.xiidm
+voltage_monitoring.xiidm                     files/cases/epic94/voltage_monitoring.xiidm
+crac-for-12nodes.json                        files/crac/epic15/jsonCrac_ep15us11-4case1.json
+crac-for-rao-result-v1.8.json                modules/data/rao-result/rao-result-io/rao-result-json/src/test/resources/retrocompatibility/v1.8/crac-for-rao-result-v1.8.json
+crac-topology-helps.json                     files/crac/epic4/SL_ep4us1_MW.json
+crac-v1.1.json                               modules/data/crac/crac-io/crac-io-json/src/test/resources/retrocompatibility/v1/crac-v1.1.json
+crac-v2.1.json                               modules/data/crac/crac-io/crac-io-json/src/test/resources/retrocompatibility/v2/crac-v2.1.json
+crac-v2.6.json                               modules/data/crac/crac-io/crac-io-json/src/test/resources/retrocompatibility/v2/crac-v2.6.json
+crac-v2.9.json                               modules/data/crac/crac-io/crac-io-json/src/test/resources/retrocompatibility/v2/crac-v2.9.json
