@@ -2,8 +2,7 @@
 //! whatever backend is available to answer it.
 //!
 //! This module is the boundary, not the mathematics. It carries no notion of a
-//! bus, a generator or a cost curve — those arrive with DC-OPF (see
-//! `plans/OPF_PLAN.md`). What lives here is the smallest description of a
+//! bus, a generator or a cost curve — those arrive with DC-OPF. What lives here is the smallest description of a
 //! convex problem that both backends can consume and that the OPF formulation
 //! can build without knowing which one will solve it.
 //!

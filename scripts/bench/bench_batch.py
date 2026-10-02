@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Measures gridoxide's batched power flow scaling across CPU cores.
 
-This is the baseline any future GPU work has to beat. `plans/GPU_PLAN.md` is
-explicit about why it exists: a single solve is ~60% sparse LU, which caps a
+This is the baseline any future GPU work has to beat. It exists because a
+single solve is ~60% sparse LU, which caps a
 perfect GPU port of everything else at ~1.65x before PCIe latency eats it, so
 the GPU target is *batches* (N-1 screening, time series, Monte Carlo). Quoting
 a GPU speedup against a single-threaded CPU solver would be meaningless —

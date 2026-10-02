@@ -177,7 +177,7 @@ let report = se::nr::estimate(&measurements, &mut buses, &se, &SeOptions::defaul
 
 The measurement model needs no changes at all: a sensor on a breaker is a `Target::BranchTerminal`
 at `branch_of_switch(switch)`, and the estimator never learns that any of its branches is a switch —
-the same reason phases 4 and 6 of the plan came free.
+the same reason DC flows, sensitivities and contingencies work on switches unchanged.
 
 What *is* different is the constraint set, and it inverts the usual proportions. A bus-branch model
 has a handful of zero-injection buses; a node-breaker model is mostly zero-injection buses, since

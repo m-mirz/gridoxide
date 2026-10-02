@@ -160,7 +160,7 @@ this book they support, and each says *why it is the one to reach for* rather th
 
 | Work | Why |
 |---|---|
-| Wood, Wollenberg & Sheblé, **Power Generation, Operation, and Control** (Wiley, 3rd ed. 2013) | The classic for economic dispatch, OPF, unit commitment and state estimation in one volume. The reference for the two OPF extensions `plans/OPF_PLAN.md` §10 puts out of scope |
+| Wood, Wollenberg & Sheblé, **Power Generation, Operation, and Control** (Wiley, 3rd ed. 2013) | The classic for economic dispatch, OPF, unit commitment and state estimation in one volume. The reference for the OPF extensions not implemented here |
 | Nocedal & Wright, **Numerical Optimization** (Springer, 2nd ed. 2006) | The method book behind `opf::nlp` — interior point, line search, filters, and the trust-region alternatives. Where to go when the barrier update or the regularization misbehaves rather than the model |
 | Boyd & Vandenberghe, **Convex Optimization** (Cambridge, 2004; free PDF) | For the DC-OPF side: why the QP is convex, what the KKT certificate means, and duality as the source of locational marginal prices |
 | Kirschen & Strbac, **Fundamentals of Power System Economics** (Wiley, 2nd ed. 2018) | What the prices the OPF reports actually *are*, and why a congested network produces different ones per bus |

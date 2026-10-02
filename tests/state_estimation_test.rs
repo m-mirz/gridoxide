@@ -1,4 +1,4 @@
-//! The phase-2 gate: gridoxide's WLS estimate against power-grid-model's.
+//! gridoxide's WLS estimate against power-grid-model's.
 //!
 //! `tests/measurement_residual_test.rs` checks the measurement *model* at a
 //! state someone else computed. This checks the estimator itself: start from a
@@ -354,7 +354,7 @@ fn a_flat_start_finds_the_wrong_basin_through_a_phase_shifting_transformer() {
 /// than as data to be fitted: a weighted least-squares fit that merely trusts
 /// the sensor a little less would still be pulled toward it. This fixture
 /// therefore fails outright without `se::constraints`, which is what makes it
-/// the phase-4 gate.
+/// that module's gate.
 #[test]
 fn zero_injection_constraint_overrides_a_conflicting_sensor() {
     assert_estimate_matches(

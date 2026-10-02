@@ -1,7 +1,7 @@
 //! Solving a CGMES model as a node-breaker network, with retained switches.
 //!
-//! This is `plans/NODE_BREAKER_PLAN.md` phase 2's gate: MiniGrid under
-//! `RetainAdjacentToBusbar` must converge and report switch flows. It does —
+//! The gate: MiniGrid under `RetainAdjacentToBusbar` must converge and report
+//! switch flows. It does —
 //! and so does every other node-breaker configuration in the tree except one,
 //! at every retention policy including the full node-breaker view.
 //!
@@ -27,12 +27,12 @@
 //! it does. Fixed in `classify`, regression-tested in `network`'s own unit
 //! tests.
 //!
-//! # What that settles about §4.1
+//! # What that settles about `Regularize`
 //!
-//! `plans/NODE_BREAKER_PLAN.md` §4.1 calls `SwitchTreatment::Regularize` "dead
-//! on arrival at real scale", reasoning from a recorded divergence at ~30
-//! switches to SmallGrid's 1,266 and Svedala's 1,464 being "45–52x past the
-//! count already measured to diverge".
+//! `SwitchTreatment::Regularize` was predicted to be dead on arrival at real
+//! scale, reasoning from a recorded divergence at ~30 switches to SmallGrid's
+//! 1,266 and Svedala's 1,464 being 45–52x past the count already measured to
+//! diverge.
 //!
 //! Measured: both converge with **every** switch retained, in the same
 //! iteration count as the bus-branch solve of the same model. The scaling
@@ -83,7 +83,7 @@ fn load(dir: &str, prefix: &str) -> Option<gridoxide::cgmes::CimDataset> {
     Some(load_profiles(&refs).expect("failed to decode CGMES profiles"))
 }
 
-/// **Phase 2's gate.** MiniGrid, imported as a node-breaker model with its
+/// **The gate.** MiniGrid, imported as a node-breaker model with its
 /// busbar-adjacent switches retained as real elements, converges — and every
 /// retained switch carries a reportable flow.
 ///
@@ -203,8 +203,7 @@ fn retaining_switches_does_not_change_the_solution() {
 }
 
 /// SmallGrid and Svedala at full node-breaker scale — 1,266 and 1,464 retained
-/// switches. `plans/NODE_BREAKER_PLAN.md` §4.1 predicts `Regularize` cannot
-/// cope at these counts. It can.
+/// switches. `Regularize` was predicted not to cope at these counts. It can.
 #[test]
 fn the_largest_models_converge_with_every_switch_retained() {
   for (dir, prefix, min_retained) in [
@@ -303,7 +302,7 @@ fn minigrid_converges_under_the_full_node_breaker_view() {
     assert_eq!(report.stats.status, SolveStatus::Converged);
 }
 
-/// **Phase 4 and 6, for free.** A retained switch is a branch, so every
+/// **DC, sensitivities and contingencies, for free.** A retained switch is a branch, so every
 /// calculation the crate already had works on one without knowing it is a
 /// switch. This asserts all three on a real node-breaker model.
 #[test]
@@ -335,8 +334,7 @@ fn dc_sensitivities_and_contingencies_all_work_on_switches() {
         .count();
     assert!(carrying > 0, "no switch carries DC flow");
 
-    // (2) A switch's LODF column *is* its bus-split distribution factor —
-    //     `plans/NODE_BREAKER_PLAN.md` §5.4's headline capability.
+    // (2) A switch's LODF column *is* its bus-split distribution factor.
     let branches = dc_branches(&net.lines, &net.transformers, DcOptions::default());
     let sensitivity = DcSensitivity::new(&buses, &branches, net.n_branches())
         .expect("reduced B is singular");
@@ -469,7 +467,7 @@ fn opening_a_switch_changes_the_solution_but_not_the_pattern() {
     }
 }
 
-/// **Phase 3's gate on real data.** MiniGrid solved with its retained switches
+/// **Constrained switches on real data.** MiniGrid solved with its retained switches
 /// as exact equality constraints rather than as stiff branches, and the two
 /// treatments agreeing.
 ///

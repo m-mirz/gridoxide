@@ -147,9 +147,9 @@ fn results_are_thread_count_invariant() {
 }
 
 /// A scenario that cannot converge must not affect any other scenario in the
-/// batch. Divergent contingencies are normal in N-1 screening, and
-/// `plans/GPU_PLAN.md` §3 makes per-scenario convergence masking a hard
-/// requirement for the eventual GPU path — this is the CPU-side precedent.
+/// batch. Divergent contingencies are normal in N-1 screening, which makes
+/// per-scenario convergence masking a hard requirement for any GPU path — this
+/// is the CPU-side precedent.
 #[test]
 fn divergent_scenario_does_not_poison_the_batch() {
     let (template, ybus) = load_network();

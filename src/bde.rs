@@ -11,8 +11,8 @@
 //!         └             J_B ┘   └ Δx_B┘   └ f_B┘
 //! ```
 //!
-//! This is the design `plans/GPU_PLAN.md` §3 adopts, and the reason it matters
-//! is §3 property 2: **it needs no batched solver API**. You hand the library
+//! This is the design a GPU path would adopt, and the reason it matters is
+//! that **it needs no batched solver API**. You hand the library
 //! one ordinary sparse matrix. That is what makes the AMD path viable even
 //! though rocSOLVER's `csrrf_*` refactorization routines are not batched, and
 //! it is why the same code can later target cuDSS, rocSOLVER, or anything else
@@ -40,7 +40,7 @@
 //! It is deliberately *not* faster than [`crate::batch::BatchSolver`] on a CPU
 //! — one big factorization beats B small ones only when the hardware wants
 //! wide independent work, which is a GPU property. Treat this as an
-//! architecture validator and the host-side half of Phase 3.
+//! architecture validator and the host-side half of a GPU path.
 
 use crate::batch::Scenario;
 use crate::jacobian::JacobianPattern;
@@ -148,8 +148,8 @@ pub struct BdeScenarioResult {
 /// sparse factorization per iteration, with per-scenario convergence masking.
 ///
 /// Scenarios converge at different iteration counts and some contingency
-/// scenarios never converge at all; `plans/GPU_PLAN.md` §3 makes masking a
-/// hard requirement rather than an optimization. A scenario that has converged
+/// scenarios never converge at all, which makes masking a hard requirement
+/// rather than an optimization. A scenario that has converged
 /// (or gone singular, or hit `max_iter`) is masked out by writing an identity
 /// into its block — its `Δx` is then exactly zero and it stops moving, while
 /// every other scenario continues undisturbed and the stacked matrix keeps the

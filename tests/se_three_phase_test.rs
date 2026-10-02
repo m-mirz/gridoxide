@@ -188,8 +188,7 @@ fn a_three_phase_terminal_couples_its_phases() {
 
 /// How many rotational symmetries the phase-domain measurement set has.
 ///
-/// This is the question the plan flagged as needing an experiment rather than a
-/// design. A network measured only in magnitudes and powers is invariant under a
+/// This is a question that needed an experiment rather than a design. A network measured only in magnitudes and powers is invariant under a
 /// global rotation, and `StateLayout` pins exactly one angle to remove it. But if
 /// the three phases were independent circuits — which they become wherever the
 /// zero and positive sequences coincide — there would be *three* such rotations,

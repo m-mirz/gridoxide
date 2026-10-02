@@ -22,8 +22,8 @@
 //! all square — they are power flow's Jacobian solvers. Forming the normal
 //! equations `G Δx = HᵀW r` makes the system square *and* symmetric, so all
 //! five backends carry state estimation with no new solver abstraction. The
-//! cost is conditioning: `G` squares `H`'s condition number, which is why the
-//! plan keeps the option of an orthogonal method open and why phase 4 prefers
+//! cost is conditioning: `G` squares `H`'s condition number, which is why an
+//! orthogonal method stays an open option and why `se::constraints` prefers
 //! equality constraints over huge weights.
 
 use crate::measurement::{AngleFrame, Measurement, MeasurementKind, Target};

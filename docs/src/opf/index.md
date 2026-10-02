@@ -73,8 +73,7 @@ constraints, which the solver handles exactly.
 > `if let Some(CostCurve::Polynomial { .. })`, so a piecewise curve fell through in silence and
 > left the generator's objective coefficient at zero — it looked **free**, and the optimizer
 > dispatched it first. Wrong dispatch, wrong cost, no error, reachable straight from the
-> documented converter. What hid it was that every committed fixture used model 2; the plan had
-> already flagged that as the reason the feature could not be claimed. `case5_pjm_pwl` is now
+> documented converter. What hid it was that every committed fixture used model 2. `case5_pjm_pwl` is now
 > generated as an *exactly equivalent* rewrite of `case5_pjm` — every generator there has
 > \\(c_2 = 0\\), so three collinear points reproduce the cost precisely while still producing two
 > segments — which makes the test a question with a known answer.

@@ -85,7 +85,7 @@ impl HighsSolver {
     /// in two places. An LP solved by simplex lands on an exact vertex, so its
     /// answer is as precise as the arithmetic; a **QP is solved by an
     /// interior-point method and converges asymptotically**, so its answer is
-    /// only as precise as the tolerance asked for. And the phase-4
+    /// only as precise as the tolerance asked for. And the
     /// cross-check between this backend and the in-house solver is only as
     /// sharp as the looser of the two.
     ///

@@ -19,9 +19,8 @@
 //! feature, so a plain `extern "C"` declaration is all that's needed to
 //! resolve these symbols at link time.
 //!
-//! `#[allow(dead_code)]` for now: nothing calls these yet (Phase 0 only
-//! scaffolds the oracle; Phase 1/2's differential tests are what actually
-//! use them) — remove once those phases land.
+//! `#[allow(dead_code)]` for now: nothing calls these yet; the differential
+//! tests that will use them have not landed. Remove it once they do.
 
 use std::os::raw::c_int;
 

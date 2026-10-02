@@ -21,10 +21,9 @@
 //! A stiff branch is a large number in the admittance matrix, and enough of
 //! them are supposed to make the Jacobian ill-conditioned. `src/cgmes.rs`
 //! records that this was tried once before and the AC solve *diverged* on
-//! FullGrid with "20-odd" such branches active, and
-//! `plans/NODE_BREAKER_PLAN.md` §4.1 extrapolates from that to call the
-//! approach "dead on arrival at real scale" for SmallGrid's 1,266 switches and
-//! Svedala's 1,464.
+//! FullGrid with "20-odd" such branches active, and extrapolating from that
+//! calls the approach dead on arrival at real scale, for SmallGrid's 1,266
+//! switches and Svedala's 1,464.
 //!
 //! [`conditioning_probe`] was written to turn that anecdote into a curve. It
 //! did not find one. Across [`Chain`](ProbeShape::Chain),
@@ -46,7 +45,7 @@
 //! should measure on its own data. `Constrain` remains the right answer for the
 //! general case for the reasons `zero_impedance_branches.md` gives — it needs
 //! no large number at all — but the empirical case against `Regularize` is
-//! weaker than the plan assumed.
+//! weaker than assumed.
 //!
 //! # The open/closed representation, and the property it buys
 //!
@@ -57,8 +56,7 @@
 //!
 //! > **Flipping a switch changes Y-bus values but not the sparsity pattern.**
 //!
-//! That is the property `plans/NODE_BREAKER_PLAN.md` §4.2 attributes to the
-//! *constrained* formulation, and it turns out `Regularize` has it too — for
+//! That is the property usually attributed to the *constrained* formulation, and it turns out `Regularize` has it too — for
 //! the same underlying reason the AC contingency work exploits
 //! (`network::build_ybus_with_outages`). What `Regularize` still lacks is the
 //! scaling, not the pattern stability.
@@ -200,9 +198,8 @@ pub enum ProbeShape {
 ///
 /// `src/cgmes.rs` records that stamping CGMES switches as large-admittance
 /// branches was tried and the AC solve *diverged* on FullGrid with "20-odd"
-/// such branches active, and `plans/NODE_BREAKER_PLAN.md` §4.1 reasons from
-/// that to "SmallGrid has 1,266 and Svedala 1,464 — 45–52x the count already
-/// measured to diverge".
+/// such branches active. Reasoning from that, SmallGrid's 1,266 and Svedala's
+/// 1,464 are 45–52x the count already measured to diverge.
 ///
 /// Measured, that inference does not hold: **switch count alone is not the
 /// driver**. A [`Chain`](ProbeShape::Chain) or [`Star`](ProbeShape::Star) of
@@ -470,12 +467,11 @@ mod tests {
 
     /// The measured ceiling, pinned so it cannot drift silently.
     ///
-    /// `plans/NODE_BREAKER_PLAN.md` §4.1 predicts that `Regularize` is "dead on
-    /// arrival" at SmallGrid's 1,266 switches and Svedala's 1,464. On synthetic
-    /// networks it is not: every shape, count and admittance sign converges. If
-    /// this test ever starts failing, the prediction has finally been
-    /// reproduced and §4.1's conclusion is vindicated — which is worth knowing
-    /// either way, so the assertion is on the *result*, not on a claim.
+    /// The prediction was that `Regularize` is dead on arrival at SmallGrid's
+    /// 1,266 switches and Svedala's 1,464. On synthetic networks it is not:
+    /// every shape, count and admittance sign converges. If this test ever
+    /// starts failing, the prediction has finally been reproduced — which is
+    /// worth knowing either way, so the assertion is on the *result*, not on a claim.
     #[test]
     fn regularized_switches_converge_at_every_count_this_probe_can_build() {
         let counts = [1usize, 20, 29, 90, 1266, 1464];
@@ -488,7 +484,7 @@ mod tests {
                     assert!(
                         iters.is_some(),
                         "{shape:?}/{label}: {n} switches failed to converge — \
-                         NODE_BREAKER_PLAN.md §4.1's prediction has been reproduced"
+                         the switch-count ceiling has been reproduced"
                     );
                     assert!(
                         (vm - 1.0).abs() < 0.05,
@@ -540,8 +536,7 @@ mod tests {
 /// - **DC** — `linear::dc_power_flow` takes the branch lists, so a switch's
 ///   active flow appears in `DcSolution::branch_p` at its own index.
 /// - **Sensitivities** — `DcSensitivity::lodf_column` at a switch's branch index
-///   *is* its bus-split distribution factor, which
-///   `plans/NODE_BREAKER_PLAN.md` §5.4 calls the highest-value remaining item.
+///   *is* its bus-split distribution factor.
 /// - **AC contingencies** — `batch::BatchSolver::solve_contingencies` outages a
 ///   switch by its branch index like any other branch, so a switching campaign
 ///   is an ordinary contingency sweep.

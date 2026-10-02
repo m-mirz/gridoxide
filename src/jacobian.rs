@@ -14,14 +14,12 @@
 //! Two payoffs:
 //!
 //! - **On the CPU**, per-iteration allocation and index arithmetic disappear.
-//!   Jacobian assembly is 36–41% of iteration time on the cases measured in
-//!   `plans/GPU_PLAN.md` §1.
+//!   Jacobian assembly is 36–41% of iteration time on the cases measured.
 //! - **On a GPU**, this *is* the kernel shape. [`Entry`] is a flat,
 //!   fixed-size, branch-light record; `fill` is one independent write per
 //!   entry into a preallocated array at a precomputed offset, with all reads
-//!   gathers from small per-bus arrays. `plans/GPU_PLAN.md` §3 property 4
-//!   ("assembly becomes one flat kernel") is exactly this layout, extended to
-//!   a batch by adding a scenario stride.
+//!   gathers from small per-bus arrays. Assembly as one flat kernel is
+//!   exactly this layout, extended to a batch by adding a scenario stride.
 //!
 //! [`fill`] is a transliteration of `build_jacobian_triplets`' H/N/M/L
 //! formulas, not a rederivation — `tests/jacobian_pattern_test.rs` asserts
@@ -327,8 +325,7 @@ mod tests {
         (buses, ybus)
     }
 
-    /// The gate `plans/GPU_PLAN.md` Phase 2 asks for, met on the host: the
-    /// precomputed-offset assembler must reproduce the reference
+    /// The precomputed-offset assembler must reproduce the reference
     /// implementation's `(row, col, value)` sequence exactly — same order,
     /// same indices, and values equal to the last bit, not merely close.
     #[test]
