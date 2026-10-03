@@ -574,27 +574,21 @@ fn an_angle_regulations_held_power_is_read() {
     assert!((r.target - -0.65).abs() < 1e-12, "{}", r.target);
 }
 
-/// The corpus itself: every vendored `.uct` file parses, and none declares a
-/// regulation target. Recorded as an assertion so that if a fixture ever gains
-/// one, this says so rather than the feature quietly going unexercised.
+/// The corpus itself: every listed `.uct` fixture parses — bar the one that is
+/// malformed on purpose and has its own test — and none declares a regulation
+/// target. Recorded as an assertion so that if a fixture ever gains one, this
+/// says so rather than the feature quietly going unexercised.
 #[test]
 fn no_vendored_file_declares_a_regulation_target() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte");
-    let mut checked = 0;
-    for entry in std::fs::read_dir(&dir).expect("ucte fixture dir") {
-        let path = entry.expect("entry").path();
-        if path.extension().is_none_or(|e| e != "uct") {
-            continue;
-        }
-        let Ok(net) = ucte::read(&path) else { continue };
+    let names = openrao::names_with_extension("uct");
+    assert!(!names.is_empty(), "tests/data/openrao-fixtures.txt lists no .uct files");
+    for name in names.into_iter().filter(|n| *n != "TestCase12Nodes_wrong.uct") {
+        let net = ucte::read(fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             net.regulation.is_empty(),
-            "{} now declares a regulation target — the note in src/ucte.rs is out of date",
-            path.display()
+            "{name} now declares a regulation target — the note in src/ucte.rs is out of date"
         );
-        checked += 1;
     }
-    assert!(checked > 0, "no .uct fixtures found");
 }
 
 // ---------------------------------------------------------------------------
