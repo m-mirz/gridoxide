@@ -20,8 +20,7 @@ use super::{guard, invalid, island_status_code, set_error, write_slice, Gridoxid
 use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, BranchParams, Terminal};
 use crate::network::{build_ybus, stamp_shunts, ShuntAdm, YBusSparse};
 use crate::solver::{
-    newton_raphson_distributing_slack, newton_raphson_enforcing_q_limits_with_stats,
-    IslandReport, IslandStatus, JacobianBackend, PersistentSolver, SlackDistribution, SolveStats,
+    IslandReport, IslandStatus, JacobianBackend, PersistentSolver, SolveStats,
 };
 use crate::types::{Bus, Line, Transformer};
 
@@ -436,17 +435,25 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_enforcing_q_limits(
             Ok(b) => b,
             Err(message) => return invalid(message),
         };
-        let (islands, stats) = newton_raphson_enforcing_q_limits_with_stats(
-            &mut model.buses,
-            &model.ybus,
-            model.options.tolerance,
-            model.options.max_iterations,
-            backend,
-            max_outer_iterations,
-        );
+        let mut qlim = crate::outerloop::ReactiveLimits::new();
+        let islands = {
+            let mut ctx =
+                crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
+            let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = vec![&mut qlim];
+            crate::outerloop::solve_with_loops(
+                &mut ctx,
+                model.options.tolerance,
+                model.options.max_iterations,
+                backend,
+                &mut list,
+                max_outer_iterations,
+            )
+            .0
+        };
         // The outer loop switches bus types, so the handle's cached
         // factorization no longer matches the network it was built for.
         model.solver.reset();
+        let stats = stats_from_islands(&islands);
         model.finish(islands, stats)
     })
 }
@@ -505,30 +512,30 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_distributing_slack(
             Ok(b) => b,
             Err(message) => return invalid(message),
         };
-        let (islands, report) = newton_raphson_distributing_slack(
-            &mut model.buses,
-            &model.ybus,
-            model.options.tolerance,
-            model.options.max_iterations,
-            backend,
-            &distribution,
-        );
+        let cap = distribution.max_outer_iter;
+        let mut slack = crate::outerloop::DistributedSlack::new(distribution);
+        let islands = {
+            let mut ctx =
+                crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
+            let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = vec![&mut slack];
+            crate::outerloop::solve_with_loops(
+                &mut ctx,
+                model.options.tolerance,
+                model.options.max_iterations,
+                backend,
+                &mut list,
+                cap,
+            )
+            .0
+        };
+        let report = slack.into_report();
         model.slack_shift = report.shift;
         // The loop leaves its own solver behind; ours never saw those solves.
         model.solver.reset();
 
-        // Reconstruct stats from the islands: the distributing entry point
-        // returns its own report shape rather than `SolveStats`.
-        let stats = SolveStats::from_loop(
-            if islands.iter().any(|i| i.status == IslandStatus::Singular) {
-                crate::solver::SolveStatus::Singular
-            } else if islands.iter().any(|i| i.status == IslandStatus::MaxIterationsReached) {
-                crate::solver::SolveStatus::MaxIterationsReached
-            } else {
-                crate::solver::SolveStatus::Converged
-            },
-            Vec::new(),
-        );
+        // Reconstruct stats from the islands: the outer-loop driver reports
+        // per-island statuses rather than one inner solve's `SolveStats`.
+        let stats = stats_from_islands(&islands);
         let status = model.finish(islands, stats);
         if status == Status::Ok && !report.converged {
             set_error(
@@ -539,6 +546,120 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_distributing_slack(
         }
         status
     })
+}
+
+/// Solves with **both** controls active: reactive limits and distributed slack
+/// in one solve.
+///
+/// This is the capability the two single-control entry points above cannot
+/// express between them — before the outer-loop layer existed a caller picked
+/// one, and a network that needs both (a real transmission grid usually does)
+/// could not be solved correctly at all.
+///
+/// `enforce_q_limits` is a boolean. `slack_factors` may be null, which means
+/// "no distributed slack" when `distribute_slack` is 0 and "an equal share for
+/// every `Slack` and `PV` bus" when it is 1. Both controls off is an ordinary
+/// solve.
+///
+/// # Safety
+///
+/// As [`gridoxide_powerflow_solve`]; `slack_factors`, if non-null, must point
+/// to `n_factors` readable doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gridoxide_powerflow_solve_with_controls(
+    handle: *mut GridoxidePowerFlow,
+    enforce_q_limits: i32,
+    distribute_slack: i32,
+    slack_factors: *const f64,
+    n_factors: usize,
+    max_outer_iterations: usize,
+) -> Status {
+    guard(|| {
+        // SAFETY: as above.
+        let model = match unsafe { handle_mut(handle) } {
+            Ok(m) => m,
+            Err(status) => return status,
+        };
+        if max_outer_iterations == 0 {
+            return invalid("max_outer_iterations must be at least 1");
+        }
+        model.buses.clone_from(&model.template);
+        model.slack_shift.clear();
+
+        let distribution = if distribute_slack == 0 {
+            None
+        } else if slack_factors.is_null() {
+            Some(crate::outerloop::SlackDistribution::uniform(&model.buses))
+        } else {
+            if n_factors != model.buses.len() {
+                return invalid(format!(
+                    "factors holds {n_factors} weights, but this network has {} buses",
+                    model.buses.len()
+                ));
+            }
+            // SAFETY: non-null with `n_factors` readable doubles by contract.
+            let weights = unsafe { std::slice::from_raw_parts(slack_factors, n_factors) };
+            if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
+                return invalid("participation weights must be finite and non-negative");
+            }
+            Some(crate::outerloop::SlackDistribution::from_weights(weights.to_vec()))
+        };
+
+        let backend = match backend_of(model.options.backend) {
+            Ok(b) => b,
+            Err(message) => return invalid(message),
+        };
+
+        let mut slack = distribution.map(crate::outerloop::DistributedSlack::new);
+        let mut qlim = (enforce_q_limits != 0).then(crate::outerloop::ReactiveLimits::new);
+        let islands = {
+            let mut ctx =
+                crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
+            let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = Vec::new();
+            if let Some(l) = slack.as_mut() {
+                list.push(l);
+            }
+            if let Some(l) = qlim.as_mut() {
+                list.push(l);
+            }
+            crate::outerloop::solve_with_loops(
+                &mut ctx,
+                model.options.tolerance,
+                model.options.max_iterations,
+                backend,
+                &mut list,
+                max_outer_iterations,
+            )
+            .0
+        };
+        if let Some(l) = slack {
+            model.slack_shift = l.into_report().shift;
+        }
+        // A `PV → PQ` switch changes the sparsity pattern, so the handle's
+        // cached factorization is stale whenever the Q-limit loop ran.
+        model.solver.reset();
+        let stats = stats_from_islands(&islands);
+        model.finish(islands, stats)
+    })
+}
+
+/// The verdict of a whole outer-loop run, in the shape the handle stores.
+///
+/// The driver re-solves through `PersistentSolver::solve`, which does not hand
+/// back `SolveStats`; the island statuses carry the same verdict by a different
+/// route, and the mismatch history belongs to whichever inner solve ran last
+/// rather than to the run.
+fn stats_from_islands(islands: &[IslandReport]) -> SolveStats {
+    SolveStats::from_loop(
+        if islands.iter().any(|i| i.status == IslandStatus::Singular) {
+            crate::solver::SolveStatus::Singular
+        } else if islands.iter().any(|i| i.status == IslandStatus::MaxIterationsReached) {
+            crate::solver::SolveStatus::MaxIterationsReached
+        } else {
+            crate::solver::SolveStatus::Converged
+        },
+        Vec::new(),
+    )
 }
 
 /// Number of buses.

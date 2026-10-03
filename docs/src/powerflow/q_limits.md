@@ -82,7 +82,7 @@ against its setpoint in addition to comparing its \\(Q\\) against its limits, no
 
 ## Where this fits in gridoxide today
 
-`solver::newton_raphson_enforcing_q_limits()` implements strategy 1, as an outer loop around a
+`outerloop::ReactiveLimits` implements strategy 1, as an outer loop around a
 `solver::PersistentSolver`:
 
 1. Solve to convergence with every `PV` bus free (`PersistentSolver::solve`). If this doesn't converge,
@@ -92,7 +92,15 @@ against its setpoint in addition to comparing its \\(Q\\) against its limits, no
    to the violated limit.
 4. If no bus was switched this pass, the solution is self-consistent — stop and return `Converged`.
 5. Otherwise, reset the cached factorization (`PersistentSolver::reset`) and go back to step 1.
-6. If `max_outer_iter` outer passes pass without stabilizing, stop and return `MaxIterationsReached`.
+6. If the outer-loop budget runs out without stabilizing, the run reports `budget_exhausted` rather
+   than dressing the state up as converged.
+
+Steps 4 and 5 are the [driver's](./outer_loops.md) job rather than this loop's: it returns
+`Unstable` after switching anything, declares `Invalidates::Pattern`, and the driver resets the
+factorization and re-solves. That separation is what lets reactive limits run *alongside*
+[distributed slack](./distributed_slack.md) and [tap control](./tap_control.md) rather than
+instead of them — before the outer-loop layer existed, each was its own entry point and a caller
+picked one.
 
 Strategies 2 and 3 both add real complexity (anti-oscillation bookkeeping, or reworking the iteration loop
 itself) to recover a case gridoxide's simpler design just accepts as a one-way commitment — a deliberate
@@ -129,7 +137,7 @@ limit — from 4 violations on the smallest case up to 166 simultaneous violatio
 
 | Tool | Strategy | Where |
 |---|---|---|
-| **gridoxide** | 1 — one-directional outer loop | `solver::newton_raphson_enforcing_q_limits` (opt-in; plain `newton_raphson` ignores `q_min`/`q_max`) |
+| **gridoxide** | 1 — one-directional outer loop | `outerloop::ReactiveLimits` (opt-in; plain `newton_raphson` ignores `q_min`/`q_max`) |
 | MATPOWER | 1 — one-directional outer loop | `runpf`'s `enforce_q_lims` option |
 | pandapower | 1 — one-directional outer loop, pypower/MATPOWER-derived | `enforce_q_lims` (NR algorithm only, per its own docstring) |
 | powsybl-open-loadflow | 2 — bidirectional, capped switch count per bus | `ReactiveLimitsOuterLoop` (handles capability curves too, not just fixed limits) |

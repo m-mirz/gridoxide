@@ -50,7 +50,7 @@ fn solve(
     base_mva: f64,
 ) -> (Solved, SolveStatus) {
     let opts = PowerFlowOptions { method: PowerFlowMethod::NewtonRaphson, ..Default::default() };
-    let report = gridoxide::run_power_flow(buses, lines, transformers, shunts, opts);
+    let report = gridoxide::run_power_flow(buses, lines, transformers, shunts, gridoxide::TapData::none(), opts);
     let v = bus_voltages(&report.buses);
     let params = branch_params(lines, transformers);
     let voltages = labels
@@ -412,4 +412,383 @@ fn a_boundary_node_takes_the_voltage_of_what_it_attaches_to() {
             bus.u_rated
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tap regulation
+// ---------------------------------------------------------------------------
+
+/// A two-winding transformer with both kinds of changer, so one document
+/// covers the voltage case, the active-power case and the two phase modes that
+/// are deliberately not modelled.
+fn regulating_transformer(ratio: &str, phase: &str) -> String {
+    format!(
+        r#"<?xml version='1.0'?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_14" id="n">
+  <iidm:substation id="S">
+    <iidm:voltageLevel id="VL1" nominalV="400.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B1"/></iidm:busBreakerTopology>
+      <iidm:generator id="G" energySource="OTHER" minP="0" maxP="100" voltageRegulatorOn="true"
+                      targetP="10" targetV="400" targetQ="0" bus="B1" connectableBus="B1">
+        <iidm:minMaxReactiveLimits minQ="-100" maxQ="100"/>
+      </iidm:generator>
+    </iidm:voltageLevel>
+    <iidm:voltageLevel id="VL2" nominalV="225.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B2"/></iidm:busBreakerTopology>
+      <iidm:load id="L" p0="10.0" q0="1.0" bus="B2" connectableBus="B2"/>
+    </iidm:voltageLevel>
+    <iidm:twoWindingsTransformer id="T" r="0.5" x="10.0" g="0.0" b="0.0"
+        ratedU1="400.0" ratedU2="225.0" bus1="B1" connectableBus1="B1"
+        voltageLevelId1="VL1" bus2="B2" connectableBus2="B2" voltageLevelId2="VL2">
+{ratio}
+{phase}
+    </iidm:twoWindingsTransformer>
+  </iidm:substation>
+</iidm:network>"#
+    )
+}
+
+const RATIO_STEPS: &str = r#"      <iidm:step rho="0.98" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.00" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.02" r="0" x="0" g="0" b="0"/>"#;
+
+const PHASE_STEPS: &str = r#"      <iidm:step rho="1.0" alpha="-5.0" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.0" alpha="0.0" r="0" x="0" g="0" b="0"/>
+      <iidm:step rho="1.0" alpha="5.0" r="0" x="0" g="0" b="0"/>"#;
+
+/// A regulating `ratioTapChanger` becomes a voltage control, per-unit against
+/// the bus it holds. Until this was read, IIDM supplied the tap table and no
+/// statement of what it was for.
+#[test]
+fn a_regulating_ratio_tap_changer_becomes_a_voltage_control() {
+    let doc = regulating_transformer(
+        &format!(
+            r#"    <iidm:ratioTapChanger lowTapPosition="0" tapPosition="1" regulating="true"
+        loadTapChangingCapabilities="true" targetV="220.5" targetDeadband="2.25">
+{RATIO_STEPS}
+    </iidm:ratioTapChanger>"#
+        ),
+        "",
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert_eq!(net.regulation.len(), 1, "{:?}", net.notes);
+    let r = &net.regulation[0];
+    assert_eq!(r.id, "T");
+    assert_eq!(r.mode, gridoxide::outerloop::RegulationMode::Voltage);
+    // 220.5 kV against a 225 kV bus, and the deadband in the same unit.
+    assert!((r.target - 220.5 / 225.0).abs() < 1e-12, "{}", r.target);
+    assert!((r.deadband - 2.25 / 225.0).abs() < 1e-12, "{}", r.deadband);
+    assert!(r.enabled);
+    assert!(net.tap_changers[0].is_some(), "the table is still there too");
+}
+
+/// `regulating="false"` means the position is an input, whatever `targetV`
+/// says. Every phase tap changer in the committed fixture set is like this.
+#[test]
+fn a_non_regulating_changer_yields_no_control() {
+    let doc = regulating_transformer(
+        &format!(
+            r#"    <iidm:ratioTapChanger lowTapPosition="0" tapPosition="1" regulating="false"
+        loadTapChangingCapabilities="true" targetV="220.5">
+{RATIO_STEPS}
+    </iidm:ratioTapChanger>"#
+        ),
+        "",
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert!(net.regulation.is_empty());
+    assert!(net.tap_changers[0].is_some());
+}
+
+/// A phase tap changer in `ACTIVE_POWER_CONTROL` becomes a flow control on its
+/// own branch, per-unit against the system base.
+#[test]
+fn a_phase_tap_changer_in_active_power_mode_becomes_a_flow_control() {
+    let doc = regulating_transformer(
+        "",
+        &format!(
+            r#"    <iidm:phaseTapChanger lowTapPosition="0" tapPosition="1" regulating="true"
+        regulationMode="ACTIVE_POWER_CONTROL" regulationValue="-65.0" targetDeadband="35.0">
+{PHASE_STEPS}
+    </iidm:phaseTapChanger>"#
+        ),
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert_eq!(net.regulation.len(), 1, "{:?}", net.notes);
+    let r = &net.regulation[0];
+    match r.mode {
+        gridoxide::outerloop::RegulationMode::ActivePower { branch, .. } => {
+            assert_eq!(branch, net.lines.len(), "the shifter's own branch");
+        }
+        m => panic!("expected an active-power control, got {m:?}"),
+    }
+    // -65 MW on the importer's own 100 MVA base.
+    assert!((r.target - -0.65).abs() < 1e-12, "{}", r.target);
+    assert!((r.deadband - 0.35).abs() < 1e-12, "{}", r.deadband);
+}
+
+/// `CURRENT_LIMITER` holds a current, which no outer loop here models. Dropped
+/// — and said so, rather than silently treated as a power target, which would
+/// hold the flow at whatever number the ampere field happened to contain.
+#[test]
+fn a_current_limiting_phase_changer_is_dropped_and_named() {
+    let doc = regulating_transformer(
+        "",
+        &format!(
+            r#"    <iidm:phaseTapChanger lowTapPosition="0" tapPosition="1" regulating="true"
+        regulationMode="CURRENT_LIMITER" regulationValue="500.0">
+{PHASE_STEPS}
+    </iidm:phaseTapChanger>"#
+        ),
+    );
+    let net = iidm::parse(&doc).expect("import");
+    assert!(net.regulation.is_empty());
+    assert!(
+        net.notes.iter().any(|n| n.contains("hold a current")),
+        "a dropped control must be named: {:?}",
+        net.notes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Control areas
+// ---------------------------------------------------------------------------
+
+/// IIDM is the only one of the three importers that states area **membership**
+/// directly: `<voltageLevelRef>` lists what is inside. CGMES states only the
+/// boundary and leaves membership to be derived; UCTE states a country per node
+/// and no schedule at all.
+#[test]
+fn area_elements_become_a_bus_assignment() {
+    let net = iidm::read(fixture("TestCase12Nodes.xiidm")).expect("import");
+    let a = &net.areas;
+
+    assert_eq!(a.report.areas, 4);
+    assert_eq!(a.report.other_types, 0);
+    assert_eq!(a.report.unknown_voltage_levels, 0);
+    assert_eq!(a.report.contested_buses, 0);
+    assert_eq!(a.report.unassigned_buses, 0, "this file has no boundary nodes");
+
+    let ids: Vec<&str> = a.ids.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["BE", "DE", "FR", "NL"]);
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            a.of_bus.iter().filter(|z| **z == Some(i)).count(),
+            3,
+            "{id} should hold three buses"
+        );
+    }
+    // No `interchangeTarget` anywhere in this file, so every target is the
+    // zero default — asking each area to serve its own load, rather than a
+    // schedule read from the file.
+    assert_eq!(a.report.without_target, vec![0, 1, 2, 3]);
+    assert_eq!(a.targets, vec![0.0; 4]);
+}
+
+/// **The cross-format check.** The twelve-node case exists as both `.uct` and
+/// `.xiidm`, and `ucte_and_iidm_agree_exactly_on_the_twelve_node_case` already
+/// establishes they are the same network. So the areas must agree too —
+/// derived from `##Z` country codes on one side and stated as
+/// `<voltageLevelRef>` on the other, by completely separate code.
+#[test]
+fn ucte_country_areas_and_iidm_area_elements_agree() {
+    let u = gridoxide::ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("ucte import");
+    let i = iidm::read(fixture("TestCase12Nodes.xiidm")).expect("iidm import");
+
+    let (u_of_bus, u_names) = u.country_areas();
+    let i_names: Vec<String> = i.areas.ids.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(u_names, i_names, "the same four countries, in the same order");
+
+    let position = |buses: &[gridoxide::types::Bus],
+                    lines: &[gridoxide::types::Line],
+                    transformers: &[gridoxide::types::Transformer],
+                    shunts: &[gridoxide::network::ShuntAdm],
+                    of_bus: &[Option<usize>]|
+     -> Vec<f64> {
+        let solved = gridoxide::run_power_flow(
+            buses.to_vec(),
+            lines,
+            transformers,
+            shunts,
+            gridoxide::TapData::none(),
+            gridoxide::solver::PowerFlowOptions { tol: 1e-10, max_iter: 40, ..Default::default() },
+        );
+        assert_eq!(solved.stats.status, gridoxide::solver::SolveStatus::Converged);
+        gridoxide::outerloop::AreaInterchange::measure(
+            &solved.buses,
+            lines,
+            transformers,
+            of_bus,
+            4,
+        )
+        .iter()
+        .map(|v| v * 100.0)
+        .collect()
+    };
+
+    let (u_lines, u_transformers) = u.as_switched();
+    let from_ucte = position(&u.buses, &u_lines, &u_transformers, &u.shunts, &u_of_bus);
+    let from_iidm = position(&i.buses, &i.lines, &i.transformers, &i.shunts, &i.areas.of_bus);
+
+    for k in 0..4 {
+        assert!(
+            (from_ucte[k] - from_iidm[k]).abs() < 1e-6,
+            "{}: UCTE says {} MW, IIDM says {}",
+            u_names[k],
+            from_ucte[k],
+            from_iidm[k]
+        );
+    }
+    // And they are the file's own schedules, not an artefact of both being
+    // read the same wrong way: two exporters and two importers at scale.
+    assert!((from_ucte[0] - 2000.0).abs() < 1e-6, "BE exports 2000 MW: {from_ucte:?}");
+    assert!((from_ucte[1] - -2500.0).abs() < 1e-6, "DE imports 2500 MW: {from_ucte:?}");
+}
+
+/// A boundary node belongs to no area, exactly as a CGMES X-node does — the
+/// file's `<areaBoundary>` elements are counted rather than read, since
+/// gridoxide derives the boundary from membership instead.
+#[test]
+fn boundary_nodes_belong_to_no_area() {
+    let net = iidm::read(fixture("TestCase_severalVoltageLevels_Xnodes.xiidm")).expect("import");
+    let a = &net.areas;
+    assert_eq!(a.report.areas, 4);
+    assert!(a.report.unassigned_buses > 0, "the X-nodes are in no area");
+    assert!(a.report.boundaries_ignored > 0, "the file states boundaries too");
+    assert_eq!(a.report.contested_buses, 0);
+}
+
+/// An area of some other `areaType` partitions the network for a different
+/// purpose and is skipped — counted, so its absence is visible.
+#[test]
+fn a_non_control_area_type_is_skipped_and_counted() {
+    let doc = r#"<?xml version='1.0'?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_14" id="n">
+  <iidm:area id="Z1" areaType="BiddingZone" interchangeTarget="10.0">
+    <iidm:voltageLevelRef id="VL"/>
+  </iidm:area>
+  <iidm:area id="C1" areaType="ControlArea" interchangeTarget="-25.0">
+    <iidm:voltageLevelRef id="VL"/>
+  </iidm:area>
+  <iidm:substation id="S">
+    <iidm:voltageLevel id="VL" nominalV="400.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B"/></iidm:busBreakerTopology>
+      <iidm:load id="L" p0="10.0" q0="1.0" bus="B" connectableBus="B"/>
+    </iidm:voltageLevel>
+  </iidm:substation>
+</iidm:network>"#;
+    let net = iidm::parse(doc).expect("import");
+    assert_eq!(net.areas.report.areas, 1);
+    assert_eq!(net.areas.report.other_types, 1);
+    assert_eq!(net.areas.ids[0].0, "C1");
+
+    // And the sign: IIDM states an import ("negative is export, positive is
+    // import" per `Area.java`), `AreaDefinition` wants an export, so -25 MW
+    // becomes +25 MW exported — +0.25 pu on the 100 MVA default base.
+    assert!((net.areas.targets[0] - 0.25).abs() < 1e-12, "{:?}", net.areas.targets);
+    assert!(net.areas.report.without_target.is_empty());
+}
+
+/// A `<voltageLevelRef>` naming a voltage level the file does not define is
+/// counted rather than silently dropped.
+#[test]
+fn an_unknown_voltage_level_reference_is_counted() {
+    let doc = r#"<?xml version='1.0'?>
+<iidm:network xmlns:iidm="http://www.powsybl.org/schema/iidm/1_14" id="n">
+  <iidm:area id="C1" areaType="ControlArea">
+    <iidm:voltageLevelRef id="VL"/>
+    <iidm:voltageLevelRef id="NOT_A_LEVEL"/>
+  </iidm:area>
+  <iidm:substation id="S">
+    <iidm:voltageLevel id="VL" nominalV="400.0" topologyKind="BUS_BREAKER">
+      <iidm:busBreakerTopology><iidm:bus id="B"/></iidm:busBreakerTopology>
+      <iidm:load id="L" p0="10.0" q0="1.0" bus="B" connectableBus="B"/>
+    </iidm:voltageLevel>
+  </iidm:substation>
+</iidm:network>"#;
+    let net = iidm::parse(doc).expect("import");
+    assert_eq!(net.areas.report.unknown_voltage_levels, 1);
+    assert_eq!(net.areas.of_bus, vec![Some(0)], "the level that does exist still claims its bus");
+}
+
+/// A file that states a real schedule, and the loop reaching it.
+///
+/// Skipped unless `references/powsybl-core` is checked out: no *committed*
+/// IIDM fixture carries an `interchangeTarget`, and the only file anywhere with
+/// a non-zero one is powsybl's own PSS/E-derived `two_area_case`.
+#[test]
+fn a_stated_interchange_target_is_read_and_reached() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("references/powsybl-core/psse/psse-converter/src/test/resources/two_area_case.xiidm");
+    if !path.exists() {
+        eprintln!("skipping: references/powsybl-core not checked out");
+        return;
+    }
+    let net = iidm::read(&path).expect("import");
+    assert_eq!(net.areas.report.areas, 2);
+    assert!(net.areas.report.without_target.is_empty(), "both areas state a schedule");
+
+    // The file says A1 = -400 MW and A2 = +400 MW in load convention, so as
+    // exports those are +400 and -400 on a 100 MVA base.
+    let mw: Vec<f64> = net.areas.targets.iter().map(|t| t * net.base_mva).collect();
+    assert!((mw[0] - 400.0).abs() < 1e-9, "{mw:?}");
+    assert!((mw[1] - -400.0).abs() < 1e-9, "{mw:?}");
+
+    // Both of AREA2's generators are `voltageRegulatorOn="false"`, so they
+    // arrive as `PQ` and only `by_generation` can dispatch them.
+    let mut buses = net.buses.clone();
+    let mut ybus = {
+        let mut y = gridoxide::network::build_ybus(buses.len(), &net.lines, &net.transformers);
+        gridoxide::network::stamp_shunts(&mut y, &net.shunts);
+        y.finish()
+    };
+    // The same start `run_power_flow` gives every caller. This network does not
+    // converge from flat, which is a property of the network rather than of
+    // anything here.
+    gridoxide::network::linear_initial_guess(&mut buses, &ybus);
+    let definition = gridoxide::outerloop::AreaDefinition {
+        targets: net.areas.targets.clone(),
+        tolerance: 1e-9,
+        ..gridoxide::outerloop::AreaDefinition::by_generation(
+            &buses,
+            net.areas.of_bus.clone(),
+            2,
+        )
+    };
+    let mut transformers = net.transformers.clone();
+    let mut changers = Vec::new();
+    let mut area_loop = gridoxide::outerloop::AreaInterchange::new(definition);
+    let (_, report) = {
+        let mut ctx = gridoxide::outerloop::SolveContext::new(&mut buses, &mut ybus)
+            .with_branches(&net.lines, &mut transformers, &net.shunts)
+            .with_taps(&mut changers, &[]);
+        let mut list: Vec<&mut dyn gridoxide::outerloop::OuterLoop> = vec![&mut area_loop];
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-9,
+            40,
+            gridoxide::solver::JacobianBackend::Scalar,
+            &mut list,
+            60,
+        )
+    };
+    let area_report = area_loop.into_report();
+    assert!(report.converged, "{report:?}");
+    assert!(area_report.unbalanced.is_empty(), "{:?}", area_report.unbalanced);
+
+    let measured = gridoxide::outerloop::AreaInterchange::measure(
+        &buses,
+        &net.lines,
+        &transformers,
+        &net.areas.of_bus,
+        2,
+    );
+    let dependent = area_report.dependent.expect("one area holds the slack");
+    let driven = 1 - dependent;
+    assert!(
+        (measured[driven] * net.base_mva - net.areas.targets[driven] * net.base_mva).abs() < 1e-6,
+        "area {driven} exports {} MW against a stated {} MW",
+        measured[driven] * net.base_mva,
+        net.areas.targets[driven] * net.base_mva
+    );
 }

@@ -492,6 +492,48 @@ struct TapEffect {
     x_override: Option<f64>,
 }
 
+/// Every position of one tap changer, before the owning transformer folds in
+/// its structural ratio and its side convention.
+///
+/// Raw because a CGMES tap changer's own ratio is not what
+/// [`crate::types::TapChanger::steps`] holds: the builder divides by the
+/// nameplate-vs-bus structural ratio and, when the changer sits on the side
+/// that ends up as `to`, inverts. Composing here would need the bus voltages,
+/// which this index does not have.
+struct RawTapTable {
+    low: i32,
+    position: i32,
+    neutral: i32,
+    /// One per position, from `low` upwards.
+    effects: Vec<TapEffect>,
+}
+
+impl RawTapTable {
+    /// Folds this table into the [`crate::types::TapChanger`] the owning
+    /// transformer needs: `compose` applies the side convention and the
+    /// structural ratio, `series` turns a per-step reactance override into the
+    /// per-step series admittance.
+    fn compose(
+        &self,
+        compose: impl Fn(Complex<f64>) -> Complex<f64>,
+        series: impl Fn(Option<f64>) -> Complex<f64>,
+    ) -> crate::types::TapChanger {
+        let admittances: Vec<Complex<f64>> =
+            self.effects.iter().map(|e| series(e.x_override)).collect();
+        // Only carried when it actually varies: a constant vector would make
+        // every `set_position` write a value the branch already has, and would
+        // hide the distinction the field exists to record.
+        let varies = admittances.windows(2).any(|w| w[0] != w[1]);
+        crate::types::TapChanger {
+            low: self.low,
+            position: self.position,
+            neutral: self.neutral,
+            steps: self.effects.iter().map(|e| compose(e.tap)).collect(),
+            series: varies.then_some(admittances),
+        }
+    }
+}
+
 /// `end_mrid -> tap-changer mrid`, one map per tap changer subtype, built
 /// once up front rather than scanned per transformer end.
 struct TapChangerIndex {
@@ -570,20 +612,148 @@ impl TapChangerIndex {
             let theta_deg = ptc.winding_connection_angle.ok_or_else(|| {
                 missing("PhaseTapChangerAsymmetrical", mrid, "windingConnectionAngle")
             })?;
-            return Ok(Some(phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx)?));
+            return Ok(Some(phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx, None)?));
         }
         if let Some(mrid) = self.phase_sym.get(end_mrid) {
             let ptc: &PhaseTapChangerSymmetrical = require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
-            return Ok(Some(phase_tap_symmetrical(&ptc.base, mrid, xtx)?));
+            return Ok(Some(phase_tap_symmetrical(&ptc.base, mrid, xtx, None)?));
         }
         if let Some(mrid) = self.phase_linear.get(end_mrid) {
             let ptc: &cimstructs::PhaseTapChangerLinear = require(ds, mrid, "PhaseTapChangerLinear", mrid, "(self)")?;
-            return Ok(Some(phase_tap_linear(ptc, mrid, xtx)?));
+            return Ok(Some(phase_tap_linear(ptc, mrid, xtx, None)?));
         }
         if let Some((ptc_mrid, table_mrid)) = self.phase_tabular.get(end_mrid) {
             let ptc: &cimstructs::PhaseTapChangerTabular = require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
             let step = ptc.base.base.step.ok_or_else(|| missing("PhaseTapChangerTabular", ptc_mrid, "step"))?;
             return Ok(Some(phase_tap_tabular(ds, ptc_mrid, table_mrid, step.round() as i64, xtx)?));
+        }
+        Ok(None)
+    }
+
+    /// Whether any tap-changer subtype sits on this end.
+    fn has_changer(&self, end_mrid: &str) -> bool {
+        self.ratio.contains_key(end_mrid)
+            || self.phase_asym.contains_key(end_mrid)
+            || self.phase_sym.contains_key(end_mrid)
+            || self.phase_linear.contains_key(end_mrid)
+            || self.phase_tabular.contains_key(end_mrid)
+    }
+
+    /// The `TapChanger` base of whichever subtype sits on this end — where
+    /// `TapChangerControl` and `controlEnabled` live, regardless of subtype.
+    fn control_of(&self, ds: &CimDataset, end_mrid: &str) -> Option<(Option<String>, bool)> {
+        let read = |tc: &cimstructs::TapChanger| {
+            (tc.tap_changer_control.as_ref().map(|r| r.mrid.clone()), tc.control_enabled == Some(true))
+        };
+        if let Some(m) = self.ratio.get(end_mrid) {
+            return get::<RatioTapChanger>(ds, m).map(|t| read(&t.base));
+        }
+        if let Some(m) = self.phase_asym.get(end_mrid) {
+            return get::<PhaseTapChangerAsymmetrical>(ds, m).map(|t| read(&t.base.base.base));
+        }
+        if let Some(m) = self.phase_sym.get(end_mrid) {
+            return get::<PhaseTapChangerSymmetrical>(ds, m).map(|t| read(&t.base.base.base));
+        }
+        if let Some(m) = self.phase_linear.get(end_mrid) {
+            return get::<cimstructs::PhaseTapChangerLinear>(ds, m).map(|t| read(&t.base.base));
+        }
+        if let Some((m, _)) = self.phase_tabular.get(end_mrid) {
+            return get::<cimstructs::PhaseTapChangerTabular>(ds, m).map(|t| read(&t.base.base));
+        }
+        None
+    }
+
+    /// Every position of the tap changer on `end_mrid`, not just the one the
+    /// SSH profile currently names.
+    ///
+    /// [`effect_for_end`](Self::effect_for_end) evaluates one step and throws
+    /// the rest away, which is all a fixed-tap power flow ever wanted. Anything
+    /// that *moves* a tap needs the discarded half back: the map from position
+    /// to ratio and angle is nonlinear, and for a table-driven changer it is
+    /// not even regular, so it cannot be reconstructed from the current value
+    /// plus a step size. The other two importers (`src/ucte.rs`, `src/iidm.rs`)
+    /// already retain it; this closes the asymmetry.
+    ///
+    /// Shares every formula with `effect_for_end` rather than reimplementing
+    /// them — the helpers take the step to evaluate at, and this loops
+    /// `lowStep..=highStep`. The current step therefore reads back from the
+    /// table bit-for-bit identical to what the single-step path returns, which
+    /// is the property `tests/cgmes_tap_table_test.rs` asserts.
+    ///
+    /// A `PhaseTapChangerTabular` or table-driven `RatioTapChanger` whose table
+    /// has no row for some position in range yields no changer at all rather
+    /// than a table with holes: a position that cannot be evaluated is one a
+    /// control must never select.
+    fn steps_for_end(
+        &self,
+        ds: &CimDataset,
+        end_mrid: &str,
+        xtx: f64,
+    ) -> Result<Option<RawTapTable>, CgmesError> {
+        // `(low, high, neutral, current)` plus a per-step evaluator, chosen by
+        // whichever subtype owns this end.
+        let build = |tc: &cimstructs::TapChanger,
+                     eval: &dyn Fn(f64) -> Option<TapEffect>|
+         -> Option<RawTapTable> {
+            let low = tc.low_step? as i32;
+            let high = tc.high_step? as i32;
+            let neutral = tc.neutral_step.unwrap_or(0) as i32;
+            let position = tc.step.map(|s| s.round() as i32).unwrap_or(neutral);
+            if high < low {
+                return None;
+            }
+            let mut effects = Vec::with_capacity((high - low + 1) as usize);
+            for s in low..=high {
+                effects.push(eval(s as f64)?);
+            }
+            Some(RawTapTable { low, position, neutral, effects })
+        };
+
+        if let Some(mrid) = self.ratio.get(end_mrid) {
+            let rtc: &RatioTapChanger = require(ds, mrid, "RatioTapChanger", mrid, "(self)")?;
+            let tc = &rtc.base;
+            let table = rtc.ratio_tap_changer_table.as_ref().map(|t| t.mrid.clone());
+            let neutral = tc.neutral_step.unwrap_or(0) as f64;
+            let inc = rtc.step_voltage_increment.unwrap_or(0.0);
+            let eval = |s: f64| -> Option<TapEffect> {
+                if let Some(t) = table.as_deref() {
+                    if let Some(effect) = ratio_tap_table(ds, t, s.round() as i64, xtx) {
+                        return Some(effect);
+                    }
+                }
+                Some(TapEffect {
+                    tap: Complex::new(1.0 + (s - neutral) * inc / 100.0, 0.0),
+                    x_override: None,
+                })
+            };
+            return Ok(build(tc, &eval));
+        }
+        if let Some(mrid) = self.phase_asym.get(end_mrid) {
+            let ptc: &PhaseTapChangerAsymmetrical =
+                require(ds, mrid, "PhaseTapChangerAsymmetrical", mrid, "(self)")?;
+            let Some(theta_deg) = ptc.winding_connection_angle else { return Ok(None) };
+            let eval =
+                |s: f64| phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx, Some(s)).ok();
+            return Ok(build(&ptc.base.base.base, &eval));
+        }
+        if let Some(mrid) = self.phase_sym.get(end_mrid) {
+            let ptc: &PhaseTapChangerSymmetrical =
+                require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
+            let eval = |s: f64| phase_tap_symmetrical(&ptc.base, mrid, xtx, Some(s)).ok();
+            return Ok(build(&ptc.base.base.base, &eval));
+        }
+        if let Some(mrid) = self.phase_linear.get(end_mrid) {
+            let ptc: &cimstructs::PhaseTapChangerLinear =
+                require(ds, mrid, "PhaseTapChangerLinear", mrid, "(self)")?;
+            let eval = |s: f64| phase_tap_linear(ptc, mrid, xtx, Some(s)).ok();
+            return Ok(build(&ptc.base.base, &eval));
+        }
+        if let Some((ptc_mrid, table_mrid)) = self.phase_tabular.get(end_mrid) {
+            let ptc: &cimstructs::PhaseTapChangerTabular =
+                require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
+            let eval =
+                |s: f64| phase_tap_tabular(ds, ptc_mrid, table_mrid, s.round() as i64, xtx).ok();
+            return Ok(build(&ptc.base.base, &eval));
         }
         Ok(None)
     }
@@ -685,9 +855,13 @@ fn x_min_max(x_min: Option<f64>, x_max: Option<f64>, xtx: f64) -> Option<(f64, f
 /// once `windingConnectionAngle` is taken into account).
 fn phase_tap_asymmetrical(
     base: &PhaseTapChangerNonLinear, mrid: &str, winding_connection_angle_deg: f64, xtx: f64,
+    at: Option<f64>,
 ) -> Result<TapEffect, CgmesError> {
     let tc = &base.base.base;
-    let step = tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?;
+    let step = match at {
+        Some(s) => s,
+        None => tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
+    };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
     let high = tc.high_step.unwrap_or(0);
@@ -735,9 +909,14 @@ fn phase_tap_asymmetrical(
 /// `PhaseTapChangerLinear`, a different, unrelated CGMES class — confirmed
 /// absent from `PhaseTapChangerNonLinear`/`Symmetrical`'s own generated
 /// fields, so it's not handled here).
-fn phase_tap_symmetrical(base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64) -> Result<TapEffect, CgmesError> {
+fn phase_tap_symmetrical(
+    base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64, at: Option<f64>,
+) -> Result<TapEffect, CgmesError> {
     let tc = &base.base.base;
-    let step = tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?;
+    let step = match at {
+        Some(s) => s,
+        None => tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
+    };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
     let high = tc.high_step.unwrap_or(0);
@@ -775,9 +954,14 @@ fn phase_tap_symmetrical(base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64) 
 /// Symmetrical's `2·atan(du/2)` curve. Reactance follows the identical
 /// `sin(alpha/2)²` interpolation Symmetrical uses — the Java reference
 /// shares one `getStepXforLinearAndSymmetrical` helper between both types.
-fn phase_tap_linear(ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f64) -> Result<TapEffect, CgmesError> {
+fn phase_tap_linear(
+    ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f64, at: Option<f64>,
+) -> Result<TapEffect, CgmesError> {
     let tc = &ptc.base.base;
-    let step = tc.step.ok_or_else(|| missing("PhaseTapChangerLinear", mrid, "step"))?;
+    let step = match at {
+        Some(s) => s,
+        None => tc.step.ok_or_else(|| missing("PhaseTapChangerLinear", mrid, "step"))?,
+    };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
     let high = tc.high_step.unwrap_or(0);
@@ -884,6 +1068,56 @@ pub fn cgmes_topological_node_bus_index(ds: &CimDataset) -> Result<HashMap<Strin
 pub fn cgmes_to_buses_and_branches(
     ds: &CimDataset, s_base_va: f64,
 ) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
+    let net = cgmes_to_network(ds, s_base_va)?;
+    Ok((net.buses, net.lines, net.transformers, net.shunts))
+}
+
+/// A converted CGMES network, tap tables included.
+///
+/// [`cgmes_to_buses_and_branches`] is this minus
+/// [`tap_changers`](Self::tap_changers) — the four things a fixed-tap power
+/// flow needs, and the shape most of this crate's tests want. Anything that
+/// *moves* a tap wants the fifth, and a five-element tuple is past the point
+/// where positional returns help anyone.
+#[derive(Clone, Debug)]
+pub struct CgmesNetwork {
+    pub buses: Vec<Bus>,
+    pub lines: Vec<Line>,
+    pub transformers: Vec<Transformer>,
+    pub shunts: Vec<ShuntAdm>,
+    /// Parallel to [`transformers`](Self::transformers): every position of the
+    /// tap changer on that transformer, or `None` where it has none.
+    ///
+    /// Composed exactly as the current position was, so reading
+    /// [`TapChanger::position`](crate::types::TapChanger::position) back out
+    /// reproduces [`Transformer::tap`](crate::types::Transformer::tap) bit for
+    /// bit — the property `tests/cgmes_tap_table_test.rs` asserts, and the one
+    /// that makes the table trustworthy as a *replacement* for the single-step
+    /// path rather than a second opinion about it.
+    pub tap_changers: Vec<Option<crate::types::TapChanger>>,
+    /// The regulating controls acting on those changers, resolved onto
+    /// gridoxide's own bus and branch indices. Only enabled, modelled controls
+    /// appear; [`tap_report`](Self::tap_report) accounts for the rest.
+    pub regulation: Vec<crate::outerloop::TapRegulation>,
+    /// What the regulation import could not use.
+    pub tap_report: TapRegulationReport,
+    /// What generator-side voltage control did: how many buses are held, how
+    /// many by more than one machine, and any target two controllers disagreed
+    /// on.
+    pub voltage_control: VoltageControlReport,
+    /// `Terminal` mRID → the flat branch index it became and which side of it,
+    /// for every two-terminal branch this conversion produced.
+    ///
+    /// Flat means lines first, then transformers — the crate-wide convention
+    /// `branch_flow::branch_params` defines. Only the conversion knows which
+    /// branches survived and in what order, which is why this is returned
+    /// rather than reconstructed; [`cgmes_control_areas`] turns a `TieFlow`'s
+    /// terminal into a boundary branch through it.
+    pub terminal_branch: HashMap<String, (usize, crate::branch_flow::Terminal)>,
+}
+
+/// [`cgmes_to_buses_and_branches`], keeping the tap tables.
+pub fn cgmes_to_network(ds: &CimDataset, s_base_va: f64) -> Result<CgmesNetwork, CgmesError> {
     let skeleton = build_ac_bus_skeleton(ds)?;
     convert_equipment(ds, s_base_va, skeleton)
 }
@@ -899,8 +1133,15 @@ fn convert_equipment(
     ds: &CimDataset,
     s_base_va: f64,
     skeleton: (Vec<Bus>, HashMap<String, usize>, TerminalIndex),
-) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
+) -> Result<CgmesNetwork, CgmesError> {
     let (mut buses, idx_of, terms) = skeleton;
+
+    // Shared by all four regulating-machine loops below, which run in two
+    // separate steps: `PowerElectronicsConnection` in step 3, then
+    // `SynchronousMachine`, `StaticVarCompensator` and
+    // `ExternalNetworkInjection` in step 8. A bus can be held by machines of
+    // different kinds, so the accumulation has to span them.
+    let mut voltage_control = VoltageControl::new(buses.len());
 
     // --- Step 3: loads/injections (EnergyConsumer + subtypes + EquivalentInjection) ---
     // Both P and Q use CGMES's uniform SSH "load sign convention" (positive =
@@ -997,14 +1238,17 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = pec.min_q.unwrap_or(-f64::INFINITY);
         let q_max = pec.max_q.unwrap_or(f64::INFINITY);
-        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
-        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            mrid,
+        );
     }
 
     // --- Step 4: lines from ACLineSegment ---
@@ -1027,7 +1271,10 @@ fn convert_equipment(
     // — mirroring pgm.rs's own from_status/to_status handling for `Line`,
     // needed here because RealGrid genuinely has `Terminal.connected=false`
     // entries (a real de-energized/switched-out snapshot, not a decode gap).
-    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) {
+    /// Returns the index of the pushed line, or `None` when both ends are
+    /// disconnected and nothing was pushed. The index is what lets a caller
+    /// map a `Terminal` onto a branch — see `terminal_branch` below.
+    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) -> Option<usize> {
         match (from_conn, to_conn) {
             (true, true) => {
                 // A jumper exported as a very short `ACLineSegment` would put an
@@ -1037,26 +1284,57 @@ fn convert_equipment(
                 // above the threshold, so this changes nothing modelled today
                 // and exists for exports that are less well behaved.
                 let (r, x) = crate::topology::clamp_branch_impedance(r, x);
-                lines.push(Line { from, to, r, x, b_shunt, g_shunt })
+                lines.push(Line { from, to, r, x, b_shunt, g_shunt });
+                Some(lines.len() - 1)
             }
-            (true, false) => lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt }),
-            (false, true) => lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt }),
-            (false, false) => {}
+            // A half-open line becomes a shunt-only self-loop at the connected
+            // end. It carries no through flow, so it can never be an area
+            // boundary and is deliberately not mapped.
+            (true, false) => {
+                lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt });
+                None
+            }
+            (false, true) => {
+                lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt });
+                None
+            }
+            (false, false) => None,
         }
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    // Terminal mRID -> (branch index within `lines`, which side it became).
+    // Built here because only the conversion knows which branches survived and
+    // in what order; `cgmes_control_areas` needs it to turn a `TieFlow`'s
+    // terminal into a boundary branch.
+    let mut line_terminal: HashMap<String, (usize, crate::branch_flow::Terminal)> = HashMap::new();
+    let record_line = |terms: &TerminalIndex,
+                           line_terminal: &mut HashMap<String, (usize, crate::branch_flow::Terminal)>,
+                           mrid: &str,
+                           pushed: Option<usize>| {
+        let Some(idx) = pushed else { return };
+        let Some(ts) = terms.by_equipment.get(mrid) else { return };
+        for (which, side) in
+            [(0, crate::branch_flow::Terminal::From), (1, crate::branch_flow::Terminal::To)]
+        {
+            if let Some(t) = ts.get(which) {
+                line_terminal.insert(t.clone(), (idx, side));
+            }
+        }
+    };
+
     for mrid in by_type(ds, "ACLineSegment") {
         let ln: &ACLineSegment = require(ds, mrid, "ACLineSegment", mrid, "(self)")?;
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
         let y_base = 1.0 / z_base;
-        push_status_aware_line(
+        let pushed = push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             ln.r.unwrap_or(0.0) / z_base, ln.x.unwrap_or(0.0) / z_base,
             ln.bch.unwrap_or(0.0) / y_base, ln.gch.unwrap_or(0.0) / y_base,
         );
+        record_line(&terms, &mut line_terminal, mrid, pushed);
     }
     // SeriesCompensator: a distinct 2-terminal CIM class from ACLineSegment
     // ("a series capacitor or reactor... without charging susceptance" per
@@ -1067,10 +1345,11 @@ fn convert_equipment(
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
-        push_status_aware_line(
+        let pushed = push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
+        record_line(&terms, &mut line_terminal, mrid, pushed);
     }
     // EquivalentBranch: a simplified series-impedance stand-in for a
     // reduced/boundary part of the network (an `EquivalentNetwork`
@@ -1082,10 +1361,11 @@ fn convert_equipment(
         let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
-        push_status_aware_line(
+        let pushed = push_status_aware_line(
             &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
             eb.r.unwrap_or(0.0) / z_base, eb.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
         );
+        record_line(&terms, &mut line_terminal, mrid, pushed);
     }
 
     // --- Steps 5+6: transformers (2- and 3-winding) ---
@@ -1100,10 +1380,47 @@ fn convert_equipment(
     }
 
     let mut transformers: Vec<Transformer> = Vec::new();
+    let mut tap_changers: Vec<Option<crate::types::TapChanger>> = Vec::new();
+    // Parallel to `transformers`: the `PowerTransformerEnd` whose tap changer
+    // produced the table, and each end's terminal with the side it became.
+    // Both are needed to resolve a `TapChangerControl` — one to find the
+    // transformer, the other to find the branch flow an `activePower` control
+    // regulates — and both are known here rather than inside the builders.
+    let mut changer_end: Vec<Option<String>> = Vec::new();
+    let mut terminal_sides: Vec<Vec<(String, crate::branch_flow::Terminal)>> = Vec::new();
+    // Sorted by mRID before conversion. `HashMap` iteration order is
+    // randomized per process, so without this the transformer list — and every
+    // flat branch index derived from it — comes out in a different order on
+    // every run of the same program against the same file. Nothing asserted on
+    // a transformer index, so it never surfaced as a failure; it would have
+    // surfaced as an irreproducible `TapRegulation.branch`, and as a RAO
+    // decision that names a different element each run.
+    let mut ends_by_pt: Vec<(String, Vec<&PowerTransformerEnd>)> = ends_by_pt.into_iter().collect();
+    ends_by_pt.sort_by(|a, b| a.0.cmp(&b.0));
     for (pt_mrid, mut ends) in ends_by_pt {
         ends.sort_by_key(|e| e.base.end_number.unwrap_or(0));
         match ends.len() {
-            2 => transformers.push(build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?),
+            2 => {
+                let (t, c) = build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?;
+                transformers.push(t);
+                tap_changers.push(c);
+                changer_end.push(
+                    [ends[0], ends[1]]
+                        .iter()
+                        .find(|e| tap_index.has_changer(e.mrid_str()))
+                        .map(|e| e.mrid_str().to_string()),
+                );
+                // `build_two_winding` fixes `to` to end 1's bus and `from` to
+                // end 2's, whichever end the changer is physically on.
+                terminal_sides.push(
+                    [(ends[0], crate::branch_flow::Terminal::To), (ends[1], crate::branch_flow::Terminal::From)]
+                        .iter()
+                        .filter_map(|(e, side)| {
+                            e.base.terminal.as_ref().map(|t| (t.mrid.clone(), *side))
+                        })
+                        .collect(),
+                );
+            }
             3 => {
                 // `buses.len()` alone is the next free index — it already
                 // reflects every star bus pushed by a *previous* iteration
@@ -1122,7 +1439,21 @@ fn convert_equipment(
                     u_rated: ends[0].rated_u.unwrap_or(1e-3) * 1e3, zip_terms: Vec::new(),
                 });
                 for end in &ends {
-                    transformers.push(build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?);
+                    let (t, c) = build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?;
+                    transformers.push(t);
+                    tap_changers.push(c);
+                    changer_end.push(
+                        tap_index.has_changer(end.mrid_str()).then(|| end.mrid_str().to_string()),
+                    );
+                    // A star leg's `to` is this end's own bus; `from` is the
+                    // synthesized star point, which no terminal names.
+                    terminal_sides.push(
+                        end.base
+                            .terminal
+                            .as_ref()
+                            .map(|t| vec![(t.mrid.clone(), crate::branch_flow::Terminal::To)])
+                            .unwrap_or_default(),
+                    );
                 }
             }
             n => return Err(CgmesError::UnsupportedTransformer {
@@ -1259,14 +1590,17 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = sm.min_q.unwrap_or(-f64::INFINITY);
         let q_max = sm.max_q.unwrap_or(f64::INFINITY);
-        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
-        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            mrid,
+        );
     }
 
     // StaticVarCompensator: same RegulatingCondEq/RegulatingControl pattern as
@@ -1306,11 +1640,6 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
-
         // capacitiveRating/inductiveRating are REACTANCE ratings in ohms,
         // not MVAr — despite the doc text reading "at maximum ... reactive
         // power", cross-checked directly against references/powsybl-core's
@@ -1329,14 +1658,23 @@ fn convert_equipment(
         // unlike SynchronousMachine's/StaticVarCompensator's own P/Q
         // injection above, no further `* 1e6 / s_base_va` MVAr-to-pu
         // conversion applies here.
-        buses[controlled_bus].q_min = match (sc.inductive_rating, z_base) {
+        let q_min = match (sc.inductive_rating, z_base) {
             (Some(x), Some(zb)) if x != 0.0 => zb / x,
             _ => -f64::INFINITY,
         };
-        buses[controlled_bus].q_max = match (sc.capacitive_rating, z_base) {
+        let q_max = match (sc.capacitive_rating, z_base) {
             (Some(x), Some(zb)) if x != 0.0 => zb / x,
             _ => f64::INFINITY,
         };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            q_min,
+            q_max,
+            mrid,
+        );
     }
 
     // ExternalNetworkInjection: CIM describes it as "used for IEC 60909
@@ -1375,14 +1713,17 @@ fn convert_equipment(
         let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
         let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
 
-        if buses[controlled_bus].bus_type == BusType::PQ {
-            buses[controlled_bus].bus_type = BusType::PV;
-        }
-        buses[controlled_bus].voltage_mag = target * mult / buses[controlled_bus].u_rated;
         let q_min = eni.min_q.unwrap_or(-f64::INFINITY);
         let q_max = eni.max_q.unwrap_or(f64::INFINITY);
-        buses[controlled_bus].q_min = if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min };
-        buses[controlled_bus].q_max = if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max };
+        let target_pu = target * mult / buses[controlled_bus].u_rated;
+        voltage_control.regulate(
+            &mut buses,
+            controlled_bus,
+            target_pu,
+            if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
+            if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
+            mrid,
+        );
     }
 
     // Slack: each TopologicalIsland's own angle reference, applied last so it
@@ -1448,7 +1789,499 @@ fn convert_equipment(
         }
     }
 
-    Ok((buses, lines, transformers, shunts))
+    // Built before the struct takes ownership of `lines`.
+    let terminal_branch = {
+        // Transformer terminals are offset onto the flat index; line ones
+        // already are, being first.
+        let mut map = line_terminal;
+        for (i, sides) in terminal_sides.iter().enumerate() {
+            for (terminal, side) in sides {
+                map.insert(terminal.clone(), (lines.len() + i, *side));
+            }
+        }
+        map
+    };
+
+    let (regulation, tap_report) = read_tap_regulation(
+        ds,
+        &tap_index,
+        &terms,
+        &buses,
+        &lines,
+        &tap_changers,
+        &changer_end,
+        &terminal_sides,
+        s_base_va,
+    );
+
+    Ok(CgmesNetwork {
+        buses,
+        lines,
+        transformers,
+        shunts,
+        tap_changers,
+        regulation,
+        tap_report,
+        voltage_control: voltage_control.finish(),
+        terminal_branch,
+    })
+}
+
+/// A CGMES `ControlArea` set, resolved onto gridoxide's own indices.
+#[derive(Clone, Debug)]
+pub struct ControlAreaImport {
+    /// Area index per bus, indexed by [`Bus::idx`]; `None` for a bus no area
+    /// claims. Feeds [`AreaDefinition::of_bus`](crate::outerloop::AreaDefinition::of_bus).
+    pub of_bus: Vec<Option<usize>>,
+    /// Scheduled net **export** per area, per-unit.
+    ///
+    /// CGMES states `ControlArea.netInterchange` as an *import* — "positive
+    /// sign means flow in to the area" — and
+    /// [`AreaDefinition::targets`](crate::outerloop::AreaDefinition::targets)
+    /// is an export, so this is its negation. Getting that backwards would
+    /// dispatch every area exactly the wrong way while converging perfectly
+    /// happily, which is why it is stated here rather than left to a reader.
+    pub targets: Vec<f64>,
+    /// `pTolerance`, per-unit, per area. `None` where the file gave none.
+    pub tolerances: Vec<Option<f64>>,
+    /// `(mRID, name)` per area, in the order the indices above use.
+    pub ids: Vec<(String, String)>,
+    pub report: ControlAreaReport,
+}
+
+/// What a `ControlArea` import could not use, counted rather than dropped.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ControlAreaReport {
+    /// Areas converted.
+    pub areas: usize,
+    /// `TieFlow` objects read.
+    pub tie_flows: usize,
+    /// Tie flows whose terminal named no branch this conversion produced —
+    /// an open line, or equipment the converter skipped.
+    pub unresolved_tie_flows: usize,
+    /// Areas with no usable tie flow, so no measurable boundary. Their
+    /// position cannot be measured *or* controlled.
+    pub without_boundary: Vec<usize>,
+    /// Areas whose SSH stated no `netInterchange`; their target is left at
+    /// zero, which is a guess rather than a schedule.
+    pub without_target: Vec<usize>,
+    /// Buses reached from more than one area's seeds once the tie branches are
+    /// cut. A contradiction in the file's own boundary; first area wins.
+    pub contested_buses: usize,
+    /// Buses no area claims.
+    pub unassigned_buses: usize,
+}
+
+/// Reads every `ControlArea` in the dataset onto gridoxide's own bus indices.
+///
+/// # How membership is derived, since CGMES does not state it
+///
+/// CGMES defines an area by its **boundary**, not its contents: a `TieFlow`
+/// names one `Terminal` per boundary point, and `ControlArea` has no list of
+/// the buses inside. [`AreaInterchange`](crate::outerloop::AreaInterchange)
+/// needs both — the boundary to measure the position, and the membership to
+/// know whose generators to dispatch.
+///
+/// So membership is derived, exactly rather than heuristically: take the
+/// branches the tie flows name, **cut them**, and compute the connected
+/// components of what remains. Each tie flow's own terminal sits on a bus
+/// inside its area, so the component holding that bus *is* that area. A
+/// component reached from two areas' seeds is a contradiction in the file's own
+/// boundary and is reported through
+/// [`contested_buses`](ControlAreaReport::contested_buses) rather than
+/// arbitrated silently.
+///
+/// The alternative — flooding outward from the seeds and letting areas claim
+/// buses by proximity — was rejected: it happens to work on a network whose
+/// areas are far apart and fails quietly on one where they are not, which is
+/// the worst combination.
+pub fn cgmes_control_areas(
+    ds: &CimDataset,
+    net: &CgmesNetwork,
+    s_base_va: f64,
+) -> Result<ControlAreaImport, CgmesError> {
+    let n = net.buses.len();
+    let mut report = ControlAreaReport::default();
+
+    // Areas, in mRID order so the indices are stable across runs — the same
+    // reason the transformer list is sorted.
+    let mut area_mrids: Vec<String> = by_type(ds, "ControlArea").to_vec();
+    area_mrids.sort();
+    let mut ids = Vec::new();
+    let mut targets = Vec::new();
+    let mut tolerances = Vec::new();
+    for mrid in &area_mrids {
+        let ca: &cimstructs::ControlArea = require(ds, mrid, "ControlArea", mrid, "(self)")?;
+        ids.push((mrid.clone(), ca.base.base.name.clone()));
+        match ca.net_interchange {
+            // Negated: CGMES states an import, `AreaDefinition` wants an export.
+            Some(mw) => targets.push(-mw * 1e6 / s_base_va),
+            None => {
+                report.without_target.push(targets.len());
+                targets.push(0.0);
+            }
+        }
+        tolerances.push(ca.p_tolerance.map(|mw| mw * 1e6 / s_base_va));
+    }
+    report.areas = ids.len();
+    let index_of = |mrid: &str| area_mrids.iter().position(|m| m == mrid);
+
+    // Tie flows: the boundary branches, and the seed buses inside each area.
+    let params = crate::branch_flow::branch_params(&net.lines, &net.transformers);
+    let mut cut = vec![false; params.len()];
+    let mut seeds: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
+    for mrid in by_type(ds, "TieFlow") {
+        let tf: &cimstructs::TieFlow = require(ds, mrid, "TieFlow", mrid, "(self)")?;
+        report.tie_flows += 1;
+        let (Some(area_ref), Some(term_ref)) = (&tf.control_area, &tf.terminal) else {
+            report.unresolved_tie_flows += 1;
+            continue;
+        };
+        let Some(a) = index_of(&area_ref.mrid) else {
+            report.unresolved_tie_flows += 1;
+            continue;
+        };
+        let Some(&(branch, side)) = net.terminal_branch.get(&term_ref.mrid) else {
+            report.unresolved_tie_flows += 1;
+            continue;
+        };
+        cut[branch] = true;
+        // **The far end, not this one.** A `TieFlow` names the terminal at the
+        // *boundary*, which in a merged model is the X-node the two areas'
+        // lines meet at — `TN_Border_AL11` carries both `NL-Line_1`'s and
+        // `BE-Line_3`'s tie flow. What belongs to the area is the *equipment*;
+        // the node is shared. Seeding from the named end put every area's seed
+        // on the same border node, which showed up as five contested buses and
+        // one area owning nothing at all.
+        seeds[a].push(match side {
+            crate::branch_flow::Terminal::From => params[branch].to,
+            crate::branch_flow::Terminal::To => params[branch].from,
+        });
+    }
+
+    // Components of the network with the tie branches removed.
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, bp) in params.iter().enumerate() {
+        if cut[i] || bp.from == bp.to {
+            continue;
+        }
+        adjacency[bp.from].push(bp.to);
+        adjacency[bp.to].push(bp.from);
+    }
+    let mut component = vec![usize::MAX; n];
+    let mut n_components = 0;
+    for start in 0..n {
+        if component[start] != usize::MAX {
+            continue;
+        }
+        let mut stack = vec![start];
+        component[start] = n_components;
+        while let Some(b) = stack.pop() {
+            for &next in &adjacency[b] {
+                if component[next] == usize::MAX {
+                    component[next] = n_components;
+                    stack.push(next);
+                }
+            }
+        }
+        n_components += 1;
+    }
+
+    // Each component takes the area of whichever seed it holds.
+    let mut area_of_component: Vec<Option<usize>> = vec![None; n_components];
+    for (a, buses) in seeds.iter().enumerate() {
+        if buses.is_empty() {
+            report.without_boundary.push(a);
+            continue;
+        }
+        for &b in buses {
+            let c = component[b];
+            match area_of_component[c] {
+                None => area_of_component[c] = Some(a),
+                Some(existing) if existing != a => report.contested_buses += 1,
+                Some(_) => {}
+            }
+        }
+    }
+    let of_bus: Vec<Option<usize>> = (0..n).map(|b| area_of_component[component[b]]).collect();
+    report.unassigned_buses = of_bus.iter().filter(|a| a.is_none()).count();
+
+    Ok(ControlAreaImport { of_bus, targets, tolerances, ids, report })
+}
+
+/// Two regulating machines asked one bus to hold different voltages.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetConflict {
+    pub bus: usize,
+    /// The target already written at that bus, per-unit.
+    pub existing: f64,
+    /// What this controller asked for, per-unit.
+    pub proposed: f64,
+    /// The mRID of the controller that disagreed.
+    pub id: String,
+}
+
+/// What generator-side voltage control did to the bus list.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VoltageControlReport {
+    /// Buses held by at least one regulating machine.
+    pub regulated_buses: usize,
+    /// Of those, how many are held by more than one — the case whose reactive
+    /// capability has to be summed rather than overwritten.
+    pub shared_buses: usize,
+    /// Controllers whose target disagreed with one already written at the same
+    /// bus. Empty on every vendored fixture; reported rather than resolved,
+    /// because neither answer is right — see
+    /// [`VoltageControl::regulate`].
+    pub target_conflicts: Vec<TargetConflict>,
+}
+
+/// Accumulates what the regulating machines at each bus jointly hold.
+///
+/// # Why this exists
+///
+/// `SynchronousMachine`, `StaticVarCompensator`, `PowerElectronicsConnection`
+/// and `ExternalNetworkInjection` each carry a `RegulatingControl`, and each
+/// used to write the controlled bus's reactive limits with `=` while writing
+/// its injections with `+=` — the same loop body, opposite conventions. Two
+/// machines on one bus therefore contributed both their reactive power to the
+/// injection but only the **last one's capability** to the limits, so the bus
+/// ran with understated headroom and
+/// [`ReactiveLimits`](crate::outerloop::ReactiveLimits) clamped it early.
+///
+/// Not rare: 62 of RealGrid's 417 voltage-regulated nodes are held by more
+/// than one machine, 2 of FullGrid's 3, and 1 of MicroGrid-Type1's 5. It went
+/// unnoticed because Q-limit enforcement was opt-in and library-only until the
+/// outer-loop layer exposed it.
+struct VoltageControl {
+    /// Whether a bus has had any contribution yet. The first assigns (the
+    /// bus starts at ±∞, which is "no limit" rather than "zero capability"),
+    /// every later one adds.
+    seen: Vec<bool>,
+    /// The target already written at each bus, and by whom.
+    target: Vec<Option<(f64, String)>>,
+    controllers: Vec<usize>,
+    conflicts: Vec<TargetConflict>,
+}
+
+impl VoltageControl {
+    fn new(n: usize) -> Self {
+        Self {
+            seen: vec![false; n],
+            target: vec![None; n],
+            controllers: vec![0; n],
+            conflicts: Vec::new(),
+        }
+    }
+
+    /// One machine holding `bus` at `target_pu` with reactive capability
+    /// `(q_min, q_max)`, already in per-unit.
+    ///
+    /// Limits **sum** across machines. Infinity propagates, which is the right
+    /// reading: one machine with no stated limit makes the bus's joint
+    /// capability unlimited.
+    ///
+    /// The target does **not** sum, and the last writer still wins. That is
+    /// deliberately unchanged: no vendored fixture has two controllers
+    /// disagreeing about a target — checked across MicroGrid, SmallGrid,
+    /// Svedala, FullGrid and RealGrid — so any resolution rule would be
+    /// untested, and picking one here would make this a behaviour change
+    /// rather than the limits-only fix it is. A disagreement is recorded in
+    /// [`VoltageControlReport::target_conflicts`] instead. Doing it properly
+    /// means reactive dispatch inside the Newton system, which is a different
+    /// job.
+    fn regulate(
+        &mut self,
+        buses: &mut [Bus],
+        bus: usize,
+        target_pu: f64,
+        q_min: f64,
+        q_max: f64,
+        id: &str,
+    ) {
+        if buses[bus].bus_type == BusType::PQ {
+            buses[bus].bus_type = BusType::PV;
+        }
+        if let Some((existing, _)) = &self.target[bus] {
+            if (*existing - target_pu).abs() > 1e-9 {
+                self.conflicts.push(TargetConflict {
+                    bus,
+                    existing: *existing,
+                    proposed: target_pu,
+                    id: id.to_string(),
+                });
+            }
+        }
+        self.target[bus] = Some((target_pu, id.to_string()));
+        buses[bus].voltage_mag = target_pu;
+
+        if self.seen[bus] {
+            buses[bus].q_min += q_min;
+            buses[bus].q_max += q_max;
+        } else {
+            buses[bus].q_min = q_min;
+            buses[bus].q_max = q_max;
+            self.seen[bus] = true;
+        }
+        self.controllers[bus] += 1;
+    }
+
+    fn finish(self) -> VoltageControlReport {
+        VoltageControlReport {
+            regulated_buses: self.controllers.iter().filter(|c| **c > 0).count(),
+            shared_buses: self.controllers.iter().filter(|c| **c > 1).count(),
+            target_conflicts: self.conflicts,
+        }
+    }
+}
+
+/// What a tap-regulation import could not use, counted rather than dropped.
+///
+/// Follows [`LimitImportReport`]'s precedent, and for the same reason: a
+/// silently dropped control is how an importer produces a plausible wrong
+/// answer. A network solved with a control gridoxide never read looks exactly
+/// like one solved correctly, only at the wrong voltage.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TapRegulationReport {
+    /// Controls converted.
+    pub converted: usize,
+    /// Present but switched off, on the control or on the tap changer. Data,
+    /// not an error — `PowerFlow`'s single control is one.
+    pub disabled: usize,
+    /// `RegulatingControl.Terminal` named no bus this dataset defines, or the
+    /// changer sat on an end no converted transformer owns.
+    pub unattached: usize,
+    /// No `targetValue`, so there is nothing to regulate towards.
+    pub without_target: usize,
+    /// A mode gridoxide does not model — `reactivePower`, `currentFlow`,
+    /// `admittance`, `temperature`, `powerFactor`. Recognised and counted, in
+    /// the same spirit as [`LimitImportReport::skipped`].
+    pub unsupported_mode: usize,
+    /// An `activePower` control whose regulated terminal resolves to no branch
+    /// this converter produced. Distinguished from `unattached` because the
+    /// control itself is well-formed; it is the flow that cannot be located.
+    pub unresolved_flow: usize,
+}
+
+/// Reads every `TapChangerControl` in the dataset onto gridoxide's own indices.
+///
+/// A separate pass over the dataset returning a side table plus a report, which
+/// is [`cgmes_operational_limits`]'s shape and for the same reasons: the
+/// conversion tuple is already at its limit, and what could not be resolved
+/// deserves counting.
+///
+/// # Units
+///
+/// [`TapRegulation`](crate::outerloop::TapRegulation) is per-unit throughout,
+/// so the conversion happens here where the bases are known: a `voltage`
+/// target divides by the controlled bus's own `u_rated`, an `activePower`
+/// target by `s_base_va`. `targetDeadband` follows its target's unit, and CGMES
+/// states it as a **full width** — the controller is satisfied within half of
+/// it either side, which is what the outer loop assumes.
+#[allow(clippy::too_many_arguments)]
+fn read_tap_regulation(
+    ds: &CimDataset,
+    tap_index: &TapChangerIndex,
+    terms: &TerminalIndex,
+    buses: &[Bus],
+    lines: &[Line],
+    tap_changers: &[Option<crate::types::TapChanger>],
+    changer_end: &[Option<String>],
+    terminal_sides: &[Vec<(String, crate::branch_flow::Terminal)>],
+    s_base_va: f64,
+) -> (Vec<crate::outerloop::TapRegulation>, TapRegulationReport) {
+    use crate::outerloop::{RegulationMode, TapRegulation};
+
+    let mut out = Vec::new();
+    let mut report = TapRegulationReport::default();
+
+    // Terminal mRID -> (flat branch index, side), for the `activePower` case.
+    // Lines first, then transformers, matching `branch_flow::branch_params`.
+    let mut flow_of: HashMap<&str, (usize, crate::branch_flow::Terminal)> = HashMap::new();
+    for (i, sides) in terminal_sides.iter().enumerate() {
+        for (terminal, side) in sides {
+            flow_of.insert(terminal.as_str(), (lines.len() + i, *side));
+        }
+    }
+
+    for (i, changer) in tap_changers.iter().enumerate() {
+        if changer.is_none() {
+            continue;
+        }
+        let Some(end_mrid) = changer_end[i].as_deref() else { continue };
+        let Some((control_mrid, control_enabled)) = tap_index.control_of(ds, end_mrid) else {
+            continue;
+        };
+        // A changer with no `TapChangerControl` at all has a fixed position by
+        // construction. FullGrid's `BE_TR2_HVDC2` is one, and it is why the
+        // published SV moves a tap this importer must not.
+        let Some(control_mrid) = control_mrid else { continue };
+        let Some(rc) = get::<cimstructs::TapChangerControl>(ds, &control_mrid) else {
+            report.unattached += 1;
+            continue;
+        };
+        let rc = &rc.base;
+
+        // Both switches must be on: the control itself, and the changer's own
+        // `controlEnabled`. Either off means the position is an input.
+        let enabled = control_enabled && rc.enabled == Some(true);
+        if !enabled {
+            report.disabled += 1;
+            continue;
+        }
+
+        let Some(term_ref) = &rc.terminal else {
+            report.unattached += 1;
+            continue;
+        };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else {
+            report.unattached += 1;
+            continue;
+        };
+        let Some(target) = rc.target_value else {
+            report.without_target += 1;
+            continue;
+        };
+        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+        let deadband = rc.target_deadband.unwrap_or(0.0);
+
+        let uri = rc.mode.as_ref().map(|m| m.uri.as_str()).unwrap_or("");
+        let (mode, target, deadband) = if uri.ends_with(".voltage") {
+            let base = buses[controlled_bus].u_rated;
+            (RegulationMode::Voltage, target * mult / base, deadband * mult / base)
+        } else if uri.ends_with(".activePower") {
+            let Some(&(branch, terminal)) = flow_of.get(term_ref.mrid.as_str()) else {
+                report.unresolved_flow += 1;
+                continue;
+            };
+            // `mult` already carries MW → W, exactly as it carries kV → V for
+            // a voltage target: powsybl's own SSH export writes "M" here and
+            // "k" there, one multiplier covering both `targetValue` and
+            // `targetDeadband`. Multiplying by 1e6 again on top — which an
+            // earlier draft did — put FullGrid's -65 MW target at -650000 pu.
+            (
+                RegulationMode::ActivePower { branch, terminal },
+                target * mult / s_base_va,
+                deadband * mult / s_base_va,
+            )
+        } else {
+            report.unsupported_mode += 1;
+            continue;
+        };
+
+        report.converted += 1;
+        out.push(TapRegulation {
+            transformer: i,
+            controlled_bus,
+            mode,
+            target,
+            deadband,
+            enabled: true,
+            id: control_mrid,
+        });
+    }
+
+    (out, report)
 }
 
 /// Builds a 2-winding `Transformer`. Per CGMES convention (confirmed against
@@ -1465,7 +2298,7 @@ fn convert_equipment(
 fn build_two_winding(
     ds: &CimDataset, tap_index: &TapChangerIndex, terms: &TerminalIndex, buses: &[Bus],
     pt_mrid: &str, end1: &PowerTransformerEnd, end2: &PowerTransformerEnd, s_base_va: f64,
-) -> Result<Transformer, CgmesError> {
+) -> Result<(Transformer, Option<crate::types::TapChanger>), CgmesError> {
     let term1 = end1.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end1.mrid_str(), "Terminal"))?;
     let term2 = end2.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end2.mrid_str(), "Terminal"))?;
     let bus1 = terms.bus_via_terminal_mrid(&term1.mrid)
@@ -1475,6 +2308,10 @@ fn build_two_winding(
 
     let tap1 = tap_index.effect_for_end(ds, end1.mrid_str(), end1.x.unwrap_or(0.0))?;
     let tap2 = tap_index.effect_for_end(ds, end2.mrid_str(), end2.x.unwrap_or(0.0))?;
+    // Which end holds the changer decides how a position composes into
+    // `Transformer::tap`, so it is recorded here alongside the current step's
+    // effect rather than re-derived below.
+    let on_end1 = tap1.is_some();
     let (tap, x_override) = match (tap1, tap2) {
         (Some(_), Some(_)) => {
             return Err(CgmesError::UnsupportedTransformer {
@@ -1536,15 +2373,35 @@ fn build_two_winding(
     let structural = structural_1 / structural_2;
     let tap = tap / structural;
 
-    Ok(Transformer {
-        from: bus2,
-        to: bus1,
-        from_status: terms.connected_via_terminal_mrid(&term2.mrid) as u8,
-        to_status: terms.connected_via_terminal_mrid(&term1.mrid) as u8,
-        y_series: Complex::new(z_base, 0.0) / Complex::new(r1, x1),
-        y_shunt: Complex::new(g1, b1) * z_base,
-        tap,
-    })
+    // The whole table, composed exactly as the current step above was, so that
+    // reading position `step` back out of it reproduces `tap` bit for bit.
+    let end_mrid = if on_end1 { end1.mrid_str() } else { end2.mrid_str() };
+    let xtx = if on_end1 { end1.x.unwrap_or(0.0) } else { end2.x.unwrap_or(0.0) };
+    let changer = tap_index.steps_for_end(ds, end_mrid, xtx)?.map(|raw| {
+        raw.compose(
+            |t| if on_end1 { Complex::new(1.0, 0.0) / t / structural } else { t / structural },
+            |x| {
+                // An override on end 2 is dropped by the match above, which is
+                // this branch's own convention: only end 1 carries series
+                // impedance, so only a changer there can move it.
+                let x = if on_end1 { x.unwrap_or_else(|| end1.x.unwrap_or(0.0)) } else { x1 };
+                Complex::new(z_base, 0.0) / Complex::new(r1, x)
+            },
+        )
+    });
+
+    Ok((
+        Transformer {
+            from: bus2,
+            to: bus1,
+            from_status: terms.connected_via_terminal_mrid(&term2.mrid) as u8,
+            to_status: terms.connected_via_terminal_mrid(&term1.mrid) as u8,
+            y_series: Complex::new(z_base, 0.0) / Complex::new(r1, x1),
+            y_shunt: Complex::new(g1, b1) * z_base,
+            tap,
+        },
+        changer,
+    ))
 }
 
 /// Builds one leg of a 3-winding transformer's star equivalent: `to` = this
@@ -1557,7 +2414,7 @@ fn build_two_winding(
 fn build_star_leg(
     ds: &CimDataset, tap_index: &TapChangerIndex, terms: &TerminalIndex, buses: &[Bus],
     end: &PowerTransformerEnd, star_idx: usize, s_base_va: f64,
-) -> Result<Transformer, CgmesError> {
+) -> Result<(Transformer, Option<crate::types::TapChanger>), CgmesError> {
     let term = end.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end.mrid_str(), "Terminal"))?;
     let bus = terms.bus_via_terminal_mrid(&term.mrid)
         .ok_or_else(|| CgmesError::UnresolvedReference { from_type: "PowerTransformerEnd", from_mrid: end.mrid_str().to_string(), field: "Terminal.TopologicalNode" })?;
@@ -1580,15 +2437,28 @@ fn build_star_leg(
     let structural = u / buses[bus].u_rated;
     let tap = tap / structural;
 
-    Ok(Transformer {
-        from: star_idx,
-        to: bus,
-        from_status: 1, // the synthesized star bus itself is never "disconnected"
-        to_status: terms.connected_via_terminal_mrid(&term.mrid) as u8,
-        y_series: Complex::new(z_base, 0.0) / Complex::new(r, x),
-        y_shunt: Complex::new(g, b) * z_base,
-        tap,
-    })
+    let changer = tap_index.steps_for_end(ds, end.mrid_str(), end.x.unwrap_or(0.0))?.map(|raw| {
+        raw.compose(
+            |t| Complex::new(1.0, 0.0) / t / structural,
+            |xo| {
+                let x = xo.unwrap_or_else(|| end.x.unwrap_or(0.0));
+                Complex::new(z_base, 0.0) / Complex::new(r, x)
+            },
+        )
+    });
+
+    Ok((
+        Transformer {
+            from: star_idx,
+            to: bus,
+            from_status: 1, // the synthesized star bus itself is never "disconnected"
+            to_status: terms.connected_via_terminal_mrid(&term.mrid) as u8,
+            y_series: Complex::new(z_base, 0.0) / Complex::new(r, x),
+            y_shunt: Complex::new(g, b) * z_base,
+            tap,
+        },
+        changer,
+    ))
 }
 
 /// Small helper trait so `build_two_winding`/`build_star_leg` can get an
@@ -2385,8 +3255,12 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
 ) -> Result<crate::switches::NodeBreakerNetwork, CgmesError> {
     let (buses, idx_of, terms, nb, view) = build_node_breaker_skeleton(ds, policy)?;
     let mut zero_injection = zero_injection_flags(ds, &terms, buses.len());
-    let (buses, lines, transformers, shunts) =
-        convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
+    let converted = convert_equipment(ds, s_base_va, (buses, idx_of, terms))?;
+    // The node-breaker path appends one branch per retained switch after the
+    // model's own transformers, so the tap tables — which are parallel to the
+    // model's transformers only — are dropped here rather than handed on
+    // misaligned. Tap control over a node-breaker view is not wired up.
+    let CgmesNetwork { buses, lines, transformers, shunts, .. } = converted;
     // Conversion appends buses of its own — a three-winding transformer's star
     // point, chiefly. Nothing terminates on those by construction, which is
     // what `true` says: they are the textbook zero-injection bus.
@@ -2605,4 +3479,108 @@ pub struct LimitImportReport {
     pub without_value: usize,
     /// Power and voltage limits, recognised but not expressible in amperes.
     pub skipped: usize,
+}
+
+#[cfg(test)]
+mod voltage_control_tests {
+    use super::*;
+
+    fn bus(idx: usize) -> Bus {
+        Bus {
+            idx,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            // What `build_ac_bus_skeleton` starts every bus at: no limit, as
+            // opposed to no capability. It is why the first contribution has
+            // to assign rather than add.
+            q_min: -f64::INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 400e3,
+            zip_terms: Vec::new(),
+        }
+    }
+
+    /// Two machines on one bus contribute both their capabilities, which is
+    /// what the injections beside them have always done. Before this, the
+    /// second `=` threw the first machine's limits away.
+    #[test]
+    fn two_machines_on_one_bus_sum_their_capability() {
+        let mut buses = vec![bus(0), bus(1)];
+        let mut vc = VoltageControl::new(2);
+        vc.regulate(&mut buses, 1, 1.02, -2.0, 3.0, "a");
+        assert_eq!(buses[1].bus_type, BusType::PV);
+        assert_eq!((buses[1].q_min, buses[1].q_max), (-2.0, 3.0), "the first assigns");
+
+        vc.regulate(&mut buses, 1, 1.02, -1.5, 4.0, "b");
+        assert_eq!((buses[1].q_min, buses[1].q_max), (-3.5, 7.0), "the second adds");
+
+        let report = vc.finish();
+        assert_eq!(report.regulated_buses, 1);
+        assert_eq!(report.shared_buses, 1);
+        assert!(report.target_conflicts.is_empty());
+    }
+
+    /// One machine with no stated limit makes the bus's joint capability
+    /// unlimited, which is the right reading of an absent `minQ`/`maxQ` — and
+    /// the reason the accumulation must not treat ±∞ as a number to be
+    /// replaced.
+    #[test]
+    fn an_unlimited_machine_makes_the_joint_capability_unlimited() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.0, -2.0, 3.0, "a");
+        vc.regulate(&mut buses, 0, 1.0, -f64::INFINITY, f64::INFINITY, "b");
+        assert!(buses[0].q_min.is_infinite() && buses[0].q_min < 0.0);
+        assert!(buses[0].q_max.is_infinite() && buses[0].q_max > 0.0);
+        assert!(!buses[0].q_min.is_nan() && !buses[0].q_max.is_nan());
+    }
+
+    /// A single machine is unaffected: it assigns, exactly as it always did.
+    /// This is the case every existing fixture test depends on.
+    #[test]
+    fn one_machine_is_left_exactly_as_it_was() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.05, -1.0, 1.0, "only");
+        assert_eq!((buses[0].q_min, buses[0].q_max), (-1.0, 1.0));
+        assert_eq!(buses[0].voltage_mag, 1.05);
+        let report = vc.finish();
+        assert_eq!(report.shared_buses, 0);
+    }
+
+    /// A target two controllers disagree on is **reported, not resolved**. The
+    /// last writer still wins, which is what it always did — no vendored
+    /// fixture has a disagreement, so any resolution rule would be untested,
+    /// and choosing one here would make this a behaviour change rather than
+    /// the limits-only fix it is.
+    #[test]
+    fn a_disagreeing_target_is_reported_and_the_last_still_wins() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.02, -1.0, 1.0, "first");
+        vc.regulate(&mut buses, 0, 1.06, -1.0, 1.0, "second");
+
+        assert_eq!(buses[0].voltage_mag, 1.06, "last writer still wins");
+        let report = vc.finish();
+        assert_eq!(report.target_conflicts.len(), 1);
+        let c = &report.target_conflicts[0];
+        assert_eq!((c.bus, c.existing, c.proposed, c.id.as_str()), (0, 1.02, 1.06, "second"));
+        // And the limits summed regardless — a disagreement about the target
+        // says nothing about the machines' capability.
+        assert_eq!((buses[0].q_min, buses[0].q_max), (-2.0, 2.0));
+    }
+
+    /// Agreement within floating-point noise is agreement. Two exports of one
+    /// set-point routinely differ in the last digit.
+    #[test]
+    fn a_negligible_difference_is_not_a_conflict() {
+        let mut buses = vec![bus(0)];
+        let mut vc = VoltageControl::new(1);
+        vc.regulate(&mut buses, 0, 1.02, -1.0, 1.0, "first");
+        vc.regulate(&mut buses, 0, 1.02 + 1e-12, -1.0, 1.0, "second");
+        assert!(vc.finish().target_conflicts.is_empty());
+    }
 }
