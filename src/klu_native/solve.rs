@@ -52,7 +52,7 @@ fn usolve(u_cols: &[Vec<(usize, f64)>], udiag: &[f64], x: &mut [f64]) {
 /// row-indexed `Rs` `scale::scale` itself returns). Ported faithfully now
 /// (`KLU_solve`'s own `Rs == NULL` branch) even though `factor::factor`/
 /// `refactor::refactor` don't populate scale factors into `Numeric` yet —
-/// see `scale.rs`'s module doc comment on Phase 7 wiring this in.
+/// see `scale.rs`'s module doc comment on wiring this in.
 pub fn solve(sym: &Symbolic, num: &Numeric, rs: Option<&[f64]>, b: &[f64]) -> Vec<f64> {
     let n = b.len();
 
@@ -254,10 +254,10 @@ mod tests {
         // was already folded into the L/U values themselves during
         // factorization (real KLU does this in `construct_column` -- see
         // `scale.rs`'s doc comment). This port doesn't wire scaling into
-        // `factor`/`refactor` yet (Phase 7), so this test only exercises
+        // `factor`/`refactor` yet, so this test only exercises
         // `solve`'s own `Rs` code path in isolation with `Rs = 1` (a no-op
-        // scale), confirming it's wired correctly and ready for Phase 7 to
-        // supply a real (factorization-consistent) Rs.
+        // scale), confirming it's wired correctly and ready for a real
+        // (factorization-consistent) Rs once scaling is wired in.
         let n = 3;
         let entries = vec![(0, 0, 4.0), (1, 1, 5.0), (2, 2, 6.0), (0, 1, 0.3), (1, 2, -0.2)];
         let (col_ptr, row_idx, values) = to_csc(n, &entries);

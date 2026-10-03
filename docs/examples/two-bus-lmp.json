@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "type": "input",
+  "is_batch": false,
+  "attributes": {},
+  "data": {
+    "node": [
+      {"id": 1, "u_rated": 1.0},
+      {"id": 2, "u_rated": 1.0}
+    ],
+    "line": [
+      {"id": 10, "from_node": 1, "to_node": 2, "from_status": 1, "to_status": 1,
+       "r1": 0.0, "x1": 1e-09, "c1": 0.0, "tan1": 0.0,
+       "r0": 0.0, "x0": 1e-09, "c0": 0.0, "tan0": 0.0}
+    ],
+    "source": [
+      {"id": 20, "node": 1, "status": 1, "u_ref": 1.0, "sk": 1e12, "rx_ratio": 0.1}
+    ],
+    "sym_load": [
+      {"id": 30, "node": 2, "status": 1, "type": 0, "p_specified": 100000000.0, "q_specified": 0.0}
+    ]
+  }
+}

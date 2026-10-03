@@ -1,5 +1,6 @@
 pub mod types;
 pub mod network;
+pub mod ratings;
 pub mod switches;
 pub mod topology;
 pub mod branch_flow;
@@ -21,6 +22,12 @@ pub mod linear;
 pub mod shortcircuit;
 pub mod json;
 pub mod pgm;
+#[cfg(feature = "ucte")]
+pub mod ucte;
+#[cfg(feature = "iidm")]
+pub mod iidm;
+#[cfg(feature = "rao")]
+pub mod rao;
 pub mod sparse;
 pub mod block_sparse;
 pub mod klu_native;

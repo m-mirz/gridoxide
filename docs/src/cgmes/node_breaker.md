@@ -141,7 +141,7 @@ model.set_switch(switch_id, True)
 ### `Constrain`: the exact alternative
 
 `SwitchTreatment::Constrain` puts no admittance in the matrix at all. A closed switch's flow becomes
-an unknown and the physics becomes two exact equations, \(θ_i = θ_j\) and \(V_i = V_j\) — approach
+an unknown and the physics becomes two exact equations, \\(θ_i = θ_j\\) and \\(V_i = V_j\\) — approach
 3 of [Ideal Switches and Zero-Impedance Branches](../powerflow/zero_impedance_branches.md). The
 network it produces carries **no switch branches**, so it is solved by `constrained::solve_constrained`
 rather than by the ordinary Newton loop:
@@ -177,7 +177,7 @@ let report = se::nr::estimate(&measurements, &mut buses, &se, &SeOptions::defaul
 
 The measurement model needs no changes at all: a sensor on a breaker is a `Target::BranchTerminal`
 at `branch_of_switch(switch)`, and the estimator never learns that any of its branches is a switch —
-the same reason phases 4 and 6 of the plan came free.
+the same reason DC flows, sensitivities and contingencies work on switches unchanged.
 
 What *is* different is the constraint set, and it inverts the usual proportions. A bus-branch model
 has a handful of zero-injection buses; a node-breaker model is mostly zero-injection buses, since

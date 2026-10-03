@@ -16,6 +16,12 @@ This book covers both the *method* (what the equations are, how the sparse solve
 modeling feature changes about the equation system) and the *tool* (how to build it, which linear
 solver backends exist, how CGMES input is mapped onto the internal network model).
 
+Most chapters end in a **worked example** small enough to check with a calculator — a fault current,
+a weighted-least-squares estimate, a congested two-bus market, a phase shifter moved to relieve an
+overload. Every figure in them was produced by running the code on the input shown, and the inputs
+themselves are committed under `docs/examples/`. Where the arithmetic is done by hand instead, the
+page says so.
+
 ## Where to start
 
 - **[Getting Started](./getting_started/building.md)** — build the Rust project, run a solve, or
@@ -27,10 +33,19 @@ solver backends exist, how CGMES input is mapped onto the internal network model
   what responds when an injection or a tap moves, and what would move a quantity you are watching.
   (The DC factors, PTDF and LODF, live in the [DC chapter](./powerflow/dc.md) alongside the method
   they are exact for.)
+- **[Optimal Power Flow](./opf/index.md)** — least-cost dispatch in DC and AC, and the prices that
+  come out with it; [worked on two buses](./opf/worked_example.md) where one line decides whether
+  they separate.
 - **[Short Circuit](./short_circuit/index.md)** — IEC 60909 fault currents in the phase domain, the
-  four fault types and their boundary conditions.
+  four fault types and their boundary conditions, the
+  [symmetrical-component algebra](./short_circuit/sequence.md) behind them, and
+  [a fault current computed by hand](./short_circuit/worked_example.md).
 - **[State Estimation](./state_estimation/index.md)** — the weighted-least-squares problem, what
-  each measurement type means, observability, and bad-data detection.
+  each measurement type means, observability, bad-data detection, and
+  [an estimate worked end to end](./state_estimation/worked_example.md).
+- **[Remedial Action Optimization](./rao/index.md)** — given contingencies, monitored elements and
+  the actions an operator may take, what to do: margins, the linear program over continuous
+  controls, and the search tree over discrete ones.
 - **[Sparse Linear Solvers](./solvers/backends.md)** — the five interchangeable linear-solver
   backends, and a step-by-step walkthrough of the KLU algorithm all of them are measured against.
 - **[CGMES Data Model](./cgmes/index.md)** — reading ENTSO-E RDF/XML grid models, and how

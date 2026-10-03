@@ -143,8 +143,7 @@ impl CostCurve {
     /// A quadratic is convex when its leading coefficient is non-negative; a
     /// piecewise-linear curve when its segment slopes are non-decreasing. A
     /// non-convex curve is not an error here — it is data — but it does mean
-    /// the "optimal is provable" argument in `plans/OPF_PLAN.md` no longer
-    /// applies, so the formulation should refuse it rather than return a
+    /// a solution can no longer be proven optimal, so the formulation should refuse it rather than return a
     /// number nobody can certify.
     pub fn is_convex(&self) -> bool {
         match self {

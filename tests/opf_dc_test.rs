@@ -1,4 +1,4 @@
-//! DC optimal power flow, against all three gates `plans/OPF_PLAN.md` §7 names.
+//! DC optimal power flow, against three validation gates.
 //!
 //! - **Analytic cases**, where the optimum is derivable by hand, so a failure
 //!   points at a specific term rather than somewhere in the solver.
@@ -9,9 +9,7 @@
 //!   PowerModels.jl with IPOPT and independent of anything here.
 //!
 //! The third gate exists because pglib publishes a **DC** column beside the AC
-//! one. An earlier draft of the plan claimed otherwise and concluded this
-//! phase would ship with no external number; see
-//! `tests/data/benchmark-grids/pglib/BASELINE.md`.
+//! one; see `tests/data/benchmark-grids/pglib/BASELINE.md`.
 
 use std::collections::HashMap;
 

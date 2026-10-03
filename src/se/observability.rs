@@ -44,8 +44,8 @@
 //! largest pivot, and faer's own rank is an upper bound on the result.
 //!
 //! The alternative — reading zero pivots out of the LU that
-//! [`crate::solver::LinearSolver`] already computes — was the plan's first
-//! choice, but none of the five backends expose their pivots (`faer`'s
+//! [`crate::solver::LinearSolver`] already computes — was the first choice,
+//! but none of the five backends expose their pivots (`faer`'s
 //! `ColPivQr` has no rank accessor, and `klu_native::factor` returns only
 //! `Option<Numeric>`). Widening the trait would force all five to implement
 //! something only this module wants.

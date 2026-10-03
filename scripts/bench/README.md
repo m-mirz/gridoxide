@@ -319,7 +319,7 @@ shared case.
 
 `bench_batch.py` measures `batch::BatchSolver`: one topology, many injection scenarios across cores. This is
 the time-series/QSTS/Monte-Carlo shape, and exists to be the baseline any future GPU work must beat —
-`plans/GPU_PLAN.md` §6 is explicit that beating a *single-threaded* CPU solver is not a result.
+beating a *single-threaded* CPU solver is not a result.
 
 ```bash
 maturin develop --release --features python,klu
@@ -359,7 +359,7 @@ just the values. Interleaved A/B, two rounds, min-of-3 each, ms/solve:
 | after | 29.95 / 30.09 | 10.63 / 10.56 | 2.395 / 2.365 | 0.690 / 0.693 |
 | **gain** | **11.4%** | **7.5%** | **7.3%** | **5.1%** |
 
-`plans/GPU_PLAN.md` §1 measures assembly at ~36% of iteration time, so single-threaded on the large case
+Assembly measures at ~36% of iteration time, so single-threaded on the large case
 roughly a third of that stage was allocation and index rebuilding. The gain is *smaller* at 8 threads: once
 all cores run, the solve is memory-stalled in the LU, so assembly is a smaller share. It is also smaller on
 the small case, whose triplet array (~20k nnz, ~0.5 MB) fits in cache; case9241pegase's is ~150k nnz, ~3.6 MB,
@@ -415,9 +415,9 @@ disagreement could equally be a converter difference as a solver bug. Max |dVm| 
 | case1354pegase | 1,355 | 3.9e-14 | 1.2e-13 | 7.5e-14 |
 | case1888rte | 1,889 | 1.4e-13 | 4.6e-13 | 3.1e-12 |
 
-**Column 2 is the one that matters.** `plans/GPU_PLAN.md` §3 property 2 claims stacking B scenarios into one
-block-diagonal matrix and taking a single LU is equivalent to B independent solves — what lets the AMD path
-work without a batched refactorization API, and the load-bearing wall under Phases 3–5. Now checked
+**Column 2 is the one that matters.** Stacking B scenarios into one block-diagonal matrix and taking a single
+LU should be equivalent to B independent solves — what lets an AMD GPU path work without a batched
+refactorization API. Now checked
 numerically: machine-precision agreement and exactly matching per-scenario iteration counts on every case.
 
 Scope limits: constant-power injections only (ZIP terms asserted absent), dense Jacobian so B is auto-capped
@@ -459,7 +459,7 @@ scenario's block would invalidate the cached symbolic factorization.
 
 **It is ~2.7x slower on a CPU, and that is expected.** One large factorization beats B small ones only on
 hardware that wants wide independent work — a GPU property. `bde.rs` is an architecture validator and the
-host-side half of Phase 3, **not** a CPU optimization; use `batch::BatchSolver` for real CPU work.
+host-side half of a GPU path, **not** a CPU optimization; use `batch::BatchSolver` for real CPU work.
 
 ## 5. Cross-validate CGMES import against pypowsybl
 
@@ -969,17 +969,17 @@ can be a default:
 | SmallGrid | 167 buses, ~334 | 540 buses, 373 retained, ~1,826 | 1,369 buses, 1,266 retained, ~5,270 |
 | Svedala | 228 buses, ~456 | 638 buses, 857 retained, ~2,990 | 1,179 buses, 1,464 retained, ~5,286 |
 
-Two things fall out, one confirming `plans/NODE_BREAKER_PLAN.md` §3.3 and one correcting it.
+Two things fall out, one confirming the expected cost of `RetainAll` and one correcting a prediction.
 
 **Confirmed: `RetainAll` really is a ~16x blowup.** SmallGrid goes from ~334 unknowns to ~5,270,
-against the plan's predicted ~5,264. `MergeAll` staying the default is not a stylistic preference.
+against a predicted ~5,264. `MergeAll` staying the default is not a stylistic preference.
 
 **Corrected: `RetainAdjacentToBusbar` is not "a retained count in the tens".** That holds on the small
 models (26 on FullGrid, 30 on MiniGrid) and fails on the real ones — 373 on SmallGrid and 857 on
 Svedala, the latter retaining *more* switches than SmallGrid despite having fewer nodes, because
 Svedala is the most switch-dense model in the tree. It still buys a 3x reduction against `RetainAll`
 on SmallGrid, so it remains the right default *for a bus-breaker view*; it is just not the small
-number the plan expected, and a contingency campaign wanting a handful of switches should use
+number expected, and a contingency campaign wanting a handful of switches should use
 `RetentionPolicy::Explicit` rather than assume this policy is already small.
 
 ### Accuracy results

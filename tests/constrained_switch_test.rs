@@ -1,6 +1,6 @@
 //! `SwitchTreatment::Constrain`: a switch as an exact equality.
 //!
-//! `plans/NODE_BREAKER_PLAN.md` phase 3. The oracle throughout is
+//! The oracle throughout is
 //! `SwitchTreatment::Regularize`, which is thoroughly covered elsewhere: a
 //! closed switch stamped as a very stiff branch and a closed switch enforced as
 //! `θ_i = θ_j, V_i = V_j` are two approximations of the same physics, so they
@@ -118,7 +118,7 @@ fn assert_states_agree(reg: &[Bus], con: &[Bus], tol: f64) {
     }
 }
 
-/// **Phase 3's gate.** A closed switch carrying load: both treatments agree on
+/// **The gate.** A closed switch carrying load: both treatments agree on
 /// the state, and the constrained solve reports the flow through the switch.
 ///
 /// The network is a source, a line, a switch, and a load behind it — so all of

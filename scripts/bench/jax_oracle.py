@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """JAX oracle for the batched AC power flow formulation.
 
-`plans/GPU_PLAN.md` Phase 1 asks for "a numerical oracle for block-diagonal
-embedding, validated against the existing accuracy suite". This is it. It is
+A numerical oracle for block-diagonal embedding, validated against the
+existing accuracy suite. It is
 **not** a performance prototype and must never be quoted as one — it runs on
 CPU, uses dense linear algebra, and is deliberately the slowest power flow in
 this repository. Its only job is to answer two questions with independent code:
 
 1. **Is block-diagonal embedding actually equivalent to independent solves?**
-   `plans/GPU_PLAN.md` §3 property 2 claims that stacking B scenarios into one
-   block-diagonal matrix and taking a single LU is mathematically identical to
-   B separate solves — which is what lets the AMD path work without a batched
-   refactorization API. That claim is the architectural load-bearing wall of
-   Phases 3-5. Here it is checked numerically rather than asserted:
+   Stacking B scenarios into one block-diagonal matrix and taking a single LU
+   should be mathematically identical to B separate solves — which is what
+   lets an AMD GPU path work without a batched refactorization API. Here it is
+   checked numerically rather than asserted:
    `solve_batch_bde` and `solve_batch_vmap` must agree to machine precision.
 
 2. **Does the batched Newton formulation reach gridoxide's answer?** The
@@ -175,7 +174,7 @@ def solve_batch_bde(case, scenarios, tol=1e-6, max_iter=20):
 
         J = diag(J_1 .. J_B),  dx = J^-1 f
 
-    This is the formulation `plans/GPU_PLAN.md` §3 adopts. Because the blocks
+    This is the formulation a GPU path would adopt. Because the blocks
     share no rows or columns, LU of the stacked matrix is block-diagonal too:
     no fill crosses a block, and partial pivoting cannot select across blocks
     since a column in block i has nonzeros only in block i's rows. So this
@@ -183,7 +182,7 @@ def solve_batch_bde(case, scenarios, tol=1e-6, max_iter=20):
     is being tested, not assumed.
 
     Scenarios are stepped in lockstep with a per-scenario active mask, the
-    convergence masking §3 requires: a scenario that has converged stops being
+    convergence masking a batch requires: a scenario that has converged stops being
     updated, and a diverging one never poisons its neighbours.
     """
     ybus, kind = case["ybus"], case["kind"]
@@ -312,7 +311,7 @@ def main():
     print(f"   max |dVm| = {worst_vm:.3e}")
     print(f"   max |dVa| = {worst_va:.3e} rad")
     print(f"   iteration-count mismatches: {iter_mismatch}/{n_scen}")
-    # This is the claim GPU_PLAN section 3 property 2 rests on. It should hold
+    # This is the claim block-diagonal embedding rests on. It should hold
     # to machine precision, not merely to solver tolerance.
     bde_ok = worst_vm < 1e-12 and worst_va < 1e-12 and iter_mismatch == 0
     print(f"   {'PASS' if bde_ok else 'FAIL'} (tolerance 1e-12)")

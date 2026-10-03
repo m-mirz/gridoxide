@@ -1,8 +1,7 @@
 //! State estimation over a CGMES node-breaker network.
 //!
-//! `plans/NODE_BREAKER_PLAN.md` phase 5. Its stated goal is "a measurement can
-//! attach to a breaker"; the real prerequisite, which the plan does not mention,
-//! was that `SeNetwork::new` took a `pgm::PgmNetwork`, so no CGMES model of any
+//! The goal is that a measurement can attach to a breaker. The real
+//! prerequisite was that `SeNetwork::new` took a `pgm::PgmNetwork`, so no CGMES model of any
 //! kind could reach the estimator. `SeNetwork::from_bus_network` closes that,
 //! and `NodeBreakerNetwork::se_network` is the bridge.
 //!
@@ -10,8 +9,8 @@
 //!
 //! Not the measurement model. A retained switch is a branch, so a sensor on a
 //! breaker is an ordinary `Target::BranchTerminal` and the estimator never
-//! learns that any of its branches is a switch — the same thing that made
-//! phases 4 and 6 come free.
+//! learns that any of its branches is a switch — the same thing that lets DC
+//! flows, sensitivities and contingencies work on switches unchanged.
 //!
 //! What differs is the *constraint* set, and it inverts the usual proportions.
 //! A bus-branch model has a handful of zero-injection buses. A node-breaker
@@ -168,7 +167,7 @@ fn worst_error(estimated: &[Bus], truth: &[Bus]) -> (f64, f64) {
     (dv, da)
 }
 
-/// **Phase 5's gate.** A CGMES node-breaker network reaches the estimator at
+/// **The gate.** A CGMES node-breaker network reaches the estimator at
 /// all, and the estimate recovers the state the power flow produced — including
 /// on the 30 bay-internal buses no sensor touches.
 #[test]
@@ -226,7 +225,7 @@ fn the_zero_injection_constraints_are_what_make_the_bays_observable() {
     );
 }
 
-/// A measurement can attach to a breaker: phase 5's headline. The sensor is an
+/// A measurement can attach to a breaker. The sensor is an
 /// ordinary branch-terminal measurement at the switch's own branch index, and
 /// the estimate reproduces the flow it reported.
 #[test]

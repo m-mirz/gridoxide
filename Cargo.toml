@@ -54,6 +54,11 @@ num-complex = { version = "0.4.6", features = ["serde"] }
 # parallelism inside faer from oversubscribing the machine, and it means a
 # batch never pays thread-creation cost per call.
 rayon = "1.12"
+# The IIDM importer's XML reader (`iidm` feature). Already present in the tree
+# as a transitive dependency of `cimdecoder`, so enabling `iidm` adds nothing to
+# a build that already has `cgmes` — this promotes it to a direct dependency the
+# same way `rayon` was promoted for `src/batch.rs`.
+quick-xml = { version = "0.37", optional = true }
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -117,6 +122,41 @@ pardiso = ["dep:bindgen"]
 # PGM-JSON input and shouldn't pay for cimdecoder's own dependency tree or
 # build time.
 cgmes = ["dep:cimdecoder", "dep:cimstructs"]
+# Reads UCTE-DEF network files (src/ucte.rs) — the fixed-column format the
+# continental-European TSOs exchanged snapshots in before CGMES, and the one
+# most published remedial-action test material is still written in.
+#
+# Unlike `cgmes` this pulls in **no dependency at all**: UCTE-DEF is plain
+# fixed-column text, so the importer is pure `std`. It is therefore built and
+# tested in CI, alongside `opf` and `capi` rather than alongside the
+# system-library features.
+#
+# It is also the only importer that arrives carrying branch *ratings* and tap
+# *tables* — see `src/ratings.rs` and `types::TapChanger` for why those two
+# were the gap worth closing.
+ucte = []
+# Reads PowSyBl's IIDM network format (src/iidm.rs) — `.xiidm` files, the native
+# serialization of powsybl-core's network model, and the second of the two
+# formats the published remedial-action test material comes in.
+#
+# Deliberately **version-tolerant**: it accepts any `.../schema/iidm/1_*`
+# namespace and skips elements it does not know rather than failing. The 51
+# vendored fixtures span eleven schema versions (1_0 through 1_16) and the model
+# moved underneath them — limits are spelled `currentLimits1` in the older files
+# and `operationalLimitsGroup1` in the newer. A strict parser would rot against
+# the next powsybl release; this one is designed not to.
+#
+# Costs one dependency (`quick-xml`) and no system library, so like `ucte` and
+# `opf` it is built and tested in CI.
+iidm = ["dep:quick-xml"]
+# The remedial-action layer (src/rao/). At present the
+# CRAC data model and its readers; the optimizer follows.
+#
+# Depends on `opf` for the `LinearProgram`/`Solver` boundary the range-action
+# optimization is written against — not on any *backend*, so the default
+# in-house interior-point solver serves and nothing needs installing. Built and
+# tested in CI.
+rao = ["opf"]
 # The optimization layer, complete and self-contained: `opf::LinearProgram`,
 # `opf::Solution` and the `opf::Solver` trait (src/opf/mod.rs), DC-OPF
 # (src/opf/dc.rs), and the in-house primal-dual interior-point QP solver
@@ -187,8 +227,63 @@ opf-ipopt = ["opf", "dep:bindgen"]
 capi = ["dep:cbindgen"]
 
 [[test]]
+name = "cli_security_test"
+path = "tests/cli_security_test.rs"
+required-features = ["rao", "ucte", "iidm"]
+
+[[test]]
+name = "rao_cucumber_test"
+path = "tests/rao_cucumber_test.rs"
+required-features = ["rao", "ucte"]
+
+[[test]]
+name = "rao_validate_test"
+path = "tests/rao_validate_test.rs"
+required-features = ["rao", "ucte", "opf"]
+
+[[test]]
+name = "rao_castor_test"
+path = "tests/rao_castor_test.rs"
+required-features = ["rao", "ucte"]
+
+[[test]]
+name = "rao_search_test"
+path = "tests/rao_search_test.rs"
+required-features = ["rao", "ucte"]
+
+[[test]]
+name = "rao_linear_test"
+path = "tests/rao_linear_test.rs"
+required-features = ["rao", "ucte"]
+
+[[test]]
+name = "rao_evaluate_test"
+path = "tests/rao_evaluate_test.rs"
+required-features = ["rao", "ucte"]
+
+[[test]]
+name = "rao_crac_test"
+path = "tests/rao_crac_test.rs"
+required-features = ["rao"]
+
+[[test]]
+name = "iidm_test"
+path = "tests/iidm_test.rs"
+required-features = ["iidm", "ucte"]
+
+[[test]]
+name = "ucte_test"
+path = "tests/ucte_test.rs"
+required-features = ["ucte"]
+
+[[test]]
 name = "cli_opf_test"
 path = "tests/cli_opf_test.rs"
+required-features = ["opf"]
+
+[[test]]
+name = "opf_milp_test"
+path = "tests/opf_milp_test.rs"
 required-features = ["opf"]
 
 [[test]]
@@ -272,6 +367,11 @@ path = "tests/cgmes_node_breaker_test.rs"
 required-features = ["cgmes"]
 
 [[test]]
+name = "cgmes_limits_test"
+path = "tests/cgmes_limits_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_smoke_test"
 path = "tests/cgmes_smoke_test.rs"
 required-features = ["cgmes"]
@@ -342,6 +442,11 @@ path = "tests/cgmes_microgrid_type3_test.rs"
 required-features = ["cgmes"]
 
 [[example]]
+name = "doc_numbers"
+path = "examples/doc_numbers.rs"
+required-features = ["rao", "ucte"]
+
+[[example]]
 name = "bench_node_breaker"
 path = "examples/bench_node_breaker.rs"
 required-features = ["cgmes"]
@@ -350,3 +455,8 @@ required-features = ["cgmes"]
 name = "cgmes_microgrid_be_dump"
 path = "examples/cgmes_microgrid_be_dump.rs"
 required-features = ["cgmes"]
+
+
+
+
+

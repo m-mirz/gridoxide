@@ -1,7 +1,6 @@
 //! A switch as an exact equality constraint, rather than as a stiff branch.
 //!
-//! This is approach 3 of `docs/src/powerflow/zero_impedance_branches.md` and
-//! phase 3 of `plans/NODE_BREAKER_PLAN.md`:
+//! This is approach 3 of `docs/src/powerflow/zero_impedance_branches.md`:
 //! [`SwitchTreatment::Constrain`](crate::switches::SwitchTreatment::Constrain).
 //! A closed switch does not become an admittance at all. Instead its power flow
 //! becomes an *unknown*, and the physics it enforces — the two ends are the same
@@ -59,8 +58,8 @@
 //! An open switch keeps its rows and columns. It simply constrains a different
 //! thing: `P_s = Q_s = 0` instead of `θ_i = θ_j` and `V_i = V_j`. Both forms'
 //! entries are stamped in every state, one of the two carrying a structural
-//! zero, so **flipping a switch changes values and not the pattern** — the
-//! property `plans/NODE_BREAKER_PLAN.md` §4.2 asks for, and which
+//! zero, so **flipping a switch changes values and not the pattern** — a
+//! property
 //! `switches::regularized_branches` reaches by the other route (an open
 //! terminal's all-zero stamp).
 

@@ -7,7 +7,7 @@
 //! are exactly PGM's `p_from`/`q_from`/`p_to`/`q_to` for each branch, so they
 //! validate the new terminal-flow formulas at no fixture cost.
 //!
-//! This is the gate for phase 0 of the state-estimation work: branch power
+//! This is the first gate for state estimation: branch power
 //! measurements are the majority of the sensors in PGM's state-estimation
 //! fixtures, and their measurement function is precisely what is checked here.
 

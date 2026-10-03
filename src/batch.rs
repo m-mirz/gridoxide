@@ -1,7 +1,7 @@
 //! Batched power flow: one topology, many scenarios, solved across all cores.
 //!
 //! This is the workload where parallelism actually pays. A single solve is
-//! ~60% sparse LU (see `plans/GPU_PLAN.md` §1), which neither threads nor a
+//! ~60% sparse LU, which neither threads nor a
 //! GPU help with; but N-1 screening, time series/QSTS and Monte Carlo run
 //! *thousands* of independent solves over one unchanging topology, and those
 //! scale essentially linearly.
@@ -29,9 +29,8 @@
 //! fresh symbolic analysis. Measured at 2.0–2.7x against independent solves,
 //! single-threaded, before any parallelism.
 //!
-//! This is also the CPU baseline any future GPU work has to beat.
-//! `plans/GPU_PLAN.md` §6 is explicit that beating a single-threaded CPU
-//! solver is not a result.
+//! This is also the CPU baseline any future GPU work has to beat: beating a
+//! single-threaded CPU solver is not a result.
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};

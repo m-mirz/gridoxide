@@ -42,6 +42,21 @@ usage:
                                 containing sym_voltage_sensor/sym_power_sensor.
                                 The default method is Newton-Raphson; the flag
                                 selects the faster, less exact linearized one.
+  gridoxide security <network> --crac <crac.json> [--json]
+                                assess a network against a CRAC: which critical
+                                elements are overloaded, in which state, and by
+                                how much. The network may be UCTE-DEF (.uct) or
+                                IIDM (.xiidm); the CRAC may be OpenRAO JSON or
+                                gridoxide's own <network>.rao.json companion.
+                                Exits 0 when every margin is non-negative and 1
+                                when any is not, so it can gate a pipeline.
+  gridoxide rao <network> --crac <crac.json> [--depth N] [--validate-ac] [--json]
+                                optimize remedial actions: search over the
+                                network actions the CRAC permits, re-optimizing
+                                the range actions at every candidate, and report
+                                what to do in each state. --depth bounds how
+                                many network actions may be stacked (default 2).
+                                Exits 0 when every perimeter ends secure.
   gridoxide switches <profile.xml>... [--retain none|busbar_adjacent|all]
                      [--open <mrid>] [--solve]
                                 list a CGMES model's switching devices, read
@@ -134,6 +149,40 @@ fn main() {
             }
             _ => {
                 eprintln!("error: dc needs a path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("security") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => match run_security(path, &args[2..]) {
+                Ok(secure) => {
+                    if !secure {
+                        std::process::exit(1);
+                    }
+                }
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    std::process::exit(2);
+                }
+            },
+            _ => {
+                eprintln!("error: security needs a network path\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
+        Some("rao") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => match run_rao(path, &args[2..]) {
+                Ok(secure) => {
+                    if !secure {
+                        std::process::exit(1);
+                    }
+                }
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    std::process::exit(2);
+                }
+            },
+            _ => {
+                eprintln!("error: rao needs a network path\n\n{USAGE}");
                 std::process::exit(2);
             }
         },
@@ -1202,4 +1251,507 @@ fn run_switches(args: &[String]) -> Result<(), String> {
 #[cfg(not(feature = "cgmes"))]
 fn run_switches(_args: &[String]) -> Result<(), String> {
     Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
+}
+
+/// `gridoxide security <network> --crac <crac.json> [--json]`
+///
+/// Returns `Ok(true)` when every margin is non-negative. The caller turns that
+/// into an exit code, so this can gate a pipeline: a secure network exits 0, an
+/// insecure one exits 1, and a *broken invocation* exits 2. Conflating the last
+/// two is how a study silently passes because the CRAC failed to load.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
+    use gridoxide::rao::{crac_json, evaluate, Network, Resolution};
+
+    let crac_path = flag_value(flags, "--crac")?
+        .ok_or("security needs --crac <crac.json>")?;
+    let as_json = flags.iter().any(|f| f == "--json");
+
+    let network = load_network_for_security(path)?;
+    let text = std::fs::read_to_string(&crac_path)
+        .map_err(|e| format!("reading {crac_path}: {e}"))?;
+    // gridoxide's own companion document first, then OpenRAO's format. Trying
+    // ours first means a malformed companion reports its own error rather than
+    // the less helpful "document is not a CRAC".
+    let (crac, report) = match gridoxide::rao::Crac::from_json(&text) {
+        Ok(crac) => (crac, crac_json::CracReport::default()),
+        Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?,
+    };
+
+    let resolution =
+        Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
+    let view = Network {
+        buses: &network.buses,
+        lines: &network.lines,
+        transformers: &network.transformers,
+        branch_ids: &network.branch_ids,
+        bus_ids: &network.bus_ids,
+        initially_open: &network.initially_open,
+        bus_countries: &network.bus_countries,
+        shunts: &network.shunts,
+        tap_changers: &network.tap_changers,
+        base_mva: network.base_mva,
+    };
+    let result = evaluate(&crac, &view, &resolution);
+
+    if as_json {
+        println!("{}", security_json(&crac, &result, &resolution));
+        return Ok(result.is_secure());
+    }
+
+    for note in &network.notes {
+        println!("note: {note}");
+    }
+    if let Some(version) = &report.version {
+        println!("crac format version {version}");
+    }
+    if !resolution.is_complete() {
+        println!(
+            "warning: {} element(s) not found in the network: {}",
+            resolution.unresolved.len(),
+            resolution.unresolved.join(", ")
+        );
+    }
+    if !result.skipped.is_empty() {
+        println!("warning: {} CNEC(s) skipped for want of their element", result.skipped.len());
+    }
+
+    for perimeter in &result.perimeters {
+        let instant = &crac.instants[perimeter.state.instant].id;
+        let contingency = perimeter
+            .state
+            .contingency
+            .map(|c| crac.contingencies[c].id.as_str())
+            .unwrap_or("base case");
+        let severed = if perimeter.severed { "  [not screenable; re-solved]" } else { "" };
+        println!(
+            "\n{instant} / {contingency}: {} monitored, worst margin {:.1} MW{severed}",
+            perimeter.cnecs.len(),
+            perimeter.min_margin().unwrap_or(f64::NAN)
+        );
+        for violation in perimeter.violations() {
+            println!(
+                "  OVERLOAD {:<28} flow {:>9.1}  limit {:>9.1}  by {:>8.1} MW",
+                crac.flow_cnecs[violation.cnec].id,
+                violation.flow_mw,
+                violation.limit_mw,
+                -violation.margin_mw
+            );
+        }
+    }
+
+    let violations = result.violations().count();
+    println!(
+        "\n{}: {violations} overload(s) across {} perimeter(s)",
+        if result.is_secure() { "SECURE" } else { "INSECURE" },
+        result.perimeters.len()
+    );
+    Ok(result.is_secure())
+}
+
+/// The subset of an import `run_security` needs, so the two importers can be
+/// handled without a trait.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+struct SecurityNetwork {
+    buses: Vec<gridoxide::types::Bus>,
+    lines: Vec<gridoxide::types::Line>,
+    transformers: Vec<gridoxide::types::Transformer>,
+    branch_ids: Vec<String>,
+    /// Bus labels, so a redispatch's generators and loads resolve.
+    bus_ids: Vec<String>,
+    /// Branches the file says are out of service.
+    initially_open: Vec<usize>,
+    /// ISO country per bus, for the search's "skip actions far from the most
+    /// limiting element" filter. Empty when the importer does not state them.
+    bus_countries: Vec<Option<String>>,
+    /// Tap changers, so a CRAC that omits its own tap table still works.
+    tap_changers: Vec<Option<gridoxide::types::TapChanger>>,
+    /// Shunt admittances. Only the AC re-validation stage reads them; the DC
+    /// search has no use for them.
+    shunts: Vec<gridoxide::network::ShuntAdm>,
+    base_mva: f64,
+    notes: Vec<String>,
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
+    let lower = path.to_ascii_lowercase();
+    #[cfg(feature = "iidm")]
+    if lower.ends_with(".xiidm") || lower.ends_with(".xml") {
+        let n = gridoxide::iidm::read(path).map_err(|e| e.to_string())?;
+        return Ok(SecurityNetwork {
+            buses: n.buses,
+            lines: n.lines,
+            transformers: n.transformers,
+            branch_ids: n.branch_ids,
+            bus_ids: n.bus_labels,
+            // The IIDM importer omits disconnected branches rather than keeping
+            // them openable, so there is nothing to seed here yet.
+            initially_open: Vec::new(),
+            // IIDM states countries on substations, which `iidm.rs` skips, so
+            // the filter that reads this stays off for IIDM networks.
+            bus_countries: Vec::new(),
+            tap_changers: n.tap_changers,
+            shunts: n.shunts,
+            base_mva: n.base_mva,
+            notes: n.notes,
+        });
+    }
+    #[cfg(feature = "ucte")]
+    if lower.ends_with(".uct") || lower.ends_with(".ucte") {
+        let n = gridoxide::ucte::read(path).map_err(|e| e.to_string())?;
+        return Ok(SecurityNetwork {
+            buses: n.buses,
+            lines: n.lines,
+            transformers: n.transformers,
+            branch_ids: n.branch_ids,
+            bus_ids: n.node_codes,
+            initially_open: n.initially_open,
+            bus_countries: n.bus_countries,
+            tap_changers: n.tap_changers,
+            shunts: n.shunts,
+            base_mva: n.base_mva,
+            notes: n.notes,
+        });
+    }
+    Err(format!(
+        "cannot tell what `{path}` is; expected a .uct or .xiidm file"
+    ))
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn security_json(
+    crac: &gridoxide::rao::Crac,
+    result: &gridoxide::rao::SecurityResult,
+    resolution: &gridoxide::rao::Resolution,
+) -> String {
+    let mut perimeters = String::new();
+    for (i, p) in result.perimeters.iter().enumerate() {
+        if i > 0 {
+            perimeters.push(',');
+        }
+        let mut cnecs = String::new();
+        for (j, c) in p.cnecs.iter().enumerate() {
+            if j > 0 {
+                cnecs.push(',');
+            }
+            cnecs.push_str(&format!(
+                "\n    {{\"cnec\": {:?}, \"flow_mw\": {}, \"limit_mw\": {}, \"upper_mw\": {}, \
+                 \"lower_mw\": {}, \"margin_mw\": {}, \"margin_a\": {}}}",
+                crac.flow_cnecs[c.cnec].id,
+                c.flow_mw,
+                c.limit_mw,
+                // A one-sided CNEC has an infinite bound, which is not JSON.
+                // `null` says "no bound" where `Infinity` would say nothing at
+                // all, and both beat emitting a document no parser accepts.
+                json_number(c.upper_mw),
+                json_number(c.lower_mw),
+                c.margin_mw,
+                c.margin_a
+            ));
+        }
+        perimeters.push_str(&format!(
+            "\n  {{\"instant\": {:?}, \"contingency\": {}, \"severed\": {}, \"cnecs\": [{cnecs}]}}",
+            crac.instants[p.state.instant].id,
+            match p.state.contingency {
+                Some(c) => format!("{:?}", crac.contingencies[c].id),
+                None => "null".to_string(),
+            },
+            p.severed
+        ));
+    }
+    format!(
+        "{{\n \"secure\": {},\n \"min_margin_mw\": {},\n \"unresolved\": {},\n \"skipped_cnecs\": {},\n \"perimeters\": [{perimeters}\n ]\n}}",
+        result.is_secure(),
+        result.min_margin().map(|m| m.to_string()).unwrap_or("null".into()),
+        resolution.unresolved.len(),
+        result.skipped.len()
+    )
+}
+
+#[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
+fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
+    Err("security needs the `rao` feature and an importer (`ucte` or `iidm`); \
+         rebuild with `--features rao,ucte`"
+        .to_string())
+}
+
+/// `gridoxide rao <network> --crac <crac.json> [--depth N] [--json]`
+///
+/// Each state the CRAC defines is optimized independently: the actions
+/// available there are searched, and the range actions re-optimized under each
+/// candidate. States are *not* chained — a curative perimeter here is solved as
+/// if the preventive one had done nothing, which is the multi-perimeter work
+/// still to come. The output says so rather than leaving it to be assumed.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
+    use gridoxide::opf::ipm::IpmSolver;
+    use gridoxide::rao::{crac_json, Network, Resolution, SearchOptions};
+
+    let crac_path = flag_value(flags, "--crac")?.ok_or("rao needs --crac <crac.json>")?;
+    let depth = match flag_value(flags, "--depth")? {
+        Some(value) => value.parse::<usize>().map_err(|_| format!("bad --depth `{value}`"))?,
+        None => 2,
+    };
+    let as_json = flags.iter().any(|f| f == "--json");
+    let validate_ac = flags.iter().any(|f| f == "--validate-ac");
+
+    let network = load_network_for_security(path)?;
+    let text = std::fs::read_to_string(&crac_path)
+        .map_err(|e| format!("reading {crac_path}: {e}"))?;
+    let crac = match gridoxide::rao::Crac::from_json(&text) {
+        Ok(crac) => crac,
+        Err(_) => crac_json::parse(&text).map_err(|e| e.to_string())?.0,
+    };
+
+    let resolution =
+        Resolution::with_buses(&crac, &network.branch_ids, &network.bus_ids);
+    let view = Network {
+        buses: &network.buses,
+        lines: &network.lines,
+        transformers: &network.transformers,
+        branch_ids: &network.branch_ids,
+        bus_ids: &network.bus_ids,
+        initially_open: &network.initially_open,
+        bus_countries: &network.bus_countries,
+        shunts: &network.shunts,
+        tap_changers: &network.tap_changers,
+        base_mva: network.base_mva,
+    };
+    let options = SearchOptions { max_depth: depth, ..Default::default() };
+
+    let mut solver = IpmSolver::new();
+    let plan = gridoxide::rao::run(&crac, &view, &resolution, &mut solver, &options);
+
+    // The search ran on DC. Asking AC whether it agrees is a separate stage
+    // that never changes the plan — it only decides whether to believe it.
+    let validation = validate_ac.then(|| {
+        use gridoxide::rao::evaluate::AcOptions;
+        use gridoxide::rao::validate::{validate, ValidationOptions};
+        let options = ValidationOptions {
+            ac: AcOptions { shunts: &network.shunts, ..Default::default() },
+            ..Default::default()
+        };
+        validate(&crac, &view, &resolution, &plan, &options)
+    });
+
+    if as_json {
+        println!("{}", rao_json(&crac, &plan, validation.as_ref()));
+        return Ok(plan.is_secure() && validation.as_ref().is_none_or(|v| v.is_accepted()));
+    }
+
+    if !resolution.is_complete() {
+        println!(
+            "warning: {} element(s) not found in the network: {}",
+            resolution.unresolved.len(),
+            resolution.unresolved.join(", ")
+        );
+    }
+    if !plan.pulled_forward.is_empty() {
+        // This changes the answer rather than just organising the work, so it
+        // is reported rather than left to be inferred from the perimeter list.
+        println!(
+            "note: {} curative CNEC(s) have no curative action and are secured preventively",
+            plan.pulled_forward.len()
+        );
+    }
+
+    println!(
+        "\npreventive perimeter ({} state(s)): {:.1} -> {:.1} MW ({:+.1}), {} leaf/leaves",
+        plan.preventive.states.len(),
+        plan.preventive.initial_margin_mw,
+        plan.preventive.final_margin_mw,
+        plan.preventive.improvement(),
+        plan.preventive.leaves
+    );
+    print_actions(&crac, &plan.preventive);
+
+    for scenario in &plan.scenarios {
+        for perimeter in &scenario.perimeters {
+            let instant = perimeter
+                .states
+                .first()
+                .map(|s| crac.instants[s.instant].id.as_str())
+                .unwrap_or("?");
+            println!(
+                "\n{} after {}: {:.1} -> {:.1} MW ({:+.1}), {} leaf/leaves",
+                instant,
+                crac.contingencies[scenario.contingency].id,
+                perimeter.initial_margin_mw,
+                perimeter.final_margin_mw,
+                perimeter.improvement(),
+                perimeter.leaves
+            );
+            print_actions(&crac, perimeter);
+        }
+    }
+
+    println!(
+        "\n{}: worst margin {:.1} MW (was {:.1})",
+        if plan.is_secure() { "SECURE" } else { "INSECURE" },
+        plan.final_margin_mw,
+        plan.initial_margin_mw
+    );
+
+    let Some(validation) = validation else { return Ok(plan.is_secure()) };
+
+    use gridoxide::rao::validate::Verdict;
+    println!("\nAC re-validation: worst margin {:.1} MW", validation.ac_margin_mw);
+    for p in &validation.perimeters {
+        let instant = p
+            .states
+            .first()
+            .map(|s| crac.instants[s.instant].id.as_str())
+            .unwrap_or("?");
+        let verdict = match &p.verdict {
+            Verdict::Accepted => "ok".to_string(),
+            Verdict::Diverged => "DIVERGED".to_string(),
+            Verdict::Insecure { margin_mw } => format!("INSECURE ({margin_mw:.1} MW)"),
+            Verdict::Regressed { by_mw } => format!("REGRESSED ({by_mw:.1} MW)"),
+        };
+        println!(
+            "  {instant:<12} dc {:>8.1} MW   ac {:>8.1} MW   {verdict}",
+            p.dc_margin_mw, p.ac_margin_mw
+        );
+    }
+    if !validation.is_accepted() {
+        println!("\nREJECTED: the AC check does not support the plan");
+    }
+    Ok(plan.is_secure() && validation.is_accepted())
+}
+
+/// A finite float, or `null` for an infinity JSON cannot represent.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn json_number(value: f64) -> String {
+    if value.is_finite() { value.to_string() } else { "null".to_string() }
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn print_actions(crac: &gridoxide::rao::Crac, perimeter: &gridoxide::rao::PerimeterPlan) {
+    for &action in &perimeter.network_actions {
+        println!("  APPLY  {}", crac.network_actions[action].id);
+    }
+    for setpoint in perimeter.setpoints.iter().filter(|s| s.moved()) {
+        match setpoint.tap {
+            Some(tap) => println!(
+                "  SET    {} to tap {tap} ({:.3} deg, was {:.3})",
+                crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
+            ),
+            None => println!(
+                "  SET    {} to {:.1} MW (was {:.1})",
+                crac.range_actions[setpoint.action].id, setpoint.value, setpoint.initial
+            ),
+        }
+    }
+    if perimeter.network_actions.is_empty() && !perimeter.setpoints.iter().any(|s| s.moved()) {
+        println!("  (nothing available helps)");
+    }
+}
+
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
+fn rao_json(
+    crac: &gridoxide::rao::Crac,
+    plan: &gridoxide::rao::Plan,
+    validation: Option<&gridoxide::rao::validate::Validation>,
+) -> String {
+    let one = |perimeter: &gridoxide::rao::PerimeterPlan, contingency: Option<usize>| -> String {
+        let actions: Vec<String> = perimeter
+            .network_actions
+            .iter()
+            .map(|&a| format!("{:?}", crac.network_actions[a].id))
+            .collect();
+        let setpoints: Vec<String> = perimeter
+            .setpoints
+            .iter()
+            .filter(|s| s.moved())
+            .map(|s| {
+                format!(
+                    "{{\"action\": {:?}, \"value\": {}, \"tap\": {}}}",
+                    crac.range_actions[s.action].id,
+                    s.value,
+                    s.tap.map(|t| t.to_string()).unwrap_or("null".into())
+                )
+            })
+            .collect();
+        let instants: Vec<String> = perimeter
+            .states
+            .iter()
+            .map(|s| format!("{:?}", crac.instants[s.instant].id))
+            .collect();
+        format!(
+            "{{\"instants\": [{}], \"contingency\": {}, \"initial_margin_mw\": {},              \"final_margin_mw\": {}, \"leaves\": {}, \"network_actions\": [{}],              \"setpoints\": [{}]}}",
+            instants.join(", "),
+            match contingency {
+                Some(c) => format!("{:?}", crac.contingencies[c].id),
+                None => "null".to_string(),
+            },
+            perimeter.initial_margin_mw,
+            perimeter.final_margin_mw,
+            perimeter.leaves,
+            actions.join(", "),
+            setpoints.join(", ")
+        )
+    };
+
+    let mut body = vec![format!("\n  {}", one(&plan.preventive, None))];
+    for scenario in &plan.scenarios {
+        for perimeter in &scenario.perimeters {
+            body.push(format!("\n  {}", one(perimeter, Some(scenario.contingency))));
+        }
+    }
+    // Absent unless asked for, rather than present and null: a consumer that
+    // never passed `--validate-ac` should not have to distinguish "AC said
+    // nothing" from "AC was never run".
+    let ac = match validation {
+        None => String::new(),
+        Some(v) => {
+            use gridoxide::rao::validate::Verdict;
+            let rows: Vec<String> = v
+                .perimeters
+                .iter()
+                .map(|p| {
+                    let verdict = match &p.verdict {
+                        Verdict::Accepted => "accepted".to_string(),
+                        Verdict::Diverged => "diverged".to_string(),
+                        Verdict::Insecure { .. } => "insecure".to_string(),
+                        Verdict::Regressed { .. } => "regressed".to_string(),
+                    };
+                    format!(
+                        "\n   {{\"instants\": [{}], \"dc_margin_mw\": {}, \"ac_margin_mw\": {}, \"verdict\": {:?}}}",
+                        p.states
+                            .iter()
+                            .map(|s| format!("{:?}", crac.instants[s.instant].id))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        p.dc_margin_mw,
+                        p.ac_margin_mw,
+                        verdict
+                    )
+                })
+                .collect();
+            format!(
+                ",\n \"ac_validation\": {{\"accepted\": {}, \"ac_margin_mw\": {}, \"perimeters\": [{}\n  ]}}",
+                v.is_accepted(),
+                v.ac_margin_mw,
+                rows.join(",")
+            )
+        }
+    };
+
+    format!(
+        "{{\n \"secure\": {},\n \"initial_margin_mw\": {},\n \"final_margin_mw\": {},\n          \"pulled_forward\": {},\n \"perimeters\": [{}\n ]{}\n}}",
+        plan.is_secure(),
+        plan.initial_margin_mw,
+        plan.final_margin_mw,
+        plan.pulled_forward.len(),
+        body.join(","),
+        ac
+    )
+}
+
+#[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
+fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
+    Err("rao needs the `rao` feature and an importer (`ucte` or `iidm`); \
+         rebuild with `--features rao,ucte`"
+        .to_string())
 }

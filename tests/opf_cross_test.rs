@@ -5,8 +5,7 @@
 //! solvers *must* agree. That makes this a far sharper instrument than most
 //! cross-tool comparisons: a disagreement is a bug in one of them, not a
 //! modelling convention, not a different local optimum, not a tolerance
-//! question. `plans/OPF_PLAN.md` §7.4 counts it as a validation gate in its
-//! own right.
+//! question. It is a validation gate in its own right.
 //!
 //! What it does **not** catch is worth stating as plainly, because the
 //! temptation is to read agreement as correctness. Both backends receive the

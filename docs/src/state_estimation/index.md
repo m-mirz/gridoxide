@@ -42,6 +42,10 @@ G \, \Delta x = H^{T} W r, \qquad G = H^{T} W H, \qquad r = z - h(x)
 
 where \\(H = \partial h / \partial x\\) is the measurement Jacobian. This is Gauss-Newton.
 
+[A worked example](./worked_example.md) carries all of that through on three buses and three
+measurements, with every intermediate — \\(H\\), \\(W\\), \\(G\\), the residuals, the chi-squared
+statistic and the normalized residuals — small enough to check by hand.
+
 ## How this differs from the power-flow Newton loop
 
 The two loops look alike and are not the same.

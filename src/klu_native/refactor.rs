@@ -135,8 +135,7 @@ pub fn refactor(
     // factorization established and are left untouched, matching
     // KLU_refactor's own behavior (Numeric->Pnum/Pinv are read, never
     // rewritten, aside from the pre-existing scale-factor permutation this
-    // port hasn't wired in yet -- see scale.rs's module doc comment on
-    // Phase 7).
+    // port hasn't wired in yet -- see scale.rs's module doc comment).
     //
     // Apply the (unchanged) final numeric pivot row permutation to the new
     // off-diagonal entries, exactly as `factor::factor` does for its own.

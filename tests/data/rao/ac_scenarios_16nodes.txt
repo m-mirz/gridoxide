@@ -1,0 +1,105 @@
+# The AC half of the external gate on `common/TestCase16Nodes.uct` — 16 buses,
+# 27 branches, four countries, and the network the largest single block of the
+# reference's scenarios is written against. Scenario ids from powsybl-open-rao's
+# own Cucumber suite, read from tests/data/benchmark-grids/powsybl-open-rao/features/
+# by tests/rao_cucumber_test.rs. `ac_scenarios.txt` is the same selection on the
+# twelve-node case.
+#
+# The selection is every scenario in that suite that is `@ac` and `@rao`, uses a
+# JSON CRAC and this network, and needs none of loop flows, relative margins,
+# costly optimization, HVDC, second-preventive or MARMOT — the features
+# `src/rao/` does not implement. That is 93.
+
+1.2.1.1    # 1_multi_step_optimisation/1_2_automatons/1_2_1_topo_after_preventive.feature
+1.2.1.2    # 1_multi_step_optimisation/1_2_automatons/1_2_1_topo_after_preventive.feature
+1.2.1.3    # 1_multi_step_optimisation/1_2_automatons/1_2_1_topo_after_preventive.feature
+1.2.2.2    # 1_multi_step_optimisation/1_2_automatons/1_2_2_range_actions_after_topo.feature
+1.2.2.3    # 1_multi_step_optimisation/1_2_automatons/1_2_2_range_actions_after_topo.feature
+1.2.2.4    # 1_multi_step_optimisation/1_2_automatons/1_2_2_range_actions_after_topo.feature
+1.2.2.5    # 1_multi_step_optimisation/1_2_automatons/1_2_2_range_actions_after_topo.feature
+1.3.2.1    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.2.2    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.2.3    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.2.4    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.2.5    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.2.6    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.2.7    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.2.8    # 1_multi_step_optimisation/1_3_curative/1_3_2_two_consecutive_states.feature
+1.3.3.1    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.2    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.3    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.4    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.5    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.6    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.7    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.8    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.3.9    # 1_multi_step_optimisation/1_3_curative/1_3_3_N_states.feature
+1.3.4.1    # 1_multi_step_optimisation/1_3_curative/1_3_4_dynamic_topo_availability.feature
+1.3.4.2    # 1_multi_step_optimisation/1_3_curative/1_3_4_dynamic_topo_availability.feature
+1.3.4.3    # 1_multi_step_optimisation/1_3_curative/1_3_4_dynamic_topo_availability.feature
+1.3.4.4    # 1_multi_step_optimisation/1_3_curative/1_3_4_dynamic_topo_availability.feature
+1.3.4.5    # 1_multi_step_optimisation/1_3_curative/1_3_4_dynamic_topo_availability.feature
+1.3.4.6    # 1_multi_step_optimisation/1_3_curative/1_3_4_dynamic_topo_availability.feature
+1.3.4.7    # 1_multi_step_optimisation/1_3_curative/1_3_4_dynamic_topo_availability.feature
+1.3.5.1    # 1_multi_step_optimisation/1_3_curative/1_3_5_dynamic_range_action_availability.feature
+1.3.5.2    # 1_multi_step_optimisation/1_3_curative/1_3_5_dynamic_range_action_availability.feature
+1.3.5.3    # 1_multi_step_optimisation/1_3_curative/1_3_5_dynamic_range_action_availability.feature
+1.3.5.4    # 1_multi_step_optimisation/1_3_curative/1_3_5_dynamic_range_action_availability.feature
+1.3.6.1    # 1_multi_step_optimisation/1_3_curative/1_3_6_mnecs.feature
+1.3.6.5    # 1_multi_step_optimisation/1_3_curative/1_3_6_mnecs.feature
+1.3.6.6    # 1_multi_step_optimisation/1_3_curative/1_3_6_mnecs.feature
+1.3.6.7    # 1_multi_step_optimisation/1_3_curative/1_3_6_mnecs.feature
+1.3.8.2    # 1_multi_step_optimisation/1_3_curative/1_3_8_relative_margin.feature
+1.3.9.1    # 1_multi_step_optimisation/1_3_curative/1_3_9_stop_criterion.feature
+1.3.9.2    # 1_multi_step_optimisation/1_3_curative/1_3_9_stop_criterion.feature
+1.3.9.3    # 1_multi_step_optimisation/1_3_curative/1_3_9_stop_criterion.feature
+1.3.9.4    # 1_multi_step_optimisation/1_3_curative/1_3_9_stop_criterion.feature
+1.4.4.1    # 1_multi_step_optimisation/1_4_second_preventive_rao/1_4_4_advanced_run_conditions.feature
+1.4.4.2    # 1_multi_step_optimisation/1_4_second_preventive_rao/1_4_4_advanced_run_conditions.feature
+2.2.1.5.1  # 2_remedial_actions/2_2_range_actions_optimisation/2_2_1_pst_range_actions/2_2_1_5_pst_nb_limit.feature
+2.2.1.5.2  # 2_remedial_actions/2_2_range_actions_optimisation/2_2_1_pst_range_actions/2_2_1_5_pst_nb_limit.feature
+2.2.1.5.3  # 2_remedial_actions/2_2_range_actions_optimisation/2_2_1_pst_range_actions/2_2_1_5_pst_nb_limit.feature
+2.2.1.5.4  # 2_remedial_actions/2_2_range_actions_optimisation/2_2_1_pst_range_actions/2_2_1_5_pst_nb_limit.feature
+2.2.1.5.5  # 2_remedial_actions/2_2_range_actions_optimisation/2_2_1_pst_range_actions/2_2_1_5_pst_nb_limit.feature
+2.2.1.5.6  # 2_remedial_actions/2_2_range_actions_optimisation/2_2_1_pst_range_actions/2_2_1_5_pst_nb_limit.feature
+2.2.1.5.7  # 2_remedial_actions/2_2_range_actions_optimisation/2_2_1_pst_range_actions/2_2_1_5_pst_nb_limit.feature
+2.4.1.1    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.1.2    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.1.3    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.1.4    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.1.5    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.1.6    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.1.7    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.1.8    # 2_remedial_actions/2_4_usage_rules/2_4_1_on_constraint.feature
+2.4.2.1    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.2.2    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.2.3    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.2.4    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.2.5    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.2.6    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.2.7    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.2.8    # 2_remedial_actions/2_4_usage_rules/2_4_2_on_constraint_country.feature
+2.4.3.1    # 2_remedial_actions/2_4_usage_rules/2_4_3_advanced.feature
+2.4.3.2    # 2_remedial_actions/2_4_usage_rules/2_4_3_advanced.feature
+2.6.1.1    # 2_remedial_actions/2_6_ra_usage_limits/2_6_1_max_topo_per_tso.feature
+2.6.1.2    # 2_remedial_actions/2_6_ra_usage_limits/2_6_1_max_topo_per_tso.feature
+2.6.1.3    # 2_remedial_actions/2_6_ra_usage_limits/2_6_1_max_topo_per_tso.feature
+2.6.1.4    # 2_remedial_actions/2_6_ra_usage_limits/2_6_1_max_topo_per_tso.feature
+2.6.1.5    # 2_remedial_actions/2_6_ra_usage_limits/2_6_1_max_topo_per_tso.feature
+2.6.1.6    # 2_remedial_actions/2_6_ra_usage_limits/2_6_1_max_topo_per_tso.feature
+2.6.2.1    # 2_remedial_actions/2_6_ra_usage_limits/2_6_2_max_xx_per_tso.feature
+2.6.2.2    # 2_remedial_actions/2_6_ra_usage_limits/2_6_2_max_xx_per_tso.feature
+2.6.2.3    # 2_remedial_actions/2_6_ra_usage_limits/2_6_2_max_xx_per_tso.feature
+2.6.2.4    # 2_remedial_actions/2_6_ra_usage_limits/2_6_2_max_xx_per_tso.feature
+2.6.2.5    # 2_remedial_actions/2_6_ra_usage_limits/2_6_2_max_xx_per_tso.feature
+2.6.2.6    # 2_remedial_actions/2_6_ra_usage_limits/2_6_2_max_xx_per_tso.feature
+2.6.3.1    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.2    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.3    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.4    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.5    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.6    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.7    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.8    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.9    # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature
+2.6.3.10   # 2_remedial_actions/2_6_ra_usage_limits/2_6_3_max_ra.feature

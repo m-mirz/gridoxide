@@ -229,8 +229,7 @@ mod ipopt {
 }
 
 /// Links a system HiGHS install and generates its FFI bindings, only when the
-/// `opf-highs` feature is enabled — see `src/opf/highs.rs` and
-/// `plans/OPF_PLAN.md`.
+/// `opf-highs` feature is enabled — see `src/opf/highs.rs`.
 ///
 /// Deliberately the same shape as [`pardiso`] below: nothing vendored, nothing
 /// compiled from source, bindings generated against the install's own header.

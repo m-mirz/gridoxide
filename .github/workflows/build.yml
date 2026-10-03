@@ -58,10 +58,58 @@ jobs:
     # does cover is the analytic battery in `tests/opf_ipm_test.rs` and the
     # published pglib objectives in `tests/opf_dc_test.rs`, neither of which
     # needs a second solver.
+    # `opf` covers the mixed-integer path too, since `opf::bnb` branches and
+    # bounds over the in-house interior-point solver and needs no system
+    # library. Before it existed every discrete question had to go to HiGHS, so
+    # that whole half was verified only where libhighs-dev happened to be
+    # installed — which is not here.
     - name: Build and test the optimization layer
       run: |
         cargo build --verbose --features opf
         cargo test --verbose --features opf
+    # `ucte` is in CI for the same reason `opf` and `capi` are, and with less
+    # excuse than either: UCTE-DEF is fixed-column text, so the importer pulls
+    # in no dependency at all — not even a parser crate.
+    #
+    # What the suite checks is not that files parse. It is that the imported
+    # network *solves to the same answer as pypowsybl*, against reference
+    # solutions committed as JSON under `tests/data/ucte/`, for networks read
+    # from the benchmark-grids submodule (fetched above). Those were generated
+    # once by `scripts/bench/ucte_reference.py`; the runner needs neither Python
+    # nor pypowsybl to check them, which is the whole point of committing them.
+    - name: Build and test the UCTE importer
+      run: |
+        cargo build --verbose --features ucte
+        cargo test --verbose --features ucte
+    # `iidm` costs one crate (quick-xml) and no system library, so it is in CI
+    # alongside `ucte`. It is built together with `ucte` because its strongest
+    # test needs both: three fixtures are pypowsybl exports of `.uct` files the
+    # UCTE suite has already checked, so gridoxide reads the same network
+    # through two parsers that share no code and the answers must agree.
+    - name: Build and test the IIDM importer
+      run: |
+        cargo build --verbose --features iidm
+        cargo test --verbose --features iidm,ucte
+    # Feature *unification* is its own failure mode, and the steps above cannot
+    # see it: each builds one feature at a time, while cargo builds whatever
+    # combination a consumer asks for. `iidm` and `cgmes` share quick-xml, and
+    # cimdecoder enables its `encoding` feature — which changes the shape of a
+    # public type. That combination compiled in neither step above and broke in
+    # the one nobody ran. This is that step.
+    # `rao` is pure Rust on serde, which the crate already depends on.
+    - name: Build and test the remedial-action layer
+      run: |
+        cargo build --verbose --features rao
+        cargo test --verbose --features rao
+        cargo test --verbose --features rao,ucte,iidm
+    # The external gate: `tests/rao_cucumber_test.rs` runs scenarios copied
+    # verbatim from powsybl-open-rao's own Cucumber suite and compares against
+    # expectations its authors wrote. It needs no network access and no Java —
+    # the scenarios, their CRACs and their parameter files are vendored — so it
+    # is an ordinary test, and it is the only check here that gridoxide did not
+    # write for itself.
+    - name: Build the CI-covered features together
+      run: cargo build --verbose --features cgmes,ucte,iidm,opf,rao
     # `capi` is built here for the same reason `opf` is: no system dependency.
     # It is pure Rust plus cbindgen, which cargo fetches like any other crate —
     # unlike klu/pardiso/opf-highs/opf-ipopt, which each need a library the

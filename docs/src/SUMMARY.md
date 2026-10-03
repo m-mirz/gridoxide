@@ -25,11 +25,14 @@
 # Optimal Power Flow
 
 - [The Optimal Power Flow Problem](./opf/index.md)
+- [Two Buses, One Congested Line](./opf/worked_example.md)
 
 # Short Circuit
 
 - [The Short-Circuit Problem](./short_circuit/index.md)
 - [Fault Types and Their Boundary Conditions](./short_circuit/faults.md)
+- [Symmetrical Components and the Fault Equations](./short_circuit/sequence.md)
+- [A Fault Current, by Hand](./short_circuit/worked_example.md)
 
 # State Estimation
 
@@ -37,11 +40,24 @@
 - [Measurements and What They Mean](./state_estimation/measurements.md)
 - [The Iterative-Linear Method](./state_estimation/iterative.md)
 - [Observability and Bad Data](./state_estimation/diagnostics.md)
+- [A Weighted Least Squares Estimate, Worked](./state_estimation/worked_example.md)
+
+# Remedial Action Optimization
+
+- [The Remedial Action Problem](./rao/index.md)
+- [CNECs, Thresholds and Margins](./rao/margins.md)
+- [The Linear Optimization of Range Actions](./rao/linear.md)
+- [The Search Tree and the CASTOR Decomposition](./rao/search.md)
 
 # Sparse Linear Solvers
 
 - [Backends and Factorization Reuse](./solvers/backends.md)
 - [Inside KLU: the Sparse Solve, Step by Step](./solvers/klu.md)
+
+# Data Import
+
+- [Reading UCTE-DEF Input](./import/ucte.md)
+- [Reading IIDM Input](./import/iidm.md)
 
 # CGMES Data Model
 
@@ -56,5 +72,6 @@
 # Reference
 
 - [Feature Comparison](./reference/feature_comparison.md)
+- [Datasets, Tools and Books](./reference/resources.md)
 - [Benchmarking and Profiling](./reference/benchmarking.md)
 - [Provenance and Licensing](./reference/provenance.md)

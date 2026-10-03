@@ -19,7 +19,7 @@
 //! the optimum. Convergence is therefore tested on the size of the *step*,
 //! not the residual. A converged estimate with a large `J(x)` is not a failure
 //! to converge; it means the measurements disagree with each other, which is
-//! what bad-data detection is for (phase 6).
+//! what bad-data detection is for.
 
 use crate::measurement::Measurement;
 use crate::solver::{JacobianBackend, LinearSolver};
@@ -99,7 +99,7 @@ pub struct SeReport {
     pub status: SeStatus,
     pub iterations: usize,
     /// `J(x) = ½·rᵀWr` at the final state — the quantity being minimized, and
-    /// the statistic phase 6's chi-squared test is built on.
+    /// the statistic bad-data detection's chi-squared test is built on.
     pub objective: f64,
     /// Largest `Δx` element of the final step, for diagnosing a run that hit
     /// `max_iter`.
@@ -118,7 +118,7 @@ pub struct SeReport {
     ///
     /// This is *structural* detection only — an all-zero column. A column that
     /// is nonzero but linearly dependent on others is just as unobservable and
-    /// is not caught here; that is phase 5's numerical analysis.
+    /// is not caught here; that is numerical observability analysis.
     pub unconstrained: Vec<usize>,
 }
 
@@ -593,7 +593,7 @@ mod tests {
     /// perfectly well determined — so the untouched columns are masked out and
     /// listed in `unconstrained` instead. Note this is structural detection
     /// only; a column that is present but linearly dependent still surfaces as
-    /// [`SeStatus::Singular`], which is what phase 5 exists to diagnose.
+    /// [`SeStatus::Singular`], which numerical observability analysis diagnoses.
     #[test]
     fn unobservable_unknowns_are_pinned_and_reported() {
         let (net, truth) = crate::se::tests::two_bus_net();

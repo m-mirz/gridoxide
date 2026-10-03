@@ -44,6 +44,10 @@ plus the generation box \\(P^{min}_g \le P_g \le P^{max}_g\\), the shedding box
 and the reference angle \\(\theta_{ref} = 0\\). Here \\(c_i\\) collects the constant
 contribution of any fixed phase shift \\(\alpha\\).
 
+[Two Buses, One Congested Line](./worked_example.md) writes that program out on the smallest network
+that has a price spread at all, and derives the locational marginal prices and the branch limit's
+shadow price from its optimality conditions.
+
 With quadratic costs this is a convex QP; with piecewise-linear costs it is an LP. Both go to
 the same solver through the same interface.
 
@@ -69,8 +73,7 @@ constraints, which the solver handles exactly.
 > `if let Some(CostCurve::Polynomial { .. })`, so a piecewise curve fell through in silence and
 > left the generator's objective coefficient at zero — it looked **free**, and the optimizer
 > dispatched it first. Wrong dispatch, wrong cost, no error, reachable straight from the
-> documented converter. What hid it was that every committed fixture used model 2; the plan had
-> already flagged that as the reason the feature could not be claimed. `case5_pjm_pwl` is now
+> documented converter. What hid it was that every committed fixture used model 2. `case5_pjm_pwl` is now
 > generated as an *exactly equivalent* rewrite of `case5_pjm` — every generator there has
 > \\(c_2 = 0\\), so three collinear points reproduce the cost precisely while still producing two
 > segments — which makes the test a question with a known answer.
@@ -488,14 +491,79 @@ print(f"voltage range: {min(r.magnitudes):.4f} – {max(r.magnitudes):.4f} pu")
 at an infeasible point is not a better result, so an objective reported without it can be badly
 misleading.
 
+## Integrality, and which backend can honour it
+
+`LinearProgram` carries a `col_integral` vector. Empty means every column is continuous, which is
+what every caller written before it existed produces, so adding it changed nothing:
+
+```rust
+let mut lp = LinearProgram::new(2);
+lp.set_binary(1);          // integral, and bounded to [0, 1]
+lp.has_integers();         // true
+```
+
+`set_binary` sets the bounds as well as the type deliberately. An "integral but unbounded"
+indicator is not a binary, and the big-M constraints written against one are wrong in exactly the
+cases where the bound would have bound.
+
+**Integrality is not a hint.** A backend that cannot honour it refuses the problem:
+
+| Backend | Integrality |
+|---|---|
+| `opf::ipm` (default, in CI) | **Refuses** — `OpfError::IntegralityUnsupported` |
+| `opf::bnb` (in CI) | Honoured, by branch and bound over `ipm` |
+| `opf::highs` (`opf-highs`) | Honoured, via HiGHS's branch-and-cut |
+
+A barrier method has no way to enforce an integer, and returning the relaxation would be the worst
+available answer: a phase shifter cannot sit at tap 4.3, and reporting that it should is a plausible
+number nobody can act on. Refusing is what lets a caller discover at the boundary that it needs the
+other backend.
+
+`opf::bnb::BranchAndBound` is what makes a discrete problem answerable without a system library, and
+therefore testable in CI:
+
+```rust
+let mut solver = BranchAndBound::new();      // over the in-house interior-point method
+let solution = solver.solve(&program)?;
+solver.nodes();                              // what the search cost
+solver.gap();                                // 0.0 means proven optimal
+```
+
+Depth-first, diving toward the rounded value, branching on the most fractional column. Best-first
+proves optimality with fewer nodes but spends a long time with no integer solution at all — and an
+incumbent is what lets the bound prune anything. The budget is a **node count** rather than a time
+limit, because a search that answers differently depending on machine speed cannot be
+regression-tested.
+
+Two things it is careful about. An exhausted tree *proves* optimality, so the gap is zero — the root
+relaxation's bound is a lower bound on the optimum, not evidence about the answer, and reporting the
+distance to it would call an exact result 5% uncertain. And integral columns come back as *exact*
+integers: the relaxation lands within tolerance and no closer, so handing back 3.9999999997 makes
+every downstream `as i32` a truncation the caller did not know it was making.
+
+No cutting planes, no presolve, no heuristics beyond the dive. For a few dozen discrete taps and
+activation indicators that is enough; a large or hard MILP should still go to HiGHS, and the two are
+cross-checked against each other on 60 randomised instances in `tests/opf_milp_test.rs`.
+
+Two further rules, both enforced by `validate`:
+
+- **No mixed-integer quadratic programs.** Integrality plus a Hessian is rejected outright, because
+  neither backend solves one and a silently linearized answer is worse than an error.
+- **A MIP reports no duals.** HiGHS fills the dual arrays anyway, from the final LP relaxation at the
+  winning node. Those are not shadow prices of the integer problem, so they are cleared rather than
+  passed through as plausible-looking numbers.
+
 ## What is not here yet
 
 **Transformer taps and phase shifters as decision variables.** Both are read and held fixed.
 Taps are genuinely discrete, so a continuous relaxation gives a bound that needs rounding and a
 re-solve before anyone acts on it.
 
-**Unit commitment.** On/off decisions make this a mixed-integer program. HiGHS solves MIPs, so
-the backend would carry it, but nothing above the solver boundary models it.
+**Unit commitment.** On/off decisions make this a mixed-integer program. The solver boundary now
+*can* express one — `LinearProgram::col_integral`, with `set_binary` for an indicator — and the
+HiGHS backend honours it through its branch-and-cut solver. What is still missing is the modelling:
+nothing in `opf::dc` or `opf::ac` builds those columns. See
+[Integrality](#integrality-and-which-backend-can-honour-it).
 
 **Security constraints.** N-1 constrained OPF needs contingency cases inside the optimization.
 The [DC outage factors](../powerflow/dc.md#sensitivity-factors-ptdf-and-lodf) are the screening

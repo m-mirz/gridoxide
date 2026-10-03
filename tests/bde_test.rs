@@ -1,10 +1,8 @@
 //! Proves block-diagonal embedding on **real sparse code**, on the CPU.
 //!
-//! `plans/GPU_PLAN.md` §3 property 2 claims that stacking B scenarios into one
-//! block-diagonal matrix and taking a single sparse LU is equivalent to B
-//! independent solves — the claim that lets the AMD path work without a
-//! batched refactorization API, and the architectural load-bearing wall under
-//! Phases 3-5.
+//! Stacking B scenarios into one block-diagonal matrix and taking a single
+//! sparse LU should be equivalent to B independent solves — the claim that
+//! lets an AMD GPU path work without a batched refactorization API.
 //!
 //! `scripts/bench/jax_oracle.py` established this with *dense* linear algebra.
 //! These tests extend it to the sparse backends the GPU path will mirror,

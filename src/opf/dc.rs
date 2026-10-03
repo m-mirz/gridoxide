@@ -349,8 +349,8 @@ impl DcOpf {
         // piecewise-linear function is the upper envelope of its segments, so
         // `min f(p)` is `min z` subject to `z ≥ (line of segment i)(p)` for
         // every segment — turning a curve the objective cannot express into
-        // ordinary rows the objective can. That is exactly why §5.2 of
-        // `plans/OPF_PLAN.md` insisted on an LP-capable solver.
+        // ordinary rows the objective can. That is why the solver boundary
+        // must handle LPs, not only QPs.
         //
         // Exactness needs convexity, which `is_convex` has already required
         // above: on a non-convex curve the same rows describe the convex

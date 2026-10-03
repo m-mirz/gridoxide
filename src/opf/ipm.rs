@@ -267,6 +267,16 @@ fn norm_inf(v: &[f64]) -> f64 {
 impl Solver for IpmSolver {
     fn solve(&mut self, problem: &LinearProgram) -> Result<Solution, OpfError> {
         problem.validate()?;
+        // A barrier method has no way to honour integrality, and quietly
+        // returning the relaxation would be the worst available answer: a tap
+        // of 4.3 looks like a result and is not one. Refusing is what lets a
+        // caller discover, at the boundary, that it needs the MIP backend.
+        if problem.has_integers() {
+            return Err(OpfError::IntegralityUnsupported {
+                backend: "interior-point",
+                columns: problem.n_integers(),
+            });
+        }
         self.iterations = 0;
 
         let p = Internal::build(problem);

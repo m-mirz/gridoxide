@@ -121,3 +121,22 @@ To pick up a newer cimoxide schema or generator change:
 
 The CGMES conformance fixtures under `tests/data/cgmes/` are referenced via a git submodule rather
 than committed, because of their own licensing — see `tests/data/cgmes/README.md`.
+
+The UCTE, IIDM and CRAC files the importer and remedial-action tests read, and the Cucumber suite
+of the external gate, come from [powsybl-open-rao](https://github.com/powsybl/powsybl-open-rao) and
+carry its **MPL-2.0** licence. They are not in this repository. They live in the `benchmark-grids`
+submodule under `powsybl-open-rao/`, pinned to an upstream commit, with that repository's
+`PROVENANCE.md` giving the upstream path of each part. `tests/data/openrao-fixtures.txt` names the
+files the tests use outside the gate, and `tests/data/rao/*.txt` select the gate's scenarios by id.
+
+What this repository does keep is its own work: those scenario lists, and the pypowsybl reference
+solutions under `tests/data/ucte/` and `tests/data/iidm/`, which gridoxide generated with
+`scripts/bench/{ucte,iidm}_reference.py`. MPL-2.0 is a per-file copyleft and does not reach the
+code that reads the files, so `Cargo.toml`'s `license` field is unaffected either way.
+
+Worth separating from that: `src/ucte.rs` itself is **not** a translation of powsybl-open-rao or of
+powsybl-core's `ucte-network` module. The column positions and the tap-changer formulae in it were
+established from the format specification and then *verified against* those implementations — the
+`.pypowsybl.json` files record the verification. Reading a reference to check an answer is not the
+same as transcribing it, and only the latter would carry the licence across. The same distinction
+applies to `src/klu_native/`, which **is** a translation and is licensed accordingly above.

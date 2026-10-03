@@ -1053,8 +1053,7 @@ mod tests {
     ///
     /// This is not hypothetical. It made Svedala's node-breaker import report
     /// `Singular`, and SmallGrid's fail under `RetainAll` — which looked like
-    /// the switch-count ceiling `NODE_BREAKER_PLAN.md` §4.1 predicts, and was
-    /// not.
+    /// a switch-count ceiling, and was not.
     #[test]
     fn a_de_energized_placeholder_is_not_a_reference_bus() {
         let buses = vec![

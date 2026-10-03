@@ -11,7 +11,7 @@
 //! description — connectivity nodes and the switches between them — and derive
 //! an electrical bus view from it under a [`RetentionPolicy`]. That is the
 //! layer that lets a switch keep its identity instead of being consumed at
-//! import, which is what `plans/NODE_BREAKER_PLAN.md` is about.
+//! import.
 //!
 //! The distinction that matters: `reduction` merges *unconditionally*, so a
 //! merged connection is gone. `bus_view` merges *selectively*, so a retained
@@ -37,9 +37,7 @@ pub use bus_view::{bus_view, BusView, RetainedSwitch, RetentionPolicy};
 pub use model::{NodeBreakerTopology, NodeIdx, Switch, SwitchIdx, SwitchKind};
 
 // The reduction layer's items keep their historical `topology::` paths, so no
-// existing caller moves. `plans/NODE_BREAKER_PLAN.md` §3 asks for exactly this
-// ("keeping `UnionFind`/`merge_groups`/`clamp_branch_impedance` where they are
-// as `topology::reduction`").
+// existing caller moves.
 pub use reduction::{
     clamp_branch_impedance, merge_groups, union_all, UnionFind, IDEAL_CONNECTION_Y,
     ZERO_IMPEDANCE_THRESHOLD,

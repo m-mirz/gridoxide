@@ -17,8 +17,7 @@
 //! It was reachable from the documented workflow: `gridoxide-matpower`
 //! converts model 1 into `{"model": "piecewise_linear", ...}`, and `OpfData`
 //! deserializes it happily. What kept it hidden was that every committed
-//! fixture used model 2, which `plans/OPF_PLAN.md` §10 had already flagged as
-//! the reason the feature could not be claimed.
+//! fixture used model 2.
 //!
 //! # How it is tested
 //!

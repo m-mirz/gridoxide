@@ -22,8 +22,11 @@ docstring explains why these cases and not `benchmark-grids/matpower/`.
 - **`CGMES-Test-Configurations/`** — ENTSO-E conformance models (MicroGrid and
   friends) used by the `--features cgmes` tests. See below.
 - **`benchmark-grids/`** — MATPOWER cases up to `case9241pegase`, used by the
-  benchmark suite in `scripts/bench/`, and the pglib-opf cases the OPF tests
-  and `injection_hessian_test.rs` need. See that directory's `README.md`.
+  benchmark suite in `scripts/bench/`; the pglib-opf cases the OPF tests
+  and `injection_hessian_test.rs` need; and powsybl-open-rao's networks,
+  CRACs and Cucumber suite, which the UCTE, IIDM and RAO tests read through
+  `tests/openrao/mod.rs` and `openrao-fixtures.txt`. See that directory's
+  `README.md`.
 
 Neither is initialized by a plain `git clone`. CI fetches `benchmark-grids/`
 but not `CGMES-Test-Configurations/`. Pull one in when you need it:
