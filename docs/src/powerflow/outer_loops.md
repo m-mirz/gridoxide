@@ -120,8 +120,7 @@ count still balances, one magnitude removed against one reactive equation remove
 | remote control, \(m\) machines | \(|V|\) at the controlled bus | \(Q\) at each of \(m\) controllers |
 
 The third row is short by \(m-1\) equations, which is what powsybl's `DISTR_Q` supplies. No
-vendored fixture has that configuration, so gridoxide does not implement it — see
-`plans/REACTIVE_DISPATCH_PLAN.md`.
+vendored fixture has that configuration, so gridoxide does not implement it.
 
 Implementing the second row *exactly* means the unknown layout stops being derivable from
 `BusType`, which is the assumption the Jacobian assembly, the Newton loop, the sensitivities, the

@@ -24,8 +24,7 @@
 //! holding one remote bus — needs `n−1` extra equations inside the Newton
 //! system (powsybl's `DISTR_Q`) because each controller bus then has its own
 //! reactive unknown. No vendored fixture has that configuration, so it is not
-//! built here. See `plans/REACTIVE_DISPATCH_PLAN.md` §2 for the measurement and
-//! §6 for the formulation when a fixture appears.
+//! built here.
 
 use crate::network::{power_injections, YBusSparse};
 use crate::types::{Bus, RegulatingMachine};

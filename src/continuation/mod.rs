@@ -376,8 +376,7 @@ fn finished_ybus(
 
 /// Traces the P-V curve from the base case to the nose.
 ///
-/// See the module docs for the shape of the answer and
-/// `plans/CONTINUATION_PLAN.md` for the design.
+/// See the module docs for the shape of the answer.
 pub fn run_continuation(
     buses: Vec<Bus>,
     lines: &[Line],

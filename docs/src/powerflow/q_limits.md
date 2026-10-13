@@ -166,8 +166,7 @@ another sits idle.
 Every shared-control case in the vendored CGMES corpus is machines sitting at the bus they regulate,
 so that bus is an ordinary `PV` bus with a single injection. The genuinely different problem —
 several machines at *different* buses holding one remote bus — needs extra equations inside the
-Newton system, and is not built, because no fixture exercises it. See
-`plans/REACTIVE_DISPATCH_PLAN.md`.
+Newton system, and is not built, because no fixture exercises it.
 
 ### What the attribution exposed
 

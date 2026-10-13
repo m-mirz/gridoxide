@@ -129,7 +129,7 @@ pub struct Line3Ph {
 /// Note that `at_bus` and `controls_bus` may differ — a machine regulating the
 /// far side of its own step-up transformer is ordinary. Where they differ the
 /// reactive power is produced at `at_bus`, which is *not* where gridoxide's
-/// solver currently puts it; see `plans/REACTIVE_DISPATCH_PLAN.md` §5.
+/// solver currently puts it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegulatingMachine {
     /// The source document's own identifier, so a caller can match this back to

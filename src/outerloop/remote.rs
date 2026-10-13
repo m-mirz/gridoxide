@@ -50,7 +50,7 @@
 //! (`ac_sensitivity` would need a voltage-setpoint variable, which it has no
 //! other caller for) is the better answer once a second fixture asks for it;
 //! deriving it for one case would be building the general thing on a sample of
-//! one, which §2 of `plans/REACTIVE_DISPATCH_PLAN.md` is a warning about.
+//! one.
 
 use crate::types::{Bus, BusType, RegulatingMachine};
 
