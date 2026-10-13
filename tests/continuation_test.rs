@@ -22,6 +22,8 @@ use gridoxide::network::{build_ybus, effective_injection, power_injections};
 use gridoxide::solver::{JacobianBackend, PowerFlowOptions};
 use gridoxide::types::{Bus, BusType, Line};
 
+mod pglib;
+
 fn bus(idx: usize, bus_type: BusType, vm: f64, p: f64, q: f64) -> Bus {
     Bus {
         idx,
@@ -614,10 +616,7 @@ fn ieee_fixtures_have_a_recorded_nose() {
         ("pglib_opf_case14_ieee", 2.5361, 0.6018),
         ("pglib_opf_case30_ieee", 1.6945, 0.4664),
     ] {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/pglib-opf")
-            .join(format!("{name}.json"));
-        let raw = std::fs::read_to_string(&path).expect("committed pglib fixture");
+        let raw = pglib::read(name, ".json");
 
         for (enforce, expected) in [(false, expected_free), (true, expected_limited)] {
             let input: PgmInput = serde_json::from_str(&raw).expect("parse");
@@ -690,9 +689,7 @@ fn the_default_parametrization_has_a_sparse_border_row() {
 fn a_whole_trace_needs_few_reanalyses() {
     use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf/pglib_opf_case118_ieee.json");
-    let raw = std::fs::read_to_string(&path).expect("committed pglib fixture");
+    let raw = pglib::read("pglib_opf_case118_ieee", ".json");
     let input: PgmInput = serde_json::from_str(&raw).expect("parse");
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 100e6, 50.0);
     let direction = LoadingDirection::scale_loads(&buses);

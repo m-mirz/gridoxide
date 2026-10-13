@@ -13,6 +13,7 @@
 //! and completely independent of everything under test.
 
 mod common;
+mod pglib;
 
 use gridoxide::continuation::{
     run_continuation, ContinuationOptions, CriticalPointKind, LoadingDirection,
@@ -23,10 +24,7 @@ use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType, Line};
 
 fn fixture(name: &str) -> (Vec<Bus>, Vec<gridoxide::types::Line>, Vec<gridoxide::types::Transformer>) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf")
-        .join(format!("{name}.json"));
-    let raw = std::fs::read_to_string(path).expect("committed pglib fixture");
+    let raw = pglib::read(name, ".json");
     let input: PgmInput = serde_json::from_str(&raw).expect("parse");
     pgm_to_buses_and_branches(input, 100e6, 50.0)
 }

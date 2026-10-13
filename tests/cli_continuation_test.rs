@@ -8,9 +8,10 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+mod pglib;
+
 fn case14() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf/pglib_opf_case14_ieee.json")
+    pglib::path("pglib_opf_case14_ieee", ".json")
 }
 
 fn run(args: &[&str]) -> Output {

@@ -1,18 +1,42 @@
-//! Continuation on the committed pglib fixtures: the loadability limit, the
+//! Continuation on the pglib fixtures: the loadability limit, the
 //! reactive-limit events on the way, and the weakest buses at the end.
 //!
 //! The numbers `tests/continuation_test.rs` records as baselines come from
-//! here. Run with paths to trace other networks:
+//! here. With no arguments the cases are converted from the `benchmark-grids`
+//! submodule by `tests/data/pglib_opf.py`, the same as the tests do, which needs
+//! a Python with numpy (`python3` unless `PYTHON` names another). Run with paths
+//! to trace other networks:
 //! `cargo run --release --example cpf_probe -- case1354pegase.json`
 use gridoxide::continuation::{run_continuation, ContinuationOptions, LoadingDirection};
 use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
 use gridoxide::solver::PowerFlowOptions;
 use std::time::Instant;
 
+/// Converts the pglib cases into a scratch directory and returns it. Examples
+/// get no `CARGO_TARGET_TMPDIR`, so this is the system temp directory rather
+/// than the per-binary one `tests/pglib` uses.
+fn convert_pglib() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("gridoxide-cpf-probe");
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib_opf.py");
+    let out = std::process::Command::new(&python)
+        .arg(&script)
+        .arg(&dir)
+        .output()
+        .unwrap_or_else(|e| panic!("running {python}: {e}; set PYTHON to a Python with numpy"));
+    assert!(
+        out.status.success(),
+        "{} failed (needs numpy and the benchmark-grids submodule):\n{}",
+        script.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    dir
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths: Vec<String> = if args.is_empty() {
-        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib-opf");
+        let base = convert_pglib();
         ["pglib_opf_case5_pjm", "pglib_opf_case14_ieee", "pglib_opf_case30_ieee", "pglib_opf_case118_ieee"]
             .iter()
             .map(|n| base.join(format!("{n}.json")).to_string_lossy().into_owned())
