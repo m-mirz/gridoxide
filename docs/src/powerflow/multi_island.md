@@ -160,7 +160,7 @@ Each of those functions does, internally:
    computation `newton_raphson_cached`'s own convergence check already uses to just that
    component's bus indices.
 
-`newton_raphson_enforcing_q_limits` composes on top the same way it always did: each of
+`outerloop::ReactiveLimits` composes on top the same way it always did: each of
 its outer PV→PQ-switching passes calls `PersistentSolver::solve` (now returning
 `Vec<IslandReport>`) and returns that same `Vec<IslandReport>` — from its last pass once
 Q-limits have stabilized, or immediately if some island's own status is `Singular`/

@@ -428,6 +428,32 @@ enum gridoxide_status gridoxide_powerflow_solve_distributing_slack(struct gridox
                                                                    size_t n_factors);
 
 /**
+ * Solves with **both** controls active: reactive limits and distributed slack
+ * in one solve.
+ *
+ * This is the capability the two single-control entry points above cannot
+ * express between them — before the outer-loop layer existed a caller picked
+ * one, and a network that needs both (a real transmission grid usually does)
+ * could not be solved correctly at all.
+ *
+ * `enforce_q_limits` is a boolean. `slack_factors` may be null, which means
+ * "no distributed slack" when `distribute_slack` is 0 and "an equal share for
+ * every `Slack` and `PV` bus" when it is 1. Both controls off is an ordinary
+ * solve.
+ *
+ * # Safety
+ *
+ * As [`gridoxide_powerflow_solve`]; `slack_factors`, if non-null, must point
+ * to `n_factors` readable doubles.
+ */
+enum gridoxide_status gridoxide_powerflow_solve_with_controls(struct gridoxide_powerflow *handle,
+                                                              int32_t enforce_q_limits,
+                                                              int32_t distribute_slack,
+                                                              const double *slack_factors,
+                                                              size_t n_factors,
+                                                              size_t max_outer_iterations);
+
+/**
  * Number of buses.
  *
  * # Safety

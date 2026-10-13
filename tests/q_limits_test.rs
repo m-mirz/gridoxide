@@ -1,6 +1,27 @@
-use gridoxide::network::{build_ybus, linear_initial_guess, power_injections};
-use gridoxide::solver::{newton_raphson, newton_raphson_enforcing_q_limits, IslandStatus, JacobianBackend};
+use gridoxide::network::{build_ybus, linear_initial_guess, power_injections, YBusSparse};
+use gridoxide::outerloop::{OuterLoop, ReactiveLimits, SolveContext};
+use gridoxide::solver::{newton_raphson, IslandReport, IslandStatus, JacobianBackend};
 use gridoxide::types::{Bus, BusType, Line};
+
+/// Reactive-limit enforcement is one outer loop among the list
+/// [`gridoxide::outerloop::solve_with_loops`] drives. This wraps the set-up so
+/// the assertions below stay about the physics — it is the whole of what the
+/// deleted `newton_raphson_enforcing_q_limits` entry point used to do.
+fn enforcing_q_limits(
+    buses: &mut [Bus],
+    ybus: &YBusSparse,
+    tol: f64,
+    max_iter: usize,
+    backend: JacobianBackend,
+    max_outer_iter: usize,
+) -> Vec<IslandReport> {
+    let mut ybus = ybus.clone();
+    let mut qlim = ReactiveLimits::new();
+    let mut ctx = SolveContext::new(buses, &mut ybus);
+
+    let mut list: Vec<&mut dyn OuterLoop> = vec![&mut qlim];
+    gridoxide::outerloop::solve_with_loops(&mut ctx, tol, max_iter, backend, &mut list, max_outer_iter).0
+}
 
 /// The same 3-bus slack/PV/PQ network as `tests/powerflow_test.rs`, except
 /// bus 1's `q_min` is tightened to -0.25 (below the -0.317 pu it actually
@@ -57,7 +78,7 @@ fn test_q_limit_enforcement_switches_pv_to_pq() {
         let (mut buses, lines) = three_bus_tight_q_min();
         let ybus = build_ybus(3, &lines, &[]).finish();
         linear_initial_guess(&mut buses, &ybus);
-        let islands = newton_raphson_enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, backend, 10);
+        let islands = enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, backend, 10);
 
         assert_eq!(islands.len(), 1, "backend {backend:?}");
         assert_eq!(islands[0].status, IslandStatus::Converged, "backend {backend:?}");
@@ -103,7 +124,7 @@ fn test_q_limit_enforcement_no_violation_matches_unconstrained() {
     ];
     let ybus = build_ybus(3, &lines, &[]).finish();
     linear_initial_guess(&mut buses, &ybus);
-    let islands = newton_raphson_enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, JacobianBackend::Scalar, 10);
+    let islands = enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, JacobianBackend::Scalar, 10);
 
     assert_eq!(islands.len(), 1);
     assert_eq!(islands[0].status, IslandStatus::Converged);

@@ -129,7 +129,7 @@ it would take your program down from inside a library it merely linked. Every
 exported function runs its body inside `catch_unwind` and reports
 `GRIDOXIDE_STATUS_PANIC` instead.
 
-That is not hypothetical. `newton_raphson_distributing_slack` asserts on a
+That is not hypothetical. `outerloop::DistributedSlack` asserts on a
 wrong-length participation vector, `YBus::finish` expects well-formed triplets,
 and the document conversion unwraps in places. The ABI checks what it can up
 front and reports `INVALID_ARGUMENT` — a far more useful answer — and the guard

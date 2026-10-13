@@ -28,14 +28,19 @@ schedule. Then:
 4. Solve again, and repeat until \\(|\Delta|\\) is below tolerance.
 
 ```rust
-use gridoxide::solver::{newton_raphson_distributing_slack, JacobianBackend, SlackDistribution};
+use gridoxide::outerloop::{DistributedSlack, OuterLoop, SlackDistribution, SolveContext};
+use gridoxide::solver::JacobianBackend;
 
 // Every generator bus — Slack and PV — takes an equal share.
 let distribution = SlackDistribution::uniform(&buses);
 
-let (islands, report) = newton_raphson_distributing_slack(
-    &mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
-);
+let mut slack = DistributedSlack::new(distribution);
+let (islands, _) = {
+    let mut ctx = SolveContext::new(&mut buses, &mut ybus);
+    let mut list: Vec<&mut dyn OuterLoop> = vec![&mut slack];
+    gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 30, JacobianBackend::Scalar, &mut list, 20)
+};
+let report = slack.report();
 
 println!("moved {:.3} pu off the slack", report.shift.iter().sum::<f64>());
 ```
@@ -143,6 +148,6 @@ literally the degenerate case.
 gridoxide does not implement area interchange control. What it would need is not a new algorithm
 but three additions: an area assignment per bus, a scheduled interchange per area, and a
 per-area mismatch computed from tie-line flows in place of the slack deviation used here. The
-per-island normalization already in `newton_raphson_distributing_slack` is the same shape that
+per-island normalization already in `outerloop::DistributedSlack` is the same shape that
 generalizes to per-area — islands and areas are both just partitions of the bus set with their
 own balance target.

@@ -39,8 +39,9 @@ use crate::ratings::current_to_power_pu;
 use crate::batch::{BatchSolver, Scenario};
 use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
 use crate::network::{build_ybus_with_outages, stamp_shunts};
+use crate::outerloop::SlackDistribution;
 use crate::solver::{
-    newton_raphson_distributing_slack, IslandStatus, JacobianBackend, SlackDistribution,
+    IslandStatus, JacobianBackend,
 };
 use crate::types::{Bus, Line, Transformer};
 use crate::network::ShuntAdm;
@@ -981,14 +982,21 @@ fn solve_distributing_slack(
                 build_ybus_with_outages(n, network.lines, network.transformers, &outaged);
             stamp_shunts(&mut ybus, ac.shunts);
             let mut buses = network.buses.to_vec();
-            let (islands, _) = newton_raphson_distributing_slack(
-                &mut buses,
-                &ybus.finish(),
-                ac.tol,
-                ac.max_iter,
-                ac.backend,
-                &distribution,
-            );
+            let mut ybus = ybus.finish();
+            let mut slack =
+                crate::outerloop::DistributedSlack::new(distribution.clone());
+            let (islands, _) = {
+                let mut ctx = crate::outerloop::SolveContext::new(&mut buses, &mut ybus);
+                let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = vec![&mut slack];
+                crate::outerloop::solve_with_loops(
+                    &mut ctx,
+                    ac.tol,
+                    ac.max_iter,
+                    ac.backend,
+                    &mut list,
+                    distribution.max_outer_iter,
+                )
+            };
             // Only `buses` and `islands` are read here. The per-island
             // statuses carry the convergence verdict; `stats` describes a
             // single inner solve, of which this path runs several.
@@ -1003,11 +1011,10 @@ fn solve_distributing_slack(
                         crate::solver::SolveStatus::MaxIterationsReached
                     },
                     mismatch_history: Vec::new(),
-                    q_limit_switches: Vec::new(),
-                    q_limit_stabilized: true,
                 },
                 dc: None,
                 linear: None,
+                outer: None,
             }
         })
         .collect()
