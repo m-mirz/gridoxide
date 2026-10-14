@@ -37,7 +37,8 @@ use gridoxide::solver::{PowerFlowOptions, SolveStatus};
 const USAGE: &str = "\
 usage:
   gridoxide                     run the bundled power-flow demo
-  gridoxide solve <network> [--control-taps] [--enforce-q-limits]
+  gridoxide solve <network> [--control-taps] [--enforce-q-limits] [--dispatch]
+                  [--control-remote-voltage]
                   [--distribute-slack | --area-interchange]
                   [--max-outer <n>] [--max-tap-shift <n>]
                   [--tol <t>] [--max-iter <n>]
@@ -49,6 +50,19 @@ usage:
                                 across generators instead of dumped on one
                                 slack. All three compose; without any of them
                                 this is an ordinary Newton solve.
+                                --control-remote-voltage moves a machine that
+                                regulates a bus other than its own onto that
+                                machine: without it the reactive power appears
+                                at the bus being held instead of at the machine,
+                                so the reactive flow between them is missing. It
+                                changes answers, which is why it is opt-in.
+                                CGMES only.
+                                --dispatch additionally attributes each
+                                voltage-controlled bus's reactive power to the
+                                individual machines holding it, and names any
+                                machine that is at its own limit while the bus
+                                as a whole is not. CGMES only — no other format
+                                states per-machine reactive capability.
                                 --area-interchange stands in distributed
                                 slack's place — it generalizes it — and holds
                                 each control area's net export at what the file
@@ -89,6 +103,28 @@ usage:
                                 before solving; --solve runs a power flow and
                                 reports each switch's own flow.
                                 Needs the `cgmes` feature.
+  gridoxide continuation <path> [--target-lambda <l> | --lower-branch]
+                     [--step <s>] [--max-steps <n>] [--enforce-q-limits]
+                     [--parametrization local|natural|arclength]
+                     [--pickup <i,j,k>] [--buses <i,j,k>]
+                     [--base-mva <m>] [--tol <t>] [--max-iter <n>] [--curve]
+                                trace the P-V curve to the point of voltage
+                                collapse: how much further this network can be
+                                loaded, which bus gives way first, and where
+                                each generator runs out of reactive capability
+                                on the way. Reports the loadability limit as a
+                                multiple of the base load (lambda) and as MW.
+                                The answer is a property of the *direction*
+                                loading grows in, not of the network alone;
+                                the default grows every net consumer at constant
+                                power factor and leaves the slack to pick it up.
+                                --pickup shares that pickup over the named buses
+                                instead; --buses stresses only the named ones.
+                                --enforce-q-limits is worth having: reactive
+                                limits usually decide where the nose is, and
+                                the exact lambda each machine saturates at is
+                                located rather than rounded to a step.
+                                Reads a PGM JSON document.
   gridoxide short-circuit <path> [--scaling max|min]
                                 run an IEC 60909 short-circuit calculation over
                                 a PGM JSON document containing `fault` entries,
@@ -243,6 +279,18 @@ fn main() {
             _ => {
                 eprintln!("error: sensitivity needs a path\n\n{USAGE}");
                 std::process::exit(2);
+            }
+        },
+        Some("continuation") => match args.get(1) {
+            Some(path) if !path.starts_with("--") => {
+                if let Err(message) = run_continuation_cli(path, &args[2..]) {
+                    eprintln!("{message}");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("usage: gridoxide continuation <path> [options]");
+                std::process::exit(1);
             }
         },
         Some("short-circuit") => match args.get(1) {
@@ -771,6 +819,198 @@ fn run_opf(_path: &str, _flags: &[String]) -> Result<(), String> {
 /// Offers both directions the library does, because they answer different
 /// questions: `--dp` and friends ask "this moves — what responds?", `--watch`
 /// asks "this is overloaded — what would relieve it?".
+/// Parses a comma-separated bus-index list, e.g. `--pickup 3,7,12`.
+fn parse_index_list(raw: &str, flag: &str, limit: usize) -> Result<Vec<usize>, String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_index(s, flag, limit))
+        .collect()
+}
+
+fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
+    match flag_value(flags, flag)? {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| format!("{flag}: expected a number, got {raw:?}")),
+    }
+}
+
+/// `gridoxide continuation` — trace the P-V curve to the point of collapse.
+fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::continuation::augmented::Parametrization;
+    use gridoxide::continuation::{
+        run_continuation, ContinuationOptions, ContinuationStatus, CriticalPointKind,
+        CurveBranch, LoadingDirection, QLimitKind, StopCriterion,
+    };
+
+    let base_mva = parse_f64_flag(flags, "--base-mva")?.unwrap_or(100.0);
+    let s_base_va = base_mva * 1e6;
+    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let input: PgmInput =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+    let n = buses.len();
+
+    let direction = match flag_value(flags, "--buses")? {
+        Some(list) => LoadingDirection::scale_buses(&buses, &parse_index_list(&list, "--buses", n)?),
+        None => LoadingDirection::scale_loads(&buses),
+    };
+    let direction = match flag_value(flags, "--pickup")? {
+        None => direction,
+        Some(list) => {
+            let mut weights = vec![0.0; n];
+            for i in parse_index_list(&list, "--pickup", n)? {
+                weights[i] = 1.0;
+            }
+            LoadingDirection::scale_loads_with_pickup(&buses, &weights)
+        }
+    };
+
+    let parametrization = match flag_value(flags, "--parametrization")?.as_deref() {
+        // Deliberately `default()` rather than a name repeated here: the choice
+        // is a performance cliff (pseudo-arclength's bordering row is dense, and
+        // costs ~90x a sparse one at a few thousand buses), so the CLI must not
+        // be able to drift away from the library's default.
+        None => Parametrization::default(),
+        Some("local") => Parametrization::Local,
+        Some("natural") => Parametrization::Natural,
+        Some("arclength") => Parametrization::PseudoArcLength,
+        Some(other) => {
+            return Err(format!(
+                "--parametrization: expected arclength, local or natural, got {other:?}"
+            ))
+        }
+    };
+    let target_lambda = parse_f64_flag(flags, "--target-lambda")?;
+    let lower_branch = flags.iter().any(|f| f == "--lower-branch");
+    if target_lambda.is_some() && lower_branch {
+        return Err("--target-lambda and --lower-branch ask for different walks".into());
+    }
+    let enforce_q_limits = flags.iter().any(|f| f == "--enforce-q-limits");
+
+    let opts = ContinuationOptions {
+        direction: direction.clone(),
+        parametrization,
+        stop: StopCriterion { target_lambda, trace_lower_branch: lower_branch },
+        step: parse_f64_flag(flags, "--step")?.unwrap_or(0.1),
+        max_steps: match flag_value(flags, "--max-steps")? {
+            None => 200,
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| format!("--max-steps: expected a count, got {raw:?}"))?,
+        },
+        power_flow: PowerFlowOptions {
+            enforce_q_limits,
+            tol: parse_f64_flag(flags, "--tol")?.unwrap_or(1e-8),
+            max_iter: match flag_value(flags, "--max-iter")? {
+                None => 30,
+                Some(raw) => raw
+                    .parse()
+                    .map_err(|_| format!("--max-iter: expected a count, got {raw:?}"))?,
+            },
+            ..Default::default()
+        },
+        base_mva,
+        ..Default::default()
+    };
+
+    let curve = run_continuation(buses, &lines, &transformers, &[], opts);
+    if let ContinuationStatus::Rejected(why) = &curve.status {
+        return Err(format!("continuation was not attempted: {why:?}"));
+    }
+    if let ContinuationStatus::BaseCaseFailed(status) = &curve.status {
+        return Err(format!(
+            "the base case did not converge ({status:?}), so there is no curve to trace from"
+        ));
+    }
+    for warning in &curve.warnings {
+        println!("warning: {warning:?}");
+    }
+
+    println!(
+        "{} point(s) over {} segment(s), {} bordered solve(s); stopped: {:?}",
+        curve.points.len(),
+        curve.segments,
+        curve.solves,
+        curve.status
+    );
+    println!(
+        "loading grows along a fixed direction ({:.1} MW per unit lambda) — the limit below \
+         is a property of that direction, not of the network alone",
+        direction.total_active_load_increase() * base_mva
+    );
+
+    if flags.iter().any(|f| f == "--curve") {
+        println!("\n  lambda   arclength   min |V|  at bus   dlambda/dsigma   its  branch");
+        for p in &curve.points {
+            let (bus, vmin) = p
+                .voltage_mag
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v > 0.0)
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, v)| (i, *v))
+                .unwrap_or((0, 0.0));
+            println!(
+                "  {:+7.4}   {:9.4}   {:7.4}  {:6}   {:+14.6}   {:3}  {}",
+                p.lambda,
+                p.arclength,
+                vmin,
+                bus,
+                p.tangent_lambda,
+                p.corrector_iterations,
+                if p.branch == CurveBranch::Upper { "upper" } else { "lower" }
+            );
+        }
+    }
+
+    let events = curve.q_limit_events();
+    if !events.is_empty() {
+        println!("\nreactive limits reached, in order:");
+        for (bus, limit, lambda) in &events {
+            println!(
+                "  lambda {lambda:.6}: bus {bus} reached q_{} and stopped holding its voltage",
+                if *limit == QLimitKind::Max { "max" } else { "min" }
+            );
+        }
+    }
+
+    match &curve.critical {
+        None => {
+            println!(
+                "\nno collapse point was found — the walk stopped at lambda {:.4} for another \
+                 reason (see the status above), so this is a lower bound on the limit, not the \
+                 limit",
+                curve.points.last().map(|p| p.lambda).unwrap_or(0.0)
+            );
+        }
+        Some(c) => {
+            println!("\nloadability limit");
+            match c.kind {
+                CriticalPointKind::SaddleNode => println!(
+                    "  a saddle-node bifurcation: the power-flow Jacobian is singular there"
+                ),
+                CriticalPointKind::LimitInduced { bus } => println!(
+                    "  limit-induced by bus {bus}: the limit is the point that machine \
+                     saturates, not a fold"
+                ),
+            }
+            println!("  lambda_max      {:.6}  ({:.4}x the base load)", c.lambda_max, 1.0 + c.lambda_max);
+            println!("  margin          {:.1} MW  ({:.4} p.u.)", c.margin_mw, c.margin_pu);
+            println!("  load at limit   {:.1} MW (from {:.1} MW)",
+                c.p_load_nose_pu * base_mva, c.p_load_base_pu * base_mva);
+            println!("  weakest buses (share of the collapse mode):");
+            for w in c.weakest.iter().take(5) {
+                println!("    bus {:5}  {:.3}   |V| = {:.4}", w.bus, w.participation, w.voltage_mag);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
@@ -1818,6 +2058,12 @@ struct SolveNetwork {
     labels: Vec<String>,
     notes: Vec<String>,
     s_base_va: f64,
+    /// The regulating machines the document declared, where it declares any.
+    /// Only CGMES states per-machine reactive capability; the other importers
+    /// leave this empty and `--dispatch` then has nothing to attribute.
+    machines: Vec<gridoxide::types::RegulatingMachine>,
+    /// Per-bus reactive injection that is not a regulating machine's.
+    nonregulating_q: Vec<f64>,
 }
 
 #[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
@@ -1845,6 +2091,11 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             labels: n.node_codes,
             notes: n.notes,
             s_base_va: n.base_mva * 1e6,
+            // UCTE-DEF and IIDM state no per-machine reactive capability, so
+            // there is nothing to attribute and `--dispatch` says so rather
+            // than printing an empty table.
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
         });
     }
 
@@ -1882,6 +2133,9 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             labels: n.bus_labels,
             notes,
             s_base_va: n.base_mva * 1e6,
+            // See the UCTE branch above.
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
         });
     }
 
@@ -1934,6 +2188,8 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             ));
         }
         let labels = (0..net.buses.len()).map(|i| format!("bus {i}")).collect();
+        let machines = net.voltage_control.machines;
+        let nonregulating_q = net.voltage_control.nonregulating_q;
         return Ok(SolveNetwork {
             areas: (areas.of_bus, areas.ids.into_iter().map(|(_, n)| n).collect()),
             area_targets: areas.targets,
@@ -1946,6 +2202,8 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             labels,
             notes,
             s_base_va,
+            machines,
+            nonregulating_q,
         });
     }
 
@@ -1987,6 +2245,8 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     let max_iter = count("--max-iter", 30)?;
     let max_outer = count("--max-outer", 40)?;
     let max_tap_shift = count("--max-tap-shift", 3)? as i32;
+    let dispatch = flags.iter().any(|f| f == "--dispatch");
+    let remote_voltage = flags.iter().any(|f| f == "--control-remote-voltage");
 
     let net = load_network_for_solve(path)?;
     for note in &net.notes {
@@ -2021,14 +2281,16 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     } else {
         None
     };
-    let report = gridoxide::run_power_flow(
+    let report = gridoxide::run_power_flow_with_remote(
         net.buses.clone(),
         &net.lines,
         &net.transformers,
         &net.shunts,
         gridoxide::TapData { changers: &net.tap_changers, regulation: &net.regulation },
+        gridoxide::RemoteControlData { machines: &net.machines },
         PowerFlowOptions {
             control_taps,
+            control_remote_voltage: remote_voltage,
             enforce_q_limits,
             distribute_slack: distribution,
             area_interchange: area_definition,
@@ -2067,6 +2329,78 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
         println!("  ... and {trivial} de-energized island(s) covering {trivial_buses} bus(es)");
     }
 
+    if dispatch {
+        if net.machines.is_empty() {
+            println!(
+                "\n--dispatch: this format states no per-machine reactive capability, so there \
+                 is nothing to attribute (only CGMES does)"
+            );
+        } else {
+            let mut y = gridoxide::network::build_ybus(net.buses.len(), &net.lines, &net.transformers);
+            gridoxide::network::stamp_shunts(&mut y, &net.shunts);
+            let ybus = y.finish();
+            let split = gridoxide::dispatch::allocate(
+                &net.machines, &net.nonregulating_q, &report.buses, &ybus);
+
+            let base_mva = net.s_base_va / 1e6;
+            let shared: Vec<_> = split.iter().filter(|b| b.machines.len() > 1).collect();
+            let unattributed: Vec<_> =
+                split.iter().filter(|b| b.unattributed.abs() > 1e-6).collect();
+            println!(
+                "\nreactive dispatch: {} machine(s) over {} regulated bus(es), {} of them held \
+                 by more than one",
+                net.machines.len(),
+                split.len(),
+                shared.len()
+            );
+
+            for bd in shared.iter().take(12) {
+                println!(
+                    "  bus {:<6} {:>9.2} MVAr over {} machine(s), split by {:?}",
+                    bd.bus,
+                    bd.attributed * base_mva,
+                    bd.machines.len(),
+                    bd.basis
+                );
+                for m in &bd.machines {
+                    println!(
+                        "      {:<40} {:>9.2} MVAr  ({:.0}% of the bus){}",
+                        m.id,
+                        m.q * base_mva,
+                        m.share * 100.0,
+                        if m.at_limit { "  at its own limit" } else { "" }
+                    );
+                }
+            }
+            if shared.len() > 12 {
+                println!("  ... and {} more shared bus(es)", shared.len() - 12);
+            }
+
+            // Worth surfacing rather than hiding: it means the solve put the
+            // bus outside what its own machines can produce, which happens
+            // because the reactive-limit clamp bounds the bus's *net* injection
+            // while the limits describe the machines' own capability. See
+            // `dispatch::BusDispatch::unattributed`.
+            if !unattributed.is_empty() {
+                let total: f64 = unattributed.iter().map(|b| b.unattributed.abs()).sum();
+                println!(
+                    "\n  {} bus(es) need {:.2} MVAr their own machines cannot produce — a \
+                     reactive load shares the bus, so the machine saturates before the bus's \
+                     net injection reaches its bound",
+                    unattributed.len(),
+                    total * base_mva
+                );
+                for bd in unattributed.iter().take(5) {
+                    println!(
+                        "      bus {:<6} short by {:>8.2} MVAr",
+                        bd.bus,
+                        bd.unattributed * base_mva
+                    );
+                }
+            }
+        }
+    }
+
     if let Some(outer) = report.outer.as_ref() {
         if let Some(r) = outer.report.as_ref() {
             println!(
@@ -2078,6 +2412,21 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
             );
             for l in &r.loops {
                 println!("  {:<26} {:>3} iteration(s)  {:?}", l.name, l.iterations, l.status);
+            }
+        }
+        if !outer.remote.is_empty() {
+            println!("\nremote voltage control: {} machine(s)", outer.remote.len());
+            for r in &outer.remote {
+                println!(
+                    "  {:<40} bus {} holds bus {}: reached {:.5} against {:.5} in {} move(s), {:?}",
+                    r.machine, r.controller_bus, r.controlled_bus, r.reached, r.target, r.moves,
+                    r.outcome
+                );
+            }
+            // The network solved is not quite the one handed over, which is
+            // worth saying rather than leaving to be noticed.
+            for (bus, from, to) in &outer.retyped {
+                println!("  bus {bus} re-typed {from:?} -> {to:?} to put the control on the machine");
             }
         }
         if !outer.q_limit_switches.is_empty() {

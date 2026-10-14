@@ -13,7 +13,7 @@
 //!    in the output, since the voltage still moves.
 //! 3. **Against the conformity fixtures' own data.** See
 //!    `svedalas_published_solution_violates_its_own_deadbands` for why this is
-//!    weaker evidence than `plans/TAP_CONTROL_PLAN.md` §8.3 assumed.
+//!    weaker evidence than it looks.
 
 use std::path::{Path, PathBuf};
 
@@ -263,13 +263,12 @@ fn solve_fixture(net: &CgmesNetwork, control_taps: bool) -> PowerFlowReport {
     )
 }
 
-/// **Why the fixed-point gate `plans/TAP_CONTROL_PLAN.md` §8.3 proposed does
-/// not apply to Svedala**, recorded as an assertion so it cannot quietly stop
-/// being true.
+/// **Why a fixed-point gate does not apply to Svedala**, recorded as an
+/// assertion so it cannot quietly stop being true.
 ///
-/// The plan reasoned that since Svedala's SSH tap positions equal its SV ones,
-/// a converged tap loop must leave all eleven where it found them. That
-/// premise is wrong: the fixture's *own published solution* sits 2–5% away
+/// The tempting argument is that since Svedala's SSH tap positions equal its
+/// SV ones, a converged tap loop must leave all eleven where it found them.
+/// That premise is wrong: the fixture's *own published solution* sits 2–5% away
 /// from the targets its own SSH declares, against half-deadbands of 1–2%. So
 /// the published state does not satisfy the controls the document records, and
 /// a loop that left those taps alone would be the defective one.

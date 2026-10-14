@@ -187,6 +187,15 @@ struct PowerFlowModel {
     tap_changers: Vec<Option<crate::types::TapChanger>>,
     /// The regulating controls acting on those changers.
     regulation: Vec<crate::outerloop::TapRegulation>,
+    /// The regulating machines the document declared, and the per-bus reactive
+    /// injection that is not theirs — what `machine_dispatch()` attributes.
+    ///
+    /// Populated by CGMES's bus-branch view only: no other format states
+    /// per-machine reactive capability, and the node-breaker view has its own
+    /// bus numbering, so carrying indices from the other view would be worse
+    /// than carrying none.
+    machines: Vec<crate::types::RegulatingMachine>,
+    nonregulating_q: Vec<f64>,
     /// What the last `solve()` with outer loops did. Cleared by any solve that
     /// configured none, so the accessors cannot serve a stale answer.
     outer: Option<crate::OuterLoopOutcome>,
@@ -273,6 +282,8 @@ impl PowerFlowModel {
             shunts,
             solver: PersistentSolver::new(backend),
             backend,
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
             method: parse_method(method)?,
             dc_opts: DcOptions {
                 approximation: parse_dc_approximation(dc_approximation)?,
@@ -341,6 +352,11 @@ impl PowerFlowModel {
         // them for the same reason.
         let mut taps: (Vec<Option<crate::types::TapChanger>>, Vec<crate::outerloop::TapRegulation>) =
             (Vec::new(), Vec::new());
+        // Same reasoning as `taps`: the node-breaker view numbers buses its own
+        // way, so machine-to-bus indices from the bus-branch view would point at
+        // the wrong buses there. Left empty rather than mismapped.
+        let mut dispatch_data: (Vec<crate::types::RegulatingMachine>, Vec<f64>) =
+            (Vec::new(), Vec::new());
         let (buses_template, lines, transformers, shunts, tn_bus_index, node_breaker) =
             match topology {
                 "bus_branch" => {
@@ -356,6 +372,8 @@ impl PowerFlowModel {
                     let (mut buses, lines, transformers, shunts) =
                         (net.buses, net.lines, net.transformers, net.shunts);
                     taps = (net.tap_changers, net.regulation);
+                    dispatch_data =
+                        (net.voltage_control.machines, net.voltage_control.nonregulating_q);
                     cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va).map_err(|e| {
                         PyRuntimeError::new_err(format!(
                             "resolving CGMES HVDC converters: {e}"
@@ -408,6 +426,8 @@ impl PowerFlowModel {
             lines,
             transformers,
             shunts,
+            machines: dispatch_data.0,
+            nonregulating_q: dispatch_data.1,
             solver: PersistentSolver::new(backend),
             backend,
             method: parse_method(method)?,
@@ -486,6 +506,7 @@ impl PowerFlowModel {
     #[pyo3(signature = (
         control_taps = false,
         enforce_q_limits = false,
+        control_remote_voltage = false,
         distribute_slack = false,
         max_outer = 40,
         max_tap_shift = 3,
@@ -494,6 +515,7 @@ impl PowerFlowModel {
         &mut self,
         control_taps: bool,
         enforce_q_limits: bool,
+        control_remote_voltage: bool,
         distribute_slack: bool,
         max_outer: usize,
         max_tap_shift: i32,
@@ -509,10 +531,15 @@ impl PowerFlowModel {
         linear_initial_guess(&mut self.buses, &self.ybus);
 
         let wants_taps = control_taps && !self.regulation.is_empty();
-        let islands = if enforce_q_limits || distribute_slack || wants_taps {
+        // A machine regulating a bus other than its own. Without this the
+        // reactive power appears at the bus being held rather than at the
+        // machine; opt-in because turning it on changes answers.
+        let wants_remote = control_remote_voltage
+            && self.machines.iter().any(|m| m.at_bus != m.controls_bus);
+        let islands = if enforce_q_limits || distribute_slack || wants_taps || wants_remote {
             let distribution = distribute_slack
                 .then(|| crate::outerloop::SlackDistribution::uniform(&self.buses));
-            let report = crate::run_power_flow(
+            let report = crate::run_power_flow_with_remote(
                 std::mem::take(&mut self.buses),
                 &self.lines,
                 &self.transformers,
@@ -521,8 +548,10 @@ impl PowerFlowModel {
                     changers: &self.tap_changers,
                     regulation: &self.regulation,
                 },
+                crate::RemoteControlData { machines: &self.machines },
                 crate::solver::PowerFlowOptions {
                     control_taps,
+                    control_remote_voltage,
                     tap_max_shift: max_tap_shift,
                     enforce_q_limits,
                     distribute_slack: distribution,
@@ -612,6 +641,107 @@ impl PowerFlowModel {
                     },
                 )?;
                 Ok(d)
+            })
+            .collect()
+    }
+
+    /// What each remotely-regulating machine reached, after a
+    /// `solve(control_remote_voltage=True)`.
+    ///
+    /// One dict per machine: `{machine, controller_bus, controlled_bus, target,
+    /// reached, setpoint, moves, outcome}`, where `outcome` is `"held"`,
+    /// `"insensitive"`, `"unfinished"` or `"at_reactive_limit"`. Empty unless
+    /// that option was set and the network has such a machine.
+    fn remote_voltage_control(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        let Some(outer) = self.outer.as_ref() else { return Ok(Vec::new()) };
+        outer
+            .remote
+            .iter()
+            .map(|r| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("machine", r.machine.clone())?;
+                d.set_item("controller_bus", r.controller_bus)?;
+                d.set_item("controlled_bus", r.controlled_bus)?;
+                d.set_item("target", r.target)?;
+                d.set_item("reached", r.reached)?;
+                d.set_item("setpoint", r.setpoint)?;
+                d.set_item("moves", r.moves)?;
+                d.set_item(
+                    "outcome",
+                    match r.outcome {
+                        crate::outerloop::RemoteOutcome::Held => "held",
+                        crate::outerloop::RemoteOutcome::Insensitive => "insensitive",
+                        crate::outerloop::RemoteOutcome::Unfinished => "unfinished",
+                        crate::outerloop::RemoteOutcome::AtReactiveLimit => "at_reactive_limit",
+                    },
+                )?;
+                Ok(d.unbind())
+            })
+            .collect()
+    }
+
+    /// Attributes each voltage-controlled bus's reactive power to the
+    /// individual machines holding it, at the last solved state.
+    ///
+    /// A `PV` bus has one reactive injection and the solver decides it; when
+    /// several machines hold that bus, nothing in the power flow says which one
+    /// is carrying it. This splits it — by explicit key where the document
+    /// states one, else in proportion to each machine's own reactive range,
+    /// else evenly — respecting each machine's own limits.
+    ///
+    /// **This changes no answer.** It is attribution after the fact. What it
+    /// adds is visibility: a bus can sit comfortably inside its *summed*
+    /// reactive limit while a machine at it is saturated and the others carry
+    /// it, which the bus-level clamp cannot show.
+    ///
+    /// Returns one dict per bus:
+    /// `{bus, required, attributed, unattributed, basis, machines: [...]}`,
+    /// each machine `{id, at_bus, q, q_min, q_max, at_limit, share}`, all
+    /// per-unit. `unattributed` is worth reading — see
+    /// `dispatch::BusDispatch::unattributed`.
+    ///
+    /// Empty for any model not loaded from CGMES's bus-branch view; no other
+    /// format states per-machine reactive capability.
+    fn machine_dispatch(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        let split = crate::dispatch::allocate(
+            &self.machines,
+            &self.nonregulating_q,
+            &self.buses,
+            &self.ybus,
+        );
+        split
+            .into_iter()
+            .map(|bd| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("bus", bd.bus)?;
+                d.set_item("required", bd.required)?;
+                d.set_item("attributed", bd.attributed)?;
+                d.set_item("unattributed", bd.unattributed)?;
+                d.set_item(
+                    "basis",
+                    match bd.basis {
+                        crate::dispatch::KeyBasis::Explicit => "explicit",
+                        crate::dispatch::KeyBasis::Capability => "capability",
+                        crate::dispatch::KeyBasis::Uniform => "uniform",
+                    },
+                )?;
+                let machines: Vec<Py<pyo3::types::PyDict>> = bd
+                    .machines
+                    .into_iter()
+                    .map(|m| {
+                        let e = pyo3::types::PyDict::new(py);
+                        e.set_item("id", m.id)?;
+                        e.set_item("at_bus", m.at_bus)?;
+                        e.set_item("q", m.q)?;
+                        e.set_item("q_min", m.q_min)?;
+                        e.set_item("q_max", m.q_max)?;
+                        e.set_item("at_limit", m.at_limit)?;
+                        e.set_item("share", m.share)?;
+                        Ok(e.unbind())
+                    })
+                    .collect::<PyResult<_>>()?;
+                d.set_item("machines", machines)?;
+                Ok(d.unbind())
             })
             .collect()
     }
@@ -1691,6 +1821,249 @@ struct ShortCircuitResult {
     shunts: Vec<Py<ShortCircuitShunt>>,
 }
 
+/// One machine running out of reactive capability, as
+/// [`continuation`] found it.
+#[pyclass]
+struct ContinuationEvent {
+    #[pyo3(get)]
+    bus: usize,
+    /// `"max"` or `"min"`.
+    #[pyo3(get)]
+    limit: String,
+    /// The λ at which it saturated — located, not rounded to a step.
+    ///
+    /// Trailing underscore because `lambda` is a Python keyword and
+    /// `event.lambda` will not parse. The rest of the binding spells λ out
+    /// (`lambdas`, `lambda_max`), which collides with nothing.
+    #[pyo3(name = "lambda_", get)]
+    lambda: f64,
+}
+
+/// The P-V curve and the loadability limit at the end of it.
+#[pyclass]
+struct ContinuationCurve {
+    /// λ at every point, in walk order. λ = 0 is the base case.
+    #[pyo3(get)]
+    lambdas: Vec<f64>,
+    /// Cumulative arclength — the parameter the walk advances in, and the one
+    /// that stays meaningful through the nose where λ does not.
+    #[pyo3(get)]
+    arclengths: Vec<f64>,
+    /// `voltage_mag[point][bus]`, per-unit.
+    #[pyo3(get)]
+    voltage_mag: Vec<Vec<f64>>,
+    /// `"upper"` or `"lower"` per point.
+    #[pyo3(get)]
+    branch: Vec<String>,
+    #[pyo3(get)]
+    events: Vec<Py<ContinuationEvent>>,
+    /// `None` when the walk stopped for some other reason — in which case the
+    /// last λ is a lower bound on the limit, not the limit.
+    #[pyo3(get)]
+    lambda_max: Option<f64>,
+    /// `"saddle_node"` or `"limit_induced"`. They are different answers: at a
+    /// limit-induced maximum the Jacobian is *not* singular, and the limit is
+    /// the point a machine saturated.
+    #[pyo3(get)]
+    critical_kind: Option<String>,
+    /// The bus whose voltage collapses.
+    #[pyo3(get)]
+    critical_bus: Option<usize>,
+    /// `(bus, share)` sorted by share of the collapse mode, largest first.
+    #[pyo3(get)]
+    weakest: Vec<(usize, f64)>,
+    /// Additional load carried at the limit, MW on `base_mva`.
+    #[pyo3(get)]
+    margin_mw: Option<f64>,
+    #[pyo3(get)]
+    margin_pu: Option<f64>,
+    #[pyo3(get)]
+    status: String,
+    #[pyo3(get)]
+    warnings: Vec<String>,
+}
+
+/// Traces the P-V curve of a PGM-format JSON network to the point of voltage
+/// collapse.
+///
+/// Answers the question an ordinary power flow cannot: *how much further can
+/// this be loaded?* At the collapse point the Jacobian is singular, so Newton
+/// simply fails — indistinguishable from a bad initial guess. Continuation
+/// reformulates the problem so that point is regular and walks through it.
+///
+/// **The answer is a property of the loading direction, not of the network
+/// alone.** By default every net consumer grows at constant power factor and
+/// the slack picks it up; `pickup` shares that pickup over the named buses
+/// instead, and `buses` restricts which loads grow.
+///
+/// `enforce_q_limits` is worth setting: reactive limits usually decide where
+/// the nose is, and the λ at which each machine saturates is located exactly
+/// rather than rounded to whichever step noticed it.
+///
+/// The physics is gated in `tests/continuation_test.rs` (against a closed-form
+/// two-bus nose) and `tests/continuation_events_test.rs` (against a brute-force
+/// bisection); this binding only has to reach it.
+#[pyfunction]
+#[pyo3(signature = (
+    path, enforce_q_limits = false, target_lambda = None, lower_branch = false,
+    step = 0.1, max_steps = 200, parametrization = None,
+    buses = None, pickup = None, base_mva = 100.0, s_base_va = None, freq_hz = 50.0,
+))]
+#[allow(clippy::too_many_arguments)]
+fn continuation(
+    py: Python<'_>,
+    path: &str,
+    enforce_q_limits: bool,
+    target_lambda: Option<f64>,
+    lower_branch: bool,
+    step: f64,
+    max_steps: usize,
+    parametrization: Option<&str>,
+    buses: Option<Vec<usize>>,
+    pickup: Option<Vec<usize>>,
+    base_mva: f64,
+    s_base_va: Option<f64>,
+    freq_hz: f64,
+) -> PyResult<ContinuationCurve> {
+    use crate::continuation::augmented::Parametrization;
+    use crate::pgm::pgm_to_buses_and_branches;
+    use crate::solver::PowerFlowOptions;
+    use crate::continuation::{
+        run_continuation, ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch,
+        LoadingDirection, QLimitKind, StopCriterion,
+    };
+
+    // `None` takes the library default rather than naming it here: the choice
+    // is a performance cliff (pseudo-arclength's bordering row is dense, and
+    // costs ~90x a sparse one at a few thousand buses), so the binding must not
+    // be able to drift away from it.
+    let parametrization = match parametrization {
+        None => Parametrization::default(),
+        Some("local") => Parametrization::Local,
+        Some("natural") => Parametrization::Natural,
+        Some("arclength") => Parametrization::PseudoArcLength,
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "parametrization must be \"local\", \"natural\" or \"arclength\", got {other:?}"
+            )))
+        }
+    };
+    if target_lambda.is_some() && lower_branch {
+        return Err(PyValueError::new_err(
+            "target_lambda and lower_branch ask for different walks",
+        ));
+    }
+
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+    let input: PgmInput = serde_json::from_str(&raw)
+        .map_err(|e| PyValueError::new_err(format!("parsing {path}: {e}")))?;
+    let (net_buses, lines, transformers) =
+        pgm_to_buses_and_branches(input, s_base_va.unwrap_or(base_mva * 1e6), freq_hz);
+    let n = net_buses.len();
+
+    let check = |list: &[usize], what: &str| -> PyResult<()> {
+        match list.iter().find(|i| **i >= n) {
+            Some(i) => Err(PyValueError::new_err(format!(
+                "{what}: bus {i} is out of range for a {n}-bus network"
+            ))),
+            None => Ok(()),
+        }
+    };
+
+    let direction = match &buses {
+        Some(list) => {
+            check(list, "buses")?;
+            LoadingDirection::scale_buses(&net_buses, list)
+        }
+        None => LoadingDirection::scale_loads(&net_buses),
+    };
+    let direction = match &pickup {
+        None => direction,
+        Some(list) => {
+            check(list, "pickup")?;
+            let mut weights = vec![0.0; n];
+            for &i in list {
+                weights[i] = 1.0;
+            }
+            LoadingDirection::scale_loads_with_pickup(&net_buses, &weights)
+        }
+    };
+
+    let curve = run_continuation(
+        net_buses,
+        &lines,
+        &transformers,
+        &[],
+        ContinuationOptions {
+            direction,
+            parametrization,
+            stop: StopCriterion { target_lambda, trace_lower_branch: lower_branch },
+            step,
+            max_steps,
+            power_flow: PowerFlowOptions { enforce_q_limits, ..Default::default() },
+            base_mva,
+            ..Default::default()
+        },
+    );
+
+    if let ContinuationStatus::Rejected(why) = &curve.status {
+        return Err(PyValueError::new_err(format!("continuation was not attempted: {why:?}")));
+    }
+    if let ContinuationStatus::BaseCaseFailed(status) = &curve.status {
+        return Err(PyRuntimeError::new_err(format!(
+            "the base case did not converge ({status:?}), so there is no curve to trace from"
+        )));
+    }
+
+    let events = curve
+        .q_limit_events()
+        .into_iter()
+        .map(|(bus, limit, lambda)| {
+            Py::new(
+                py,
+                ContinuationEvent {
+                    bus,
+                    limit: match limit {
+                        QLimitKind::Max => "max".to_string(),
+                        QLimitKind::Min => "min".to_string(),
+                    },
+                    lambda,
+                },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let critical = curve.critical.as_ref();
+    Ok(ContinuationCurve {
+        lambdas: curve.lambdas(),
+        arclengths: curve.points.iter().map(|p| p.arclength).collect(),
+        voltage_mag: curve.points.iter().map(|p| p.voltage_mag.clone()).collect(),
+        branch: curve
+            .points
+            .iter()
+            .map(|p| match p.branch {
+                CurveBranch::Upper => "upper".to_string(),
+                CurveBranch::Lower => "lower".to_string(),
+            })
+            .collect(),
+        events,
+        lambda_max: critical.map(|c| c.lambda_max),
+        critical_kind: critical.map(|c| match c.kind {
+            CriticalPointKind::SaddleNode => "saddle_node".to_string(),
+            CriticalPointKind::LimitInduced { .. } => "limit_induced".to_string(),
+        }),
+        critical_bus: critical.and_then(|c| c.critical_bus()),
+        weakest: critical
+            .map(|c| c.weakest.iter().map(|w| (w.bus, w.participation)).collect())
+            .unwrap_or_default(),
+        margin_mw: critical.map(|c| c.margin_mw),
+        margin_pu: critical.map(|c| c.margin_pu),
+        status: format!("{:?}", curve.status),
+        warnings: curve.warnings.iter().map(|w| format!("{w:?}")).collect(),
+    })
+}
+
 /// Runs an IEC 60909 short-circuit calculation over a PGM-format JSON file.
 ///
 /// Unlike `PowerFlowModel`, this is a plain function rather than a
@@ -2359,6 +2732,9 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ShortCircuitBranch>()?;
     m.add_class::<ShortCircuitShunt>()?;
     m.add_function(wrap_pyfunction!(short_circuit, m)?)?;
+    m.add_class::<ContinuationCurve>()?;
+    m.add_class::<ContinuationEvent>()?;
+    m.add_function(wrap_pyfunction!(continuation, m)?)?;
     m.add_class::<AcSensitivityModel>()?;
     m.add_class::<SensitivityColumn>()?;
     m.add_class::<SensitivityRow>()?;

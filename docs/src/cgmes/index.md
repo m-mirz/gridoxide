@@ -112,3 +112,114 @@ removed after it broke `case3120sp`.
 The remaining pages in this section each take one CIM class or attribute that needed real modeling
 work, and follow the same structure: why it matters, the concepts and formulas involved, where it
 sits in gridoxide today, and how other tools handle it.
+
+## One voltage base per galvanic level
+
+An `ACLineSegment` has no ratio. Its two ends are one conductor at one physical
+voltage — which means per-unit across it is only meaningful if \\(|V| = 1.0\\)
+denotes the same volts at both. That is what a per-unit *base* is for.
+
+CGMES does not guarantee it. The same physical level is declared **380 kV** in
+Belgium and **400 kV** in the Netherlands, **220** and **225** either side of
+another border, and a tie line between them is one wire carrying two different
+`BaseVoltage.nominalVoltage` values on its ends. Per-unitizing that line on one
+end's base — all a single base can do — leaves its two ends in different
+per-unit systems, so a flat \\(1.0\\) profile already contains a 5% step across a
+wire with nothing in it to make one. The solver pushes reactive power to sustain
+the step, and the whole area comes out high.
+
+So the importer gives every galvanically-connected group of buses one base
+before it converts a single branch. The group is the connected component over
+plain conductors — `ACLineSegment` and `SeriesCompensator` — and the base is the
+nominal the most of its members declare, ties going to the larger.
+
+### Moving a base is safe, and moving a branch is not
+
+A per-unit base is a choice, not a measurement. Moving one changes the per-unit
+numbers and leaves the volts alone, because everything that converts between the
+two reads `u_rated`: a reported voltage is \\(|V| \cdot u_{rated}\\), a voltage
+setpoint is imported as \\(target / u_{rated}\\), and — the load-bearing one —
+transformers self-correct, because
+[`transformer_tap`](./index.md) already takes the node ratings and computes
+
+\\[ k = \frac{u_1 / u_2}{u_{1,rated} / u_{2,rated}} \\]
+
+so a moved node base is absorbed by the off-nominal ratio. That is why this runs
+*before* any branch is converted rather than after.
+
+### The one thing it is not invariant to
+
+That invariance holds wherever `u_rated` is used as a *base*. It fails in the
+one place the importer uses it as a stand-in for the **actual operating
+voltage**: the `StaticVarCompensator` rating, which turns an ohmic reactance
+into a reactive limit through \\(Q \approx V^2 / x\\) evaluated at
+\\(|V| = 1.0\\). Move the base and \\(1.0\\) p.u. denotes different volts,
+so the limit moves with it — by \\((400/380)^2 = 10.8\%\\), or
+\\((225/220)^2 = 4.6\%\\).
+
+The shunt compensators converted a few lines away look identical and are *not*
+affected, which is worth seeing clearly: they convert siemens to per-unit, and
+\\(Q_{pu} = |V|_{pu}^2 \cdot B_{pu}\\) recovers the same physical MVAr on
+any base. Only pinning \\(|V| = 1\\) makes the base stand for a voltage.
+
+No vendored fixture exercises it. MicroGrid-Type1's single SVC sits at 225 kV —
+the base that is *kept* — so its rating is ±0.1 p.u. either way. A document with
+an SVC on the other side of such a boundary would see its rating shift, and
+nothing would flag it.
+
+### It adjudicates, and the alternative does not
+
+Harmonizing has to **choose** which of two declarations to keep. That is a
+judgement about the document, not arithmetic, and it rests on an inference: an
+`ACLineSegment` has no ratio, therefore its two ends are one level, therefore a
+differing declaration is a naming convention rather than a fact.
+
+For 380/400 and 220/225 that inference is right, and the error figures below say
+so. Where it would be wrong is a document that is *itself* wrong — a line
+written where a transformer belongs. Then harmonizing forces the two ends onto
+one base and the level difference disappears into a model that looks entirely
+reasonable, where powsybl's branch-side treatment would carry both declarations
+through and let the discrepancy reach the answer. Neither is correct, because
+the input is not; the difference is whether to trust the declaration or the
+topology.
+
+What this does instead of choosing silently is report:
+`CgmesNetwork::base_harmonization` names every nominal it merged and how many
+buses moved, and `examples/base_mismatch_probe.rs` prints it. That is weaker
+than not having to choose — it needs someone to look — but it is what makes a
+mis-declared nominal noticeable rather than absorbed.
+
+### What it was worth
+
+Measured against the fixtures' own published `SvVoltage`:
+
+| fixture | lines spanning two bases | worst error before | after |
+|---|---|---|---|
+| MicroGrid-Type1 | 5 of 13 | 4.4% | 1.3% |
+| FullGrid | 5 of 13 | — (does not converge) | — |
+| SmallGrid, MiniGrid, RealGrid, Svedala | 0 | unchanged, bit for bit | |
+
+On MicroGrid-Type1 the median error falls from 0.96% to 0.01%. With
+[remote voltage control](../powerflow/outer_loops.md) also enabled — the same
+fixture needs it — the worst error reaches **0.09%**, and the machine's own
+reactive output comes within 2% of the published one. Neither fix is visible
+underneath the other: the base defect was larger than the reactive power remote
+control moves, which is why that fixture could not referee remote control until
+this landed.
+
+### What powsybl does
+
+The same problem, solved in the branch rather than the bus, and enough of a real
+modelling question there to be a configuration option. `LinePerUnitMode` is
+either `IMPEDANCE` — per-unitize on the geometric mean \\(n_1 n_2 / S_B\\) and
+fold correction terms into the two end shunts — or `RATIO`, an ideal transformer
+of \\(n_1/n_2\\) on an otherwise ordinary line (`LfBranchImpl.createLine`).
+
+Both need a branch model with per-terminal shunts or a ratio.
+[`types::Line`](../powerflow/index.md) has neither, deliberately: its shunt is
+one total split equally, which is what every line in every other fixture needs.
+Doing this in the bus base reaches the same coherent per-unit system without
+giving every line in the crate a field that ten lines in two fixtures would ever
+use — and, unlike `RATIO`, without moving a line into the transformer list and
+shifting the flat branch index that ratings, `terminal_branch` and the RAO all
+address branches by.

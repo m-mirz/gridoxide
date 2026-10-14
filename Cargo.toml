@@ -356,6 +356,37 @@ name = "area_interchange_test"
 path = "tests/area_interchange_test.rs"
 
 [[test]]
+name = "remote_voltage_test"
+path = "tests/remote_voltage_test.rs"
+
+[[test]]
+name = "continuation_test"
+path = "tests/continuation_test.rs"
+
+[[test]]
+name = "continuation_events_test"
+path = "tests/continuation_events_test.rs"
+
+[[test]]
+name = "cli_continuation_test"
+path = "tests/cli_continuation_test.rs"
+
+[[test]]
+name = "cgmes_voltage_base_test"
+path = "tests/cgmes_voltage_base_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_remote_test"
+path = "tests/cgmes_remote_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
+name = "cgmes_dispatch_test"
+path = "tests/cgmes_dispatch_test.rs"
+required-features = ["cgmes"]
+
+[[test]]
 name = "cgmes_area_test"
 path = "tests/cgmes_area_test.rs"
 required-features = ["cgmes"]
@@ -503,6 +534,21 @@ required-features = ["cgmes"]
 [[example]]
 name = "tap_deadband_probe"
 path = "examples/tap_deadband_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "base_mismatch_probe"
+path = "examples/base_mismatch_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "remote_probe"
+path = "examples/remote_probe.rs"
+required-features = ["cgmes"]
+
+[[example]]
+name = "dispatch_probe"
+path = "examples/dispatch_probe.rs"
 required-features = ["cgmes"]
 
 [[example]]

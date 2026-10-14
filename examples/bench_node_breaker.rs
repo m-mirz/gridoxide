@@ -49,7 +49,7 @@ fn main() {
         let start = Instant::now();
         let view = bus_view(&nb.topology, &policy);
         let ms = start.elapsed().as_secs_f64() * 1e3;
-        // The AC unknown count the plan's §3.3 argues about: two per non-slack
+        // The AC unknown count a constrained formulation would carry: two per non-slack
         // bus, plus two per retained edge under a constrained formulation.
         let unknowns = 2 * view.n_buses() + 2 * view.retained().len();
         println!(

@@ -1,7 +1,7 @@
 //! What the CGMES tap-regulation importer finds in a conformity fixture.
 //!
 //! Not a test — a probe, so the counts in `tests/cgmes_tap_regulation_test.rs`
-//! and in `plans/TAP_CONTROL_PLAN.md` are recorded from what the importer
+//! are recorded from what the importer
 //! actually reads rather than from what the XML appears to say.
 use std::path::{Path, PathBuf};
 
