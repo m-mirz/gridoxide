@@ -20,6 +20,8 @@ use gridoxide::qv::{qv_curve, QvError, QvOptions, QvStatus};
 use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType, Line};
 
+mod pglib;
+
 fn bus(idx: usize, bus_type: BusType, p: f64, q: f64) -> Bus {
     Bus {
         idx,
@@ -278,8 +280,7 @@ fn impossible_requests_are_refused() {
 fn case14_margins_are_coherent_and_grid_independent() {
     use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pglib-opf/pglib_opf_case14_ieee.json");
+    let path = pglib::path("pglib_opf_case14_ieee", ".json");
     let raw = std::fs::read_to_string(&path).expect("committed pglib fixture");
     let input: PgmInput = serde_json::from_str(&raw).expect("parse");
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 100e6, 50.0);

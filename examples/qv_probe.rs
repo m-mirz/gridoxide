@@ -4,11 +4,35 @@
 //! The comparison is the point. Both are voltage-stability measures and it is
 //! natural to expect them to agree on which bus is weakest; they do not, and
 //! this is what shows it. See `docs/src/powerflow/qv.md`.
+//!
+//! The cases are converted from the `benchmark-grids` submodule by
+//! `tests/data/pglib_opf.py`, the same as the tests do, which needs a Python
+//! with numpy (`python3` unless `PYTHON` names another).
 use gridoxide::continuation::{run_continuation, ContinuationOptions, LoadingDirection};
 use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
 use gridoxide::qv::{qv_curve, QvOptions, QvStatus};
 use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType};
+
+/// Converts the pglib cases into a scratch directory and returns it, as
+/// `cpf_probe` does.
+fn convert_pglib() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("gridoxide-qv-probe");
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib_opf.py");
+    let out = std::process::Command::new(&python)
+        .arg(&script)
+        .arg(&dir)
+        .output()
+        .unwrap_or_else(|e| panic!("running {python}: {e}; set PYTHON to a Python with numpy"));
+    assert!(
+        out.status.success(),
+        "{} failed (needs numpy and the benchmark-grids submodule):\n{}",
+        script.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    dir
+}
 
 /// Every bus's reactive margin, weakest first.
 fn margins(
@@ -50,10 +74,9 @@ fn main() {
         names
     };
 
+    let base = convert_pglib();
     for name in names {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/pglib-opf")
-            .join(format!("{name}.json"));
+        let path = base.join(format!("{name}.json"));
         let Ok(raw) = std::fs::read_to_string(&path) else {
             println!("{name}: absent");
             continue;

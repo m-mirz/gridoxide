@@ -5,14 +5,10 @@ curve. What is checked here is that the binding reaches it and the shapes are
 what the docstring promises.
 """
 
-from pathlib import Path
-
 import pytest
 
 import gridoxide
-
-ROOT = Path(__file__).resolve().parent.parent.parent
-CASE14 = ROOT / "tests/data/pglib-opf/pglib_opf_case14_ieee.json"
+from _pglib import fixtures
 
 
 pytestmark = pytest.mark.skipif(
@@ -22,9 +18,8 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def model():
-    if not CASE14.exists():
-        pytest.skip(f"missing fixture: {CASE14}")
-    return gridoxide.PowerFlowModel.from_pgm_json(str(CASE14), s_base_va=100e6)
+    case14 = fixtures() / "pglib_opf_case14_ieee.json"
+    return gridoxide.PowerFlowModel.from_pgm_json(str(case14), s_base_va=100e6)
 
 
 def test_it_traces_a_curve_and_finds_a_margin(model):
