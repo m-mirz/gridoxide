@@ -16,9 +16,9 @@
 //! - **`.crv`** — which variables to record.
 //!
 //! Because the addressing is by name, the fixtures under
-//! `tests/data/dynamics/dynawo/` are copied **verbatim** from Dynawo's own
-//! repository rather than written here. The parameter names this reader looks
-//! for are the ones a real case uses, and the gate proves it.
+//! `tests/data/benchmark-grids/dynawo/` are copied **verbatim** from Dynawo's
+//! own repository rather than written here. The parameter names this reader
+//! looks for are the ones a real case uses, and the gate proves it.
 //!
 //! # What maps exactly, and what does not
 //!

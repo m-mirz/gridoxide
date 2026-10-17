@@ -1,7 +1,8 @@
-//! Phase-4 gates for `src/dynamics/dyd.rs`: Dynawo's `.dyd`/`.par`/`.crv`.
+//! Gates for `src/dynamics/dyd.rs`: Dynawo's `.dyd`/`.par`/`.crv`.
 //!
-//! The fixtures under `tests/data/dynamics/dynawo/` are copied **verbatim**
-//! from Dynawo's own repository — see the `PROVENANCE.md` beside them. That is
+//! The fixtures under `tests/data/benchmark-grids/dynawo/` are copied
+//! **verbatim** from Dynawo's own repository — see that repository's
+//! `PROVENANCE.md`. That is
 //! the point of this suite. A `.par` is addressed by parameter *name*, so the
 //! only real risk is looking up a name that no real file uses, and a
 //! hand-written fixture would agree with whatever the reader happened to
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use gridoxide::dynamics::dyd::{self, DydError, DydWarning};
 use gridoxide::dynamics::json::{AvrSpec, GovSpec, MachineSpec};
 
-const DIR: &str = "tests/data/dynamics/dynawo";
+const DIR: &str = "tests/data/benchmark-grids/dynawo/ieee14";
 
 fn documents() -> (dyd::DydDocument, dyd::ParDocument) {
     (

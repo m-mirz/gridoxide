@@ -38,7 +38,7 @@ use gridoxide::dynamics::{run_dynamics, DynamicsOptions, DynamicsStatus, Traject
 use gridoxide::json::NetworkData;
 use gridoxide::types::{Bus, BusType, Line};
 
-const DIR: &str = "tests/data/dynamics/dynawo/kundur13";
+const DIR: &str = "tests/data/benchmark-grids/dynawo/kundur13";
 
 /// The network's own base, in MVA. Dynawo's `SnRef`, and what every `…Pu` in
 /// the reference file is on.
