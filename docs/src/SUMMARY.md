@@ -39,6 +39,17 @@
 - [Symmetrical Components and the Fault Equations](./short_circuit/sequence.md)
 - [A Fault Current, by Hand](./short_circuit/worked_example.md)
 
+# Dynamics (RMS)
+
+- [The RMS Simulation Problem](./dynamics/index.md)
+- [The DAE and Its Jacobian](./dynamics/dae.md)
+- [Initialization from a Power Flow](./dynamics/initialization.md)
+- [The Model Library](./dynamics/models.md)
+- [Events and Discontinuities](./dynamics/events.md)
+- [Small-Signal Analysis](./dynamics/smallsignal.md)
+- [Reading Dynamic Data](./dynamics/input.md)
+- [Kundur's Example 13.2, Against Dynawo](./dynamics/validation.md)
+
 # State Estimation
 
 - [The State Estimation Problem](./state_estimation/index.md)

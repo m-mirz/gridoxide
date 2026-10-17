@@ -1996,6 +1996,576 @@ struct ContinuationCurve {
 /// the nose is, and the λ at which each machine saturates is located exactly
 /// rather than rounded to whichever step noticed it.
 ///
+
+// --- RMS dynamics -----------------------------------------------------------
+//
+// Only present when the `dynamics` feature was built in.
+// `hasattr(gridoxide, "dynamics")` is the check a caller makes.
+
+/// A trajectory: one column per observable, one row per time point.
+///
+/// Returned as plain lists rather than as numpy arrays, so the extension keeps
+/// no numpy dependency; `numpy.asarray(result.values())` is one call away for
+/// anyone who wants one.
+#[cfg(feature = "dynamics")]
+#[pyclass]
+pub struct DynamicsResult {
+    #[pyo3(get)]
+    status: String,
+    #[pyo3(get)]
+    steps: usize,
+    #[pyo3(get)]
+    newton_iterations: usize,
+    #[pyo3(get)]
+    events_applied: usize,
+    /// Anything noticed that is not an error — a de-energized island, an event
+    /// naming something that does not exist.
+    #[pyo3(get)]
+    warnings: Vec<String>,
+    /// What each relay did: `(id, crossing time, firing time)`. The crossing
+    /// time is **located** inside the step, not rounded to its boundary.
+    #[pyo3(get)]
+    relay_actions: Vec<(String, f64, f64)>,
+    #[pyo3(get)]
+    time: Vec<f64>,
+    #[pyo3(get)]
+    names: Vec<String>,
+    rows: Vec<Vec<f64>>,
+}
+
+#[cfg(feature = "dynamics")]
+#[pymethods]
+impl DynamicsResult {
+    /// One observable's whole series, by name.
+    ///
+    /// The names are `"<machine>.<state>"` for a device state — `"G1.delta"`,
+    /// `"G1.omega"` — and `"bus<i>.vmag"` / `"bus<i>.vang"` for the network.
+    fn series(&self, name: &str) -> PyResult<Vec<f64>> {
+        let column = self
+            .names
+            .iter()
+            .position(|n| n == name)
+            .ok_or_else(|| PyValueError::new_err(format!("no observable named {name:?}")))?;
+        Ok(self.rows.iter().map(|r| r[column]).collect())
+    }
+
+    /// Every column, in `names` order — the whole trajectory as a list of rows.
+    fn values(&self) -> Vec<Vec<f64>> {
+        self.rows.clone()
+    }
+
+    /// Whether the run reached its end time.
+    fn completed(&self) -> bool {
+        self.status == "completed"
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DynamicsResult(status={:?}, steps={}, points={}, observables={})",
+            self.status,
+            self.steps,
+            self.time.len(),
+            self.names.len()
+        )
+    }
+}
+
+/// Runs an RMS (phasor-domain) dynamic simulation over a gridoxide JSON
+/// document carrying a `dynamics` section.
+///
+/// ```python
+/// result = gridoxide.dynamics("case.json", stop=10.0, step=0.005)
+/// omega = result.series("G1.omega")
+/// ```
+///
+/// The document states the machines, their controls and the schedule of faults,
+/// trips and load steps; the base case is solved and every device initialized
+/// so that nothing moves until the first event does. `events` overrides the
+/// document's own schedule when given, which is what a caller sweeping clearing
+/// times wants.
+///
+/// `speed_voltages` overrides the document's own choice of machine
+/// formulation: `False` (the default) makes the classical `ω ≈ 1` assumption,
+/// `True` carries the rotor speed on the speed-voltage terms and writes the
+/// swing equation in torque, which is what Dynawo does. On Kundur's Example
+/// 13.2 the difference is 0.6% of terminal power at a 0.9% speed deviation.
+///
+/// The physics is gated in the Rust suite — against closed forms, against a
+/// finite-difference oracle, and against Dynawo's own published answer for
+/// Kundur's Example 13.2. This binding only has to reach it.
+#[cfg(feature = "dynamics")]
+#[pyfunction]
+#[pyo3(signature = (
+    path, stop = 10.0, step = 0.005, tol = 1e-9, max_newton = 20,
+    damping_steps = 2, backend = None, events = None, speed_voltages = None,
+    relays = None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn dynamics(
+    py: Python<'_>,
+    path: &str,
+    stop: f64,
+    step: f64,
+    tol: f64,
+    max_newton: usize,
+    damping_steps: usize,
+    backend: Option<&str>,
+    events: Option<Vec<Bound<'_, pyo3::types::PyAny>>>,
+    speed_voltages: Option<bool>,
+    relays: Option<Vec<Bound<'_, pyo3::types::PyAny>>>,
+) -> PyResult<DynamicsResult> {
+    use crate::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
+    use crate::solver::JacobianBackend;
+
+    let backend = match backend {
+        None | Some("scalar") => JacobianBackend::Scalar,
+        Some("klu_native") => JacobianBackend::KluNative,
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "backend must be \"scalar\" or \"klu_native\", got {other:?}"
+            )))
+        }
+    };
+
+    let mut document = json::read(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // The document states this; the argument overrides it, so one case can be
+    // asked both ways without editing the file.
+    if let Some(on) = speed_voltages {
+        document.dynamics.speed_voltages = on;
+    }
+    let (mut system, mut schedule, mut protection) =
+        document.build_with_relays().map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // An overriding schedule is given as dicts in the same shape the document
+    // uses, so there is one vocabulary for events and not two.
+    if let Some(given) = events {
+        let mut parsed = Vec::with_capacity(given.len());
+        for item in given {
+            let text: String = py
+                .import("json")?
+                .call_method1("dumps", (item,))?
+                .extract()?;
+            let spec: json::EventSpec = serde_json::from_str(&text)
+                .map_err(|e| PyValueError::new_err(format!("event: {e}")))?;
+            parsed.push(crate::dynamics::Event::from(spec));
+        }
+        schedule = parsed;
+    }
+    // Relays are given in the same shape the document uses, so there is one
+    // vocabulary for protection and not two.
+    if let Some(given) = relays {
+        let mut parsed = Vec::with_capacity(given.len());
+        for item in given {
+            let text: String = py.import("json")?.call_method1("dumps", (item,))?.extract()?;
+            parsed.push(
+                serde_json::from_str(&text)
+                    .map_err(|e| PyValueError::new_err(format!("relay: {e}")))?,
+            );
+        }
+        protection = parsed;
+    }
+
+    let report = run_dynamics(
+        &mut system,
+        &DynamicsOptions {
+            end_time: stop,
+            step,
+            tol,
+            max_newton,
+            damping_steps,
+            events: schedule,
+            relays: protection,
+            backend,
+        },
+    );
+
+    let status = match report.status {
+        DynamicsStatus::Completed => "completed".to_string(),
+        DynamicsStatus::NewtonFailed { time } => format!("newton_failed at {time}"),
+        DynamicsStatus::Singular { time } => format!("singular at {time}"),
+    };
+    Ok(DynamicsResult {
+        status,
+        steps: report.steps,
+        newton_iterations: report.newton_iterations,
+        events_applied: report.events_applied,
+        warnings: report.warnings.iter().map(|w| w.to_string()).collect(),
+        relay_actions: report
+            .relay_actions
+            .iter()
+            .map(|a| (a.id.clone(), a.crossed_at, a.fired_at))
+            .collect(),
+        time: report.trajectory.time,
+        names: report.trajectory.names,
+        rows: report.trajectory.rows,
+    })
+}
+
+
+/// One mode of the linearized system.
+#[cfg(feature = "dynamics")]
+#[pyclass]
+pub struct DynamicsMode {
+    /// Real part of the eigenvalue, in reciprocal seconds. Positive grows.
+    #[pyo3(get)]
+    sigma: f64,
+    /// Imaginary part, in radians per second.
+    #[pyo3(get)]
+    omega: f64,
+    /// Damping ratio. **Negative means growing.**
+    #[pyo3(get)]
+    damping: f64,
+    /// Oscillation frequency in Hz; zero for a non-oscillatory mode.
+    #[pyo3(get)]
+    frequency: f64,
+    /// `1/e` decay time in seconds; `inf` for an undamped mode.
+    #[pyo3(get)]
+    time_constant: f64,
+    /// `(state name, factor)`, largest first, normalized to sum to one.
+    #[pyo3(get)]
+    participation: Vec<(String, f64)>,
+    /// The mode shape at the rotor angles: `(state name, magnitude, phase in
+    /// degrees)`, scaled so the largest is `1∠0`.
+    ///
+    /// Participation says whose a mode is; the shape says how they move. Two
+    /// rotors near opposite phase are swinging *against* each other, which is
+    /// what separates an inter-area mode from a local one. Empty for a
+    /// non-oscillatory mode, where a relative phase means nothing.
+    #[pyo3(get)]
+    shape: Vec<(String, f64, f64)>,
+    /// How far this eigenvalue may be from the true one, in reciprocal seconds.
+    ///
+    /// Zero from the dense method, which does not iterate. From the sparse one
+    /// it is measured rather than estimated, and it is what says whether an
+    /// answer is an answer.
+    #[pyo3(get)]
+    residual: f64,
+}
+
+#[cfg(feature = "dynamics")]
+#[pymethods]
+impl DynamicsMode {
+    fn __repr__(&self) -> String {
+        format!(
+            "DynamicsMode({:+.5}{:+.5}j, damping={:.4}, f={:.4} Hz)",
+            self.sigma, self.omega, self.damping, self.frequency
+        )
+    }
+}
+
+/// How one mode moves when one parameter does.
+#[cfg(feature = "dynamics")]
+#[pyclass]
+pub struct ModeSensitivity {
+    /// The device, indexed as the units were declared.
+    #[pyo3(get)]
+    device: usize,
+    /// The device's own name.
+    #[pyo3(get)]
+    unit: String,
+    /// The parameter — `"h"` or `"d"`.
+    #[pyo3(get)]
+    name: String,
+    /// Its current value, so a relative sensitivity is one multiplication away.
+    #[pyo3(get)]
+    value: f64,
+    /// `d(Re λ)/dp`, per unit of the parameter.
+    #[pyo3(get)]
+    d_sigma: f64,
+    /// `d(Im λ)/dp`, radians per second per unit of the parameter.
+    #[pyo3(get)]
+    d_omega: f64,
+    /// `dζ/dp` — usually the one that matters, since damping is what a study is
+    /// choosing between.
+    #[pyo3(get)]
+    d_damping: f64,
+    /// `df/dp`, hertz per unit of the parameter.
+    #[pyo3(get)]
+    d_frequency: f64,
+}
+
+#[cfg(feature = "dynamics")]
+#[pymethods]
+impl ModeSensitivity {
+    fn __repr__(&self) -> String {
+        format!(
+            "ModeSensitivity({}.{} = {:.4}, dzeta/dp={:+.3e})",
+            self.unit, self.name, self.value, self.d_damping
+        )
+    }
+}
+
+/// What a small-signal analysis reports, and how it was reached.
+#[cfg(feature = "dynamics")]
+#[pyclass]
+pub struct SmallSignalResult {
+    /// The modes, least damped first.
+    #[pyo3(get)]
+    modes: Vec<Py<DynamicsMode>>,
+    /// `"dense"` or `"sparse"` — see [`shift`](Self::shift).
+    #[pyo3(get)]
+    method: String,
+    /// The shift the sparse method was aimed at, as `(re, im)`; `None` for the
+    /// dense method, which needs no aim because it computes everything.
+    #[pyo3(get)]
+    shift: Option<(f64, f64)>,
+    /// Whether every mode met its tolerance. Always true of the dense method.
+    #[pyo3(get)]
+    converged: bool,
+    /// Whether `modes` is every mode the system has, or only those near the
+    /// shift.
+    ///
+    /// The distinction a caller must not lose: "no unstable modes" drawn from a
+    /// partial list is not a statement about the system.
+    #[pyo3(get)]
+    complete: bool,
+    /// How the **least-damped** mode moves with each tunable parameter, ranked
+    /// by how much damping a 1% change buys.
+    ///
+    /// Empty unless `sensitivities=True` was asked for. The critical mode only,
+    /// because that is the question — a table of every mode against every
+    /// parameter is one nobody reads, and on a large case it is thousands of
+    /// rows.
+    #[pyo3(get)]
+    sensitivities: Vec<Py<ModeSensitivity>>,
+}
+
+#[cfg(feature = "dynamics")]
+#[pymethods]
+impl SmallSignalResult {
+    fn __repr__(&self) -> String {
+        match self.shift {
+            None => format!("SmallSignalResult({} modes, dense, complete)", self.modes.len()),
+            Some((re, im)) => format!(
+                "SmallSignalResult({} modes, sparse near {re:+.4}{im:+.4}j, partial)",
+                self.modes.len()
+            ),
+        }
+    }
+
+    fn __len__(&self) -> usize {
+        self.modes.len()
+    }
+
+    /// Indexing and iteration, so this reads as the list of modes it replaced.
+    ///
+    /// The result used to *be* a list. Making it an object was needed to carry
+    /// which method answered — the difference between "every mode" and "the
+    /// ones near a shift" changes what a caller may conclude — and keeping the
+    /// sequence protocol means no caller has to care.
+    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Py<DynamicsMode>> {
+        let len = self.modes.len() as isize;
+        let index = if index < 0 { index + len } else { index };
+        if index < 0 || index >= len {
+            return Err(pyo3::exceptions::PyIndexError::new_err("mode index out of range"));
+        }
+        Ok(self.modes[index as usize].clone_ref(py))
+    }
+}
+
+/// Linearizes a case about its equilibrium and returns its modes.
+///
+/// ```python
+/// modes = gridoxide.small_signal("case.json")
+/// worst = modes[0]                      # least damped first
+/// print(worst.frequency, worst.damping, worst.participation[:3])
+/// ```
+///
+/// This answers a question no single run can — what oscillations the system
+/// has at all, and which machines take part in each — and it is the only
+/// reliable way to find a *negatively* damped mode, since a time-domain run
+/// finds one only if the disturbance happened to excite it.
+///
+/// Refuses a case that is not at an equilibrium: a linearization about a point
+/// the system is not sitting at describes nothing in particular, and its
+/// eigenvalues would look entirely plausible.
+///
+/// # Asking about one band
+///
+/// Below two thousand states this computes *every* mode. Past that — and
+/// whenever `freq` or `near` is given — it switches to a sparse method that
+/// computes only the `count` modes nearest a point in the complex plane:
+///
+/// ```python
+/// # the inter-area modes, on a case too large to decompose whole
+/// result = gridoxide.small_signal("big.json", freq=0.5, count=10)
+/// assert result.complete is False        # these are not all the modes
+/// print(result.method, result.shift, result.converged)
+/// ```
+///
+/// `result.complete` is the flag that matters. A partial list supports no
+/// statement about the system as a whole, and reading "nothing unstable" off
+/// one is a mistake the object is shaped to prevent.
+#[cfg(feature = "dynamics")]
+#[pyfunction]
+#[pyo3(signature = (
+    path,
+    speed_voltages = None,
+    freq = None,
+    damping = None,
+    near = None,
+    count = None,
+    tol = None,
+    sensitivities = false,
+))]
+#[allow(clippy::too_many_arguments)]
+fn small_signal(
+    py: Python<'_>,
+    path: &str,
+    speed_voltages: Option<bool>,
+    freq: Option<f64>,
+    damping: Option<f64>,
+    near: Option<(f64, f64)>,
+    count: Option<usize>,
+    tol: Option<f64>,
+    sensitivities: bool,
+) -> PyResult<SmallSignalResult> {
+    use crate::dynamics::{json, smallsignal};
+    use smallsignal::{Method, SmallSignalOptions};
+
+    let mut document = json::read(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    if let Some(on) = speed_voltages {
+        document.dynamics.speed_voltages = on;
+    }
+    let (mut system, _) = document.build().map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    if near.is_some() && freq.is_some() {
+        return Err(PyValueError::new_err(
+            "near names the shift outright; do not also give freq",
+        ));
+    }
+    if near.is_none() && freq.is_none() && damping.is_some() {
+        return Err(PyValueError::new_err(
+            "damping only says how far off the axis to aim; give freq to say where",
+        ));
+    }
+
+    let aimed = match (near, freq) {
+        (Some((re, im)), _) => Some(num_complex::Complex::new(re, im)),
+        (None, Some(hz)) => {
+            if hz <= 0.0 {
+                return Err(PyValueError::new_err("freq must be positive"));
+            }
+            Some(SmallSignalOptions::near_frequency(hz, damping.unwrap_or(0.05)).shift)
+        }
+        (None, None) => None,
+    };
+
+    let result = match aimed {
+        Some(shift) => {
+            let mut opts = SmallSignalOptions { shift, ..SmallSignalOptions::default() };
+            if let Some(count) = count {
+                opts.count = count;
+            }
+            if let Some(tol) = tol {
+                opts.tol = tol;
+            }
+            smallsignal::analyze_near(&system, &opts)
+        }
+        None => smallsignal::analyze(&system),
+    }
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let sensitivities = if sensitivities {
+        mode_sensitivities(py, &mut system, &result)?
+    } else {
+        Vec::new()
+    };
+
+    let modes = result
+        .modes
+        .iter()
+        .map(|mode| {
+            Py::new(
+                py,
+                DynamicsMode {
+                    sigma: mode.eigenvalue.re,
+                    omega: mode.eigenvalue.im,
+                    damping: mode.damping,
+                    frequency: mode.frequency,
+                    time_constant: mode.time_constant,
+                    participation: result.participants(mode),
+                    shape: result.shape(mode),
+                    residual: mode.residual,
+                },
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let (method, shift, complete) = match result.method {
+        Method::Dense => ("dense".to_string(), None, true),
+        Method::Sparse { shift, .. } => {
+            ("sparse".to_string(), Some((shift.re, shift.im)), false)
+        }
+    };
+
+    Ok(SmallSignalResult {
+        modes,
+        method,
+        shift,
+        converged: result.converged,
+        complete,
+        sensitivities,
+    })
+}
+
+/// The critical mode's sensitivity to every tunable parameter, ranked.
+#[cfg(feature = "dynamics")]
+fn mode_sensitivities(
+    py: Python<'_>,
+    system: &mut crate::dynamics::DynamicSystem,
+    result: &crate::dynamics::smallsignal::SmallSignal,
+) -> PyResult<Vec<Py<ModeSensitivity>>> {
+    use crate::dynamics::smallsignal;
+
+    let Some(mode) = result.critical().cloned() else {
+        return Ok(Vec::new());
+    };
+    let parameters = smallsignal::tunable_parameters(system);
+    if parameters.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut computed = smallsignal::sensitivities(system, &mode, &parameters)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    computed.sort_by(|a, b| {
+        let (x, y) = (a.d_damping * a.value, b.d_damping * b.value);
+        y.abs().partial_cmp(&x.abs()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Device names come from the states they own: every state of one device
+    // shares its prefix, so no second list is needed to say whose a parameter
+    // is.
+    let mut units: Vec<&str> = Vec::new();
+    for name in &result.state_names {
+        let unit = name.split('.').next().unwrap_or(name);
+        if !units.contains(&unit) {
+            units.push(unit);
+        }
+    }
+
+    computed
+        .into_iter()
+        .map(|s| {
+            Py::new(
+                py,
+                ModeSensitivity {
+                    device: s.parameter.device,
+                    unit: units
+                        .get(s.parameter.device)
+                        .map(|u| (*u).to_string())
+                        .unwrap_or_default(),
+                    name: s.parameter.name,
+                    value: s.value,
+                    d_sigma: s.d_eigenvalue.re,
+                    d_omega: s.d_eigenvalue.im,
+                    d_damping: s.d_damping,
+                    d_frequency: s.d_frequency,
+                },
+            )
+        })
+        .collect()
+}
+
 /// The physics is gated in `tests/continuation_test.rs` (against a closed-form
 /// two-bus nose) and `tests/continuation_events_test.rs` (against a brute-force
 /// bisection); this binding only has to reach it.
@@ -2837,6 +3407,17 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Only present when the optimization layer was built in — see the `opf`
     // feature. `hasattr(gridoxide, "dc_opf")` is the check a caller makes.
+    // Only present when the RMS dynamics layer was built in — see the
+    // `dynamics` feature. `hasattr(gridoxide, "dynamics")` is the check.
+    #[cfg(feature = "dynamics")]
+    {
+        m.add_class::<DynamicsResult>()?;
+        m.add_class::<DynamicsMode>()?;
+        m.add_class::<SmallSignalResult>()?;
+        m.add_class::<ModeSensitivity>()?;
+        m.add_function(wrap_pyfunction!(dynamics, m)?)?;
+        m.add_function(wrap_pyfunction!(small_signal, m)?)?;
+    }
     #[cfg(feature = "opf")]
     {
         m.add_class::<DcOpfResult>()?;

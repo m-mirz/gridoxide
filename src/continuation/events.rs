@@ -77,7 +77,7 @@ pub(crate) fn worst_violation(buses: &[Bus], q_calc: &[f64]) -> f64 {
 /// Each iteration costs a full corrector, so plain bisection would be wasteful;
 /// Illinois damping keeps the superlinear rate without losing the bracket the
 /// way unmodified regula falsi does when one endpoint stalls.
-pub(crate) struct Illinois {
+pub struct Illinois {
     pub lo: f64,
     pub hi: f64,
     pub f_lo: f64,

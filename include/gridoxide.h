@@ -609,32 +609,6 @@ enum gridoxide_status gridoxide_powerflow_island_buses(const struct gridoxide_po
  */
 void gridoxide_options_default(struct gridoxide_options *out);
 
-/**
- * `vendor/suitesparse/BTF/Include/btf.h`'s `btf_order` (real/int32
- * variant, not `btf_l_order`).
- */
-extern int32_t btf_order(int32_t n,
-                         const int32_t *ap,
-                         const int32_t *ai,
-                         double maxwork,
-                         double *work,
-                         int32_t *p,
-                         int32_t *q,
-                         int32_t *r,
-                         int32_t *nmatch,
-                         int32_t *work_arr);
-
-/**
- * `vendor/suitesparse/AMD/Include/amd.h`'s `amd_order` (real/int32
- * variant, not `amd_l_order`).
- */
-extern int amd_order(int32_t n,
-                     const int32_t *ap,
-                     const int32_t *ai,
-                     int32_t *p,
-                     const double *control,
-                     double *info);
-
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

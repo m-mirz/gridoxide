@@ -51,6 +51,22 @@ See [Building and Running](docs/src/getting_started/building.md) and
   detection](docs/src/state_estimation/diagnostics.md) and zero injections enforced as hard
   constraints rather than high-weight guesses. Validated against power-grid-model's own fixtures; see
   [The State Estimation Problem](docs/src/state_estimation/index.md).
+- **RMS (phasor-domain) dynamic simulation** (`--features dynamics`) — what the network does over
+  *time* after a fault, rather than at one instant. The differential-algebraic system is solved
+  simultaneously, one Newton per step over machine states and network voltages together, with
+  classical, transient and subtransient machines, exciters, governors and stabilizers, and
+  scheduled faults, trips and load steps. Reads its own JSON, PSS/E `.dyr` and Dynawo `.dyd`/`.par`.
+  Gated against the equal-area criterion's closed-form critical clearing time and against
+  [Dynawo's own published answer](docs/src/dynamics/validation.md) for Kundur's Example 13.2 —
+  see [The RMS Simulation Problem](docs/src/dynamics/index.md).
+- **Small-signal (modal) analysis** on the same system — eigenvalues, damping ratios,
+  participation factors naming the states each mode belongs to, and mode shapes saying how the
+  rotors move, from the very Jacobian blocks the time-domain solve already assembles. Dense below a
+  couple of thousand states; past that, **sparse shift-invert Arnoldi** takes over and returns the
+  modes near a named frequency without ever forming the state matrix — 20 480 states in under 15 s, and
+  cross-checked against ARPACK on the identical operator. With **eigenvalue sensitivities**: how far
+  a mode moves, and how much damping it gains, per unit of a machine parameter. See
+  [Small-Signal Analysis](docs/src/dynamics/smallsignal.md).
 - **Five interchangeable linear-solver backends** — `faer` (`Scalar`), a hand-written block LU
   (`Block`), vendored SuiteSparse KLU over FFI (`Klu`), a from-scratch Rust translation of KLU
   (`KluNative`, always built), and Intel oneMKL PARDISO (`Pardiso`). All five produce identical
