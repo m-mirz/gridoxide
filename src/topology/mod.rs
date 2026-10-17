@@ -7,7 +7,7 @@
 //! electrically the same point, collapse them", and it is importer-agnostic
 //! because both importers can reach a network needing it.
 //!
-//! [`model`] and [`bus_view`] are the newer one. They hold a **node-breaker**
+//! [`model`] and [`mod@bus_view`] are the newer one. They hold a **node-breaker**
 //! description — connectivity nodes and the switches between them — and derive
 //! an electrical bus view from it under a [`RetentionPolicy`]. That is the
 //! layer that lets a switch keep its identity instead of being consumed at
@@ -22,7 +22,8 @@
 //!
 //! # Index spaces
 //!
-//! [`NodeIdx`] and [`BusIdx`] are different things and this module keeps them
+//! [`NodeIdx`] and [`BusIdx`](model::BusIdx) are different
+//! things and this module keeps them
 //! different in the type system. `src/cgmes.rs` carries a comment describing a
 //! real bug where pre-merge and post-merge indices were confused and
 //! `AngleRefTopologicalNode` resolution picked an unrelated node; both were

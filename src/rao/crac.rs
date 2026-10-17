@@ -31,7 +31,8 @@
 //! **Network elements are strings here.** A CRAC names branches, switches and
 //! generators by the id its source network uses, and this model keeps them that
 //! way. Resolving them to gridoxide's own indices needs a network, is fallible
-//! in an interesting way, and therefore gets [its own step](Crac::resolve)
+//! in an interesting way, and therefore gets
+//! [its own step](super::evaluate::Resolution)
 //! with its own report — a silently mis-resolved element produces a plausible
 //! wrong answer, which is the worst kind.
 

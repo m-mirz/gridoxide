@@ -17,18 +17,14 @@ use gridoxide::json::NetworkData;
 use gridoxide::linear::{
     dc_branches, dc_power_flow, DcApproximation, DcOptions, DcSensitivity,
 };
-use gridoxide::measurement::measurements_from_pgm;
 use gridoxide::network::{build_ybus, stamp_shunts};
-use gridoxide::pgm::{
-    node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches, pgm_to_network, PgmInput,
-};
+use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
 use gridoxide::{run_power_flow, run_power_flow_analysis};
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
 use gridoxide::se::nr::{estimate, linear_start, SeMethod, SeOptions, SeStatus};
 use gridoxide::se::observability;
-use gridoxide::se::SeNetwork;
 use gridoxide::shortcircuit::{
     short_circuit_from_pgm, SequenceValue, ShortCircuitOptions, VoltageScaling,
 };
@@ -74,11 +70,20 @@ usage:
                                 The network may be CGMES (a directory, or the
                                 profile .xml files), UCTE-DEF (.uct) or IIDM
                                 (.xiidm). Needs the matching importer feature.
-  gridoxide estimate <path> [--iterative-linear]
+  gridoxide estimate <path> [--iterative-linear] [--asymmetric]
                                 run state estimation over a PGM JSON document
-                                containing sym_voltage_sensor/sym_power_sensor.
+                                containing voltage, power or current sensors.
                                 The default method is Newton-Raphson; the flag
                                 selects the faster, less exact linearized one.
+                                --asymmetric estimates in the *phase domain*:
+                                three buses per node rather than one, with each
+                                asym sensor reading its own phase instead of a
+                                balanced total. That is what makes an unbalanced
+                                network estimable rather than approximable, and
+                                on a distribution feeder the unbalance is the
+                                question rather than a refinement. It refuses,
+                                by name, the components the three-phase model
+                                does not carry.
   gridoxide security <network> --crac <crac.json> [--json]
                                 assess a network against a CRAC: which critical
                                 elements are overloaded, in which state, and by
@@ -271,7 +276,8 @@ fn main() {
                 } else {
                     SeMethod::NewtonRaphson
                 };
-                if let Err(message) = run_estimate(path, method) {
+                let phases = if args.iter().any(|a| a == "--asymmetric") { 3 } else { 1 };
+                if let Err(message) = run_estimate(path, method, phases) {
                     eprintln!("error: {message}");
                     std::process::exit(1);
                 }
@@ -454,29 +460,25 @@ fn power_flow_demo() {
 
 /// Estimates the state of the grid in `path` and prints it, along with the two
 /// analyses that say whether the answer should be trusted.
-fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
+fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), String> {
+    use gridoxide::se::case::{SeCase, PHASE_NAMES};
+
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput =
         serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
-    let id_to_idx = node_id_to_idx(&input);
-    let shunts = pgm_shunts_1ph(&input, &id_to_idx, s_base_va);
-    let net = pgm_to_network(
-        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?,
-        s_base_va,
-        50.0,
-    );
-    let measurements =
-        measurements_from_pgm(&input, &net, s_base_va).map_err(|e| format!("{path}: {e}"))?;
-    if measurements.is_empty() {
-        return Err(format!("{path} contains no usable sensors, so there is nothing to estimate"));
+
+    let case = if phases == 3 {
+        SeCase::from_pgm_3ph(&input, s_base_va, 50.0)
+    } else {
+        SeCase::from_pgm(&input, s_base_va, 50.0)
     }
+    .map_err(|e| format!("{path}: {e}"))?;
 
-    let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
-    stamp_shunts(&mut ybus, &shunts);
-    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+    let nodes = case.nodes();
+    let n_physical = case.phases * nodes.len();
+    let SeCase { network: se_net, mut buses, measurements, .. } = case;
 
-    let mut buses = net.buses.clone();
     linear_start(&mut buses, &se_net, &measurements);
     // The linearized method converges linearly rather than quadratically, so it
     // wants a larger budget for the same tolerance — that trade, a cheaper
@@ -493,8 +495,9 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
     );
 
     println!(
-        "{} bus(es), {} measurement(s) after aggregation",
+        "{} bus(es) ({}), {} measurement(s) after aggregation",
         buses.len(),
+        if phases == 3 { "phase domain, three per node" } else { "symmetric, one per node" },
         measurements.len()
     );
     match report.status {
@@ -514,14 +517,23 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
     println!("Objective J(x) = {:.6e}", report.objective);
 
     println!("\nEstimated voltages:");
-    let mut ids: Vec<(&u64, &usize)> = net.node_idx.iter().collect();
-    ids.sort();
-    for (id, &idx) in ids {
-        println!(
-            "  node {id}: |V| = {:.6} p.u., angle = {:.6} deg",
-            buses[idx].voltage_mag,
-            buses[idx].voltage_ang.to_degrees()
-        );
+    for (id, idx) in &nodes {
+        for phase in 0..phases {
+            // A node owns one bus symmetrically and three in the phase domain,
+            // laid out `3*node + phase`, which is the same arithmetic every
+            // functional in the model uses.
+            let bus = phases * idx + phase;
+            let label = if phases == 3 {
+                format!("node {id} phase {}", PHASE_NAMES[phase])
+            } else {
+                format!("node {id}")
+            };
+            println!(
+                "  {label}: |V| = {:.6} p.u., angle = {:.6} deg",
+                buses[bus].voltage_mag,
+                buses[bus].voltage_ang.to_degrees()
+            );
+        }
     }
 
     let layout = StateLayout::new(&buses, &measurements, &se_net);
@@ -542,11 +554,12 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
     if obs.skipped_numerical {
         println!("  (too large for the dense rank check; structural analysis only)");
     }
-    // Buses beyond the physical node count are gridoxide's own synthesized
-    // ones — a virtual slack bus per source, a star point per three-winding
-    // transformer — and are expected to be unobservable when the source's own
-    // power is unmeasured. Saying which is which avoids a false alarm.
-    let n_physical = net.node_idx.len();
+    // Buses beyond the physical count are gridoxide's own synthesized ones — a
+    // virtual slack bus per source, a star point per three-winding transformer
+    // — and are expected to be unobservable when the source's own power is
+    // unmeasured. Saying which is which avoids a false alarm. In the phase
+    // domain the physical count is three per node, for the same reason.
+
     // The two lists overlap by design — a structurally unmeasured column is
     // also rank-deficient — so they are merged before printing rather than
     // reported twice.
@@ -556,7 +569,17 @@ fn run_estimate(path: &str, method: SeMethod) -> Result<(), String> {
     undetermined.dedup();
     for unknown in undetermined {
         let kind = if unknown.bus >= n_physical { "synthesized" } else { "physical" };
-        println!("  undetermined: {kind} bus {} ({:?})", unknown.bus, unknown.quantity);
+        let where_ = if phases == 3 && unknown.bus < n_physical {
+            format!(
+                "bus {} (node index {}, phase {})",
+                unknown.bus,
+                unknown.bus / 3,
+                PHASE_NAMES[unknown.bus % 3]
+            )
+        } else {
+            format!("bus {}", unknown.bus)
+        };
+        println!("  undetermined: {kind} {where_} ({:?})", unknown.quantity);
     }
     if obs.is_observable() {
         println!("  fully observable");

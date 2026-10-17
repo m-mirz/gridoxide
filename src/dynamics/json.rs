@@ -124,7 +124,7 @@ pub struct DynamicsData {
     #[serde(default)]
     pub events: Vec<EventSpec>,
     /// Protection relays. Unlike an event these carry no time: when they act is
-    /// found, not stated. See [`Relay`](super::events::Relay).
+    /// found, not stated. See [`Relay`].
     #[serde(default)]
     pub relays: Vec<super::events::Relay>,
 }

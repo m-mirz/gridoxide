@@ -611,7 +611,7 @@ fn zero_seq_available(this_side: u8, other_side: u8) -> bool {
 ///   10% of its positive-sequence value.
 ///
 /// Then every side without a zero-sequence path of its own
-/// ([`zero_seq_available`]) and in service picks up
+/// (`zero_seq_available`, private) and in service picks up
 /// `−j·1e-8·sn/s_base/uk`.
 ///
 /// # Two modelling substitutions
