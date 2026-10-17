@@ -402,8 +402,8 @@ impl SmallSignalOptions {
 /// The one fill both methods here read their blocks out of — the dense
 /// reduction below, and the shifted operator `super::shift` factorizes. Sharing
 /// it is not merely tidy: it is what guarantees the sparse path and the dense
-/// path are linearizing the *same* system, which is what phase 1's gate
-/// compares.
+/// path are linearizing the *same* system, which is what
+/// `the_shifted_operator_inverts_the_dense_state_matrix` compares.
 pub(crate) fn fill_at_equilibrium(system: &DynamicSystem) -> Vec<f64> {
     let layout = system.pattern.layout();
     let mut scratch: Vec<super::models::ModelJacobian> = (0..layout.n_devices())

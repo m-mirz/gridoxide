@@ -33,7 +33,7 @@
 //!
 //! # The device/load split, and why it is derived here
 //!
-//! `plans/RMS_PLAN.md` §11 records the one hazard the equilibrium gate cannot
+//! There is one hazard the equilibrium gate cannot
 //! catch: if a caller states a machine's terminal power wrongly, the result is
 //! *self-consistent* — the machine initializes to an equilibrium at the power
 //! it was told, the remainder is absorbed into the bus's admittance, and what

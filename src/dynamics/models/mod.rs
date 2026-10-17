@@ -161,8 +161,7 @@ impl std::error::Error for InitError {}
 /// Machine parameters are conventionally given on the machine's own MVA
 /// rating. Conversion to the network base happens **once**, at construction,
 /// so every method here is already on the network base and no per-step code
-/// has to remember which is which. See `plans/RMS_PLAN.md` §9.5 for why that
-/// placement matters.
+/// has to remember which is which.
 pub trait DynamicModel: std::fmt::Debug {
     fn n_states(&self) -> usize;
 
@@ -182,7 +181,7 @@ pub trait DynamicModel: std::fmt::Debug {
     /// already accounts for the rest.
     fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64>;
 
-    /// The four blocks of §2's Jacobian, analytically. `out` arrives cleared.
+    /// The four blocks of the DAE Jacobian, analytically. `out` arrives cleared.
     ///
     /// Every implementation of this is checked against
     /// [`finite_difference`] by `tests/dynamics_jacobian_test.rs` — gate G4.

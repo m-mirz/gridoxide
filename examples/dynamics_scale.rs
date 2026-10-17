@@ -1,6 +1,6 @@
 //! How an RMS run scales.
 //!
-//! Gate G10 of `plans/RMS_PLAN.md`: a large case runs to completion, and the
+//! A large case runs to completion, and the
 //! cost measures that matter are recorded rather than assumed.
 //!
 //! The case is a ring of alternating generator and load buses — sparse, like a

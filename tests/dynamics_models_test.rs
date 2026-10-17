@@ -824,8 +824,8 @@ fn the_subtransient_machine_is_self_consistent() {
 /// Because `GenTransient` is independently pinned — by the terminal-current
 /// identity and the Norton-cancellation identity above — this transfers that
 /// confidence to `GenRound`. What it cannot confirm is the *magnitude* of the
-/// damper coupling in the regime where it matters; that waits for the external
-/// comparison in phase 5.
+/// damper coupling in the regime where it matters; that is the external
+/// comparison's job (`tests/dynamics_reference_test.rs`).
 #[test]
 fn the_subtransient_machine_reduces_to_the_transient_one() {
     let trajectory = |sixth: bool| {
@@ -1173,8 +1173,7 @@ fn limited_avr(limits: Limits) -> Sexs {
 /// A ceiling the operating point cannot respect has no equilibrium, and is
 /// refused by name rather than initialized to a state the model would leave.
 ///
-/// This is what `InitError::OutsideLimits` was reserved for in phase 1 and
-/// never used until now.
+/// This is what `InitError::OutsideLimits` is for.
 #[test]
 fn an_unreachable_equilibrium_is_refused() {
     // The machine at this operating point needs about 2.3 pu of field voltage.

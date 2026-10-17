@@ -221,7 +221,7 @@ fn both_generator_libraries_map() {
 
 /// Saturation is stated as an exponential characteristic here and as a pair of
 /// points in PSS/E — two incompatible representations of the same physics, and
-/// exactly the divergence `plans/RMS_PLAN.md` §7 predicted. Neither is
+/// a divergence between tools. Neither is
 /// modelled, and both are reported.
 #[test]
 fn saturation_and_limits_are_reported() {
@@ -348,7 +348,7 @@ fn a_whole_case_loads_from_its_two_halves() {
 /// as a `PQ` one.
 ///
 /// The check is the equilibrium itself: a wrong split is silent everywhere else
-/// (see `plans/RMS_PLAN.md` §11), but here it would have to be *consistent*
+/// (see `dynamics::json`), but here it would have to be *consistent*
 /// with a network the file also fixes, and it is not free to be.
 #[test]
 fn a_machine_sharing_its_bus_with_a_load_still_initializes() {

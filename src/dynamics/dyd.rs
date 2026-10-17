@@ -49,8 +49,8 @@
 //! `k = KGover · PNom / s_base`. Every other quantity is read as stated or is
 //! converted by a model that documents its own rule. This one rests on a
 //! reading of Dynawo's base convention rather than on anything in the file, and
-//! it is flagged here so phase 5's comparison knows where to look first if the
-//! frequencies disagree.
+//! it is flagged here so a comparison against Dynawo knows where to look first
+//! if the frequencies disagree.
 //!
 //! # Limits are carried through
 //!
@@ -66,8 +66,8 @@
 //! Dynawo states saturation as `generator_md`, `mq`, `nd`, `nq` — an
 //! exponential characteristic, and *not* PSS/E's `S(1.0)`/`S(1.2)` pair. Two
 //! incompatible representations of the same physics is precisely the
-//! divergence `plans/RMS_PLAN.md` §7 predicted, and precisely why §13 declined
-//! to pick one before a reference was running. Nonzero values are reported.
+//! reason neither reader picks one before a reference states saturation to
+//! compare against. Nonzero values are reported.
 
 use std::collections::HashMap;
 use std::path::Path;

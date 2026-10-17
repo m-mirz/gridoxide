@@ -5,8 +5,8 @@
 //! Every device is initialized **backwards**: from its terminal voltage and
 //! power, choose the states that make its derivatives *zero*, and latch
 //! whatever internal reference that implies. A classical machine latches its
-//! internal EMF magnitude and its mechanical power; an exciter (phase 3) will
-//! latch `V_ref` so that its output is exactly the field voltage the machine
+//! internal EMF magnitude and its mechanical power; an exciter latches
+//! `V_ref` so that its output is exactly the field voltage the machine
 //! turned out to need. Nothing reads a setpoint from the input file — the
 //! setpoint is *derived* from the operating point, because a file's stated
 //! `V_ref` and its stated power flow are two independent claims and they will
@@ -53,8 +53,8 @@
 //! phase-1 load model and it is exact at `t = 0` by construction. It is also a
 //! real modelling choice with real consequences — a constant-impedance load
 //! sheds power as the voltage dips, so it is *optimistic* about voltage
-//! recovery compared to a constant-power load. Voltage-dependent and dynamic
-//! load models are phase 3.
+//! recovery compared to a constant-power load. A device with ZIP terms
+//! replaces it with a voltage-dependent load.
 
 use num_complex::Complex;
 

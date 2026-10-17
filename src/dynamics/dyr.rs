@@ -3,7 +3,7 @@
 //! The `.dyr` is the format most published dynamic cases ship in, and it is
 //! what ANDES reads — so the same file can drive both gridoxide and the
 //! reference, which removes an entire class of "the two tools were given
-//! different data" disagreement before phase 5 starts.
+//! different data" disagreement from any comparison.
 //!
 //! # The format
 //!
@@ -44,8 +44,8 @@
 //! # Saturation is read and discarded
 //!
 //! `GENROU` carries `S(1.0)` and `S(1.2)`, the saturation characteristic. No
-//! model here implements saturation — see `plans/RMS_PLAN.md` §13 for why that
-//! choice waits for a reference to compare against — so those two parameters
+//! model here implements saturation — that choice waits for a reference to
+//! compare against — so those two parameters
 //! are parsed, checked, and dropped. A **nonzero** value produces a
 //! [`DyrWarning::SaturationIgnored`], because ignoring it changes answers and a
 //! silent drop would be the kind of omission that only shows up as a small

@@ -14,8 +14,8 @@ in a keyword-addressed format.
 
 Dynawo's repository also ships `reference/outputs/curves/curves.csv` for this
 case — its own solver's trajectories, committed. That is the comparison data
-phase 5 needs, and it means the Dynawo gate does **not** require a Dynawo
-install, contrary to what `plans/RMS_PLAN.md` §8 phase 0 assumed.
+the reference tests need, and it means the Dynawo gate does **not** require a
+Dynawo install.
 
 Note that this case's own timeline records `PMIN : activation` on two
 generators: its governors hit their minimum-power limits. gridoxide models no

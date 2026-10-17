@@ -979,7 +979,7 @@ fn the_sparse_method_reads_the_same_mode_shape() {
 ///
 /// Every gate above compares the sparse method against the dense one, against a
 /// closed form, or against itself. This compares it against a **trajectory** —
-/// the same independent evidence §19 used for the dense method, now for the
+/// the same independent evidence the dense method is checked with, now for the
 /// method that runs where the dense one cannot.
 ///
 /// The trick is to excite one mode rather than all of them. A fault on a ring

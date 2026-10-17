@@ -169,7 +169,7 @@ rao = ["opf"]
 opf = []
 # RMS (phasor-domain) dynamic simulation — src/dynamics/. The DAE, its
 # integrator, and the machine/exciter/governor model library; see
-# plans/RMS_PLAN.md.
+# docs/src/dynamics/.
 #
 # Like `opf`, this is **complete and self-contained**: pure Rust on this
 # crate's own sparse factorization and its existing `solver::LinearSolver`

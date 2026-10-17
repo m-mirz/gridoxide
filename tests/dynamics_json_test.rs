@@ -3,7 +3,7 @@
 //! Two things are being checked. That a file round-trips into a system that
 //! satisfies the same equilibrium invariant a hand-built one does — parsing is
 //! not the interesting part, *initializing from what was parsed* is. And that
-//! the device/load split, which `plans/RMS_PLAN.md` §11 identified as the one
+//! the device/load split, the one
 //! hazard no gate can catch downstream, is either derived unambiguously or
 //! refused by name.
 
@@ -57,7 +57,7 @@ fn a_document_builds_and_runs() {
 /// An unstated terminal power is derived from the bus, and derived correctly:
 /// stating it explicitly must give the identical machine.
 ///
-/// This is what makes a file immune to §11's hazard. The split is a property of
+/// This is what makes a file immune to the split hazard. The split is a property of
 /// the network, and the file only has to say so when the network cannot.
 #[test]
 fn an_unstated_terminal_power_is_derived_from_the_bus() {

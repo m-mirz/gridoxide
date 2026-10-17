@@ -21,14 +21,12 @@
 //! measurable. [`DynamicsOptions::damping_steps`](super::DynamicsOptions::damping_steps)
 //! is that count.
 //!
-//! **It has nothing to damp yet.** Ringing needs a mode fast enough for
-//! `h·λ` to be large, and the only differential mode in the present model
-//! library is a classical machine's swing — order 1 Hz, which a 5 ms step
-//! resolves comfortably. The damping is wired in now because the exciters and
-//! governors of phase 3 have time constants of 20–50 ms, which is exactly
-//! where it starts to matter. `tests/dynamics_events_test.rs` checks only that
-//! it does not *distort* the answer here, which is the honest claim to make
-//! about it today.
+//! A classical machine's swing gives it nothing to damp: ringing needs a mode
+//! fast enough for `h·λ` to be large, and a swing of order 1 Hz is resolved
+//! comfortably by a 5 ms step. It matters for exciters and governors, whose
+//! time constants of 20–50 ms are exactly where it starts to.
+//! `tests/dynamics_events_test.rs` checks that it does not *distort* the
+//! answer on a classical case.
 //!
 //! Both rules are the same residual with different coefficients — see
 //! [`dae`](super::dae) — so nothing here branches on which is active beyond

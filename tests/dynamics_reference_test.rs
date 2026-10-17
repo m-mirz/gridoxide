@@ -26,7 +26,7 @@
 //! The comparison is between two approximations, not against truth: Dynawo
 //! integrates with IDA at order 2 and a variable step, gridoxide with a fixed
 //! trapezoidal step. Tolerances are therefore stated **per variable** and
-//! justified, as `plans/RMS_PLAN.md` §7 requires, rather than set to whatever
+//! justified rather than set to whatever
 //! makes the test pass.
 
 use std::collections::HashMap;
@@ -276,7 +276,7 @@ fn the_operating_point_and_the_initial_rotor_angle_agree() {
 /// - not the tripped branch — tripping the other line, or neither, gives a
 ///   completely different trajectory;
 /// - not the sign of the `q`-axis damper coupling that
-///   `plans/RMS_PLAN.md` §13 left open — flipping it moves the answer by less
+///   the reduction gates cannot see — flipping it moves the answer by less
 ///   than `1e-3` rad, which also means **this case does not settle that
 ///   question**;
 /// - not the operating point, the parameters, or the air-gap power

@@ -41,10 +41,9 @@
 //!
 //! # Scope
 //!
-//! Phase 1 of `plans/RMS_PLAN.md`: the DAE, the integrator, and the classical
-//! machine, with fixed-voltage buses and constant-impedance loads. Events, the
-//! model library (transient and subtransient machines, AVRs, governors, PSS),
-//! the readers and the external validation are phases 2 through 6.
+//! The DAE, its integrator, events and relays, the machine/exciter/governor
+//! model library, the JSON, PSS/E and Dynawo readers, and small-signal
+//! analysis. Saturation and EMT are not implemented.
 
 pub mod arnoldi;
 /// ARPACK, as the cross-check `arnoldi` is measured against — never as a
@@ -159,8 +158,8 @@ pub enum DynamicsStatus {
 /// The recorded trajectory: one row of observables per time point.
 ///
 /// Every differential state, then each bus's voltage magnitude and angle.
-/// Selecting a subset is a later phase; at phase 1 sizes the whole thing fits
-/// comfortably and recording everything makes the gates easier to write.
+/// Recording everything makes the gates easier to write; the CLI's
+/// `--observe` narrows what it prints.
 #[derive(Clone, Debug, Default)]
 pub struct Trajectory {
     pub time: Vec<f64>,
@@ -490,7 +489,7 @@ pub fn settle(system: &mut DynamicSystem, opts: &DynamicsOptions) -> integrator:
 /// Integrates `system` from its current state to `opts.end_time`.
 ///
 /// The system is advanced in place, so a caller can run in segments — which is
-/// what event handling will do in phase 2.
+/// what event handling does.
 pub fn run_dynamics(system: &mut DynamicSystem, opts: &DynamicsOptions) -> DynamicsReport {
     match opts.backend {
         JacobianBackend::Scalar | JacobianBackend::Block => {

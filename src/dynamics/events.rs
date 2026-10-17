@@ -35,9 +35,9 @@
 //! refill against a symbolic factorization that is still valid, not a
 //! re-analysis.
 //!
-//! Tripping a whole generating unit *is* structural — its states leave the
-//! system — and is deferred to a later phase along with the rest of the model
-//! library. See `plans/RMS_PLAN.md` §11.
+//! Tripping a whole generating unit is value-only too: its states are frozen
+//! rather than removed, so the variable layout does not change. See
+//! [`EventKind::UnitTrip`].
 
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
@@ -93,8 +93,7 @@ pub enum EventKind {
     /// Disconnect a device from the network. Indexed in `SystemSpec::devices`
     /// order.
     ///
-    /// Value-only, despite phase 2 of `plans/RMS_PLAN.md` predicting it would
-    /// be structural. Removing the unit's states from the DAE would indeed
+    /// Value-only. Removing the unit's states from the DAE would
     /// change the variable layout; **freezing** them does not, and freezing is
     /// also the more defensible model — nothing in the network can observe a
     /// disconnected machine's rotor, so integrating it would be tracking a
@@ -120,7 +119,7 @@ pub enum EventKind {
 impl EventKind {
     /// Whether applying this changes the Y-bus and so needs a reassembly.
     /// Everything currently does; the distinction is kept because a reference
-    /// step (phase 3, once there are controls to step) will not.
+    /// step on a control would not.
     pub fn touches_network(&self) -> bool {
         true
     }

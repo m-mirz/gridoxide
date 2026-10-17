@@ -17,7 +17,7 @@
 //!
 //! so that both rules share one residual and one Jacobian, differing only in
 //! the scalar `h·a` this module is handed. That is not a convenience: the
-//! integrator switches between them *within a run* (§5 of the plan — backward
+//! integrator switches between them *within a run* (backward
 //! Euler for two steps after each event, to kill the trapezoidal rule's
 //! ringing), and two separate assemblies would be two places to get the
 //! damping wrong.

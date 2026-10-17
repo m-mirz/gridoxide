@@ -337,9 +337,9 @@ fn a_terminal_fault_removes_the_electrical_power() {
 ///
 /// It cannot yet *improve* it either: ringing needs a mode fast enough that
 /// `h·λ` is large, and a classical machine's swing at about 1 Hz is nowhere
-/// near that for a 2 ms step. The damping is wired in for the exciters and
-/// governors of phase 3, whose time constants are two orders faster. What is
-/// worth pinning today is that turning it on and off does not move the
+/// near that for a 2 ms step. The damping is there for exciters and
+/// governors, whose time constants are two orders faster. What is
+/// worth pinning on a classical case is that turning it on and off does not move the
 /// critical clearing time.
 #[test]
 fn damping_steps_do_not_change_the_answer_yet() {
