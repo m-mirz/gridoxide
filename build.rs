@@ -108,10 +108,15 @@ mod capi {
         }
     }
 
+    /// Parses `src/capi/` and nothing else. `with_crate` would read every
+    /// module regardless of `#[cfg]`, so a hand-written `extern "C"` block
+    /// elsewhere (the BTF/AMD test oracle's, ARPACK's) or a second type named
+    /// like the first (`rao::Limits` and `dynamics::models::Limits`) landed in
+    /// the header as if it were this ABI.
     fn generate(manifest: &std::path::Path) -> Option<String> {
         let config = cbindgen::Config::from_root_or_default(manifest);
         cbindgen::Builder::new()
-            .with_crate(manifest)
+            .with_src(manifest.join("src/capi/mod.rs"))
             .with_config(config)
             .generate()
             .ok()
