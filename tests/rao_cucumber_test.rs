@@ -1968,10 +1968,10 @@ fn every_scenario_names_inputs_that_exist() {
 // TEMPORARY PROBE — remove before commit.
 #[test]
 fn probe_1_4_1_1_3() {
-    let net = ucte::read_with(resolve("common/TestCase16Nodes.uct"), &ucte::UcteOptions::default())
+    let net = ucte::read_with(resolve("cases", "common/TestCase16Nodes.uct"), &ucte::UcteOptions::default())
         .expect("network");
-    let (crac, _) = crac_json::read(resolve("epic20/second_preventive_ls_1_3.json")).expect("crac");
-    let config = resolve("epic20/RaoParameters_maxMargin_ampere_second_preventive.json");
+    let (crac, _) = crac_json::read(resolve("crac", "epic20/second_preventive_ls_1_3.json")).expect("crac");
+    let config = resolve("configurations", "epic20/RaoParameters_maxMargin_ampere_second_preventive.json");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let view = Network {
         generation: &net.generation, buses: &net.buses, lines: &net.lines,
