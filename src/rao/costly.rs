@@ -59,7 +59,10 @@ pub struct CostlyOptions {
 
 impl Default for CostlyOptions {
     fn default() -> Self {
-        Self { violation_penalty: 1000.0, violation_threshold: 0.0 }
+        Self {
+            violation_penalty: 1000.0,
+            violation_threshold: 0.0,
+        }
     }
 }
 
@@ -116,7 +119,11 @@ impl Costly {
         // future threshold that makes a *negative* contribution meaningful.
         let mut preventive: Option<f64> = None;
         let mut worst: Option<f64> = None;
-        for p in result.perimeters.iter().filter(|p| perimeter.contains(&p.state)) {
+        for p in result
+            .perimeters
+            .iter()
+            .filter(|p| perimeter.contains(&p.state))
+        {
             let total: f64 = p
                 .cnecs
                 .iter()
@@ -173,7 +180,11 @@ impl Costly {
                 // Direction is the sign of the movement; the two prices are
                 // separate because a CRAC may state them so.
                 let variation = a.variation_cost.map_or(0.0, |c| {
-                    if distance >= 0.0 { c.up * distance } else { c.down * -distance }
+                    if distance >= 0.0 {
+                        c.up * distance
+                    } else {
+                        c.down * -distance
+                    }
                 });
                 a.activation_cost.unwrap_or(0.0) + variation
             })
@@ -191,7 +202,6 @@ impl Costly {
         activated: &[usize],
         moved: &[(usize, f64)],
     ) -> f64 {
-        self.violation(crac, result, perimeter, unit)
-            + self.activation(crac, activated, moved)
+        self.violation(crac, result, perimeter, unit) + self.activation(crac, activated, moved)
     }
 }

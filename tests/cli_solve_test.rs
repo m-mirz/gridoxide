@@ -55,12 +55,21 @@ fn an_unreadable_network_is_reported_rather_than_panicking() {
 /// section at all — nothing was asked for, so nothing should be claimed.
 #[test]
 fn a_bare_solve_runs_no_outer_loop() {
-    let Some(dir) = config("Svedala/Svedala-Merged") else { return };
+    let Some(dir) = config("Svedala/Svedala-Merged") else {
+        return;
+    };
     let out = run(&["solve", dir.to_str().unwrap()]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
     assert!(text.contains("Converged"), "{text}");
-    assert!(!text.contains("outer loops:"), "no loop was configured: {text}");
+    assert!(
+        !text.contains("outer loops:"),
+        "no loop was configured: {text}"
+    );
     assert!(!text.contains("tap controllers:"), "{text}");
 }
 
@@ -69,7 +78,9 @@ fn a_bare_solve_runs_no_outer_loop() {
 /// express before the outer-loop layer existed.
 #[test]
 fn all_three_controls_run_together() {
-    let Some(dir) = config("Svedala/Svedala-Merged") else { return };
+    let Some(dir) = config("Svedala/Svedala-Merged") else {
+        return;
+    };
     let out = run(&[
         "solve",
         dir.to_str().unwrap(),
@@ -77,11 +88,20 @@ fn all_three_controls_run_together() {
         "--enforce-q-limits",
         "--distribute-slack",
     ]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
 
     assert!(text.contains("outer loops:"), "{text}");
-    for loop_name in ["DistributedSlack", "ReactiveLimits", "PhaseControl", "TransformerVoltageControl"] {
+    for loop_name in [
+        "DistributedSlack",
+        "ReactiveLimits",
+        "PhaseControl",
+        "TransformerVoltageControl",
+    ] {
         assert!(text.contains(loop_name), "missing {loop_name} in:\n{text}");
     }
     assert!(text.contains("converged = true"), "{text}");
@@ -95,9 +115,15 @@ fn all_three_controls_run_together() {
 /// section is absent rather than reporting zero controllers as a success.
 #[test]
 fn control_taps_on_an_uncontrolled_network_reports_nothing() {
-    let Some(dir) = config("SmallGrid/SmallGrid-Merged") else { return };
+    let Some(dir) = config("SmallGrid/SmallGrid-Merged") else {
+        return;
+    };
     let out = run(&["solve", dir.to_str().unwrap(), "--control-taps"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
     assert!(text.contains("0 regulating control(s)"), "{text}");
     assert!(!text.contains("tap controllers:"), "{text}");
@@ -107,7 +133,9 @@ fn control_taps_on_an_uncontrolled_network_reports_nothing() {
 /// used is visible without reading Rust.
 #[test]
 fn the_import_report_is_printed() {
-    let Some(dir) = config("PowerFlow/PowerFlow") else { return };
+    let Some(dir) = config("PowerFlow/PowerFlow") else {
+        return;
+    };
     let out = run(&["solve", dir.to_str().unwrap(), "--control-taps"]);
     let text = stdout(&out);
     assert!(text.contains("tap controls: 0 read, 1 disabled"), "{text}");
@@ -116,7 +144,9 @@ fn the_import_report_is_printed() {
 /// A malformed flag value is a usage error, not a panic or a silent default.
 #[test]
 fn a_bad_flag_value_is_rejected() {
-    let Some(dir) = config("PowerFlow/PowerFlow") else { return };
+    let Some(dir) = config("PowerFlow/PowerFlow") else {
+        return;
+    };
     let out = run(&["solve", dir.to_str().unwrap(), "--max-iter", "banana"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--max-iter"));
@@ -128,7 +158,11 @@ fn a_bad_flag_value_is_rejected() {
 fn a_ucte_network_solves_through_the_same_path() {
     let path = openrao::fixture("TestCase12Nodes.uct");
     let out = run(&["solve", path.to_str().unwrap(), "--enforce-q-limits"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
     assert!(text.contains("Converged"), "{text}");
     assert!(text.contains("ReactiveLimits"), "{text}");
@@ -143,9 +177,15 @@ fn a_ucte_network_solves_through_the_same_path() {
 /// line.
 #[test]
 fn cgmes_supplies_both_the_areas_and_the_schedule() {
-    let Some(dir) = config("MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged") else { return };
+    let Some(dir) = config("MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged") else {
+        return;
+    };
     let out = run(&["solve", dir.to_str().unwrap(), "--area-interchange"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
 
     assert!(text.contains("2 control area(s), 10 tie flow(s)"), "{text}");
@@ -166,7 +206,11 @@ fn cgmes_supplies_both_the_areas_and_the_schedule() {
 fn ucte_supplies_areas_from_country_codes() {
     let path = openrao::fixture("TestCase12Nodes.uct");
     let out = run(&["solve", path.to_str().unwrap(), "--area-interchange"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
     for country in ["BE", "DE", "FR", "NL"] {
         assert!(text.contains(country), "missing {country} in:\n{text}");
@@ -179,7 +223,12 @@ fn ucte_supplies_areas_from_country_codes() {
 #[test]
 fn the_two_active_power_controls_are_refused_together() {
     let path = openrao::fixture("TestCase12Nodes.uct");
-    let out = run(&["solve", path.to_str().unwrap(), "--area-interchange", "--distribute-slack"]);
+    let out = run(&[
+        "solve",
+        path.to_str().unwrap(),
+        "--area-interchange",
+        "--distribute-slack",
+    ]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("subsumes"), "{err}");
@@ -192,10 +241,17 @@ fn the_two_active_power_controls_are_refused_together() {
 fn iidm_supplies_areas_from_its_own_elements() {
     let path = openrao::fixture("TestCase12Nodes.xiidm");
     let out = run(&["solve", path.to_str().unwrap(), "--area-interchange"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
     assert!(text.contains("4 control area(s)"), "{text}");
-    assert!(text.contains("0 contested bus(es), 0 bus(es) in no area"), "{text}");
+    assert!(
+        text.contains("0 contested bus(es), 0 bus(es) in no area"),
+        "{text}"
+    );
     for country in ["BE", "DE", "FR", "NL"] {
         assert!(text.contains(country), "missing {country} in:\n{text}");
     }
@@ -222,13 +278,33 @@ fn area_interchange_without_areas_is_refused() {
 /// reaches it and that the shares it prints are self-consistent.
 #[test]
 fn dispatch_attributes_reactive_power_to_individual_machines() {
-    let Some(dir) = config("RealGrid/RealGrid-Merged") else { return };
-    let text = stdout(&run(&["solve", dir.to_str().unwrap(), "--enforce-q-limits", "--dispatch"]));
+    let Some(dir) = config("RealGrid/RealGrid-Merged") else {
+        return;
+    };
+    let text = stdout(&run(&[
+        "solve",
+        dir.to_str().unwrap(),
+        "--enforce-q-limits",
+        "--dispatch",
+    ]));
 
-    assert!(text.contains("reactive dispatch:"), "{}", &text[..text.len().min(2000)]);
-    assert!(text.contains("held by more than one"), "shared buses should be called out");
-    assert!(text.contains("split by Capability"), "RealGrid's machines state a usable range");
-    assert!(text.contains("% of the bus)"), "each machine's share should be shown");
+    assert!(
+        text.contains("reactive dispatch:"),
+        "{}",
+        &text[..text.len().min(2000)]
+    );
+    assert!(
+        text.contains("held by more than one"),
+        "shared buses should be called out"
+    );
+    assert!(
+        text.contains("split by Capability"),
+        "RealGrid's machines state a usable range"
+    );
+    assert!(
+        text.contains("% of the bus)"),
+        "each machine's share should be shown"
+    );
 
     // The diagnostic that only exists because the split exposed it: a machine
     // saturating while the bus it holds is still inside its own summed bound.
@@ -255,15 +331,25 @@ fn dispatch_says_so_when_the_format_carries_no_machines() {
 /// its own onto that machine.
 #[test]
 fn remote_voltage_control_moves_the_control_onto_the_machine() {
-    let Some(dir) = config("MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged") else { return };
+    let Some(dir) = config("MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged") else {
+        return;
+    };
     let path = dir.to_str().unwrap();
 
     let off = stdout(&run(&["solve", path, "--enforce-q-limits"]));
     assert!(!off.contains("remote voltage control"), "off by default");
 
-    let on = stdout(&run(&["solve", path, "--enforce-q-limits", "--control-remote-voltage"]));
+    let on = stdout(&run(&[
+        "solve",
+        path,
+        "--enforce-q-limits",
+        "--control-remote-voltage",
+    ]));
     assert!(on.contains("remote voltage control: 1 machine(s)"), "{on}");
-    assert!(on.contains("Held"), "the controller should reach its target");
+    assert!(
+        on.contains("Held"),
+        "the controller should reach its target"
+    );
     // The network solved is not the one handed over, and the output says so.
     assert!(on.contains("re-typed PV -> PQ"), "the held bus is freed");
     assert!(on.contains("re-typed PQ -> PV"), "the machine is pinned");

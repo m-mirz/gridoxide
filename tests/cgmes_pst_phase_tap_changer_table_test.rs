@@ -2,7 +2,9 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -32,7 +34,11 @@ fn test_cgmes_pst_phase_tap_changer_table_type3() {
     let ds = load_profiles(&[&eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
-    assert_eq!(tn_mrids.len(), 2, "expected 2 physical TopologicalNode buses");
+    assert_eq!(
+        tn_mrids.len(),
+        2,
+        "expected 2 physical TopologicalNode buses"
+    );
     let expected = cgmes_common::expected_voltages(&ds);
     assert_eq!(expected.len(), 2, "fixture should have 2 SvVoltage entries");
 

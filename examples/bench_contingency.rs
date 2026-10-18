@@ -28,9 +28,13 @@ use gridoxide::types::{Line, Transformer};
 
 fn main() {
     let mut args = env::args().skip(1);
-    let path = args.next().expect("usage: bench_contingency <input.json> [max-outages] [backend]");
-    let max_outages: usize =
-        args.next().map(|s| s.parse().expect("max-outages must be an integer")).unwrap_or(200);
+    let path = args
+        .next()
+        .expect("usage: bench_contingency <input.json> [max-outages] [backend]");
+    let max_outages: usize = args
+        .next()
+        .map(|s| s.parse().expect("max-outages must be an integer"))
+        .unwrap_or(200);
     let backend = match args.next().as_deref() {
         None | Some("scalar") => JacobianBackend::Scalar,
         Some("klu_native") => JacobianBackend::KluNative,
@@ -101,7 +105,10 @@ fn main() {
     }
     let independent_ms = start.elapsed().as_secs_f64() * 1e3;
 
-    println!("  batched     {batched_ms:9.2} ms  ({:.3} ms/outage)", batched_ms / sweep as f64);
+    println!(
+        "  batched     {batched_ms:9.2} ms  ({:.3} ms/outage)",
+        batched_ms / sweep as f64
+    );
     println!(
         "  independent {independent_ms:9.2} ms  ({:.3} ms/outage)",
         independent_ms / sweep as f64

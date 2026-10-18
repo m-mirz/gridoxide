@@ -35,8 +35,8 @@ use crate::opf::Solver;
 
 use super::crac::{Crac, ElementaryAction, NetworkAction, State};
 use super::evaluate::{Network, Resolution};
-use super::linear::{optimize, LinearOptions, NetworkMut, Setpoint};
 use super::limits::Limits;
+use super::linear::{LinearOptions, NetworkMut, Setpoint, optimize};
 use super::usage::Constrained;
 
 #[derive(Clone, Debug)]
@@ -320,7 +320,11 @@ fn effect_of(
     tap_changers: &[Option<crate::types::TapChanger>],
     lines: usize,
 ) -> Option<Effect> {
-    let mut effect = Effect { open: Vec::new(), close: Vec::new(), taps: Vec::new() };
+    let mut effect = Effect {
+        open: Vec::new(),
+        close: Vec::new(),
+        taps: Vec::new(),
+    };
     for elementary in &action.elementary {
         match elementary {
             ElementaryAction::TerminalsConnection { element, connected } => {
@@ -362,16 +366,15 @@ fn effect_of(
                     .range_actions
                     .iter()
                     .find_map(|r| match &r.kind {
-                        super::crac::RangeActionKind::Pst { element: e, tap_to_angle, .. }
-                            if e == element =>
-                        {
-                            Some(tap_to_angle.clone())
-                        }
+                        super::crac::RangeActionKind::Pst {
+                            element: e,
+                            tap_to_angle,
+                            ..
+                        } if e == element => Some(tap_to_angle.clone()),
                         _ => None,
                     })
                     .unwrap_or_default();
-                let table =
-                    super::linear::tap_table(&declared, tap_changers, branch, lines);
+                let table = super::linear::tap_table(&declared, tap_changers, branch, lines);
                 let angle = table.iter().find(|(t, _)| t == tap).map(|(_, a)| *a)?;
                 effect.taps.push((branch, *tap, angle));
             }
@@ -415,7 +418,11 @@ struct Candidate {
 /// the other moves, and the result depends on the order, which a set has none
 /// of.
 fn compatible(a: &NetworkAction, b: &NetworkAction) -> bool {
-    let mine: Vec<&str> = a.elementary.iter().flat_map(ElementaryAction::elements).collect();
+    let mine: Vec<&str> = a
+        .elementary
+        .iter()
+        .flat_map(ElementaryAction::elements)
+        .collect();
     !b.elementary
         .iter()
         .flat_map(ElementaryAction::elements)
@@ -438,7 +445,15 @@ pub fn search(
     solver: &mut dyn Solver,
     options: &SearchOptions,
 ) -> SearchResult {
-    search_with_open(crac, network, resolution, perimeter, solver, options, network.initially_open)
+    search_with_open(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        solver,
+        options,
+        network.initially_open,
+    )
 }
 
 /// [`search`], starting from a stated open set rather than the network's own.
@@ -517,14 +532,25 @@ pub fn search_with_open(
     // curative leaf, which under a cost objective makes every curative
     // candidate look equally and wrongly expensive.
     linear.activated = Vec::new();
-    let options = &SearchOptions { linear, ..options.clone() };
+    let options = &SearchOptions {
+        linear,
+        ..options.clone()
+    };
 
     let available_at = options.available_at.as_deref().unwrap_or(perimeter);
     let offered = |index: usize| -> Option<Effect> {
         let action = crac.network_actions.get(index)?;
         constrained
             .allows(&action.usage_rules, available_at, crac)
-            .then(|| effect_of(action, crac, resolution, network.tap_changers, network.lines.len()))
+            .then(|| {
+                effect_of(
+                    action,
+                    crac,
+                    resolution,
+                    network.tap_changers,
+                    network.lines.len(),
+                )
+            })
             .flatten()
     };
     let mut available: Vec<Candidate> = (0..crac.network_actions.len())
@@ -558,7 +584,11 @@ pub fn search_with_open(
         if !pairwise_ok {
             continue;
         }
-        let mut effect = Effect { open: Vec::new(), close: Vec::new(), taps: Vec::new() };
+        let mut effect = Effect {
+            open: Vec::new(),
+            close: Vec::new(),
+            taps: Vec::new(),
+        };
         let mut expressible = true;
         for &index in &members {
             match offered(index) {
@@ -578,7 +608,11 @@ pub fn search_with_open(
             .map(|&i| crac.network_actions[i].id.as_str())
             .collect::<Vec<_>>()
             .join("+");
-        available.push(Candidate { actions: members, effect, key });
+        available.push(Candidate {
+            actions: members,
+            effect,
+            key,
+        });
     }
     let available = match options.skip_far_actions {
         Some(max) => near_most_limiting(
@@ -654,7 +688,10 @@ pub fn search_with_open(
         perimeter,
         solver,
         &budgeted(&[]),
-        Applied { open: &base_open, taps: &[] },
+        Applied {
+            open: &base_open,
+            taps: &[],
+        },
     );
 
     let mut chosen: Vec<usize> = Vec::new();
@@ -686,9 +723,9 @@ pub fn search_with_open(
                 continue;
             }
             if offer.actions.iter().any(|&index| {
-                chosen.iter().any(|&c| {
-                    !compatible(&crac.network_actions[c], &crac.network_actions[index])
-                })
+                chosen
+                    .iter()
+                    .any(|&c| !compatible(&crac.network_actions[c], &crac.network_actions[index]))
             }) {
                 continue;
             }
@@ -715,7 +752,10 @@ pub fn search_with_open(
                 perimeter,
                 solver,
                 &budgeted(&with_candidate),
-                Applied { open: &open, taps: &taps },
+                Applied {
+                    open: &open,
+                    taps: &taps,
+                },
             );
             leaves += 1;
 
@@ -734,7 +774,9 @@ pub fn search_with_open(
             }
         }
 
-        let Some((offer, candidate)) = winner else { break };
+        let Some((offer, candidate)) = winner else {
+            break;
+        };
         // A candidate that reaches the target is taken even if it falls short
         // of the minimum-impact thresholds: those exist to stop the search
         // spending an action for nothing, and securing the network is not
@@ -833,7 +875,12 @@ fn leaf(
     // out does not make the action fail loudly — it makes it evaluate as a
     // change that does nothing, so the search can never prefer it and would
     // misreport the network if it ever did.
-    apply_taps(&mut transformers, network.tap_changers, network.lines.len(), applied.taps);
+    apply_taps(
+        &mut transformers,
+        network.tap_changers,
+        network.lines.len(),
+        applied.taps,
+    );
     // The leaf gets its own copy of the buses as well as the transformers: a
     // redispatch moves injections, and a candidate that is evaluated and
     // discarded must not leave them moved.
@@ -859,9 +906,23 @@ fn leaf(
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
-    let (objective, margin_mw, setpoints, held_setpoints) =
-        optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, applied.open);
-    Evaluated { objective, margin_mw, setpoints, held_setpoints, transformers, buses }
+    let (objective, margin_mw, setpoints, held_setpoints) = optimize_with_open(
+        crac,
+        &mut mutable,
+        resolution,
+        perimeter,
+        solver,
+        options,
+        applied.open,
+    );
+    Evaluated {
+        objective,
+        margin_mw,
+        setpoints,
+        held_setpoints,
+        transformers,
+        buses,
+    }
 }
 
 /// One leaf's outcome.
@@ -903,8 +964,13 @@ pub(super) fn apply_taps(
     taps: &[(usize, i32, f64)],
 ) {
     for &(branch, tap, angle_deg) in taps {
-        let Some(i) = branch.checked_sub(lines) else { continue };
-        let from_network = tap_changers.get(i).and_then(|c| c.as_ref()).and_then(|c| c.at(tap));
+        let Some(i) = branch.checked_sub(lines) else {
+            continue;
+        };
+        let from_network = tap_changers
+            .get(i)
+            .and_then(|c| c.as_ref())
+            .and_then(|c| c.at(tap));
         if let Some(transformer) = transformers.get_mut(i) {
             // The magnitude is the transformer's own ratio and is not the
             // shifter's to change; only the angle moves.
@@ -932,7 +998,12 @@ fn optimize_with_open(
 ) -> (f64, f64, Vec<Setpoint>, Vec<Setpoint>) {
     if open.is_empty() {
         let result = optimize(crac, network, resolution, perimeter, solver, options);
-        return (result.final_objective, result.final_margin_mw, result.setpoints, result.held_setpoints);
+        return (
+            result.final_objective,
+            result.final_margin_mw,
+            result.setpoints,
+            result.held_setpoints,
+        );
     }
     // Opening a branch is expressed by removing it from the working copy's
     // line list — a line with no admittance carries no flow and contributes
@@ -993,7 +1064,12 @@ fn optimize_with_open(
     for (a, b) in network.transformers.iter_mut().zip(transformers.iter()) {
         a.tap = b.tap;
     }
-    (result.final_objective, result.final_margin_mw, result.setpoints, result.held_setpoints)
+    (
+        result.final_objective,
+        result.final_margin_mw,
+        result.setpoints,
+        result.held_setpoints,
+    )
 }
 
 /// Evaluate with the given flow model, taking the AC options from the network.
@@ -1045,7 +1121,11 @@ pub(super) fn objective_of(
                     super::linear::ObjectiveUnit::Ampere => c.margin_a,
                 })
                 .fold(f64::INFINITY, f64::min);
-            if margin.is_finite() { margin } else { super::mnec::NO_CNEC_MARGIN }
+            if margin.is_finite() {
+                margin
+            } else {
+                super::mnec::NO_CNEC_MARGIN
+            }
         }
     };
     score - options.mnec.cost(crac, result, perimeter, unit)
@@ -1053,11 +1133,7 @@ pub(super) fn objective_of(
 
 /// The worst optimized margin over `perimeter` in an assessment already made —
 /// the "do nothing" baseline the search improves on.
-fn worst_of(
-    crac: &Crac,
-    result: &super::evaluate::SecurityResult,
-    perimeter: &[State],
-) -> f64 {
+fn worst_of(crac: &Crac, result: &super::evaluate::SecurityResult, perimeter: &[State]) -> f64 {
     result
         .perimeters
         .iter()
@@ -1076,7 +1152,9 @@ fn branch_countries(
     branch: usize,
     dc: &[crate::linear::btheta::DcBranch],
 ) -> Vec<String> {
-    let Some(b) = dc.iter().find(|b| b.index == branch) else { return Vec::new() };
+    let Some(b) = dc.iter().find(|b| b.index == branch) else {
+        return Vec::new();
+    };
     [b.from, b.to]
         .iter()
         .filter_map(|&bus| network.bus_countries.get(bus)?.clone())
@@ -1094,15 +1172,20 @@ fn country_boundaries(
 ) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for b in dc {
-        let (Some(Some(x)), Some(Some(y))) =
-            (network.bus_countries.get(b.from), network.bus_countries.get(b.to))
-        else {
+        let (Some(Some(x)), Some(Some(y))) = (
+            network.bus_countries.get(b.from),
+            network.bus_countries.get(b.to),
+        ) else {
             continue;
         };
         if x == y {
             continue;
         }
-        let pair = if x < y { (x.clone(), y.clone()) } else { (y.clone(), x.clone()) };
+        let pair = if x < y {
+            (x.clone(), y.clone())
+        } else {
+            (y.clone(), x.clone())
+        };
         if !out.contains(&pair) {
             out.push(pair);
         }
@@ -1213,7 +1296,8 @@ fn near_most_limiting(
                 return true;
             }
             touched.iter().any(|t| {
-                here.iter().any(|h| within_boundaries(h, t, &boundaries, max_boundaries))
+                here.iter()
+                    .any(|h| within_boundaries(h, t, &boundaries, max_boundaries))
             })
         })
         .collect()

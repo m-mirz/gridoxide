@@ -70,7 +70,9 @@ fn the_interior_point_backend_refuses_rather_than_relaxing() {
     lp.set_integral(1);
 
     let mut solver = IpmSolver::new();
-    let err = solver.solve(&lp).expect_err("a barrier method cannot honour integrality");
+    let err = solver
+        .solve(&lp)
+        .expect_err("a barrier method cannot honour integrality");
     match err {
         OpfError::IntegralityUnsupported { backend, columns } => {
             assert_eq!(columns, 2);
@@ -93,9 +95,21 @@ fn the_same_program_without_integrality_still_solves_on_the_interior_point() {
     let solution = solver.solve(&lp).expect("continuous solve");
     assert_eq!(solution.status, OptStatus::Optimal);
     // x = 3, y = 1.5, objective -21.
-    assert!((solution.primal[0] - 3.0).abs() < 1e-6, "{:?}", solution.primal);
-    assert!((solution.primal[1] - 1.5).abs() < 1e-6, "{:?}", solution.primal);
-    assert!((solution.objective + 21.0).abs() < 1e-6, "{}", solution.objective);
+    assert!(
+        (solution.primal[0] - 3.0).abs() < 1e-6,
+        "{:?}",
+        solution.primal
+    );
+    assert!(
+        (solution.primal[1] - 1.5).abs() < 1e-6,
+        "{:?}",
+        solution.primal
+    );
+    assert!(
+        (solution.objective + 21.0).abs() < 1e-6,
+        "{}",
+        solution.objective
+    );
 }
 
 #[test]
@@ -116,7 +130,11 @@ fn a_wrong_length_integrality_vector_is_a_shape_error() {
     let mut lp = LinearProgram::new(3);
     lp.col_integral = vec![true, false];
     match lp.validate() {
-        Err(OpfError::Shape { what, expected, got }) => {
+        Err(OpfError::Shape {
+            what,
+            expected,
+            got,
+        }) => {
             assert_eq!((what, expected, got), ("col_integral", 3, 2));
         }
         other => panic!("expected a shape error, got {other:?}"),
@@ -146,10 +164,17 @@ fn highs_solves_the_integer_problem_and_not_its_relaxation() {
         "objective {} — 21 would mean the relaxation was solved",
         solution.objective
     );
-    assert!((solution.primal[0] - 4.0).abs() < 1e-6, "{:?}", solution.primal);
+    assert!(
+        (solution.primal[0] - 4.0).abs() < 1e-6,
+        "{:?}",
+        solution.primal
+    );
     assert!(solution.primal[1].abs() < 1e-6, "{:?}", solution.primal);
     for (i, x) in solution.primal.iter().enumerate() {
-        assert!((x - x.round()).abs() < 1e-6, "column {i} came back at {x}, which is not integral");
+        assert!(
+            (x - x.round()).abs() < 1e-6,
+            "column {i} came back at {x}, which is not integral"
+        );
     }
 }
 
@@ -168,7 +193,11 @@ fn a_binary_choice_is_honoured() {
     solver.set_output(false).expect("quiet");
     let solution = solver.solve(&lp).expect("MIP solve");
     assert_eq!(solution.status, OptStatus::Optimal);
-    assert!((solution.primal[0] - 1.0).abs() < 1e-6, "{:?}", solution.primal);
+    assert!(
+        (solution.primal[0] - 1.0).abs() < 1e-6,
+        "{:?}",
+        solution.primal
+    );
     assert!(solution.primal[1].abs() < 1e-6, "{:?}", solution.primal);
     assert!((solution.objective + 3.0).abs() < 1e-6);
 }
@@ -186,8 +215,16 @@ fn a_mip_reports_no_duals_rather_than_meaningless_ones() {
     let mut solver = HighsSolver::new().expect("HiGHS instance");
     solver.set_output(false).expect("quiet");
     let solution = solver.solve(&lp).expect("MIP solve");
-    assert!(solution.row_dual.iter().all(|d| *d == 0.0), "{:?}", solution.row_dual);
-    assert!(solution.col_dual.iter().all(|d| *d == 0.0), "{:?}", solution.col_dual);
+    assert!(
+        solution.row_dual.iter().all(|d| *d == 0.0),
+        "{:?}",
+        solution.row_dual
+    );
+    assert!(
+        solution.col_dual.iter().all(|d| *d == 0.0),
+        "{:?}",
+        solution.col_dual
+    );
 }
 
 #[cfg(feature = "opf-highs")]
@@ -200,9 +237,17 @@ fn the_continuous_answer_is_unaffected_by_the_new_field() {
     solver.set_output(false).expect("quiet");
     let solution = solver.solve(&lp).expect("LP solve");
     assert_eq!(solution.status, OptStatus::Optimal);
-    assert!((solution.objective + 21.0).abs() < 1e-6, "{}", solution.objective);
+    assert!(
+        (solution.objective + 21.0).abs() < 1e-6,
+        "{}",
+        solution.objective
+    );
     // And the duals must still come through, since a continuous solve has them.
-    assert!(solution.row_dual.iter().any(|d| d.abs() > 1e-9), "{:?}", solution.row_dual);
+    assert!(
+        solution.row_dual.iter().any(|d| d.abs() > 1e-9),
+        "{:?}",
+        solution.row_dual
+    );
 }
 
 #[cfg(feature = "opf-highs")]
@@ -216,7 +261,12 @@ fn the_two_backends_still_agree_where_both_apply() {
     highs.set_output(false).expect("quiet");
     let a = highs.solve(&lp).expect("highs");
     let b = IpmSolver::new().solve(&lp).expect("ipm");
-    assert!((a.objective - b.objective).abs() < 1e-7, "{} vs {}", a.objective, b.objective);
+    assert!(
+        (a.objective - b.objective).abs() < 1e-7,
+        "{} vs {}",
+        a.objective,
+        b.objective
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +290,11 @@ fn branch_and_bound_solves_the_integer_problem_in_pure_rust() {
         "objective {} — 21 would mean the relaxation was solved",
         solution.objective
     );
-    assert!((solution.primal[0] - 4.0).abs() < 1e-9, "{:?}", solution.primal);
+    assert!(
+        (solution.primal[0] - 4.0).abs() < 1e-9,
+        "{:?}",
+        solution.primal
+    );
     assert!(solution.primal[1].abs() < 1e-9, "{:?}", solution.primal);
     // Proved, not merely found.
     assert_eq!(solver.gap(), 0.0, "gap {}", solver.gap());
@@ -275,7 +329,11 @@ fn a_continuous_problem_passes_straight_through() {
     let wrapped = solver.solve(&lp).expect("bnb");
     assert_eq!(wrapped.status, direct.status);
     assert!((wrapped.objective - direct.objective).abs() < 1e-12);
-    assert_eq!(solver.nodes(), 0, "a continuous problem should branch not at all");
+    assert_eq!(
+        solver.nodes(),
+        0,
+        "a continuous problem should branch not at all"
+    );
     // And its duals survive, since a continuous solve has them.
     assert!(wrapped.row_dual.iter().any(|d| d.abs() > 1e-9));
 }
@@ -287,10 +345,22 @@ fn a_mixed_problem_leaves_its_continuous_columns_alone() {
     lp.set_integral(0);
     let solution = BranchAndBound::new().solve(&lp).expect("solve");
     assert_eq!(solution.status, OptStatus::Optimal);
-    assert_eq!(solution.primal[0], solution.primal[0].round(), "x should be integral");
+    assert_eq!(
+        solution.primal[0],
+        solution.primal[0].round(),
+        "x should be integral"
+    );
     // x = 3, y = 1.5 is feasible and better than any all-integer point.
-    assert!((solution.objective + 21.0).abs() < 1e-6, "{}", solution.objective);
-    assert!((solution.primal[1] - 1.5).abs() < 1e-6, "{:?}", solution.primal);
+    assert!(
+        (solution.objective + 21.0).abs() < 1e-6,
+        "{}",
+        solution.objective
+    );
+    assert!(
+        (solution.primal[1] - 1.5).abs() < 1e-6,
+        "{:?}",
+        solution.primal
+    );
 }
 
 #[test]
@@ -305,7 +375,11 @@ fn binaries_are_honoured() {
     let solution = BranchAndBound::new().solve(&lp).expect("solve");
     assert_eq!(solution.status, OptStatus::Optimal);
     // Take the two most valuable.
-    assert!((solution.objective + 5.0).abs() < 1e-6, "{}", solution.objective);
+    assert!(
+        (solution.objective + 5.0).abs() < 1e-6,
+        "{}",
+        solution.objective
+    );
     assert_eq!(solution.primal, vec![1.0, 1.0, 0.0]);
 }
 
@@ -404,7 +478,11 @@ fn branch_and_bound_agrees_with_highs_on_randomised_milps() {
         // equal in objective.
         for c in 0..n {
             if lp.is_integral(c) {
-                assert_eq!(mine.primal[c], mine.primal[c].round(), "case {case} column {c}");
+                assert_eq!(
+                    mine.primal[c],
+                    mine.primal[c].round(),
+                    "case {case} column {c}"
+                );
             }
             assert!(mine.primal[c] >= -1e-9 && mine.primal[c] <= 4.0 + 1e-9);
         }

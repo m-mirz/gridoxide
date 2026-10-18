@@ -57,8 +57,14 @@ fn main() {
         // afford to build: `dynamics_scale`'s own assertions have the same
         // role. A converged answer at twenty thousand states is the claim this
         // whole method exists to make.
-        let worst = result.modes.iter().fold(0.0f64, |m, mode| m.max(mode.residual));
-        assert!(result.converged, "{n_bus} buses: unconverged, worst residual {worst:e}");
+        let worst = result
+            .modes
+            .iter()
+            .fold(0.0f64, |m, mode| m.max(mode.residual));
+        assert!(
+            result.converged,
+            "{n_bus} buses: unconverged, worst residual {worst:e}"
+        );
         assert!(worst < 1e-9, "{n_bus} buses: worst residual {worst:e}");
         assert!(
             result.modes.iter().all(|m| !m.participation.is_empty()),
@@ -69,8 +75,11 @@ fn main() {
             Method::Sparse { restarts, .. } => restarts,
             Method::Dense => 0,
         };
-        let with_participation =
-            result.modes.iter().filter(|m| !m.participation.is_empty()).count();
+        let with_participation = result
+            .modes
+            .iter()
+            .filter(|m| !m.participation.is_empty())
+            .count();
 
         println!(
             "{n_bus:>7}  {:>7}  {n_x:>8}  {:>8.2?}  {:>8.2?}  {worst:>10.2e}  {restarts:>9}  {:>3}/{:<2}",

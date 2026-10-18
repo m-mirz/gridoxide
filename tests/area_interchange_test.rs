@@ -8,7 +8,7 @@
 //! loop's own bookkeeping, the same discipline `distributed_slack_test.rs`
 //! keeps.
 
-use gridoxide::network::{build_ybus, effective_injection, power_injections, YBusSparse};
+use gridoxide::network::{YBusSparse, build_ybus, effective_injection, power_injections};
 use gridoxide::outerloop::{
     AreaDefinition, AreaInterchange, DistributedSlack, OuterLoop, SlackDistribution, SolveContext,
 };
@@ -47,14 +47,63 @@ fn two_areas() -> (Vec<Bus>, Vec<Line>, YBusSparse, Vec<Option<usize>>) {
         bus(5, BusType::PV, 0.30, 0.0),
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.03, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 0, to: 2, r: 0.04, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.03,
+            x: 0.08,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.04,
+            x: 0.10,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
         // the tie
-        Line { from: 2, to: 3, r: 0.03, x: 0.09, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 3, to: 4, r: 0.02, x: 0.07, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 4, to: 5, r: 0.03, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 3, to: 5, r: 0.04, x: 0.11, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 2,
+            to: 3,
+            r: 0.03,
+            x: 0.09,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 3,
+            to: 4,
+            r: 0.02,
+            x: 0.07,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 4,
+            to: 5,
+            r: 0.03,
+            x: 0.08,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 3,
+            to: 5,
+            r: 0.04,
+            x: 0.11,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let ybus = build_ybus(6, &lines, &Vec::<Transformer>::new()).finish();
     let of_bus = vec![Some(0), Some(0), Some(0), Some(1), Some(1), Some(1)];
@@ -66,7 +115,10 @@ fn run_area(
     lines: &[Line],
     ybus: &YBusSparse,
     areas: AreaDefinition,
-) -> (Vec<gridoxide::solver::IslandReport>, gridoxide::outerloop::AreaInterchangeReport) {
+) -> (
+    Vec<gridoxide::solver::IslandReport>,
+    gridoxide::outerloop::AreaInterchangeReport,
+) {
     let cap = areas.max_outer_iter;
     let mut ybus = ybus.clone();
     let mut transformers: Vec<Transformer> = Vec::new();
@@ -77,7 +129,15 @@ fn run_area(
             .with_branches(lines, &mut transformers, &[])
             .with_taps(&mut changers, &[]);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut loop_];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-11, 40, JacobianBackend::Scalar, &mut list, cap * 2).0
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-11,
+            40,
+            JacobianBackend::Scalar,
+            &mut list,
+            cap * 2,
+        )
+        .0
     };
     (islands, loop_.into_report())
 }
@@ -107,7 +167,14 @@ fn area_interchange_with_one_area_is_distributed_slack() {
     {
         let mut ctx = SolveContext::new(&mut by_slack, &mut ybus_a);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut slack];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-11, 40, JacobianBackend::Scalar, &mut list, 60);
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-11,
+            40,
+            JacobianBackend::Scalar,
+            &mut list,
+            60,
+        );
     }
     let slack_report = slack.into_report();
     assert!(slack_report.converged, "{slack_report:?}");
@@ -120,7 +187,10 @@ fn area_interchange_with_one_area_is_distributed_slack() {
     };
     let (islands, area_report) = run_area(&mut by_area, &lines, &ybus, areas);
 
-    assert!(islands.iter().all(|i| i.status == IslandStatus::Converged), "{islands:?}");
+    assert!(
+        islands.iter().all(|i| i.status == IslandStatus::Converged),
+        "{islands:?}"
+    );
     assert!(area_report.converged, "{area_report:?}");
     for i in 0..6 {
         assert!(
@@ -152,7 +222,10 @@ fn each_area_reaches_its_scheduled_net_position() {
     };
     let (islands, report) = run_area(&mut buses, &lines, &ybus, areas);
 
-    assert!(islands.iter().all(|i| i.status == IslandStatus::Converged), "{islands:?}");
+    assert!(
+        islands.iter().all(|i| i.status == IslandStatus::Converged),
+        "{islands:?}"
+    );
     assert!(report.converged, "{report:?}");
     assert!(report.unbalanced.is_empty(), "{:?}", report.unbalanced);
 
@@ -171,7 +244,10 @@ fn each_area_reaches_its_scheduled_net_position() {
     // dissipates rather than cancelling.
     assert_eq!(report.dependent, Some(0));
     let tie_loss = measured[0] + measured[1];
-    assert!(tie_loss > 0.0, "a resistive tie must lose something: {tie_loss}");
+    assert!(
+        tie_loss > 0.0,
+        "a resistive tie must lose something: {tie_loss}"
+    );
     assert!(
         (measured[0] - (0.15 + tie_loss)).abs() < 1e-8,
         "area 0 exports {} against 0.15 plus {tie_loss} of tie loss",
@@ -217,9 +293,18 @@ fn a_different_schedule_moves_the_flow() {
     // slack and is the dependent one.
     let low = solve_for(-0.10);
     let high = solve_for(0.30);
-    assert!((low - 0.10).abs() < 1e-8, "area 1 should import 0.10, got {low}");
-    assert!((high - -0.30).abs() < 1e-8, "area 1 should export 0.30, got {high}");
-    assert!(low - high > 0.35, "the schedule should move the tie flow: {high} -> {low}");
+    assert!(
+        (low - 0.10).abs() < 1e-8,
+        "area 1 should import 0.10, got {low}"
+    );
+    assert!(
+        (high - -0.30).abs() < 1e-8,
+        "area 1 should export 0.30, got {high}"
+    );
+    assert!(
+        low - high > 0.35,
+        "the schedule should move the tie flow: {high} -> {low}"
+    );
 }
 
 /// An area with nothing to dispatch is named rather than silently left at
@@ -239,7 +324,10 @@ fn an_area_with_no_generator_is_reported() {
     let (_, report) = run_area(&mut buses, &lines, &ybus, areas);
 
     assert!(
-        report.unbalanced.iter().any(|(a, why)| *a == 1 && why.contains("no participating")),
+        report
+            .unbalanced
+            .iter()
+            .any(|(a, why)| *a == 1 && why.contains("no participating")),
         "{:?}",
         report.unbalanced
     );
@@ -270,7 +358,10 @@ fn a_bus_in_no_area_is_left_alone() {
     };
     let (_, report) = run_area(&mut buses, &lines, &ybus, areas);
 
-    assert_eq!(report.shift[5], 0.0, "a bus in no area must not be dispatched");
+    assert_eq!(
+        report.shift[5], 0.0,
+        "a bus in no area must not be dispatched"
+    );
     assert_eq!(buses[5].p_spec, before);
     // Bus 5's two branches (4-5 and 3-5) now cross area 1's boundary, so area
     // 1's interchange counts them — a different number from the all-in-one
@@ -290,10 +381,19 @@ fn a_context_without_branches_fails_loudly() {
     let (_, report) = {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut loop_];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 40, JacobianBackend::Scalar, &mut list, 40)
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-10,
+            40,
+            JacobianBackend::Scalar,
+            &mut list,
+            40,
+        )
     };
     assert!(!report.converged);
-    let status = report.loop_named("AreaInterchange").map(|l| l.status.clone());
+    let status = report
+        .loop_named("AreaInterchange")
+        .map(|l| l.status.clone());
     assert!(
         matches!(status, Some(gridoxide::outerloop::OuterLoopStatus::Failed(ref m)) if m.contains("with_branches")),
         "{status:?}"
@@ -323,7 +423,11 @@ fn by_generation_participates_a_pq_bus_that_generates() {
     let of_bus = vec![Some(0); 4];
 
     let uniform = AreaDefinition::uniform(&buses, of_bus.clone(), 1);
-    assert_eq!(uniform.factors, vec![1.0, 1.0, 0.0, 0.0], "PQ excluded, whatever it injects");
+    assert_eq!(
+        uniform.factors,
+        vec![1.0, 1.0, 0.0, 0.0],
+        "PQ excluded, whatever it injects"
+    );
 
     let by_gen = AreaDefinition::by_generation(&buses, of_bus, 1);
     assert_eq!(
@@ -352,7 +456,10 @@ fn an_area_of_fixed_output_machines_is_only_dispatchable_by_generation() {
     };
     let (_, report) = run_area(&mut fixed.clone(), &lines, &ybus, with_uniform);
     assert!(
-        report.unbalanced.iter().any(|(a, why)| *a == 1 && why.contains("no participating")),
+        report
+            .unbalanced
+            .iter()
+            .any(|(a, why)| *a == 1 && why.contains("no participating")),
         "uniform should find nothing to dispatch in area 1: {:?}",
         report.unbalanced
     );
@@ -367,5 +474,9 @@ fn an_area_of_fixed_output_machines_is_only_dispatchable_by_generation() {
     assert!(report.unbalanced.is_empty(), "{:?}", report.unbalanced);
     assert!(report.converged, "{report:?}");
     let measured = interchange(&by_gen_buses, &lines, &of_bus);
-    assert!((measured[1] - -0.15).abs() < 1e-8, "area 1 reaches its target: {}", measured[1]);
+    assert!(
+        (measured[1] - -0.15).abs() < 1e-8,
+        "area 1 reaches its target: {}",
+        measured[1]
+    );
 }

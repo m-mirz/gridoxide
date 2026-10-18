@@ -107,14 +107,17 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
     // different places in the file — the improvement under the search-tree
     // extension, the security flag beside the objective's type.
     if let Some(v) = doc
-        .pointer("/extensions/open-rao-search-tree-parameters/objective-function\
-                  /curative-min-obj-improvement")
+        .pointer(
+            "/extensions/open-rao-search-tree-parameters/objective-function\
+                  /curative-min-obj-improvement",
+        )
         .and_then(Value::as_f64)
     {
         options.curative_min_obj_improvement = v;
     }
-    if let Some(v) =
-        doc.pointer("/objective-function/enforce-curative-security").and_then(Value::as_bool)
+    if let Some(v) = doc
+        .pointer("/objective-function/enforce-curative-security")
+        .and_then(Value::as_bool)
     {
         options.enforce_curative_security = v;
     }
@@ -122,7 +125,11 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
     // `SECURE_FLOW` means "stop once secure" rather than "maximize" —
     // `TreeParameters.buildForPreventivePerimeter` turns it into
     // `AT_TARGET_OBJECTIVE_VALUE` with a target of zero.
-    if doc.pointer("/objective-function/type").and_then(|v| v.as_str()) == Some("SECURE_FLOW") {
+    if doc
+        .pointer("/objective-function/type")
+        .and_then(|v| v.as_str())
+        == Some("SECURE_FLOW")
+    {
         options.stop_at_target = Some(0.0);
     }
 
@@ -130,11 +137,15 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
     // buys. Read here rather than left to fall through, which is what happened
     // before this and is how a costly configuration was silently answered in
     // the wrong currency.
-    if doc.pointer("/objective-function/type").and_then(|v| v.as_str()) == Some("MIN_COST") {
+    if doc
+        .pointer("/objective-function/type")
+        .and_then(|v| v.as_str())
+        == Some("MIN_COST")
+    {
         let mut costly = CostlyOptions::default();
-        if let Some(c) = doc.pointer(
-            "/extensions/open-rao-search-tree-parameters/costly-min-margin-parameters",
-        ) {
+        if let Some(c) =
+            doc.pointer("/extensions/open-rao-search-tree-parameters/costly-min-margin-parameters")
+        {
             if let Some(v) = c.get("shifted-violation-penalty").and_then(Value::as_f64) {
                 costly.violation_penalty = v;
             }
@@ -147,9 +158,9 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
 
     // The two knobs live under the search-tree extension, not beside the
     // thresholds above.
-    if let Some(topology) = doc.pointer(
-        "/extensions/open-rao-search-tree-parameters/topological-actions-optimization",
-    ) {
+    if let Some(topology) =
+        doc.pointer("/extensions/open-rao-search-tree-parameters/topological-actions-optimization")
+    {
         let skip = topology
             .get("skip-actions-far-from-most-limiting-element")
             .and_then(|v| v.as_bool())
@@ -164,18 +175,30 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
         }
     }
     if let Some(topology) = doc.get("topological-actions-optimization") {
-        if let Some(v) = topology.get("absolute-minimum-impact-threshold").and_then(|v| v.as_f64()) {
+        if let Some(v) = topology
+            .get("absolute-minimum-impact-threshold")
+            .and_then(|v| v.as_f64())
+        {
             options.absolute_min_impact = v;
         }
-        if let Some(v) = topology.get("relative-minimum-impact-threshold").and_then(|v| v.as_f64()) {
+        if let Some(v) = topology
+            .get("relative-minimum-impact-threshold")
+            .and_then(|v| v.as_f64())
+        {
             options.relative_min_impact = v;
         }
     }
     if let Some(range) = doc.get("range-actions-optimization") {
-        if let Some(v) = range.get("pst-ra-min-impact-threshold").and_then(|v| v.as_f64()) {
+        if let Some(v) = range
+            .get("pst-ra-min-impact-threshold")
+            .and_then(|v| v.as_f64())
+        {
             options.linear.pst_penalty = v;
         }
-        if let Some(v) = range.get("injection-ra-min-impact-threshold").and_then(|v| v.as_f64()) {
+        if let Some(v) = range
+            .get("injection-ra-min-impact-threshold")
+            .and_then(|v| v.as_f64())
+        {
             options.linear.injection_penalty = v;
         }
     }
@@ -186,7 +209,10 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
         if let Some(v) = range.get("max-mip-iterations").and_then(|v| v.as_u64()) {
             options.linear.max_iterations = v as usize;
         }
-        if let Some(v) = range.get("pst-sensitivity-threshold").and_then(|v| v.as_f64()) {
+        if let Some(v) = range
+            .get("pst-sensitivity-threshold")
+            .and_then(|v| v.as_f64())
+        {
             options.linear.sensitivity_threshold = v;
         }
     }
@@ -197,7 +223,9 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
     let base_mnec = doc.get("mnec-parameters");
     let extension_mnec = extension.and_then(|e| e.get("mnec-parameters"));
     options.linear.mnec.options.enabled = base_mnec.is_some() && extension_mnec.is_some();
-    if let Some(v) = base_mnec.and_then(|m| m.get("acceptable-margin-decrease")).and_then(Value::as_f64)
+    if let Some(v) = base_mnec
+        .and_then(|m| m.get("acceptable-margin-decrease"))
+        .and_then(Value::as_f64)
     {
         options.linear.mnec.options.acceptable_margin_decrease = v;
     }
@@ -205,8 +233,15 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
         if let Some(v) = m.get("violation-cost").and_then(Value::as_f64) {
             options.linear.mnec.options.violation_cost = v;
         }
-        if let Some(v) = m.get("constraint-adjustment-coefficient").and_then(Value::as_f64) {
-            options.linear.mnec.options.constraint_adjustment_coefficient = v;
+        if let Some(v) = m
+            .get("constraint-adjustment-coefficient")
+            .and_then(Value::as_f64)
+        {
+            options
+                .linear
+                .mnec
+                .options
+                .constraint_adjustment_coefficient = v;
         }
     }
     // `second-preventive-rao`. Off unless the configuration says otherwise,
@@ -227,14 +262,20 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
     }
     if let Some(topology) = extension.and_then(|e| e.get("topological-actions-optimization")) {
         // The reference's default is i32::MAX; anything that large is a depth
-        if let Some(v) = topology.get("max-preventive-search-tree-depth").and_then(|v| v.as_u64()) {
+        if let Some(v) = topology
+            .get("max-preventive-search-tree-depth")
+            .and_then(|v| v.as_u64())
+        {
             options.max_depth = v as usize;
         }
         // Read separately, because the reference states it separately. Every
         // vendored configuration sets the two the same, so this moves nothing
         // here — and a configuration that did not would otherwise have been
         // scored against the preventive depth without a word.
-        if let Some(v) = topology.get("max-curative-search-tree-depth").and_then(|v| v.as_u64()) {
+        if let Some(v) = topology
+            .get("max-curative-search-tree-depth")
+            .and_then(|v| v.as_u64())
+        {
             options.curative_max_depth = Some(v as usize);
         }
         // The reference's whole mechanism for offering anything but a greedy
@@ -242,14 +283,20 @@ pub fn from_document(doc: &serde_json::Value) -> SearchOptions {
         // finding that killed the "gridoxide needs a combinatorial search"
         // diagnosis: on the scenarios that fail, the reference reaches its
         // answer with the same single-action chain.
-        if let Some(list) = topology.get("predefined-combinations").and_then(|v| v.as_array()) {
+        if let Some(list) = topology
+            .get("predefined-combinations")
+            .and_then(|v| v.as_array())
+        {
             options.predefined_combinations = list
                 .iter()
                 .filter_map(|c| c.as_array())
-                .map(|c| c.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|c| {
+                    c.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .collect();
         }
     }
     options
 }
-

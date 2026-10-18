@@ -24,7 +24,7 @@ mod common;
 use std::path::PathBuf;
 
 use gridoxide::network::{build_ybus_3ph, stamp_transformers_3ph};
-use gridoxide::pgm::{node_id_to_idx, pgm_to_3ph_network, pgm_transformers_3ph, PgmNodeAsymOutput};
+use gridoxide::pgm::{PgmNodeAsymOutput, node_id_to_idx, pgm_to_3ph_network, pgm_transformers_3ph};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
 #[test]
@@ -40,13 +40,20 @@ fn three_winding_transformer_matches_pgms_asymmetric_answer() {
     // The reference's own `params.json`: rtol 1e-4, atol 1e-5.
     let tol = 1e-4;
     let mut scenarios = 0;
-    for (scenario, expected_scenario) in
-        update["data"].as_array().unwrap().iter().zip(&expected.data)
+    for (scenario, expected_scenario) in update["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&expected.data)
     {
         let input = common::apply_batch_scenario(&base_json, scenario);
         let id_to_idx = node_id_to_idx(&input);
         let transformers = pgm_transformers_3ph(&input, &id_to_idx, 1e6);
-        assert_eq!(transformers.len(), 3, "one three-winding transformer is three legs");
+        assert_eq!(
+            transformers.len(),
+            3,
+            "one three-winding transformer is three legs"
+        );
 
         let (buses, lines, id_to_idx) = pgm_to_3ph_network(input, 1e6, 50.0);
         // Three physical nodes, one star node, one source: five in all.
@@ -91,8 +98,7 @@ fn the_zero_sequence_follows_the_winding_configuration() {
     let base_json = common::load_json(&base.join("input.json"));
     let update = common::load_json(&base.join("update_batch.json"));
     // The first scenario puts all three sides in service.
-    let input =
-        common::apply_batch_scenario(&base_json, &update["data"].as_array().unwrap()[0]);
+    let input = common::apply_batch_scenario(&base_json, &update["data"].as_array().unwrap()[0]);
 
     let t = &input.data.three_winding_transformer[0];
     assert_eq!(t.winding_1, DELTA, "the fixture's side 1 is a delta");
@@ -108,13 +114,19 @@ fn the_zero_sequence_follows_the_winding_configuration() {
     // T1: wye_n into wye_n, so the zero sequence is a full two-port — current
     // crosses it, rather than only finding ground on one side.
     let t1 = &legs[0].y0;
-    assert!(live(t1[1]) && live(t1[2]), "T1 zero sequence should couple its two ends: {t1:?}");
+    assert!(
+        live(t1[1]) && live(t1[2]),
+        "T1 zero sequence should couple its two ends: {t1:?}"
+    );
 
     // T2 and T3: grounded on the physical side, delta on the star side. A
     // one-port on `yff`, and no path at all on `ytt` beyond the low-susceptance
     // term the delta side picks up.
     for (name, leg) in [("T2", &legs[1].y0), ("T3", &legs[2].y0)] {
-        assert!(live(leg[0]), "{name} should ground its physical side: {leg:?}");
+        assert!(
+            live(leg[0]),
+            "{name} should ground its physical side: {leg:?}"
+        );
         assert!(
             !live(leg[1]) && !live(leg[2]),
             "{name} zero sequence must not cross a delta: {leg:?}"

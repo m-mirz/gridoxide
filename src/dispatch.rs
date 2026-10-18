@@ -26,7 +26,7 @@
 //! reactive unknown. No vendored fixture has that configuration, so it is not
 //! built here.
 
-use crate::network::{power_injections, YBusSparse};
+use crate::network::{YBusSparse, power_injections};
 use crate::types::{Bus, RegulatingMachine};
 
 /// One bus's machines, and what they could account for.
@@ -125,21 +125,30 @@ pub fn reactive_keys(machines: &[&RegulatingMachine]) -> (Vec<f64>, KeyBasis) {
     let normalize = |raw: Vec<f64>, basis| {
         let total: f64 = raw.iter().sum();
         if total > 0.0 && total.is_finite() {
-            Some((raw.into_iter().map(|k| k / total).collect::<Vec<_>>(), basis))
+            Some((
+                raw.into_iter().map(|k| k / total).collect::<Vec<_>>(),
+                basis,
+            ))
         } else {
             None
         }
     };
 
-    if machines.iter().all(|m| m.key.is_some_and(|k| k.is_finite() && k >= 0.0))
-        && let Some(out) =
-            normalize(machines.iter().map(|m| m.key.unwrap()).collect(), KeyBasis::Explicit)
+    if machines
+        .iter()
+        .all(|m| m.key.is_some_and(|k| k.is_finite() && k >= 0.0))
+        && let Some(out) = normalize(
+            machines.iter().map(|m| m.key.unwrap()).collect(),
+            KeyBasis::Explicit,
+        )
     {
         return out;
     }
 
     let ranges: Vec<f64> = machines.iter().map(|m| m.q_max - m.q_min).collect();
-    if ranges.iter().all(|r| (MIN_PLAUSIBLE_RANGE_PU..=MAX_PLAUSIBLE_RANGE_PU).contains(r))
+    if ranges
+        .iter()
+        .all(|r| (MIN_PLAUSIBLE_RANGE_PU..=MAX_PLAUSIBLE_RANGE_PU).contains(r))
         && let Some(out) = normalize(ranges, KeyBasis::Capability)
     {
         return out;
@@ -173,8 +182,7 @@ fn split(total: f64, machines: &[&RegulatingMachine], keys: &[f64]) -> (Vec<f64>
     let mut pinned = vec![false; n];
 
     for _ in 0..=n {
-        let free_key: f64 =
-            (0..n).filter(|&i| !pinned[i]).map(|i| keys[i]).sum();
+        let free_key: f64 = (0..n).filter(|&i| !pinned[i]).map(|i| keys[i]).sum();
         let pinned_q: f64 = (0..n).filter(|&i| pinned[i]).map(|i| q[i]).sum();
         let remaining = total - pinned_q;
 
@@ -183,7 +191,11 @@ fn split(total: f64, machines: &[&RegulatingMachine], keys: &[f64]) -> (Vec<f64>
                 // All keys pinned out is handled by the loop guard below; a zero
                 // free key with machines left means every remaining share is
                 // zero, which is a legitimate answer.
-                q[i] = if free_key > 0.0 { remaining * keys[i] / free_key } else { 0.0 };
+                q[i] = if free_key > 0.0 {
+                    remaining * keys[i] / free_key
+                } else {
+                    0.0
+                };
             }
         }
 
@@ -299,10 +311,16 @@ mod tests {
 
     #[test]
     fn explicit_keys_are_used_and_normalized() {
-        let ms = [machine("a", -1.0, 1.0, Some(3.0)), machine("b", -1.0, 1.0, Some(1.0))];
+        let ms = [
+            machine("a", -1.0, 1.0, Some(3.0)),
+            machine("b", -1.0, 1.0, Some(1.0)),
+        ];
         let (keys, basis) = reactive_keys(&ms.iter().collect::<Vec<_>>());
         assert_eq!(basis, KeyBasis::Explicit);
-        assert!((keys[0] - 0.75).abs() < 1e-12 && (keys[1] - 0.25).abs() < 1e-12, "{keys:?}");
+        assert!(
+            (keys[0] - 0.75).abs() < 1e-12 && (keys[1] - 0.25).abs() < 1e-12,
+            "{keys:?}"
+        );
     }
 
     /// One missing key discards the whole basis rather than mixing two rules —
@@ -311,9 +329,16 @@ mod tests {
     /// alone.
     #[test]
     fn one_missing_key_falls_back_wholesale() {
-        let ms = [machine("a", -1.0, 1.0, Some(3.0)), machine("b", -2.0, 2.0, None)];
+        let ms = [
+            machine("a", -1.0, 1.0, Some(3.0)),
+            machine("b", -2.0, 2.0, None),
+        ];
         let (keys, basis) = reactive_keys(&ms.iter().collect::<Vec<_>>());
-        assert_eq!(basis, KeyBasis::Capability, "the stated key must not survive alone");
+        assert_eq!(
+            basis,
+            KeyBasis::Capability,
+            "the stated key must not survive alone"
+        );
         // 2.0 range against 4.0 range.
         assert!((keys[0] - 1.0 / 3.0).abs() < 1e-12, "{keys:?}");
     }
@@ -332,13 +357,17 @@ mod tests {
     fn implausible_ranges_fall_back_to_uniform() {
         for (lo, hi) in [
             (f64::NEG_INFINITY, f64::INFINITY),
-            (0.0, 0.0),               // no stated capability
-            (-1e6, 1e6),              // beyond any real machine
-            (-0.001, 0.001),          // below the plausible floor
+            (0.0, 0.0),      // no stated capability
+            (-1e6, 1e6),     // beyond any real machine
+            (-0.001, 0.001), // below the plausible floor
         ] {
             let ms = [machine("a", lo, hi, None), machine("b", -0.2, 0.2, None)];
             let (keys, basis) = reactive_keys(&ms.iter().collect::<Vec<_>>());
-            assert_eq!(basis, KeyBasis::Uniform, "range ({lo}, {hi}) should be rejected");
+            assert_eq!(
+                basis,
+                KeyBasis::Uniform,
+                "range ({lo}, {hi}) should be rejected"
+            );
             assert!((keys[0] - 0.5).abs() < 1e-12);
         }
     }
@@ -351,7 +380,10 @@ mod tests {
         let (q, pinned) = split(0.2, &refs, &keys);
         assert!((q.iter().sum::<f64>() - 0.2).abs() < 1e-12);
         assert!(pinned.iter().all(|p| !p));
-        assert!((q[0] - 0.15).abs() < 1e-12 && (q[1] - 0.05).abs() < 1e-12, "{q:?}");
+        assert!(
+            (q[0] - 0.15).abs() < 1e-12 && (q[1] - 0.05).abs() < 1e-12,
+            "{q:?}"
+        );
     }
 
     /// The case the redistribution exists for, and note what it takes to reach
@@ -366,15 +398,27 @@ mod tests {
     /// path, and one built that way would suggest the loop is dead code.
     #[test]
     fn a_saturated_machine_pins_and_the_rest_absorbs_it() {
-        let ms = [machine("big", -1.0, 1.0, None), machine("small", -0.3, 0.1, None)];
+        let ms = [
+            machine("big", -1.0, 1.0, None),
+            machine("small", -0.3, 0.1, None),
+        ];
         let refs: Vec<&RegulatingMachine> = ms.iter().collect();
         let (keys, _) = reactive_keys(&refs);
         let (q, pinned) = split(0.9, &refs, &keys);
 
         assert!((q.iter().sum::<f64>() - 0.9).abs() < 1e-12, "{q:?}");
-        assert!(pinned[1] && !pinned[0], "the small machine should be the one to saturate");
-        assert!((q[1] - 0.1).abs() < 1e-12, "pinned at its own max, not its share");
-        assert!((q[0] - 0.8).abs() < 1e-12, "the big machine takes what is left");
+        assert!(
+            pinned[1] && !pinned[0],
+            "the small machine should be the one to saturate"
+        );
+        assert!(
+            (q[1] - 0.1).abs() < 1e-12,
+            "pinned at its own max, not its share"
+        );
+        assert!(
+            (q[0] - 0.8).abs() < 1e-12,
+            "the big machine takes what is left"
+        );
     }
 
     /// When even every machine at its limit is not enough, the shortfall is
@@ -387,7 +431,10 @@ mod tests {
         let (keys, _) = reactive_keys(&refs);
         let (q, pinned) = split(0.5, &refs, &keys);
         assert!(pinned.iter().all(|p| *p));
-        assert!((q.iter().sum::<f64>() - 0.2).abs() < 1e-12, "capped at joint capability");
+        assert!(
+            (q.iter().sum::<f64>() - 0.2).abs() < 1e-12,
+            "capped at joint capability"
+        );
     }
 
     #[test]

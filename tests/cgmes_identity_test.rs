@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gridoxide::cgmes::{cgmes_to_network, load_profiles, CgmesNetwork};
+use gridoxide::cgmes::{CgmesNetwork, cgmes_to_network, load_profiles};
 
 fn config(dir: &str) -> Option<PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -58,7 +58,11 @@ fn every_branch_and_bus_has_its_own_identifier() {
             net.lines.len() + net.transformers.len(),
             "{name}: branch_ids must be parallel to lines-then-transformers"
         );
-        assert_eq!(net.bus_ids.len(), net.buses.len(), "{name}: bus_ids must be parallel to buses");
+        assert_eq!(
+            net.bus_ids.len(),
+            net.buses.len(),
+            "{name}: bus_ids must be parallel to buses"
+        );
 
         for (i, id) in net.branch_ids.iter().enumerate() {
             assert!(!id.is_empty(), "{name}: branch {i} has no identifier");
@@ -71,17 +75,28 @@ fn every_branch_and_bus_has_its_own_identifier() {
         seen.sort_unstable();
         let before = seen.len();
         seen.dedup();
-        assert_eq!(before, seen.len(), "{name}: two branches share an identifier");
+        assert_eq!(
+            before,
+            seen.len(),
+            "{name}: two branches share an identifier"
+        );
 
         let mut bus_seen: Vec<&str> = net.bus_ids.iter().map(String::as_str).collect();
         bus_seen.sort_unstable();
         let before = bus_seen.len();
         bus_seen.dedup();
-        assert_eq!(before, bus_seen.len(), "{name}: two buses share an identifier");
+        assert_eq!(
+            before,
+            bus_seen.len(),
+            "{name}: two buses share an identifier"
+        );
 
         checked += net.branch_ids.len();
     }
-    assert!(checked > 100, "expected the fixture set to contribute branches, got {checked}");
+    assert!(
+        checked > 100,
+        "expected the fixture set to contribute branches, got {checked}"
+    );
 }
 
 /// The identifiers are the model's own, not invented — every one resolves back
@@ -110,8 +125,15 @@ fn identifiers_come_from_the_document() {
 
     // MiniGrid is the fixture with three-winding transformers, so it exercises
     // both the ordinary case and the exception.
-    let stars = net.bus_ids.iter().filter(|id| id.ends_with("_star")).count();
-    assert!(stars > 0, "MiniGrid should have at least one three-winding star point");
+    let stars = net
+        .bus_ids
+        .iter()
+        .filter(|id| id.ends_with("_star"))
+        .count();
+    assert!(
+        stars > 0,
+        "MiniGrid should have at least one three-winding star point"
+    );
 
     for id in net.branch_ids.iter().chain(net.bus_ids.iter()) {
         if id.ends_with("_star") {
@@ -164,7 +186,10 @@ fn a_crac_resolves_against_an_imported_cgmes_network() {
     let crac = Crac {
         id: "t".into(),
         name: None,
-        instants: vec![Instant { id: "preventive".into(), kind: InstantKind::Preventive }],
+        instants: vec![Instant {
+            id: "preventive".into(),
+            kind: InstantKind::Preventive,
+        }],
         contingencies: Vec::new(),
         flow_cnecs: vec![cnec("a", &line), cnec("b", &transformer)],
         network_actions: Vec::new(),
@@ -237,8 +262,8 @@ fn two_imports_of_the_same_model_agree_on_every_index() {
 fn a_phase_shifter_range_action_works_on_a_cgmes_network() {
     use gridoxide::opf::ipm::IpmSolver;
     use gridoxide::rao::{
-        run, Crac, FlowCnec, Instant, InstantKind, Network, Range, RangeAction, RangeActionKind,
-        RangeKind, Resolution, SearchOptions, Side, State, Threshold, Unit, UsageRule,
+        Crac, FlowCnec, Instant, InstantKind, Network, Range, RangeAction, RangeActionKind,
+        RangeKind, Resolution, SearchOptions, Side, State, Threshold, Unit, UsageRule, run,
     };
 
     let Some(net) = network("PST/PST_PhaseTapChangerLinear_Type1") else {
@@ -280,7 +305,10 @@ fn a_phase_shifter_range_action_works_on_a_cgmes_network() {
     let crac = Crac {
         id: "pst".into(),
         name: None,
-        instants: vec![Instant { id: "preventive".into(), kind: InstantKind::Preventive }],
+        instants: vec![Instant {
+            id: "preventive".into(),
+            kind: InstantKind::Preventive,
+        }],
         contingencies: Vec::new(),
         flow_cnecs: vec![FlowCnec {
             id: "on the shifter".into(),
@@ -333,7 +361,13 @@ fn a_phase_shifter_range_action_works_on_a_cgmes_network() {
     );
 
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &view, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &view,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     let setpoint = plan
         .preventive
@@ -446,9 +480,11 @@ fn generation_totals_come_from_the_machines() {
              generation should only ever be a subset, dropped for out-of-service machines"
         );
     }
-    assert!(fixtures_with_machines > 0, "no fixture contributed a machine");
+    assert!(
+        fixtures_with_machines > 0,
+        "no fixture contributed a machine"
+    );
 }
-
 
 /// A merged bus answers to **every** `TopologicalNode` mRID that went into it.
 ///
@@ -468,8 +504,8 @@ fn generation_totals_come_from_the_machines() {
 /// difference.
 #[test]
 fn a_crac_may_name_any_node_merged_into_a_bus() {
-    use gridoxide::rao::crac::{Crac, Range, RangeAction, RangeActionKind, RangeKind};
     use gridoxide::rao::Resolution;
+    use gridoxide::rao::crac::{Crac, Range, RangeAction, RangeActionKind, RangeKind};
 
     let mut checked = 0;
     for name in CONFIGS {
@@ -549,16 +585,25 @@ fn bus_aliases_cover_every_named_bus_and_are_ordered() {
         let Some(net) = network(name) else { continue };
         let mut sorted = net.bus_aliases.clone();
         sorted.sort();
-        assert_eq!(net.bus_aliases, sorted, "{name}: aliases must be sorted by mRID");
+        assert_eq!(
+            net.bus_aliases, sorted,
+            "{name}: aliases must be sorted by mRID"
+        );
 
         let aliased: std::collections::BTreeSet<usize> =
             net.bus_aliases.iter().map(|(_, i)| *i).collect();
         for (i, id) in net.bus_ids.iter().enumerate() {
             if id.ends_with("_star") {
-                assert!(!aliased.contains(&i), "{name}: a star point has no document name");
+                assert!(
+                    !aliased.contains(&i),
+                    "{name}: a star point has no document name"
+                );
                 continue;
             }
-            assert!(aliased.contains(&i), "{name}: bus {i} ({id}) has no alias entry");
+            assert!(
+                aliased.contains(&i),
+                "{name}: bus {i} ({id}) has no alias entry"
+            );
             // The canonical name is itself one of the aliases, so the relation
             // is whole rather than a correction to `bus_ids`.
             assert!(
@@ -567,9 +612,15 @@ fn bus_aliases_cover_every_named_bus_and_are_ordered() {
             );
         }
         for (_, i) in &net.bus_aliases {
-            assert!(*i < net.buses.len(), "{name}: alias points past the bus list");
+            assert!(
+                *i < net.buses.len(),
+                "{name}: alias points past the bus list"
+            );
         }
         checked += 1;
     }
-    assert!(checked >= 4, "expected several configurations, checked {checked}");
+    assert!(
+        checked >= 4,
+        "expected several configurations, checked {checked}"
+    );
 }

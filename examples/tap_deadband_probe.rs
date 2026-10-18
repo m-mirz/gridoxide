@@ -8,8 +8,8 @@ use cimstructs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/CGMES-Test-Configurations/v3.0");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/CGMES-Test-Configurations/v3.0");
     for name in std::env::args().skip(1) {
         let dir = root.join(&name);
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -37,7 +37,9 @@ fn main() {
                 .as_any()
                 .downcast_ref()
                 .expect("SvVoltage downcast");
-            let (Some(tn), Some(v)) = (sv.topological_node.as_ref(), sv.v) else { continue };
+            let (Some(tn), Some(v)) = (sv.topological_node.as_ref(), sv.v) else {
+                continue;
+            };
             if let Some(&b) = index.get(&tn.mrid) {
                 published[b] = v * 1e3 / net.buses[b].u_rated;
             }
@@ -50,7 +52,11 @@ fn main() {
             &net.transformers,
             &net.shunts,
             gridoxide::TapData::none(),
-            gridoxide::solver::PowerFlowOptions { tol: 1e-8, max_iter: 30, ..Default::default() },
+            gridoxide::solver::PowerFlowOptions {
+                tol: 1e-8,
+                max_iter: 30,
+                ..Default::default()
+            },
         );
         // And the same, after letting the tap loops run.
         let after = gridoxide::run_power_flow(
@@ -58,7 +64,10 @@ fn main() {
             &net.lines,
             &net.transformers,
             &net.shunts,
-            gridoxide::TapData { changers: &net.tap_changers, regulation: &net.regulation },
+            gridoxide::TapData {
+                changers: &net.tap_changers,
+                regulation: &net.regulation,
+            },
             gridoxide::solver::PowerFlowOptions {
                 control_taps: true,
                 max_outer_iter: 60,
@@ -88,16 +97,28 @@ fn main() {
                 r.deadband / 2.0,
                 mine,
                 (mine - r.target).abs(),
-                if (mine - r.target).abs() > r.deadband / 2.0 { " OUT" } else { "  in" },
+                if (mine - r.target).abs() > r.deadband / 2.0 {
+                    " OUT"
+                } else {
+                    "  in"
+                },
                 theirs,
                 (theirs - r.target).abs(),
-                if (theirs - r.target).abs() > r.deadband / 2.0 { " OUT" } else { "  in" },
+                if (theirs - r.target).abs() > r.deadband / 2.0 {
+                    " OUT"
+                } else {
+                    "  in"
+                },
             );
             let controlled = after.buses[r.controlled_bus].voltage_mag;
             println!(
                 "     -> after tap control: {controlled:.5}  |err| {:.5}{}",
                 (controlled - r.target).abs(),
-                if (controlled - r.target).abs() > r.deadband / 2.0 { " OUT" } else { "  in" },
+                if (controlled - r.target).abs() > r.deadband / 2.0 {
+                    " OUT"
+                } else {
+                    "  in"
+                },
             );
         }
     }

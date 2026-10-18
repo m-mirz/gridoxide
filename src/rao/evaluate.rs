@@ -32,19 +32,17 @@
 
 use std::collections::HashMap;
 
-use crate::linear::btheta::{dc_branches, dc_power_flow};
-use crate::linear::DcOptions;
-use crate::linear::sensitivity::DcSensitivity;
-use crate::ratings::current_to_power_pu;
 use crate::batch::{BatchSolver, Scenario};
-use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use crate::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
+use crate::linear::DcOptions;
+use crate::linear::btheta::{dc_branches, dc_power_flow};
+use crate::linear::sensitivity::DcSensitivity;
+use crate::network::ShuntAdm;
 use crate::network::{build_ybus_with_outages, stamp_shunts};
 use crate::outerloop::SlackDistribution;
-use crate::solver::{
-    IslandStatus, JacobianBackend,
-};
+use crate::ratings::current_to_power_pu;
+use crate::solver::{IslandStatus, JacobianBackend};
 use crate::types::{Bus, Line, Transformer};
-use crate::network::ShuntAdm;
 
 use super::crac::{Crac, FlowCnec, Side, State, Threshold, Unit};
 
@@ -134,14 +132,15 @@ impl Resolution {
             bus_trimmed.entry(id.trim()).or_insert(*i);
         }
         let find_bus = |element: &str| -> Option<usize> {
-            if let Some(&i) = bus_exact.get(element).or_else(|| bus_trimmed.get(element.trim())) {
+            if let Some(&i) = bus_exact
+                .get(element)
+                .or_else(|| bus_trimmed.get(element.trim()))
+            {
                 return Some(i);
             }
             for suffix in ["_generator", "_load"] {
                 if let Some(stem) = element.strip_suffix(suffix) {
-                    if let Some(&i) =
-                        bus_exact.get(stem).or_else(|| bus_trimmed.get(stem.trim()))
-                    {
+                    if let Some(&i) = bus_exact.get(stem).or_else(|| bus_trimmed.get(stem.trim())) {
                         return Some(i);
                     }
                 }
@@ -163,7 +162,11 @@ impl Resolution {
             }
             unresolved.push(element.to_string());
         }
-        Self { branch_of, bus_of, unresolved }
+        Self {
+            branch_of,
+            bus_of,
+            unresolved,
+        }
     }
 
     pub fn branch(&self, element: &str) -> Option<usize> {
@@ -281,7 +284,11 @@ impl CnecResult {
     /// names. `0.0` when no voltage is known, which leaves an ampere objective
     /// indifferent to it rather than dividing by zero.
     pub fn amperes_per_mw(&self) -> f64 {
-        if self.conversion_v > 0.0 { 1e6 / (3f64.sqrt() * self.conversion_v) } else { 0.0 }
+        if self.conversion_v > 0.0 {
+            1e6 / (3f64.sqrt() * self.conversion_v)
+        } else {
+            0.0
+        }
     }
 
     pub fn is_violated(&self) -> bool {
@@ -354,12 +361,15 @@ pub struct SecurityResult {
 impl SecurityResult {
     /// The worst margin anywhere. `None` when nothing was evaluated.
     pub fn min_margin(&self) -> Option<f64> {
-        self.perimeters.iter().filter_map(PerimeterResult::min_margin).fold(None, |acc, m| {
-            Some(match acc {
-                Some(a) => f64::min(a, m),
-                None => m,
+        self.perimeters
+            .iter()
+            .filter_map(PerimeterResult::min_margin)
+            .fold(None, |acc, m| {
+                Some(match acc {
+                    Some(a) => f64::min(a, m),
+                    None => m,
+                })
             })
-        })
     }
 
     pub fn is_secure(&self) -> bool {
@@ -367,7 +377,9 @@ impl SecurityResult {
     }
 
     pub fn violations(&self) -> impl Iterator<Item = (&PerimeterResult, &CnecResult)> {
-        self.perimeters.iter().flat_map(|p| p.violations().map(move |c| (p, c)))
+        self.perimeters
+            .iter()
+            .flat_map(|p| p.violations().map(move |c| (p, c)))
     }
 }
 
@@ -535,7 +547,11 @@ impl Bounds {
     fn margin(&self, flow_mw: f64) -> (f64, f64) {
         let from_upper = self.upper - flow_mw;
         let from_lower = flow_mw - self.lower;
-        if from_upper <= from_lower { (from_upper, self.u_upper) } else { (from_lower, self.u_lower) }
+        if from_upper <= from_lower {
+            (from_upper, self.u_upper)
+        } else {
+            (from_lower, self.u_lower)
+        }
     }
 
     /// The expression voltage of whichever bound the megawatt margin found
@@ -709,9 +725,14 @@ impl Held {
     pub fn transformers_of(&self, network: &Network<'_>) -> Vec<crate::types::Transformer> {
         let mut out = network.transformers.to_vec();
         for &(branch, tap, angle_deg) in &self.taps {
-            let Some(i) = branch.checked_sub(network.lines.len()) else { continue };
-            let from_network =
-                network.tap_changers.get(i).and_then(|c| c.as_ref()).and_then(|c| c.at(tap));
+            let Some(i) = branch.checked_sub(network.lines.len()) else {
+                continue;
+            };
+            let from_network = network
+                .tap_changers
+                .get(i)
+                .and_then(|c| c.as_ref())
+                .and_then(|c| c.at(tap));
             let Some(slot) = out.get_mut(i) else { continue };
             let ratio = slot.tap.norm();
             slot.tap = match from_network {
@@ -723,8 +744,12 @@ impl Held {
     }
 
     pub fn applied_to(&self, open: &[usize]) -> Vec<usize> {
-        let mut out: Vec<usize> =
-            open.iter().chain(self.open.iter()).copied().filter(|b| !self.close.contains(b)).collect();
+        let mut out: Vec<usize> = open
+            .iter()
+            .chain(self.open.iter())
+            .copied()
+            .filter(|b| !self.close.contains(b))
+            .collect();
         out.sort_unstable();
         out.dedup();
         out
@@ -761,11 +786,20 @@ pub fn evaluate_split(
         network
     } else {
         transformers = held.transformers_of(network);
-        stepped = Network { transformers: &transformers, ..*network };
+        stepped = Network {
+            transformers: &transformers,
+            ..*network
+        };
         &stepped
     };
-    let other =
-        evaluate_model(crac, other_network, resolution, &held.applied_to(open), model, ac);
+    let other = evaluate_model(
+        crac,
+        other_network,
+        resolution,
+        &held.applied_to(open),
+        model,
+        ac,
+    );
     let mut perimeters: Vec<PerimeterResult> = Vec::with_capacity(base.perimeters.len());
     for perimeter in base.perimeters {
         if held.states.contains(&perimeter.state)
@@ -776,7 +810,10 @@ pub fn evaluate_split(
         }
         perimeters.push(perimeter);
     }
-    SecurityResult { perimeters, skipped: base.skipped }
+    SecurityResult {
+        perimeters,
+        skipped: base.skipped,
+    }
 }
 
 pub fn evaluate_model(
@@ -851,7 +888,9 @@ pub fn evaluate_with(
 
     let mut perimeters = Vec::new();
     for state in crac.states() {
-        let Some(indices) = by_state.get(&state) else { continue };
+        let Some(indices) = by_state.get(&state) else {
+            continue;
+        };
 
         // Post-contingency flows. A preventive state is the base case; anything
         // else opens the contingency's elements.
@@ -890,8 +929,12 @@ pub fn evaluate_with(
         let mut cnecs = Vec::new();
         for &i in indices {
             let cnec = &crac.flow_cnecs[i];
-            let Some(branch) = resolution.branch(&cnec.network_element) else { continue };
-            let Some(u_rated) = network.branch_voltage(branch, &dc) else { continue };
+            let Some(branch) = resolution.branch(&cnec.network_element) else {
+                continue;
+            };
+            let Some(u_rated) = network.branch_voltage(branch, &dc) else {
+                continue;
+            };
             let flow_mw = flows.get(branch).copied().unwrap_or(0.0) * network.base_mva;
 
             // The tightest expressible threshold binds. A CNEC whose thresholds
@@ -939,10 +982,17 @@ pub fn evaluate_with(
                 side_two: (flow_mw, to_amperes(flow_mw.abs(), u_far)),
             });
         }
-        perimeters.push(PerimeterResult { state, cnecs, severed });
+        perimeters.push(PerimeterResult {
+            state,
+            cnecs,
+            severed,
+        });
     }
 
-    SecurityResult { perimeters, skipped }
+    SecurityResult {
+        perimeters,
+        skipped,
+    }
 }
 
 /// The AC settings every RAO layer measures with.
@@ -1101,19 +1151,29 @@ pub fn evaluate_ac(
 
     // One scenario per state that has CNECs, in `crac.states()` order so the
     // reports come back aligned with the perimeters below.
-    let states: Vec<State> = crac.states().into_iter().filter(|s| by_state.contains_key(s)).collect();
+    let states: Vec<State> = crac
+        .states()
+        .into_iter()
+        .filter(|s| by_state.contains_key(s))
+        .collect();
     let scenarios: Vec<Scenario> = states
         .iter()
         .map(|state| {
             let mut outages = applied.clone();
             if let Some(c) = state.contingency {
                 outages.extend(
-                    crac.contingencies[c].elements.iter().filter_map(|e| resolution.branch(e)),
+                    crac.contingencies[c]
+                        .elements
+                        .iter()
+                        .filter_map(|e| resolution.branch(e)),
                 );
             }
             outages.sort_unstable();
             outages.dedup();
-            Scenario { bus_overrides: Vec::new(), branch_outages: outages }
+            Scenario {
+                bus_overrides: Vec::new(),
+                branch_outages: outages,
+            }
         })
         .collect();
 
@@ -1138,7 +1198,11 @@ pub fn evaluate_ac(
         return SecurityResult {
             perimeters: states
                 .into_iter()
-                .map(|state| PerimeterResult { state, cnecs: Vec::new(), severed: true })
+                .map(|state| PerimeterResult {
+                    state,
+                    cnecs: Vec::new(),
+                    severed: true,
+                })
                 .collect(),
             skipped,
         };
@@ -1148,7 +1212,10 @@ pub fn evaluate_ac(
     let mut perimeters = Vec::new();
     for ((state, scenario), report) in states.into_iter().zip(&scenarios).zip(&reports) {
         let v = bus_voltages(&report.buses);
-        let severed = report.islands.iter().any(|i| i.status != IslandStatus::Converged);
+        let severed = report
+            .islands
+            .iter()
+            .any(|i| i.status != IslandStatus::Converged);
         let out: Vec<bool> = {
             let mut out = vec![false; params.len()];
             for &b in &scenario.branch_outages {
@@ -1162,9 +1229,15 @@ pub fn evaluate_ac(
         let mut cnecs = Vec::new();
         for &i in by_state.get(&state).into_iter().flatten() {
             let cnec = &crac.flow_cnecs[i];
-            let Some(branch) = resolution.branch(&cnec.network_element) else { continue };
-            let Some(u_rated) = network.branch_voltage(branch, &dc) else { continue };
-            let Some(param) = params.get(branch) else { continue };
+            let Some(branch) = resolution.branch(&cnec.network_element) else {
+                continue;
+            };
+            let Some(u_rated) = network.branch_voltage(branch, &dc) else {
+                continue;
+            };
+            let Some(param) = params.get(branch) else {
+                continue;
+            };
 
             // An outaged branch carries nothing. `solve_contingencies` removes
             // it from the Y-bus, but `params` still describes it, so evaluating
@@ -1232,7 +1305,14 @@ pub fn evaluate_ac(
                     // limit, so the `continue` above has already fired.
                     Unit::Megawatt | Unit::Degree | Unit::Kilovolt => 0.0,
                 };
-                bound.tighten(lo, hi, u_written, expressed, cnec.reliability_margin, charge);
+                bound.tighten(
+                    lo,
+                    hi,
+                    u_written,
+                    expressed,
+                    cnec.reliability_margin,
+                    charge,
+                );
             }
             if !bound.is_constraining() {
                 continue;
@@ -1240,11 +1320,10 @@ pub fn evaluate_ac(
 
             // Report the current on whichever side the CNEC's thresholds
             // name, so an ampere assertion is checked where it was written.
-            let (p_mw, q_mvar, u_actual) =
-                match cnec.thresholds.first().map(|t| t.side) {
-                    Some(Side::Two) => ends[1],
-                    _ => ends[0],
-                };
+            let (p_mw, q_mvar, u_actual) = match cnec.thresholds.first().map(|t| t.side) {
+                Some(Side::Two) => ends[1],
+                _ => ends[0],
+            };
             let current_a = if u_actual > 0.0 {
                 p_mw.hypot(q_mvar) * 1e6 / (3f64.sqrt() * u_actual)
             } else {
@@ -1288,10 +1367,17 @@ pub fn evaluate_ac(
                 ),
             });
         }
-        perimeters.push(PerimeterResult { state, cnecs, severed });
+        perimeters.push(PerimeterResult {
+            state,
+            cnecs,
+            severed,
+        });
     }
 
-    SecurityResult { perimeters, skipped }
+    SecurityResult {
+        perimeters,
+        skipped,
+    }
 }
 
 /// Solve each scenario on its own Y-bus, spreading the slack across generators
@@ -1354,8 +1440,7 @@ fn solve_distributing_slack(
             stamp_shunts(&mut ybus, ac.shunts);
             let mut buses = network.buses.to_vec();
             let mut ybus = ybus.finish();
-            let mut slack =
-                crate::outerloop::DistributedSlack::new(distribution.clone());
+            let mut slack = crate::outerloop::DistributedSlack::new(distribution.clone());
             let (islands, _) = {
                 let mut ctx = crate::outerloop::SolveContext::new(&mut buses, &mut ybus);
                 let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = vec![&mut slack];
@@ -1396,6 +1481,9 @@ fn solve_distributing_slack(
 /// Sign-preserving, because a margin can be negative and an overload of −40 A
 /// is not an overload of 40 A.
 fn to_amperes(power_mw: f64, voltage_v: f64) -> f64 {
-    if voltage_v > 0.0 { power_mw * 1e6 / (3f64.sqrt() * voltage_v) } else { 0.0 }
+    if voltage_v > 0.0 {
+        power_mw * 1e6 / (3f64.sqrt() * voltage_v)
+    } else {
+        0.0
+    }
 }
-

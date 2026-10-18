@@ -70,11 +70,10 @@ use std::path::{Path, PathBuf};
 
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
-use gridoxide::rao::evaluate::{evaluate_model, FlowModel};
+use gridoxide::rao::evaluate::{FlowModel, evaluate_model};
 use gridoxide::rao::linear::ObjectiveUnit;
 use gridoxide::rao::{
-    crac_json, run, Network, Resolution, SearchOptions,
-    SecondPreventiveCondition,
+    Network, Resolution, SearchOptions, SecondPreventiveCondition, crac_json, run,
 };
 use gridoxide::ucte;
 
@@ -91,7 +90,11 @@ fn all_scenarios() -> HashMap<String, Scenario> {
                 let text = std::fs::read_to_string(&path).expect("feature file");
                 for scenario in parse(&text) {
                     let previous = out.insert(scenario.name.clone(), scenario);
-                    assert!(previous.is_none(), "a scenario id repeats in {}", path.display());
+                    assert!(
+                        previous.is_none(),
+                        "a scenario id repeats in {}",
+                        path.display()
+                    );
                 }
             }
         }
@@ -103,11 +106,17 @@ fn all_scenarios() -> HashMap<String, Scenario> {
 
 /// The scenarios a gate selects, in the order its list names them.
 fn selected(list: &str, all: &HashMap<String, Scenario>) -> Vec<Scenario> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(list);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/rao")
+        .join(list);
     let text = std::fs::read_to_string(&path).expect("scenario list");
     text.lines()
         .filter_map(|l| l.split('#').next().unwrap().split_whitespace().next())
-        .map(|id| all.get(id).unwrap_or_else(|| panic!("{list}: no scenario {id}")).clone())
+        .map(|id| {
+            all.get(id)
+                .unwrap_or_else(|| panic!("{list}: no scenario {id}"))
+                .clone()
+        })
         .collect()
 }
 
@@ -190,44 +199,95 @@ impl Margin {
 #[derive(Debug, Clone)]
 enum Expect {
     Secured(bool),
-    WorstMargin { value: f64, cnec: Option<String>, stage: Stage, unit: MarginUnit },
-    CnecMargin { cnec: String, value: f64, stage: Stage, unit: MarginUnit },
+    WorstMargin {
+        value: f64,
+        cnec: Option<String>,
+        stage: Stage,
+        unit: MarginUnit,
+    },
+    CnecMargin {
+        cnec: String,
+        value: f64,
+        stage: Stage,
+        unit: MarginUnit,
+    },
     /// `the initial margin on cnec "X" should be N MW` — the *untouched*
     /// network, before any remedial action. Distinct from the after-PRA one,
     /// and a scenario routinely asserts both for the same CNEC: reading them
     /// as the same step compares the optimized answer against the starting
     /// point and fails on every scenario that improves anything.
-    InitialCnecMargin { cnec: String, value: f64, unit: MarginUnit },
+    InitialCnecMargin {
+        cnec: String,
+        value: f64,
+        unit: MarginUnit,
+    },
     /// `the value of the objective function after CRA should be N` — the
     /// reference's **cost**, which is the negated worst margin plus whatever
     /// the monitored CNECs are violating. `None` means "initially", before any
     /// remedial action.
-    ObjectiveValue { value: f64, stage: Option<Stage> },
-    PstTap { action: String, tap: i32, at: Where },
+    ObjectiveValue {
+        value: f64,
+        stage: Option<Stage>,
+    },
+    PstTap {
+        action: String,
+        tap: i32,
+        at: Where,
+    },
     /// A redispatch's set-point, in MW. Absolute, not a shift — see
     /// `linear::injection_origin`.
-    Setpoint { action: String, value: f64, at: Where },
-    ActionUsed { action: String, at: Where },
+    Setpoint {
+        action: String,
+        value: f64,
+        at: Where,
+    },
+    ActionUsed {
+        action: String,
+        at: Where,
+    },
     /// `the remedial action "X" is not used ...` — the negative, and worth
     /// having for exactly the reason it is easy to skip: nothing else in this
     /// harness penalizes taking an action the reference declines, which is the
     /// shape two recorded defects already had.
-    ActionNotUsed { action: String, at: Where },
-    ActionCount { count: usize, at: Where },
+    ActionNotUsed {
+        action: String,
+        at: Where,
+    },
+    ActionCount {
+        count: usize,
+        at: Where,
+    },
     /// `the flow on cnec "X" after PRA should be N A on side N`, and the
     /// `initial flow` form with `stage: None`. Sides are the reference's own
     /// 1-based numbering.
-    CnecFlow { cnec: String, value: f64, unit: MarginUnit, side: usize, stage: Option<Stage> },
+    CnecFlow {
+        cnec: String,
+        value: f64,
+        unit: MarginUnit,
+        side: usize,
+        stage: Option<Stage>,
+    },
     /// `the "upper"/"lower" threshold on cnec "X" should be N A` — the bound
     /// itself, not the distance to it.
-    CnecThreshold { cnec: String, upper: bool, value: f64, unit: MarginUnit },
+    CnecThreshold {
+        cnec: String,
+        upper: bool,
+        value: f64,
+        unit: MarginUnit,
+    },
     /// `PST "X" in network file with PRA is on tap N` — where the *network*
     /// left the shifter, addressed by network element rather than by range
     /// action. Distinct from [`PstTap`](Self::PstTap): a scenario asserts this
     /// for a shifter no range action names.
-    NetworkTap { element: String, tap: i32 },
+    NetworkTap {
+        element: String,
+        tap: i32,
+    },
     /// `line "X" in network file with PRA has connection status to "X"`.
-    Connected { element: String, connected: bool },
+    Connected {
+        element: String,
+        connected: bool,
+    },
     /// `the execution details should be "X"` — which optimization steps ran and
     /// how each turned out. The most-asserted step in the whole suite, and the
     /// one thing no margin can tell you: whether the answer in front of you is
@@ -272,7 +332,10 @@ fn stage_of(line: &str) -> Stage {
 #[derive(Debug, Clone, PartialEq)]
 enum Where {
     Preventive,
-    After { contingency: String, instant: String },
+    After {
+        contingency: String,
+        instant: String,
+    },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -323,12 +386,21 @@ fn number_after_quotes(line: &str) -> Option<f64> {
 /// Needed because the reference does not put the subject first in every step:
 /// `the "upper" threshold on cnec "X"` names the bound before the CNEC.
 fn quoted_nth(line: &str, n: usize) -> Option<String> {
-    line.split('"').skip(1).step_by(2).nth(n).map(str::to_string)
+    line.split('"')
+        .skip(1)
+        .step_by(2)
+        .nth(n)
+        .map(str::to_string)
 }
 
 /// The terminal a flow step names, in the reference's 1-based numbering.
 fn side_of(line: &str) -> Option<usize> {
-    line.split_once(" on side ")?.1.split_whitespace().next()?.parse().ok()
+    line.split_once(" on side ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn parse(text: &str) -> Vec<Scenario> {
@@ -344,12 +416,19 @@ fn parse(text: &str) -> Vec<Scenario> {
                 scenarios.push(s);
             }
             current = Some(Scenario {
-                name: rest.split_whitespace().next().unwrap_or("?").trim_end_matches(':').to_string(),
+                name: rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("?")
+                    .trim_end_matches(':')
+                    .to_string(),
                 ..Default::default()
             });
             continue;
         }
-        let Some(scenario) = current.as_mut() else { continue };
+        let Some(scenario) = current.as_mut() else {
+            continue;
+        };
 
         if line.starts_with("Given network file is") {
             scenario.network = quoted(line).unwrap_or_default();
@@ -448,23 +527,33 @@ fn expectation(line: &str) -> Expect {
         };
     }
     if line.contains("the worst margin is") {
-        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
         let cnec = line.contains("on cnec").then(|| quoted(line)).flatten();
         return match number_after_quotes(line) {
-            Some(value) => Expect::WorstMargin { value, cnec, stage: stage_of(line), unit },
+            Some(value) => Expect::WorstMargin {
+                value,
+                cnec,
+                stage: stage_of(line),
+                unit,
+            },
             None => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("margin on cnec") {
-        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
         let initial = line.contains("initial margin on cnec");
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(cnec), Some(value)) if initial => {
-                Expect::InitialCnecMargin { cnec, value, unit }
-            }
-            (Some(cnec), Some(value)) => {
-                Expect::CnecMargin { cnec, value, stage: stage_of(line), unit }
-            }
+            (Some(cnec), Some(value)) if initial => Expect::InitialCnecMargin { cnec, value, unit },
+            (Some(cnec), Some(value)) => Expect::CnecMargin {
+                cnec,
+                value,
+                stage: stage_of(line),
+                unit,
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
@@ -482,24 +571,41 @@ fn expectation(line: &str) -> Expect {
         };
     }
     if line.contains("flow on cnec") {
-        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
-        let Some(side) = side_of(line) else { return Expect::Unsupported(line.to_string()) };
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
+        let Some(side) = side_of(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
         // `initial` is the untouched network; every other form names a stage.
         let stage = (!line.contains("initial flow")).then(|| stage_of(line));
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(cnec), Some(value)) => Expect::CnecFlow { cnec, value, unit, side, stage },
+            (Some(cnec), Some(value)) => Expect::CnecFlow {
+                cnec,
+                value,
+                unit,
+                side,
+                stage,
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("threshold on cnec") {
-        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
         let upper = match quoted(line).as_deref() {
             Some("upper") => true,
             Some("lower") => false,
             _ => return Expect::Unsupported(line.to_string()),
         };
         return match (quoted_nth(line, 1), number_after_quotes(line)) {
-            (Some(cnec), Some(value)) => Expect::CnecThreshold { cnec, upper, value, unit },
+            (Some(cnec), Some(value)) => Expect::CnecThreshold {
+                cnec,
+                upper,
+                value,
+                unit,
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
@@ -510,20 +616,33 @@ fn expectation(line: &str) -> Expect {
         // reference's own 2.3.1.1.a spells out, and what the CRAC's declared
         // range is stated in.
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(action), Some(value)) => Expect::Setpoint { action, value, at: where_of(line) },
+            (Some(action), Some(value)) => Expect::Setpoint {
+                action,
+                value,
+                at: where_of(line),
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("in network file with PRA is on tap") {
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(element), Some(tap)) => Expect::NetworkTap { element, tap: tap as i32 },
+            (Some(element), Some(tap)) => Expect::NetworkTap {
+                element,
+                tap: tap as i32,
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("in network file with PRA has connection status to") {
         return match (quoted(line), quoted_nth(line, 1).as_deref()) {
-            (Some(element), Some("true")) => Expect::Connected { element, connected: true },
-            (Some(element), Some("false")) => Expect::Connected { element, connected: false },
+            (Some(element), Some("true")) => Expect::Connected {
+                element,
+                connected: true,
+            },
+            (Some(element), Some("false")) => Expect::Connected {
+                element,
+                connected: false,
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
@@ -535,27 +654,38 @@ fn expectation(line: &str) -> Expect {
     }
     if line.contains("remedial action") && line.contains(" is not used") {
         return match quoted(line) {
-            Some(action) => Expect::ActionNotUsed { action, at: where_of(line) },
+            Some(action) => Expect::ActionNotUsed {
+                action,
+                at: where_of(line),
+            },
             None => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("the tap of PstRangeAction") {
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(action), Some(tap)) => {
-                Expect::PstTap { action, tap: tap as i32, at: where_of(line) }
-            }
+            (Some(action), Some(tap)) => Expect::PstTap {
+                action,
+                tap: tap as i32,
+                at: where_of(line),
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("remedial action") && line.contains(" is used") && !line.contains("not used") {
         return match quoted(line) {
-            Some(action) => Expect::ActionUsed { action, at: where_of(line) },
+            Some(action) => Expect::ActionUsed {
+                action,
+                at: where_of(line),
+            },
             None => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("remedial actions are used") {
         return match number_after_quotes(line) {
-            Some(n) => Expect::ActionCount { count: n as usize, at: where_of(line) },
+            Some(n) => Expect::ActionCount {
+                count: n as usize,
+                at: where_of(line),
+            },
             None => Expect::Unsupported(line.to_string()),
         };
     }
@@ -652,7 +782,10 @@ fn setpoint_of(
 ) -> Option<f64> {
     let index = crac.range_actions.iter().position(|a| a.id == action)?;
     let from_plan = |setpoints: &[gridoxide::rao::Setpoint]| {
-        setpoints.iter().find(|s| s.action == index).map(|s| s.value)
+        setpoints
+            .iter()
+            .find(|s| s.action == index)
+            .map(|s| s.value)
     };
     let moved = match at {
         Where::Preventive => from_plan(&plan.preventive.setpoints),
@@ -691,17 +824,21 @@ fn resting_tap(
     action: &str,
 ) -> Option<i32> {
     let range = crac.range_actions.iter().find(|r| r.id == action)?;
-    let RangeActionKind::Pst { element, initial_tap, .. } = &range.kind else { return None };
+    let RangeActionKind::Pst {
+        element,
+        initial_tap,
+        ..
+    } = &range.kind
+    else {
+        return None;
+    };
     // Read out of the network **this state** is in, not out of the file. A
     // shifter the preventive stage moved to −16 and that no curative action may
     // touch is at −16 in the curative state, and the reference's
     // `getOptimizedTapOnState` says so: it answers for every state, from the
     // set-points in force there. Falling back to the file's position instead
     // reports the plan undoing a decision it never revisited.
-    Some(
-        tap_in_network(crac, resolution, net, &[], transformers, element)
-            .unwrap_or(*initial_tap),
-    )
+    Some(tap_in_network(crac, resolution, net, &[], transformers, element).unwrap_or(*initial_tap))
 }
 
 /// Where a phase shifter *in the network* ended up, addressed by network
@@ -726,10 +863,12 @@ fn tap_in_network(
     // position it was rounded to, so recovering the position from the angle
     // afterwards can land on the other neighbour — the same off-by-one
     // `BestTapFinder` exists to settle.
-    let by_action = setpoints.iter().find_map(|s| match &crac.range_actions[s.action].kind {
-        RangeActionKind::Pst { element: e, .. } if e == element => s.tap,
-        _ => None,
-    });
+    let by_action = setpoints
+        .iter()
+        .find_map(|s| match &crac.range_actions[s.action].kind {
+            RangeActionKind::Pst { element: e, .. } if e == element => s.tap,
+            _ => None,
+        });
     if by_action.is_some() {
         return by_action;
     }
@@ -795,7 +934,9 @@ fn worst_at_own_stage(
             };
             pick(stage, &c.id, pra, ara, cra).map(|m| m.in_unit(unit))
         })
-        .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))
+        .fold(None, |acc: Option<f64>, m| {
+            Some(acc.map_or(m, |a| a.min(m)))
+        })
 }
 
 struct Outcome {
@@ -805,8 +946,11 @@ struct Outcome {
 }
 
 fn check(scenario: &Scenario) -> Outcome {
-    let mut outcome =
-        Outcome { matched: Vec::new(), mismatched: Vec::new(), unsupported: Vec::new() };
+    let mut outcome = Outcome {
+        matched: Vec::new(),
+        mismatched: Vec::new(),
+        unsupported: Vec::new(),
+    };
 
     let options = if scenario.core_cc {
         ucte::UcteOptions::core_capacity_calculation()
@@ -942,10 +1086,7 @@ fn check(scenario: &Scenario) -> Outcome {
                     continue;
                 }
                 for c in &perimeter.cnecs {
-                    out.insert(
-                        crac.flow_cnecs[c.cnec].id.clone(),
-                        Margin::of(c),
-                    );
+                    out.insert(crac.flow_cnecs[c.cnec].id.clone(), Margin::of(c));
                 }
             }
         }
@@ -970,22 +1111,19 @@ fn check(scenario: &Scenario) -> Outcome {
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
-    let evaluated =
-        evaluate_model(
-            &crac,
-            &after_pra,
-            &resolution,
-            &plan.preventive.open_branches,
-            model,
-            &ac_options,
-        );
+    let evaluated = evaluate_model(
+        &crac,
+        &after_pra,
+        &resolution,
+        &plan.preventive.open_branches,
+        model,
+        &ac_options,
+    );
     let margins: HashMap<&str, Margin> = evaluated
         .perimeters
         .iter()
         .flat_map(|p| p.cnecs.iter())
-        .map(|c| {
-            (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c))
-        })
+        .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c)))
         .collect();
 
     // The network's *own* open set, not an empty one. "Untouched" means before
@@ -994,15 +1132,19 @@ fn check(scenario: &Scenario) -> Outcome {
     // `&[]` here measures a network that does not exist, and does it silently:
     // every margin stays self-consistent and the whole initial situation is
     // simply a different one.
-    let untouched =
-        evaluate_model(&crac, &view, &resolution, view.initially_open, model, &ac_options);
+    let untouched = evaluate_model(
+        &crac,
+        &view,
+        &resolution,
+        view.initially_open,
+        model,
+        &ac_options,
+    );
     let initial_margins: HashMap<&str, Margin> = untouched
         .perimeters
         .iter()
         .flat_map(|p| p.cnecs.iter())
-        .map(|c| {
-            (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c))
-        })
+        .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c)))
         .collect();
 
     // The reference's "value of the objective function" is its **cost**: the
@@ -1124,7 +1266,11 @@ fn check(scenario: &Scenario) -> Outcome {
             scenario.name
         );
         for (mine, theirs) in mine_moved.iter().zip(&theirs_moved) {
-            assert_eq!(mine.0, theirs.0, "{}: different range action", scenario.name);
+            assert_eq!(
+                mine.0, theirs.0,
+                "{}: different range action",
+                scenario.name
+            );
             assert!(
                 (mine.1 - theirs.1).abs() < 1e-9,
                 "{}: `{}` moved {} by one reading and {} by the other",
@@ -1158,8 +1304,7 @@ fn check(scenario: &Scenario) -> Outcome {
                 .iter()
                 .filter(|c| c.monitored)
                 .filter_map(|c| {
-                    let initial =
-                        initial_margins.get(c.id.as_str())?.in_unit(objective_unit);
+                    let initial = initial_margins.get(c.id.as_str())?.in_unit(objective_unit);
                     let floor = f64::min(0.0, initial - mnec.acceptable_margin_decrease);
                     Some(mnec.violation_cost * (floor - read(c)?).max(0.0))
                 })
@@ -1203,7 +1348,9 @@ fn check(scenario: &Scenario) -> Outcome {
             .iter()
             .filter(|c| c.optimized)
             .filter_map(read)
-            .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))?;
+            .fold(None, |acc: Option<f64>, m| {
+                Some(acc.map_or(m, |a| a.min(m)))
+            })?;
         Some(violated - worst)
     };
 
@@ -1239,12 +1386,18 @@ fn check(scenario: &Scenario) -> Outcome {
                 );
                 take_setpoints(&crac, &plan.preventive.setpoints, &mut used, &mut taps);
             }
-            Where::After { contingency, instant } => {
+            Where::After {
+                contingency,
+                instant,
+            } => {
                 for scenario in &plan.scenarios {
                     if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
                         continue;
                     }
-                    if crac.instants.iter().any(|i| i.id == *instant && i.kind == InstantKind::Auto)
+                    if crac
+                        .instants
+                        .iter()
+                        .any(|i| i.id == *instant && i.kind == InstantKind::Auto)
                         && let Some(a) = &scenario.automatons
                     {
                         {
@@ -1287,20 +1440,29 @@ fn check(scenario: &Scenario) -> Outcome {
     // set-point in this perimeter still has a tap — the one an earlier
     // perimeter put it on — and only this network knows which.
     let transformers_at = |at: &Where| -> &[gridoxide::types::Transformer] {
-        let Where::After { contingency, instant } = at else {
+        let Where::After {
+            contingency,
+            instant,
+        } = at
+        else {
             return &plan.preventive.transformers;
         };
         for scenario in &plan.scenarios {
             if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
                 continue;
             }
-            if crac.instants.iter().any(|i| i.id == *instant && i.kind == InstantKind::Auto)
+            if crac
+                .instants
+                .iter()
+                .any(|i| i.id == *instant && i.kind == InstantKind::Auto)
                 && let Some(a) = &scenario.automatons
             {
                 return &a.transformers;
             }
             if let Some(perimeter) = scenario.perimeters.iter().find(|p| {
-                p.states.iter().any(|s| crac.instants[s.instant].id == *instant)
+                p.states
+                    .iter()
+                    .any(|s| crac.instants[s.instant].id == *instant)
             }) {
                 return &perimeter.transformers;
             }
@@ -1327,7 +1489,12 @@ fn check(scenario: &Scenario) -> Outcome {
                 let got = plan.is_secure();
                 record(got == *want, format!("security {got} (expected {want})"));
             }
-            Expect::WorstMargin { value, cnec: None, unit, .. } => {
+            Expect::WorstMargin {
+                value,
+                cnec: None,
+                unit,
+                ..
+            } => {
                 // In MW the plan's own objective is the answer. In amperes it
                 // is not the same quantity: the worst margin in amperes can
                 // fall on a different CNEC, because the conversion voltage
@@ -1336,20 +1503,21 @@ fn check(scenario: &Scenario) -> Outcome {
                 // named form already uses.
                 let got = match unit {
                     MarginUnit::Megawatt => Some(plan.final_margin_mw),
-                    MarginUnit::Ampere => worst_at_own_stage(
-                        &crac,
-                        *unit,
-                        &margins,
-                        &ara_margins,
-                        &cra_margins,
-                    ),
+                    MarginUnit::Ampere => {
+                        worst_at_own_stage(&crac, *unit, &margins, &ara_margins, &cra_margins)
+                    }
                 };
                 record(
                     got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
                     format!("worst margin {got:?} {unit:?} (expected {value})"),
                 );
             }
-            Expect::WorstMargin { value, cnec: Some(id), unit, .. } => {
+            Expect::WorstMargin {
+                value,
+                cnec: Some(id),
+                unit,
+                ..
+            } => {
                 // A worst-margin step names the CNEC that *ends up* carrying the
                 // worst margin, so it is measured at that CNEC's own stage —
                 // an `auto` CNEC after the automatons, a `curative` one after
@@ -1366,8 +1534,8 @@ fn check(scenario: &Scenario) -> Outcome {
                         _ => Stage::Pra,
                     })
                     .unwrap_or(Stage::Pra);
-                let got = pick(stage, id, &margins, &ara_margins, &cra_margins)
-                    .map(|m| m.in_unit(*unit));
+                let got =
+                    pick(stage, id, &margins, &ara_margins, &cra_margins).map(|m| m.in_unit(*unit));
                 record(
                     got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
                     format!("worst margin on `{id}` {got:?} (expected {value})"),
@@ -1380,7 +1548,12 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("initial margin on `{cnec}` {got:?} (expected {value})"),
                 );
             }
-            Expect::CnecMargin { cnec, value, stage, unit } => {
+            Expect::CnecMargin {
+                cnec,
+                value,
+                stage,
+                unit,
+            } => {
                 let got = pick(*stage, cnec, &margins, &ara_margins, &cra_margins)
                     .map(|m| m.in_unit(*unit));
                 record(
@@ -1403,11 +1576,8 @@ fn check(scenario: &Scenario) -> Outcome {
                 // `auto` while a scenario asks where it stood in preventive.
                 // Reporting `None` there fails an assertion that is simply
                 // asking "unchanged?".
-                let got = decisions(at)
-                    .1
-                    .get(action)
-                    .copied()
-                    .or_else(|| {
+                let got =
+                    decisions(at).1.get(action).copied().or_else(|| {
                         resting_tap(&crac, &resolution, &net, transformers_at(at), action)
                     });
                 record(
@@ -1433,14 +1603,26 @@ fn check(scenario: &Scenario) -> Outcome {
             }
             Expect::Steps(want) => {
                 let got = plan.steps.as_str();
-                record(got == want, format!("execution details {got:?} (expected {want:?})"));
+                record(
+                    got == want,
+                    format!("execution details {got:?} (expected {want:?})"),
+                );
             }
             Expect::ActionNotUsed { action, at } => {
                 let (used, _) = decisions(at);
                 let got = used.iter().any(|u| u == action);
-                record(!got, format!("`{action}` used: {got} (expected false) {at:?}"));
+                record(
+                    !got,
+                    format!("`{action}` used: {got} (expected false) {at:?}"),
+                );
             }
-            Expect::CnecFlow { cnec, value, unit, side, stage } => {
+            Expect::CnecFlow {
+                cnec,
+                value,
+                unit,
+                side,
+                stage,
+            } => {
                 let reading = match stage {
                     None => initial_margins.get(cnec.as_str()).copied(),
                     Some(s) => pick(*s, cnec, &margins, &ara_margins, &cra_margins),
@@ -1451,7 +1633,12 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("flow on `{cnec}` side {side} {got:?} (expected {value})"),
                 );
             }
-            Expect::CnecThreshold { cnec, upper, value, unit } => {
+            Expect::CnecThreshold {
+                cnec,
+                upper,
+                value,
+                unit,
+            } => {
                 let got = declared_threshold(&crac, cnec, *upper, *unit);
                 record(
                     got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
@@ -1486,7 +1673,10 @@ fn check(scenario: &Scenario) -> Outcome {
             }
             Expect::ActionCount { count, at } => {
                 let got = decisions(at).0.len();
-                record(got == *count, format!("{got} action(s) used (expected {count}) {at:?}"));
+                record(
+                    got == *count,
+                    format!("{got} action(s) used (expected {count}) {at:?}"),
+                );
             }
             Expect::Unsupported(line) => outcome.unsupported.push(line.clone()),
         }
@@ -1514,14 +1704,20 @@ fn the_reference_implementations_own_expectations() {
     // `run_gate` can only notice an entry that has stopped disagreeing in a
     // file it appears in; one naming nothing at all would sit there forever,
     // looking like diligence.
-    let known: Vec<String> =
-        FILES.iter().flat_map(|(file, ..)| selected(file, &all)).map(|s| s.name).collect();
+    let known: Vec<String> = FILES
+        .iter()
+        .flat_map(|(file, ..)| selected(file, &all))
+        .map(|s| s.name)
+        .collect();
     let orphans: Vec<&str> = RECORDED_DISAGREEMENTS
         .iter()
         .map(|(s, _)| *s)
         .filter(|s| !known.iter().any(|k| k == s))
         .collect();
-    assert!(orphans.is_empty(), "RECORDED_DISAGREEMENTS names scenarios nothing runs: {orphans:?}");
+    assert!(
+        orphans.is_empty(),
+        "RECORDED_DISAGREEMENTS names scenarios nothing runs: {orphans:?}"
+    );
 }
 
 /// The gate's scenario lists, with their scenario counts and recorded
@@ -1610,7 +1806,10 @@ fn run_gate(
         matched += outcome.matched.len();
         mismatched += outcome.mismatched.len();
         unsupported += outcome.unsupported.len();
-        match (recorded_reason(&scenario.name), outcome.mismatched.is_empty()) {
+        match (
+            recorded_reason(&scenario.name),
+            outcome.mismatched.is_empty(),
+        ) {
             (None, false) => unexplained.push(scenario.name.clone()),
             (Some(_), true) => stale.push(scenario.name.clone()),
             _ => {}
@@ -1686,19 +1885,28 @@ const RECORDED_DISAGREEMENTS: &[(&str, &str)] = &[
         "same worst margin, reached with one curative action instead of two — the alternative \
          optimum risk 1 names, and this CRAC has no MNEC to break the tie",
     ),
-    ("1.3.2.8", "gridoxide 461.3 A against the reference's 433 on the binding CNEC, one tap apart"),
+    (
+        "1.3.2.8",
+        "gridoxide 461.3 A against the reference's 433 on the binding CNEC, one tap apart",
+    ),
     (
         "1.3.6.6",
         "gridoxide 630.0 A against 612, spending one curative action the reference declines; the \
          MNEC it moves lands at 21.8 A against a floor of 0, so nothing is violated to get there",
     ),
-    ("1.3.8.2", "same worst margin, one tap apart on a non-binding CNEC"),
+    (
+        "1.3.8.2",
+        "same worst margin, one tap apart on a non-binding CNEC",
+    ),
     (
         "5.2.1.3",
         "BestTapFinder: gridoxide's tap -6 scores 188.42 with no MNEC violation; the reference's \
          -7 scores 192.05 and pays 0.76 of violation, for 184.41",
     ),
-    ("5.2.1.4", "BestTapFinder: as 5.2.1.3 — 188.42 against 184.41"),
+    (
+        "5.2.1.4",
+        "BestTapFinder: as 5.2.1.3 — 188.42 against 184.41",
+    ),
     (
         "5.2.3.2",
         "BestTapFinder: gridoxide's -11 scores -156.28 clean; the reference's -12 scores -146.33 \
@@ -1732,7 +1940,10 @@ const RECORDED_DISAGREEMENTS: &[(&str, &str)] = &[
 /// whether a disagreement counts as explained.
 fn recorded_reason(name: &str) -> Option<&'static str> {
     let id = name.split_whitespace().next()?.trim_end_matches(':');
-    RECORDED_DISAGREEMENTS.iter().find(|(s, _)| *s == id).map(|(_, why)| *why)
+    RECORDED_DISAGREEMENTS
+        .iter()
+        .find(|(s, _)| *s == id)
+        .map(|(_, why)| *why)
 }
 
 /// How many of the reference's assertions currently hold: **175 of 181**,
@@ -2130,14 +2341,22 @@ fn every_scenario_names_inputs_that_exist() {
     // A scenario whose fixture is missing would otherwise be silently skipped,
     // and the gate would pass by testing nothing.
     let all = all_scenarios();
-    for list in ["dc_scenarios.txt", "ac_scenarios.txt", "ac_scenarios_16nodes.txt"] {
+    for list in [
+        "dc_scenarios.txt",
+        "ac_scenarios.txt",
+        "ac_scenarios_16nodes.txt",
+    ] {
         for scenario in selected(list, &all) {
             for (kind, reference) in [
                 ("cases", &scenario.network),
                 ("crac", &scenario.crac),
                 ("configurations", &scenario.config),
             ] {
-                assert!(!reference.is_empty(), "{}: a Given step is missing", scenario.name);
+                assert!(
+                    !reference.is_empty(),
+                    "{}: a Given step is missing",
+                    scenario.name
+                );
                 assert!(
                     resolve(kind, reference).exists(),
                     "{}: `{reference}` resolves to {} which does not exist",
@@ -2145,7 +2364,11 @@ fn every_scenario_names_inputs_that_exist() {
                     resolve(kind, reference).display()
                 );
             }
-            assert!(!scenario.expectations.is_empty(), "{}: nothing to check", scenario.name);
+            assert!(
+                !scenario.expectations.is_empty(),
+                "{}: nothing to check",
+                scenario.name
+            );
         }
     }
 }

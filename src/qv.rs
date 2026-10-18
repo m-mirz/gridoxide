@@ -54,7 +54,7 @@
 //! strongest gate here: two independent methods agreeing is worth more than
 //! either agreeing with itself.
 
-use crate::network::{build_ybus, effective_injection, power_injections, stamp_shunts, ShuntAdm};
+use crate::network::{ShuntAdm, build_ybus, effective_injection, power_injections, stamp_shunts};
 use crate::solver::{PowerFlowOptions, SolveStatus};
 use crate::types::{Bus, BusType, Line, Transformer};
 
@@ -80,7 +80,10 @@ pub struct QvOptions {
 impl Default for QvOptions {
     fn default() -> Self {
         Self {
-            pf: PowerFlowOptions { max_iter: 60, ..Default::default() },
+            pf: PowerFlowOptions {
+                max_iter: 60,
+                ..Default::default()
+            },
             v_max: 1.10,
             v_min: 0.40,
             step: 0.01,
@@ -139,7 +142,10 @@ pub enum QvError {
     /// reactive injection, so there is no condenser to add and no curve to
     /// trace.
     SlackBus(usize),
-    BusOutOfRange { bus: usize, n: usize },
+    BusOutOfRange {
+        bus: usize,
+        n: usize,
+    },
     /// `v_min >= v_max`, or a non-positive step.
     EmptyRange,
     MethodUnsupported(crate::solver::PowerFlowMethod),
@@ -197,7 +203,13 @@ pub fn qv_curve(
     opts: QvOptions,
 ) -> QvCurve {
     if bus >= buses.len() {
-        return QvCurve::rejected(bus, QvError::BusOutOfRange { bus, n: buses.len() });
+        return QvCurve::rejected(
+            bus,
+            QvError::BusOutOfRange {
+                bus,
+                n: buses.len(),
+            },
+        );
     }
     if buses[bus].bus_type == BusType::Slack {
         return QvCurve::rejected(bus, QvError::SlackBus(bus));
@@ -270,7 +282,10 @@ pub fn qv_curve(
         // `effective_injection` at the *solved* voltage so a voltage-dependent
         // load is subtracted at the voltage it actually sees, rather than at
         // its nominal.
-        let own = Bus { voltage_mag: report.buses[bus].voltage_mag, ..buses[bus].clone() };
+        let own = Bus {
+            voltage_mag: report.buses[bus].voltage_mag,
+            ..buses[bus].clone()
+        };
         let (_, q_own) = effective_injection(&own);
         points.push(QvPoint {
             voltage: report.buses[bus].voltage_mag,
@@ -280,7 +295,15 @@ pub fn qv_curve(
     }
 
     let (nose, status) = locate_nose(&points, opts.refine);
-    QvCurve { bus, points, nose, status, base_voltage, failed, already_controlled }
+    QvCurve {
+        bus,
+        points,
+        nose,
+        status,
+        base_voltage,
+        failed,
+        already_controlled,
+    }
 }
 
 /// The minimum of a sampled curve, and whether it is genuinely inside the
@@ -316,7 +339,12 @@ fn locate_nose(points: &[QvPoint], refine: bool) -> (Option<QvNose>, QvStatus) {
     let (a, b, c) = (&points[lowest - 1], &points[lowest], &points[lowest + 1]);
     if !refine {
         return (
-            Some(QvNose { voltage: b.voltage, q: b.q, margin_pu: -b.q, refined: false }),
+            Some(QvNose {
+                voltage: b.voltage,
+                q: b.q,
+                margin_pu: -b.q,
+                refined: false,
+            }),
             QvStatus::NoseFound,
         );
     }
@@ -328,20 +356,36 @@ fn locate_nose(points: &[QvPoint], refine: bool) -> (Option<QvNose>, QvStatus) {
     let (x3, y3) = (c.voltage, c.q);
     let denom = (x1 - x2) * (y2 - y3) - (x2 - x3) * (y1 - y2);
     let nose = if denom.abs() < 1e-15 {
-        QvNose { voltage: x2, q: y2, margin_pu: -y2, refined: false }
+        QvNose {
+            voltage: x2,
+            q: y2,
+            margin_pu: -y2,
+            refined: false,
+        }
     } else {
-        let vertex = x2 - 0.5 * ((x2 - x1).powi(2) * (y2 - y3) - (x2 - x3).powi(2) * (y2 - y1))
-            / ((x2 - x1) * (y2 - y3) - (x2 - x3) * (y2 - y1));
+        let vertex = x2
+            - 0.5 * ((x2 - x1).powi(2) * (y2 - y3) - (x2 - x3).powi(2) * (y2 - y1))
+                / ((x2 - x1) * (y2 - y3) - (x2 - x3) * (y2 - y1));
         // Refuse a vertex outside the bracketing samples — that means the three
         // points do not describe a minimum and the parabola is extrapolating.
         if vertex > x1.max(x3) || vertex < x1.min(x3) || !vertex.is_finite() {
-            QvNose { voltage: x2, q: y2, margin_pu: -y2, refined: false }
+            QvNose {
+                voltage: x2,
+                q: y2,
+                margin_pu: -y2,
+                refined: false,
+            }
         } else {
             // Lagrange interpolation at the vertex.
             let q = y1 * (vertex - x2) * (vertex - x3) / ((x1 - x2) * (x1 - x3))
                 + y2 * (vertex - x1) * (vertex - x3) / ((x2 - x1) * (x2 - x3))
                 + y3 * (vertex - x1) * (vertex - x2) / ((x3 - x1) * (x3 - x2));
-            QvNose { voltage: vertex, q, margin_pu: -q, refined: true }
+            QvNose {
+                voltage: vertex,
+                q,
+                margin_pu: -q,
+                refined: true,
+            }
         }
     };
     (Some(nose), QvStatus::NoseFound)

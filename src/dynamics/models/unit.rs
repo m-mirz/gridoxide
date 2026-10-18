@@ -177,7 +177,13 @@ impl GeneratingUnit {
             Some(c) => c.output(&x[self.off_g..self.off_g + self.n_g], d_omega),
             None => self.p_m0,
         };
-        Signals { d_omega, v_t, u_avr, e_fd, p_m }
+        Signals {
+            d_omega,
+            v_t,
+            u_avr,
+            e_fd,
+            p_m,
+        }
     }
 
     /// The machine, for a caller that needs a model-specific accessor — an
@@ -236,7 +242,8 @@ impl DynamicModel for GeneratingUnit {
             return;
         }
         let sig = self.signals(x, v);
-        self.machine.derivatives(&x[..self.n_m], v, sig.e_fd, sig.p_m, &mut out[..self.n_m]);
+        self.machine
+            .derivatives(&x[..self.n_m], v, sig.e_fd, sig.p_m, &mut out[..self.n_m]);
         if let Some(c) = &self.avr {
             let (o, n) = (self.off_a, self.n_a);
             c.derivatives(&x[o..o + n], sig.u_avr, &mut out[o..o + n]);
@@ -270,13 +277,17 @@ impl DynamicModel for GeneratingUnit {
         let mut s = self.scratch.borrow_mut();
 
         s.machine.clear();
-        self.machine.jacobian(&x[..self.n_m], v, sig.e_fd, sig.p_m, &mut s.machine);
+        self.machine
+            .jacobian(&x[..self.n_m], v, sig.e_fd, sig.p_m, &mut s.machine);
 
         // ∂|V|/∂V is the unit vector along V. At |V| = 0 it is undefined; zero
         // is the only finite choice, and a machine terminal at exactly zero
         // volts is already outside what any of these models describe.
-        let (dvt_re, dvt_im) =
-            if sig.v_t > 0.0 { (v.re / sig.v_t, v.im / sig.v_t) } else { (0.0, 0.0) };
+        let (dvt_re, dvt_im) = if sig.v_t > 0.0 {
+            (v.re / sig.v_t, v.im / sig.v_t)
+        } else {
+            (0.0, 0.0)
+        };
 
         // --- each control's own blocks and output sensitivities ---
         let mut dvs_du = 0.0;
@@ -285,7 +296,10 @@ impl DynamicModel for GeneratingUnit {
             s.pss_dfdx.fill(0.0);
             s.pss_dfdu.fill(0.0);
             s.pss_dydx.fill(0.0);
-            let (mut fx, mut fu) = (std::mem::take(&mut s.pss_dfdx), std::mem::take(&mut s.pss_dfdu));
+            let (mut fx, mut fu) = (
+                std::mem::take(&mut s.pss_dfdx),
+                std::mem::take(&mut s.pss_dfdu),
+            );
             c.jacobian(xs, sig.d_omega, &mut fx, &mut fu);
             s.pss_dfdx = fx;
             s.pss_dfdu = fu;
@@ -299,7 +313,10 @@ impl DynamicModel for GeneratingUnit {
             s.avr_dfdx.fill(0.0);
             s.avr_dfdu.fill(0.0);
             s.avr_dydx.fill(0.0);
-            let (mut fx, mut fu) = (std::mem::take(&mut s.avr_dfdx), std::mem::take(&mut s.avr_dfdu));
+            let (mut fx, mut fu) = (
+                std::mem::take(&mut s.avr_dfdx),
+                std::mem::take(&mut s.avr_dfdu),
+            );
             c.jacobian(xs, sig.u_avr, &mut fx, &mut fu);
             s.avr_dfdx = fx;
             s.avr_dfdu = fu;
@@ -313,7 +330,10 @@ impl DynamicModel for GeneratingUnit {
             s.gov_dfdx.fill(0.0);
             s.gov_dfdu.fill(0.0);
             s.gov_dydx.fill(0.0);
-            let (mut fx, mut fu) = (std::mem::take(&mut s.gov_dfdx), std::mem::take(&mut s.gov_dfdu));
+            let (mut fx, mut fu) = (
+                std::mem::take(&mut s.gov_dfdx),
+                std::mem::take(&mut s.gov_dfdu),
+            );
             c.jacobian(xs, sig.d_omega, &mut fx, &mut fu);
             s.gov_dfdx = fx;
             s.gov_dfdu = fu;

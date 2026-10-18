@@ -128,7 +128,12 @@ mod tests {
         ];
         let back = SequenceValue::from_phase(&abc).to_phase();
         for p in 0..3 {
-            assert!((abc[p] - back[p]).norm() < 1e-14, "phase {p}: {} vs {}", abc[p], back[p]);
+            assert!(
+                (abc[p] - back[p]).norm() < 1e-14,
+                "phase {p}: {} vs {}",
+                abc[p],
+                back[p]
+            );
         }
     }
 }

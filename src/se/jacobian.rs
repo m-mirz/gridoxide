@@ -29,7 +29,7 @@
 
 use crate::measurement::{AngleFrame, Measurement, MeasurementKind, Target};
 use crate::se::functional::{
-    current_partials_of, local_current_partials_of, power_partials_of, Partial,
+    Partial, current_partials_of, local_current_partials_of, power_partials_of,
 };
 use crate::types::Bus;
 
@@ -84,7 +84,12 @@ impl StateLayout {
                 next += 1;
             }
         }
-        Self { n_buses: buses.len(), angle_ref, theta_pos, vmag_offset: next }
+        Self {
+            n_buses: buses.len(),
+            angle_ref,
+            theta_pos,
+            vmag_offset: next,
+        }
     }
 
     /// Number of unknowns: `2N` when the phase is measured, `2N − 1` when a
@@ -449,7 +454,12 @@ mod tests {
     }
 
     fn measurement(kind: MeasurementKind, target: Target) -> Measurement {
-        Measurement { kind, target, value: 0.0, sigma: 1.0 }
+        Measurement {
+            kind,
+            target,
+            value: 0.0,
+            sigma: 1.0,
+        }
     }
 
     /// The unified row reproduces the closed-form injection partials it
@@ -484,14 +494,33 @@ mod tests {
             for p in &partials {
                 let (dp_dth, dp_dv, dq_dth, dq_dv) =
                     injection_partials(&net, &buses, &p_inj, &q_inj, bus, p.bus);
-                assert!((p.d_dtheta.re - dp_dth).abs() < 1e-12, "dP/dθ at ({bus},{})", p.bus);
-                assert!((p.d_dvmag.re - dp_dv).abs() < 1e-12, "dP/dV at ({bus},{})", p.bus);
-                assert!((p.d_dtheta.im - dq_dth).abs() < 1e-12, "dQ/dθ at ({bus},{})", p.bus);
-                assert!((p.d_dvmag.im - dq_dv).abs() < 1e-12, "dQ/dV at ({bus},{})", p.bus);
+                assert!(
+                    (p.d_dtheta.re - dp_dth).abs() < 1e-12,
+                    "dP/dθ at ({bus},{})",
+                    p.bus
+                );
+                assert!(
+                    (p.d_dvmag.re - dp_dv).abs() < 1e-12,
+                    "dP/dV at ({bus},{})",
+                    p.bus
+                );
+                assert!(
+                    (p.d_dtheta.im - dq_dth).abs() < 1e-12,
+                    "dQ/dθ at ({bus},{})",
+                    p.bus
+                );
+                assert!(
+                    (p.d_dvmag.im - dq_dv).abs() < 1e-12,
+                    "dQ/dV at ({bus},{})",
+                    p.bus
+                );
                 compared += 1;
             }
         }
-        assert!(compared >= 4, "expected several neighbours to compare, got {compared}");
+        assert!(
+            compared >= 4,
+            "expected several neighbours to compare, got {compared}"
+        );
     }
 
     /// Covers every target kind at once, on a network where no partial is zero
@@ -506,14 +535,26 @@ mod tests {
             measurement(MeasurementKind::ReactivePower, Target::Bus(1)),
             measurement(
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
             measurement(
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::To },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::To,
+                },
             ),
-            measurement(MeasurementKind::ActivePower, Target::SourceInjection { branch: 0 }),
-            measurement(MeasurementKind::ReactivePower, Target::ShuntInjection { bus: 1 }),
+            measurement(
+                MeasurementKind::ActivePower,
+                Target::SourceInjection { branch: 0 },
+            ),
+            measurement(
+                MeasurementKind::ReactivePower,
+                Target::ShuntInjection { bus: 1 },
+            ),
             measurement(MeasurementKind::ActivePower, Target::NodeInjection(1)),
             measurement(MeasurementKind::ReactivePower, Target::NodeInjection(1)),
         ];
@@ -526,11 +567,16 @@ mod tests {
         let (net, buses) = super::super::tests::two_bus_net();
         let layout = StateLayout::new(&buses, &[], &net);
         assert_eq!(layout.n_unknowns(), 2 * buses.len() - 1);
-        let reference = layout.angle_ref.expect("no angle measurements, so a reference is pinned");
+        let reference = layout
+            .angle_ref
+            .expect("no angle measurements, so a reference is pinned");
         assert_eq!(layout.theta(reference), None);
         for i in 0..buses.len() {
             if i != reference {
-                assert!(layout.theta(i).is_some(), "bus {i} should carry an angle unknown");
+                assert!(
+                    layout.theta(i).is_some(),
+                    "bus {i} should carry an angle unknown"
+                );
             }
         }
     }
@@ -581,7 +627,10 @@ mod tests {
         let vrows = measurement_jacobian(&only_voltage, &buses, &net, &layout);
         let (_, vrhs, _) = gain_and_rhs(&vrows, &only_voltage, &residuals[..1]);
         for (x, y) in rhs.iter().zip(&vrhs) {
-            assert!((x - y).abs() < 1e-15, "an infinite sigma still moved the rhs: {x} vs {y}");
+            assert!(
+                (x - y).abs() < 1e-15,
+                "an infinite sigma still moved the rhs: {x} vs {y}"
+            );
         }
     }
 
@@ -594,7 +643,10 @@ mod tests {
             measurement(MeasurementKind::ActivePower, Target::Bus(1)),
             measurement(
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
@@ -606,7 +658,11 @@ mod tests {
             dense[i][j] += v;
         }
         for i in 0..n {
-            assert!(dense[i][i] >= -1e-12, "diagonal {i} is negative: {}", dense[i][i]);
+            assert!(
+                dense[i][i] >= -1e-12,
+                "diagonal {i} is negative: {}",
+                dense[i][i]
+            );
             for j in 0..n {
                 assert!(
                     (dense[i][j] - dense[j][i]).abs() < 1e-9,

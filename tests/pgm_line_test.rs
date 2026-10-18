@@ -1,14 +1,15 @@
 mod common;
 
-use std::path::PathBuf;
-use gridoxide::pgm::{node_id_to_idx, pgm_to_buses_and_branches};
 use gridoxide::network::build_ybus;
+use gridoxide::pgm::{node_id_to_idx, pgm_to_buses_and_branches};
 use gridoxide::run_power_flow_analysis_from_ybus;
+use std::path::PathBuf;
 
 #[test]
 fn test_pgm_line_power_flow() {
     // Adopted from Power Grid Model tests/data/power_flow/components/symmetric/line
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pgm/powerflow/symmetric/line");
+    let base =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pgm/powerflow/symmetric/line");
 
     let input = common::load_pgm_input(&base.join("input.json"));
     let expected = common::load_output(&base.join("sym_output.json"));

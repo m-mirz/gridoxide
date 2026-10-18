@@ -30,7 +30,13 @@
 
 use std::ffi::c_void;
 
-#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all)]
+#[allow(
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    dead_code,
+    clippy::all
+)]
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/pardiso_bindings.rs"));
 }
@@ -67,7 +73,10 @@ const PHASE_RELEASE_MEMORY: i32 = -1;
 /// exactly, just row-major instead of column-major. Returns `(row_ptr,
 /// col_idx, groups)`, where `groups[k]` lists the original `entries`
 /// indices contributing to the `k`-th CSR position.
-fn build_csr_structure(n: usize, pairs: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>, Vec<Vec<usize>>) {
+fn build_csr_structure(
+    n: usize,
+    pairs: &[(usize, usize)],
+) -> (Vec<i32>, Vec<i32>, Vec<Vec<usize>>) {
     let mut order: Vec<usize> = (0..pairs.len()).collect();
     order.sort_by_key(|&i| (pairs[i].0, pairs[i].1));
 
@@ -96,13 +105,19 @@ fn build_csr_structure(n: usize, pairs: &[(usize, usize)]) -> (Vec<i32>, Vec<i32
 }
 
 fn pack_real_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups.iter().map(|g| g.iter().map(|&i| entries[i].2).sum()).collect()
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&i| entries[i].2).sum())
+        .collect()
 }
 
 /// `pack_real_values` for callers that already hold just the values — see
 /// `solver::LinearSolver::factor_and_solve_values`.
 fn pack_real_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups.iter().map(|g| g.iter().map(|&i| values[i]).sum()).collect()
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&i| values[i]).sum())
+        .collect()
 }
 
 /// A real sparse system whose sparsity *pattern* is fixed across repeated
@@ -149,15 +164,33 @@ impl PardisoRealSystem {
         iparm[0] = 1; // use our own iparm, not silent per-call defaults
         iparm[34] = 1; // 0-based (C-style) row_ptr/col_idx indexing
 
-        let mut system = Self { n, row_ptr, col_idx, groups, pt, iparm };
+        let mut system = Self {
+            n,
+            row_ptr,
+            col_idx,
+            groups,
+            pt,
+            iparm,
+        };
 
         let a = values.as_mut_ptr() as *const c_void;
-        if system.call(PHASE_ANALYSIS, a, std::ptr::null_mut(), std::ptr::null_mut()) != 0 {
+        if system.call(
+            PHASE_ANALYSIS,
+            a,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+        {
             // `system`'s `Drop` runs phase -1 to release anything phase 11
             // itself may have already allocated.
             return None;
         }
-        if system.call(PHASE_NUMERICAL_FACTORIZATION, a, std::ptr::null_mut(), std::ptr::null_mut()) != 0
+        if system.call(
+            PHASE_NUMERICAL_FACTORIZATION,
+            a,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
             || system.iparm[IPARM_NUM_PERTURBED_PIVOTS] != 0
         {
             return None;
@@ -171,7 +204,11 @@ impl PardisoRealSystem {
     /// if either phase reports an error, if PARDISO had to perturb a pivot
     /// (see [`IPARM_NUM_PERTURBED_PIVOTS`]'s doc comment), or if the
     /// solution contains a non-finite value.
-    pub fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    pub fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         let values = pack_real_values(entries, &self.groups);
         self.solve_packed(values, rhs)
     }
@@ -180,7 +217,12 @@ impl PardisoRealSystem {
     /// CSC values.
     fn solve_packed(&mut self, mut values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
         let a = values.as_mut_ptr() as *const c_void;
-        if self.call(PHASE_NUMERICAL_FACTORIZATION, a, std::ptr::null_mut(), std::ptr::null_mut()) != 0
+        if self.call(
+            PHASE_NUMERICAL_FACTORIZATION,
+            a,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
             || self.iparm[IPARM_NUM_PERTURBED_PIVOTS] != 0
         {
             return None;
@@ -188,8 +230,12 @@ impl PardisoRealSystem {
 
         let mut b = rhs.to_vec();
         let mut x: Vec<f64> = vec![0.0; self.n];
-        let error =
-            self.call(PHASE_SOLVE, a, b.as_mut_ptr() as *mut c_void, x.as_mut_ptr() as *mut c_void);
+        let error = self.call(
+            PHASE_SOLVE,
+            a,
+            b.as_mut_ptr() as *mut c_void,
+            x.as_mut_ptr() as *mut c_void,
+        );
         if error != 0 || x.iter().any(|v| !v.is_finite()) {
             return None;
         }
@@ -237,7 +283,11 @@ impl crate::solver::LinearSolver for PardisoRealSystem {
         PardisoRealSystem::new(n, entries)
     }
 
-    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         PardisoRealSystem::factor_and_solve(self, entries, rhs)
     }
 
@@ -248,7 +298,12 @@ impl crate::solver::LinearSolver for PardisoRealSystem {
 
 impl Drop for PardisoRealSystem {
     fn drop(&mut self) {
-        self.call(PHASE_RELEASE_MEMORY, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut());
+        self.call(
+            PHASE_RELEASE_MEMORY,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
     }
 }
 

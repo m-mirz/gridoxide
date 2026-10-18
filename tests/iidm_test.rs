@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::iidm;
 use gridoxide::solver::{PowerFlowMethod, PowerFlowOptions, SolveStatus};
 use gridoxide::topology::bus_view::RetentionPolicy;
@@ -30,7 +30,9 @@ fn fixture(name: &str) -> PathBuf {
 
 /// pypowsybl's solution for a fixture, written by `scripts/bench/iidm_reference.py`.
 fn reference_file(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/iidm").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/iidm")
+        .join(name)
 }
 
 fn ucte_fixture(name: &str) -> PathBuf {
@@ -49,15 +51,31 @@ fn solve(
     ids: &[String],
     base_mva: f64,
 ) -> (Solved, SolveStatus) {
-    let opts = PowerFlowOptions { method: PowerFlowMethod::NewtonRaphson, ..Default::default() };
-    let report = gridoxide::run_power_flow(buses, lines, transformers, shunts, gridoxide::TapData::none(), opts);
+    let opts = PowerFlowOptions {
+        method: PowerFlowMethod::NewtonRaphson,
+        ..Default::default()
+    };
+    let report = gridoxide::run_power_flow(
+        buses,
+        lines,
+        transformers,
+        shunts,
+        gridoxide::TapData::none(),
+        opts,
+    );
     let v = bus_voltages(&report.buses);
     let params = branch_params(lines, transformers);
     let voltages = labels
         .iter()
         .enumerate()
         .map(|(i, l)| {
-            (l.trim().to_string(), (report.buses[i].voltage_mag, report.buses[i].voltage_ang.to_degrees()))
+            (
+                l.trim().to_string(),
+                (
+                    report.buses[i].voltage_mag,
+                    report.buses[i].voltage_ang.to_degrees(),
+                ),
+            )
         })
         .collect();
     let flows = ids
@@ -66,7 +84,10 @@ fn solve(
         .map(|(b, id)| {
             let (p1, q1) = terminal_flow(&params[b], Terminal::From, &v);
             let (p2, q2) = terminal_flow(&params[b], Terminal::To, &v);
-            (id.trim().to_string(), [p1 * base_mva, q1 * base_mva, p2 * base_mva, q2 * base_mva])
+            (
+                id.trim().to_string(),
+                [p1 * base_mva, q1 * base_mva, p2 * base_mva, q2 * base_mva],
+            )
         })
         .collect();
     ((voltages, flows), report.stats.status)
@@ -101,7 +122,9 @@ fn worst_flow(a: &HashMap<String, [f64; 4]>, b: &HashMap<String, [f64; 4]>) -> (
         shared += 1;
         let direct = (0..4).map(|k| (x[k] - y[k]).abs()).fold(0.0f64, f64::max);
         let swapped = [y[2], y[3], y[0], y[1]];
-        let reversed = (0..4).map(|k| (x[k] - swapped[k]).abs()).fold(0.0f64, f64::max);
+        let reversed = (0..4)
+            .map(|k| (x[k] - swapped[k]).abs())
+            .fold(0.0f64, f64::max);
         if reversed < direct {
             reversed_count += 1;
         }
@@ -125,18 +148,43 @@ fn cross_check(stem: &str, tolerance: f64) -> (f64, usize) {
         u.buses.len(),
         i.buses.len()
     );
-    assert_eq!(u.n_branches(), i.n_branches(), "{stem}: branch counts differ");
+    assert_eq!(
+        u.n_branches(),
+        i.n_branches(),
+        "{stem}: branch counts differ"
+    );
 
     let ((_, fu), su) = solve(
-        u.buses.clone(), &u.lines, &u.transformers, &u.shunts, &u.node_codes, &u.branch_ids, u.base_mva,
+        u.buses.clone(),
+        &u.lines,
+        &u.transformers,
+        &u.shunts,
+        &u.node_codes,
+        &u.branch_ids,
+        u.base_mva,
     );
     let ((_, fi), si) = solve_iidm(&i);
-    assert_eq!(su, SolveStatus::Converged, "{stem}: UCTE side did not converge");
-    assert_eq!(si, SolveStatus::Converged, "{stem}: IIDM side did not converge");
+    assert_eq!(
+        su,
+        SolveStatus::Converged,
+        "{stem}: UCTE side did not converge"
+    );
+    assert_eq!(
+        si,
+        SolveStatus::Converged,
+        "{stem}: IIDM side did not converge"
+    );
 
     let (worst, shared, reversed) = worst_flow(&fu, &fi);
-    assert_eq!(shared, u.n_branches(), "{stem}: only {shared} branch ids matched");
-    assert!(worst < tolerance, "{stem}: worst flow deviation {worst} MW/MVar");
+    assert_eq!(
+        shared,
+        u.n_branches(),
+        "{stem}: only {shared} branch ids matched"
+    );
+    assert!(
+        worst < tolerance,
+        "{stem}: worst flow deviation {worst} MW/MVar"
+    );
     (worst, reversed)
 }
 
@@ -167,7 +215,10 @@ fn ucte_and_iidm_agree_exactly_with_the_phase_shifter_at_its_limit() {
 fn ucte_and_iidm_agree_across_voltage_levels_and_boundary_nodes() {
     let (worst, reversed) = cross_check("TestCase_severalVoltageLevels_Xnodes", 1e-9);
     assert!(worst < 1e-9, "worst deviation {worst}");
-    assert!(reversed > 0, "boundary half-lines should differ in terminal order");
+    assert!(
+        reversed > 0,
+        "boundary half-lines should differ in terminal order"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +233,10 @@ fn reference(name: &str) -> Solved {
         .expect("buses")
         .iter()
         .filter_map(|(k, v)| {
-            Some((k.trim().to_string(), (v["v_pu"].as_f64()?, v["angle_deg"].as_f64()?)))
+            Some((
+                k.trim().to_string(),
+                (v["v_pu"].as_f64()?, v["angle_deg"].as_f64()?),
+            ))
         })
         .collect();
     let branches = doc["branches"]
@@ -190,8 +244,10 @@ fn reference(name: &str) -> Solved {
         .expect("branches")
         .iter()
         .filter_map(|(k, v)| {
-            let f: Option<Vec<f64>> =
-                ["p1", "q1", "p2", "q2"].iter().map(|n| v[*n].as_f64()).collect();
+            let f: Option<Vec<f64>> = ["p1", "q1", "p2", "q2"]
+                .iter()
+                .map(|n| v[*n].as_f64())
+                .collect();
             Some((k.trim().to_string(), {
                 let f = f?;
                 [f[0], f[1], f[2], f[3]]
@@ -207,7 +263,10 @@ fn against_pypowsybl(stem: &str, min_branches: usize) -> f64 {
     assert_eq!(status, SolveStatus::Converged, "{stem} did not converge");
     let (_, expected) = reference(&format!("{stem}.pypowsybl.json"));
     let (worst, shared, _) = worst_flow(&flows, &expected);
-    assert!(shared >= min_branches, "{stem}: only {shared} branches matched by id");
+    assert!(
+        shared >= min_branches,
+        "{stem}: only {shared} branches matched by id"
+    );
     worst
 }
 
@@ -253,14 +312,21 @@ fn every_vendored_version_parses() {
     for name in openrao::names_with_extension("xiidm") {
         let path = fixture(name);
         let net = iidm::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        assert!(!net.buses.is_empty(), "{} produced no buses", path.display());
+        assert!(
+            !net.buses.is_empty(),
+            "{} produced no buses",
+            path.display()
+        );
         if let Some(v) = net.version.clone() {
             if !seen.contains(&v) {
                 seen.push(v);
             }
         }
     }
-    assert!(seen.len() >= 4, "expected several schema versions, saw {seen:?}");
+    assert!(
+        seen.len() >= 4,
+        "expected several schema versions, saw {seen:?}"
+    );
 }
 
 #[test]
@@ -282,7 +348,9 @@ fn an_unknown_element_is_skipped_and_named() {
     assert_eq!(net.version.as_deref(), Some("1_14"));
     assert_eq!(net.buses.len(), 1);
     assert!(
-        net.notes.iter().any(|n| n.contains("somethingNobodyHasHeardOf")),
+        net.notes
+            .iter()
+            .any(|n| n.contains("somethingNobodyHasHeardOf")),
         "unknown element was skipped without saying so: {:?}",
         net.notes
     );
@@ -295,12 +363,16 @@ fn both_limit_spellings_are_read() {
     // one of them silently reports a network with no ratings.
     let old = iidm::read(fixture("TestCase2Nodes.xiidm")).expect("import");
     assert!(
-        old.limits.iter().any(|[a, b]| a.patl_a.is_some() || b.patl_a.is_some()),
+        old.limits
+            .iter()
+            .any(|[a, b]| a.patl_a.is_some() || b.patl_a.is_some()),
         "no limit read from the currentLimits1 spelling"
     );
     let new = iidm::read(fixture("network_with_dangling_lines.xiidm")).expect("import");
     assert!(
-        new.limits.iter().any(|[a, b]| a.patl_a.is_some() || b.patl_a.is_some()),
+        new.limits
+            .iter()
+            .any(|[a, b]| a.patl_a.is_some() || b.patl_a.is_some()),
         "no limit read from the operationalLimitsGroup spelling"
     );
 }
@@ -308,11 +380,19 @@ fn both_limit_spellings_are_read() {
 #[test]
 fn a_temporary_limit_keeps_its_duration() {
     let net = iidm::read(fixture("network_one_voltage_level.xiidm")).expect("import");
-    let temporary: Vec<_> =
-        net.limits.iter().flat_map(|[a, b]| a.tatl.iter().chain(b.tatl.iter())).collect();
-    assert!(!temporary.is_empty(), "fixture declares temporary limits but none were read");
+    let temporary: Vec<_> = net
+        .limits
+        .iter()
+        .flat_map(|[a, b]| a.tatl.iter().chain(b.tatl.iter()))
+        .collect();
     assert!(
-        temporary.iter().any(|t| t.acceptable_duration_s == Some(60.0)),
+        !temporary.is_empty(),
+        "fixture declares temporary limits but none were read"
+    );
+    assert!(
+        temporary
+            .iter()
+            .any(|t| t.acceptable_duration_s == Some(60.0)),
         "the 60-second limit lost its duration: {temporary:?}"
     );
     // A duration-less temporary limit is legitimate (IIDM writes one for the
@@ -331,19 +411,33 @@ fn limits_are_kept_per_side() {
         .iter()
         .filter(|[a, b]| a.patl_a.is_some() != b.patl_a.is_some())
         .count();
-    assert!(one_sided > 0, "this fixture has a line rated on one side only");
+    assert!(
+        one_sided > 0,
+        "this fixture has a line rated on one side only"
+    );
 }
 
 #[test]
 fn a_phase_tap_changer_becomes_a_tap_table() {
     let net = iidm::read(fixture("TestCase12NodesDifferentPstTap.xiidm")).expect("import");
-    let changer = net.tap_changers.iter().flatten().next().expect("a tap changer");
-    assert!(changer.len() > 1, "a single-step table is not a tap changer");
+    let changer = net
+        .tap_changers
+        .iter()
+        .flatten()
+        .next()
+        .expect("a tap changer");
+    assert!(
+        changer.len() > 1,
+        "a single-step table is not a tap changer"
+    );
     // Sitting at the top tap, as the source UCTE file did.
     assert_eq!(changer.position, changer.high());
     let tap = net.transformers[0].tap;
     assert!((tap - changer.current().unwrap()).norm() < 1e-15);
-    assert!(tap.arg().abs() > 1e-6, "a shifted PST should have a nonzero angle");
+    assert!(
+        tap.arg().abs() > 1e-6,
+        "a shifted PST should have a nonzero angle"
+    );
 }
 
 #[test]
@@ -353,9 +447,16 @@ fn switches_survive_import_as_first_class_objects() {
     // remedial action needs switches it can open, and a bus view has resolved
     // them away.
     let net = iidm::read(fixture("voltage_monitoring.xiidm")).expect("import");
-    assert!(!net.topology.switches.is_empty(), "node-breaker file yielded no switches");
+    assert!(
+        !net.topology.switches.is_empty(),
+        "node-breaker file yielded no switches"
+    );
     assert_eq!(net.switch_ids.len(), net.topology.switches.len());
-    assert!(net.switch_ids.iter().any(|id| id.contains("Break")), "{:?}", net.switch_ids);
+    assert!(
+        net.switch_ids.iter().any(|id| id.contains("Break")),
+        "{:?}",
+        net.switch_ids
+    );
     // With every closed switch merged, the bus view has fewer buses than nodes.
     assert!(net.view.n_buses() < net.view.n_nodes());
 }
@@ -367,8 +468,7 @@ fn retaining_switches_yields_more_buses_than_merging_them() {
         retention: RetentionPolicy::RetainAll,
         ..Default::default()
     };
-    let retained =
-        iidm::read_with(fixture("voltage_monitoring.xiidm"), &options).expect("import");
+    let retained = iidm::read_with(fixture("voltage_monitoring.xiidm"), &options).expect("import");
     assert!(
         retained.buses.len() > merged.buses.len(),
         "retaining switches ({}) should split buses that merging ({}) joins",
@@ -381,7 +481,10 @@ fn retaining_switches_yields_more_buses_than_merging_them() {
 fn a_disconnected_terminal_omits_the_branch_and_names_it() {
     let net = iidm::read(fixture("network_with_dangling_lines.xiidm")).expect("import");
     for id in &net.disconnected {
-        assert!(!net.branch_ids.contains(id), "`{id}` was both omitted and kept");
+        assert!(
+            !net.branch_ids.contains(id),
+            "`{id}` was both omitted and kept"
+        );
     }
 }
 
@@ -392,7 +495,10 @@ fn the_slack_is_chosen_deterministically() {
     assert_eq!(a.slack, b.slack);
     assert_eq!(a.buses[a.slack].bus_type, gridoxide::types::BusType::Slack);
     assert_eq!(
-        a.buses.iter().filter(|x| x.bus_type == gridoxide::types::BusType::Slack).count(),
+        a.buses
+            .iter()
+            .filter(|x| x.bus_type == gridoxide::types::BusType::Slack)
+            .count(),
         1
     );
     assert!(a.notes.iter().any(|n| n.contains("slack chosen")));
@@ -479,7 +585,10 @@ fn a_regulating_ratio_tap_changer_becomes_a_voltage_control() {
     assert!((r.target - 220.5 / 225.0).abs() < 1e-12, "{}", r.target);
     assert!((r.deadband - 2.25 / 225.0).abs() < 1e-12, "{}", r.deadband);
     assert!(r.enabled);
-    assert!(net.tap_changers[0].is_some(), "the table is still there too");
+    assert!(
+        net.tap_changers[0].is_some(),
+        "the table is still there too"
+    );
 }
 
 /// `regulating="false"` means the position is an input, whatever `targetV`
@@ -567,7 +676,10 @@ fn area_elements_become_a_bus_assignment() {
     assert_eq!(a.report.other_types, 0);
     assert_eq!(a.report.unknown_voltage_levels, 0);
     assert_eq!(a.report.contested_buses, 0);
-    assert_eq!(a.report.unassigned_buses, 0, "this file has no boundary nodes");
+    assert_eq!(
+        a.report.unassigned_buses, 0,
+        "this file has no boundary nodes"
+    );
 
     let ids: Vec<&str> = a.ids.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["BE", "DE", "FR", "NL"]);
@@ -597,7 +709,10 @@ fn ucte_country_areas_and_iidm_area_elements_agree() {
 
     let (u_of_bus, u_names) = u.country_areas();
     let i_names: Vec<String> = i.areas.ids.iter().map(|(id, _)| id.clone()).collect();
-    assert_eq!(u_names, i_names, "the same four countries, in the same order");
+    assert_eq!(
+        u_names, i_names,
+        "the same four countries, in the same order"
+    );
 
     let position = |buses: &[gridoxide::types::Bus],
                     lines: &[gridoxide::types::Line],
@@ -611,9 +726,16 @@ fn ucte_country_areas_and_iidm_area_elements_agree() {
             transformers,
             shunts,
             gridoxide::TapData::none(),
-            gridoxide::solver::PowerFlowOptions { tol: 1e-10, max_iter: 40, ..Default::default() },
+            gridoxide::solver::PowerFlowOptions {
+                tol: 1e-10,
+                max_iter: 40,
+                ..Default::default()
+            },
         );
-        assert_eq!(solved.stats.status, gridoxide::solver::SolveStatus::Converged);
+        assert_eq!(
+            solved.stats.status,
+            gridoxide::solver::SolveStatus::Converged
+        );
         gridoxide::outerloop::AreaInterchange::measure(
             &solved.buses,
             lines,
@@ -628,7 +750,13 @@ fn ucte_country_areas_and_iidm_area_elements_agree() {
 
     let (u_lines, u_transformers) = u.as_switched();
     let from_ucte = position(&u.buses, &u_lines, &u_transformers, &u.shunts, &u_of_bus);
-    let from_iidm = position(&i.buses, &i.lines, &i.transformers, &i.shunts, &i.areas.of_bus);
+    let from_iidm = position(
+        &i.buses,
+        &i.lines,
+        &i.transformers,
+        &i.shunts,
+        &i.areas.of_bus,
+    );
 
     for k in 0..4 {
         assert!(
@@ -641,8 +769,14 @@ fn ucte_country_areas_and_iidm_area_elements_agree() {
     }
     // And they are the file's own schedules, not an artefact of both being
     // read the same wrong way: two exporters and two importers at scale.
-    assert!((from_ucte[0] - 2000.0).abs() < 1e-6, "BE exports 2000 MW: {from_ucte:?}");
-    assert!((from_ucte[1] - -2500.0).abs() < 1e-6, "DE imports 2500 MW: {from_ucte:?}");
+    assert!(
+        (from_ucte[0] - 2000.0).abs() < 1e-6,
+        "BE exports 2000 MW: {from_ucte:?}"
+    );
+    assert!(
+        (from_ucte[1] - -2500.0).abs() < 1e-6,
+        "DE imports 2500 MW: {from_ucte:?}"
+    );
 }
 
 /// A boundary node belongs to no area, exactly as a CGMES X-node does — the
@@ -654,7 +788,10 @@ fn boundary_nodes_belong_to_no_area() {
     let a = &net.areas;
     assert_eq!(a.report.areas, 4);
     assert!(a.report.unassigned_buses > 0, "the X-nodes are in no area");
-    assert!(a.report.boundaries_ignored > 0, "the file states boundaries too");
+    assert!(
+        a.report.boundaries_ignored > 0,
+        "the file states boundaries too"
+    );
     assert_eq!(a.report.contested_buses, 0);
 }
 
@@ -685,7 +822,11 @@ fn a_non_control_area_type_is_skipped_and_counted() {
     // And the sign: IIDM states an import ("negative is export, positive is
     // import" per `Area.java`), `AreaDefinition` wants an export, so -25 MW
     // becomes +25 MW exported — +0.25 pu on the 100 MVA default base.
-    assert!((net.areas.targets[0] - 0.25).abs() < 1e-12, "{:?}", net.areas.targets);
+    assert!(
+        (net.areas.targets[0] - 0.25).abs() < 1e-12,
+        "{:?}",
+        net.areas.targets
+    );
     assert!(net.areas.report.without_target.is_empty());
 }
 
@@ -708,7 +849,11 @@ fn an_unknown_voltage_level_reference_is_counted() {
 </iidm:network>"#;
     let net = iidm::parse(doc).expect("import");
     assert_eq!(net.areas.report.unknown_voltage_levels, 1);
-    assert_eq!(net.areas.of_bus, vec![Some(0)], "the level that does exist still claims its bus");
+    assert_eq!(
+        net.areas.of_bus,
+        vec![Some(0)],
+        "the level that does exist still claims its bus"
+    );
 }
 
 /// A file that states a real schedule, and the loop reaching it.
@@ -726,7 +871,10 @@ fn a_stated_interchange_target_is_read_and_reached() {
     }
     let net = iidm::read(&path).expect("import");
     assert_eq!(net.areas.report.areas, 2);
-    assert!(net.areas.report.without_target.is_empty(), "both areas state a schedule");
+    assert!(
+        net.areas.report.without_target.is_empty(),
+        "both areas state a schedule"
+    );
 
     // The file says A1 = -400 MW and A2 = +400 MW in load convention, so as
     // exports those are +400 and -400 on a 100 MVA base.
@@ -749,11 +897,7 @@ fn a_stated_interchange_target_is_read_and_reached() {
     let definition = gridoxide::outerloop::AreaDefinition {
         targets: net.areas.targets.clone(),
         tolerance: 1e-9,
-        ..gridoxide::outerloop::AreaDefinition::by_generation(
-            &buses,
-            net.areas.of_bus.clone(),
-            2,
-        )
+        ..gridoxide::outerloop::AreaDefinition::by_generation(&buses, net.areas.of_bus.clone(), 2)
     };
     let mut transformers = net.transformers.clone();
     let mut changers = Vec::new();
@@ -774,7 +918,11 @@ fn a_stated_interchange_target_is_read_and_reached() {
     };
     let area_report = area_loop.into_report();
     assert!(report.converged, "{report:?}");
-    assert!(area_report.unbalanced.is_empty(), "{:?}", area_report.unbalanced);
+    assert!(
+        area_report.unbalanced.is_empty(),
+        "{:?}",
+        area_report.unbalanced
+    );
 
     let measured = gridoxide::outerloop::AreaInterchange::measure(
         &buses,
@@ -982,7 +1130,9 @@ fn the_two_formats_agree_about_everything_a_solve_does_not_read() {
         // single-sided document cannot disagree about a side it never names.
         let mut compared = 0;
         for b in 0..u.n_branches() {
-            let (Some(un), Some(inn)) = (u.limits.get(b), i.limits.get(b)) else { continue };
+            let (Some(un), Some(inn)) = (u.limits.get(b), i.limits.get(b)) else {
+                continue;
+            };
             let Some(upatl) = un.patl_a else { continue };
             for side in inn {
                 let Some(ipatl) = side.patl_a else { continue };
@@ -994,10 +1144,16 @@ fn the_two_formats_agree_about_everything_a_solve_does_not_read() {
                 compared += 1;
             }
         }
-        assert!(compared > 0, "{stem}: no limits compared, the check is vacuous");
-        eprintln!("SWEEP {stem}: {} buses, {} branches, {compared} limits, {} tap changers",
-            u.buses.len(), u.n_branches(),
-            u.tap_changers.iter().filter(|t| t.is_some()).count());
+        assert!(
+            compared > 0,
+            "{stem}: no limits compared, the check is vacuous"
+        );
+        eprintln!(
+            "SWEEP {stem}: {} buses, {} branches, {compared} limits, {} tap changers",
+            u.buses.len(),
+            u.n_branches(),
+            u.tap_changers.iter().filter(|t| t.is_some()).count()
+        );
 
         // Tap changers, where both formats describe the same shifter.
         for (t, (ut, it)) in u.tap_changers.iter().zip(&i.tap_changers).enumerate() {
@@ -1007,7 +1163,9 @@ fn the_two_formats_agree_about_everything_a_solve_does_not_read() {
                     "{stem} transformer {t}: tap position"
                 ),
                 (None, None) => {}
-                _ => panic!("{stem} transformer {t}: one format has a tap changer and the other does not"),
+                _ => panic!(
+                    "{stem} transformer {t}: one format has a tap changer and the other does not"
+                ),
             }
         }
     }

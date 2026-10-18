@@ -72,7 +72,10 @@ struct Pair {
 fn pair(buses: &[Bus], i: usize, k: usize, y: num_complex::Complex<f64>) -> Pair {
     let angle = buses[i].voltage_ang - buses[k].voltage_ang;
     let (sin, cos) = angle.sin_cos();
-    Pair { c: y.re * cos + y.im * sin, s: y.re * sin - y.im * cos }
+    Pair {
+        c: y.re * cos + y.im * sin,
+        s: y.re * sin - y.im * cos,
+    }
 }
 
 /// First derivatives of every injection, over the full \\(2n\\) state.

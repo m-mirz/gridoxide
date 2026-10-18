@@ -9,14 +9,18 @@ fn main() {
     let mut examples = Vec::new();
     let mut stack = vec![std::path::PathBuf::from(root)];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
             } else if p.extension().is_some_and(|x| x == "xiidm") {
                 files += 1;
-                let Ok(net) = gridoxide::iidm::read(&p) else { continue };
+                let Ok(net) = gridoxide::iidm::read(&p) else {
+                    continue;
+                };
                 for r in &net.regulation {
                     match r.mode {
                         gridoxide::outerloop::RegulationMode::Voltage => volt += 1,
@@ -26,7 +30,10 @@ fn main() {
                         examples.push(format!(
                             "{}: {} {:?} target {:.5} deadband {:.5}",
                             p.file_name().unwrap().to_string_lossy(),
-                            r.id, r.mode, r.target, r.deadband
+                            r.id,
+                            r.mode,
+                            r.target,
+                            r.deadband
                         ));
                     }
                 }
@@ -38,7 +45,9 @@ fn main() {
             }
         }
     }
-    println!("{files} files: {volt} voltage controls, {power} active-power controls, {skipped} files with current-mode changers dropped");
+    println!(
+        "{files} files: {volt} voltage controls, {power} active-power controls, {skipped} files with current-mode changers dropped"
+    );
     for e in examples {
         println!("  {e}");
     }

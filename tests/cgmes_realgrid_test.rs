@@ -2,7 +2,9 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -64,15 +66,34 @@ fn test_cgmes_realgrid() {
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
 
     assert_eq!(buses.len(), 6252);
-    assert_eq!(lines.len(), 7333, "7561 ACLineSegments minus half-/fully-open ones folded/dropped");
+    assert_eq!(
+        lines.len(),
+        7333,
+        "7561 ACLineSegments minus half-/fully-open ones folded/dropped"
+    );
     assert_eq!(transformers.len(), 1509);
-    assert_eq!(shunts.len(), 81, "311 LinearShuntCompensators minus disconnected ones");
+    assert_eq!(
+        shunts.len(),
+        81,
+        "311 LinearShuntCompensators minus disconnected ones"
+    );
 
-    let n_deenergized = buses.iter().filter(|b| matches!(b.bus_type, gridoxide::types::BusType::Slack)).count() - 1;
-    assert_eq!(n_deenergized, 201, "TopologicalIsland lists 6051 of 6252 TopologicalNodes as energized");
+    let n_deenergized = buses
+        .iter()
+        .filter(|b| matches!(b.bus_type, gridoxide::types::BusType::Slack))
+        .count()
+        - 1;
+    assert_eq!(
+        n_deenergized, 201,
+        "TopologicalIsland lists 6051 of 6252 TopologicalNodes as energized"
+    );
 
     let expected = cgmes_common::expected_voltages(&ds);
-    assert_eq!(expected.len(), 6051, "one SvVoltage per energized TopologicalNode");
+    assert_eq!(
+        expected.len(),
+        6051,
+        "one SvVoltage per energized TopologicalNode"
+    );
 
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);
@@ -80,7 +101,10 @@ fn test_cgmes_realgrid() {
     let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     for (i, b) in result.iter().enumerate() {
-        assert!(b.voltage_mag.is_finite() && b.voltage_ang.is_finite(), "non-finite solved voltage at bus {i}");
+        assert!(
+            b.voltage_mag.is_finite() && b.voltage_ang.is_finite(),
+            "non-finite solved voltage at bus {i}"
+        );
     }
 
     // Percentile-based (see `cgmes_common::assert_matches_sv_percentile`'s own

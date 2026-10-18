@@ -2,7 +2,9 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -37,7 +39,8 @@ fn test_cgmes_microgrid_type1_be_mas() {
     let ssh = dir.join("20210323T1730Z_1D_BE_SSH_1.xml");
     let tp = dir.join("20210323T1730Z_1D_BE_TP_1.xml");
     let sv = dir.join("20210323T1730Z_1D_BE_SV_1.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let expected = cgmes_common::expected_voltages(&ds);
     assert_eq!(expected.len(), 7, "fixture should have 7 SvVoltage entries");
@@ -45,7 +48,11 @@ fn test_cgmes_microgrid_type1_be_mas() {
     let s_base_va = 100e6;
     let (buses, lines, transformers, shunts) =
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
-    assert!(buses.len() > 7, "expected at least the 7 physical TopologicalNode buses, got {}", buses.len());
+    assert!(
+        buses.len() > 7,
+        "expected at least the 7 physical TopologicalNode buses, got {}",
+        buses.len()
+    );
     assert_eq!(lines.len(), 8, "expected 8 ACLineSegment lines");
     assert_eq!(transformers.len(), 6, "expected 6 two-winding transformers");
     assert_eq!(shunts.len(), 2, "expected 2 LinearShuntCompensator shunts");
@@ -90,7 +97,11 @@ fn test_cgmes_microgrid_type1_merged() {
         .expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
-    assert_eq!(tn_mrids.len(), 17, "expected 17 physical TopologicalNode buses across both areas");
+    assert_eq!(
+        tn_mrids.len(),
+        17,
+        "expected 17 physical TopologicalNode buses across both areas"
+    );
     let expected = cgmes_common::expected_voltages(&ds);
 
     let s_base_va = 100e6;

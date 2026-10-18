@@ -89,7 +89,10 @@ pub struct State {
 
 impl State {
     pub fn preventive(instant: usize) -> Self {
-        Self { instant, contingency: None }
+        Self {
+            instant,
+            contingency: None,
+        }
     }
 
     pub fn is_preventive(&self) -> bool {
@@ -286,7 +289,11 @@ impl UsageRule {
             UsageRule::OnInstant { instant } => state.instant == *instant,
             UsageRule::OnContingencyState { state: s } => s == state,
             UsageRule::OnConstraint { instant, .. } => state.instant == *instant,
-            UsageRule::OnFlowConstraintInCountry { instant, contingency, .. } => {
+            UsageRule::OnFlowConstraintInCountry {
+                instant,
+                contingency,
+                ..
+            } => {
                 state.instant == *instant
                     && contingency.is_none_or(|c| state.contingency == Some(c))
             }
@@ -369,7 +376,10 @@ pub enum RangeActionKind {
     /// A cross-border exchange adjustment. Carried so a CRAC round-trips, but
     /// the optimizer does not model it — it has no network sensitivity, which
     /// is why the reference implementation leaves it out of the LP too.
-    CounterTrade { exporting: String, importing: String },
+    CounterTrade {
+        exporting: String,
+        importing: String,
+    },
 }
 
 /// A remedial action with a continuous degree of freedom.
@@ -477,7 +487,9 @@ impl Crac {
 
     /// The one preventive instant, if the CRAC declares one.
     pub fn preventive_instant(&self) -> Option<usize> {
-        self.instants.iter().position(|i| i.kind == InstantKind::Preventive)
+        self.instants
+            .iter()
+            .position(|i| i.kind == InstantKind::Preventive)
     }
 
     /// Curative instants in chronological order.

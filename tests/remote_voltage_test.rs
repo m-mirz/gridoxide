@@ -52,7 +52,14 @@ fn network(target: f64) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>) {
         held,
         bus(2, BusType::PQ, 0.6, 0.0), // the machine
     ];
-    let lines = vec![Line { from: 0, to: 1, r: 0.01, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = vec![Line {
+        from: 0,
+        to: 1,
+        r: 0.01,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
     let transformers = vec![Transformer {
         from: 2,
         to: 1,
@@ -65,7 +72,13 @@ fn network(target: f64) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>) {
     (buses, lines, transformers)
 }
 
-fn machine(at_bus: usize, controls_bus: usize, target: f64, q_min: f64, q_max: f64) -> RegulatingMachine {
+fn machine(
+    at_bus: usize,
+    controls_bus: usize,
+    target: f64,
+    q_min: f64,
+    q_max: f64,
+) -> RegulatingMachine {
     RegulatingMachine {
         id: "m".to_string(),
         at_bus,
@@ -116,7 +129,11 @@ fn the_setpoint_it_lands_on_is_a_fixed_point_of_the_exact_formulation() {
         let (buses, lines, transformers) = network(target);
         let machines = [machine(2, 1, target, -3.0, 3.0)];
         let report = solve(buses.clone(), &lines, &transformers, &machines, true);
-        assert_eq!(report.stats.status, SolveStatus::Converged, "target {target}");
+        assert_eq!(
+            report.stats.status,
+            SolveStatus::Converged,
+            "target {target}"
+        );
 
         let outer = report.outer.as_ref().expect("the loop ran");
         let r = &outer.remote[0];
@@ -140,7 +157,10 @@ fn the_setpoint_it_lands_on_is_a_fixed_point_of_the_exact_formulation() {
             &transformers,
             &[],
             gridoxide::TapData::none(),
-            PowerFlowOptions { max_iter: 40, ..Default::default() },
+            PowerFlowOptions {
+                max_iter: 40,
+                ..Default::default()
+            },
         );
         assert_eq!(plain.stats.status, SolveStatus::Converged);
         // The fixed-point identity: the same setpoint must reproduce the same
@@ -183,7 +203,11 @@ fn the_reactive_power_is_produced_at_the_machine() {
         q_on[1],
         buses[1].q_spec
     );
-    assert!(q_on[2].abs() > 1e-3, "the machine should be producing something, got {}", q_on[2]);
+    assert!(
+        q_on[2].abs() > 1e-3,
+        "the machine should be producing something, got {}",
+        q_on[2]
+    );
 
     // Without it, the roles are exactly reversed — which is the defect.
     assert_eq!(off.buses[1].bus_type, BusType::PV);
@@ -213,8 +237,14 @@ fn local_control_is_untouched() {
 
     assert_eq!(on.stats.status, SolveStatus::Converged);
     let outer = on.outer.as_ref().expect("loops ran");
-    assert!(outer.remote.is_empty(), "a local machine is not a remote controller");
-    assert!(outer.retyped.is_empty(), "nothing should have been re-typed");
+    assert!(
+        outer.remote.is_empty(),
+        "a local machine is not a remote controller"
+    );
+    assert!(
+        outer.retyped.is_empty(),
+        "nothing should have been re-typed"
+    );
     for (a, b) in on.buses.iter().zip(&off.buses) {
         assert!(
             (a.voltage_mag - b.voltage_mag).abs() < 1e-9
@@ -242,11 +272,20 @@ fn a_saturating_machine_is_clamped_at_its_own_limit() {
     // Derive the limit from what holding the target actually takes, rather than
     // guessing a number that might not bind. Solve once unconstrained, read the
     // machine's output, then give it half of that.
-    let free = solve(buses.clone(), &lines, &transformers, &[machine(2, 1, 1.05, -9.0, 9.0)], true);
+    let free = solve(
+        buses.clone(),
+        &lines,
+        &transformers,
+        &[machine(2, 1, 1.05, -9.0, 9.0)],
+        true,
+    );
     assert_eq!(free.stats.status, SolveStatus::Converged);
     let (_, q_free) = power_injections(&free.buses, &ybus);
     let needed = q_free[2];
-    assert!(needed > 0.05, "the fixture should need real reactive support, got {needed}");
+    assert!(
+        needed > 0.05,
+        "the fixture should need real reactive support, got {needed}"
+    );
 
     let cap = needed / 2.0;
     let machines = [machine(2, 1, 1.05, -cap, cap)];
@@ -254,7 +293,12 @@ fn a_saturating_machine_is_clamped_at_its_own_limit() {
     assert_eq!(report.stats.status, SolveStatus::Converged);
 
     let outer = report.outer.as_ref().expect("the loop ran");
-    assert_eq!(outer.remote[0].outcome, RemoteOutcome::AtReactiveLimit, "{:?}", outer.remote[0]);
+    assert_eq!(
+        outer.remote[0].outcome,
+        RemoteOutcome::AtReactiveLimit,
+        "{:?}",
+        outer.remote[0]
+    );
     assert!(
         outer.q_limit_switches.contains(&2),
         "the *machine's* bus should be the one clamped, got {:?}",
@@ -282,12 +326,22 @@ fn the_option_is_inert_without_data() {
         &transformers,
         &[],
         gridoxide::TapData::none(),
-        PowerFlowOptions { control_remote_voltage: true, ..Default::default() },
+        PowerFlowOptions {
+            control_remote_voltage: true,
+            ..Default::default()
+        },
     );
     assert_eq!(bare.stats.status, SolveStatus::Converged);
-    assert!(bare.outer.is_none(), "no machines means no loop, not an empty loop");
+    assert!(
+        bare.outer.is_none(),
+        "no machines means no loop, not an empty loop"
+    );
 
     let machines = [machine(2, 1, 1.02, -3.0, 3.0)];
     let off = solve(buses, &lines, &transformers, &machines, false);
-    assert_eq!(off.buses[1].bus_type, BusType::PV, "off leaves the old behaviour in place");
+    assert_eq!(
+        off.buses[1].bus_type,
+        BusType::PV,
+        "off leaves the old behaviour in place"
+    );
 }

@@ -27,7 +27,11 @@ fn sensitivity(extra: &[&str]) -> Output {
 }
 
 fn stdout_of(out: &Output) -> String {
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -43,7 +47,10 @@ fn forward_direction_reports_branch_and_voltage_response() {
 #[test]
 fn adjoint_direction_reports_injections_and_taps() {
     let text = stdout_of(&sensitivity(&["--watch", "8"]));
-    assert!(text.contains("what moves the active flow on branch 8"), "{text}");
+    assert!(
+        text.contains("what moves the active flow on branch 8"),
+        "{text}"
+    );
     assert!(text.contains("by injection"), "{text}");
     assert!(text.contains("by tap"), "{text}");
 }
@@ -74,7 +81,10 @@ fn the_two_directions_agree_through_the_cli() {
         .map(|s| s.trim().to_string())
         .expect("bus 2 in the adjoint output");
 
-    assert_eq!(from_forward, from_adjoint, "\nforward:\n{forward}\nadjoint:\n{adjoint}");
+    assert_eq!(
+        from_forward, from_adjoint,
+        "\nforward:\n{forward}\nadjoint:\n{adjoint}"
+    );
 }
 
 /// Tap variables are branch-indexed, not bus-indexed, and a line has no tap —
@@ -103,7 +113,10 @@ fn the_to_terminal_is_selectable() {
     let from = stdout_of(&sensitivity(&["--dp", "2"]));
     let to = stdout_of(&sensitivity(&["--dp", "2", "--terminal", "to"]));
     assert!(to.contains("To terminal"), "{to}");
-    assert_ne!(from, to, "the two terminals should not report identical flows");
+    assert_ne!(
+        from, to,
+        "the two terminals should not report identical flows"
+    );
 }
 
 #[test]

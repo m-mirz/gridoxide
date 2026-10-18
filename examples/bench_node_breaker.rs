@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use gridoxide::cgmes::{cgmes_node_breaker_topology, load_profiles};
-use gridoxide::topology::{bus_view, RetentionPolicy};
+use gridoxide::topology::{RetentionPolicy, bus_view};
 
 fn main() {
     let paths: Vec<PathBuf> = env::args().skip(1).map(PathBuf::from).collect();
@@ -39,11 +39,17 @@ fn main() {
         nb.topology.busbars.len()
     );
     println!("  decode      {decode_ms:8.2} ms");
-    println!("  topology    {read_ms:8.2} ms  ({:.1}% of decode)", 100.0 * read_ms / decode_ms);
+    println!(
+        "  topology    {read_ms:8.2} ms  ({:.1}% of decode)",
+        100.0 * read_ms / decode_ms
+    );
 
     for (label, policy) in [
         ("MergeAll", RetentionPolicy::MergeAll),
-        ("RetainAdjacentToBusbar", RetentionPolicy::RetainAdjacentToBusbar),
+        (
+            "RetainAdjacentToBusbar",
+            RetentionPolicy::RetainAdjacentToBusbar,
+        ),
         ("RetainAll", RetentionPolicy::RetainAll),
     ] {
         let start = Instant::now();

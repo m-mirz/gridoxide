@@ -124,14 +124,16 @@ fn three_phase_terminal_functionals_agree_with_the_ybus() {
             let from_terminals: Complex<f64> = incident[bus]
                 .iter()
                 .map(|&(b, t)| {
-                    net.functional(Target::BranchTerminal { branch: b, terminal: t })
-                        .expect("terminal resolves")
-                        .current(&v)
+                    net.functional(Target::BranchTerminal {
+                        branch: b,
+                        terminal: t,
+                    })
+                    .expect("terminal resolves")
+                    .current(&v)
                 })
                 .sum();
             // From the Y-bus: the same current, as that row applied to the state.
-            let from_ybus: Complex<f64> =
-                net.ybus.row(bus).iter().map(|&(k, y)| y * v[k]).sum();
+            let from_ybus: Complex<f64> = net.ybus.row(bus).iter().map(|&(k, y)| y * v[k]).sum();
 
             // Relative: a stiff source branch carries currents of order 1e7
             // per-unit, where an absolute 1e-9 would be asking for more than
@@ -175,8 +177,7 @@ fn a_three_phase_terminal_couples_its_phases() {
         // A coefficient on a different phase than the terminal's own is a
         // cross-phase term. It vanishes wherever the zero and positive sequences
         // coincide, so this counts branches rather than requiring every one.
-        if f
-            .coefficients
+        if f.coefficients
             .iter()
             .any(|&(k, c)| k % 3 != f.at % 3 && c.norm() > 1e-12)
         {
@@ -262,7 +263,10 @@ fn only_the_global_rotation_is_a_symmetry_of_the_phase_domain() {
             for kind in [MeasurementKind::ActivePower, MeasurementKind::ReactivePower] {
                 measurements.push(Measurement {
                     kind,
-                    target: Target::BranchTerminal { branch: b, terminal: t },
+                    target: Target::BranchTerminal {
+                        branch: b,
+                        terminal: t,
+                    },
                     value: 0.0,
                     sigma: 0.01,
                 });
@@ -273,8 +277,11 @@ fn only_the_global_rotation_is_a_symmetry_of_the_phase_domain() {
     const ALPHA: f64 = 0.17;
     let base = measurement_functions(&measurements, &state(&|_| 0.0), &net);
     let global = measurement_functions(&measurements, &state(&|_| ALPHA), &net);
-    let phase_a =
-        measurement_functions(&measurements, &state(&|i| if i % 3 == 0 { ALPHA } else { 0.0 }), &net);
+    let phase_a = measurement_functions(
+        &measurements,
+        &state(&|i| if i % 3 == 0 { ALPHA } else { 0.0 }),
+        &net,
+    );
 
     // Relative, because the stiff source branch carries currents of order 1e7
     // and an absolute comparison there is measuring f64's mantissa.
@@ -316,7 +323,7 @@ fn only_the_global_rotation_is_a_symmetry_of_the_phase_domain() {
 fn estimates_transmission_case_in_the_phase_domain() {
     use gridoxide::measurement::measurements_from_pgm_3ph;
     use gridoxide::pgm::pgm_3ph_maps;
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+    use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let dir = fixture("tests/data/pgm/state_estimation/transmission-case");
     let input = common::load_pgm_input(&dir.join("input.json"));
@@ -345,8 +352,8 @@ fn estimates_transmission_case_in_the_phase_domain() {
     );
 
     let u_rated = |bus: usize| buses[bus].u_rated;
-    let measurements = measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated)
-        .expect("measurements");
+    let measurements =
+        measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated).expect("measurements");
     assert!(
         measurements.len() > 100,
         "11 voltage and 24 power sensors over three phases should give a large set, got {}",
@@ -359,7 +366,10 @@ fn estimates_transmission_case_in_the_phase_domain() {
         &measurements,
         &mut state,
         &se_net,
-        &SeOptions { max_iter: 40, ..SeOptions::default() },
+        &SeOptions {
+            max_iter: 40,
+            ..SeOptions::default()
+        },
     );
     assert_eq!(report.status, SeStatus::Converged, "{report:?}");
 
@@ -379,7 +389,11 @@ fn estimates_transmission_case_in_the_phase_domain() {
                 (got - want).abs() < 1e-6,
                 "node {id} phase {p}: |V| = {got}, PGM says {want}"
             );
-            offsets.push((id, p, state[3 * k + p].voltage_ang - u_angle[p].as_f64().expect("angle")));
+            offsets.push((
+                id,
+                p,
+                state[3 * k + p].voltage_ang - u_angle[p].as_f64().expect("angle"),
+            ));
             checked += 1;
         }
     }
@@ -396,7 +410,6 @@ fn estimates_transmission_case_in_the_phase_domain() {
     }
 }
 
-
 /// Asymmetric sensors describing their three phases separately.
 ///
 /// The `transmission-case` gate above drives the phase domain from *symmetric*
@@ -411,7 +424,7 @@ fn estimates_transmission_case_in_the_phase_domain() {
 fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
     use gridoxide::measurement::measurements_from_pgm_3ph;
     use gridoxide::pgm::pgm_3ph_maps;
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+    use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let name = "single-node-source-asym-voltage-sensor";
     let dir = fixture("tests/data/pgm/state_estimation").join(name);
@@ -442,7 +455,11 @@ fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
     let u_rated = |bus: usize| buses[bus].u_rated;
     let measurements =
         measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated).expect("measurements");
-    assert_eq!(measurements.len(), 6, "three phases, each a magnitude and an angle");
+    assert_eq!(
+        measurements.len(),
+        6,
+        "three phases, each a magnitude and an angle"
+    );
 
     let mut state = buses.clone();
     linear_start(&mut state, &se_net, &measurements);
@@ -450,7 +467,10 @@ fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
         &measurements,
         &mut state,
         &se_net,
-        &SeOptions { max_iter: 40, ..SeOptions::default() },
+        &SeOptions {
+            max_iter: 40,
+            ..SeOptions::default()
+        },
     );
     assert_eq!(report.status, SeStatus::Converged, "{name}: {report:?}");
 
@@ -521,7 +541,7 @@ fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
 fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
     use gridoxide::measurement::measurements_from_pgm_3ph;
     use gridoxide::pgm::pgm_3ph_maps;
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+    use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let dir = fixture("tests/data/pgm/state_estimation")
         .join("single-node-source-asym-voltage-sensor-no-angle");
@@ -558,7 +578,10 @@ fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
         &measurements,
         &mut state,
         &se_net,
-        &SeOptions { max_iter: 40, ..SeOptions::default() },
+        &SeOptions {
+            max_iter: 40,
+            ..SeOptions::default()
+        },
     );
     assert_eq!(
         report.status,
@@ -671,8 +694,13 @@ fn observability_carries_over_to_the_phase_domain() {
     let case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
     let layout = StateLayout::new(&case.buses, &case.measurements, &case.network);
     let constraints = Constraints::new(&case.network);
-    let report =
-        observability::analyze(&case.measurements, &case.buses, &case.network, &layout, &constraints);
+    let report = observability::analyze(
+        &case.measurements,
+        &case.buses,
+        &case.network,
+        &layout,
+        &constraints,
+    );
 
     assert!(report.n_unknowns > 0);
     assert!(report.rank <= report.n_unknowns);
@@ -682,7 +710,11 @@ fn observability_carries_over_to_the_phase_domain() {
     // and a phase-domain estimate that could not say so would be reporting a
     // defect of the model rather than of the data.
     let n_physical = 3 * case.nodes().len();
-    for unknown in report.unobservable.iter().chain(&report.structurally_unmeasured) {
+    for unknown in report
+        .unobservable
+        .iter()
+        .chain(&report.structurally_unmeasured)
+    {
         assert!(
             unknown.bus >= n_physical,
             "physical bus {} ({:?}) came back undetermined",
@@ -702,7 +734,11 @@ fn observability_carries_over_to_the_phase_domain() {
         &sym_layout,
         &Constraints::new(&sym.network),
     );
-    for unknown in sym_report.unobservable.iter().chain(&sym_report.structurally_unmeasured) {
+    for unknown in sym_report
+        .unobservable
+        .iter()
+        .chain(&sym_report.structurally_unmeasured)
+    {
         assert!(unknown.bus >= sym.nodes().len());
     }
 }
@@ -718,7 +754,7 @@ fn bad_data_detection_finds_the_corrupted_measurement() {
     use gridoxide::se::bad_data::{self, Candidates};
     use gridoxide::se::constraints::Constraints;
     use gridoxide::se::jacobian::StateLayout;
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+    use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let mut case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
 
@@ -729,7 +765,12 @@ fn bad_data_detection_finds_the_corrupted_measurement() {
     let victim = case
         .measurements
         .iter()
-        .position(|m| matches!(m.kind, gridoxide::measurement::MeasurementKind::VoltageMagnitude))
+        .position(|m| {
+            matches!(
+                m.kind,
+                gridoxide::measurement::MeasurementKind::VoltageMagnitude
+            )
+        })
         .expect("this fixture has voltage sensors");
     let sigma = case.measurements[victim].sigma;
     case.measurements[victim].value += 15.0 * sigma;
@@ -740,9 +781,17 @@ fn bad_data_detection_finds_the_corrupted_measurement() {
         &case.measurements,
         &mut buses,
         &case.network,
-        &SeOptions { max_iter: 40, ..SeOptions::default() },
+        &SeOptions {
+            max_iter: 40,
+            ..SeOptions::default()
+        },
     );
-    assert_eq!(report.status, SeStatus::Converged, "objective {:.3e}", report.objective);
+    assert_eq!(
+        report.status,
+        SeStatus::Converged,
+        "objective {:.3e}",
+        report.objective
+    );
 
     let layout = StateLayout::new(&buses, &case.measurements, &case.network);
     let bad = bad_data::analyze(
@@ -769,7 +818,10 @@ fn bad_data_detection_finds_the_corrupted_measurement() {
     // And it is that measurement by a margin, rather than by a hair.
     let worst = bad.suspects[0].normalized_residual;
     let next = bad.suspects.get(1).map_or(0.0, |s| s.normalized_residual);
-    assert!(worst > 5.0 * next.max(1e-12), "{worst} against a runner-up of {next}");
+    assert!(
+        worst > 5.0 * next.max(1e-12),
+        "{worst} against a runner-up of {next}"
+    );
 }
 
 /// A large enough error makes Gauss-Newton diverge — and it says so.
@@ -795,13 +847,18 @@ fn bad_data_detection_finds_the_corrupted_measurement() {
 /// bad-data report built on top of it is exactly what that danger looks like.
 #[test]
 fn a_large_error_diverges_and_says_so() {
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+    use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let mut case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
     let victim = case
         .measurements
         .iter()
-        .position(|m| matches!(m.kind, gridoxide::measurement::MeasurementKind::VoltageMagnitude))
+        .position(|m| {
+            matches!(
+                m.kind,
+                gridoxide::measurement::MeasurementKind::VoltageMagnitude
+            )
+        })
         .unwrap();
     let sigma = case.measurements[victim].sigma;
     case.measurements[victim].value += 20.0 * sigma;
@@ -812,7 +869,10 @@ fn a_large_error_diverges_and_says_so() {
         &case.measurements,
         &mut buses,
         &case.network,
-        &SeOptions { max_iter: 40, ..SeOptions::default() },
+        &SeOptions {
+            max_iter: 40,
+            ..SeOptions::default()
+        },
     );
 
     assert_eq!(
@@ -839,7 +899,7 @@ fn a_clean_phase_domain_estimate_is_not_rejected() {
     use gridoxide::se::bad_data::{self, Candidates};
     use gridoxide::se::constraints::Constraints;
     use gridoxide::se::jacobian::StateLayout;
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions};
+    use gridoxide::se::nr::{SeOptions, estimate, linear_start};
 
     let case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
     let mut buses = case.buses.clone();
@@ -848,7 +908,10 @@ fn a_clean_phase_domain_estimate_is_not_rejected() {
         &case.measurements,
         &mut buses,
         &case.network,
-        &SeOptions { max_iter: 40, ..SeOptions::default() },
+        &SeOptions {
+            max_iter: 40,
+            ..SeOptions::default()
+        },
     );
 
     let layout = StateLayout::new(&buses, &case.measurements, &case.network);
@@ -882,7 +945,7 @@ fn a_clean_phase_domain_estimate_is_not_rejected() {
 #[test]
 fn the_batch_solver_carries_over_to_the_phase_domain() {
     use gridoxide::se::batch::{MeasurementOverride, SeBatchSolver, SeScenario};
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+    use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
 
@@ -892,21 +955,35 @@ fn the_batch_solver_carries_over_to_the_phase_domain() {
         .measurements
         .iter()
         .enumerate()
-        .filter(|(_, m)| matches!(m.kind, gridoxide::measurement::MeasurementKind::VoltageMagnitude))
+        .filter(|(_, m)| {
+            matches!(
+                m.kind,
+                gridoxide::measurement::MeasurementKind::VoltageMagnitude
+            )
+        })
         .map(|(i, _)| i)
         .take(5)
         .collect();
-    assert_eq!(voltages.len(), 5, "this fixture has voltage sensors on several phases");
+    assert_eq!(
+        voltages.len(),
+        5,
+        "this fixture has voltage sensors on several phases"
+    );
 
     let scenarios: Vec<SeScenario> = voltages
         .iter()
         .map(|&i| {
             let m = &case.measurements[i];
-            SeScenario::new(vec![MeasurementOverride::new(i).value(m.value + 2.0 * m.sigma)])
+            SeScenario::new(vec![
+                MeasurementOverride::new(i).value(m.value + 2.0 * m.sigma),
+            ])
         })
         .collect();
 
-    let options = SeOptions { max_iter: 40, ..SeOptions::default() };
+    let options = SeOptions {
+        max_iter: 40,
+        ..SeOptions::default()
+    };
     let solver = SeBatchSolver::new(options.clone());
     let batched = solver
         .estimate(&case.buses, &case.network, &case.measurements, &scenarios)
@@ -1003,14 +1080,17 @@ fn a_voltage_regulator_does_not_stop_an_estimate() {
 /// 1.0)`, the same admittance in the positive and zero sequences.
 #[test]
 fn a_link_is_phase_transparent() {
-    use gridoxide::pgm::{pgm_3ph_maps, LINK_Y};
+    use gridoxide::pgm::{LINK_Y, pgm_3ph_maps};
 
     let dir = fixture("tests/data/pgm/state_estimation/dummy-test-sym");
     let input = common::load_pgm_input(&dir.join("input.json"));
     let maps = pgm_3ph_maps(&input);
 
     let link = input.data.link.first().expect("this fixture has a link");
-    let branch = *maps.branch_idx.get(&link.id).expect("a link takes a branch index");
+    let branch = *maps
+        .branch_idx
+        .get(&link.id)
+        .expect("a link takes a branch index");
     assert_eq!(link.from_status, 1);
     assert_eq!(link.to_status, 1);
 
@@ -1033,14 +1113,31 @@ fn a_link_is_phase_transparent() {
         // which is 1.5e-16 relative — round-off, and exactly what a
         // phase-transparent element should leave behind.
         let floor = 1e-9 * LINK_Y.norm();
-        let live: Vec<_> =
-            terminal.coefficients.iter().filter(|(_, y)| y.norm() > floor).collect();
+        let live: Vec<_> = terminal
+            .coefficients
+            .iter()
+            .filter(|(_, y)| y.norm() > floor)
+            .collect();
         assert_eq!(live.len(), 2, "phase {phase}: {:?}", terminal.coefficients);
 
-        let self_y = live.iter().find(|(bus, _)| *bus == 3 * from + phase).unwrap().1;
-        let mutual_y = live.iter().find(|(bus, _)| *bus == 3 * to + phase).unwrap().1;
-        assert!((self_y - LINK_Y).norm() < 1e-6 * LINK_Y.norm(), "phase {phase}: {self_y}");
-        assert!((mutual_y + LINK_Y).norm() < 1e-6 * LINK_Y.norm(), "phase {phase}: {mutual_y}");
+        let self_y = live
+            .iter()
+            .find(|(bus, _)| *bus == 3 * from + phase)
+            .unwrap()
+            .1;
+        let mutual_y = live
+            .iter()
+            .find(|(bus, _)| *bus == 3 * to + phase)
+            .unwrap()
+            .1;
+        assert!(
+            (self_y - LINK_Y).norm() < 1e-6 * LINK_Y.norm(),
+            "phase {phase}: {self_y}"
+        );
+        assert!(
+            (mutual_y + LINK_Y).norm() < 1e-6 * LINK_Y.norm(),
+            "phase {phase}: {mutual_y}"
+        );
     }
 }
 
@@ -1053,7 +1150,7 @@ fn a_link_is_phase_transparent() {
 /// that far.
 #[test]
 fn a_current_sensor_on_a_link_is_refused() {
-    use gridoxide::measurement::{measurements_from_pgm_3ph, MeasurementError};
+    use gridoxide::measurement::{MeasurementError, measurements_from_pgm_3ph};
     use gridoxide::pgm::pgm_3ph_maps;
 
     let dir = fixture("tests/data/pgm/state_estimation/dummy-test-sym");
@@ -1101,7 +1198,7 @@ fn a_current_sensor_on_a_link_is_refused() {
 /// modelled no such transformer.
 #[test]
 fn a_three_winding_transformer_estimates_in_the_phase_domain() {
-    use gridoxide::se::nr::{estimate, linear_start, SeOptions, SeStatus};
+    use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let name = "tests/data/pgm/state_estimation/three_winding_transformer";
     let case = case_3ph(name);
@@ -1120,9 +1217,17 @@ fn a_three_winding_transformer_estimates_in_the_phase_domain() {
         &case.measurements,
         &mut buses,
         &case.network,
-        &SeOptions { max_iter: 40, ..SeOptions::default() },
+        &SeOptions {
+            max_iter: 40,
+            ..SeOptions::default()
+        },
     );
-    assert_eq!(report.status, SeStatus::Converged, "objective {:.3e}", report.objective);
+    assert_eq!(
+        report.status,
+        SeStatus::Converged,
+        "objective {:.3e}",
+        report.objective
+    );
 
     // Against the answer power-grid-model published for this document. The
     // magnitudes are per-phase and must each equal the balanced one.
@@ -1145,6 +1250,9 @@ fn a_three_winding_transformer_estimates_in_the_phase_domain() {
     // nothing is attached to it.
     let n_physical = 3 * case.nodes().len();
     for bus in n_physical..n_physical + 3 {
-        assert!(case.network.zero_injection[bus], "the star node injects nothing");
+        assert!(
+            case.network.zero_injection[bus],
+            "the star node injects nothing"
+        );
     }
 }

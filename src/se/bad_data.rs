@@ -41,9 +41,9 @@ use crate::solver::LinearSolver;
 use crate::sparse::RealSparseSystem;
 use crate::types::Bus;
 
-use super::constraints::{augment, Constraints};
-use super::jacobian::{gain_and_rhs, mask_untouched, measurement_jacobian, Row, StateLayout};
 use super::SeNetwork;
+use super::constraints::{Constraints, augment};
+use super::jacobian::{Row, StateLayout, gain_and_rhs, mask_untouched, measurement_jacobian};
 
 /// How many measurements to examine in detail.
 #[derive(Clone, Copy, Debug)]
@@ -246,7 +246,9 @@ pub fn analyze(
     let mut shortlist: Vec<(usize, &Measurement, f64)> = weighted.clone();
     shortlist.sort_by(|a, b| {
         let key = |t: &(usize, &Measurement, f64)| (t.2 / t.1.sigma).abs();
-        key(b).partial_cmp(&key(a)).unwrap_or(std::cmp::Ordering::Equal)
+        key(b)
+            .partial_cmp(&key(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     shortlist.truncate(candidates.limit);
 
@@ -255,7 +257,12 @@ pub fn analyze(
         // Without a factorizable system there is no residual covariance to
         // compute; the chi-squared half of the report still stands.
         None => {
-            return BadDataReport { chi_squared, degrees_of_freedom, p_value, suspects: Vec::new() }
+            return BadDataReport {
+                chi_squared,
+                degrees_of_freedom,
+                p_value,
+                suspects: Vec::new(),
+            };
         }
     };
 
@@ -291,7 +298,10 @@ pub fn analyze(
         if omega <= MIN_REDUNDANCY * m.sigma * m.sigma {
             continue;
         }
-        suspects.push(Suspect { measurement: index, normalized_residual: r.abs() / omega.sqrt() });
+        suspects.push(Suspect {
+            measurement: index,
+            normalized_residual: r.abs() / omega.sqrt(),
+        });
     }
     suspects.sort_by(|a, b| {
         b.normalized_residual
@@ -299,7 +309,12 @@ pub fn analyze(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    BadDataReport { chi_squared, degrees_of_freedom, p_value, suspects }
+    BadDataReport {
+        chi_squared,
+        degrees_of_freedom,
+        p_value,
+        suspects,
+    }
 }
 
 /// `Ωᵢᵢ = Rᵢᵢ − hᵢ G⁻¹ hᵢᵀ`, the variance of one measurement's residual.
@@ -339,7 +354,7 @@ mod tests {
     use crate::branch_flow::Terminal;
     use crate::measurement::{MeasurementKind, Target};
     use crate::se::measurement_functions;
-    use crate::se::nr::{estimate, flat_start, SeOptions};
+    use crate::se::nr::{SeOptions, estimate, flat_start};
 
     /// Published chi-squared critical values: `P(X > x) = 0.05`.
     ///
@@ -348,7 +363,13 @@ mod tests {
     /// checkable against an external source rather than against itself.
     #[test]
     fn chi_squared_matches_published_critical_values() {
-        for (dof, critical) in [(1, 3.841), (2, 5.991), (5, 11.070), (10, 18.307), (20, 31.410)] {
+        for (dof, critical) in [
+            (1, 3.841),
+            (2, 5.991),
+            (5, 11.070),
+            (10, 18.307),
+            (20, 31.410),
+        ] {
             let p = chi_squared_upper_tail(critical, dof);
             assert!(
                 (p - 0.05).abs() < 1e-3,
@@ -386,19 +407,33 @@ mod tests {
             (MeasurementKind::ReactivePower, Target::Bus(1)),
             (
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
             (
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
             (
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::To },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::To,
+                },
             ),
         ]
         .into_iter()
-        .map(|(kind, target)| Measurement { kind, target, value: 0.0, sigma: 0.01 })
+        .map(|(kind, target)| Measurement {
+            kind,
+            target,
+            value: 0.0,
+            sigma: 0.01,
+        })
         .collect();
 
         let exact = measurement_functions(&probe, truth, net);
@@ -440,7 +475,10 @@ mod tests {
         );
 
         assert!(bad.chi_squared < 1e-12, "noise-free data: {bad:?}");
-        assert!(!bad.rejects_at(0.05), "clean data must not be rejected: {bad:?}");
+        assert!(
+            !bad.rejects_at(0.05),
+            "clean data must not be rejected: {bad:?}"
+        );
     }
 
     /// One grossly wrong reading, twenty sigma out, must be both detected and

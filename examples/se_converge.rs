@@ -5,12 +5,12 @@
 //! prints both, so the two can be compared.
 use std::path::PathBuf;
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::measurement::{Measurement, MeasurementKind, Target};
 use gridoxide::network::{build_ybus, linear_initial_guess, stamp_shunts};
-use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network, PgmInput};
-use gridoxide::se::nr::{estimate, flat_start, SeMethod, SeOptions};
+use gridoxide::pgm::{PgmInput, node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
 use gridoxide::se::SeNetwork;
+use gridoxide::se::nr::{SeMethod, SeOptions, estimate, flat_start};
 use gridoxide::solver::{JacobianBackend, PersistentSolver};
 use gridoxide::types::Bus;
 
@@ -19,8 +19,13 @@ const SIGMA_V: f64 = 1e-3;
 const SIGMA_S: f64 = 1e-2;
 
 fn main() {
-    let case = std::env::args().nth(1).unwrap_or_else(|| "case1354pegase".into());
-    let limit: usize = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(100);
+    let case = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "case1354pegase".into());
+    let limit: usize = std::env::args()
+        .nth(2)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(100);
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts/bench/.case-cache")
         .join(format!("{case}.json"));
@@ -39,8 +44,15 @@ fn main() {
     let se_net = SeNetwork::new(&net, ybus, &shunts);
     let measurements = synthesize(&truth, &se_net, &net);
 
-    println!("{case}: {} buses, {} measurements", truth.len(), measurements.len());
-    println!("{:>5} {:>12} {:>8} {:>12} {:>12}", "iter", "step", "ratio", "worst dV", "objective");
+    println!(
+        "{case}: {} buses, {} measurements",
+        truth.len(),
+        measurements.len()
+    );
+    println!(
+        "{:>5} {:>12} {:>8} {:>12} {:>12}",
+        "iter", "step", "ratio", "worst dV", "objective"
+    );
 
     let mut previous = f64::NAN;
     for k in 1..=limit {
@@ -72,7 +84,11 @@ fn main() {
 }
 
 /// Same synthesis as `bench_se.rs`, inlined.
-fn synthesize(truth: &[Bus], net: &SeNetwork, pgm: &gridoxide::pgm::PgmNetwork) -> Vec<Measurement> {
+fn synthesize(
+    truth: &[Bus],
+    net: &SeNetwork,
+    pgm: &gridoxide::pgm::PgmNetwork,
+) -> Vec<Measurement> {
     let v = bus_voltages(truth);
     let params = branch_params(&pgm.lines, &pgm.transformers);
     let (p_inj, q_inj) = gridoxide::network::power_injections(truth, &net.ybus);

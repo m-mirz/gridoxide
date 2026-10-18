@@ -21,19 +21,22 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::batch::{uniform_load_scaling, BatchSolver, BusOverride, Scenario};
-use crate::linear::{
-    dc_branches, dc_power_flow, linear_power_flow, DcApproximation, DcIslandStatus, DcOptions,
-    DcSensitivity, DcSolution, LinearIslandStatus,
-};
-use crate::network::{build_ybus, linear_initial_guess, stamp_shunts, ShuntAdm, YBusSparse};
-use crate::pgm::PgmInput;
-use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, PowerFlowMethod, SolveStatus};
-use crate::types::{Bus, Line, Transformer};
+use crate::batch::{BatchSolver, BusOverride, Scenario, uniform_load_scaling};
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
-    cgmes_resolve_dc_converters, cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+    cgmes_resolve_dc_converters, cgmes_to_buses_and_branches, cgmes_topological_node_bus_index,
+    load_profiles,
 };
+use crate::linear::{
+    DcApproximation, DcIslandStatus, DcOptions, DcSensitivity, DcSolution, LinearIslandStatus,
+    dc_branches, dc_power_flow, linear_power_flow,
+};
+use crate::network::{ShuntAdm, YBusSparse, build_ybus, linear_initial_guess, stamp_shunts};
+use crate::pgm::PgmInput;
+use crate::solver::{
+    IslandStatus, JacobianBackend, PersistentSolver, PowerFlowMethod, SolveStatus,
+};
+use crate::types::{Bus, Line, Transformer};
 
 fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
     match name {
@@ -350,8 +353,10 @@ impl PowerFlowModel {
         // the tables — parallel to those transformers alone — would be
         // misaligned there; `cgmes_node_breaker_to_buses_and_branches` drops
         // them for the same reason.
-        let mut taps: (Vec<Option<crate::types::TapChanger>>, Vec<crate::outerloop::TapRegulation>) =
-            (Vec::new(), Vec::new());
+        let mut taps: (
+            Vec<Option<crate::types::TapChanger>>,
+            Vec<crate::outerloop::TapRegulation>,
+        ) = (Vec::new(), Vec::new());
         // Same reasoning as `taps`: the node-breaker view numbers buses its own
         // way, so machine-to-bus indices from the bus-branch view would point at
         // the wrong buses there. Left empty rather than mismapped.
@@ -372,12 +377,12 @@ impl PowerFlowModel {
                     let (mut buses, lines, transformers, shunts) =
                         (net.buses, net.lines, net.transformers, net.shunts);
                     taps = (net.tap_changers, net.regulation);
-                    dispatch_data =
-                        (net.voltage_control.machines, net.voltage_control.nonregulating_q);
+                    dispatch_data = (
+                        net.voltage_control.machines,
+                        net.voltage_control.nonregulating_q,
+                    );
                     cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va).map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "resolving CGMES HVDC converters: {e}"
-                        ))
+                        PyRuntimeError::new_err(format!("resolving CGMES HVDC converters: {e}"))
                     })?;
                     let tn = cgmes_topological_node_bus_index(&ds).map_err(|e| {
                         PyRuntimeError::new_err(format!("resolving CGMES bus index: {e}"))
@@ -392,9 +397,7 @@ impl PowerFlowModel {
                         &policy,
                         crate::switches::SwitchTreatment::Regularize,
                     )
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
-                    })?;
+                    .map_err(|e| PyRuntimeError::new_err(format!("converting CGMES model: {e}")))?;
                     // HVDC converters resolve by `TopologicalNode`, which the
                     // node-breaker path indexes too — but its bus numbering is
                     // its own, so the mapping is left empty rather than handing
@@ -411,7 +414,7 @@ impl PowerFlowModel {
                 other => {
                     return Err(PyValueError::new_err(format!(
                         "unknown topology '{other}', expected 'bus_branch' or 'node_breaker'"
-                    )))
+                    )));
                 }
             };
 
@@ -534,11 +537,11 @@ impl PowerFlowModel {
         // A machine regulating a bus other than its own. Without this the
         // reactive power appears at the bus being held rather than at the
         // machine; opt-in because turning it on changes answers.
-        let wants_remote = control_remote_voltage
-            && self.machines.iter().any(|m| m.at_bus != m.controls_bus);
+        let wants_remote =
+            control_remote_voltage && self.machines.iter().any(|m| m.at_bus != m.controls_bus);
         let islands = if enforce_q_limits || distribute_slack || wants_taps || wants_remote {
-            let distribution = distribute_slack
-                .then(|| crate::outerloop::SlackDistribution::uniform(&self.buses));
+            let distribution =
+                distribute_slack.then(|| crate::outerloop::SlackDistribution::uniform(&self.buses));
             let report = crate::run_power_flow_with_remote(
                 std::mem::take(&mut self.buses),
                 &self.lines,
@@ -548,7 +551,9 @@ impl PowerFlowModel {
                     changers: &self.tap_changers,
                     regulation: &self.regulation,
                 },
-                crate::RemoteControlData { machines: &self.machines },
+                crate::RemoteControlData {
+                    machines: &self.machines,
+                },
                 crate::solver::PowerFlowOptions {
                     control_taps,
                     control_remote_voltage,
@@ -571,18 +576,26 @@ impl PowerFlowModel {
             self.sensitivity = None;
             report.islands
         } else {
-            self.solver.solve(&mut self.buses, &self.ybus, self.tol, self.max_iter)
+            self.solver
+                .solve(&mut self.buses, &self.ybus, self.tol, self.max_iter)
         };
         for island in &islands {
             match island.status {
-                IslandStatus::Converged | IslandStatus::NoReferenceBus | IslandStatus::AmbiguousReferenceBus => {}
-                IslandStatus::MaxIterationsReached => return Err(PyRuntimeError::new_err(format!(
-                    "power flow did not converge within {} iterations (component with buses {:?})",
-                    self.max_iter, island.bus_indices
-                ))),
-                IslandStatus::Singular => return Err(PyRuntimeError::new_err(format!(
-                    "Jacobian is singular (component with buses {:?})", island.bus_indices
-                ))),
+                IslandStatus::Converged
+                | IslandStatus::NoReferenceBus
+                | IslandStatus::AmbiguousReferenceBus => {}
+                IslandStatus::MaxIterationsReached => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "power flow did not converge within {} iterations (component with buses {:?})",
+                        self.max_iter, island.bus_indices
+                    )));
+                }
+                IslandStatus::Singular => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Jacobian is singular (component with buses {:?})",
+                        island.bus_indices
+                    )));
+                }
             }
         }
         Ok(())
@@ -593,7 +606,11 @@ impl PowerFlowModel {
     /// — lines first, then transformers, so transformer `i` is flat branch
     /// `n_lines + i`.
     fn tap_positions(&self) -> Vec<Option<i32>> {
-        let moved = self.outer.as_ref().map(|o| &o.changers).filter(|c| !c.is_empty());
+        let moved = self
+            .outer
+            .as_ref()
+            .map(|o| &o.changers)
+            .filter(|c| !c.is_empty());
         moved
             .unwrap_or(&self.tap_changers)
             .iter()
@@ -616,7 +633,9 @@ impl PowerFlowModel {
         py: Python<'py>,
     ) -> PyResult<Vec<pyo3::Bound<'py, pyo3::types::PyDict>>> {
         use crate::outerloop::ControllerOutcome;
-        let Some(outer) = self.outer.as_ref() else { return Ok(Vec::new()) };
+        let Some(outer) = self.outer.as_ref() else {
+            return Ok(Vec::new());
+        };
         outer
             .taps
             .iter()
@@ -653,7 +672,9 @@ impl PowerFlowModel {
     /// `"insensitive"`, `"unfinished"` or `"at_reactive_limit"`. Empty unless
     /// that option was set and the network has such a machine.
     fn remote_voltage_control(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
-        let Some(outer) = self.outer.as_ref() else { return Ok(Vec::new()) };
+        let Some(outer) = self.outer.as_ref() else {
+            return Ok(Vec::new());
+        };
         outer
             .remote
             .iter()
@@ -710,7 +731,7 @@ impl PowerFlowModel {
         refine: bool,
         enforce_q_limits: bool,
     ) -> PyResult<Py<pyo3::types::PyDict>> {
-        use crate::qv::{qv_curve, QvOptions, QvStatus};
+        use crate::qv::{QvOptions, QvStatus, qv_curve};
 
         let curve = qv_curve(
             &self.buses_template,
@@ -845,7 +866,10 @@ impl PowerFlowModel {
     /// Buses switched `PV → PQ` on their reactive limit by the last solve, in
     /// switch order. Empty unless `solve(enforce_q_limits=True)`.
     fn q_limit_switches(&self) -> Vec<usize> {
-        self.outer.as_ref().map(|o| o.q_limit_switches.clone()).unwrap_or_default()
+        self.outer
+            .as_ref()
+            .map(|o| o.q_limit_switches.clone())
+            .unwrap_or_default()
     }
 
     /// Per bus, how much its active schedule moved, per-unit. Empty unless
@@ -909,8 +933,12 @@ impl PowerFlowModel {
     /// a sourceless component.
     fn solve_dc(&mut self) -> PyResult<()> {
         self.buses = self.buses_template.clone();
-        let solution =
-            dc_power_flow(&mut self.buses, &self.lines, &self.transformers, self.dc_opts);
+        let solution = dc_power_flow(
+            &mut self.buses,
+            &self.lines,
+            &self.transformers,
+            self.dc_opts,
+        );
         let singular: Vec<&[usize]> = solution
             .islands
             .iter()
@@ -1075,7 +1103,9 @@ impl PowerFlowModel {
                 base.len()
             )));
         }
-        Ok(self.require_sensitivity()?.multi_outage_flows(&base, &branches))
+        Ok(self
+            .require_sensitivity()?
+            .multi_outage_flows(&base, &branches))
     }
 
     /// Runs an AC N-1/N-k contingency sweep: one entry in `contingencies` per
@@ -1098,7 +1128,10 @@ impl PowerFlowModel {
     ) -> PyResult<Vec<(String, Vec<f64>, Vec<f64>)>> {
         let scenarios: Vec<Scenario> = contingencies
             .into_iter()
-            .map(|branch_outages| Scenario { bus_overrides: Vec::new(), branch_outages })
+            .map(|branch_outages| Scenario {
+                bus_overrides: Vec::new(),
+                branch_outages,
+            })
             .collect();
         let batch = match threads {
             Some(t) => BatchSolver::with_threads(self.backend, t.max(1))
@@ -1169,7 +1202,9 @@ impl PowerFlowModel {
     /// Empty unless the model was built with `topology="node_breaker"`.
     #[cfg(feature = "cgmes")]
     fn switches(&self) -> Vec<(usize, String, String, usize, usize, bool, usize)> {
-        let Some(net) = self.node_breaker.as_ref() else { return Vec::new() };
+        let Some(net) = self.node_breaker.as_ref() else {
+            return Vec::new();
+        };
         net.view
             .retained()
             .iter()
@@ -1401,7 +1436,10 @@ impl PowerFlowModel {
     /// producing a wrong answer on a network where `effective_injection`
     /// contributes voltage-dependent terms the oracle does not implement.
     fn zip_term_counts(&self) -> Vec<usize> {
-        self.buses_template.iter().map(|b| b.zip_terms.len()).collect()
+        self.buses_template
+            .iter()
+            .map(|b| b.zip_terms.len())
+            .collect()
     }
 
     /// Per-bus voltage magnitude in per-unit, in node order — `None` before
@@ -1420,7 +1458,10 @@ impl PowerFlowModel {
     /// `SvVoltage.v` uses, so a caller comparing against a fixture's
     /// published values doesn't need `u_rated` (not itself exposed) at all.
     fn voltage_kv(&self) -> Vec<f64> {
-        self.buses.iter().map(|b| b.voltage_mag * b.u_rated / 1e3).collect()
+        self.buses
+            .iter()
+            .map(|b| b.voltage_mag * b.u_rated / 1e3)
+            .collect()
     }
 }
 
@@ -1445,15 +1486,16 @@ impl PowerFlowModel {
         if self.sensitivity.is_none() {
             let branches = dc_branches(&self.lines, &self.transformers, self.dc_opts);
             let n_branches = self.lines.len() + self.transformers.len();
-            self.sensitivity =
-                Some(DcSensitivity::new(&self.buses_template, &branches, n_branches).ok_or_else(
+            self.sensitivity = Some(
+                DcSensitivity::new(&self.buses_template, &branches, n_branches).ok_or_else(
                     || {
                         PyRuntimeError::new_err(
                             "the reduced susceptance matrix is singular, so no sensitivity \
                              factors exist for this network",
                         )
                     },
-                )?);
+                )?,
+            );
         }
         Ok(self.sensitivity.as_ref().expect("just populated"))
     }
@@ -1484,7 +1526,13 @@ impl PowerFlowModel {
         // immutably. Nothing here needs `&mut self`.
         let (_, batch) = self.batch.as_ref().expect("just populated above");
         let reports = batch
-            .solve(&self.buses_template, &self.ybus, &scenarios, self.tol, self.max_iter)
+            .solve(
+                &self.buses_template,
+                &self.ybus,
+                &scenarios,
+                self.tol,
+                self.max_iter,
+            )
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(reports
@@ -1586,7 +1634,7 @@ impl StateEstimationModel {
             other => {
                 return Err(PyValueError::new_err(format!(
                     "unknown method {other:?}, expected 'newton_raphson' or 'iterative_linear'"
-                )))
+                )));
             }
         };
         let raw = std::fs::read_to_string(path)
@@ -1644,8 +1692,11 @@ impl StateEstimationModel {
     /// rather than left to the caller because the arithmetic is the model's,
     /// not the document's.
     fn nodes(&self) -> Vec<(u64, usize)> {
-        let mut out: Vec<(u64, usize)> =
-            self.node_idx.iter().map(|(&id, &i)| (id, self.phases * i)).collect();
+        let mut out: Vec<(u64, usize)> = self
+            .node_idx
+            .iter()
+            .map(|(&id, &i)| (id, self.phases * i))
+            .collect();
         out.sort_unstable();
         out
     }
@@ -1746,7 +1797,12 @@ impl StateEstimationModel {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
         let results = solver
-            .estimate(&self.buses_template, &self.se_net, &self.measurements, &scenarios)
+            .estimate(
+                &self.buses_template,
+                &self.se_net,
+                &self.measurements,
+                &scenarios,
+            )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(results
@@ -1773,7 +1829,10 @@ impl StateEstimationModel {
 
     /// `z - h(x)` at the final state, one per measurement.
     fn residuals(&self) -> Vec<f64> {
-        self.report.as_ref().map(|r| r.residuals.clone()).unwrap_or_default()
+        self.report
+            .as_ref()
+            .map(|r| r.residuals.clone())
+            .unwrap_or_default()
     }
 
     /// `J(x) = 1/2 r^T W r` at the final state.
@@ -1782,7 +1841,10 @@ impl StateEstimationModel {
     /// disagree with each other. `bad_data()` is what interprets it.
     #[getter]
     fn objective(&self) -> f64 {
-        self.report.as_ref().map(|r| r.objective).unwrap_or(f64::NAN)
+        self.report
+            .as_ref()
+            .map(|r| r.objective)
+            .unwrap_or(f64::NAN)
     }
 
     /// Which buses and quantities the measurements leave undetermined, as a
@@ -1792,11 +1854,8 @@ impl StateEstimationModel {
     /// refer to gridoxide's synthesized buses, which are expected to appear
     /// whenever a source's own power is unmeasured.
     fn observability(&self) -> Vec<(usize, String)> {
-        let layout = crate::se::jacobian::StateLayout::new(
-            &self.buses,
-            &self.measurements,
-            &self.se_net,
-        );
+        let layout =
+            crate::se::jacobian::StateLayout::new(&self.buses, &self.measurements, &self.se_net);
         let report = crate::se::observability::analyze(
             &self.measurements,
             &self.buses,
@@ -1830,11 +1889,8 @@ impl StateEstimationModel {
         let Some(report) = self.report.as_ref() else {
             return Err(PyRuntimeError::new_err("call solve() before bad_data()"));
         };
-        let layout = crate::se::jacobian::StateLayout::new(
-            &self.buses,
-            &self.measurements,
-            &self.se_net,
-        );
+        let layout =
+            crate::se::jacobian::StateLayout::new(&self.buses, &self.measurements, &self.se_net);
         let constraints = crate::se::constraints::Constraints::new(&self.se_net);
         let bad = crate::se::bad_data::analyze(
             &self.measurements,
@@ -2160,7 +2216,7 @@ fn dynamics(
     speed_voltages: Option<bool>,
     relays: Option<Vec<Bound<'_, pyo3::types::PyAny>>>,
 ) -> PyResult<DynamicsResult> {
-    use crate::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
+    use crate::dynamics::{DynamicsOptions, DynamicsStatus, json, run_dynamics};
     use crate::solver::JacobianBackend;
 
     let backend = match backend {
@@ -2169,7 +2225,7 @@ fn dynamics(
         Some(other) => {
             return Err(PyValueError::new_err(format!(
                 "backend must be \"scalar\" or \"klu_native\", got {other:?}"
-            )))
+            )));
         }
     };
 
@@ -2179,8 +2235,9 @@ fn dynamics(
     if let Some(on) = speed_voltages {
         document.dynamics.speed_voltages = on;
     }
-    let (mut system, mut schedule, mut protection) =
-        document.build_with_relays().map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (mut system, mut schedule, mut protection) = document
+        .build_with_relays()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // An overriding schedule is given as dicts in the same shape the document
     // uses, so there is one vocabulary for events and not two.
@@ -2202,7 +2259,10 @@ fn dynamics(
     if let Some(given) = relays {
         let mut parsed = Vec::with_capacity(given.len());
         for item in given {
-            let text: String = py.import("json")?.call_method1("dumps", (item,))?.extract()?;
+            let text: String = py
+                .import("json")?
+                .call_method1("dumps", (item,))?
+                .extract()?;
             parsed.push(
                 serde_json::from_str(&text)
                     .map_err(|e| PyValueError::new_err(format!("relay: {e}")))?,
@@ -2246,7 +2306,6 @@ fn dynamics(
         rows: report.trajectory.rows,
     })
 }
-
 
 /// One mode of the linearized system.
 #[cfg(feature = "dynamics")]
@@ -2381,7 +2440,10 @@ pub struct SmallSignalResult {
 impl SmallSignalResult {
     fn __repr__(&self) -> String {
         match self.shift {
-            None => format!("SmallSignalResult({} modes, dense, complete)", self.modes.len()),
+            None => format!(
+                "SmallSignalResult({} modes, dense, complete)",
+                self.modes.len()
+            ),
             Some((re, im)) => format!(
                 "SmallSignalResult({} modes, sparse near {re:+.4}{im:+.4}j, partial)",
                 self.modes.len()
@@ -2403,7 +2465,9 @@ impl SmallSignalResult {
         let len = self.modes.len() as isize;
         let index = if index < 0 { index + len } else { index };
         if index < 0 || index >= len {
-            return Err(pyo3::exceptions::PyIndexError::new_err("mode index out of range"));
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "mode index out of range",
+            ));
         }
         Ok(self.modes[index as usize].clone_ref(py))
     }
@@ -2473,7 +2537,9 @@ fn small_signal(
     if let Some(on) = speed_voltages {
         document.dynamics.speed_voltages = on;
     }
-    let (mut system, _) = document.build().map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (mut system, _) = document
+        .build()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     if near.is_some() && freq.is_some() {
         return Err(PyValueError::new_err(
@@ -2499,7 +2565,10 @@ fn small_signal(
 
     let result = match aimed {
         Some(shift) => {
-            let mut opts = SmallSignalOptions { shift, ..SmallSignalOptions::default() };
+            let mut opts = SmallSignalOptions {
+                shift,
+                ..SmallSignalOptions::default()
+            };
             if let Some(count) = count {
                 opts.count = count;
             }
@@ -2540,9 +2609,7 @@ fn small_signal(
 
     let (method, shift, complete) = match result.method {
         Method::Dense => ("dense".to_string(), None, true),
-        Method::Sparse { shift, .. } => {
-            ("sparse".to_string(), Some((shift.re, shift.im)), false)
-        }
+        Method::Sparse { shift, .. } => ("sparse".to_string(), Some((shift.re, shift.im)), false),
     };
 
     Ok(SmallSignalResult {
@@ -2575,7 +2642,9 @@ fn mode_sensitivities(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     computed.sort_by(|a, b| {
         let (x, y) = (a.d_damping * a.value, b.d_damping * b.value);
-        y.abs().partial_cmp(&x.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        y.abs()
+            .partial_cmp(&x.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Device names come from the states they own: every state of one device
@@ -2638,12 +2707,12 @@ fn continuation(
     freq_hz: f64,
 ) -> PyResult<ContinuationCurve> {
     use crate::continuation::augmented::Parametrization;
+    use crate::continuation::{
+        ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch, LoadingDirection,
+        QLimitKind, StopCriterion, run_continuation,
+    };
     use crate::pgm::pgm_to_buses_and_branches;
     use crate::solver::PowerFlowOptions;
-    use crate::continuation::{
-        run_continuation, ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch,
-        LoadingDirection, QLimitKind, StopCriterion,
-    };
 
     // `None` takes the library default rather than naming it here: the choice
     // is a performance cliff (pseudo-arclength's bordering row is dense, and
@@ -2657,7 +2726,7 @@ fn continuation(
         Some(other) => {
             return Err(PyValueError::new_err(format!(
                 "parametrization must be \"local\", \"natural\" or \"arclength\", got {other:?}"
-            )))
+            )));
         }
     };
     if target_lambda.is_some() && lower_branch {
@@ -2710,17 +2779,25 @@ fn continuation(
         ContinuationOptions {
             direction,
             parametrization,
-            stop: StopCriterion { target_lambda, trace_lower_branch: lower_branch },
+            stop: StopCriterion {
+                target_lambda,
+                trace_lower_branch: lower_branch,
+            },
             step,
             max_steps,
-            power_flow: PowerFlowOptions { enforce_q_limits, ..Default::default() },
+            power_flow: PowerFlowOptions {
+                enforce_q_limits,
+                ..Default::default()
+            },
             base_mva,
             ..Default::default()
         },
     );
 
     if let ContinuationStatus::Rejected(why) = &curve.status {
-        return Err(PyValueError::new_err(format!("continuation was not attempted: {why:?}")));
+        return Err(PyValueError::new_err(format!(
+            "continuation was not attempted: {why:?}"
+        )));
     }
     if let ContinuationStatus::BaseCaseFailed(status) = &curve.status {
         return Err(PyRuntimeError::new_err(format!(
@@ -2796,7 +2873,7 @@ fn short_circuit(
     freq_hz: f64,
 ) -> PyResult<ShortCircuitResult> {
     use crate::shortcircuit::{
-        short_circuit_from_pgm, SequenceValue, ShortCircuitOptions, VoltageScaling,
+        SequenceValue, ShortCircuitOptions, VoltageScaling, short_circuit_from_pgm,
     };
 
     let scaling = match scaling {
@@ -2805,7 +2882,7 @@ fn short_circuit(
         other => {
             return Err(PyValueError::new_err(format!(
                 "scaling must be \"max\" or \"min\", got {other:?}"
-            )))
+            )));
         }
     };
 
@@ -2851,7 +2928,11 @@ fn short_circuit(
         .map(|f| {
             Py::new(
                 py,
-                ShortCircuitFault { id: f.id, i_f: f.i_f, i_f_angle: f.i_f_angle },
+                ShortCircuitFault {
+                    id: f.id,
+                    i_f: f.i_f,
+                    i_f_angle: f.i_f_angle,
+                },
             )
         })
         .collect::<PyResult<Vec<_>>>()?;
@@ -2860,7 +2941,14 @@ fn short_circuit(
         .sources
         .iter()
         .map(|s| {
-            Py::new(py, ShortCircuitSource { id: s.id, i: s.i, i_angle: s.i_angle })
+            Py::new(
+                py,
+                ShortCircuitSource {
+                    id: s.id,
+                    i: s.i,
+                    i_angle: s.i_angle,
+                },
+            )
         })
         .collect::<PyResult<Vec<_>>>()?;
 
@@ -2885,10 +2973,25 @@ fn short_circuit(
     let shunts = report
         .shunts
         .iter()
-        .map(|s| Py::new(py, ShortCircuitShunt { id: s.id, i: s.i, i_angle: s.i_angle }))
+        .map(|s| {
+            Py::new(
+                py,
+                ShortCircuitShunt {
+                    id: s.id,
+                    i: s.i,
+                    i_angle: s.i_angle,
+                },
+            )
+        })
         .collect::<PyResult<Vec<_>>>()?;
 
-    Ok(ShortCircuitResult { nodes, faults, sources, branches, shunts })
+    Ok(ShortCircuitResult {
+        nodes,
+        faults,
+        sources,
+        branches,
+        shunts,
+    })
 }
 
 /// How the network responds to one variable — the forward direction.
@@ -2964,13 +3067,7 @@ impl AcSensitivityModel {
     /// silently returning one would be the worst of both.
     #[new]
     #[pyo3(signature = (path, s_base_va = 1e6, freq_hz = 50.0, tol = 1e-8, max_iter = 50))]
-    fn new(
-        path: &str,
-        s_base_va: f64,
-        freq_hz: f64,
-        tol: f64,
-        max_iter: usize,
-    ) -> PyResult<Self> {
+    fn new(path: &str, s_base_va: f64, freq_hz: f64, tol: f64, max_iter: usize) -> PyResult<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
         let input: PgmInput = serde_json::from_str(&raw)
@@ -2978,8 +3075,19 @@ impl AcSensitivityModel {
         let (buses, lines, transformers) =
             crate::pgm::pgm_to_buses_and_branches(input, s_base_va, freq_hz);
 
-        let opts = crate::solver::PowerFlowOptions { tol, max_iter, ..Default::default() };
-        let report = crate::run_power_flow(buses, &lines, &transformers, &[], crate::TapData::none(), opts);
+        let opts = crate::solver::PowerFlowOptions {
+            tol,
+            max_iter,
+            ..Default::default()
+        };
+        let report = crate::run_power_flow(
+            buses,
+            &lines,
+            &transformers,
+            &[],
+            crate::TapData::none(),
+            opts,
+        );
         if report.stats.status != SolveStatus::Converged {
             return Err(PyRuntimeError::new_err(format!(
                 "the power flow did not converge ({:?}); there is no operating point to \
@@ -2996,7 +3104,11 @@ impl AcSensitivityModel {
                 .ok_or_else(|| {
                     PyRuntimeError::new_err("the Jacobian is singular at the solved point")
                 })?;
-        Ok(Self { inner, n_buses, n_branches })
+        Ok(Self {
+            inner,
+            n_buses,
+            n_branches,
+        })
     }
 
     #[getter]
@@ -3085,7 +3197,7 @@ impl AcSensitivityModel {
                     other => {
                         return Err(PyValueError::new_err(format!(
                             "for a branch, quantity must be \"active\" or \"reactive\", got {other:?}"
-                        )))
+                        )));
                     }
                 }
             }
@@ -3095,14 +3207,10 @@ impl AcSensitivityModel {
                 other => {
                     return Err(PyValueError::new_err(format!(
                         "for a bus, quantity must be \"magnitude\" or \"angle\", got {other:?}"
-                    )))
+                    )));
                 }
             },
-            _ => {
-                return Err(PyValueError::new_err(
-                    "pass exactly one of branch or bus",
-                ))
-            }
+            _ => return Err(PyValueError::new_err("pass exactly one of branch or bus")),
         };
 
         let row = self
@@ -3280,25 +3388,29 @@ fn dc_opf(
     let data = OpfData::from_json(&data_text)
         .map_err(|e| PyValueError::new_err(format!("parsing {}: {e}", data_path.display())))?;
 
-    let options = DcOpfOptions { shed_price, allow_shedding };
+    let options = DcOpfOptions {
+        shed_price,
+        allow_shedding,
+    };
     let approximation = parse_dc_approximation(dc_approximation)?;
     let network = DcOpfNetwork::from_pgm(input, &data, freq_hz, approximation)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let generator_index: Vec<usize> = network.generators.iter().map(|g| g.index).collect();
 
-    let opf = DcOpf::build(network, options)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let opf = DcOpf::build(network, options).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let solution = match solver {
         "ipm" => {
             let mut s = IpmSolver::new();
-            s.solve(opf.problem()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            s.solve(opf.problem())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         }
         "highs" => {
             #[cfg(feature = "opf-highs")]
             {
                 let mut s = crate::opf::highs::HighsSolver::new()
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                s.solve(opf.problem()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                s.solve(opf.problem())
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
             }
             #[cfg(not(feature = "opf-highs"))]
             {
@@ -3311,7 +3423,7 @@ fn dc_opf(
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown solver '{other}', expected 'ipm' or 'highs'"
-            )))
+            )));
         }
     };
     let result = opf.interpret(&solution);
@@ -3330,7 +3442,12 @@ fn dc_opf(
         .map(|b| {
             Py::new(
                 py,
-                DcOpfBinding { branch: b.branch, flow: b.flow, rate: b.rate, price: b.price },
+                DcOpfBinding {
+                    branch: b.branch,
+                    flow: b.flow,
+                    rate: b.rate,
+                    price: b.price,
+                },
             )
         })
         .collect::<PyResult<Vec<_>>>()?;
@@ -3395,7 +3512,10 @@ fn ac_opf(
     let data = OpfData::from_json(&data_text)
         .map_err(|e| PyValueError::new_err(format!("parsing {}: {e}", data_path.display())))?;
 
-    let mut options = AcOpfOptions { enforce_limits, ..AcOpfOptions::default() };
+    let mut options = AcOpfOptions {
+        enforce_limits,
+        ..AcOpfOptions::default()
+    };
     options.nlp.max_iterations = max_iterations;
     options.nlp.tolerance = tolerance;
 

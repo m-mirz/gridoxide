@@ -118,9 +118,9 @@
 //! (`DcSensitivity::outage_flows`) that has no equally cheap AC analogue.
 //! `batch::BatchSolver::solve_contingencies` is the AC answer, and it re-solves.
 
-use crate::branch_flow::{branch_params, terminal_flow_derivs, BranchParams, Terminal};
+use crate::branch_flow::{BranchParams, Terminal, branch_params, terminal_flow_derivs};
 use crate::jacobian::JacobianPattern;
-use crate::network::{power_injections, YBusSparse};
+use crate::network::{YBusSparse, power_injections};
 use crate::sparse::RealFactorization;
 use crate::types::{Bus, BusType, Line, Transformer};
 
@@ -301,8 +301,7 @@ impl AcSensitivity {
         let pattern = JacobianPattern::analyze(buses, ybus);
         let mut values = Vec::with_capacity(pattern.len());
         pattern.fill(buses, &p_calc, &q_calc, &mut values);
-        let factorization =
-            RealFactorization::new(n_unknowns, &pattern.to_triplets(&values))?;
+        let factorization = RealFactorization::new(n_unknowns, &pattern.to_triplets(&values))?;
 
         Some(Self {
             n_buses: n,
@@ -342,11 +341,7 @@ impl AcSensitivity {
     /// exact without reconstructing the branch from nameplate data, and what
     /// makes it hold unchanged for the half-open terminal states (where the
     /// affected entries are already zero).
-    fn admittance_derivative(
-        &self,
-        branch: usize,
-        kind: TapKind,
-    ) -> Option<[Complex<f64>; 4]> {
+    fn admittance_derivative(&self, branch: usize, kind: TapKind) -> Option<[Complex<f64>; 4]> {
         let tap = (*self.taps.get(branch)?)?;
         let y = &self.branches[branch].y;
         Some(match kind {
@@ -491,8 +486,9 @@ impl AcSensitivity {
         // branch — picks up an extra `∂f/∂p|_x`. Leaving it out yields an
         // answer that is right everywhere except on the branch being adjusted,
         // which is the one most likely to be read.
-        let direct = Self::as_tap(variable)
-            .and_then(|(branch, kind)| Some((branch, self.tap_flow_derivative(branch, kind, terminal)?)));
+        let direct = Self::as_tap(variable).and_then(|(branch, kind)| {
+            Some((branch, self.tap_flow_derivative(branch, kind, terminal)?))
+        });
 
         Some(
             self.branches
@@ -606,15 +602,22 @@ impl AcSensitivity {
         let mut d_ratio = vec![0.0; self.branches.len()];
         let mut d_phase = vec![0.0; self.branches.len()];
         for branch in 0..self.branches.len() {
-            for (kind, out) in
-                [(TapKind::Ratio, &mut d_ratio), (TapKind::Phase, &mut d_phase)]
-            {
+            for (kind, out) in [
+                (TapKind::Ratio, &mut d_ratio),
+                (TapKind::Phase, &mut d_phase),
+            ] {
                 let Some(dg) = self.tap_residual_derivative(branch, kind) else {
                     continue;
                 };
                 let mut value: f64 = -dg.iter().zip(&w).map(|(g, wi)| g * wi).sum::<f64>();
-                if let Function::BranchActivePower { branch: b, terminal }
-                | Function::BranchReactivePower { branch: b, terminal } = function
+                if let Function::BranchActivePower {
+                    branch: b,
+                    terminal,
+                }
+                | Function::BranchReactivePower {
+                    branch: b,
+                    terminal,
+                } = function
                 {
                     if b == branch {
                         let s = self
@@ -631,6 +634,11 @@ impl AcSensitivity {
             }
         }
 
-        Some(FunctionRow { d_active, d_reactive, d_ratio, d_phase })
+        Some(FunctionRow {
+            d_active,
+            d_reactive,
+            d_ratio,
+            d_phase,
+        })
     }
 }

@@ -77,8 +77,8 @@ use num_complex::Complex;
 
 use crate::sparse::ComplexSparseSystem;
 
-use super::smallsignal::fill_at_equilibrium;
 use super::DynamicSystem;
+use super::smallsignal::fill_at_equilibrium;
 
 /// A factorization of `J − σE` for one shift, and the operator it provides.
 ///
@@ -140,7 +140,8 @@ impl ShiftedDae {
 
         // The top block-rows negated, the bottom ones as they stand. See the
         // module doc for why that is `J − σE` up to the diagonal term below.
-        let mut entries: Vec<(usize, usize, Complex<f64>)> = Vec::with_capacity(triplets.len() + n_x);
+        let mut entries: Vec<(usize, usize, Complex<f64>)> =
+            Vec::with_capacity(triplets.len() + n_x);
         for (r, c, value) in triplets {
             let value = if r < n_x { -value } else { value };
             entries.push((r, c, Complex::new(value, 0.0)));
@@ -155,8 +156,7 @@ impl ShiftedDae {
             entries.push((r, r, shift));
         }
 
-        let lu = ComplexSparseSystem::new(n, &entries)
-            .ok_or(ShiftError::Singular { sigma })?;
+        let lu = ComplexSparseSystem::new(n, &entries).ok_or(ShiftError::Singular { sigma })?;
         Ok(Self { n_x, n, sigma, lu })
     }
 

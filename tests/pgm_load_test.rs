@@ -1,12 +1,14 @@
 mod common;
 
-use std::path::PathBuf;
-use gridoxide::pgm::{node_id_to_idx, pgm_to_buses_and_branches, pgm_to_3ph_network};
 use gridoxide::network::{build_ybus, build_ybus_3ph};
+use gridoxide::pgm::{node_id_to_idx, pgm_to_3ph_network, pgm_to_buses_and_branches};
 use gridoxide::run_power_flow_analysis_from_ybus;
+use std::path::PathBuf;
 
 fn data_dir(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pgm/powerflow").join(rel)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/pgm/powerflow")
+        .join(rel)
 }
 
 #[test]

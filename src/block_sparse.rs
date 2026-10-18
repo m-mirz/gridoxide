@@ -22,8 +22,8 @@
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::prelude::Reborrow;
-use faer::sparse::{Pair, SymbolicSparseColMat};
 use faer::sparse::linalg::colamd;
+use faer::sparse::{Pair, SymbolicSparseColMat};
 
 /// A 2×2 real block, row-major: `[[a, b], [c, d]]`.
 pub type Block2 = [[f64; 2]; 2];
@@ -33,22 +33,37 @@ pub fn block_zero() -> Block2 {
 }
 
 pub fn block_add(a: Block2, b: Block2) -> Block2 {
-    [[a[0][0] + b[0][0], a[0][1] + b[0][1]], [a[1][0] + b[1][0], a[1][1] + b[1][1]]]
+    [
+        [a[0][0] + b[0][0], a[0][1] + b[0][1]],
+        [a[1][0] + b[1][0], a[1][1] + b[1][1]],
+    ]
 }
 
 pub fn block_sub(a: Block2, b: Block2) -> Block2 {
-    [[a[0][0] - b[0][0], a[0][1] - b[0][1]], [a[1][0] - b[1][0], a[1][1] - b[1][1]]]
+    [
+        [a[0][0] - b[0][0], a[0][1] - b[0][1]],
+        [a[1][0] - b[1][0], a[1][1] - b[1][1]],
+    ]
 }
 
 pub fn block_mul(a: Block2, b: Block2) -> Block2 {
     [
-        [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
-        [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]],
+        [
+            a[0][0] * b[0][0] + a[0][1] * b[1][0],
+            a[0][0] * b[0][1] + a[0][1] * b[1][1],
+        ],
+        [
+            a[1][0] * b[0][0] + a[1][1] * b[1][0],
+            a[1][0] * b[0][1] + a[1][1] * b[1][1],
+        ],
     ]
 }
 
 pub fn block_vec_mul(a: Block2, v: [f64; 2]) -> [f64; 2] {
-    [a[0][0] * v[0] + a[0][1] * v[1], a[1][0] * v[0] + a[1][1] * v[1]]
+    [
+        a[0][0] * v[0] + a[0][1] * v[1],
+        a[1][0] * v[0] + a[1][1] * v[1],
+    ]
 }
 
 pub fn vec_sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
@@ -68,7 +83,10 @@ pub fn block_inv(a: Block2) -> Option<Block2> {
         return None;
     }
     let inv_det = 1.0 / det;
-    Some([[a[1][1] * inv_det, -a[0][1] * inv_det], [-a[1][0] * inv_det, a[0][0] * inv_det]])
+    Some([
+        [a[1][1] * inv_det, -a[0][1] * inv_det],
+        [-a[1][0] * inv_det, a[0][0] * inv_det],
+    ])
 }
 
 /// A mutable block-COO Y-bus/Jacobian accumulator: one 2×2 block per (bus,
@@ -82,7 +100,10 @@ pub struct BlockMatrix {
 
 impl BlockMatrix {
     pub fn new(n: usize) -> Self {
-        Self { n, entries: Vec::new() }
+        Self {
+            n,
+            entries: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, i: usize, j: usize, block: Block2) {
@@ -133,7 +154,11 @@ impl BlockMatrix {
             cols[j].push((i, acc));
             idx = k;
         }
-        BlockAdjacency { n: self.n, rows, cols }
+        BlockAdjacency {
+            n: self.n,
+            rows,
+            cols,
+        }
     }
 }
 
@@ -194,8 +219,14 @@ impl BlockAdjacency {
 
         let mut perm = vec![0usize; self.n];
         let mut perm_inv = vec![0usize; self.n];
-        colamd::order(&mut perm, &mut perm_inv, symbolic.rb(), colamd::Control::default(), stack)
-            .expect("colamd ordering should always succeed on a valid sparsity pattern");
+        colamd::order(
+            &mut perm,
+            &mut perm_inv,
+            symbolic.rb(),
+            colamd::Control::default(),
+            stack,
+        )
+        .expect("colamd ordering should always succeed on a valid sparsity pattern");
         perm
     }
 }
@@ -288,7 +319,12 @@ impl BlockSymbolic {
             l_struct[j].sort_unstable();
         }
 
-        Self { n, perm, l_struct, u_struct }
+        Self {
+            n,
+            perm,
+            l_struct,
+            u_struct,
+        }
     }
 }
 
@@ -390,7 +426,11 @@ impl BlockLu {
                 if k == j {
                     continue;
                 }
-                let xk = if touched_at[k] == j as i64 { x[k] } else { block_zero() };
+                let xk = if touched_at[k] == j as i64 {
+                    x[k]
+                } else {
+                    block_zero()
+                };
                 for &(row, lval) in &l_cols[k] {
                     let delta = block_mul(lval, xk);
                     if touched_at[row] != j as i64 {
@@ -403,21 +443,38 @@ impl BlockLu {
             }
 
             // 3. Diagonal pivot (no partial pivoting — see doc comment).
-            let pivot = if touched_at[j] == j as i64 { x[j] } else { block_zero() };
+            let pivot = if touched_at[j] == j as i64 {
+                x[j]
+            } else {
+                block_zero()
+            };
             let pivot_inv = block_inv(pivot)?;
 
             // 4. Finalize U's and L's column j using the known structure.
             for &row in &symbolic.u_struct[j] {
-                let v = if touched_at[row] == j as i64 { x[row] } else { block_zero() };
+                let v = if touched_at[row] == j as i64 {
+                    x[row]
+                } else {
+                    block_zero()
+                };
                 u_cols[j].push((row, v));
             }
             for &row in &symbolic.l_struct[j] {
-                let v = if touched_at[row] == j as i64 { x[row] } else { block_zero() };
+                let v = if touched_at[row] == j as i64 {
+                    x[row]
+                } else {
+                    block_zero()
+                };
                 l_cols[j].push((row, block_mul(v, pivot_inv)));
             }
         }
 
-        Some(Self { n, perm: perm.clone(), l_cols, u_cols })
+        Some(Self {
+            n,
+            perm: perm.clone(),
+            l_cols,
+            u_cols,
+        })
     }
 
     /// Solves `A x = b` using this factorization. `b` is in original
@@ -443,13 +500,13 @@ impl BlockLu {
             // The diagonal entry is always the last (largest row index <= j,
             // i.e. exactly j) in u_cols[j] since entries are sorted ascending
             // and all rows are <= j.
-            let diag = self
-                .u_cols[j]
+            let diag = self.u_cols[j]
                 .last()
                 .filter(|&&(row, _)| row == j)
                 .map(|&(_, v)| v)
                 .expect("factorize() always records the diagonal entry for column j");
-            let diag_inv = block_inv(diag).expect("diagonal was already validated non-singular during factorize()");
+            let diag_inv = block_inv(diag)
+                .expect("diagonal was already validated non-singular during factorize()");
             x[j] = block_vec_mul(diag_inv, x[j]);
             let xj = x[j];
             for &(row, uval) in &self.u_cols[j] {
@@ -505,14 +562,29 @@ mod tests {
         // A small chain graph: 0-1-2-3.
         let mut m = BlockMatrix::new(4);
         let id = [[1.0, 0.0], [0.0, 1.0]];
-        for &(i, j) in &[(0, 0), (1, 1), (2, 2), (3, 3), (0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)] {
+        for &(i, j) in &[
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (0, 1),
+            (1, 0),
+            (1, 2),
+            (2, 1),
+            (2, 3),
+            (3, 2),
+        ] {
             m.add(i, j, id);
         }
         let adj = m.finish();
         let perm = adj.colamd_order();
         let mut sorted = perm.clone();
         sorted.sort_unstable();
-        assert_eq!(sorted, vec![0, 1, 2, 3], "permutation must be a bijection on 0..n");
+        assert_eq!(
+            sorted,
+            vec![0, 1, 2, 3],
+            "permutation must be a bijection on 0..n"
+        );
     }
 
     #[test]
@@ -533,7 +605,10 @@ mod tests {
         // rows must stay sorted by column for BlockLu's structural-symmetry
         // and binary-search assumptions to hold.
         let cols: Vec<usize> = adj.row(0).iter().map(|&(j, _)| j).collect();
-        assert!(cols.windows(2).all(|w| w[0] < w[1]), "row(0) columns must be strictly ascending: {cols:?}");
+        assert!(
+            cols.windows(2).all(|w| w[0] < w[1]),
+            "row(0) columns must be strictly ascending: {cols:?}"
+        );
     }
 
     /// A ground-truth oracle: expands an `n`-bus block system into a `2n×2n`
@@ -564,8 +639,13 @@ mod tests {
 
         // Gaussian elimination with partial pivoting.
         for col in 0..m {
-            let pivot_row = (col..m).max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs())).unwrap();
-            assert!(a[pivot_row][col].abs() > 1e-12, "dense reference matrix is singular");
+            let pivot_row = (col..m)
+                .max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs()))
+                .unwrap();
+            assert!(
+                a[pivot_row][col].abs() > 1e-12,
+                "dense reference matrix is singular"
+            );
             a.swap(col, pivot_row);
             rhs.swap(col, pivot_row);
             for row in (col + 1)..m {
@@ -645,7 +725,11 @@ mod tests {
         let n = 6;
         let mut m = BlockMatrix::new(n);
         for i in 0..n {
-            m.add(i, i, [[3.0 + i as f64 * 0.3, 0.2], [0.15, 2.5 + i as f64 * 0.2]]);
+            m.add(
+                i,
+                i,
+                [[3.0 + i as f64 * 0.3, 0.2], [0.15, 2.5 + i as f64 * 0.2]],
+            );
         }
         for i in 0..n - 1 {
             let off = [[-0.8, 0.05], [0.03, -0.7]];
@@ -654,7 +738,9 @@ mod tests {
         }
         let adj = m.finish();
         let lu = BlockLu::factorize(&adj).unwrap();
-        let b: Vec<[f64; 2]> = (0..n).map(|i| [1.0 + i as f64, 2.0 - i as f64 * 0.5]).collect();
+        let b: Vec<[f64; 2]> = (0..n)
+            .map(|i| [1.0 + i as f64, 2.0 - i as f64 * 0.5])
+            .collect();
         let x = lu.solve(&b);
         let expected = dense_reference_solve(&adj, &b);
         assert_close(&x, &expected, 1e-8);
@@ -695,7 +781,11 @@ mod tests {
         let n = 5;
         let mut m = BlockMatrix::new(n);
         for i in 0..n {
-            m.add(i, i, [[5.0 + i as f64 * 0.4, 0.3], [0.2, 4.0 + i as f64 * 0.25]]);
+            m.add(
+                i,
+                i,
+                [[5.0 + i as f64 * 0.4, 0.3], [0.2, 4.0 + i as f64 * 0.25]],
+            );
         }
         let edges = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 0), (0, 2)];
         for &(i, j) in &edges {
@@ -705,7 +795,9 @@ mod tests {
         }
         let adj = m.finish();
         let lu = BlockLu::factorize(&adj).unwrap();
-        let b: Vec<[f64; 2]> = (0..n).map(|i| [0.5 * i as f64 + 1.0, 3.0 - 0.3 * i as f64]).collect();
+        let b: Vec<[f64; 2]> = (0..n)
+            .map(|i| [0.5 * i as f64 + 1.0, 3.0 - 0.3 * i as f64])
+            .collect();
         let x = lu.solve(&b);
         let expected = dense_reference_solve(&adj, &b);
         assert_close(&x, &expected, 1e-8);
@@ -738,18 +830,28 @@ mod tests {
                 let a = (next() * n as f64) as usize;
                 let b_idx = (next() * n as f64) as usize;
                 if a != b_idx {
-                    let off = [[-0.2 - next(), 0.05 * next()], [0.05 * next(), -0.2 - next()]];
+                    let off = [
+                        [-0.2 - next(), 0.05 * next()],
+                        [0.05 * next(), -0.2 - next()],
+                    ];
                     m.add(a, b_idx, off);
                     m.add(b_idx, a, off);
                 }
             }
             // Diagonally dominant self-admittance, well within the no-pivoting scope.
             for i in 0..n {
-                m.add(i, i, [[6.0 + next(), 0.2 * next()], [0.2 * next(), 6.0 + next()]]);
+                m.add(
+                    i,
+                    i,
+                    [[6.0 + next(), 0.2 * next()], [0.2 * next(), 6.0 + next()]],
+                );
             }
             let adj = m.finish();
-            let lu = BlockLu::factorize(&adj).unwrap_or_else(|| panic!("trial {trial}: expected non-singular"));
-            let rhs: Vec<[f64; 2]> = (0..n).map(|_| [next() * 4.0 - 2.0, next() * 4.0 - 2.0]).collect();
+            let lu = BlockLu::factorize(&adj)
+                .unwrap_or_else(|| panic!("trial {trial}: expected non-singular"));
+            let rhs: Vec<[f64; 2]> = (0..n)
+                .map(|_| [next() * 4.0 - 2.0, next() * 4.0 - 2.0])
+                .collect();
             let x = lu.solve(&rhs);
             let expected = dense_reference_solve(&adj, &rhs);
             assert_close(&x, &expected, 1e-7);
@@ -767,7 +869,14 @@ mod tests {
         let build = |scale: f64| {
             let mut m = BlockMatrix::new(n);
             for i in 0..n {
-                m.add(i, i, [[6.0 + i as f64 * scale, 0.2], [0.15, 5.0 + i as f64 * scale]]);
+                m.add(
+                    i,
+                    i,
+                    [
+                        [6.0 + i as f64 * scale, 0.2],
+                        [0.15, 5.0 + i as f64 * scale],
+                    ],
+                );
             }
             for i in 0..n - 1 {
                 let off = [[-0.9 * scale, 0.05], [0.04, -0.8 * scale]];
@@ -780,7 +889,9 @@ mod tests {
         let adj_a = build(1.0);
         let symbolic = BlockSymbolic::analyze(&adj_a);
 
-        let b: Vec<[f64; 2]> = (0..n).map(|i| [1.0 + i as f64 * 0.3, -0.5 + i as f64 * 0.2]).collect();
+        let b: Vec<[f64; 2]> = (0..n)
+            .map(|i| [1.0 + i as f64 * 0.3, -0.5 + i as f64 * 0.2])
+            .collect();
 
         for &scale in &[1.0, 2.3, 0.6] {
             let adj = build(scale);

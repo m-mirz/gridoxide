@@ -6,7 +6,7 @@
 //! here are about what that made impossible, plus the driver's own contract:
 //! ordering, termination, budget and invalidation.
 
-use gridoxide::network::{build_ybus, effective_injection, power_injections, YBusSparse};
+use gridoxide::network::{YBusSparse, build_ybus, effective_injection, power_injections};
 use gridoxide::outerloop::{
     DistributedSlack, Invalidates, OuterLoop, OuterLoopContext, OuterLoopStatus, ReactiveLimits,
     SlackDistribution, SolveContext,
@@ -42,10 +42,38 @@ fn ring() -> (Vec<Bus>, YBusSparse) {
         bus(3, BusType::PQ, -1.00, -0.30, -99.0, 99.0),
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.03, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 2, to: 3, r: 0.02, x: 0.07, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 3, to: 0, r: 0.03, x: 0.09, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.03,
+            x: 0.08,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 2,
+            to: 3,
+            r: 0.02,
+            x: 0.07,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 3,
+            to: 0,
+            r: 0.03,
+            x: 0.09,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let ybus = build_ybus(4, &lines, &Vec::<Transformer>::new()).finish();
     (buses, ybus)
@@ -77,13 +105,20 @@ fn q_limits_and_distributed_slack_hold_simultaneously() {
         )
     };
 
-    assert!(islands.iter().all(|i| i.status == IslandStatus::Converged), "{islands:?}");
+    assert!(
+        islands.iter().all(|i| i.status == IslandStatus::Converged),
+        "{islands:?}"
+    );
     assert!(report.converged, "{report:?}");
     assert!(!report.budget_exhausted, "{report:?}");
 
     // Criterion 1: the reactive limit is respected, and by the mechanism that
     // respects it — the bus is off voltage control and pinned at its limit.
-    assert_eq!(buses[1].bus_type, BusType::PQ, "bus 1 should have left voltage control");
+    assert_eq!(
+        buses[1].bus_type,
+        BusType::PQ,
+        "bus 1 should have left voltage control"
+    );
     assert_eq!(qlim.switches(), [1], "exactly bus 1 should switch");
     let (p_calc, q_calc) = power_injections(&buses, &ybus);
     assert!(
@@ -126,7 +161,14 @@ fn neither_loop_alone_satisfies_both_criteria() {
     {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut qlim];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 30, JacobianBackend::Scalar, &mut list, 40);
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-10,
+            30,
+            JacobianBackend::Scalar,
+            &mut list,
+            40,
+        );
     }
     let (p_calc, _) = power_injections(&buses, &ybus);
     let scheduled = effective_injection(&buses[0]).0;
@@ -145,12 +187,23 @@ fn neither_loop_alone_satisfies_both_criteria() {
     {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut slack];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 30, JacobianBackend::Scalar, &mut list, 40);
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-10,
+            30,
+            JacobianBackend::Scalar,
+            &mut list,
+            40,
+        );
     }
     let (p_calc, q_calc) = power_injections(&buses, &ybus);
     let scheduled = effective_injection(&buses[0]).0;
     assert!((p_calc[0] - scheduled).abs() < 1e-8);
-    assert_eq!(buses[1].bus_type, BusType::PV, "no Q-limit loop, so no switch");
+    assert_eq!(
+        buses[1].bus_type,
+        BusType::PV,
+        "no Q-limit loop, so no switch"
+    );
     assert!(
         q_calc[1] < buses[1].q_min - 1e-3,
         "the fixture must genuinely violate the limit when unenforced: Q = {}, q_min = {}",
@@ -169,7 +222,14 @@ fn an_empty_list_is_a_plain_solve() {
 
     let (islands, report) = {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 30, JacobianBackend::Scalar, &mut [], 40)
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-10,
+            30,
+            JacobianBackend::Scalar,
+            &mut [],
+            40,
+        )
     };
 
     assert!(islands.iter().all(|i| i.status == IslandStatus::Converged));
@@ -177,8 +237,18 @@ fn an_empty_list_is_a_plain_solve() {
     assert_eq!(report.total_iterations, 0);
     assert!(report.loops.is_empty());
     for (a, b) in buses.iter().zip(&plain) {
-        assert_eq!(a.voltage_mag.to_bits(), b.voltage_mag.to_bits(), "bus {}", a.idx);
-        assert_eq!(a.voltage_ang.to_bits(), b.voltage_ang.to_bits(), "bus {}", a.idx);
+        assert_eq!(
+            a.voltage_mag.to_bits(),
+            b.voltage_mag.to_bits(),
+            "bus {}",
+            a.idx
+        );
+        assert_eq!(
+            a.voltage_ang.to_bits(),
+            b.voltage_ang.to_bits(),
+            "bus {}",
+            a.idx
+        );
     }
 }
 
@@ -221,13 +291,30 @@ impl OuterLoop for Counter {
 fn loops_run_innermost_first_and_the_list_is_re_walked() {
     let (mut buses, mut ybus) = ring();
     let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut inner = Counter { name: "inner", unstable_for: 2, seen: 0, log: log.clone() };
-    let mut outer = Counter { name: "outer", unstable_for: 1, seen: 0, log: log.clone() };
+    let mut inner = Counter {
+        name: "inner",
+        unstable_for: 2,
+        seen: 0,
+        log: log.clone(),
+    };
+    let mut outer = Counter {
+        name: "outer",
+        unstable_for: 1,
+        seen: 0,
+        log: log.clone(),
+    };
 
     let (_, report) = {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut inner, &mut outer];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 30, JacobianBackend::Scalar, &mut list, 40)
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-10,
+            30,
+            JacobianBackend::Scalar,
+            &mut list,
+            40,
+        )
     };
 
     assert_eq!(
@@ -259,16 +346,31 @@ fn loops_run_innermost_first_and_the_list_is_re_walked() {
 fn the_budget_is_shared_and_exhaustion_is_reported() {
     let (mut buses, mut ybus) = ring();
     let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut never = Counter { name: "never", unstable_for: usize::MAX, seen: 0, log };
+    let mut never = Counter {
+        name: "never",
+        unstable_for: usize::MAX,
+        seen: 0,
+        log,
+    };
 
     let (_, report) = {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut never];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 30, JacobianBackend::Scalar, &mut list, 5)
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-10,
+            30,
+            JacobianBackend::Scalar,
+            &mut list,
+            5,
+        )
     };
 
     assert!(report.budget_exhausted, "{report:?}");
-    assert!(!report.converged, "a run that ran out of budget has not converged");
+    assert!(
+        !report.converged,
+        "a run that ran out of budget has not converged"
+    );
     assert_eq!(report.total_iterations, 5);
 }
 
@@ -291,7 +393,14 @@ fn a_failing_loop_stops_the_run() {
     let (_, report) = {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut fails];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-10, 30, JacobianBackend::Scalar, &mut list, 40)
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-10,
+            30,
+            JacobianBackend::Scalar,
+            &mut list,
+            40,
+        )
     };
 
     assert!(!report.converged);
@@ -314,18 +423,35 @@ fn a_solve_that_does_not_settle_consults_no_loop() {
     let (mut buses, mut ybus) = ring();
 
     let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut counter = Counter { name: "unused", unstable_for: 3, seen: 0, log: log.clone() };
+    let mut counter = Counter {
+        name: "unused",
+        unstable_for: 3,
+        seen: 0,
+        log: log.clone(),
+    };
     let (islands, report) = {
         let mut ctx = SolveContext::new(&mut buses, &mut ybus);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut counter];
         // One iteration cannot reach 1e-12 from a flat start.
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-12, 1, JacobianBackend::Scalar, &mut list, 40)
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-12,
+            1,
+            JacobianBackend::Scalar,
+            &mut list,
+            40,
+        )
     };
 
     assert!(
-        islands.iter().all(|i| i.status == IslandStatus::MaxIterationsReached),
+        islands
+            .iter()
+            .all(|i| i.status == IslandStatus::MaxIterationsReached),
         "fixture assumption broken, this should not settle: {islands:?}"
     );
-    assert!(log.borrow().is_empty(), "no loop should have been consulted");
+    assert!(
+        log.borrow().is_empty(),
+        "no loop should have been consulted"
+    );
     assert_eq!(report.solves, 1);
 }

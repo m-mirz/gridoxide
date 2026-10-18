@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use num_complex::Complex;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BusType {
@@ -40,12 +40,12 @@ fn is_unbounded(limit: &f64) -> bool {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bus {
-    pub idx: usize,          // index in arrays (0-based)
+    pub idx: usize, // index in arrays (0-based)
     pub bus_type: BusType,
-    pub voltage_mag: f64,    // Vm (p.u.)
-    pub voltage_ang: f64,    // Va (rad)
-    pub p_spec: f64,         // P specified (generation - load) in p.u., constant-power part
-    pub q_spec: f64,         // Q specified (generation - load) in p.u., constant-power part
+    pub voltage_mag: f64, // Vm (p.u.)
+    pub voltage_ang: f64, // Va (rad)
+    pub p_spec: f64,      // P specified (generation - load) in p.u., constant-power part
+    pub q_spec: f64,      // Q specified (generation - load) in p.u., constant-power part
     /// PV bus reactive limits, enforced only by `outerloop::ReactiveLimits`.
     ///
     /// Unbounded is `±∞`, and JSON has no infinity — `serde_json` writes any
@@ -59,7 +59,7 @@ pub struct Bus {
     #[serde(default = "unbounded_above", skip_serializing_if = "is_unbounded")]
     pub q_max: f64,
     #[serde(default)]
-    pub u_rated: f64,        // rated line-to-line voltage in V (0 = not set)
+    pub u_rated: f64, // rated line-to-line voltage in V (0 = not set)
     /// Additional voltage-dependent (constant-current/-impedance) injection terms,
     /// summed on top of `p_spec`/`q_spec` at the current voltage estimate.
     #[serde(default)]
@@ -287,11 +287,15 @@ impl TapChanger {
     /// `invalidate_admittances` — the same position a switch flip is in.
     /// `outerloop::SolveContext::restamp_ybus` is what does the rebuilding.
     pub fn set_position(&mut self, transformer: &mut Transformer, position: i32) -> bool {
-        let Some(tap) = self.at(position) else { return false };
+        let Some(tap) = self.at(position) else {
+            return false;
+        };
         if let Some(series) = &self.series {
             // Checked before either write, so a malformed changer leaves both
             // halves untouched rather than one.
-            let Some(y) = series.get((position - self.low) as usize) else { return false };
+            let Some(y) = series.get((position - self.low) as usize) else {
+                return false;
+            };
             transformer.y_series = *y;
         }
         self.position = position;

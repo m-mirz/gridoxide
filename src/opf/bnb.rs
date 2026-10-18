@@ -57,7 +57,11 @@ pub struct BnbOptions {
 
 impl Default for BnbOptions {
     fn default() -> Self {
-        Self { integrality_tolerance: 1e-6, relative_gap: 0.0, max_nodes: 10_000 }
+        Self {
+            integrality_tolerance: 1e-6,
+            relative_gap: 0.0,
+            max_nodes: 10_000,
+        }
     }
 }
 
@@ -80,7 +84,12 @@ impl BranchAndBound {
     }
 
     pub fn with_solver(relaxation: Box<dyn Solver>) -> Self {
-        Self { relaxation, options: BnbOptions::default(), nodes: 0, gap: f64::INFINITY }
+        Self {
+            relaxation,
+            options: BnbOptions::default(),
+            nodes: 0,
+            gap: f64::INFINITY,
+        }
     }
 
     pub fn options_mut(&mut self) -> &mut BnbOptions {
@@ -219,15 +228,9 @@ impl Solver for BranchAndBound {
                     let floor = value.floor();
                     let ceil = value.ceil();
                     let (near, far) = if value - floor <= ceil - value {
-                        (
-                            (col, f64::NEG_INFINITY, floor),
-                            (col, ceil, f64::INFINITY),
-                        )
+                        ((col, f64::NEG_INFINITY, floor), (col, ceil, f64::INFINITY))
                     } else {
-                        (
-                            (col, ceil, f64::INFINITY),
-                            (col, f64::NEG_INFINITY, floor),
-                        )
+                        ((col, ceil, f64::INFINITY), (col, f64::NEG_INFINITY, floor))
                     };
                     // Pushed far-first so the *near* child is popped first —
                     // the dive that finds an incumbent quickly.

@@ -1,15 +1,17 @@
 mod common;
 
-use std::fs;
-use std::path::PathBuf;
 use gridoxide::json::NetworkData;
 use gridoxide::network::{build_ybus, linear_initial_guess, stamp_shunts};
-use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches, PgmNodeOutput};
-use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend};
+use gridoxide::pgm::{PgmNodeOutput, node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
+use gridoxide::solver::{JacobianBackend, newton_raphson_with_backend};
 use gridoxide::types::Bus;
+use std::fs;
+use std::path::PathBuf;
 
 fn data_dir(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pgm/powerflow/symmetric").join(rel)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/pgm/powerflow/symmetric")
+        .join(rel)
 }
 
 /// Mirrors `run_power_flow_analysis_from_ybus`, but runs the experimental
@@ -50,11 +52,16 @@ fn block_backend_matches_scalar_backend_with_pv_bus() {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("tests/data/network.json");
     let network_json = fs::read_to_string(&path).expect("Unable to read network.json");
-    let network_data: NetworkData = serde_json::from_str(&network_json).expect("Unable to parse network.json");
+    let network_data: NetworkData =
+        serde_json::from_str(&network_json).expect("Unable to parse network.json");
 
     let mut buses = network_data.buses;
-    assert!(buses.iter().any(|b| matches!(b.bus_type, gridoxide::types::BusType::PV)),
-        "fixture must contain a PV bus to exercise this backend's PV handling");
+    assert!(
+        buses
+            .iter()
+            .any(|b| matches!(b.bus_type, gridoxide::types::BusType::PV)),
+        "fixture must contain a PV bus to exercise this backend's PV handling"
+    );
     let ybus = build_ybus(buses.len(), &network_data.lines, &[]).finish();
     linear_initial_guess(&mut buses, &ybus);
     newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, JacobianBackend::Block);
@@ -62,8 +69,14 @@ fn block_backend_matches_scalar_backend_with_pv_bus() {
     // Same expected values as tests/powerflow_test.rs's Scalar-backend run.
     let expected_voltages = [(1.06, 0.0), (1.04, 0.014349), (1.003358, -0.043141)];
     for (i, &(expected_mag, expected_ang_rad)) in expected_voltages.iter().enumerate() {
-        assert!((buses[i].voltage_mag - expected_mag).abs() < 1e-5, "bus {i} voltage_mag");
-        assert!((buses[i].voltage_ang - expected_ang_rad).abs() < 1e-5, "bus {i} voltage_ang");
+        assert!(
+            (buses[i].voltage_mag - expected_mag).abs() < 1e-5,
+            "bus {i} voltage_mag"
+        );
+        assert!(
+            (buses[i].voltage_ang - expected_ang_rad).abs() < 1e-5,
+            "bus {i} voltage_ang"
+        );
     }
 }
 
@@ -118,7 +131,12 @@ fn block_backend_matches_pgm_transformer_batch() {
     let expected = common::load_batch_output::<PgmNodeOutput>(&base.join("sym_output_batch.json"));
 
     let tol = 1e-4;
-    for (scenario, expected_scenario) in update["data"].as_array().unwrap().iter().zip(&expected.data) {
+    for (scenario, expected_scenario) in update["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&expected.data)
+    {
         let input = common::apply_batch_scenario(&base_json, scenario);
         let id_to_idx = node_id_to_idx(&input);
         let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
@@ -140,7 +158,12 @@ fn block_backend_matches_pgm_distribution_case_batch() {
     let expected = common::load_batch_output::<PgmNodeOutput>(&base.join("sym_output_batch.json"));
 
     let tol = 1e-5;
-    for (scenario, expected_scenario) in update["data"].as_array().unwrap().iter().zip(&expected.data) {
+    for (scenario, expected_scenario) in update["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&expected.data)
+    {
         let input = common::apply_batch_scenario(&base_json, scenario);
         let id_to_idx = node_id_to_idx(&input);
         let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);

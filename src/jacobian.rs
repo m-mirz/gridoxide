@@ -115,16 +115,26 @@ impl JacobianPattern {
             pq_pos[i] = Some(pos);
         }
 
-        let capacity: usize = non_slack_idx.iter().map(|&i| ybus.row(i).len()).sum::<usize>() * 2
+        let capacity: usize = non_slack_idx
+            .iter()
+            .map(|&i| ybus.row(i).len())
+            .sum::<usize>()
+            * 2
             + pq_idx.iter().map(|&i| ybus.row(i).len()).sum::<usize>() * 2;
         let mut rows = Vec::with_capacity(capacity);
         let mut cols = Vec::with_capacity(capacity);
         let mut entries = Vec::with_capacity(capacity);
-        let mut push = |row: usize, col: usize, kind: EntryKind, i: usize, k: usize, y: Complex<f64>| {
-            rows.push(row as u32);
-            cols.push(col as u32);
-            entries.push(Entry { kind, i: i as u32, k: k as u32, y });
-        };
+        let mut push =
+            |row: usize, col: usize, kind: EntryKind, i: usize, k: usize, y: Complex<f64>| {
+                rows.push(row as u32);
+                cols.push(col as u32);
+                entries.push(Entry {
+                    kind,
+                    i: i as u32,
+                    k: k as u32,
+                    y,
+                });
+            };
 
         // H and N blocks: rows = non_slack_idx (P-mismatch equations).
         for (row_idx, &i) in non_slack_idx.iter().enumerate() {
@@ -153,19 +163,38 @@ impl JacobianPattern {
                     // just PQ ones — these differ once PV buses exist.
                     let col_idx = non_slack_pos[i].expect("a PQ bus is always non-slack");
                     push(n_angle + row_idx, col_idx, EntryKind::Mii, i, i, y_ik);
-                    push(n_angle + row_idx, n_angle + row_idx, EntryKind::Lii, i, i, y_ik);
+                    push(
+                        n_angle + row_idx,
+                        n_angle + row_idx,
+                        EntryKind::Lii,
+                        i,
+                        i,
+                        y_ik,
+                    );
                     continue;
                 }
                 if let Some(col_idx) = non_slack_pos[k] {
                     push(n_angle + row_idx, col_idx, EntryKind::Mik, i, k, y_ik);
                 }
                 if let Some(col_idx) = pq_pos[k] {
-                    push(n_angle + row_idx, n_angle + col_idx, EntryKind::Lik, i, k, y_ik);
+                    push(
+                        n_angle + row_idx,
+                        n_angle + col_idx,
+                        EntryKind::Lik,
+                        i,
+                        k,
+                        y_ik,
+                    );
                 }
             }
         }
 
-        Self { n_unknowns, rows, cols, entries }
+        Self {
+            n_unknowns,
+            rows,
+            cols,
+            entries,
+        }
     }
 
     /// Number of Jacobian nonzeros — the length of `values` that
@@ -265,7 +294,11 @@ impl JacobianPattern {
     pub fn fill_identity_into(&self, values: &mut Vec<f64>) {
         values.reserve(self.entries.len());
         for k in 0..self.entries.len() {
-            values.push(if self.rows[k] == self.cols[k] { 1.0 } else { 0.0 });
+            values.push(if self.rows[k] == self.cols[k] {
+                1.0
+            } else {
+                0.0
+            });
         }
     }
 
@@ -312,7 +345,14 @@ mod tests {
             bus(3, BusType::PQ, 1.0, -0.3, -0.1),
             bus(4, BusType::PQ, 1.0, -0.5, -0.15),
         ];
-        let line = |from, to, r, x, b| Line { from, to, r, x, b_shunt: b, g_shunt: 0.0 };
+        let line = |from, to, r, x, b| Line {
+            from,
+            to,
+            r,
+            x,
+            b_shunt: b,
+            g_shunt: 0.0,
+        };
         let lines = vec![
             line(0, 1, 0.02, 0.06, 0.03),
             line(0, 2, 0.08, 0.24, 0.025),
@@ -352,7 +392,11 @@ mod tests {
 
             assert_eq!(got.len(), expected.len(), "nonzero count at step {step}");
             for (idx, (g, e)) in got.iter().zip(&expected).enumerate() {
-                assert_eq!((g.0, g.1), (e.0, e.1), "entry {idx} position at step {step}");
+                assert_eq!(
+                    (g.0, g.1),
+                    (e.0, e.1),
+                    "entry {idx} position at step {step}"
+                );
                 assert_eq!(
                     g.2.to_bits(),
                     e.2.to_bits(),

@@ -15,8 +15,8 @@
 
 #![cfg(feature = "opf")]
 
-use gridoxide::opf::nlp::{solve, NlpOptions, NonlinearProblem};
 use gridoxide::opf::OptStatus;
+use gridoxide::opf::nlp::{NlpOptions, NonlinearProblem, solve};
 
 const TOL: f64 = 1e-6;
 
@@ -92,7 +92,11 @@ fn a_curved_equality_constraint_is_satisfied_at_the_solution() {
         1.0,
         "the constraint itself",
     );
-    assert!(solution.violation < 1e-8, "violation {}", solution.violation);
+    assert!(
+        solution.violation < 1e-8,
+        "violation {}",
+        solution.violation
+    );
 }
 
 /// Minimize `x0 · x1` subject to `x0 + x1 = 2`, with both variables in
@@ -149,10 +153,17 @@ fn an_indefinite_lagrangian_does_not_stall_at_the_saddle() {
     let solution = solve(&IndefiniteProduct, &NlpOptions::default()).unwrap();
     assert_eq!(solution.status, OptStatus::Optimal, "{:?}", solution);
     close(solution.objective, 0.0, "objective at a corner");
-    close(solution.x[0] + solution.x[1], 2.0, "the equality constraint");
+    close(
+        solution.x[0] + solution.x[1],
+        2.0,
+        "the equality constraint",
+    );
 
     // One variable at zero, the other at two — whichever way round.
-    let (a, b) = (solution.x[0].min(solution.x[1]), solution.x[0].max(solution.x[1]));
+    let (a, b) = (
+        solution.x[0].min(solution.x[1]),
+        solution.x[0].max(solution.x[1]),
+    );
     close(a, 0.0, "the variable driven to its floor");
     close(b, 2.0, "the variable taking the whole budget");
 
@@ -218,7 +229,11 @@ fn a_curved_inequality_binds_where_geometry_says_it_should() {
     close(solution.x[0], 2.0 / root5, "x0 on the circle");
     close(solution.x[1], 1.0 / root5, "x1 on the circle");
     close(solution.objective, (root5 - 1.0).powi(2), "objective");
-    assert!(solution.violation < 1e-8, "violation {}", solution.violation);
+    assert!(
+        solution.violation < 1e-8,
+        "violation {}",
+        solution.violation
+    );
 }
 
 /// A problem with **two local minima**, to make explicit what a nonconvex
@@ -278,14 +293,25 @@ fn a_nonconvex_problem_finds_the_local_minimum_it_started_near() {
 
     assert_eq!(from_the_right.status, OptStatus::Optimal);
     assert_eq!(from_the_left.status, OptStatus::Optimal);
-    assert!(from_the_right.x[0] > 0.0, "started right, ended at {}", from_the_right.x[0]);
-    assert!(from_the_left.x[0] < 0.0, "started left, ended at {}", from_the_left.x[0]);
+    assert!(
+        from_the_right.x[0] > 0.0,
+        "started right, ended at {}",
+        from_the_right.x[0]
+    );
+    assert!(
+        from_the_left.x[0] < 0.0,
+        "started left, ended at {}",
+        from_the_left.x[0]
+    );
 
     // Both are genuine stationary points: f'(x) = 4x³ − 8x + 0.3 ≈ 0.
     for solution in [&from_the_right, &from_the_left] {
         let x = solution.x[0];
         let slope = 4.0 * x.powi(3) - 8.0 * x + 0.3;
-        assert!(slope.abs() < 1e-5, "f'({x}) = {slope}, not a stationary point");
+        assert!(
+            slope.abs() < 1e-5,
+            "f'({x}) = {slope}, not a stationary point"
+        );
     }
 
     // And the left well really is the deeper one, so the answer genuinely

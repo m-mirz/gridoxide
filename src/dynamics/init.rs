@@ -58,12 +58,12 @@
 
 use num_complex::Complex;
 
-use crate::network::{build_ybus, power_injections, stamp_shunts, ShuntAdm};
+use crate::network::{ShuntAdm, build_ybus, power_injections, stamp_shunts};
 use crate::types::{Bus, Line, Transformer};
 
-use super::dae::{residual, DaeLayout, DaePattern};
-use super::models::{DynamicModel, InitError};
 use super::DynamicSystem;
+use super::dae::{DaeLayout, DaePattern, residual};
+use super::models::{DynamicModel, InitError};
 
 /// One device to place on the network.
 pub struct DeviceSpec {
@@ -118,36 +118,61 @@ pub struct SystemSpec<'a> {
 /// Why a system could not be assembled.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BuildError {
-    BusOutOfRange { id: String, bus: usize, n_bus: usize },
+    BusOutOfRange {
+        id: String,
+        bus: usize,
+        n_bus: usize,
+    },
     /// A device at a bus whose voltage is held constant. Refused rather than
     /// handled: the constraint would absorb whatever the device injected, so
     /// the device's own dynamics would be decoupled from the network and its
     /// trajectory would be meaningless.
-    DeviceAtFixedBus { id: String, bus: usize },
-    ModelInit { id: String, source: InitError },
+    DeviceAtFixedBus {
+        id: String,
+        bus: usize,
+    },
+    ModelInit {
+        id: String,
+        source: InitError,
+    },
     /// A bus with no admittance to anything, so its two algebraic rows are
     /// empty and the block is structurally singular.
-    BusWithoutAdmittance { bus: usize },
+    BusWithoutAdmittance {
+        bus: usize,
+    },
     /// Some device is not at an equilibrium. See the module doc: this is
     /// always a real internal inconsistency, never rounding — but note that a
     /// mis-declared device/load split is *not* one of the things it catches.
-    NotAnEquilibrium { max_derivative: f64 },
+    NotAnEquilibrium {
+        max_derivative: f64,
+    },
     /// The network constraint is not satisfied at the initial point.
-    NetworkResidual { norm: f64 },
+    NetworkResidual {
+        norm: f64,
+    },
 }
 
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BuildError::BusOutOfRange { id, bus, n_bus } => {
-                write!(f, "device {id} is at bus {bus}, but the network has {n_bus} buses")
+                write!(
+                    f,
+                    "device {id} is at bus {bus}, but the network has {n_bus} buses"
+                )
             }
             BuildError::DeviceAtFixedBus { id, bus } => {
-                write!(f, "device {id} is at bus {bus}, whose voltage is held constant")
+                write!(
+                    f,
+                    "device {id} is at bus {bus}, whose voltage is held constant"
+                )
             }
             BuildError::ModelInit { id, source } => write!(f, "device {id}: {source}"),
             BuildError::BusWithoutAdmittance { bus } => {
-                write!(f, "bus {bus} has no admittance to anything, so the network block is singular")
+                write!(
+                    f,
+                    "bus {bus} has no admittance to anything, so the network block is singular"
+                )
             }
             BuildError::NotAnEquilibrium { max_derivative } => write!(
                 f,
@@ -188,7 +213,10 @@ pub fn build(spec: SystemSpec<'_>) -> Result<DynamicSystem, BuildError> {
             });
         }
         if is_fixed[dev.bus] {
-            return Err(BuildError::DeviceAtFixedBus { id: dev.id.clone(), bus: dev.bus });
+            return Err(BuildError::DeviceAtFixedBus {
+                id: dev.id.clone(),
+                bus: dev.bus,
+            });
         }
     }
 
@@ -213,8 +241,9 @@ pub fn build(spec: SystemSpec<'_>) -> Result<DynamicSystem, BuildError> {
     stamp_shunts(&mut ybus, spec.shunts);
 
     // What each bus injects beyond its devices becomes a constant admittance.
-    let mut remaining: Vec<Complex<f64>> =
-        (0..n_bus).map(|i| Complex::new(p_calc[i], q_calc[i])).collect();
+    let mut remaining: Vec<Complex<f64>> = (0..n_bus)
+        .map(|i| Complex::new(p_calc[i], q_calc[i]))
+        .collect();
     for dev in &spec.devices {
         remaining[dev.bus] -= dev.s;
     }
@@ -252,10 +281,18 @@ pub fn build(spec: SystemSpec<'_>) -> Result<DynamicSystem, BuildError> {
     let mut x0: Vec<f64> = Vec::new();
 
     for dev in spec.devices {
-        let DeviceSpec { id, bus, s, mut model } = dev;
+        let DeviceSpec {
+            id,
+            bus,
+            s,
+            mut model,
+        } = dev;
         let states = model
             .initialize(v[bus], s)
-            .map_err(|source| BuildError::ModelInit { id: id.clone(), source })?;
+            .map_err(|source| BuildError::ModelInit {
+                id: id.clone(),
+                source,
+            })?;
         dev_len.push(states.len());
         dev_bus.push(bus);
         x0.extend_from_slice(&states);
@@ -287,7 +324,9 @@ pub fn build(spec: SystemSpec<'_>) -> Result<DynamicSystem, BuildError> {
 
     let drift = system.max_derivative();
     if drift > EQUILIBRIUM_TOL {
-        return Err(BuildError::NotAnEquilibrium { max_derivative: drift });
+        return Err(BuildError::NotAnEquilibrium {
+            max_derivative: drift,
+        });
     }
     let norm = system.network_residual_norm();
     if norm > EQUILIBRIUM_TOL {
@@ -321,6 +360,8 @@ impl DynamicSystem {
             &mut f_scratch,
             &mut out,
         );
-        out[layout.n_diff..].iter().fold(0.0f64, |m, r| m.max(r.abs()))
+        out[layout.n_diff..]
+            .iter()
+            .fold(0.0f64, |m, r| m.max(r.abs()))
     }
 }

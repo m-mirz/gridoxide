@@ -47,13 +47,13 @@
 //! has moved in one direction it will not be moved back, since a protection
 //! scheme does not hunt.
 
+use crate::linear::DcOptions;
 use crate::linear::btheta::dc_branches;
 use crate::linear::sensitivity::DcSensitivity;
-use crate::linear::DcOptions;
 use crate::types::Transformer;
 
 use super::crac::{Crac, ElementaryAction, InstantKind, RangeActionKind, State, UsageRule};
-use super::evaluate::{evaluate_model, CnecResult, FlowModel, Network, Resolution};
+use super::evaluate::{CnecResult, FlowModel, Network, Resolution, evaluate_model};
 use super::linear::{phase_shift_sensitivity, tap_table};
 
 /// What fired, and what it left behind.
@@ -149,7 +149,10 @@ pub fn simulate(
         .instants
         .iter()
         .position(|i| i.kind == InstantKind::Auto)?;
-    let state = State { instant, contingency: Some(contingency) };
+    let state = State {
+        instant,
+        contingency: Some(contingency),
+    };
     if !crac.flow_cnecs.iter().any(|c| c.state == state) {
         return None;
     }
@@ -159,8 +162,15 @@ pub fn simulate(
         transformers: transformers.to_vec(),
         ..Default::default()
     };
-    result.initial_margin_mw =
-        margin(crac, network, resolution, &state, &result.open_branches, &result.transformers, model);
+    result.initial_margin_mw = margin(
+        crac,
+        network,
+        resolution,
+        &state,
+        &result.open_branches,
+        &result.transformers,
+        model,
+    );
     result.final_margin_mw = result.initial_margin_mw;
 
     // Where each shifter stood when this perimeter began, which is what a
@@ -170,17 +180,28 @@ pub fn simulate(
     // fires and never re-measured, exactly as [`search`](super::search) does it.
     let anchors = super::linear::taps_now(
         crac,
-        &Network { transformers, ..*network },
+        &Network {
+            transformers,
+            ..*network
+        },
         resolution,
     );
 
     // Speeds, ascending — see [`DEFAULT_SPEED`] for where an action that states
     // none belongs, which is not where it looks like it belongs.
     let mut speeds: Vec<i64> = Vec::new();
-    for action in crac.network_actions.iter().filter(|a| covers(&a.usage_rules, &state)) {
+    for action in crac
+        .network_actions
+        .iter()
+        .filter(|a| covers(&a.usage_rules, &state))
+    {
         speeds.push(speed_of(action.speed));
     }
-    for action in crac.range_actions.iter().filter(|a| covers(&a.usage_rules, &state)) {
+    for action in crac
+        .range_actions
+        .iter()
+        .filter(|a| covers(&a.usage_rules, &state))
+    {
         speeds.push(speed_of(action.speed));
     }
     speeds.sort_unstable();
@@ -193,8 +214,15 @@ pub fn simulate(
         // same speed class samples the grid at the same moment; asking each in
         // turn what its sibling just did is a different — and, on the vendored
         // evidence, wrong — model.
-        let snapshot =
-            violated(crac, network, resolution, &state, &result.open_branches, &result.transformers, model);
+        let snapshot = violated(
+            crac,
+            network,
+            resolution,
+            &state,
+            &result.open_branches,
+            &result.transformers,
+            model,
+        );
         for (index, action) in crac.network_actions.iter().enumerate() {
             if result.network_actions.contains(&index) {
                 continue;
@@ -219,8 +247,15 @@ pub fn simulate(
             if rounds > MAX_ROUNDS {
                 break;
             }
-            let violations =
-                violated(crac, network, resolution, &state, &result.open_branches, &result.transformers, model);
+            let violations = violated(
+                crac,
+                network,
+                resolution,
+                &state,
+                &result.open_branches,
+                &result.transformers,
+                model,
+            );
             let mut moved = false;
             for (index, action) in crac.range_actions.iter().enumerate() {
                 if result.range_actions.iter().any(|(i, _, _)| *i == index) {
@@ -232,13 +267,23 @@ pub fn simulate(
                 if !triggered(&action.usage_rules, &state, &violations) {
                     continue;
                 }
-                let RangeActionKind::Pst { element, tap_to_angle, initial_tap } = &action.kind
+                let RangeActionKind::Pst {
+                    element,
+                    tap_to_angle,
+                    initial_tap,
+                } = &action.kind
                 else {
                     continue;
                 };
-                let Some(branch) = resolution.branch(element) else { continue };
-                let table =
-                    tap_table(tap_to_angle, network.tap_changers, branch, network.lines.len());
+                let Some(branch) = resolution.branch(element) else {
+                    continue;
+                };
+                let table = tap_table(
+                    tap_to_angle,
+                    network.tap_changers,
+                    branch,
+                    network.lines.len(),
+                );
                 // Restricted to what the CRAC actually permits, *before* the
                 // shift is sized. An automaton is not exempt from its own
                 // range: the reference clamps the computed set-point to
@@ -251,8 +296,10 @@ pub fn simulate(
                     .find(|(i, _)| *i == index)
                     .map_or(*initial_tap, |(_, t)| *t);
                 let (low, high) = super::linear::tap_bounds(action, &table, *initial_tap, previous);
-                let table: Vec<(i32, f64)> =
-                    table.into_iter().filter(|(_, a)| *a >= low - 1e-9 && *a <= high + 1e-9).collect();
+                let table: Vec<(i32, f64)> = table
+                    .into_iter()
+                    .filter(|(_, a)| *a >= low - 1e-9 && *a <= high + 1e-9)
+                    .collect();
                 // Sized against the CNECs *this* action watches, not the worst
                 // in the perimeter. A scheme is wired to a particular circuit;
                 // sizing it against somebody else's overload asks it to relieve
@@ -280,8 +327,15 @@ pub fn simulate(
         }
     }
 
-    result.final_margin_mw =
-        margin(crac, network, resolution, &state, &result.open_branches, &result.transformers, model);
+    result.final_margin_mw = margin(
+        crac,
+        network,
+        resolution,
+        &state,
+        &result.open_branches,
+        &result.transformers,
+        model,
+    );
     Some(result)
 }
 
@@ -376,7 +430,9 @@ fn apply_network_action(
     for elementary in &action.elementary {
         match elementary {
             ElementaryAction::TerminalsConnection { element, connected } => {
-                let Some(branch) = resolution.branch(element) else { return false };
+                let Some(branch) = resolution.branch(element) else {
+                    return false;
+                };
                 if *connected {
                     closed.push(branch);
                 } else {
@@ -384,7 +440,9 @@ fn apply_network_action(
                 }
             }
             ElementaryAction::Switch { element, open } => {
-                let Some(branch) = resolution.branch(element) else { return false };
+                let Some(branch) = resolution.branch(element) else {
+                    return false;
+                };
                 if *open {
                     opened.push(branch);
                 } else {
@@ -451,7 +509,12 @@ fn shift_until_secure(
     model: FlowModel,
 ) -> Option<(i32, f64)> {
     let start = current_tap(result, branch, network.lines.len(), tap_to_angle)?;
-    let angle_of = |tap: i32| tap_to_angle.iter().find(|(t, _)| *t == tap).map(|(_, a)| *a);
+    let angle_of = |tap: i32| {
+        tap_to_angle
+            .iter()
+            .find(|(t, _)| *t == tap)
+            .map(|(_, a)| *a)
+    };
     let start_angle = angle_of(start)?;
 
     let mut transformers = result.transformers.clone();
@@ -512,7 +575,9 @@ fn shift_until_secure(
         ) else {
             break;
         };
-        let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else { break };
+        let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else {
+            break;
+        };
         // MW per degree of the CRAC's angle — the same sign convention the
         // linear optimizer uses, and for the same reason.
         let sigma = -column.get(worst.branch).copied().unwrap_or(0.0)
@@ -531,7 +596,9 @@ fn shift_until_secure(
         // either unit — only the choice of CNEC above depended on that.
         let needed = worst.flow_mw.signum() * worst.margin_mw.min(0.0) / sigma;
         let target = angle + needed;
-        let Some(next) = round_away(tap_to_angle, angle, target) else { break };
+        let Some(next) = round_away(tap_to_angle, angle, target) else {
+            break;
+        };
 
         let step = (next.1 - angle).signum() * f64::from(u8::from((next.1 - angle).abs() > 1e-9));
         // At a bound, or asked to turn round. Either way the position it is
@@ -552,8 +619,18 @@ fn shift_until_secure(
     }
     // The estimate got it into the neighbourhood; this settles which tap.
     Some(smallest_securing(
-        crac, network, resolution, state, result, branch, tap_to_angle, watched, &hopeless, model,
-        start, tap,
+        crac,
+        network,
+        resolution,
+        state,
+        result,
+        branch,
+        tap_to_angle,
+        watched,
+        &hopeless,
+        model,
+        start,
+        tap,
     ))
 }
 
@@ -599,9 +676,16 @@ fn smallest_securing(
     start: i32,
     reached: i32,
 ) -> (i32, f64) {
-    let angle_of = |tap: i32| tap_to_angle.iter().find(|(t, _)| *t == tap).map(|(_, a)| *a);
+    let angle_of = |tap: i32| {
+        tap_to_angle
+            .iter()
+            .find(|(t, _)| *t == tap)
+            .map(|(_, a)| *a)
+    };
     let reached_angle = angle_of(reached).unwrap_or_default();
-    let Some(i) = branch.checked_sub(network.lines.len()) else { return (reached, reached_angle) };
+    let Some(i) = branch.checked_sub(network.lines.len()) else {
+        return (reached, reached_angle);
+    };
 
     // Every tap strictly between the two, ordered from `start` outward, then
     // the one actually reached. Ordered by tap number rather than by angle
@@ -609,7 +693,13 @@ fn smallest_securing(
     let mut between: Vec<i32> = tap_to_angle
         .iter()
         .map(|(t, _)| *t)
-        .filter(|t| if reached > start { *t > start && *t < reached } else { *t < start && *t > reached })
+        .filter(|t| {
+            if reached > start {
+                *t > start && *t < reached
+            } else {
+                *t < start && *t > reached
+            }
+        })
         .collect();
     between.sort_by_key(|t| (t - start).abs());
 
@@ -697,8 +787,11 @@ fn apply_tap(
     tap: i32,
     angle: f64,
 ) {
-    let from_network =
-        network.tap_changers.get(index).and_then(|c| c.as_ref()).and_then(|c| c.at(tap));
+    let from_network = network
+        .tap_changers
+        .get(index)
+        .and_then(|c| c.as_ref())
+        .and_then(|c| c.at(tap));
     if let Some(t) = transformers.get_mut(index) {
         let ratio = t.tap.norm();
         t.tap = match from_network {
@@ -852,7 +945,10 @@ mod country_tests {
         }
     }
 
-    const AUTO: State = State { instant: 0, contingency: Some(0) };
+    const AUTO: State = State {
+        instant: 0,
+        contingency: Some(0),
+    };
 
     /// A rule scoped to a country is a rule **about where the overload is**.
     ///
@@ -875,7 +971,10 @@ mod country_tests {
             "an overload in France must not operate equipment scoped to Belgium"
         );
         let here = [violated("be-cnec", &["BE"])];
-        assert!(triggered(&rules, &AUTO, &here), "an overload in Belgium must");
+        assert!(
+            triggered(&rules, &AUTO, &here),
+            "an overload in Belgium must"
+        );
     }
 
     /// A cross-border branch counts for both ends, which is why the country is
@@ -894,6 +993,9 @@ mod country_tests {
     fn what_a_country_scoped_rule_watches_is_scoped_too() {
         let rules = [in_country("BE")];
         let violations = [violated("be-cnec", &["BE"]), violated("fr-cnec", &["FR"])];
-        assert_eq!(watched_cnecs(&rules, &AUTO, &violations), vec!["be-cnec".to_string()]);
+        assert_eq!(
+            watched_cnecs(&rules, &AUTO, &violations),
+            vec!["be-cnec".to_string()]
+        );
     }
 }

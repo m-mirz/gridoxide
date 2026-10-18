@@ -10,7 +10,10 @@ use gridoxide::solver::PowerFlowOptions;
 use std::path::{Path, PathBuf};
 
 /// Published per-equipment reactive output, per-unit, in injection sign.
-fn published_q(ds: &gridoxide::cgmes::CimDataset, base_mva: f64) -> std::collections::HashMap<String, f64> {
+fn published_q(
+    ds: &gridoxide::cgmes::CimDataset,
+    base_mva: f64,
+) -> std::collections::HashMap<String, f64> {
     let mut equipment_of: std::collections::HashMap<&str, &str> = Default::default();
     if let Some(ms) = ds.by_type.get("Terminal") {
         for m in ms {
@@ -23,7 +26,8 @@ fn published_q(ds: &gridoxide::cgmes::CimDataset, base_mva: f64) -> std::collect
     let mut out = std::collections::HashMap::new();
     if let Some(ms) = ds.by_type.get("SvPowerFlow") {
         for m in ms {
-            let sv: &cimstructs::SvPowerFlow = ds.entries[m].element.as_any().downcast_ref().unwrap();
+            let sv: &cimstructs::SvPowerFlow =
+                ds.entries[m].element.as_any().downcast_ref().unwrap();
             if let (Some(t), Some(q)) = (&sv.terminal, sv.q)
                 && let Some(e) = equipment_of.get(t.mrid.as_str())
             {
@@ -35,8 +39,8 @@ fn published_q(ds: &gridoxide::cgmes::CimDataset, base_mva: f64) -> std::collect
 }
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/CGMES-Test-Configurations/v3.0");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/CGMES-Test-Configurations/v3.0");
     let names: Vec<String> = std::env::args().skip(1).collect();
     let names = if names.is_empty() {
         vec![
@@ -71,8 +75,12 @@ fn main() {
             continue;
         };
 
-        let remote: Vec<_> =
-            net.voltage_control.machines.iter().filter(|m| m.at_bus != m.controls_bus).collect();
+        let remote: Vec<_> = net
+            .voltage_control
+            .machines
+            .iter()
+            .filter(|m| m.at_bus != m.controls_bus)
+            .collect();
         println!(
             "\n=== {name}: {} bus(es), {} regulating machine(s), {} remote",
             net.buses.len(),
@@ -89,8 +97,11 @@ fn main() {
                     || (t.to == m.at_bus && t.from == m.controls_bus)
             });
             let between = match tx {
-                Some(t) => format!("one transformer, x = {:.5} pu, tap {:.4}",
-                    1.0 / t.y_series.im.abs().max(1e-12), t.tap.norm()),
+                Some(t) => format!(
+                    "one transformer, x = {:.5} pu, tap {:.4}",
+                    1.0 / t.y_series.im.abs().max(1e-12),
+                    t.tap.norm()
+                ),
                 None => "not adjacent".to_string(),
             };
             println!(
@@ -117,7 +128,9 @@ fn main() {
                 &net.transformers,
                 &net.shunts,
                 gridoxide::TapData::none(),
-                gridoxide::RemoteControlData { machines: &net.voltage_control.machines },
+                gridoxide::RemoteControlData {
+                    machines: &net.voltage_control.machines,
+                },
                 PowerFlowOptions {
                     control_remote_voltage: on,
                     enforce_q_limits: true,
@@ -152,8 +165,12 @@ fn main() {
                 for mrid in sv {
                     let v: &cimstructs::SvVoltage =
                         ds.entries[mrid].element.as_any().downcast_ref().unwrap();
-                    let (Some(tn), Some(kv)) = (&v.topological_node, v.v) else { continue };
-                    let Some(&b) = idx.get(&tn.mrid) else { continue };
+                    let (Some(tn), Some(kv)) = (&v.topological_node, v.v) else {
+                        continue;
+                    };
+                    let Some(&b) = idx.get(&tn.mrid) else {
+                        continue;
+                    };
                     let got = rep.buses[b].voltage_mag * net.buses[b].u_rated / 1e3;
                     errs.push((got - kv).abs() / kv.abs().max(1e-9));
                 }

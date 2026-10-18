@@ -70,7 +70,10 @@ impl std::fmt::Display for SeCaseError {
         match self {
             SeCaseError::Measurement(e) => write!(f, "{e}"),
             SeCaseError::NoSensors => {
-                write!(f, "the document contains no usable sensors, so there is nothing to estimate")
+                write!(
+                    f,
+                    "the document contains no usable sensors, so there is nothing to estimate"
+                )
             }
         }
     }
@@ -148,7 +151,13 @@ impl SeCase {
         if measurements.is_empty() {
             return Err(SeCaseError::NoSensors);
         }
-        Ok(Self { network, buses, measurements, node_idx, phases })
+        Ok(Self {
+            network,
+            buses,
+            measurements,
+            node_idx,
+            phases,
+        })
     }
 
     /// The bus index carrying one phase of one document node.

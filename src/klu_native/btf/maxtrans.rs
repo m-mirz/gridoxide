@@ -119,7 +119,17 @@ pub fn maxtrans(nrow: usize, ncol: usize, col_ptr: &[i64], row_idx: &[i64]) -> (
 
     let mut nmatch = 0usize;
     for k in 0..ncol {
-        if augment(k, col_ptr, row_idx, &mut match_, &mut cheap, &mut flag, &mut istack, &mut jstack, &mut pstack) {
+        if augment(
+            k,
+            col_ptr,
+            row_idx,
+            &mut match_,
+            &mut cheap,
+            &mut flag,
+            &mut istack,
+            &mut jstack,
+            &mut pstack,
+        ) {
             nmatch += 1;
         }
     }

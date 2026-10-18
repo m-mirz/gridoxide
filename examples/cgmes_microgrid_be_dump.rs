@@ -39,7 +39,8 @@ fn main() {
     let ssh = dir.join("20210325T1530Z_1D_BE_SSH_001.xml");
     let tp = dir.join("20210325T1530Z_1D_BE_TP_001.xml");
     let sv = dir.join("20210325T1530Z_1D_BE_SV_001.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
 

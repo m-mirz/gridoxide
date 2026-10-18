@@ -37,12 +37,12 @@ pub mod constraints;
 pub mod functional;
 pub mod iterative;
 pub mod jacobian;
-pub mod observability;
 pub mod nr;
+pub mod observability;
 
 use num_complex::Complex;
 
-use crate::branch_flow::{branch_params, BranchParams};
+use crate::branch_flow::{BranchParams, branch_params};
 use crate::measurement::{Measurement, MeasurementKind, Target};
 use crate::network::YBusSparse;
 use crate::types::Bus;
@@ -206,7 +206,14 @@ impl SeNetwork {
         let terminals = terminals_from_params(&branch_params(lines, transformers));
         let mut zero_injection = zero_injection;
         zero_injection.resize(n, false);
-        Self::from_parts(ybus, terminals, shunts, vec![Vec::new(); n], zero_injection, energized)
+        Self::from_parts(
+            ybus,
+            terminals,
+            shunts,
+            vec![Vec::new(); n],
+            zero_injection,
+            energized,
+        )
     }
 
     /// The common tail of both constructors: everything that does not depend on
@@ -384,7 +391,6 @@ impl SeNetwork {
             .map(|(&zero, &live)| zero && live)
             .collect()
     }
-
 }
 
 /// Evaluates `h(x)` for every measurement in `measurements`, in order.
@@ -478,7 +484,10 @@ impl MeasurementModel {
         let functionals: Vec<Option<functional::CurrentFunctional>> = measurements
             .iter()
             .map(|m| match (m.kind, m.target) {
-                (MeasurementKind::VoltageMagnitude | MeasurementKind::VoltageAngle, Target::Bus(_)) => None,
+                (
+                    MeasurementKind::VoltageMagnitude | MeasurementKind::VoltageAngle,
+                    Target::Bus(_),
+                ) => None,
                 _ => net.functional(m.target),
             })
             .collect();
@@ -520,7 +529,7 @@ impl MeasurementModel {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::branch_flow::{terminal_flow, Terminal};
+    use crate::branch_flow::{Terminal, terminal_flow};
     use crate::network::YBus;
     use crate::types::BusType;
 
@@ -549,7 +558,11 @@ pub(crate) mod tests {
     /// derivation rather than a restatement of the one under test.
     pub(crate) fn two_bus_params() -> BranchParams {
         let y_series = Complex::new(1.0, 0.0) / Complex::new(0.05, 0.2);
-        BranchParams { from: 0, to: 1, y: [y_series, -y_series, -y_series, y_series] }
+        BranchParams {
+            from: 0,
+            to: 1,
+            y: [y_series, -y_series, -y_series, y_series],
+        }
     }
 
     pub(crate) fn two_bus_net() -> (SeNetwork, Vec<Bus>) {
@@ -590,24 +603,33 @@ pub(crate) mod tests {
 
         let net = SeNetwork {
             ybus: yb.finish(),
-            terminals: terminals_from_params(&[BranchParams { from: 0, to: 1, y: [y, -y, -y, y] }]),
+            terminals: terminals_from_params(&[BranchParams {
+                from: 0,
+                to: 1,
+                y: [y, -y, -y, y],
+            }]),
             shunt_y: vec![Complex::new(0.0, 0.0); 3],
             source_branches: vec![Vec::new(), vec![0], Vec::new()],
             zero_injection: vec![true, false, true],
             energized: vec![true, true, false],
         };
 
-        let rebuilt: Vec<bool> = crate::network::connected_components(&net.ybus)
-            .iter()
-            .fold(vec![false; 3], |mut acc, c| {
+        let rebuilt: Vec<bool> = crate::network::connected_components(&net.ybus).iter().fold(
+            vec![false; 3],
+            |mut acc, c| {
                 if c.iter().any(|&i| !net.source_branches[i].is_empty()) {
                     for &i in c {
                         acc[i] = true;
                     }
                 }
                 acc
-            });
-        assert_eq!(rebuilt, vec![true, true, false], "bus 2 has no source in its component");
+            },
+        );
+        assert_eq!(
+            rebuilt,
+            vec![true, true, false],
+            "bus 2 has no source in its component"
+        );
 
         // And a zero-injection flag on the de-energized bus does not become a
         // constraint, which is what used to make the gain matrix singular.
@@ -678,9 +700,16 @@ pub(crate) mod tests {
         let expected = h[0]
             + power(Target::SourceInjection { branch: 0 })
             + power(Target::ShuntInjection { bus: 1 });
-        assert!((h[1] - expected).abs() < 1e-12, "node={} expected={expected}", h[1]);
+        assert!(
+            (h[1] - expected).abs() < 1e-12,
+            "node={} expected={expected}",
+            h[1]
+        );
         // And the two are genuinely different quantities, so a test that
         // confused them would not pass by coincidence.
-        assert!((h[1] - h[0]).abs() > 1e-6, "bus and node injection should differ here");
+        assert!(
+            (h[1] - h[0]).abs() > 1e-6,
+            "bus and node injection should differ here"
+        );
     }
 }

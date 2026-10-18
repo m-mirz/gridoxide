@@ -28,12 +28,12 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::measurement::{Measurement, MeasurementKind, Target};
 use gridoxide::network::{build_ybus, linear_initial_guess, power_injections, stamp_shunts};
-use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network, PgmInput};
-use gridoxide::se::nr::{estimate, flat_start, SeMethod, SeOptions, SeStatus};
+use gridoxide::pgm::{PgmInput, node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
 use gridoxide::se::SeNetwork;
+use gridoxide::se::nr::{SeMethod, SeOptions, SeStatus, estimate, flat_start};
 use gridoxide::solver::{JacobianBackend, PersistentSolver};
 use gridoxide::types::Bus;
 
@@ -82,7 +82,9 @@ fn emit_pgm_document(
     for m in measurements {
         match (m.kind, m.target) {
             (MeasurementKind::VoltageMagnitude, Target::Bus(bus)) => {
-                let Some(&node) = bus_to_node.get(&bus) else { continue };
+                let Some(&node) = bus_to_node.get(&bus) else {
+                    continue;
+                };
                 let u_rated = truth[bus].u_rated;
                 voltage.push(serde_json::json!({
                     "id": next_id,
@@ -96,7 +98,9 @@ fn emit_pgm_document(
                 if branch_to_id.get(&branch).is_none() {
                     continue;
                 }
-                let slot = pending.entry((branch, terminal == Terminal::To)).or_default();
+                let slot = pending
+                    .entry((branch, terminal == Terminal::To))
+                    .or_default();
                 if kind == MeasurementKind::ActivePower {
                     slot.0 = Some(m.value);
                 } else {
@@ -110,7 +114,9 @@ fn emit_pgm_document(
     let mut keys: Vec<_> = pending.keys().copied().collect();
     keys.sort();
     for key in keys {
-        let (Some(p), Some(q)) = pending[&key] else { continue };
+        let (Some(p), Some(q)) = pending[&key] else {
+            continue;
+        };
         power.push(serde_json::json!({
             "id": next_id,
             "measured_object": branch_to_id[&key.0],
@@ -135,10 +141,16 @@ fn main() {
         .take_while(|a| a != "--emit")
         .collect();
     if cases.is_empty() {
-        cases = ["case14", "case118", "case300", "case1354pegase", "case2869pegase"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        cases = [
+            "case14",
+            "case118",
+            "case300",
+            "case1354pegase",
+            "case2869pegase",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     }
 
     println!(
@@ -185,7 +197,11 @@ fn main() {
             flat_start(&mut buses, &measurements);
             let options = SeOptions {
                 method,
-                max_iter: if method == SeMethod::IterativeLinear { 100 } else { 20 },
+                max_iter: if method == SeMethod::IterativeLinear {
+                    100
+                } else {
+                    20
+                },
                 ..SeOptions::default()
             };
             let start = Instant::now();
@@ -238,7 +254,11 @@ fn main() {
 /// mostly has — line-end telemetry is far more common than a metered injection —
 /// and because it produces the sparsity pattern the estimator will actually
 /// meet.
-fn synthesize(truth: &[Bus], net: &SeNetwork, pgm: &gridoxide::pgm::PgmNetwork) -> Vec<Measurement> {
+fn synthesize(
+    truth: &[Bus],
+    net: &SeNetwork,
+    pgm: &gridoxide::pgm::PgmNetwork,
+) -> Vec<Measurement> {
     let v = bus_voltages(truth);
     let params = branch_params(&pgm.lines, &pgm.transformers);
     let (p_inj, q_inj) = power_injections(truth, &net.ybus);

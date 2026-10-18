@@ -2,7 +2,9 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 use gridoxide::types::BusType;
@@ -59,23 +61,46 @@ fn test_cgmes_smallgrid() {
     let ssh = dir.join("SmallGrid_SSH.xml");
     let tp = dir.join("SmallGrid_TP.xml");
     let sv = dir.join("SmallGrid_SV.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
-    assert_eq!(tn_mrids.len(), 167, "expected 167 physical TopologicalNode buses before switch merging");
+    assert_eq!(
+        tn_mrids.len(),
+        167,
+        "expected 167 physical TopologicalNode buses before switch merging"
+    );
     let expected = cgmes_common::expected_voltages(&ds);
 
     let s_base_va = 100e6;
     let (buses, lines, transformers, shunts) =
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
     // 4 buses genuinely merge away via closed Disconnectors/Breakers.
-    assert_eq!(buses.len(), 163, "expected 4 TopologicalNodes to merge via closed switches, 167 -> 163");
+    assert_eq!(
+        buses.len(),
+        163,
+        "expected 4 TopologicalNodes to merge via closed switches, 167 -> 163"
+    );
     assert_eq!(lines.len(), 185, "expected 185 ACLineSegment lines");
-    assert_eq!(transformers.len(), 14, "expected 14 two-winding transformers");
-    assert_eq!(shunts.len(), 14, "expected 14 LinearShuntCompensator shunts");
+    assert_eq!(
+        transformers.len(),
+        14,
+        "expected 14 two-winding transformers"
+    );
+    assert_eq!(
+        shunts.len(),
+        14,
+        "expected 14 LinearShuntCompensator shunts"
+    );
 
-    let n_deenergized = buses.iter().filter(|b| b.bus_type == BusType::Slack && b.voltage_mag == 0.0).count();
-    assert_eq!(n_deenergized, 40, "expected 40 de-energized (TopologicalIsland-absent) buses");
+    let n_deenergized = buses
+        .iter()
+        .filter(|b| b.bus_type == BusType::Slack && b.voltage_mag == 0.0)
+        .count();
+    assert_eq!(
+        n_deenergized, 40,
+        "expected 40 de-energized (TopologicalIsland-absent) buses"
+    );
 
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);

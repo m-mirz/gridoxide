@@ -7,8 +7,8 @@
 //! a Python with numpy (`python3` unless `PYTHON` names another). Run with paths
 //! to trace other networks:
 //! `cargo run --release --example cpf_probe -- case1354pegase.json`
-use gridoxide::continuation::{run_continuation, ContinuationOptions, LoadingDirection};
-use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
+use gridoxide::continuation::{ContinuationOptions, LoadingDirection, run_continuation};
+use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 use gridoxide::solver::PowerFlowOptions;
 use std::time::Instant;
 
@@ -37,10 +37,19 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths: Vec<String> = if args.is_empty() {
         let base = convert_pglib();
-        ["pglib_opf_case5_pjm", "pglib_opf_case14_ieee", "pglib_opf_case30_ieee", "pglib_opf_case118_ieee"]
-            .iter()
-            .map(|n| base.join(format!("{n}.json")).to_string_lossy().into_owned())
-            .collect()
+        [
+            "pglib_opf_case5_pjm",
+            "pglib_opf_case14_ieee",
+            "pglib_opf_case30_ieee",
+            "pglib_opf_case118_ieee",
+        ]
+        .iter()
+        .map(|n| {
+            base.join(format!("{n}.json"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
     } else {
         args
     };

@@ -16,21 +16,21 @@
 
 use num_complex::Complex;
 
-use gridoxide::dynamics::models::avr::{Sexs, SexsParams};
 use gridoxide::dynamics::models::InitError;
+use gridoxide::dynamics::models::avr::{Sexs, SexsParams};
 use gridoxide::dynamics::models::gov::{Tgov1, Tgov1Params};
+use gridoxide::dynamics::models::load::ZipLoad;
 use gridoxide::dynamics::models::machine::{
     GenRound, GenRoundParams, GenSalient, GenSalientParams, GenTransient, GenTransientParams,
     Machine,
 };
-use gridoxide::dynamics::models::load::ZipLoad;
 use gridoxide::dynamics::models::pss::{Stab1, Stab1Params};
 use gridoxide::dynamics::models::{
-    finite_difference, Control, DynamicModel, GeneratingUnit, Limits, ModelJacobian,
+    Control, DynamicModel, GeneratingUnit, Limits, ModelJacobian, finite_difference,
 };
 use gridoxide::dynamics::{
-    build, run_dynamics, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus, Event,
-    EventKind, SystemSpec,
+    DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus, Event, EventKind, SystemSpec,
+    build, run_dynamics,
 };
 use gridoxide::network::{build_ybus, power_injections};
 use gridoxide::types::{Bus, BusType, Line};
@@ -73,15 +73,40 @@ fn new_machine(d: f64) -> GenTransient {
 }
 
 fn new_avr() -> Sexs {
-    Sexs::new(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05, limits: Limits::NONE }).unwrap()
+    Sexs::new(SexsParams {
+        k: 200.0,
+        ta: 0.1,
+        tb: 1.0,
+        te: 0.05,
+        limits: Limits::NONE,
+    })
+    .unwrap()
 }
 
 fn new_gov(r: f64) -> Tgov1 {
-    Tgov1::new(Tgov1Params { r, t1: 0.5, t2: 1.0, t3: 5.0, dt: 0.0, limits: Limits::NONE, rate: Limits::NONE }).unwrap()
+    Tgov1::new(Tgov1Params {
+        r,
+        t1: 0.5,
+        t2: 1.0,
+        t3: 5.0,
+        dt: 0.0,
+        limits: Limits::NONE,
+        rate: Limits::NONE,
+    })
+    .unwrap()
 }
 
 fn new_pss() -> Stab1 {
-    Stab1::new(Stab1Params { k: 5.0, tw: 10.0, t1: 0.15, t2: 0.03, t3: 0.15, t4: 0.03, limits: Limits::NONE }).unwrap()
+    Stab1::new(Stab1Params {
+        k: 5.0,
+        tw: 10.0,
+        t1: 0.15,
+        t2: 0.03,
+        t3: 0.15,
+        t4: 0.03,
+        limits: Limits::NONE,
+    })
+    .unwrap()
 }
 
 /// Which controls a unit carries, so the gates can sweep every combination.
@@ -112,21 +137,54 @@ impl Fit {
 /// deliberately: it is legal, it does nothing, and it must still initialize to
 /// an equilibrium and differentiate correctly.
 const FITS: [Fit; 8] = [
-    Fit { avr: false, gov: false, pss: false },
-    Fit { avr: true, gov: false, pss: false },
-    Fit { avr: false, gov: true, pss: false },
-    Fit { avr: false, gov: false, pss: true },
-    Fit { avr: true, gov: true, pss: false },
-    Fit { avr: true, gov: false, pss: true },
-    Fit { avr: false, gov: true, pss: true },
-    Fit { avr: true, gov: true, pss: true },
+    Fit {
+        avr: false,
+        gov: false,
+        pss: false,
+    },
+    Fit {
+        avr: true,
+        gov: false,
+        pss: false,
+    },
+    Fit {
+        avr: false,
+        gov: true,
+        pss: false,
+    },
+    Fit {
+        avr: false,
+        gov: false,
+        pss: true,
+    },
+    Fit {
+        avr: true,
+        gov: true,
+        pss: false,
+    },
+    Fit {
+        avr: true,
+        gov: false,
+        pss: true,
+    },
+    Fit {
+        avr: false,
+        gov: true,
+        pss: true,
+    },
+    Fit {
+        avr: true,
+        gov: true,
+        pss: true,
+    },
 ];
 
 fn unit(fit: Fit, damping: f64, droop: f64) -> GeneratingUnit {
     GeneratingUnit::new(
         Box::new(new_machine(damping)),
         fit.avr.then(|| Box::new(new_avr()) as Box<dyn Control>),
-        fit.gov.then(|| Box::new(new_gov(droop)) as Box<dyn Control>),
+        fit.gov
+            .then(|| Box::new(new_gov(droop)) as Box<dyn Control>),
         fit.pss.then(|| Box::new(new_pss()) as Box<dyn Control>),
     )
 }
@@ -146,9 +204,18 @@ fn every_combination_matches_the_finite_difference_oracle() {
         // accidentally zero — a Jacobian that is only right at the operating
         // point is right for nothing.
         let probes: [(Vec<f64>, Complex<f64>); 3] = [
-            ((0..n).map(|k| 0.4 + 0.13 * k as f64).collect(), Complex::new(1.00, 0.05)),
-            ((0..n).map(|k| -0.3 + 0.21 * k as f64).collect(), Complex::new(0.87, -0.24)),
-            ((0..n).map(|k| 1.1 - 0.17 * k as f64).collect(), Complex::new(1.06, 0.31)),
+            (
+                (0..n).map(|k| 0.4 + 0.13 * k as f64).collect(),
+                Complex::new(1.00, 0.05),
+            ),
+            (
+                (0..n).map(|k| -0.3 + 0.21 * k as f64).collect(),
+                Complex::new(0.87, -0.24),
+            ),
+            (
+                (0..n).map(|k| 1.1 - 0.17 * k as f64).collect(),
+                Complex::new(1.06, 0.31),
+            ),
         ];
 
         for (x, v) in probes {
@@ -248,14 +315,24 @@ fn islanded_with(
 
     let mut lines = Vec::new();
     for i in 0..n_gen {
-        lines.push(Line { from: i, to: load_bus, r: 0.005, x: 0.05, b_shunt: 0.0, g_shunt: 0.0 });
+        lines.push(Line {
+            from: i,
+            to: load_bus,
+            r: 0.005,
+            x: 0.05,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        });
     }
 
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
         lines: lines.clone(),
     });
-    assert_eq!(report.stats.status, gridoxide::solver::SolveStatus::Converged);
+    assert_eq!(
+        report.stats.status,
+        gridoxide::solver::SolveStatus::Converged
+    );
     let buses = report.buses;
     let ybus = build_ybus(buses.len(), &lines, &[]).finish();
     let (p_calc, q_calc) = power_injections(&buses, &ybus);
@@ -265,7 +342,12 @@ fn islanded_with(
     for (i, model) in models.into_iter().enumerate() {
         let id = format!("G{}", i + 1);
         ids.push(id.clone());
-        devices.push(DeviceSpec { id, bus: i, s: Complex::new(p_calc[i], q_calc[i]), model });
+        devices.push(DeviceSpec {
+            id,
+            bus: i,
+            s: Complex::new(p_calc[i], q_calc[i]),
+            model,
+        });
     }
 
     let system = build(SystemSpec {
@@ -281,7 +363,12 @@ fn islanded_with(
 }
 
 fn options(step: f64, end: f64, events: Vec<Event>) -> DynamicsOptions {
-    DynamicsOptions { end_time: end, step, events, ..Default::default() }
+    DynamicsOptions {
+        end_time: end,
+        step,
+        events,
+        ..Default::default()
+    }
 }
 
 /// G1, for every combination. Undisturbed, nothing moves — and "nothing" is
@@ -318,7 +405,9 @@ fn every_combination_is_an_equilibrium() {
             if name.ends_with(".delta") || name.ends_with(".vang") {
                 continue;
             }
-            let drift = series.iter().fold(0.0f64, |m, s| m.max((s - series[0]).abs()));
+            let drift = series
+                .iter()
+                .fold(0.0f64, |m, s| m.max((s - series[0]).abs()));
             assert!(
                 drift < 1e-9,
                 "{}: {name} drifted by {drift:e} with no disturbance",
@@ -339,12 +428,22 @@ fn every_combination_is_an_equilibrium() {
 #[test]
 fn an_exciter_returns_the_terminal_voltage() {
     let recovery = |avr: bool| {
-        let fit = Fit { avr, gov: false, pss: false };
+        let fit = Fit {
+            avr,
+            gov: false,
+            pss: false,
+        };
         let (mut system, _) = islanded(&[(fit, 2.0, 0.05)], &[0.8], (-0.8, -0.2));
         let opts = options(
             0.005,
             30.0,
-            vec![Event::new(1.0, EventKind::LoadStep { bus: 1, ds: Complex::new(-0.25, -0.1) })],
+            vec![Event::new(
+                1.0,
+                EventKind::LoadStep {
+                    bus: 1,
+                    ds: Complex::new(-0.25, -0.1),
+                },
+            )],
         );
         let report = run_dynamics(&mut system, &opts);
         assert_eq!(report.status, DynamicsStatus::Completed);
@@ -381,15 +480,28 @@ fn an_exciter_returns_the_terminal_voltage() {
 /// what was asked for.
 #[test]
 fn droop_shares_a_disturbance_in_inverse_proportion() {
-    let fit = Fit { avr: true, gov: true, pss: false };
+    let fit = Fit {
+        avr: true,
+        gov: true,
+        pss: false,
+    };
     let (r_a, r_b) = (0.05, 0.10);
-    let (mut system, _) =
-        islanded(&[(fit, 2.0, r_a), (fit, 2.0, r_b)], &[0.8, 0.8], (-1.6, -0.4));
+    let (mut system, _) = islanded(
+        &[(fit, 2.0, r_a), (fit, 2.0, r_b)],
+        &[0.8, 0.8],
+        (-1.6, -0.4),
+    );
 
     let opts = options(
         0.01,
         120.0,
-        vec![Event::new(1.0, EventKind::LoadStep { bus: 2, ds: Complex::new(-0.2, 0.0) })],
+        vec![Event::new(
+            1.0,
+            EventKind::LoadStep {
+                bus: 2,
+                ds: Complex::new(-0.2, 0.0),
+            },
+        )],
     );
     let report = run_dynamics(&mut system, &opts);
     assert_eq!(report.status, DynamicsStatus::Completed);
@@ -444,7 +556,11 @@ fn droop_shares_a_disturbance_in_inverse_proportion() {
 /// settles on exactly that.
 #[test]
 fn a_stabilizer_leaves_no_steady_signal() {
-    let fit = Fit { avr: true, gov: false, pss: true };
+    let fit = Fit {
+        avr: true,
+        gov: false,
+        pss: true,
+    };
     let (mut system, _) = islanded(&[(fit, 2.0, 0.05)], &[0.8], (-0.8, -0.2));
     // Long enough for everything to settle, which takes a surprising while.
     // The washout's own time constant is 10 s and the field flux relaxes with
@@ -457,7 +573,13 @@ fn a_stabilizer_leaves_no_steady_signal() {
     let opts = options(
         0.02,
         400.0,
-        vec![Event::new(1.0, EventKind::LoadStep { bus: 1, ds: Complex::new(-0.2, 0.0) })],
+        vec![Event::new(
+            1.0,
+            EventKind::LoadStep {
+                bus: 1,
+                ds: Complex::new(-0.2, 0.0),
+            },
+        )],
     );
     let report = run_dynamics(&mut system, &opts);
     assert_eq!(report.status, DynamicsStatus::Completed);
@@ -468,7 +590,10 @@ fn a_stabilizer_leaves_no_steady_signal() {
     let omega = report.trajectory.series("G1.omega").unwrap();
 
     let peak = lead2.iter().fold(0.0f64, |m, s| m.max(s.abs()));
-    assert!(peak > 1e-6, "the stabilizer should respond to the disturbance at all, peaked {peak:e}");
+    assert!(
+        peak > 1e-6,
+        "the stabilizer should respond to the disturbance at all, peaked {peak:e}"
+    );
 
     // The frequency really did stay low — otherwise this proves nothing — and
     // it stayed low by the amount the swing equation's own steady state says:
@@ -526,7 +651,6 @@ fn a_stabilizer_leaves_no_steady_signal() {
     );
 }
 
-
 /// The three ZIP parts do what their names say, and the cutoff turns all of
 /// them into the same thing.
 ///
@@ -549,10 +673,23 @@ fn a_zip_load_follows_its_own_exponents() {
     };
 
     for v_mag in [0.7, 0.9, 1.1] {
-        let (z, i, p) = (ratio(1.0, 0.0, 0.0, v_mag), ratio(0.0, 1.0, 0.0, v_mag), ratio(0.0, 0.0, 1.0, v_mag));
-        assert!((z - v_mag * v_mag).abs() < 1e-12, "constant impedance at |V| = {v_mag}: {z}");
-        assert!((i - v_mag).abs() < 1e-12, "constant current at |V| = {v_mag}: {i}");
-        assert!((p - 1.0).abs() < 1e-12, "constant power at |V| = {v_mag}: {p}");
+        let (z, i, p) = (
+            ratio(1.0, 0.0, 0.0, v_mag),
+            ratio(0.0, 1.0, 0.0, v_mag),
+            ratio(0.0, 0.0, 1.0, v_mag),
+        );
+        assert!(
+            (z - v_mag * v_mag).abs() < 1e-12,
+            "constant impedance at |V| = {v_mag}: {z}"
+        );
+        assert!(
+            (i - v_mag).abs() < 1e-12,
+            "constant current at |V| = {v_mag}: {i}"
+        );
+        assert!(
+            (p - 1.0).abs() < 1e-12,
+            "constant power at |V| = {v_mag}: {p}"
+        );
     }
 
     // Below the cutoff every part is a constant impedance referred to the
@@ -582,7 +719,10 @@ fn a_zip_load_follows_its_own_exponents() {
     let eps = 1e-9;
     let below = load.injection(&[], Complex::from_polar(cutoff - eps, 0.2));
     let above = load.injection(&[], Complex::from_polar(cutoff + eps, 0.2));
-    assert!((below - above).norm() < 1e-7, "the current should be continuous at the cutoff");
+    assert!(
+        (below - above).norm() < 1e-7,
+        "the current should be continuous at the cutoff"
+    );
 }
 
 /// The ZIP load's `∂I/∂V` against the oracle, on both sides of the cutoff.
@@ -593,7 +733,8 @@ fn a_zip_load_follows_its_own_exponents() {
 #[test]
 fn a_zip_load_matches_the_finite_difference_oracle() {
     let mut load = ZipLoad::new(0.3, 0.3, 0.4, 0.5).unwrap();
-    load.initialize(Complex::new(1.0, 0.0), Complex::new(-0.8, -0.3)).unwrap();
+    load.initialize(Complex::new(1.0, 0.0), Complex::new(-0.8, -0.3))
+        .unwrap();
 
     // Never straddling the cutoff: the derivative there is genuinely
     // discontinuous, so a central difference across it is not approximating
@@ -631,12 +772,23 @@ fn a_zip_load_matches_the_finite_difference_oracle() {
 #[test]
 fn a_constant_power_load_deepens_a_sag() {
     let sag = |constant_power: bool| {
-        let fit = Fit { avr: false, gov: false, pss: false };
+        let fit = Fit {
+            avr: false,
+            gov: false,
+            pss: false,
+        };
         let buses = vec![
             bus(0, BusType::Slack, 1.0, 0.8, 0.0),
             bus(1, BusType::PQ, 1.0, -0.8, -0.3),
         ];
-        let lines = vec![Line { from: 0, to: 1, r: 0.01, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 }];
+        let lines = vec![Line {
+            from: 0,
+            to: 1,
+            r: 0.01,
+            x: 0.10,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }];
         let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
             buses,
             lines: lines.clone(),
@@ -678,7 +830,13 @@ fn a_constant_power_load_deepens_a_sag() {
         let opts = options(
             0.005,
             10.0,
-            vec![Event::new(1.0, EventKind::BusFault { bus: 1, y: Complex::new(1.5, 0.0) })],
+            vec![Event::new(
+                1.0,
+                EventKind::BusFault {
+                    bus: 1,
+                    y: Complex::new(1.5, 0.0),
+                },
+            )],
         );
         let report = run_dynamics(&mut system, &opts);
         assert_eq!(report.status, DynamicsStatus::Completed);
@@ -733,7 +891,10 @@ fn a_non_salient_machine_cancels_its_own_norton_stamp() {
     let s = Complex::new(0.7, 0.25);
 
     let mut transient = GenTransient::new(
-        GenTransientParams { xqp: 0.30, ..machine_params(0.0) },
+        GenTransientParams {
+            xqp: 0.30,
+            ..machine_params(0.0)
+        },
         S_BASE,
         F_NOM,
     )
@@ -743,7 +904,10 @@ fn a_non_salient_machine_cancels_its_own_norton_stamp() {
     jac.clear();
     transient.jacobian(&init.states, v, init.e_fd, init.p_m, &mut jac);
     for (k, value) in jac.didv.iter().enumerate() {
-        assert!(value.abs() < 1e-12, "transient didv[{k}] = {value:e}, should be exactly zero");
+        assert!(
+            value.abs() < 1e-12,
+            "transient didv[{k}] = {value:e}, should be exactly zero"
+        );
     }
 
     let mut round = GenRound::new(round_params(0.22, 0.22), S_BASE, F_NOM).unwrap();
@@ -752,7 +916,10 @@ fn a_non_salient_machine_cancels_its_own_norton_stamp() {
     jac.clear();
     round.jacobian(&init.states, v, init.e_fd, init.p_m, &mut jac);
     for (k, value) in jac.didv.iter().enumerate() {
-        assert!(value.abs() < 1e-12, "round didv[{k}] = {value:e}, should be exactly zero");
+        assert!(
+            value.abs() < 1e-12,
+            "round didv[{k}] = {value:e}, should be exactly zero"
+        );
     }
 }
 
@@ -859,8 +1026,14 @@ fn the_subtransient_machine_reduces_to_the_transient_one() {
     let (d6, w6) = trajectory(true);
     assert_eq!(d4.len(), d6.len());
 
-    let worst_d = d4.iter().zip(d6.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
-    let worst_w = w4.iter().zip(w6.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    let worst_d = d4
+        .iter()
+        .zip(d6.iter())
+        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    let worst_w = w4
+        .iter()
+        .zip(w6.iter())
+        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
     assert!(
         worst_d < 1e-5,
         "with the dampers made ineffective the two orders should agree; \
@@ -893,7 +1066,13 @@ fn dampers_stiffen_the_instantaneous_response() {
         let opts = options(
             0.002,
             1.2,
-            vec![Event::new(1.0, EventKind::BusFault { bus: 1, y: Complex::new(4.0, 0.0) })],
+            vec![Event::new(
+                1.0,
+                EventKind::BusFault {
+                    bus: 1,
+                    y: Complex::new(4.0, 0.0),
+                },
+            )],
         );
         let report = run_dynamics(&mut system, &opts);
         assert_eq!(report.status, DynamicsStatus::Completed);
@@ -909,14 +1088,19 @@ fn dampers_stiffen_the_instantaneous_response() {
             .collect();
         assert_eq!(at.len(), 2);
         let col = report.trajectory.column("bus0.vmag").unwrap();
-        let (before, after) =
-            (report.trajectory.rows[at[0]][col], report.trajectory.rows[at[1]][col]);
+        let (before, after) = (
+            report.trajectory.rows[at[0]][col],
+            report.trajectory.rows[at[1]][col],
+        );
         (before, after)
     };
 
     let (v4_before, v4_after) = fault_current(false);
     let (v6_before, v6_after) = fault_current(true);
-    assert!((v4_before - v6_before).abs() < 1e-6, "the two should start from the same point");
+    assert!(
+        (v4_before - v6_before).abs() < 1e-6,
+        "the two should start from the same point"
+    );
     assert!(
         v6_after > v4_after,
         "a stiffer machine should hold its terminal voltage up better through the \
@@ -932,9 +1116,16 @@ fn dampers_stiffen_the_instantaneous_response() {
 /// single symbolic factorization still serves and nothing re-analyzes.
 #[test]
 fn a_tripped_unit_freezes_and_the_rest_picks_up_the_load() {
-    let fit = Fit { avr: true, gov: true, pss: false };
-    let (mut system, _) =
-        islanded(&[(fit, 2.0, 0.05), (fit, 2.0, 0.05)], &[0.8, 0.8], (-1.6, -0.4));
+    let fit = Fit {
+        avr: true,
+        gov: true,
+        pss: false,
+    };
+    let (mut system, _) = islanded(
+        &[(fit, 2.0, 0.05), (fit, 2.0, 0.05)],
+        &[0.8, 0.8],
+        (-1.6, -0.4),
+    );
 
     let opts = options(
         0.005,
@@ -1009,9 +1200,11 @@ fn the_full_form_is_as_well_founded_as_the_approximate_one() {
     // The oracle, over every machine, with the speed voltages on.
     let machines: Vec<Box<dyn Machine>> = vec![
         Box::new(new_machine(2.0).with_speed_voltages(true)),
-        Box::new(GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM)
-            .unwrap()
-            .with_speed_voltages(true)),
+        Box::new(
+            GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM)
+                .unwrap()
+                .with_speed_voltages(true),
+        ),
     ];
     for machine in machines {
         let mut model = GeneratingUnit::new(
@@ -1054,9 +1247,11 @@ fn the_full_form_is_as_well_founded_as_the_approximate_one() {
 
     // And the equilibrium, through a whole run.
     let model: Box<dyn DynamicModel> = Box::new(GeneratingUnit::new(
-        Box::new(GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM)
-            .unwrap()
-            .with_speed_voltages(true)),
+        Box::new(
+            GenRound::new(round_params(0.22, 0.25), S_BASE, F_NOM)
+                .unwrap()
+                .with_speed_voltages(true),
+        ),
         Some(Box::new(new_avr())),
         Some(Box::new(new_gov(0.05))),
         None,
@@ -1070,7 +1265,9 @@ fn the_full_form_is_as_well_founded_as_the_approximate_one() {
     let report = run_dynamics(&mut system, &options(0.01, 20.0, Vec::new()));
     assert_eq!(report.status, DynamicsStatus::Completed);
     let omega = report.trajectory.series("G1.omega").unwrap();
-    let drift = omega.iter().fold(0.0f64, |m, w| m.max((w - omega[0]).abs()));
+    let drift = omega
+        .iter()
+        .fold(0.0f64, |m, w| m.max((w - omega[0]).abs()));
     assert!(drift < 1e-9, "undisturbed speed drifted by {drift:e}");
 }
 
@@ -1094,7 +1291,14 @@ fn the_two_forms_agree_at_synchronous_speed_and_part_in_proportion_to_deviation(
             bus(0, BusType::PV, 1.0, 0.8, 0.0),
             bus(1, BusType::Slack, 1.0, 0.0, 0.0),
         ];
-        let lines = vec![Line { from: 0, to: 1, r: 0.0, x: 0.20, b_shunt: 0.0, g_shunt: 0.0 }];
+        let lines = vec![Line {
+            from: 0,
+            to: 1,
+            r: 0.0,
+            x: 0.20,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }];
         let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
             buses,
             lines: lines.clone(),
@@ -1156,9 +1360,18 @@ fn the_two_forms_agree_at_synchronous_speed_and_part_in_proportion_to_deviation(
     let swing = d_approx.iter().fold(0.0f64, |m, d| m.max(*d))
         - d_approx.iter().fold(f64::MAX, |m, d| m.min(*d));
 
-    assert!(deviation > 1e-3, "the case must actually leave synchronous speed");
-    assert!(swing < std::f64::consts::TAU, "the machine must stay in step, swing {swing:e}");
-    assert!(gap > 1e-5, "the flag must reach the equations, but the gap was {gap:e}");
+    assert!(
+        deviation > 1e-3,
+        "the case must actually leave synchronous speed"
+    );
+    assert!(
+        swing < std::f64::consts::TAU,
+        "the machine must stay in step, swing {swing:e}"
+    );
+    assert!(
+        gap > 1e-5,
+        "the flag must reach the equations, but the gap was {gap:e}"
+    );
     assert!(
         gap < 5.0 * deviation * swing,
         "the two forms should differ by the order of the speed deviation: gap {gap:e} \
@@ -1167,7 +1380,14 @@ fn the_two_forms_agree_at_synchronous_speed_and_part_in_proportion_to_deviation(
 }
 
 fn limited_avr(limits: Limits) -> Sexs {
-    Sexs::new(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05, limits }).unwrap()
+    Sexs::new(SexsParams {
+        k: 200.0,
+        ta: 0.1,
+        tb: 1.0,
+        te: 0.05,
+        limits,
+    })
+    .unwrap()
 }
 
 /// A ceiling the operating point cannot respect has no equilibrium, and is
@@ -1178,7 +1398,9 @@ fn limited_avr(limits: Limits) -> Sexs {
 fn an_unreachable_equilibrium_is_refused() {
     // The machine at this operating point needs about 2.3 pu of field voltage.
     let mut avr = limited_avr(Limits::new(-1.0, 1.0));
-    let err = avr.initialize(2.3, -1.0).expect_err("a 1.0 ceiling cannot hold 2.3");
+    let err = avr
+        .initialize(2.3, -1.0)
+        .expect_err("a 1.0 ceiling cannot hold 2.3");
     assert!(
         matches!(err, InitError::OutsideLimits { name, value } if name.contains("field") && value == 2.3),
         "got {err}"
@@ -1188,7 +1410,10 @@ fn an_unreachable_equilibrium_is_refused() {
     // A ceiling that *can* hold it initializes exactly as an unlimited one.
     let mut limited = limited_avr(Limits::new(-6.0, 6.0));
     let mut free = limited_avr(Limits::NONE);
-    assert_eq!(limited.initialize(2.3, -1.0).unwrap(), free.initialize(2.3, -1.0).unwrap());
+    assert_eq!(
+        limited.initialize(2.3, -1.0).unwrap(),
+        free.initialize(2.3, -1.0).unwrap()
+    );
 }
 
 /// The limits are **non-windup**: the state is held at the boundary rather than
@@ -1205,7 +1430,11 @@ fn an_unreachable_equilibrium_is_refused() {
 #[test]
 fn a_limit_is_non_windup() {
     let ceiling = 2.6;
-    let fit = Fit { avr: true, gov: false, pss: false };
+    let fit = Fit {
+        avr: true,
+        gov: false,
+        pss: false,
+    };
     let unit = GeneratingUnit::new(
         Box::new(new_machine(2.0)),
         Some(Box::new(limited_avr(Limits::new(-6.0, ceiling)))),
@@ -1222,7 +1451,13 @@ fn a_limit_is_non_windup() {
         0.002,
         30.0,
         vec![
-            Event::new(1.0, EventKind::BusFault { bus: 1, y: Complex::new(3.0, 0.0) }),
+            Event::new(
+                1.0,
+                EventKind::BusFault {
+                    bus: 1,
+                    y: Complex::new(3.0, 0.0),
+                },
+            ),
             Event::new(clear, EventKind::ClearFault { bus: 1 }),
         ],
     );
@@ -1277,7 +1512,13 @@ fn a_ceiling_holds_the_voltage_lower() {
         let opts = options(
             0.005,
             20.0,
-            vec![Event::new(1.0, EventKind::LoadStep { bus: 1, ds: Complex::new(-0.35, -0.15) })],
+            vec![Event::new(
+                1.0,
+                EventKind::LoadStep {
+                    bus: 1,
+                    ds: Complex::new(-0.35, -0.15),
+                },
+            )],
         );
         let report = run_dynamics(&mut system, &opts);
         assert_eq!(report.status, DynamicsStatus::Completed);
@@ -1352,7 +1593,6 @@ fn a_limited_control_matches_the_oracle_on_both_sides() {
         }
     }
 }
-
 
 fn salient_params() -> GenSalientParams {
     GenSalientParams {
@@ -1474,8 +1714,7 @@ fn the_round_machine_reduces_to_the_salient_one() {
                 .unwrap(),
             )
         };
-        let model: Box<dyn DynamicModel> =
-            Box::new(GeneratingUnit::machine_only(machine));
+        let model: Box<dyn DynamicModel> = Box::new(GeneratingUnit::machine_only(machine));
         let (mut system, _) = islanded_with(vec![model], &[0.8], (-0.8, -0.2));
         let opts = options(
             0.002,
@@ -1492,7 +1731,10 @@ fn the_round_machine_reduces_to_the_salient_one() {
 
     let (round, salient) = (trajectory(false), trajectory(true));
     assert_eq!(round.len(), salient.len());
-    let worst = round.iter().zip(salient.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    let worst = round
+        .iter()
+        .zip(salient.iter())
+        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
     assert!(
         worst < 1e-5,
         "with one effective q winding the two orders should agree; \
@@ -1517,20 +1759,25 @@ fn a_rate_limit_makes_the_valve_travel_at_exactly_its_rate() {
             t3: 5.0,
             dt: 0.0,
             limits: Limits::NONE,
-            rate: if limited { Limits::new(-rate, rate) } else { Limits::NONE },
+            rate: if limited {
+                Limits::new(-rate, rate)
+            } else {
+                Limits::NONE
+            },
         })
         .unwrap();
-        let unit = GeneratingUnit::new(
-            Box::new(new_machine(2.0)),
-            None,
-            Some(Box::new(gov)),
-            None,
-        );
+        let unit = GeneratingUnit::new(Box::new(new_machine(2.0)), None, Some(Box::new(gov)), None);
         let (mut system, _) = islanded_with(vec![Box::new(unit)], &[0.8], (-0.8, -0.2));
         let opts = options(
             0.002,
             8.0,
-            vec![Event::new(1.0, EventKind::LoadStep { bus: 1, ds: Complex::new(-0.4, 0.0) })],
+            vec![Event::new(
+                1.0,
+                EventKind::LoadStep {
+                    bus: 1,
+                    ds: Complex::new(-0.4, 0.0),
+                },
+            )],
         );
         let report = run_dynamics(&mut system, &opts);
         assert_eq!(report.status, DynamicsStatus::Completed);
@@ -1601,5 +1848,8 @@ fn a_rate_limit_makes_the_valve_travel_at_exactly_its_rate() {
         .filter(|&k| time[k] > time[k - 1])
         .map(|k| (free[k] - free[k - 1]).abs() / (time[k] - time[k - 1]))
         .fold(0.0f64, f64::max);
-    assert!(fastest > 2.0 * rate, "the unlimited valve peaked at {fastest}");
+    assert!(
+        fastest > 2.0 * rate,
+        "the unlimited valve peaked at {fastest}"
+    );
 }

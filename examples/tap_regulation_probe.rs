@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/CGMES-Test-Configurations/v3.0");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/CGMES-Test-Configurations/v3.0");
     for name in [
         "Svedala/Svedala-Merged",
         "FullGrid/FullGrid-Merged",
@@ -50,8 +50,16 @@ fn main() {
                     let c = net.tap_changers[r.transformer].as_ref().unwrap();
                     println!(
                         "    transformer {} -> bus {} {:?} target {:.6} deadband {:.6} | pos {} in [{}, {}] neutral {} series {}",
-                        r.transformer, r.controlled_bus, r.mode, r.target, r.deadband,
-                        c.position, c.low, c.high(), c.neutral, c.series.is_some()
+                        r.transformer,
+                        r.controlled_bus,
+                        r.mode,
+                        r.target,
+                        r.deadband,
+                        c.position,
+                        c.low,
+                        c.high(),
+                        c.neutral,
+                        c.series.is_some()
                     );
                 }
             }

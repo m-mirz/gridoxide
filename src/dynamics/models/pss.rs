@@ -81,9 +81,11 @@ const STAB1_STATES: [&str; 3] = ["pss_washout", "pss_lead1", "pss_lead2"];
 
 impl Stab1 {
     pub fn new(params: Stab1Params) -> Result<Self, InitError> {
-        for (name, value) in
-            [("pss tw", params.tw), ("pss t2", params.t2), ("pss t4", params.t4)]
-        {
+        for (name, value) in [
+            ("pss tw", params.tw),
+            ("pss t2", params.t2),
+            ("pss t4", params.t4),
+        ] {
             if value <= 0.0 {
                 return Err(InitError::NonPositiveParameter { name, value });
             }
@@ -158,12 +160,17 @@ impl Control for Stab1 {
 
     fn output(&self, x: &[f64], u: f64) -> f64 {
         let (_, y2) = self.stages(x, u);
-        self.limits.under(self.limit.get(), x[2] + self.t3_over_t4 * y2).0
+        self.limits
+            .under(self.limit.get(), x[2] + self.t3_over_t4 * y2)
+            .0
     }
 
     fn output_jacobian(&self, x: &[f64], u: f64, dydx: &mut [f64]) -> f64 {
         let (_, y2) = self.stages(x, u);
-        let scale = self.limits.under(self.limit.get(), x[2] + self.t3_over_t4 * y2).1;
+        let scale = self
+            .limits
+            .under(self.limit.get(), x[2] + self.t3_over_t4 * y2)
+            .1;
         let a = self.t3_over_t4 * self.t1_over_t2 * self.k;
         dydx[0] = -a * scale;
         dydx[1] = self.t3_over_t4 * scale;
@@ -179,7 +186,10 @@ impl Control for Stab1 {
         // produce is zero. Anything else asked for here is a caller error, not
         // something to accommodate.
         if y != 0.0 {
-            return Err(InitError::OutsideLimits { name: "pss output", value: y });
+            return Err(InitError::OutsideLimits {
+                name: "pss output",
+                value: y,
+            });
         }
         let _ = u;
         Ok(vec![u, 0.0, 0.0])

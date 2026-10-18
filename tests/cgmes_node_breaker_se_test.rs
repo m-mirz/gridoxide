@@ -44,14 +44,14 @@
 
 use std::path::{Path, PathBuf};
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::cgmes::{cgmes_node_breaker_to_buses_and_branches, load_profiles};
 use gridoxide::measurement::{Measurement, MeasurementKind, Target};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
-use gridoxide::se::nr::{estimate, SeOptions, SeStatus};
+use gridoxide::se::nr::{SeOptions, SeStatus, estimate};
 use gridoxide::se::observability;
 use gridoxide::solver::SolveStatus;
 use gridoxide::switches::{NodeBreakerNetwork, SwitchTreatment};
@@ -94,7 +94,11 @@ fn true_state(net: &NodeBreakerNetwork) -> Vec<Bus> {
     let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut ybus, &net.shunts);
     let report = run_power_flow_analysis_from_ybus(net.buses.clone(), ybus);
-    assert_eq!(report.stats.status, SolveStatus::Converged, "power flow did not converge");
+    assert_eq!(
+        report.stats.status,
+        SolveStatus::Converged,
+        "power flow did not converge"
+    );
     report.buses
 }
 
@@ -139,13 +143,19 @@ fn scada(net: &NodeBreakerNetwork, state: &[Bus], sigma: f64) -> Vec<Measurement
             }
             ms.push(Measurement {
                 kind: MeasurementKind::ActivePower,
-                target: Target::BranchTerminal { branch: b, terminal },
+                target: Target::BranchTerminal {
+                    branch: b,
+                    terminal,
+                },
                 value: pf,
                 sigma,
             });
             ms.push(Measurement {
                 kind: MeasurementKind::ReactivePower,
-                target: Target::BranchTerminal { branch: b, terminal },
+                target: Target::BranchTerminal {
+                    branch: b,
+                    terminal,
+                },
                 value: qf,
                 sigma,
             });
@@ -172,7 +182,9 @@ fn worst_error(estimated: &[Bus], truth: &[Bus]) -> (f64, f64) {
 /// on the 30 bay-internal buses no sensor touches.
 #[test]
 fn minigrid_node_breaker_state_is_recovered_from_scada() {
-    let Some(net) = node_breaker(RetentionPolicy::RetainAdjacentToBusbar) else { return };
+    let Some(net) = node_breaker(RetentionPolicy::RetainAdjacentToBusbar) else {
+        return;
+    };
     let truth = true_state(&net);
     let measurements = scada(&net, &truth, 0.01);
 
@@ -187,10 +199,17 @@ fn minigrid_node_breaker_state_is_recovered_from_scada() {
     let mut buses = net.buses.clone();
     gridoxide::se::nr::linear_start(&mut buses, &se, &measurements);
     let report = estimate(&measurements, &mut buses, &se, &SeOptions::default());
-    assert_eq!(report.status, SeStatus::Converged, "estimate did not converge");
+    assert_eq!(
+        report.status,
+        SeStatus::Converged,
+        "estimate did not converge"
+    );
 
     let (dv, da) = worst_error(&buses, &truth);
-    assert!(dv < 1e-4, "worst voltage error {dv} — the estimate did not find the true state");
+    assert!(
+        dv < 1e-4,
+        "worst voltage error {dv} — the estimate did not find the true state"
+    );
     assert!(da < 1e-4, "worst angle error {da}");
 }
 
@@ -203,21 +222,40 @@ fn minigrid_node_breaker_state_is_recovered_from_scada() {
 /// and is unavoidable here.
 #[test]
 fn the_zero_injection_constraints_are_what_make_the_bays_observable() {
-    let Some(net) = node_breaker(RetentionPolicy::RetainAdjacentToBusbar) else { return };
+    let Some(net) = node_breaker(RetentionPolicy::RetainAdjacentToBusbar) else {
+        return;
+    };
     let truth = true_state(&net);
     let measurements = scada(&net, &truth, 0.01);
     let se = net.se_network(ybus_of(&net));
     let layout = StateLayout::new(&net.buses, &measurements, &se);
 
-    let with = observability::analyze(&measurements, &net.buses, &se, &layout, &Constraints::new(&se));
-    let without =
-        observability::analyze(&measurements, &net.buses, &se, &layout, &Constraints::from_flags(&[]));
+    let with = observability::analyze(
+        &measurements,
+        &net.buses,
+        &se,
+        &layout,
+        &Constraints::new(&se),
+    );
+    let without = observability::analyze(
+        &measurements,
+        &net.buses,
+        &se,
+        &layout,
+        &Constraints::from_flags(&[]),
+    );
 
-    assert!(with.rank > without.rank, "constraints added no rank: {} vs {}", with.rank, without.rank);
+    assert!(
+        with.rank > without.rank,
+        "constraints added no rank: {} vs {}",
+        with.rank,
+        without.rank
+    );
     assert!(
         with.is_observable(),
         "the network should be observable with its constraints: rank {}/{}",
-        with.rank, with.n_unknowns
+        with.rank,
+        with.n_unknowns
     );
     assert!(
         !without.is_observable(),
@@ -230,7 +268,9 @@ fn the_zero_injection_constraints_are_what_make_the_bays_observable() {
 /// the estimate reproduces the flow it reported.
 #[test]
 fn a_measurement_attaches_to_a_switch() {
-    let Some(net) = node_breaker(RetentionPolicy::RetainAdjacentToBusbar) else { return };
+    let Some(net) = node_breaker(RetentionPolicy::RetainAdjacentToBusbar) else {
+        return;
+    };
     let truth = true_state(&net);
     let v = bus_voltages(&truth);
 
@@ -242,15 +282,22 @@ fn a_measurement_attaches_to_a_switch() {
         .filter_map(|(s, b)| net.switch_flow(s, &v).map(|(p, q)| (s, b, p, q)))
         .max_by(|a, b| a.2.abs().partial_cmp(&b.2.abs()).unwrap())
         .expect("no switch carries a flow");
-    assert!(p_true.abs() > 1e-6, "the busiest switch carries nothing; the fixture changed");
+    assert!(
+        p_true.abs() > 1e-6,
+        "the busiest switch carries nothing; the fixture changed"
+    );
 
     let mut measurements = scada(&net, &truth, 0.01);
-    for (kind, value) in
-        [(MeasurementKind::ActivePower, p_true), (MeasurementKind::ReactivePower, q_true)]
-    {
+    for (kind, value) in [
+        (MeasurementKind::ActivePower, p_true),
+        (MeasurementKind::ReactivePower, q_true),
+    ] {
         measurements.push(Measurement {
             kind,
-            target: Target::BranchTerminal { branch, terminal: Terminal::From },
+            target: Target::BranchTerminal {
+                branch,
+                terminal: Terminal::From,
+            },
             value,
             sigma: 0.01,
         });
@@ -274,7 +321,10 @@ fn a_measurement_attaches_to_a_switch() {
     // than discarding it as inconsistent.
     let n = measurements.len();
     for r in &report.residuals[n - 2..] {
-        assert!(r.abs() < 1e-3, "switch measurement residual {r} is too large");
+        assert!(
+            r.abs() < 1e-3,
+            "switch measurement residual {r} is too large"
+        );
     }
 }
 
@@ -284,7 +334,9 @@ fn a_measurement_attaches_to_a_switch() {
 /// CGMES data reaches the estimator.
 #[test]
 fn the_merged_view_estimates_through_the_same_path() {
-    let Some(net) = node_breaker(RetentionPolicy::MergeAll) else { return };
+    let Some(net) = node_breaker(RetentionPolicy::MergeAll) else {
+        return;
+    };
     let truth = true_state(&net);
     let measurements = scada(&net, &truth, 0.01);
 
@@ -302,18 +354,31 @@ fn the_merged_view_estimates_through_the_same_path() {
 /// says its power is. The flags come from the model's structure.
 #[test]
 fn a_bus_with_equipment_is_not_zero_injection() {
-    let Some(net) = node_breaker(RetentionPolicy::MergeAll) else { return };
+    let Some(net) = node_breaker(RetentionPolicy::MergeAll) else {
+        return;
+    };
     let mut with_equipment = 0;
     for (i, bus) in net.buses.iter().enumerate() {
         if bus.p_spec != 0.0 || bus.q_spec != 0.0 {
-            assert!(!net.zero_injection[i], "bus {i} injects {} but is flagged zero", bus.p_spec);
+            assert!(
+                !net.zero_injection[i],
+                "bus {i} injects {} but is flagged zero",
+                bus.p_spec
+            );
             with_equipment += 1;
         }
     }
-    assert!(with_equipment > 0, "no bus in MiniGrid injects anything; the fixture changed");
+    assert!(
+        with_equipment > 0,
+        "no bus in MiniGrid injects anything; the fixture changed"
+    );
     // Shunts are structural rather than an injection in `p_spec`, and are
     // likewise not zero-injection buses.
     for s in &net.shunts {
-        assert!(!net.zero_injection[s.at], "bus {} carries a shunt but is flagged zero", s.at);
+        assert!(
+            !net.zero_injection[s.at],
+            "bus {} carries a shunt but is flagged zero",
+            s.at
+        );
     }
 }

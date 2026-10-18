@@ -13,9 +13,9 @@
 //! indefinite KKT system whose diagonal has zeros in it. Agreement to 1e-9 is
 //! not two runs of the same arithmetic.
 
-use gridoxide::constrained::{solve_constrained, ConstrainedSwitch};
-use gridoxide::network::{build_ybus, stamp_shunts, YBus};
-use gridoxide::solver::{newton_raphson, SolveStatus};
+use gridoxide::constrained::{ConstrainedSwitch, solve_constrained};
+use gridoxide::network::{YBus, build_ybus, stamp_shunts};
+use gridoxide::solver::{SolveStatus, newton_raphson};
 use gridoxide::switches::switch_admittance;
 use gridoxide::types::{Bus, BusType, Line, Transformer};
 use num_complex::Complex;
@@ -36,7 +36,14 @@ fn bus(idx: usize, bus_type: BusType, p: f64, q: f64) -> Bus {
 }
 
 fn line(from: usize, to: usize, r: f64, x: f64) -> Line {
-    Line { from, to, r, x, b_shunt: 0.0, g_shunt: 0.0 }
+    Line {
+        from,
+        to,
+        r,
+        x,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }
 }
 
 fn switch_branch(from: usize, to: usize, open: bool) -> Transformer {
@@ -52,7 +59,11 @@ fn switch_branch(from: usize, to: usize, open: bool) -> Transformer {
     }
 }
 
-fn ybus_of(n: usize, lines: &[Line], transformers: &[Transformer]) -> gridoxide::network::YBusSparse {
+fn ybus_of(
+    n: usize,
+    lines: &[Line],
+    transformers: &[Transformer],
+) -> gridoxide::network::YBusSparse {
     let mut y: YBus = build_ybus(n, lines, transformers);
     stamp_shunts(&mut y, &[]);
     y.finish()
@@ -64,9 +75,15 @@ fn both_ways(
     buses: &[Bus],
     lines: &[Line],
     switches: &[ConstrainedSwitch],
-) -> (Vec<Bus>, Vec<Bus>, gridoxide::constrained::ConstrainedSolution) {
-    let stamped: Vec<Transformer> =
-        switches.iter().map(|s| switch_branch(s.from, s.to, s.open)).collect();
+) -> (
+    Vec<Bus>,
+    Vec<Bus>,
+    gridoxide::constrained::ConstrainedSolution,
+) {
+    let stamped: Vec<Transformer> = switches
+        .iter()
+        .map(|s| switch_branch(s.from, s.to, s.open))
+        .collect();
 
     let mut reg = buses.to_vec();
     let y_reg = ybus_of(reg.len(), lines, &stamped);
@@ -132,12 +149,23 @@ fn a_closed_switch_carries_the_load_and_both_treatments_agree() {
         bus(2, BusType::PQ, -0.8, -0.3),
     ];
     let lines = vec![line(0, 1, 0.01, 0.1)];
-    let switches = vec![ConstrainedSwitch { from: 1, to: 2, open: false }];
+    let switches = vec![ConstrainedSwitch {
+        from: 1,
+        to: 2,
+        open: false,
+    }];
 
     let (reg, con, solution) = both_ways(&buses, &lines, &switches);
     assert_eq!(solution.stats.status, SolveStatus::Converged);
-    assert!(solution.indeterminate.is_empty(), "nothing here is indeterminate");
-    assert_states_agree(&reg, &con, agreement_tolerance(switches.iter().filter(|s| !s.open).count()));
+    assert!(
+        solution.indeterminate.is_empty(),
+        "nothing here is indeterminate"
+    );
+    assert_states_agree(
+        &reg,
+        &con,
+        agreement_tolerance(switches.iter().filter(|s| !s.open).count()),
+    );
 
     // The switch's two ends are the same point, exactly.
     assert!((con[1].voltage_mag - con[2].voltage_mag).abs() < 1e-12);
@@ -146,8 +174,14 @@ fn a_closed_switch_carries_the_load_and_both_treatments_agree() {
     // Everything the load draws passes through the switch, and nothing else
     // reaches bus 2.
     let (p, q) = solution.flows[0];
-    assert!((p - 0.8).abs() < 1e-9, "switch carries P = {p}, expected the load's 0.8");
-    assert!((q - 0.3).abs() < 1e-9, "switch carries Q = {q}, expected the load's 0.3");
+    assert!(
+        (p - 0.8).abs() < 1e-9,
+        "switch carries P = {p}, expected the load's 0.8"
+    );
+    assert!(
+        (q - 0.3).abs() < 1e-9,
+        "switch carries Q = {q}, expected the load's 0.3"
+    );
 }
 
 /// An open switch is not a connection. Its ends are free to differ, its flow is
@@ -160,12 +194,24 @@ fn an_open_switch_carries_nothing_and_ties_nothing() {
         bus(2, BusType::PQ, -0.3, -0.1),
     ];
     let lines = vec![line(0, 1, 0.01, 0.1)];
-    let switches = vec![ConstrainedSwitch { from: 1, to: 2, open: true }];
+    let switches = vec![ConstrainedSwitch {
+        from: 1,
+        to: 2,
+        open: true,
+    }];
 
     let (reg, con, solution) = both_ways(&buses, &lines, &switches);
     assert_eq!(solution.stats.status, SolveStatus::Converged);
-    assert_eq!(solution.flows[0], (0.0, 0.0), "an open switch carries exactly nothing");
-    assert_states_agree(&reg, &con, agreement_tolerance(switches.iter().filter(|s| !s.open).count()));
+    assert_eq!(
+        solution.flows[0],
+        (0.0, 0.0),
+        "an open switch carries exactly nothing"
+    );
+    assert_states_agree(
+        &reg,
+        &con,
+        agreement_tolerance(switches.iter().filter(|s| !s.open).count()),
+    );
     // Bus 2 is behind the open switch with no source: de-energized, reported at
     // exactly zero, the same as any unreferenced island.
     assert_eq!(con[2].voltage_mag, 0.0);
@@ -183,20 +229,39 @@ fn the_two_treatments_agree_across_a_switching_campaign() {
         bus(2, BusType::PQ, -0.1, -0.02),
         bus(3, BusType::PQ, -0.6, -0.25),
     ];
-    let lines = vec![line(0, 1, 0.01, 0.1), line(0, 2, 0.02, 0.15), line(1, 3, 0.015, 0.12)];
+    let lines = vec![
+        line(0, 1, 0.01, 0.1),
+        line(0, 2, 0.02, 0.15),
+        line(1, 3, 0.015, 0.12),
+    ];
 
     let mut previous: Option<f64> = None;
     for open in [false, true, false] {
-        let switches = vec![ConstrainedSwitch { from: 2, to: 3, open }];
+        let switches = vec![ConstrainedSwitch {
+            from: 2,
+            to: 3,
+            open,
+        }];
         let (reg, con, solution) = both_ways(&buses, &lines, &switches);
-        assert_eq!(solution.stats.status, SolveStatus::Converged, "open = {open}");
-        assert_states_agree(&reg, &con, agreement_tolerance(switches.iter().filter(|s| !s.open).count()));
+        assert_eq!(
+            solution.stats.status,
+            SolveStatus::Converged,
+            "open = {open}"
+        );
+        assert_states_agree(
+            &reg,
+            &con,
+            agreement_tolerance(switches.iter().filter(|s| !s.open).count()),
+        );
 
         let p = solution.flows[0].0;
         if open {
             assert_eq!(p, 0.0);
         } else {
-            assert!(p.abs() > 1e-3, "a closed tie in a ring should carry something, got {p}");
+            assert!(
+                p.abs() > 1e-3,
+                "a closed tie in a ring should carry something, got {p}"
+            );
         }
         // Closing and reopening returns to the same state, so the loop is not
         // accumulating anything between runs.
@@ -225,20 +290,43 @@ fn a_loop_of_closed_switches_is_reported_as_indeterminate() {
     ];
     let lines = vec![line(0, 1, 0.01, 0.1)];
     let switches = vec![
-        ConstrainedSwitch { from: 1, to: 2, open: false },
-        ConstrainedSwitch { from: 1, to: 2, open: false },
+        ConstrainedSwitch {
+            from: 1,
+            to: 2,
+            open: false,
+        },
+        ConstrainedSwitch {
+            from: 1,
+            to: 2,
+            open: false,
+        },
     ];
 
     let (reg, con, solution) = both_ways(&buses, &lines, &switches);
     assert_eq!(solution.stats.status, SolveStatus::Converged);
-    assert_states_agree(&reg, &con, agreement_tolerance(switches.iter().filter(|s| !s.open).count()));
+    assert_states_agree(
+        &reg,
+        &con,
+        agreement_tolerance(switches.iter().filter(|s| !s.open).count()),
+    );
 
-    assert_eq!(solution.indeterminate, vec![1], "the loop-closing switch is the second one");
-    assert_eq!(solution.flows[1], (0.0, 0.0), "an indeterminate flow is pinned, not guessed");
+    assert_eq!(
+        solution.indeterminate,
+        vec![1],
+        "the loop-closing switch is the second one"
+    );
+    assert_eq!(
+        solution.flows[1],
+        (0.0, 0.0),
+        "an indeterminate flow is pinned, not guessed"
+    );
     // The determined one carries the whole load, which is the only quantity the
     // network actually fixes.
     let (p, q) = solution.flows[0];
-    assert!((p - 0.4).abs() < 1e-9 && (q - 0.15).abs() < 1e-9, "got ({p}, {q})");
+    assert!(
+        (p - 0.4).abs() < 1e-9 && (q - 0.15).abs() < 1e-9,
+        "got ({p}, {q})"
+    );
 }
 
 /// A chain of switches with nothing but switches between source and load — the
@@ -254,13 +342,22 @@ fn a_chain_of_switches_ties_every_intermediate_bus() {
     buses[n - 1].p_spec = -0.5;
     buses[n - 1].q_spec = -0.2;
     let lines = vec![line(0, 1, 0.01, 0.1)];
-    let switches: Vec<ConstrainedSwitch> =
-        (1..n - 1).map(|i| ConstrainedSwitch { from: i, to: i + 1, open: false }).collect();
+    let switches: Vec<ConstrainedSwitch> = (1..n - 1)
+        .map(|i| ConstrainedSwitch {
+            from: i,
+            to: i + 1,
+            open: false,
+        })
+        .collect();
 
     let (reg, con, solution) = both_ways(&buses, &lines, &switches);
     assert_eq!(solution.stats.status, SolveStatus::Converged);
     assert!(solution.indeterminate.is_empty());
-    assert_states_agree(&reg, &con, agreement_tolerance(switches.iter().filter(|s| !s.open).count()));
+    assert_states_agree(
+        &reg,
+        &con,
+        agreement_tolerance(switches.iter().filter(|s| !s.open).count()),
+    );
 
     for i in 1..n - 1 {
         assert!(
@@ -291,13 +388,22 @@ fn many_switches_do_not_degrade_convergence() {
     buses[n - 1].p_spec = -0.5;
     buses[n - 1].q_spec = -0.2;
     let lines = vec![line(0, 1, 0.01, 0.1)];
-    let switches: Vec<ConstrainedSwitch> =
-        (1..n - 1).map(|i| ConstrainedSwitch { from: i, to: i + 1, open: false }).collect();
+    let switches: Vec<ConstrainedSwitch> = (1..n - 1)
+        .map(|i| ConstrainedSwitch {
+            from: i,
+            to: i + 1,
+            open: false,
+        })
+        .collect();
 
     let mut con = buses.clone();
     let y = ybus_of(n, &lines, &[]);
     let solution = solve_constrained(&mut con, &y, &switches, 1e-10, 30);
-    assert_eq!(solution.stats.status, SolveStatus::Converged, "100 switches did not converge");
+    assert_eq!(
+        solution.stats.status,
+        SolveStatus::Converged,
+        "100 switches did not converge"
+    );
     assert!(
         solution.stats.iterations() <= 5,
         "took {} iterations",
@@ -320,7 +426,11 @@ fn a_switch_between_two_references_is_indeterminate_rather_than_singular() {
         bus(2, BusType::PQ, -0.3, -0.1),
     ];
     let lines = vec![line(0, 2, 0.01, 0.1)];
-    let switches = vec![ConstrainedSwitch { from: 0, to: 1, open: false }];
+    let switches = vec![ConstrainedSwitch {
+        from: 0,
+        to: 1,
+        open: false,
+    }];
 
     let mut con = buses.clone();
     let y = ybus_of(3, &lines, &[]);
@@ -342,14 +452,24 @@ fn islands_are_decided_across_closed_switches() {
         bus(1, BusType::PQ, -0.25, -0.1),
     ];
     let lines: Vec<Line> = Vec::new();
-    let switches = vec![ConstrainedSwitch { from: 0, to: 1, open: false }];
+    let switches = vec![ConstrainedSwitch {
+        from: 0,
+        to: 1,
+        open: false,
+    }];
 
     let mut con = buses.clone();
     let y = ybus_of(2, &lines, &[]);
     let solution = solve_constrained(&mut con, &y, &switches, 1e-10, 30);
     assert_eq!(solution.stats.status, SolveStatus::Converged);
-    assert!(con[1].voltage_mag > 0.5, "bus 1 was de-energized despite a closed switch to the source");
+    assert!(
+        con[1].voltage_mag > 0.5,
+        "bus 1 was de-energized despite a closed switch to the source"
+    );
     assert!((con[1].voltage_mag - con[0].voltage_mag).abs() < 1e-12);
     let (p, q) = solution.flows[0];
-    assert!((p - 0.25).abs() < 1e-9 && (q - 0.1).abs() < 1e-9, "got ({p}, {q})");
+    assert!(
+        (p - 0.25).abs() < 1e-9 && (q - 0.1).abs() < 1e-9,
+        "got ({p}, {q})"
+    );
 }

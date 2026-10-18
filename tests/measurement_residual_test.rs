@@ -32,8 +32,8 @@ use num_complex::Complex;
 
 use gridoxide::measurement::measurements_from_pgm;
 use gridoxide::network::{build_ybus, source_impedance_pu, stamp_shunts};
-use gridoxide::pgm::{pgm_shunts_1ph, pgm_to_network, PgmInput, PgmNetwork};
-use gridoxide::se::{measurement_functions, SeNetwork};
+use gridoxide::pgm::{PgmInput, PgmNetwork, pgm_shunts_1ph, pgm_to_network};
+use gridoxide::se::{SeNetwork, measurement_functions};
 use gridoxide::types::Bus;
 
 const S_BASE_VA: f64 = 1e6;
@@ -55,7 +55,12 @@ fn fixture_dir(name: &str) -> PathBuf {
 /// Without that step every bus-injection measurement at a source node would
 /// have to be skipped, since its `h(x)` reads the whole Y-bus row — including
 /// the virtual neighbour.
-fn apply_expected_state(buses: &mut [Bus], net: &PgmNetwork, input: &PgmInput, expected: &serde_json::Value) {
+fn apply_expected_state(
+    buses: &mut [Bus],
+    net: &PgmNetwork,
+    input: &PgmInput,
+    expected: &serde_json::Value,
+) {
     for node in expected["data"]["node"].as_array().expect("node output") {
         let id = node["id"].as_u64().expect("node id");
         let idx = net.node_idx[&id];
@@ -65,9 +70,9 @@ fn apply_expected_state(buses: &mut [Bus], net: &PgmNetwork, input: &PgmInput, e
 
     let source_out = expected["data"]["source"].as_array();
     for src in input.data.source.iter().filter(|s| s.status != 0) {
-        let Some(out) = source_out.and_then(|arr| {
-            arr.iter().find(|o| o["id"].as_u64() == Some(src.id))
-        }) else {
+        let Some(out) =
+            source_out.and_then(|arr| arr.iter().find(|o| o["id"].as_u64() == Some(src.id)))
+        else {
             continue;
         };
         let branch = net.source_branch_idx[&src.id];
@@ -216,9 +221,9 @@ fn has_complete_state(dir: &Path) -> bool {
         Err(_) => return false,
     };
     match v["data"].get("node").and_then(|n| n.as_array()) {
-        Some(nodes) if !nodes.is_empty() => {
-            nodes.iter().all(|n| n.get("u_pu").is_some() && n.get("u_angle").is_some())
-        }
+        Some(nodes) if !nodes.is_empty() => nodes
+            .iter()
+            .all(|n| n.get("u_pu").is_some() && n.get("u_angle").is_some()),
         _ => false,
     }
 }
@@ -242,8 +247,14 @@ fn measurements_agree_with_pgm_state_within_noise() {
     // types are filtered out (`node-injection-sensor-and-zero-injection`
     // measures only node injections), so the floor is on the aggregate rather
     // than per fixture — otherwise this test could quietly become vacuous.
-    assert!(contributing >= 3, "only {contributing} fixtures contributed measurements");
-    assert!(total > 50, "expected a meaningful number of measurements, got {total}");
+    assert!(
+        contributing >= 3,
+        "only {contributing} fixtures contributed measurements"
+    );
+    assert!(
+        total > 50,
+        "expected a meaningful number of measurements, got {total}"
+    );
 }
 
 /// A sanity check on the check: the fixture directory should not have grown
@@ -256,7 +267,9 @@ fn every_symmetric_fixture_is_either_modelled_or_excluded() {
     for entry in std::fs::read_dir(&dir).expect("fixture dir") {
         let entry = entry.expect("dir entry");
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !entry.path().join("sym_output.json").exists() || MODELLED_FIXTURES.contains(&name.as_str()) {
+        if !entry.path().join("sym_output.json").exists()
+            || MODELLED_FIXTURES.contains(&name.as_str())
+        {
             continue;
         }
         // `link` is modelled now (stamped as a branch, see `pgm::LINK_Y`),
@@ -302,6 +315,9 @@ fn link_fixtures_are_no_longer_excluded_for_their_link() {
     for name in ["dummy-test-sym", "ill-conditioned-by-link-meshed"] {
         let text = std::fs::read_to_string(fixture_dir(name).join("input.json")).expect("input");
         let v: serde_json::Value = serde_json::from_str(&text).expect("parses");
-        assert!(v["data"].get("link").is_some(), "{name} should still carry a link");
+        assert!(
+            v["data"].get("link").is_some(),
+            "{name} should still carry a link"
+        );
     }
 }

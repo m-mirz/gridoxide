@@ -159,7 +159,10 @@ mod tests {
         let col_ptr = [0, 1, 2, 3];
         let row_idx = [0, 1, 2];
         let lists = build_symmetric_lists(3, &col_ptr, &row_idx);
-        assert!(lists.iter().all(|l| l.is_empty()), "diagonal-only matrix has no off-diagonal A+A' entries");
+        assert!(
+            lists.iter().all(|l| l.is_empty()),
+            "diagonal-only matrix has no off-diagonal A+A' entries"
+        );
     }
 
     #[test]

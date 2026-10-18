@@ -73,9 +73,9 @@
 //! counter trade has no network sensitivity at all, which is why the reference
 //! leaves it out of its LP too.
 
-use crate::linear::btheta::{dc_branches, dc_power_flow, DcBranch};
-use crate::linear::sensitivity::DcSensitivity;
 use crate::linear::DcOptions;
+use crate::linear::btheta::{DcBranch, dc_branches, dc_power_flow};
+use crate::linear::sensitivity::DcSensitivity;
 use crate::opf::{LinearProgram, OpfError, OptStatus, Solver};
 use crate::types::Transformer;
 
@@ -430,7 +430,10 @@ pub fn tap_table(
     branch: usize,
     lines: usize,
 ) -> Vec<(i32, f64)> {
-    if let Some(changer) = branch.checked_sub(lines).and_then(|i| tap_changers.get(i)?.as_ref()) {
+    if let Some(changer) = branch
+        .checked_sub(lines)
+        .and_then(|i| tap_changers.get(i)?.as_ref())
+    {
         let table: Vec<(i32, f64)> = (changer.low..=changer.high())
             .filter_map(|tap| changer.angle_deg(tap).map(|a| (tap, CRAC_ANGLE_SIGN * a)))
             .collect();
@@ -625,7 +628,10 @@ impl PstControl {
     }
 
     fn angle_at(&self, tap: i32) -> Option<f64> {
-        self.tap_to_angle.binary_search_by_key(&tap, |(t, _)| *t).ok().map(|i| self.tap_to_angle[i].1)
+        self.tap_to_angle
+            .binary_search_by_key(&tap, |(t, _)| *t)
+            .ok()
+            .map(|i| self.tap_to_angle[i].1)
     }
 }
 
@@ -647,7 +653,8 @@ pub fn optimize(
     // network wherever its answer says — and the whole point of the retry below
     // is to start each subset from the same place.
     let before = (network.buses.clone(), network.transformers.clone());
-    let unconstrained = optimize_within(crac, network, resolution, perimeter, solver, options, None);
+    let unconstrained =
+        optimize_within(crac, network, resolution, perimeter, solver, options, None);
     let moved = moved_actions(&unconstrained);
     if options.limits.is_unlimited() || options.limits.admits(crac, &moved) {
         return unconstrained;
@@ -668,11 +675,21 @@ pub fn optimize(
     for subset in admissible_subsets(crac, &usable, &options.limits) {
         network.buses.clone_from(&before.0);
         network.transformers.clone_from(&before.1);
-        let result =
-            optimize_within(crac, network, resolution, perimeter, solver, options, Some(&subset));
+        let result = optimize_within(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            solver,
+            options,
+            Some(&subset),
+        );
         // The network each attempt leaves behind travels with its result, so
         // the winner can be restored without optimizing it a second time.
-        if best.as_ref().is_none_or(|(b, ..)| result.final_objective > b.final_objective) {
+        if best
+            .as_ref()
+            .is_none_or(|(b, ..)| result.final_objective > b.final_objective)
+        {
             best = Some((result, network.buses.clone(), network.transformers.clone()));
         }
     }
@@ -687,7 +704,12 @@ pub fn optimize(
 /// Which range actions a result actually moved, by index into
 /// [`Crac::range_actions`].
 fn moved_actions(result: &LinearResult) -> Vec<usize> {
-    result.setpoints.iter().filter(|s| s.moved()).map(|s| s.action).collect()
+    result
+        .setpoints
+        .iter()
+        .filter(|s| s.moved())
+        .map(|s| s.action)
+        .collect()
 }
 
 /// The **maximal** subsets of `usable` the budget admits.
@@ -782,15 +804,25 @@ fn optimize_within(
     // One list for everything that needs a flow and a sensitivity row. The
     // optimized ones come first, so a position below `cnec_indices.len()` is an
     // optimized CNEC and anything after it is a monitored one.
-    let lp_indices: Vec<usize> =
-        cnec_indices.iter().chain(mnec_indices.iter()).copied().collect();
+    let lp_indices: Vec<usize> = cnec_indices
+        .iter()
+        .chain(mnec_indices.iter())
+        .copied()
+        .collect();
 
     // Before any control exists, so there is nothing state-dependent to see.
     let mut best = objective(crac, network, resolution, perimeter, &[], options);
     let initial_objective = best;
     // Before any control exists, like `best` above.
-    let initial_margin =
-        margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, &[], options);
+    let initial_margin = margin(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        ObjectiveUnit::Megawatt,
+        &[],
+        options,
+    );
     let mut setpoints: Vec<Setpoint> = Vec::new();
     let mut held_setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
@@ -814,7 +846,16 @@ fn optimize_within(
 
     // Where every control started, so `Setpoint::initial` is the pre-optimization
     // value rather than the previous iteration's.
-    let mut controls = match build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options, allowed) {
+    let mut controls = match build_controls(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        &lp_indices,
+        dc_options,
+        options,
+        allowed,
+    ) {
         Some(c) if !c.is_empty() => c,
         _ => {
             return LinearResult {
@@ -826,12 +867,14 @@ fn optimize_within(
                 initial_objective,
                 final_objective: best,
                 iterations,
-            }
+            };
         }
     };
     let starting: Vec<f64> = controls.iter().map(|c| c.current).collect();
-    let starting_taps: Vec<Option<i32>> =
-        controls.iter().map(|c| c.pst.as_ref().map(|p| p.tap)).collect();
+    let starting_taps: Vec<Option<i32>> = controls
+        .iter()
+        .map(|c| c.pst.as_ref().map(|p| p.tap))
+        .collect();
 
     // Whether to price activation with a binary, which needs a backend that can
     // honour integrality. Asked of the solver rather than configured, because
@@ -842,12 +885,21 @@ fn optimize_within(
     // continues on the LP — a cost objective without activation pricing, which
     // is what a build with no MIP backend can honestly answer.
     let mut binaries = options.objective_kind.costly().is_some()
-        && controls.iter().any(|c| c.activation.is_some_and(|k| k > 0.0));
+        && controls
+            .iter()
+            .any(|c| c.activation.is_some_and(|k| k > 0.0));
 
     for _ in 0..options.max_iterations {
         iterations += 1;
-        let (flows, limits) =
-            perimeter_flows(crac, network, resolution, perimeter, &lp_indices, &controls, options);
+        let (flows, limits) = perimeter_flows(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            &lp_indices,
+            &controls,
+            options,
+        );
         let build = |binaries| {
             build_program(
                 cnec_indices.len(),
@@ -873,12 +925,13 @@ fn optimize_within(
             break;
         }
 
-
         // Read the new set-points, round a phase shifter to a real tap, and
         // apply. Rounding *before* measuring is the point: the margin that
         // matters is the one at a tap the operator can actually select.
-        let previous: Vec<(f64, Option<i32>)> =
-            controls.iter().map(|c| (c.current, c.pst.as_ref().map(|p| p.tap))).collect();
+        let previous: Vec<(f64, Option<i32>)> = controls
+            .iter()
+            .map(|c| (c.current, c.pst.as_ref().map(|p| p.tap)))
+            .collect();
 
         // The LP's answer, rounded to the nearer bracketing tap as a starting
         // point.
@@ -907,7 +960,9 @@ fn optimize_within(
         // column is anchored on the network and moves on its own.
         let coupled = options.objective_kind.costly().is_some();
         for k in 0..controls.len() {
-            let Some(pst) = controls[k].pst.as_ref() else { continue };
+            let Some(pst) = controls[k].pst.as_ref() else {
+                continue;
+            };
             let target = solution.primal[setpoint_column(k)];
             let candidates: Vec<i32> = pst
                 .bracketing_taps(target)
@@ -1071,9 +1126,16 @@ fn optimize_within(
             // its last round, a shifter that reached tap −7 in one move is
             // indistinguishable from one that took three, and each round is free
             // to buy a fraction of a degree with a fresh activation.
-            if let Some(mut rebuilt) =
-                build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options, allowed)
-            {
+            if let Some(mut rebuilt) = build_controls(
+                crac,
+                network,
+                resolution,
+                perimeter,
+                &lp_indices,
+                dc_options,
+                options,
+                allowed,
+            ) {
                 if rebuilt.len() == controls.len() {
                     for (new, old) in rebuilt.iter_mut().zip(&controls) {
                         new.start = old.start;
@@ -1095,8 +1157,11 @@ fn optimize_within(
     // rejection path above restores it, and this asserts the invariant rather
     // than assuming it.
     if setpoints.is_empty() {
-        let restore: Vec<(f64, Option<i32>)> =
-            starting.iter().copied().zip(starting_taps.iter().copied()).collect();
+        let restore: Vec<(f64, Option<i32>)> = starting
+            .iter()
+            .copied()
+            .zip(starting_taps.iter().copied())
+            .collect();
         apply(crac, network, &mut controls, &restore);
     }
 
@@ -1209,7 +1274,12 @@ fn build_program(
     // an action the CRAC prices at nothing needs no column and no big-M row.
     let activation: Vec<Option<f64>> = controls
         .iter()
-        .map(|c| binaries.then_some(c.activation).flatten().filter(|k| *k > 0.0))
+        .map(|c| {
+            binaries
+                .then_some(c.activation)
+                .flatten()
+                .filter(|k| *k > 0.0)
+        })
         .collect();
     let n_binary = activation.iter().filter(|a| a.is_some()).count();
     // The layout: `3n` control columns, then the minimum-margin column **only
@@ -1251,16 +1321,21 @@ fn build_program(
     for (k, control) in controls.iter().enumerate() {
         lp.col_lower[setpoint_column(k)] = control.lower;
         lp.col_upper[setpoint_column(k)] = control.upper;
-        for (column, price) in
-            [(up_column(k), control.variation.0), (down_column(k), control.variation.1)]
-        {
+        for (column, price) in [
+            (up_column(k), control.variation.0),
+            (down_column(k), control.variation.1),
+        ] {
             lp.col_lower[column] = 0.0;
             lp.col_upper[column] = f64::INFINITY;
             // Under a cost objective this is a **real price**, in the same
             // currency as the overload penalty. Otherwise it stays the
             // movement penalty, which exists only to break ties toward the
             // answer that moves least.
-            lp.col_cost[column] = if costly.is_some() { price } else { control.penalty };
+            lp.col_cost[column] = if costly.is_some() {
+                price
+            } else {
+                control.penalty
+            };
         }
         // What this control's movement is measured **from**.
         //
@@ -1354,7 +1429,11 @@ fn build_program(
             && let Some(pst) = controls[p].pst.as_ref()
         {
             let (lo, hi) = chained_window(pst, window);
-            lp.add_row(&[(setpoint_column(k), 1.0), (setpoint_column(p), -1.0)], lo, hi);
+            lp.add_row(
+                &[(setpoint_column(k), 1.0), (setpoint_column(p), -1.0)],
+                lo,
+                hi,
+            );
         }
 
         // What it costs to use this action **at all**, as against how far it
@@ -1501,7 +1580,12 @@ fn build_program(
                 continue;
             }
             let sign = if is_upper { 1.0 } else { -1.0 };
-            let bound = scale * if is_upper { limit - constant } else { constant - limit };
+            let bound = scale
+                * if is_upper {
+                    limit - constant
+                } else {
+                    constant - limit
+                };
             match costly {
                 // `v ≥ τ − margin`, one column per CNEC, floored at zero by its
                 // own bound. Minimizing a positive penalty drives it to exactly
@@ -1511,8 +1595,7 @@ fn build_program(
                 // the bound on the other side: a margin row says
                 // `MM ≤ margin`, this says `v ≥ τ − margin`.
                 Some(c) => {
-                    let mut coefficients: Vec<(usize, f64)> =
-                        Vec::with_capacity(terms.len() + 1);
+                    let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
                     coefficients.push((overload_of(position), 1.0));
                     for &(column, s) in &terms {
                         coefficients.push((column, -sign * s * scale));
@@ -1524,8 +1607,7 @@ fn build_program(
                     );
                 }
                 None => {
-                    let mut coefficients: Vec<(usize, f64)> =
-                        Vec::with_capacity(terms.len() + 1);
+                    let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
                     coefficients.push((mm, 1.0));
                     for &(column, s) in &terms {
                         coefficients.push((column, sign * s * scale));
@@ -1563,7 +1645,9 @@ fn build_program(
         let position = optimized + slot;
         let violation = violation_of(slot);
         let (lower, upper, amperes_per_mw) = limits[position];
-        let Some(initial) = options.mnec.baseline.get(cnec) else { continue };
+        let Some(initial) = options.mnec.baseline.get(cnec) else {
+            continue;
+        };
         let to_mw = match options.objective_unit {
             ObjectiveUnit::Megawatt => 1.0,
             // No voltage means no conversion, and a bound converted at a made-up
@@ -1587,8 +1671,11 @@ fn build_program(
                 (s.abs() >= options.sensitivity_threshold).then_some((k, s))
             })
             .collect();
-        let constant: f64 =
-            flows[position] - terms.iter().map(|&(k, s)| s * controls[k].current).sum::<f64>();
+        let constant: f64 = flows[position]
+            - terms
+                .iter()
+                .map(|&(k, s)| s * controls[k].current)
+                .sum::<f64>();
 
         if upper.is_finite() {
             let bound = f64::max(upper, initial.flow_mw + decrease) - adjustment;
@@ -1704,20 +1791,33 @@ fn build_controls(
     // uniform error. A perimeter spanning every state has no single network,
     // and there the error stops being uniform: preventive columns are traded
     // against curative CNECs whose response to them is the wrong number.
-    let points = SensitivityPoints::build(network, crac, resolution, cnecs, dc_options, options.held.as_ref())?;
+    let points = SensitivityPoints::build(
+        network,
+        crac,
+        resolution,
+        cnecs,
+        dc_options,
+        options.held.as_ref(),
+    )?;
 
     // Which CNEC rows a column governs, given the states it is available in.
     // `None` is every row, which is what a single-instant perimeter always
     // gets. A column scoped to a subset writes zeros elsewhere, so a curative
     // shifter cannot pretend to move a preventive flow.
     let scoped = |sensitivity: Vec<f64>, governs: Option<&[State]>| -> Vec<f64> {
-        let Some(governs) = governs else { return sensitivity };
+        let Some(governs) = governs else {
+            return sensitivity;
+        };
         sensitivity
             .into_iter()
             .enumerate()
             .map(|(position, value)| {
                 let state = cnecs.get(position).map(|&i| &crac.flow_cnecs[i].state);
-                if state.is_some_and(|s| governs.contains(s)) { value } else { 0.0 }
+                if state.is_some_and(|s| governs.contains(s)) {
+                    value
+                } else {
+                    0.0
+                }
             })
             .collect()
     };
@@ -1753,14 +1853,16 @@ fn build_controls(
         }
         if let Some(held) = split
             && options.a_r_s
-            && options.available.allows(&action.usage_rules, &held.states, crac)
-            // A range written `relativeToPreviousInstant` used to be declined
-            // here. Its window is relative to another *column* — the preventive
-            // set-point this same problem is deciding — and an earlier version read that as
-            // beyond the LP, "one bound pair per column and no row coupling two
-            // of them". True of a bound, and the window is now stated as a row
-            // instead: see `tap_bounds_split` and the chained row in
-            // `build_program`.
+            && options
+                .available
+                .allows(&action.usage_rules, &held.states, crac)
+        // A range written `relativeToPreviousInstant` used to be declined
+        // here. Its window is relative to another *column* — the preventive
+        // set-point this same problem is deciding — and an earlier version read that as
+        // beyond the LP, "one bound pair per column and no row coupling two
+        // of them". True of a bound, and the window is now stated as a row
+        // instead: see `tap_bounds_split` and the chained row in
+        // `build_program`.
         {
             wanted.push((index, Some(&held.states)));
         }
@@ -1781,8 +1883,14 @@ fn build_controls(
     for (index, governs) in wanted {
         let action = &crac.range_actions[index];
         match &action.kind {
-            RangeActionKind::Pst { element, initial_tap, tap_to_angle } => {
-                let Some(branch) = resolution.branch(element) else { continue };
+            RangeActionKind::Pst {
+                element,
+                initial_tap,
+                tap_to_angle,
+            } => {
+                let Some(branch) = resolution.branch(element) else {
+                    continue;
+                };
                 let table = tap_table(
                     tap_to_angle,
                     network.tap_changers,
@@ -1797,8 +1905,7 @@ fn build_controls(
                 };
                 // MW per degree *of the CRAC's angle*: the column is per-unit
                 // per radian of gridoxide's, so the sign flips with it.
-                let scale =
-                    CRAC_ANGLE_SIGN * network.base_mva * std::f64::consts::PI / 180.0;
+                let scale = CRAC_ANGLE_SIGN * network.base_mva * std::f64::consts::PI / 180.0;
                 let sensitivity_mw: Vec<f64> = column.iter().map(|s| s * scale).collect();
 
                 // The live tap is whatever the transformer's angle is closest
@@ -1870,7 +1977,11 @@ fn build_controls(
                     lower,
                     upper,
                     penalty: options.pst_penalty,
-                    pst: Some(PstControl { branch, tap_to_angle: table, tap }),
+                    pst: Some(PstControl {
+                        branch,
+                        tap_to_angle: table,
+                        tap,
+                    }),
                     injection: None,
                 });
             }
@@ -1885,7 +1996,9 @@ fn build_controls(
                     // A redispatch names generators and loads, which are buses.
                     // Resolving them as branches finds nothing and silently
                     // drops the action.
-                    let Some(bus) = resolution.bus(element) else { continue };
+                    let Some(bus) = resolution.bus(element) else {
+                        continue;
+                    };
                     if bus >= injections.len() {
                         continue;
                     }
@@ -1913,7 +2026,9 @@ fn build_controls(
                 // on the bound, so saturating *was* optimal and the scale never
                 // showed. Anchoring the control where it really starts removes
                 // that accident, which is how this surfaced.
-                let Some(column) = points.injection(&injections) else { continue };
+                let Some(column) = points.injection(&injections) else {
+                    continue;
+                };
                 let sensitivity_mw: Vec<f64> =
                     column.iter().map(|s| s * network.base_mva).collect();
                 let (lower, upper) = standard_bounds(action);
@@ -1952,9 +2067,7 @@ fn build_controls(
                     start_tap: None,
                     // A redispatch's set-point is megawatts and its variation
                     // cost is per megawatt, so no conversion.
-                    variation: action
-                        .variation_cost
-                        .map_or((0.0, 0.0), |c| (c.up, c.down)),
+                    variation: action.variation_cost.map_or((0.0, 0.0), |c| (c.up, c.down)),
                     chained: None,
                     activation: action.activation_cost,
                     lower,
@@ -1994,7 +2107,9 @@ fn build_controls(
         && !superseded.is_empty()
     {
         for control in controls.iter_mut().filter(|c| c.reported) {
-            let Some(branch) = control.pst.as_ref().map(|p| p.branch) else { continue };
+            let Some(branch) = control.pst.as_ref().map(|p| p.branch) else {
+                continue;
+            };
             if !superseded.contains(&branch) {
                 continue;
             }
@@ -2037,27 +2152,31 @@ fn tap_nearest(table: &[(i32, f64)], angle: f64) -> Option<i32> {
 /// imported, and for a curative one it is what the preventive stage and the
 /// automatons left, which is precisely the instant a
 /// `relativeToPreviousInstant` range is written against.
-pub fn taps_now(
-    crac: &Crac,
-    network: &Network<'_>,
-    resolution: &Resolution,
-) -> Vec<(usize, i32)> {
+pub fn taps_now(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> Vec<(usize, i32)> {
     crac.range_actions
         .iter()
         .enumerate()
         .filter_map(|(index, action)| {
-            let RangeActionKind::Pst { element, initial_tap, tap_to_angle } = &action.kind else {
+            let RangeActionKind::Pst {
+                element,
+                initial_tap,
+                tap_to_angle,
+            } = &action.kind
+            else {
                 return None;
             };
             let branch = resolution.branch(element)?;
-            let table =
-                tap_table(tap_to_angle, network.tap_changers, branch, network.lines.len());
+            let table = tap_table(
+                tap_to_angle,
+                network.tap_changers,
+                branch,
+                network.lines.len(),
+            );
             if table.is_empty() {
                 return None;
             }
             let i = branch.checked_sub(network.lines.len())?;
-            let angle =
-                CRAC_ANGLE_SIGN * network.transformers.get(i)?.tap.arg().to_degrees();
+            let angle = CRAC_ANGLE_SIGN * network.transformers.get(i)?.tap.arg().to_degrees();
             Some((index, tap_nearest(&table, angle).unwrap_or(*initial_tap)))
         })
         .collect()
@@ -2246,8 +2365,8 @@ impl SensitivityPoints {
             let mut lines = network.lines.to_vec();
             let mut transformers = network.transformers.clone();
             let cut = |branch: usize,
-                           lines: &mut Vec<crate::types::Line>,
-                           transformers: &mut Vec<Transformer>| {
+                       lines: &mut Vec<crate::types::Line>,
+                       transformers: &mut Vec<Transformer>| {
                 if branch < lines.len() {
                     lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
                     lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
@@ -2274,7 +2393,9 @@ impl SensitivityPoints {
             }
             if let Some(c) = contingency {
                 for element in &crac.contingencies[c].elements {
-                    let Some(branch) = resolution.branch(element) else { continue };
+                    let Some(branch) = resolution.branch(element) else {
+                        continue;
+                    };
                     cut(branch, &mut lines, &mut transformers);
                 }
             }
@@ -2307,9 +2428,17 @@ impl SensitivityPoints {
             .collect();
         let branches = cnecs
             .iter()
-            .map(|&i| resolution.branch(&crac.flow_cnecs[i].network_element).unwrap())
+            .map(|&i| {
+                resolution
+                    .branch(&crac.flow_cnecs[i].network_element)
+                    .unwrap()
+            })
             .collect();
-        Some(Self { points, per_cnec, branches })
+        Some(Self {
+            points,
+            per_cnec,
+            branches,
+        })
     }
 
     /// MW per radian of `branch`'s phase shift at each CNEC, each read in its
@@ -2320,7 +2449,10 @@ impl SensitivityPoints {
             .iter()
             .map(|(_, branches, s)| phase_shift_sensitivity(s, branches, branch))
             .collect();
-        columns.iter().any(Option::is_some).then(|| self.gather(&columns))
+        columns
+            .iter()
+            .any(Option::is_some)
+            .then(|| self.gather(&columns))
     }
 
     /// The same for an injection pattern.
@@ -2330,7 +2462,10 @@ impl SensitivityPoints {
             .iter()
             .map(|(_, _, s)| s.response(injections).map(|(_, column)| column))
             .collect();
-        columns.iter().any(Option::is_some).then(|| self.gather(&columns))
+        columns
+            .iter()
+            .any(Option::is_some)
+            .then(|| self.gather(&columns))
     }
 
     fn gather(&self, columns: &[Option<Vec<f64>>]) -> Vec<f64> {
@@ -2520,7 +2655,9 @@ fn anchor_of(controls: &[Control], k: usize) -> Option<usize> {
     if control.reported {
         return None;
     }
-    controls[..k].iter().position(|c| c.action == control.action && c.reported)
+    controls[..k]
+        .iter()
+        .position(|c| c.action == control.action && c.reported)
 }
 
 /// Whether a proposal keeps every chained column inside the window its CRAC
@@ -2542,9 +2679,15 @@ fn anchor_of(controls: &[Control], k: usize) -> Option<usize> {
 /// questions and should not be merged.
 fn chained_taps_hold(controls: &[Control], proposed: &[(f64, Option<i32>)]) -> bool {
     for (k, control) in controls.iter().enumerate() {
-        let Some(window) = control.chained else { continue };
-        let Some(p) = previous_instant_of(controls, k) else { continue };
-        let (Some(here), Some(there)) = (proposed[k].1, proposed[p].1) else { continue };
+        let Some(window) = control.chained else {
+            continue;
+        };
+        let Some(p) = previous_instant_of(controls, k) else {
+            continue;
+        };
+        let (Some(here), Some(there)) = (proposed[k].1, proposed[p].1) else {
+            continue;
+        };
         let delta = here - there;
         if window.0.is_some_and(|m| delta < m) || window.1.is_some_and(|m| delta > m) {
             return false;
@@ -2655,10 +2798,7 @@ fn moved_range_actions(controls: &[Control]) -> Vec<(usize, f64)> {
 /// This is what closes the loop on `A(r, s)`: the LP proposes a curative
 /// set-point, and the measurement that scores the proposal has to see it — in
 /// the curative states, and only there.
-fn held_now(
-    options: &LinearOptions,
-    controls: &[Control],
-) -> Option<super::evaluate::Held> {
+fn held_now(options: &LinearOptions, controls: &[Control]) -> Option<super::evaluate::Held> {
     let held = options.held.as_ref()?;
     if controls.iter().all(|c| c.reported) {
         return Some(held.clone());
@@ -2731,7 +2871,11 @@ fn objective(
         ),
         None => {
             let margin = margin_of(crac, &result, perimeter, unit);
-            if margin.is_finite() { margin } else { NO_CNEC_MARGIN }
+            if margin.is_finite() {
+                margin
+            } else {
+                NO_CNEC_MARGIN
+            }
         }
     };
     score - options.mnec.cost(crac, &result, perimeter, unit)
@@ -2768,7 +2912,13 @@ fn perimeter_flows(
 /// without going through a full evaluation.
 pub fn base_flows(network: &Network<'_>) -> Vec<f64> {
     let mut buses = network.buses.to_vec();
-    dc_power_flow(&mut buses, network.lines, network.transformers, DcOptions::default()).branch_p
+    dc_power_flow(
+        &mut buses,
+        network.lines,
+        network.transformers,
+        DcOptions::default(),
+    )
+    .branch_p
 }
 
 #[cfg(test)]
@@ -2782,7 +2932,9 @@ mod chained_tests {
             branch: 0,
             // Widening steps, and *descending* in angle as the tap rises — the
             // sign `CRAC_ANGLE_SIGN` produces on the vendored fixtures.
-            tap_to_angle: (-8..=8).map(|t| (t, -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01))).collect(),
+            tap_to_angle: (-8..=8)
+                .map(|t| (t, -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01)))
+                .collect(),
             tap,
         }
     }
@@ -2848,9 +3000,15 @@ mod chained_tests {
         chained.pst = Some(pst(0));
         let controls = vec![anchor, chained];
         // Anchor at tap 1, chained at tap -1: two apart, allowed.
-        assert!(chained_taps_hold(&controls, &[(0.0, Some(1)), (0.0, Some(-1))]));
+        assert!(chained_taps_hold(
+            &controls,
+            &[(0.0, Some(1)), (0.0, Some(-1))]
+        ));
         // Three apart: not.
-        assert!(!chained_taps_hold(&controls, &[(0.0, Some(1)), (0.0, Some(-2))]));
+        assert!(!chained_taps_hold(
+            &controls,
+            &[(0.0, Some(1)), (0.0, Some(-2))]
+        ));
     }
 
     fn control() -> Control {

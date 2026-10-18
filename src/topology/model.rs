@@ -129,7 +129,11 @@ impl NodeBreakerTopology {
     /// A topology with `n_nodes` nodes and no switches — every node is its own
     /// bus under any policy.
     pub fn new(n_nodes: usize) -> Self {
-        Self { n_nodes, switches: Vec::new(), busbars: Vec::new() }
+        Self {
+            n_nodes,
+            switches: Vec::new(),
+            busbars: Vec::new(),
+        }
     }
 
     /// Appends a switch, returning its index.
@@ -151,7 +155,12 @@ mod tests {
     use super::*;
 
     fn switch(kind: SwitchKind, a: usize, b: usize, open: bool, in_service: bool) -> Switch {
-        Switch { kind, nodes: [NodeIdx(a), NodeIdx(b)], open, in_service }
+        Switch {
+            kind,
+            nodes: [NodeIdx(a), NodeIdx(b)],
+            open,
+            in_service,
+        }
     }
 
     #[test]

@@ -21,10 +21,10 @@
 use num_complex::Complex;
 
 use gridoxide::dynamics::models::machine::{self, GenCls, GenClsParams};
-use gridoxide::dynamics::models::{finite_difference, DynamicModel, GeneratingUnit, ModelJacobian};
+use gridoxide::dynamics::models::{DynamicModel, GeneratingUnit, ModelJacobian, finite_difference};
 use gridoxide::dynamics::{
-    build, run_dynamics, settle, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus,
-    SystemSpec,
+    DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus, SystemSpec, build, run_dynamics,
+    settle,
 };
 use gridoxide::network::{build_ybus, power_injections};
 use gridoxide::solver::JacobianBackend;
@@ -54,7 +54,13 @@ fn bus(idx: usize, bus_type: BusType, vmag: f64, p: f64, q: f64) -> Bus {
 }
 
 fn params(d: f64) -> GenClsParams {
-    GenClsParams { h: H, d, ra: 0.0, xdp: XDP, mbase: S_BASE }
+    GenClsParams {
+        h: H,
+        d,
+        ra: 0.0,
+        xdp: XDP,
+        mbase: S_BASE,
+    }
 }
 
 /// A single machine at bus 0, a lossless line, an infinite bus at 1∠0.
@@ -69,7 +75,14 @@ fn smib(damping: f64) -> (DynamicSystem, f64, f64) {
         bus(0, BusType::PV, 1.0, P_GEN, 0.0),
         bus(1, BusType::Slack, 1.0, 0.0, 0.0),
     ];
-    let lines = vec![Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = vec![Line {
+        from: 0,
+        to: 1,
+        r: 0.0,
+        x: X_LINE,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
 
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
@@ -119,7 +132,12 @@ fn smib(damping: f64) -> (DynamicSystem, f64, f64) {
 }
 
 fn options(step: f64, end: f64) -> DynamicsOptions {
-    DynamicsOptions { end_time: end, step, damping_steps: 0, ..Default::default() }
+    DynamicsOptions {
+        end_time: end,
+        step,
+        damping_steps: 0,
+        ..Default::default()
+    }
 }
 
 /// G1. No disturbance, so nothing moves — and "nothing" means machine epsilon,
@@ -142,15 +160,27 @@ fn equilibrium_is_invariant() {
     let report = run_dynamics(&mut system, &options(0.01, 10.0));
     assert_eq!(report.status, DynamicsStatus::Completed);
 
-    let delta = report.trajectory.series("G1.delta").expect("delta is recorded");
-    let omega = report.trajectory.series("G1.omega").expect("omega is recorded");
-    let vmag = report.trajectory.series("bus0.vmag").expect("bus 0 voltage is recorded");
+    let delta = report
+        .trajectory
+        .series("G1.delta")
+        .expect("delta is recorded");
+    let omega = report
+        .trajectory
+        .series("G1.omega")
+        .expect("omega is recorded");
+    let vmag = report
+        .trajectory
+        .series("bus0.vmag")
+        .expect("bus 0 voltage is recorded");
 
     let d_drift = delta.iter().fold(0.0f64, |m, d| m.max((d - delta_0).abs()));
     let w_drift = omega.iter().fold(0.0f64, |m, w| m.max((w - 1.0).abs()));
     let v_drift = vmag.iter().fold(0.0f64, |m, v| m.max((v - vmag[0]).abs()));
 
-    assert!(d_drift < 1e-12, "rotor angle drifted by {d_drift:e} over 10 s with no disturbance");
+    assert!(
+        d_drift < 1e-12,
+        "rotor angle drifted by {d_drift:e} over 10 s with no disturbance"
+    );
     assert!(w_drift < 1e-12, "rotor speed drifted by {w_drift:e}");
     assert!(v_drift < 1e-12, "terminal voltage drifted by {v_drift:e}");
 }
@@ -165,9 +195,8 @@ fn equilibrium_is_invariant() {
 /// anything is attached.
 #[test]
 fn analytic_jacobian_matches_finite_difference() {
-    let mut model = GeneratingUnit::machine_only(Box::new(
-        GenCls::new(params(2.0), S_BASE, F_NOM).unwrap(),
-    ));
+    let mut model =
+        GeneratingUnit::machine_only(Box::new(GenCls::new(params(2.0), S_BASE, F_NOM).unwrap()));
     model
         .initialize(Complex::from_polar(1.02, 0.15), Complex::new(0.8, 0.3))
         .expect("initializes");
@@ -248,7 +277,11 @@ fn small_signal_oscillation_matches_the_closed_form() {
 
     let delta = report.trajectory.series("G1.delta").unwrap();
     let zeros = crossings(&report.trajectory.time, &delta, delta_0);
-    assert!(zeros.len() >= 5, "expected several oscillations, found {} crossings", zeros.len());
+    assert!(
+        zeros.len() >= 5,
+        "expected several oscillations, found {} crossings",
+        zeros.len()
+    );
     // Average half-period over the whole record, which is far less sensitive to
     // any one crossing than the first pair would be.
     let measured = 2.0 * (zeros[zeros.len() - 1] - zeros[0]) / (zeros.len() - 1) as f64;
@@ -279,8 +312,12 @@ fn damping_decays_and_its_absence_does_not() {
         let report = run_dynamics(&mut system, &opts);
         let delta = report.trajectory.series("G1.delta").unwrap();
         let n = delta.len();
-        let early = delta[..n / 6].iter().fold(0.0f64, |m, d| m.max((d - delta_0).abs()));
-        let late = delta[5 * n / 6..].iter().fold(0.0f64, |m, d| m.max((d - delta_0).abs()));
+        let early = delta[..n / 6]
+            .iter()
+            .fold(0.0f64, |m, d| m.max((d - delta_0).abs()));
+        let late = delta[5 * n / 6..]
+            .iter()
+            .fold(0.0f64, |m, d| m.max((d - delta_0).abs()));
         (early, late)
     };
 
@@ -291,7 +328,10 @@ fn damping_decays_and_its_absence_does_not() {
     );
 
     let (early, late) = run(10.0);
-    assert!(late < 0.5 * early, "a damped swing should decay: {early:e} then {late:e}");
+    assert!(
+        late < 0.5 * early,
+        "a damped swing should decay: {early:e} then {late:e}"
+    );
 }
 
 /// G3. The trapezoidal rule is second-order, so halving the step quarters the
@@ -308,7 +348,12 @@ fn trapezoidal_is_second_order() {
         settle(&mut system, &opts);
         let report = run_dynamics(&mut system, &opts);
         assert_eq!(report.status, DynamicsStatus::Completed);
-        *report.trajectory.series("G1.delta").unwrap().last().unwrap()
+        *report
+            .trajectory
+            .series("G1.delta")
+            .unwrap()
+            .last()
+            .unwrap()
     };
 
     let reference = final_delta(0.02 / 16.0);
@@ -327,7 +372,10 @@ fn trapezoidal_is_second_order() {
 fn backends_agree() {
     let trajectory = |backend: JacobianBackend| {
         let (mut system, _, _) = smib(1.0);
-        let opts = DynamicsOptions { backend, ..options(0.005, 2.0) };
+        let opts = DynamicsOptions {
+            backend,
+            ..options(0.005, 2.0)
+        };
         system.state_mut()[0] += 0.1;
         settle(&mut system, &opts);
         let report = run_dynamics(&mut system, &opts);
@@ -367,7 +415,14 @@ fn a_mis_declared_split_is_silent_and_changes_the_machine() {
             bus(0, BusType::PV, 1.0, P_GEN, 0.0),
             bus(1, BusType::Slack, 1.0, 0.0, 0.0),
         ];
-        let lines = vec![Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 }];
+        let lines = vec![Line {
+            from: 0,
+            to: 1,
+            r: 0.0,
+            x: X_LINE,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }];
         let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
             buses,
             lines: lines.clone(),
@@ -391,7 +446,14 @@ fn a_mis_declared_split_is_silent_and_changes_the_machine() {
 
     let ybus = build_ybus(
         2,
-        &[Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 }],
+        &[Line {
+            from: 0,
+            to: 1,
+            r: 0.0,
+            x: X_LINE,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }],
         &[],
     )
     .finish();
@@ -400,11 +462,16 @@ fn a_mis_declared_split_is_silent_and_changes_the_machine() {
             bus(0, BusType::PV, 1.0, P_GEN, 0.0),
             bus(1, BusType::Slack, 1.0, 0.0, 0.0),
         ];
-        let lines = vec![Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 }];
-        let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
-            buses,
-            lines,
-        });
+        let lines = vec![Line {
+            from: 0,
+            to: 1,
+            r: 0.0,
+            x: X_LINE,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }];
+        let report =
+            gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData { buses, lines });
         let (p, q) = power_injections(&report.buses, &ybus);
         Complex::new(p[0], q[0])
     };

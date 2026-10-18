@@ -1,15 +1,19 @@
 mod common;
 
-use std::path::PathBuf;
-use gridoxide::pgm::{
-    node_id_to_idx, pgm_shunts_1ph, pgm_shunts_3ph, pgm_to_buses_and_branches, pgm_to_3ph_network,
-    pgm_transformers_3ph, PgmNodeAsymOutput, PgmNodeOutput,
+use gridoxide::network::{
+    build_ybus, build_ybus_3ph, stamp_shunts, stamp_shunts_3ph, stamp_transformers_3ph,
 };
-use gridoxide::network::{build_ybus, build_ybus_3ph, stamp_shunts, stamp_shunts_3ph, stamp_transformers_3ph};
+use gridoxide::pgm::{
+    PgmNodeAsymOutput, PgmNodeOutput, node_id_to_idx, pgm_shunts_1ph, pgm_shunts_3ph,
+    pgm_to_3ph_network, pgm_to_buses_and_branches, pgm_transformers_3ph,
+};
 use gridoxide::run_power_flow_analysis_from_ybus;
+use std::path::PathBuf;
 
 fn data_dir(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pgm/powerflow").join(rel)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/pgm/powerflow")
+        .join(rel)
 }
 
 #[test]
@@ -42,7 +46,12 @@ fn test_pgm_network_symmetric_distribution_case() {
     let expected = common::load_batch_output::<PgmNodeOutput>(&base.join("sym_output_batch.json"));
 
     let tol = 1e-5;
-    for (scenario, expected_scenario) in update["data"].as_array().unwrap().iter().zip(&expected.data) {
+    for (scenario, expected_scenario) in update["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&expected.data)
+    {
         let input = common::apply_batch_scenario(&base_json, scenario);
         let id_to_idx = node_id_to_idx(&input);
         let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
@@ -89,11 +98,17 @@ fn test_pgm_network_asymmetric_distribution_case() {
     let base = data_dir("asymmetric/distribution-case");
     let base_json = common::load_json(&base.join("input.json"));
     let update = common::load_json(&base.join("update_batch.json"));
-    let expected = common::load_batch_output::<PgmNodeAsymOutput>(&base.join("asym_output_batch.json"));
+    let expected =
+        common::load_batch_output::<PgmNodeAsymOutput>(&base.join("asym_output_batch.json"));
 
     // Looser tolerance per this fixture's params.json (rtol=atol=1e-3).
     let tol = 1e-3;
-    for (scenario, expected_scenario) in update["data"].as_array().unwrap().iter().zip(&expected.data) {
+    for (scenario, expected_scenario) in update["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&expected.data)
+    {
         let input = common::apply_batch_scenario(&base_json, scenario);
         let id_to_idx = node_id_to_idx(&input);
         let transformers = pgm_transformers_3ph(&input, &id_to_idx, 1e6);

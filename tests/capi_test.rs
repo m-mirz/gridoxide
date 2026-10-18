@@ -22,7 +22,9 @@ use std::path::PathBuf;
 
 use gridoxide::capi::powerflow::*;
 use gridoxide::capi::types::*;
-use gridoxide::capi::{gridoxide_abi_version, gridoxide_last_error_message, GridoxideIslandStatus, Status};
+use gridoxide::capi::{
+    GridoxideIslandStatus, Status, gridoxide_abi_version, gridoxide_last_error_message,
+};
 
 mod pglib;
 
@@ -36,13 +38,18 @@ fn last_error() -> String {
         return String::new();
     }
     // SAFETY: the pointer is either null or a live thread-local CString.
-    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Opens a model from a fixture, asserting it worked.
 fn open(name: &str) -> *mut GridoxidePowerFlow {
     // pglib documents are per-unit on a 100 MVA base.
-    let options = GridoxideOptions { s_base_va: 1e8, ..Default::default() };
+    let options = GridoxideOptions {
+        s_base_va: 1e8,
+        ..Default::default()
+    };
     let mut handle: *mut GridoxidePowerFlow = std::ptr::null_mut();
     // SAFETY: a valid path, a live options struct, a writable out-pointer.
     let status =
@@ -58,8 +65,14 @@ fn voltages(handle: *mut GridoxidePowerFlow) -> (Vec<f64>, Vec<f64>) {
     let (mut vm, mut va) = (vec![0.0; n], vec![0.0; n]);
     // SAFETY: buffers are exactly `n` long, as required.
     unsafe {
-        assert_eq!(gridoxide_powerflow_voltage_magnitude(handle, vm.as_mut_ptr(), n), Status::Ok);
-        assert_eq!(gridoxide_powerflow_voltage_angle(handle, va.as_mut_ptr(), n), Status::Ok);
+        assert_eq!(
+            gridoxide_powerflow_voltage_magnitude(handle, vm.as_mut_ptr(), n),
+            Status::Ok
+        );
+        assert_eq!(
+            gridoxide_powerflow_voltage_angle(handle, va.as_mut_ptr(), n),
+            Status::Ok
+        );
     }
     (vm, va)
 }
@@ -72,10 +85,19 @@ fn voltages(handle: *mut GridoxidePowerFlow) -> (Vec<f64>, Vec<f64>) {
 /// at all is a marshalling error, not numerical weather.
 #[test]
 fn the_abi_reproduces_a_direct_rust_solve_exactly() {
-    for name in ["pglib_opf_case14_ieee", "pglib_opf_case30_ieee", "pglib_opf_case118_ieee"] {
+    for name in [
+        "pglib_opf_case14_ieee",
+        "pglib_opf_case30_ieee",
+        "pglib_opf_case118_ieee",
+    ] {
         let handle = open(name);
         // SAFETY: live handle.
-        assert_eq!(unsafe { gridoxide_powerflow_solve(handle) }, Status::Ok, "{}", last_error());
+        assert_eq!(
+            unsafe { gridoxide_powerflow_solve(handle) },
+            Status::Ok,
+            "{}",
+            last_error()
+        );
         let (vm, va) = voltages(handle);
 
         // The same network, solved without the ABI in the way.
@@ -131,7 +153,14 @@ fn the_array_path_agrees_with_the_document_path() {
             u_rated: 1.0,
         },
     ];
-    let lines = [GridoxideLine { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = [GridoxideLine {
+        from: 0,
+        to: 1,
+        r: 0.02,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
 
     let mut handle: *mut GridoxidePowerFlow = std::ptr::null_mut();
     // SAFETY: arrays outlive the call; counts match; out-pointer writable.
@@ -151,7 +180,12 @@ fn the_array_path_agrees_with_the_document_path() {
     };
     assert_eq!(status, Status::Ok, "{}", last_error());
     // SAFETY: live handle.
-    assert_eq!(unsafe { gridoxide_powerflow_solve(handle) }, Status::Ok, "{}", last_error());
+    assert_eq!(
+        unsafe { gridoxide_powerflow_solve(handle) },
+        Status::Ok,
+        "{}",
+        last_error()
+    );
     let (vm, va) = voltages(handle);
 
     // The same network built directly in Rust.
@@ -232,14 +266,25 @@ fn branch_flows_are_reported_and_obey_conservation() {
     // Losses are positive and small: a branch cannot generate active power.
     for b in 0..n {
         let loss = pf[b] + pt[b];
-        assert!(loss > -1e-9, "branch {b} produced {loss} pu of active power");
-        assert!(loss < 0.5, "branch {b} lost {loss} pu, which is implausible");
+        assert!(
+            loss > -1e-9,
+            "branch {b} produced {loss} pu of active power"
+        );
+        assert!(
+            loss < 0.5,
+            "branch {b} lost {loss} pu, which is implausible"
+        );
     }
-    assert!(pf.iter().any(|p| p.abs() > 0.01), "no branch carried anything");
+    assert!(
+        pf.iter().any(|p| p.abs() > 0.01),
+        "no branch carried anything"
+    );
 
     // A terminal other than from/to is the caller's mistake.
     // SAFETY: live handle, correct buffer length.
-    let bad = unsafe { gridoxide_powerflow_branch_flow(handle, 7, pf.as_mut_ptr(), std::ptr::null_mut(), n) };
+    let bad = unsafe {
+        gridoxide_powerflow_branch_flow(handle, 7, pf.as_mut_ptr(), std::ptr::null_mut(), n)
+    };
     assert_eq!(bad, Status::InvalidArgument);
     assert!(last_error().contains("terminal"), "{}", last_error());
 
@@ -297,8 +342,9 @@ fn a_panic_is_caught_rather_than_killing_the_process() {
 
     // SAFETY: live handle; the slice is shorter than the bus count, which is
     // precisely what is under test.
-    let status =
-        unsafe { gridoxide_powerflow_solve_distributing_slack(handle, wrong.as_ptr(), wrong.len()) };
+    let status = unsafe {
+        gridoxide_powerflow_solve_distributing_slack(handle, wrong.as_ptr(), wrong.len())
+    };
     assert_eq!(status, Status::InvalidArgument, "{}", last_error());
     assert!(last_error().contains("15 buses"), "{}", last_error());
 
@@ -316,7 +362,10 @@ fn caller_mistakes_are_reported_not_undefined() {
     // Null handle everywhere.
     // SAFETY: null is explicitly permitted and checked.
     unsafe {
-        assert_eq!(gridoxide_powerflow_solve(std::ptr::null_mut()), Status::InvalidArgument);
+        assert_eq!(
+            gridoxide_powerflow_solve(std::ptr::null_mut()),
+            Status::InvalidArgument
+        );
         assert_eq!(gridoxide_powerflow_bus_count(std::ptr::null()), 0);
         assert_eq!(gridoxide_powerflow_branch_count(std::ptr::null()), 0);
         assert!(gridoxide_powerflow_max_mismatch(std::ptr::null()).is_nan());
@@ -328,10 +377,15 @@ fn caller_mistakes_are_reported_not_undefined() {
     let mut handle: *mut GridoxidePowerFlow = std::ptr::null_mut();
     let missing = CString::new("/nonexistent/network.json").unwrap();
     // SAFETY: valid pointers.
-    let status =
-        unsafe { gridoxide_powerflow_from_pgm_file(missing.as_ptr(), std::ptr::null(), &mut handle) };
+    let status = unsafe {
+        gridoxide_powerflow_from_pgm_file(missing.as_ptr(), std::ptr::null(), &mut handle)
+    };
     assert_eq!(status, Status::Io);
-    assert!(last_error().contains("/nonexistent/network.json"), "{}", last_error());
+    assert!(
+        last_error().contains("/nonexistent/network.json"),
+        "{}",
+        last_error()
+    );
 
     // Malformed JSON is a parse failure.
     let junk = "{ not json";
@@ -358,7 +412,14 @@ fn caller_mistakes_are_reported_not_undefined() {
         q_max: f64::INFINITY,
         u_rated: 1.0,
     }];
-    let lines = [GridoxideLine { from: 0, to: 9, r: 0.01, x: 0.1, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = [GridoxideLine {
+        from: 0,
+        to: 9,
+        r: 0.01,
+        x: 0.1,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
     // SAFETY: arrays outlive the call and counts match.
     let status = unsafe {
         gridoxide_powerflow_from_arrays(
@@ -450,7 +511,11 @@ fn islands_are_enumerable() {
     // branch — right for a power flow, where the source's output is an unknown.
     // Worth asserting rather than glossing: a C++ caller indexing results by
     // its own bus numbering would silently read the wrong bus otherwise.
-    assert_eq!(members.len(), 15, "14 physical buses plus one virtual slack bus");
+    assert_eq!(
+        members.len(),
+        15,
+        "14 physical buses plus one virtual slack bus"
+    );
     // SAFETY: live handle.
     assert_eq!(unsafe { gridoxide_powerflow_bus_count(handle) }, 15);
 

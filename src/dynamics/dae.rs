@@ -275,8 +275,7 @@ impl DaePattern {
     /// the algebraic block structurally singular, and saying which one it is
     /// beats letting the factorization fail with no explanation.
     pub fn bus_without_diagonal(&self) -> Option<usize> {
-        (0..self.layout.n_bus)
-            .find(|&i| !self.fixed[i] && self.net_diag_slot[i] == usize::MAX)
+        (0..self.layout.n_bus).find(|&i| !self.fixed[i] && self.net_diag_slot[i] == usize::MAX)
     }
 
     /// Writes the Jacobian's values into `values`, in slot order.

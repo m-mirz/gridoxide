@@ -65,7 +65,7 @@
 //! `DistributedSlackOuterLoop` as its no-area fallback and why the two must not
 //! both be configured.
 
-use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use crate::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use crate::network::{effective_injection, power_injections};
 use crate::types::{Bus, BusType};
 
@@ -139,7 +139,13 @@ impl AreaDefinition {
     /// no positive injection, still is not.
     pub fn by_generation(buses: &[Bus], of_bus: Vec<Option<usize>>, n_areas: usize) -> Self {
         let factors = buses.iter().map(|b| b.p_spec.max(0.0)).collect();
-        Self { of_bus, targets: vec![0.0; n_areas], factors, tolerance: 1e-8, max_outer_iter: 30 }
+        Self {
+            of_bus,
+            targets: vec![0.0; n_areas],
+            factors,
+            tolerance: 1e-8,
+            max_outer_iter: 30,
+        }
     }
 
     fn n_areas(&self) -> usize {
@@ -191,7 +197,11 @@ pub struct AreaInterchange {
 
 impl AreaInterchange {
     pub fn new(areas: AreaDefinition) -> Self {
-        Self { areas, report: AreaInterchangeReport::default(), exhausted: false }
+        Self {
+            areas,
+            report: AreaInterchangeReport::default(),
+            exhausted: false,
+        }
     }
 
     pub fn report(&self) -> &AreaInterchangeReport {
@@ -252,8 +262,16 @@ impl OuterLoop for AreaInterchange {
 
     fn initialize(&mut self, ctx: &mut OuterLoopContext<'_, '_>) {
         let n = ctx.net.buses.len();
-        assert_eq!(self.areas.of_bus.len(), n, "area assignment must carry one entry per bus");
-        assert_eq!(self.areas.factors.len(), n, "participation factors must carry one weight per bus");
+        assert_eq!(
+            self.areas.of_bus.len(),
+            n,
+            "area assignment must carry one entry per bus"
+        );
+        assert_eq!(
+            self.areas.factors.len(),
+            n,
+            "participation factors must carry one weight per bus"
+        );
         self.report.shift = vec![0.0; n];
         self.report.interchange = vec![0.0; self.areas.n_areas()];
     }
@@ -292,7 +310,9 @@ impl OuterLoop for AreaInterchange {
         // reference is balanced by its own participants.
         let mut dependent: Option<usize> = None;
         for island in ctx.islands {
-            let [slack] = island.slack_indices.as_slice() else { continue };
+            let [slack] = island.slack_indices.as_slice() else {
+                continue;
+            };
             let delta = p_calc[*slack] - effective_injection(&ctx.net.buses[*slack]).0;
             match self.areas.of_bus[*slack] {
                 Some(a) => {
@@ -305,7 +325,10 @@ impl OuterLoop for AreaInterchange {
 
         let mut unbalanced = Vec::new();
         if homeless_slack {
-            unbalanced.push((usize::MAX, "the slack is in no area; nothing drives it to its schedule"));
+            unbalanced.push((
+                usize::MAX,
+                "the slack is in no area; nothing drives it to its schedule",
+            ));
         }
 
         let mut residual = vec![0.0; n_areas];
@@ -325,7 +348,11 @@ impl OuterLoop for AreaInterchange {
             // dependent one, and it absorbs the tie losses. For every other
             // area it is the position. See the module docs for the count that
             // forces this.
-            let driven = if dependent == Some(a) { -slack_delta[a] } else { residual[a] };
+            let driven = if dependent == Some(a) {
+                -slack_delta[a]
+            } else {
+                residual[a]
+            };
 
             let total: f64 = (0..ctx.net.buses.len())
                 .filter(|&i| self.areas.of_bus[i] == Some(a))

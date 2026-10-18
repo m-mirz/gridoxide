@@ -25,12 +25,11 @@
 
 #![cfg(feature = "opf")]
 
-
 use gridoxide::network::power_injections;
+use gridoxide::opf::OptStatus;
 use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
 use gridoxide::opf::model::OpfData;
 use gridoxide::opf::nlp::NonlinearProblem;
-use gridoxide::opf::OptStatus;
 use gridoxide::pgm::PgmInput;
 
 mod pglib;
@@ -77,7 +76,12 @@ fn build(name: &str, options: AcOpfOptions) -> AcOpf {
 fn objectives_match_the_published_ac_baseline() {
     for &(name, published) in PUBLISHED_AC {
         let result = build(name, AcOpfOptions::default()).solve().unwrap();
-        assert_eq!(result.status, OptStatus::Optimal, "{name}: {:?}", result.status);
+        assert_eq!(
+            result.status,
+            OptStatus::Optimal,
+            "{name}: {:?}",
+            result.status
+        );
 
         let relative = (result.objective - published).abs() / published;
         assert!(
@@ -200,7 +204,10 @@ fn branch_limits_are_enforced_and_actually_bind() {
 
     let relaxed = build(
         name,
-        AcOpfOptions { enforce_limits: false, ..AcOpfOptions::default() },
+        AcOpfOptions {
+            enforce_limits: false,
+            ..AcOpfOptions::default()
+        },
     )
     .solve()
     .unwrap();
@@ -245,8 +252,8 @@ fn the_models_derivatives_match_finite_differences() {
     // Gradient.
     let gradient = opf.gradient(&x);
     for k in 0..n_vars {
-        let numeric = (opf.objective(&perturbed(k, h)) - opf.objective(&perturbed(k, -h)))
-            / (2.0 * h);
+        let numeric =
+            (opf.objective(&perturbed(k, h)) - opf.objective(&perturbed(k, -h))) / (2.0 * h);
         assert!(
             (gradient[k] - numeric).abs() < 1e-5 * (1.0 + numeric.abs()),
             "df/dx{k}: analytic {}, numeric {numeric}",
@@ -275,7 +282,9 @@ fn the_models_derivatives_match_finite_differences() {
     // Hessian of the Lagrangian, against central differences of the gradient
     // of the Lagrangian — the same two-stage grounding the injection Hessian
     // uses, and for the same reason.
-    let y: Vec<f64> = (0..m).map(|r| 0.8 * ((r as f64 * 0.9).cos()) - 0.3).collect();
+    let y: Vec<f64> = (0..m)
+        .map(|r| 0.8 * ((r as f64 * 0.9).cos()) - 0.3)
+        .collect();
     let mut hessian = vec![vec![0.0; n_vars]; n_vars];
     for (r, c, v) in opf.lagrangian_hessian(&x, &y) {
         hessian[r][c] += v;
@@ -326,15 +335,18 @@ fn every_starting_point_reaches_the_same_optimum() {
                     )
                     .unwrap();
                     let data = OpfData::from_json(
-                        &std::fs::read_to_string(dir.join(format!("{name}.opf.json")))
-                            .unwrap(),
+                        &std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap(),
                     )
                     .unwrap();
                     AcOpfNetwork::from_pgm(input, &data, 50.0, &options).unwrap()
                 };
                 opf_network.v_start = Some(v_start);
                 let result = AcOpf::build(opf_network, options).unwrap().solve().unwrap();
-                assert_eq!(result.status, OptStatus::Optimal, "{name} from |V| = {v_start}");
+                assert_eq!(
+                    result.status,
+                    OptStatus::Optimal,
+                    "{name} from |V| = {v_start}"
+                );
                 objectives.push(result.objective);
             }
         }
@@ -346,7 +358,6 @@ fn every_starting_point_reaches_the_same_optimum() {
         );
     }
 }
-
 
 /// **The price sign**, pinned against a numerical `∂cost/∂load`.
 ///
@@ -406,7 +417,10 @@ fn the_locational_marginal_price_is_the_cost_of_one_more_megawatt() {
          {numerical:.4} $/MWh"
     );
     // And the sign is the claim, not just the magnitude.
-    assert!(reported > 0.0, "serving more demand cannot cost less than nothing");
+    assert!(
+        reported > 0.0,
+        "serving more demand cannot cost less than nothing"
+    );
 }
 
 /// AC and DC prices should agree closely on the same network — they differ
@@ -419,24 +433,22 @@ fn the_locational_marginal_price_is_the_cost_of_one_more_megawatt() {
 #[test]
 fn ac_and_dc_prices_agree_to_within_losses() {
     use gridoxide::linear::DcApproximation;
+    use gridoxide::opf::Solver;
     use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
     use gridoxide::opf::ipm::IpmSolver;
-    use gridoxide::opf::Solver;
 
     let name = "pglib_opf_case5_pjm";
     let dir = pglib::dir();
-    let data = OpfData::from_json(
-        &std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap(),
-    )
-    .unwrap();
+    let data =
+        OpfData::from_json(&std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap())
+            .unwrap();
 
     let ac = build(name, AcOpfOptions::default()).solve().unwrap();
 
     let input: PgmInput =
         serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap())
             .unwrap();
-    let dc_network =
-        DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG).unwrap();
+    let dc_network = DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG).unwrap();
     let dc_opf = DcOpf::build(dc_network, DcOpfOptions::default()).unwrap();
     let dc = dc_opf.interpret(&IpmSolver::new().solve(dc_opf.problem()).unwrap());
 

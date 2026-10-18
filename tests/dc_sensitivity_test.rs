@@ -9,9 +9,7 @@
 
 use std::path::PathBuf;
 
-use gridoxide::linear::{
-    dc_branches, dc_power_flow, DcOptions, DcSensitivity,
-};
+use gridoxide::linear::{DcOptions, DcSensitivity, dc_branches, dc_power_flow};
 use gridoxide::pgm::pgm_to_buses_and_branches;
 use gridoxide::types::{Bus, Line, Transformer};
 
@@ -34,7 +32,11 @@ impl Case {
     fn load(rel: &str) -> Self {
         let input = common::load_pgm_input(&fixture(rel));
         let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
-        Self { buses, lines, transformers }
+        Self {
+            buses,
+            lines,
+            transformers,
+        }
     }
 
     fn n_branches(&self) -> usize {
@@ -49,7 +51,13 @@ impl Case {
         for (b, d) in buses.iter_mut().zip(delta) {
             b.p_spec += d;
         }
-        dc_power_flow(&mut buses, &self.lines, &self.transformers, DcOptions::default()).branch_p
+        dc_power_flow(
+            &mut buses,
+            &self.lines,
+            &self.transformers,
+            DcOptions::default(),
+        )
+        .branch_p
     }
 
     fn sensitivity(&self) -> DcSensitivity {
@@ -74,7 +82,9 @@ fn ptdf_columns_match_a_finite_difference_of_the_solve() {
 
         let mut checked = 0;
         for bus in 0..case.buses.len() {
-            let Some(column) = sensitivity.ptdf_column(bus) else { continue };
+            let Some(column) = sensitivity.ptdf_column(bus) else {
+                continue;
+            };
 
             let mut delta = vec![0.0; case.buses.len()];
             delta[bus] = eps;
@@ -103,12 +113,15 @@ fn ptdf_rows_agree_with_ptdf_columns() {
     let case = Case::load("symmetric/transmission-case");
     let sensitivity = case.sensitivity();
 
-    let columns: Vec<Option<Vec<f64>>> =
-        (0..case.buses.len()).map(|b| sensitivity.ptdf_column(b)).collect();
+    let columns: Vec<Option<Vec<f64>>> = (0..case.buses.len())
+        .map(|b| sensitivity.ptdf_column(b))
+        .collect();
 
     let mut checked = 0;
     for branch in 0..case.n_branches() {
-        let Some(row) = sensitivity.ptdf_row(branch) else { continue };
+        let Some(row) = sensitivity.ptdf_row(branch) else {
+            continue;
+        };
         for (bus, column) in columns.iter().enumerate() {
             let Some(column) = column else { continue };
             assert!(
@@ -139,7 +152,9 @@ fn lodf_columns_match_an_actual_outage_resolve() {
 
     let mut checked = 0;
     for outaged in 0..case.lines.len() {
-        let Some(column) = sensitivity.lodf_column(outaged) else { continue };
+        let Some(column) = sensitivity.lodf_column(outaged) else {
+            continue;
+        };
 
         // Re-solve without that line.
         let mut lines = case.lines.clone();
@@ -169,7 +184,10 @@ fn lodf_columns_match_an_actual_outage_resolve() {
         assert_eq!(column[outaged], -1.0);
         checked += 1;
     }
-    assert!(checked > 0, "no non-radial, load-carrying branch was checked");
+    assert!(
+        checked > 0,
+        "no non-radial, load-carrying branch was checked"
+    );
 }
 
 /// A radial branch has no LODF column, because removing it islands the network
@@ -194,8 +212,14 @@ fn radial_branches_are_identified_and_have_no_factors() {
             meshed += 1;
         }
     }
-    assert!(radial > 0, "fixture has no radial branch, so is_radial is untested here");
-    assert!(meshed > 0, "fixture has no meshed branch, so lodf_column is untested here");
+    assert!(
+        radial > 0,
+        "fixture has no radial branch, so is_radial is untested here"
+    );
+    assert!(
+        meshed > 0,
+        "fixture has no meshed branch, so lodf_column is untested here"
+    );
 }
 
 /// `transfer_factors` is the primitive the columns are special cases of, so a
@@ -235,18 +259,28 @@ fn dense_matrices_agree_with_the_accessors() {
     let sensitivity = case.sensitivity();
 
     let ptdf = sensitivity.ptdf_dense().unwrap();
-    assert_eq!((ptdf.rows, ptdf.cols), (case.n_branches(), case.buses.len()));
+    assert_eq!(
+        (ptdf.rows, ptdf.cols),
+        (case.n_branches(), case.buses.len())
+    );
     for bus in 0..case.buses.len() {
-        let Some(column) = sensitivity.ptdf_column(bus) else { continue };
+        let Some(column) = sensitivity.ptdf_column(bus) else {
+            continue;
+        };
         for branch in 0..case.n_branches() {
             assert_eq!(ptdf.get(branch, bus), column[branch]);
         }
     }
 
     let lodf = sensitivity.lodf_dense().unwrap();
-    assert_eq!((lodf.rows, lodf.cols), (case.n_branches(), case.n_branches()));
+    assert_eq!(
+        (lodf.rows, lodf.cols),
+        (case.n_branches(), case.n_branches())
+    );
     for l in 0..case.n_branches() {
-        let Some(column) = sensitivity.lodf_column(l) else { continue };
+        let Some(column) = sensitivity.lodf_column(l) else {
+            continue;
+        };
         for k in 0..case.n_branches() {
             assert_eq!(lodf.get(k, l), column[k]);
         }

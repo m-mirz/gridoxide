@@ -23,14 +23,14 @@ mod common;
 
 use std::path::PathBuf;
 
-use gridoxide::measurement::{measurements_from_pgm, Measurement};
+use gridoxide::measurement::{Measurement, measurements_from_pgm};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
-use gridoxide::se::batch::{
-    align_scenarios, MeasurementOverride, SeBatchError, SeBatchSolver, SeScenario,
-};
-use gridoxide::se::nr::{linear_start, PersistentEstimator, SeMethod, SeOptions, SeStatus};
 use gridoxide::se::SeNetwork;
+use gridoxide::se::batch::{
+    MeasurementOverride, SeBatchError, SeBatchSolver, SeScenario, align_scenarios,
+};
+use gridoxide::se::nr::{PersistentEstimator, SeMethod, SeOptions, SeStatus, linear_start};
 use gridoxide::types::Bus;
 
 const S_BASE_VA: f64 = 1e6;
@@ -122,8 +122,14 @@ const BATCH_FIXTURES: &[(&str, SeMethod)] = &[
     ("sensor-update-nr", SeMethod::NewtonRaphson),
     ("sensor-update-il", SeMethod::IterativeLinear),
     ("sensor-update-initially-empty", SeMethod::NewtonRaphson),
-    ("unbalanced-power-measurements-newton-raphson", SeMethod::NewtonRaphson),
-    ("unbalanced-power-measurements-iterative-linear", SeMethod::IterativeLinear),
+    (
+        "unbalanced-power-measurements-newton-raphson",
+        SeMethod::NewtonRaphson,
+    ),
+    (
+        "unbalanced-power-measurements-iterative-linear",
+        SeMethod::IterativeLinear,
+    ),
 ];
 
 /// Every fixture, with the tolerance its own comparison holds to.
@@ -146,9 +152,21 @@ const BATCH_FIXTURES: &[(&str, SeMethod)] = &[
 const SOLVABLE_FIXTURES: &[(&str, SeMethod, f64)] = &[
     ("sensor-update-nr", SeMethod::NewtonRaphson, 1e-6),
     ("sensor-update-il", SeMethod::IterativeLinear, 1e-3),
-    ("sensor-update-initially-empty", SeMethod::NewtonRaphson, 1e-6),
-    ("unbalanced-power-measurements-newton-raphson", SeMethod::NewtonRaphson, 1e-6),
-    ("unbalanced-power-measurements-iterative-linear", SeMethod::IterativeLinear, 1e-6),
+    (
+        "sensor-update-initially-empty",
+        SeMethod::NewtonRaphson,
+        1e-6,
+    ),
+    (
+        "unbalanced-power-measurements-newton-raphson",
+        SeMethod::NewtonRaphson,
+        1e-6,
+    ),
+    (
+        "unbalanced-power-measurements-iterative-linear",
+        SeMethod::IterativeLinear,
+        1e-6,
+    ),
 ];
 
 /// A parallel batch equals a sequential loop, bit for bit, at every thread
@@ -161,7 +179,11 @@ const SOLVABLE_FIXTURES: &[(&str, SeMethod, f64)] = &[
 fn a_batch_reproduces_a_sequential_loop_exactly() {
     for &(name, method) in BATCH_FIXTURES {
         let l = load(name);
-        let options = SeOptions { method, max_iter: 100, ..SeOptions::default() };
+        let options = SeOptions {
+            method,
+            max_iter: 100,
+            ..SeOptions::default()
+        };
         let reference = sequential(&l, options);
 
         for threads in [1usize, 2, 4] {
@@ -195,7 +217,11 @@ fn batch_scenarios_match_pgm_per_scenario() {
     let mut checked = 0;
     for &(name, method, tol) in SOLVABLE_FIXTURES {
         let l = load(name);
-        let options = SeOptions { method, max_iter: 100, ..SeOptions::default() };
+        let options = SeOptions {
+            method,
+            max_iter: 100,
+            ..SeOptions::default()
+        };
         let out = SeBatchSolver::new(options)
             .estimate(&l.buses, &l.se_net, &l.template, &l.scenarios)
             .expect("batch estimates");
@@ -220,9 +246,10 @@ fn batch_scenarios_match_pgm_per_scenario() {
                 }
                 let idx = l.node_idx[&id];
                 let u_rated = l.buses[idx].u_rated;
-                let Some(u) = node["u"].as_f64().or_else(|| {
-                    node["u_pu"].as_f64().map(|pu| pu * u_rated)
-                }) else {
+                let Some(u) = node["u"]
+                    .as_f64()
+                    .or_else(|| node["u_pu"].as_f64().map(|pu| pu * u_rated))
+                else {
                     continue;
                 };
                 let got = result.buses[idx].voltage_mag * u_rated;
@@ -237,7 +264,10 @@ fn batch_scenarios_match_pgm_per_scenario() {
     // 20 today: 2 scenarios x 1 node, plus 2 fixtures x 3 scenarios x 3 nodes. A
     // floor rather than an equality, so the check catches coverage silently
     // dropping without breaking when a fixture is added.
-    assert!(checked >= 20, "expected a meaningful number of node checks, got {checked}");
+    assert!(
+        checked >= 20,
+        "expected a meaningful number of node checks, got {checked}"
+    );
 }
 
 /// `sensor-update-initially-empty` is the fixture that forces the template to
@@ -256,7 +286,10 @@ fn a_base_document_with_no_readings_still_yields_a_template() {
         50.0,
     );
     let from_base = measurements_from_pgm(&base_input, &net, S_BASE_VA).expect("measurements");
-    assert!(from_base.is_empty(), "the base document is supposed to carry no readings");
+    assert!(
+        from_base.is_empty(),
+        "the base document is supposed to carry no readings"
+    );
 
     let l = load("sensor-update-initially-empty");
     assert!(
@@ -279,16 +312,24 @@ fn changing_whether_an_angle_is_measured_is_rejected() {
         .filter(|(_, m)| m.kind == gridoxide::measurement::MeasurementKind::VoltageAngle)
         .map(|(i, _)| i)
         .collect();
-    assert!(!angle_rows.is_empty(), "fixture is supposed to carry voltage angles");
+    assert!(
+        !angle_rows.is_empty(),
+        "fixture is supposed to carry voltage angles"
+    );
 
     let mut scenarios = l.scenarios.clone();
     scenarios[0] = SeScenario::new(
-        angle_rows.iter().map(|&i| MeasurementOverride::new(i).absent()).collect(),
+        angle_rows
+            .iter()
+            .map(|&i| MeasurementOverride::new(i).absent())
+            .collect(),
     );
 
     let solver = SeBatchSolver::new(SeOptions::default());
     assert_eq!(
-        solver.estimate(&l.buses, &l.se_net, &l.template, &scenarios).unwrap_err(),
+        solver
+            .estimate(&l.buses, &l.se_net, &l.template, &scenarios)
+            .unwrap_err(),
         SeBatchError::AngleReferenceChanged { scenario: 0 }
     );
 }
@@ -299,14 +340,21 @@ fn changing_whether_an_angle_is_measured_is_rejected() {
 fn an_out_of_range_override_is_reported() {
     let l = load("sensor-update-nr");
     let n = l.template.len();
-    let scenarios = vec![SeScenario::new(vec![MeasurementOverride::new(n).value(1.0)])];
+    let scenarios = vec![SeScenario::new(vec![
+        MeasurementOverride::new(n).value(1.0),
+    ])];
     let solver = SeBatchSolver::new(SeOptions::default());
     assert_eq!(
-        solver.estimate(&l.buses, &l.se_net, &l.template, &scenarios).unwrap_err(),
-        SeBatchError::MeasurementOutOfRange { scenario: 0, measurement: n, n }
+        solver
+            .estimate(&l.buses, &l.se_net, &l.template, &scenarios)
+            .unwrap_err(),
+        SeBatchError::MeasurementOutOfRange {
+            scenario: 0,
+            measurement: n,
+            n
+        }
     );
 }
-
 
 /// A component with no source is reported at exactly zero, and the rest of the
 /// network solves around it.
@@ -338,7 +386,11 @@ fn a_de_energised_island_is_reported_at_zero() {
             "{name}: expected several components with exactly one energised"
         );
 
-        let options = SeOptions { method: SeMethod::NewtonRaphson, max_iter: 100, ..SeOptions::default() };
+        let options = SeOptions {
+            method: SeMethod::NewtonRaphson,
+            max_iter: 100,
+            ..SeOptions::default()
+        };
         let out = SeBatchSolver::new(options)
             .estimate(&l.buses, &l.se_net, &l.template, &l.scenarios)
             .expect("batch estimates");
@@ -346,7 +398,12 @@ fn a_de_energised_island_is_reported_at_zero() {
         let expected = l.expected["data"].as_array().expect("batch output");
         let mut zeroed = 0;
         for (result, scenario) in out.iter().zip(expected) {
-            assert_eq!(result.report.status, SeStatus::Converged, "{name}: {:?}", result.report);
+            assert_eq!(
+                result.report.status,
+                SeStatus::Converged,
+                "{name}: {:?}",
+                result.report
+            );
             for node in scenario["node"].as_array().expect("node output") {
                 if node["energized"].as_u64() != Some(0) {
                     continue;
@@ -361,7 +418,10 @@ fn a_de_energised_island_is_reported_at_zero() {
                 zeroed += 1;
             }
         }
-        assert!(zeroed >= 8, "{name}: expected several de-energised nodes, got {zeroed}");
+        assert!(
+            zeroed >= 8,
+            "{name}: expected several de-energised nodes, got {zeroed}"
+        );
     }
 }
 

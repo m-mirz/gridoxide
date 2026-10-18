@@ -52,7 +52,10 @@ pub struct RefactorScratch {
 
 impl RefactorScratch {
     pub fn new(n: usize) -> Self {
-        Self { x: vec![0.0; n], columns: vec![Vec::new(); n] }
+        Self {
+            x: vec![0.0; n],
+            columns: vec![Vec::new(); n],
+        }
     }
 }
 
@@ -162,7 +165,9 @@ mod tests {
         let mut a: Vec<Vec<f64>> = a.to_vec();
         let mut rhs = b.to_vec();
         for col in 0..n {
-            let pivot_row = (col..n).max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs())).unwrap();
+            let pivot_row = (col..n)
+                .max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs()))
+                .unwrap();
             a.swap(col, pivot_row);
             rhs.swap(col, pivot_row);
             for row in (col + 1)..n {
@@ -238,7 +243,11 @@ mod tests {
         ];
         let (col_ptr, row_idx, values) = to_csc(n, &original);
         let sym = analyze(n, &col_ptr, &row_idx);
-        assert!(sym.nblocks() >= 2, "fixture should produce multiple BTF blocks, got {}", sym.nblocks());
+        assert!(
+            sym.nblocks() >= 2,
+            "fixture should produce multiple BTF blocks, got {}",
+            sym.nblocks()
+        );
         let mut num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
 
         let updated = vec![
@@ -256,17 +265,36 @@ mod tests {
             (4, 2, 0.15),
         ];
         let (col_ptr2, row_idx2, values2) = to_csc(n, &updated);
-        assert_eq!(col_ptr, col_ptr2, "fixture must keep the same sparsity pattern");
-        assert_eq!(row_idx, row_idx2, "fixture must keep the same sparsity pattern");
+        assert_eq!(
+            col_ptr, col_ptr2,
+            "fixture must keep the same sparsity pattern"
+        );
+        assert_eq!(
+            row_idx, row_idx2,
+            "fixture must keep the same sparsity pattern"
+        );
 
         let mut scratch = RefactorScratch::new(n);
-        assert!(refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &mut num, &mut scratch));
+        assert!(refactor(
+            n,
+            &col_ptr2,
+            &row_idx2,
+            &values2,
+            &sym,
+            &mut num,
+            &mut scratch
+        ));
 
         let b = vec![1.0, -2.0, 0.5, 3.0, -1.0];
         let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &updated), &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -278,7 +306,16 @@ mod tests {
         // would), confirming each call's result is independently correct
         // rather than only the first refactor after the original factor.
         let n = 4;
-        let base = vec![(0, 0, 6.0), (1, 1, 7.0), (2, 2, 8.0), (3, 3, 5.0), (0, 1, -0.9), (1, 0, -0.5), (2, 3, 0.4), (3, 2, -0.2)];
+        let base = vec![
+            (0, 0, 6.0),
+            (1, 1, 7.0),
+            (2, 2, 8.0),
+            (3, 3, 5.0),
+            (0, 1, -0.9),
+            (1, 0, -0.5),
+            (2, 3, 0.4),
+            (3, 2, -0.2),
+        ];
         let (col_ptr, row_idx, values) = to_csc(n, &base);
         let sym = analyze(n, &col_ptr, &row_idx);
         let mut num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
@@ -286,15 +323,24 @@ mod tests {
 
         for trial in 0..5 {
             let scale = 1.0 + trial as f64 * 0.3;
-            let updated: Vec<(usize, usize, f64)> = base.iter().map(|&(r, c, v)| (r, c, v * scale)).collect();
+            let updated: Vec<(usize, usize, f64)> =
+                base.iter().map(|&(r, c, v)| (r, c, v * scale)).collect();
             let (cp, ri, vals) = to_csc(n, &updated);
-            assert!(refactor(n, &cp, &ri, &vals, &sym, &mut num, &mut scratch), "trial {trial}");
+            assert!(
+                refactor(n, &cp, &ri, &vals, &sym, &mut num, &mut scratch),
+                "trial {trial}"
+            );
 
             let b = vec![1.0, 2.0, -1.0, 0.5];
             let x = solve(&sym, &num, None, &b);
             let expected = dense_solve(&dense_from_entries(n, &updated), &b);
             for i in 0..n {
-                assert!((x[i] - expected[i]).abs() < 1e-8, "trial {trial}, index {i}: {} vs {}", x[i], expected[i]);
+                assert!(
+                    (x[i] - expected[i]).abs() < 1e-8,
+                    "trial {trial}, index {i}: {} vs {}",
+                    x[i],
+                    expected[i]
+                );
             }
         }
     }
@@ -337,8 +383,11 @@ mod tests {
                         row_sums[i] += v.abs();
                     }
                 }
-                let mut entries: Vec<(usize, usize, f64)> =
-                    row_sums.iter().enumerate().map(|(i, &rs)| (i, i, rs + 1.0 + next_f64())).collect();
+                let mut entries: Vec<(usize, usize, f64)> = row_sums
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &rs)| (i, i, rs + 1.0 + next_f64()))
+                    .collect();
                 entries.extend(off_entries);
                 entries
             };
@@ -353,7 +402,15 @@ mod tests {
             let entries2 = make_values(&mut next_f64);
             let (col_ptr2, row_idx2, values2) = to_csc(n, &entries2);
             assert!(
-                refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &mut num, &mut scratch),
+                refactor(
+                    n,
+                    &col_ptr2,
+                    &row_idx2,
+                    &values2,
+                    &sym,
+                    &mut num,
+                    &mut scratch
+                ),
                 "trial {trial} (n={n}): unexpectedly singular (refactor)"
             );
 

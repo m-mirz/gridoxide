@@ -143,7 +143,11 @@ where
     }
     let nev = opts.count;
     // ARPACK requires `nev + 2 <= ncv <= n`, and recommends `ncv >= 2·nev`.
-    let requested = if opts.max_dim == 0 { (2 * nev + 20).max(30) } else { opts.max_dim };
+    let requested = if opts.max_dim == 0 {
+        (2 * nev + 20).max(30)
+    } else {
+        opts.max_dim
+    };
     let ncv = requested.clamp(nev + 2, n);
 
     let (ni, nevi, ncvi) = (n as a_int, nev as a_int, ncv as a_int);
@@ -213,7 +217,10 @@ where
     // many converged anyway, and returning those is more useful than nothing.
     let converged = iparam[4] as usize;
     if converged < nev {
-        return Err(ArpackError::NotConverged { wanted: nev, converged });
+        return Err(ArpackError::NotConverged {
+            wanted: nev,
+            converged,
+        });
     }
 
     let mut d = vec![zero; nev + 1];
@@ -272,15 +279,26 @@ where
         pairs.push(RitzPair {
             theta,
             vector,
-            residual: if magnitude > 0.0 { raw / (magnitude * magnitude) } else { f64::INFINITY },
+            residual: if magnitude > 0.0 {
+                raw / (magnitude * magnitude)
+            } else {
+                f64::INFINITY
+            },
             converged: magnitude > 0.0 && raw <= opts.tol.max(1e-14) * magnitude,
         });
     }
     pairs.sort_by(|a, b| {
-        b.theta.norm().partial_cmp(&a.theta.norm()).unwrap_or(std::cmp::Ordering::Equal)
+        b.theta
+            .norm()
+            .partial_cmp(&a.theta.norm())
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Ok(ArnoldiResult { pairs, restarts: 0, dim: ncv })
+    Ok(ArnoldiResult {
+        pairs,
+        restarts: 0,
+        dim: ncv,
+    })
 }
 
 impl From<ArpackError> for ArnoldiError {

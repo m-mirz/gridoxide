@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use gridoxide::pgm::{PgmScBatchOutput, PgmScOutput, PgmScOutputData};
 use gridoxide::shortcircuit::{
-    short_circuit_from_pgm, ShortCircuitOptions, ShortCircuitReport, VoltageScaling,
+    ShortCircuitOptions, ShortCircuitReport, VoltageScaling, short_circuit_from_pgm,
 };
 
 const S_BASE_VA: f64 = 1e6;
@@ -125,7 +125,10 @@ fn close_angle(got: f64, want: f64, magnitude: f64, tol: f64, what: &str) {
     if d > std::f64::consts::PI {
         d -= two_pi;
     }
-    assert!(d.abs() <= tol, "{what}: angle got {got:.12}, want {want:.12}");
+    assert!(
+        d.abs() <= tol,
+        "{what}: angle got {got:.12}, want {want:.12}"
+    );
 }
 
 fn check_scenario(
@@ -149,7 +152,13 @@ fn check_scenario(
                 close(got.u[p], u[p], rtol, &format!("{what} u"));
             }
             if let (Some(ang), Some(mag)) = (node_out.u_angle, node_out.u_pu) {
-                close_angle(got.u_angle[p], ang[p], mag[p], angle_tol, &format!("{what} u_angle"));
+                close_angle(
+                    got.u_angle[p],
+                    ang[p],
+                    mag[p],
+                    angle_tol,
+                    &format!("{what} u_angle"),
+                );
             }
         }
         if let Some(e) = node_out.energized {
@@ -167,14 +176,25 @@ fn check_scenario(
             .faults
             .iter()
             .find(|f| f.id == fault_out.id)
-            .unwrap_or_else(|| panic!("{fixture}[{scenario}]: no result for fault {}", fault_out.id));
+            .unwrap_or_else(|| {
+                panic!(
+                    "{fixture}[{scenario}]: no result for fault {}",
+                    fault_out.id
+                )
+            });
         for p in 0..3 {
             let what = format!("{fixture}[{scenario}] fault {} phase {p}", fault_out.id);
             if let Some(i_f) = fault_out.i_f {
                 close(got.i_f[p], i_f[p], rtol, &format!("{what} i_f"));
             }
             if let (Some(ang), Some(mag)) = (fault_out.i_f_angle, fault_out.i_f) {
-                close_angle(got.i_f_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_f_angle"));
+                close_angle(
+                    got.i_f_angle[p],
+                    ang[p],
+                    mag[p],
+                    angle_tol,
+                    &format!("{what} i_f_angle"),
+                );
             }
         }
     }
@@ -199,7 +219,13 @@ fn check_scenario(
                 close(got.i[p], i[p], rtol, &format!("{what} i"));
             }
             if let (Some(ang), Some(mag)) = (src_out.i_angle, src_out.i) {
-                close_angle(got.i_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_angle"));
+                close_angle(
+                    got.i_angle[p],
+                    ang[p],
+                    mag[p],
+                    angle_tol,
+                    &format!("{what} i_angle"),
+                );
             }
         }
     }
@@ -222,14 +248,25 @@ fn check_scenario(
                 close(got.i[p], i[p], rtol, &format!("{what} i"));
             }
             if let (Some(ang), Some(mag)) = (sh_out.i_angle, sh_out.i) {
-                close_angle(got.i_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_angle"));
+                close_angle(
+                    got.i_angle[p],
+                    ang[p],
+                    mag[p],
+                    angle_tol,
+                    &format!("{what} i_angle"),
+                );
             }
         }
     }
 
     // Lines, transformers and links share one record shape and one id space.
     // A fully open branch yields no result, as an inactive appliance does.
-    for br_out in expected.line.iter().chain(&expected.transformer).chain(&expected.link) {
+    for br_out in expected
+        .line
+        .iter()
+        .chain(&expected.transformer)
+        .chain(&expected.link)
+    {
         let Some(got) = report.branches.iter().find(|b| b.id == br_out.id) else {
             assert_eq!(
                 br_out.energized,
@@ -240,7 +277,12 @@ fn check_scenario(
             continue;
         };
         if let Some(e) = br_out.energized {
-            assert_eq!(got.energized, e == 1, "{fixture}[{scenario}] branch {} energized", br_out.id);
+            assert_eq!(
+                got.energized,
+                e == 1,
+                "{fixture}[{scenario}] branch {} energized",
+                br_out.id
+            );
         }
         for p in 0..3 {
             let what = format!("{fixture}[{scenario}] branch {} phase {p}", br_out.id);
@@ -248,13 +290,25 @@ fn check_scenario(
                 close(got.i_from[p], i[p], rtol, &format!("{what} i_from"));
             }
             if let (Some(ang), Some(mag)) = (br_out.i_from_angle, br_out.i_from) {
-                close_angle(got.i_from_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_from_angle"));
+                close_angle(
+                    got.i_from_angle[p],
+                    ang[p],
+                    mag[p],
+                    angle_tol,
+                    &format!("{what} i_from_angle"),
+                );
             }
             if let Some(i) = br_out.i_to {
                 close(got.i_to[p], i[p], rtol, &format!("{what} i_to"));
             }
             if let (Some(ang), Some(mag)) = (br_out.i_to_angle, br_out.i_to) {
-                close_angle(got.i_to_angle[p], ang[p], mag[p], angle_tol, &format!("{what} i_to_angle"));
+                close_angle(
+                    got.i_to_angle[p],
+                    ang[p],
+                    mag[p],
+                    angle_tol,
+                    &format!("{what} i_to_angle"),
+                );
             }
         }
     }
@@ -275,14 +329,17 @@ fn run_diverging_fixture(name: &str, _why: KnownDivergence) {
 
 fn run_fixture_inner(name: &str, rtol: f64, angle_tol: f64) {
     let dir = data_dir(name);
-    let opts = ShortCircuitOptions { scaling: scaling_of(&dir) };
+    let opts = ShortCircuitOptions {
+        scaling: scaling_of(&dir),
+    };
 
     if dir.join("update_batch.json").exists() {
         let base_json = common::load_json(&dir.join("input.json"));
         let update = common::load_json(&dir.join("update_batch.json"));
-        let expected: PgmScBatchOutput =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("sc_output_batch.json")).unwrap())
-                .unwrap();
+        let expected: PgmScBatchOutput = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("sc_output_batch.json")).unwrap(),
+        )
+        .unwrap();
 
         let scenarios = update["data"].as_array().unwrap();
         // `zip` below would silently stop at the shorter of the two.
@@ -291,16 +348,10 @@ fn run_fixture_inner(name: &str, rtol: f64, angle_tol: f64) {
             expected.data.len(),
             "{name}: update and expected-output batches differ in length"
         );
-        for (i, (scenario, expected_scenario)) in scenarios
-            .iter()
-            .zip(&expected.data)
-            .enumerate()
-        {
+        for (i, (scenario, expected_scenario)) in scenarios.iter().zip(&expected.data).enumerate() {
             let input = common::apply_batch_scenario(&base_json, scenario);
-            let (net, report) =
-                short_circuit_from_pgm(&input, S_BASE_VA, FREQ_HZ, opts).unwrap_or_else(|e| {
-                    panic!("{name}[{i}]: {e}")
-                });
+            let (net, report) = short_circuit_from_pgm(&input, S_BASE_VA, FREQ_HZ, opts)
+                .unwrap_or_else(|e| panic!("{name}[{i}]: {e}"));
             check_scenario(&report, &net, expected_scenario, name, i, rtol, angle_tol);
         }
     } else {
@@ -343,12 +394,18 @@ fn single_node_source_three_phase_c_minimum() {
 
 #[test]
 fn single_phase_to_ground_c_maximum() {
-    run_diverging_fixture("single_phase_to_ground_c_maximum", KnownDivergence::ZeroSequenceRegularization);
+    run_diverging_fixture(
+        "single_phase_to_ground_c_maximum",
+        KnownDivergence::ZeroSequenceRegularization,
+    );
 }
 
 #[test]
 fn single_phase_to_ground_c_minimum() {
-    run_diverging_fixture("single_phase_to_ground_c_minimum", KnownDivergence::ZeroSequenceRegularization);
+    run_diverging_fixture(
+        "single_phase_to_ground_c_minimum",
+        KnownDivergence::ZeroSequenceRegularization,
+    );
 }
 
 #[test]
@@ -380,12 +437,18 @@ fn floating_zero_sequence_two_phase_short_circuit() {
 
 #[test]
 fn two_phase_to_ground_c_maximum() {
-    run_diverging_fixture("two_phase_to_ground_c_maximum", KnownDivergence::ZeroSequenceRegularization);
+    run_diverging_fixture(
+        "two_phase_to_ground_c_maximum",
+        KnownDivergence::ZeroSequenceRegularization,
+    );
 }
 
 #[test]
 fn two_phase_to_ground_c_minimum() {
-    run_diverging_fixture("two_phase_to_ground_c_minimum", KnownDivergence::ZeroSequenceRegularization);
+    run_diverging_fixture(
+        "two_phase_to_ground_c_minimum",
+        KnownDivergence::ZeroSequenceRegularization,
+    );
 }
 
 // ── Multiple simultaneous faults ──────────────────────────────────────────────
@@ -410,5 +473,8 @@ fn multiple_short_circuits_different_subgrids() {
 /// self-loop carrying only its own shunt.
 #[test]
 fn dummy_test_line_into_itself() {
-    run_diverging_fixture("dummy-test-line-into-itself", KnownDivergence::LinkAdmittance);
+    run_diverging_fixture(
+        "dummy-test-line-into-itself",
+        KnownDivergence::LinkAdmittance,
+    );
 }

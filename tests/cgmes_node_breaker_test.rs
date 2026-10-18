@@ -45,14 +45,12 @@
 //! non-conducting switches — which is a statement that would break if the
 //! reader ever missed an edge, while a bare count would not.
 
-
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use gridoxide::cgmes::{cgmes_node_breaker_topology, load_profiles, CgmesNodeBreaker};
+use gridoxide::cgmes::{CgmesNodeBreaker, cgmes_node_breaker_topology, load_profiles};
 use gridoxide::topology::model::{BusIdx, NodeIdx};
-use gridoxide::topology::{bus_view, BusView, RetentionPolicy};
+use gridoxide::topology::{BusView, RetentionPolicy, bus_view};
 
 struct Fixture {
     name: &'static str,
@@ -63,10 +61,26 @@ struct Fixture {
 /// The four genuine node-breaker configurations in the tree. RealGrid and
 /// PowerFlow are 1:1 CN:TN with no switches, so they exercise nothing here.
 const FIXTURES: &[Fixture] = &[
-    Fixture { name: "MiniGrid", dir: "MiniGrid/MiniGrid-Merged", prefix: "MiniGrid" },
-    Fixture { name: "FullGrid", dir: "FullGrid/FullGrid-Merged", prefix: "FullGrid" },
-    Fixture { name: "SmallGrid", dir: "SmallGrid/SmallGrid-Merged", prefix: "SmallGrid" },
-    Fixture { name: "Svedala", dir: "Svedala/Svedala-Merged", prefix: "Svedala" },
+    Fixture {
+        name: "MiniGrid",
+        dir: "MiniGrid/MiniGrid-Merged",
+        prefix: "MiniGrid",
+    },
+    Fixture {
+        name: "FullGrid",
+        dir: "FullGrid/FullGrid-Merged",
+        prefix: "FullGrid",
+    },
+    Fixture {
+        name: "SmallGrid",
+        dir: "SmallGrid/SmallGrid-Merged",
+        prefix: "SmallGrid",
+    },
+    Fixture {
+        name: "Svedala",
+        dir: "Svedala/Svedala-Merged",
+        prefix: "Svedala",
+    },
 ];
 
 fn profile_dir(fixture: &Fixture) -> PathBuf {
@@ -146,13 +160,19 @@ fn crossing_switches<'a>(
 fn every_disagreement_with_the_exporter_is_explained_by_an_open_switch() {
     let mut checked = 0;
     for fixture in FIXTURES {
-        let Some(nb) = read(fixture, true) else { continue };
+        let Some(nb) = read(fixture, true) else {
+            continue;
+        };
         let view = bus_view(&nb.topology, &RetentionPolicy::MergeAll);
         let by_tn = nodes_by_topological_node(&nb);
         checked += 1;
 
         // Fixture assumption: these are the node-breaker configurations.
-        assert!(!nb.topology.switches.is_empty(), "{}: no switches read", fixture.name);
+        assert!(
+            !nb.topology.switches.is_empty(),
+            "{}: no switches read",
+            fixture.name
+        );
         assert!(
             nb.topology.n_nodes > by_tn.len(),
             "{}: {} CN is not more than {} TN — not a node-breaker export?",
@@ -164,8 +184,7 @@ fn every_disagreement_with_the_exporter_is_explained_by_an_open_switch() {
         let mut splits = 0;
         let mut tns_of_bus: HashMap<usize, HashSet<&str>> = HashMap::new();
         for (tn, nodes) in &by_tn {
-            let buses: HashSet<BusIdx> =
-                nodes.iter().map(|&n| view.bus_of(NodeIdx(n))).collect();
+            let buses: HashSet<BusIdx> = nodes.iter().map(|&n| view.bus_of(NodeIdx(n))).collect();
             for b in &buses {
                 tns_of_bus.entry(b.0).or_default().insert(tn);
             }
@@ -206,7 +225,10 @@ fn every_disagreement_with_the_exporter_is_explained_by_an_open_switch() {
             tns_of_bus.len(),
         );
     }
-    assert!(checked > 0, "no CGMES fixture was available; the gate proved nothing");
+    assert!(
+        checked > 0,
+        "no CGMES fixture was available; the gate proved nothing"
+    );
 }
 
 /// MiniGrid is the clean case, and pinning it is what stops the gate above
@@ -217,14 +239,20 @@ fn every_disagreement_with_the_exporter_is_explained_by_an_open_switch() {
 fn minigrid_reproduces_the_exporter_partition_exactly() {
     let fixture = &FIXTURES[0];
     assert_eq!(fixture.name, "MiniGrid");
-    let Some(nb) = read(fixture, true) else { return };
+    let Some(nb) = read(fixture, true) else {
+        return;
+    };
 
     let view = bus_view(&nb.topology, &RetentionPolicy::MergeAll);
     let by_tn = nodes_by_topological_node(&nb);
 
     assert_eq!(nb.topology.n_nodes, 103);
     assert_eq!(nb.topology.switches.len(), 90);
-    assert_eq!(nb.topology.conducting_count(), 90, "every MiniGrid switch is closed");
+    assert_eq!(
+        nb.topology.conducting_count(),
+        90,
+        "every MiniGrid switch is closed"
+    );
     assert_eq!(by_tn.len(), 13);
 
     // Exact agreement: the TN partition and the bus partition are the same
@@ -232,7 +260,12 @@ fn minigrid_reproduces_the_exporter_partition_exactly() {
     let mut buses_seen: HashSet<BusIdx> = HashSet::new();
     for (tn, nodes) in &by_tn {
         let buses: HashSet<BusIdx> = nodes.iter().map(|&n| view.bus_of(NodeIdx(n))).collect();
-        assert_eq!(buses.len(), 1, "TopologicalNode {tn} split across {} buses", buses.len());
+        assert_eq!(
+            buses.len(),
+            1,
+            "TopologicalNode {tn} split across {} buses",
+            buses.len()
+        );
         assert!(
             buses_seen.insert(*buses.iter().next().unwrap()),
             "two TopologicalNodes landed on one bus — gridoxide merged further than the exporter"
@@ -250,13 +283,18 @@ fn minigrid_reproduces_the_exporter_partition_exactly() {
 fn fullgrid_still_needs_merging_the_exporter_did_not_do() {
     let fixture = &FIXTURES[1];
     assert_eq!(fixture.name, "FullGrid");
-    let Some(nb) = read(fixture, true) else { return };
+    let Some(nb) = read(fixture, true) else {
+        return;
+    };
 
     let view = bus_view(&nb.topology, &RetentionPolicy::MergeAll);
     let mut tns_of_bus: HashMap<BusIdx, HashSet<&str>> = HashMap::new();
     for (tn, nodes) in &nodes_by_topological_node(&nb) {
         for &n in nodes {
-            tns_of_bus.entry(view.bus_of(NodeIdx(n))).or_default().insert(tn);
+            tns_of_bus
+                .entry(view.bus_of(NodeIdx(n)))
+                .or_default()
+                .insert(tn);
         }
     }
     assert!(
@@ -275,10 +313,16 @@ fn fullgrid_still_needs_merging_the_exporter_did_not_do() {
 fn busbars_are_read_and_the_busbar_policy_selects_a_strict_subset() {
     let mut checked = 0;
     for fixture in FIXTURES {
-        let Some(nb) = read(fixture, false) else { continue };
+        let Some(nb) = read(fixture, false) else {
+            continue;
+        };
         checked += 1;
 
-        assert!(!nb.topology.busbars.is_empty(), "{}: no busbar sections read", fixture.name);
+        assert!(
+            !nb.topology.busbars.is_empty(),
+            "{}: no busbar sections read",
+            fixture.name
+        );
 
         let all = bus_view(&nb.topology, &RetentionPolicy::RetainAll);
         let busbar = bus_view(&nb.topology, &RetentionPolicy::RetainAdjacentToBusbar);
@@ -297,7 +341,12 @@ fn busbars_are_read_and_the_busbar_policy_selects_a_strict_subset() {
         );
         assert!(merged.n_buses() <= busbar.n_buses());
         assert!(busbar.n_buses() <= all.n_buses());
-        assert_eq!(all.n_buses(), nb.topology.n_nodes, "{}: RetainAll must merge nothing but junctions or nothing at all", fixture.name);
+        assert_eq!(
+            all.n_buses(),
+            nb.topology.n_nodes,
+            "{}: RetainAll must merge nothing but junctions or nothing at all",
+            fixture.name
+        );
 
         eprintln!(
             "{:<10} retained: all={:<5} busbar-adjacent={:<5}   buses: merged={:<5} \
@@ -329,7 +378,11 @@ fn the_bus_partition_does_not_depend_on_the_tp_profile() {
         };
         checked += 1;
 
-        assert_eq!(without.topology.n_nodes, with.topology.n_nodes, "{}", fixture.name);
+        assert_eq!(
+            without.topology.n_nodes, with.topology.n_nodes,
+            "{}",
+            fixture.name
+        );
         assert_eq!(
             without.topology.switches.len(),
             with.topology.switches.len(),
@@ -390,28 +443,50 @@ fn the_bus_partition_does_not_depend_on_the_tp_profile() {
 #[test]
 fn the_returned_indices_are_internally_consistent() {
     for fixture in FIXTURES {
-        let Some(nb) = read(fixture, false) else { continue };
+        let Some(nb) = read(fixture, false) else {
+            continue;
+        };
 
         assert_eq!(nb.node_mrids.len(), nb.topology.n_nodes, "{}", fixture.name);
         assert_eq!(nb.tn_of_node.len(), nb.topology.n_nodes, "{}", fixture.name);
-        assert_eq!(nb.switch_mrids.len(), nb.topology.switches.len(), "{}", fixture.name);
+        assert_eq!(
+            nb.switch_mrids.len(),
+            nb.topology.switches.len(),
+            "{}",
+            fixture.name
+        );
 
         for s in &nb.topology.switches {
             for n in s.nodes {
-                assert!(n.0 < nb.topology.n_nodes, "{}: node {n:?} out of range", fixture.name);
+                assert!(
+                    n.0 < nb.topology.n_nodes,
+                    "{}: node {n:?} out of range",
+                    fixture.name
+                );
             }
         }
         for b in &nb.topology.busbars {
-            assert!(b.0 < nb.topology.n_nodes, "{}: busbar {b:?} out of range", fixture.name);
+            assert!(
+                b.0 < nb.topology.n_nodes,
+                "{}: busbar {b:?} out of range",
+                fixture.name
+            );
         }
 
         // Node mrids are the identity of the index space, so a duplicate would
         // silently alias two substation points.
         let unique: HashSet<&String> = nb.node_mrids.iter().collect();
-        assert_eq!(unique.len(), nb.node_mrids.len(), "{}: duplicate CN mrid", fixture.name);
+        assert_eq!(
+            unique.len(),
+            nb.node_mrids.len(),
+            "{}: duplicate CN mrid",
+            fixture.name
+        );
 
         let view = bus_view(&nb.topology, &RetentionPolicy::MergeAll);
-        let total: usize = (0..view.n_buses()).map(|b| view.nodes_of(BusIdx(b)).len()).sum();
+        let total: usize = (0..view.n_buses())
+            .map(|b| view.nodes_of(BusIdx(b)).len())
+            .sum();
         assert_eq!(total, nb.topology.n_nodes, "{}", fixture.name);
     }
 }

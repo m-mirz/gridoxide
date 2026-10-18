@@ -172,10 +172,20 @@ fn newton<S: LinearSolver>(
         );
         let norm = ws.res.iter().fold(0.0f64, |m, r| m.max(r.abs()));
         if norm < tol {
-            return StepOutcome::Converged { iterations: iteration - 1 };
+            return StepOutcome::Converged {
+                iterations: iteration - 1,
+            };
         }
 
-        pattern.fill(&system.models, x, v, ha, &system.ybus, &mut ws.scratch, &mut ws.values);
+        pattern.fill(
+            &system.models,
+            x,
+            v,
+            ha,
+            &system.ybus,
+            &mut ws.scratch,
+            &mut ws.values,
+        );
         for k in 0..n {
             ws.rhs[k] = -ws.res[k];
         }
@@ -228,8 +238,7 @@ fn apply(system: &mut DynamicSystem, kind: EventKind) -> Result<(), EventError> 
             if unit >= n_unit {
                 return Err(EventError::UnitOutOfRange { unit, n_unit });
             }
-            system.models[unit]
-                .set_connected(matches!(kind, EventKind::UnitClose { .. }));
+            system.models[unit].set_connected(matches!(kind, EventKind::UnitClose { .. }));
         }
         EventKind::LoadStep { bus, ds } => {
             let v_sq = system.v_fixed[bus].norm_sqr();
@@ -260,7 +269,11 @@ pub fn integrate<S: LinearSolver>(
     let mut traj = Trajectory::new(system.observable_names());
     let mut warnings: Vec<DynamicsWarning> = Vec::new();
     let mut events: Vec<Event> = opts.events.clone();
-    events.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    events.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut next_event = 0usize;
     let mut events_applied = 0usize;
 
@@ -315,16 +328,16 @@ pub fn integrate<S: LinearSolver>(
 
     // Anything scheduled at or before zero happens before the first step.
     let fire = |system: &mut DynamicSystem,
-                    events: &[Event],
-                    next_event: &mut usize,
-                    t: f64,
-                    x: &mut Vec<f64>,
-                    v: &mut Vec<Complex<f64>>,
-                    solver: &mut Option<S>,
-                    ws: &mut Workspace,
-                    traj: &mut Trajectory,
-                    warnings: &mut Vec<DynamicsWarning>,
-                    events_applied: &mut usize|
+                events: &[Event],
+                next_event: &mut usize,
+                t: f64,
+                x: &mut Vec<f64>,
+                v: &mut Vec<Complex<f64>>,
+                solver: &mut Option<S>,
+                ws: &mut Workspace,
+                traj: &mut Trajectory,
+                warnings: &mut Vec<DynamicsWarning>,
+                events_applied: &mut usize|
      -> Option<DynamicsStatus> {
         let mut any = false;
         while *next_event < events.len() && events[*next_event].time <= t + eps {
@@ -335,7 +348,10 @@ pub fn integrate<S: LinearSolver>(
                     any = true;
                     *events_applied += 1;
                 }
-                Err(error) => warnings.push(DynamicsWarning::Skipped { time: event.time, error }),
+                Err(error) => warnings.push(DynamicsWarning::Skipped {
+                    time: event.time,
+                    error,
+                }),
             }
         }
         if !any {
@@ -348,7 +364,18 @@ pub fn integrate<S: LinearSolver>(
         let x_prev = x.clone();
         let zero = vec![0.0; x.len()];
         match newton(
-            system, solver, ws, &x_prev, &zero, x, v, 0.0, 0.0, true, opts.tol, opts.max_newton,
+            system,
+            solver,
+            ws,
+            &x_prev,
+            &zero,
+            x,
+            v,
+            0.0,
+            0.0,
+            true,
+            opts.tol,
+            opts.max_newton,
         ) {
             StepOutcome::Converged { .. } => {}
             StepOutcome::NotConverged => return Some(DynamicsStatus::NewtonFailed { time: t }),
@@ -357,7 +384,10 @@ pub fn integrate<S: LinearSolver>(
         traj.push(t, x, v);
 
         for island in system.dead_islands() {
-            let warning = DynamicsWarning::DeadIsland { buses: island, time: t };
+            let warning = DynamicsWarning::DeadIsland {
+                buses: island,
+                time: t,
+            };
             if !warnings.contains(&warning) {
                 warnings.push(warning);
             }
@@ -366,8 +396,17 @@ pub fn integrate<S: LinearSolver>(
     };
 
     if let Some(bad) = fire(
-        system, &events, &mut next_event, t, &mut x, &mut v, &mut solver, &mut ws, &mut traj,
-        &mut warnings, &mut events_applied,
+        system,
+        &events,
+        &mut next_event,
+        t,
+        &mut x,
+        &mut v,
+        &mut solver,
+        &mut ws,
+        &mut traj,
+        &mut warnings,
+        &mut events_applied,
     ) {
         status = bad;
     } else {
@@ -396,7 +435,11 @@ pub fn integrate<S: LinearSolver>(
                 consider(p.fires_at, &mut h, &mut snap);
             }
 
-            let rule = if damping_left > 0 { Rule::BackwardEuler } else { Rule::Trapezoidal };
+            let rule = if damping_left > 0 {
+                Rule::BackwardEuler
+            } else {
+                Rule::Trapezoidal
+            };
             let (a, b) = rule.coefficients();
 
             // Which limits hold, for this whole step. Fixing the active set
@@ -426,8 +469,18 @@ pub fn integrate<S: LinearSolver>(
                         x[i] = x_prev[i] + $size * f0[i];
                     }
                     newton(
-                        system, &mut solver, &mut ws, &x_prev, &f0, &mut x, &mut v,
-                        $size * a, $size * b, false, opts.tol, opts.max_newton,
+                        system,
+                        &mut solver,
+                        &mut ws,
+                        &x_prev,
+                        &f0,
+                        &mut x,
+                        &mut v,
+                        $size * a,
+                        $size * b,
+                        false,
+                        opts.tol,
+                        opts.max_newton,
                     )
                 }};
             }
@@ -457,7 +510,9 @@ pub fn integrate<S: LinearSolver>(
                 let before = system
                     .watched(relay.watch, &x_prev, &v_prev, &reference)
                     .unwrap_or(0.0);
-                let after = system.watched(relay.watch, &x, &v, &reference).unwrap_or(0.0);
+                let after = system
+                    .watched(relay.watch, &x, &v, &reference)
+                    .unwrap_or(0.0);
                 if relay.trigger.holds(after) && !relay.trigger.holds(before) {
                     // Illinois on the step fraction: the same locator
                     // `continuation` uses to find a Q-limit along its curve.
@@ -475,8 +530,9 @@ pub fn integrate<S: LinearSolver>(
                         if !matches!(attempt!(theta * h), StepOutcome::Converged { .. }) {
                             break;
                         }
-                        let value =
-                            system.watched(relay.watch, &x, &v, &reference).unwrap_or(0.0);
+                        let value = system
+                            .watched(relay.watch, &x, &v, &reference)
+                            .unwrap_or(0.0);
                         bracket.update(theta, relay.trigger.residual(value));
                     }
                     let theta = bracket.hi.clamp(1e-9, 1.0);
@@ -510,8 +566,17 @@ pub fn integrate<S: LinearSolver>(
 
             let before = events_applied;
             if let Some(bad) = fire(
-                system, &events, &mut next_event, t, &mut x, &mut v, &mut solver, &mut ws,
-                &mut traj, &mut warnings, &mut events_applied,
+                system,
+                &events,
+                &mut next_event,
+                t,
+                &mut x,
+                &mut v,
+                &mut solver,
+                &mut ws,
+                &mut traj,
+                &mut warnings,
+                &mut events_applied,
             ) {
                 status = bad;
                 break;
@@ -533,7 +598,11 @@ pub fn integrate<S: LinearSolver>(
                 };
                 let now = relay.trigger.holds(value);
                 if now && !holding[i] && !pending.iter().any(|p| p.relay == i) {
-                    pending.push(Pending { relay: i, crossed_at: t, fires_at: t + relay.delay });
+                    pending.push(Pending {
+                        relay: i,
+                        crossed_at: t,
+                        fires_at: t + relay.delay,
+                    });
                 }
                 holding[i] = now;
             }
@@ -563,8 +632,18 @@ pub fn integrate<S: LinearSolver>(
                         system.latch(&x, &v);
                         if !matches!(
                             newton(
-                                system, &mut solver, &mut ws, &x_frozen, &zero, &mut x, &mut v,
-                                0.0, 0.0, true, opts.tol, opts.max_newton,
+                                system,
+                                &mut solver,
+                                &mut ws,
+                                &x_frozen,
+                                &zero,
+                                &mut x,
+                                &mut v,
+                                0.0,
+                                0.0,
+                                true,
+                                opts.tol,
+                                opts.max_newton,
                             ),
                             StepOutcome::Converged { .. }
                         ) {
@@ -581,7 +660,10 @@ pub fn integrate<S: LinearSolver>(
                         });
                         damping_left = opts.damping_steps;
                         for island in system.dead_islands() {
-                            let warning = DynamicsWarning::DeadIsland { buses: island, time: t };
+                            let warning = DynamicsWarning::DeadIsland {
+                                buses: island,
+                                time: t,
+                            };
                             if !warnings.contains(&warning) {
                                 warnings.push(warning);
                             }
@@ -631,7 +713,17 @@ pub fn solve_algebraic<S: LinearSolver>(
     let zero = vec![0.0; x.len()];
 
     let outcome = newton(
-        system, &mut solver, &mut ws, &x_prev, &zero, &mut x, &mut v, 0.0, 0.0, true, tol,
+        system,
+        &mut solver,
+        &mut ws,
+        &x_prev,
+        &zero,
+        &mut x,
+        &mut v,
+        0.0,
+        0.0,
+        true,
+        tol,
         max_newton,
     );
     if matches!(outcome, StepOutcome::Converged { .. }) {

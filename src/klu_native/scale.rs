@@ -65,8 +65,16 @@ pub fn scale(
         }
     }
 
-    let mut rs = if scale > 0 { vec![0.0f64; n] } else { Vec::new() };
-    let mut w = if check_duplicates { vec![-1i64; n] } else { Vec::new() };
+    let mut rs = if scale > 0 {
+        vec![0.0f64; n]
+    } else {
+        Vec::new()
+    };
+    let mut w = if check_duplicates {
+        vec![-1i64; n]
+    } else {
+        Vec::new()
+    };
 
     for col in 0..n {
         let pend = col_ptr[col + 1] as usize;
@@ -222,7 +230,8 @@ mod tests {
             let row_idx64: Vec<i64> = row_idx.iter().map(|&x| x as i64).collect();
             let rust_rs = scale(scale_mode, n, &col_ptr64, &row_idx64, &values, false).unwrap();
 
-            let c_rs = ffi_oracle::klu_scale_oracle(scale_mode, n, &col_ptr, &row_idx, &values).unwrap();
+            let c_rs =
+                ffi_oracle::klu_scale_oracle(scale_mode, n, &col_ptr, &row_idx, &values).unwrap();
 
             assert_eq!(rust_rs.len(), c_rs.len(), "trial {trial}");
             for row in 0..n {

@@ -13,8 +13,8 @@ use num_complex::Complex;
 
 use gridoxide::dynamics::models::machine::{self, GenCls, GenClsParams};
 use gridoxide::dynamics::{
-    build, run_dynamics, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus,
-    DynamicsWarning, Event, EventKind, SystemSpec,
+    DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus, DynamicsWarning, Event, EventKind,
+    SystemSpec, build, run_dynamics,
 };
 use gridoxide::network::{build_ybus, power_injections};
 use gridoxide::types::{Bus, BusType, Line};
@@ -57,7 +57,14 @@ fn smib() -> (DynamicSystem, Analytic) {
         bus(0, BusType::PV, P_GEN, 0.0),
         bus(1, BusType::Slack, 0.0, 0.0),
     ];
-    let lines = vec![Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = vec![Line {
+        from: 0,
+        to: 1,
+        r: 0.0,
+        x: X_LINE,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
 
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
@@ -69,7 +76,13 @@ fn smib() -> (DynamicSystem, Analytic) {
     let s_dev = Complex::new(p_calc[0], q_calc[0]);
 
     let model = GenCls::new(
-        GenClsParams { h: H, d: 0.0, ra: 0.0, xdp: XDP, mbase: S_BASE },
+        GenClsParams {
+            h: H,
+            d: 0.0,
+            ra: 0.0,
+            xdp: XDP,
+            mbase: S_BASE,
+        },
         S_BASE,
         F_NOM,
     )
@@ -114,11 +127,24 @@ fn smib() -> (DynamicSystem, Analytic) {
     let delta_cc = cos_cc.acos();
     let t_cc = (4.0 * H * (delta_cc - delta_0) / (OMEGA_B * p_m)).sqrt();
 
-    (system, Analytic { p_max, p_m, delta_0, t_cc })
+    (
+        system,
+        Analytic {
+            p_max,
+            p_m,
+            delta_0,
+            t_cc,
+        },
+    )
 }
 
 fn options(step: f64, end: f64, events: Vec<Event>) -> DynamicsOptions {
-    DynamicsOptions { end_time: end, step, events, ..Default::default() }
+    DynamicsOptions {
+        end_time: end,
+        step,
+        events,
+        ..Default::default()
+    }
 }
 
 const FAULT_AT: f64 = 1.0;
@@ -140,7 +166,11 @@ fn stays_in_step(clearing: f64, step: f64) -> bool {
         ],
     );
     let report = run_dynamics(&mut system, &opts);
-    assert_eq!(report.status, DynamicsStatus::Completed, "clearing at {clearing}");
+    assert_eq!(
+        report.status,
+        DynamicsStatus::Completed,
+        "clearing at {clearing}"
+    );
     assert_eq!(report.events_applied, 2);
     let delta = report.trajectory.series("G1.delta").unwrap();
     delta.iter().fold(0.0f64, |m, d| m.max(*d)) < std::f64::consts::TAU
@@ -168,8 +198,14 @@ fn critical_clearing_time_matches_the_equal_area_criterion() {
 
     let step = 0.002;
     let (mut lo, mut hi) = (0.15, 0.45);
-    assert!(stays_in_step(lo, step), "the machine must survive a short fault");
-    assert!(!stays_in_step(hi, step), "the machine must not survive a long one");
+    assert!(
+        stays_in_step(lo, step),
+        "the machine must survive a short fault"
+    );
+    assert!(
+        !stays_in_step(hi, step),
+        "the machine must not survive a long one"
+    );
 
     // 14 halvings of a 0.30 s bracket leaves the answer located to ~18 µs,
     // well inside the 1 ms the gate asks for.
@@ -210,7 +246,11 @@ fn state_is_continuous_across_an_event_and_voltage_is_not() {
         .filter(|(_, t)| (**t - FAULT_AT).abs() < 1e-12)
         .map(|(k, _)| k)
         .collect();
-    assert_eq!(at_fault.len(), 2, "the fault instant should be recorded twice");
+    assert_eq!(
+        at_fault.len(),
+        2,
+        "the fault instant should be recorded twice"
+    );
     let (before, after) = (at_fault[0], at_fault[1]);
 
     let col = |name: &str| report.trajectory.column(name).unwrap();
@@ -224,10 +264,18 @@ fn state_is_continuous_across_an_event_and_voltage_is_not() {
     }
 
     let vmag = col("bus0.vmag");
-    let (v_before, v_after) =
-        (report.trajectory.rows[before][vmag], report.trajectory.rows[after][vmag]);
-    assert!(v_before > 0.9, "terminal voltage before the fault was {v_before}");
-    assert!(v_after < 1e-4, "a bolted fault should collapse the terminal voltage, got {v_after}");
+    let (v_before, v_after) = (
+        report.trajectory.rows[before][vmag],
+        report.trajectory.rows[after][vmag],
+    );
+    assert!(
+        v_before > 0.9,
+        "terminal voltage before the fault was {v_before}"
+    );
+    assert!(
+        v_after < 1e-4,
+        "a bolted fault should collapse the terminal voltage, got {v_after}"
+    );
 
     // And the constraint is satisfied again on the far side, to machine zero
     // rather than to the solver's tolerance.
@@ -275,7 +323,10 @@ fn a_terminal_fault_removes_the_electrical_power() {
                 FAULT_AT + 0.25,
                 vec![Event::new(
                     FAULT_AT,
-                    EventKind::BusFault { bus: 0, y: Complex::new(y_fault, 0.0) },
+                    EventKind::BusFault {
+                        bus: 0,
+                        y: Complex::new(y_fault, 0.0),
+                    },
                 )],
             )
         };
@@ -359,7 +410,12 @@ fn damping_steps_do_not_change_the_answer_yet() {
         };
         let report = run_dynamics(&mut system, &opts);
         assert_eq!(report.status, DynamicsStatus::Completed);
-        report.trajectory.series("G1.delta").unwrap().iter().fold(0.0f64, |m, d| m.max(*d))
+        report
+            .trajectory
+            .series("G1.delta")
+            .unwrap()
+            .iter()
+            .fold(0.0f64, |m, d| m.max(*d))
     };
 
     let (none, damped) = (peak(0), peak(2));
@@ -381,7 +437,10 @@ fn an_event_lands_exactly_on_its_own_time() {
     assert_eq!(report.events_applied, 1);
 
     let hits = report.trajectory.time.iter().filter(|t| **t == odd).count();
-    assert_eq!(hits, 2, "the event time should appear exactly twice, bit-exact");
+    assert_eq!(
+        hits, 2,
+        "the event time should appear exactly twice, bit-exact"
+    );
 }
 
 /// G9. Switching a network apart leaves an island with no machine and no
@@ -396,20 +455,43 @@ fn a_switched_off_island_is_reported() {
         bus(2, BusType::PQ, -0.3, -0.1),
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.01, x: 0.1, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.0,
+            x: X_LINE,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.01,
+            x: 0.1,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
         lines: lines.clone(),
     });
-    assert_eq!(report.stats.status, gridoxide::solver::SolveStatus::Converged);
+    assert_eq!(
+        report.stats.status,
+        gridoxide::solver::SolveStatus::Converged
+    );
     let buses = report.buses;
     let ybus = build_ybus(buses.len(), &lines, &[]).finish();
     let (p_calc, q_calc) = power_injections(&buses, &ybus);
 
     let model = GenCls::new(
-        GenClsParams { h: H, d: 0.0, ra: 0.0, xdp: XDP, mbase: S_BASE },
+        GenClsParams {
+            h: H,
+            d: 0.0,
+            ra: 0.0,
+            xdp: XDP,
+            mbase: S_BASE,
+        },
         S_BASE,
         F_NOM,
     )
@@ -430,7 +512,11 @@ fn a_switched_off_island_is_reported() {
     .unwrap();
 
     // Branch 1 is the only thing holding bus 2 on.
-    let opts = options(0.005, 1.0, vec![Event::new(0.5, EventKind::BranchTrip { branch: 1 })]);
+    let opts = options(
+        0.005,
+        1.0,
+        vec![Event::new(0.5, EventKind::BranchTrip { branch: 1 })],
+    );
     let out = run_dynamics(&mut system, &opts);
     assert_eq!(out.status, DynamicsStatus::Completed);
     assert_eq!(out.events_applied, 1);
@@ -440,7 +526,12 @@ fn a_switched_off_island_is_reported() {
         .iter()
         .filter(|w| matches!(w, DynamicsWarning::DeadIsland { .. }))
         .collect();
-    assert_eq!(dead.len(), 1, "expected one dead island, got {:?}", out.warnings);
+    assert_eq!(
+        dead.len(),
+        1,
+        "expected one dead island, got {:?}",
+        out.warnings
+    );
     match dead[0] {
         DynamicsWarning::DeadIsland { buses, time } => {
             assert_eq!(buses, &vec![2]);
@@ -451,8 +542,13 @@ fn a_switched_off_island_is_reported() {
 
     // The machine is untouched by a trip on the far side of the infinite bus.
     let delta = out.trajectory.series("G1.delta").unwrap();
-    let drift = delta.iter().fold(0.0f64, |m, d| m.max((d - delta[0]).abs()));
-    assert!(drift < 1e-9, "the machine should not notice, but moved {drift:e} rad");
+    let drift = delta
+        .iter()
+        .fold(0.0f64, |m, d| m.max((d - delta[0]).abs()));
+    assert!(
+        drift < 1e-9,
+        "the machine should not notice, but moved {drift:e} rad"
+    );
 }
 
 /// An event naming something that does not exist is a data error, not a crash.
@@ -473,8 +569,9 @@ fn an_impossible_event_is_skipped_and_named() {
     assert_eq!(report.events_applied, 0);
     assert_eq!(report.warnings.len(), 2);
     for warning in &report.warnings {
-        assert!(matches!(warning, DynamicsWarning::Skipped { .. }), "got {warning:?}");
+        assert!(
+            matches!(warning, DynamicsWarning::Skipped { .. }),
+            "got {warning:?}"
+        );
     }
 }
-
-

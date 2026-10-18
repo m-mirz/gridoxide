@@ -15,11 +15,11 @@
 //! No `faer` type appears in any signature here: keeping the backend behind
 //! this module is what lets it be swapped without touching the power-flow math.
 
-use num_complex::Complex;
-use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat, Triplet};
-use faer::sparse::linalg::solvers::{Lu, SymbolicLu};
 use faer::Col;
 use faer::prelude::{Reborrow, Solve};
+use faer::sparse::linalg::solvers::{Lu, SymbolicLu};
+use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat, Triplet};
+use num_complex::Complex;
 
 /// A sparse matrix built once from a fixed set of (row, col, value) triplets
 /// (duplicates summed), kept around for repeated matrix-vector products —
@@ -34,9 +34,12 @@ pub struct SparseMatrix {
 
 impl SparseMatrix {
     pub fn build(n: usize, entries: &[(usize, usize, Complex<f64>)]) -> Option<Self> {
-        let triplets: Vec<Triplet<usize, usize, Complex<f64>>> =
-            entries.iter().map(|&(r, c, v)| Triplet::new(r, c, v)).collect();
-        let mat = SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
+        let triplets: Vec<Triplet<usize, usize, Complex<f64>>> = entries
+            .iter()
+            .map(|&(r, c, v)| Triplet::new(r, c, v))
+            .collect();
+        let mat =
+            SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
         Some(Self { n, mat })
     }
 
@@ -61,8 +64,10 @@ pub fn solve_complex(
     entries: &[(usize, usize, Complex<f64>)],
     rhs: &[Complex<f64>],
 ) -> Option<Vec<Complex<f64>>> {
-    let triplets: Vec<Triplet<usize, usize, Complex<f64>>> =
-        entries.iter().map(|&(r, c, v)| Triplet::new(r, c, v)).collect();
+    let triplets: Vec<Triplet<usize, usize, Complex<f64>>> = entries
+        .iter()
+        .map(|&(r, c, v)| Triplet::new(r, c, v))
+        .collect();
     let mat = SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
     let lu = mat.sp_lu().ok()?;
     let b = Col::<Complex<f64>>::from_fn(n, |i| rhs[i]);
@@ -106,18 +111,31 @@ impl RealSparseSystem {
     /// (values may differ) — the cached argsort assumes positional
     /// correspondence, not just set equality.
     pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
-        let pairs: Vec<Pair<usize, usize>> =
-            entries.iter().map(|&(r, c, _)| Pair { row: r, col: c }).collect();
-        let (symbolic_mat, argsort) = SymbolicSparseColMat::try_new_from_indices(n, n, &pairs).ok()?;
+        let pairs: Vec<Pair<usize, usize>> = entries
+            .iter()
+            .map(|&(r, c, _)| Pair { row: r, col: c })
+            .collect();
+        let (symbolic_mat, argsort) =
+            SymbolicSparseColMat::try_new_from_indices(n, n, &pairs).ok()?;
         let symbolic_lu = SymbolicLu::try_new(symbolic_mat.rb()).ok()?;
-        Some(Self { n, n_values: entries.len(), symbolic_mat, argsort, symbolic_lu })
+        Some(Self {
+            n,
+            n_values: entries.len(),
+            symbolic_mat,
+            argsort,
+            symbolic_lu,
+        })
     }
 
     /// Numeric-only refactorization against the cached symbolic pattern and
     /// argsort, then solves `A x = b`. Returns `None` if the matrix is
     /// singular (see `solve_complex`'s doc comment for why this needs an
     /// explicit check).
-    pub fn factor_and_solve(&self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    pub fn factor_and_solve(
+        &self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
         self.solve_values(&vals, rhs)
     }
@@ -138,7 +156,8 @@ impl RealSparseSystem {
         if vals.len() != self.n_values || rhs.len() < self.n {
             return None;
         }
-        let mat = SparseColMat::new_from_argsort(self.symbolic_mat.clone(), &self.argsort, vals).ok()?;
+        let mat =
+            SparseColMat::new_from_argsort(self.symbolic_mat.clone(), &self.argsort, vals).ok()?;
         let lu = Lu::try_new_with_symbolic(self.symbolic_lu.clone(), mat.as_ref()).ok()?;
         let b = Col::<f64>::from_fn(self.n, |i| rhs[i]);
         let x = lu.solve(&b);
@@ -157,7 +176,11 @@ impl crate::solver::LinearSolver for RealSparseSystem {
         RealSparseSystem::new(n, entries)
     }
 
-    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         RealSparseSystem::factor_and_solve(self, entries, rhs)
     }
 
@@ -186,10 +209,16 @@ pub struct ComplexSparseSystem {
 impl ComplexSparseSystem {
     /// Factorizes once. Returns `None` if the matrix is singular or malformed.
     pub fn new(n: usize, entries: &[(usize, usize, Complex<f64>)]) -> Option<Self> {
-        let triplets: Vec<Triplet<usize, usize, Complex<f64>>> =
-            entries.iter().map(|&(r, c, v)| Triplet::new(r, c, v)).collect();
-        let mat = SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
-        Some(Self { n, lu: mat.sp_lu().ok()? })
+        let triplets: Vec<Triplet<usize, usize, Complex<f64>>> = entries
+            .iter()
+            .map(|&(r, c, v)| Triplet::new(r, c, v))
+            .collect();
+        let mat =
+            SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
+        Some(Self {
+            n,
+            lu: mat.sp_lu().ok()?,
+        })
     }
 
     /// Solves `A x = b` against the cached factorization.
@@ -255,10 +284,15 @@ pub struct RealFactorization {
 impl RealFactorization {
     /// Factorizes once. Returns `None` if the matrix is singular or malformed.
     pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
-        let triplets: Vec<Triplet<usize, usize, f64>> =
-            entries.iter().map(|&(r, c, v)| Triplet::new(r, c, v)).collect();
+        let triplets: Vec<Triplet<usize, usize, f64>> = entries
+            .iter()
+            .map(|&(r, c, v)| Triplet::new(r, c, v))
+            .collect();
         let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).ok()?;
-        Some(Self { n, lu: mat.sp_lu().ok()? })
+        Some(Self {
+            n,
+            lu: mat.sp_lu().ok()?,
+        })
     }
 
     pub fn n(&self) -> usize {
@@ -377,7 +411,10 @@ mod tests {
     fn solve_dense_matches_a_hand_solution() {
         // [[2,1],[1,3]] x = [5,10] => x = [1,3]
         let x = solve_dense(vec![vec![2.0, 1.0], vec![1.0, 3.0]], vec![5.0, 10.0]).unwrap();
-        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12, "{x:?}");
+        assert!(
+            (x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12,
+            "{x:?}"
+        );
     }
 
     /// Partial pivoting must handle a zero leading pivot rather than dividing
@@ -385,7 +422,10 @@ mod tests {
     #[test]
     fn solve_dense_pivots_past_a_zero_diagonal() {
         let x = solve_dense(vec![vec![0.0, 2.0], vec![1.0, 1.0]], vec![4.0, 3.0]).unwrap();
-        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12, "{x:?}");
+        assert!(
+            (x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12,
+            "{x:?}"
+        );
     }
 
     #[test]
@@ -468,9 +508,15 @@ mod tests {
         assert!((x[1] - 3.0).abs() < 1e-12, "got {}", x[1]);
 
         let c0 = sys.solve(&[1.0, 0.0]).unwrap();
-        assert!((c0[0] - 0.6).abs() < 1e-12 && (c0[1] + 0.2).abs() < 1e-12, "{c0:?}");
+        assert!(
+            (c0[0] - 0.6).abs() < 1e-12 && (c0[1] + 0.2).abs() < 1e-12,
+            "{c0:?}"
+        );
         let c1 = sys.solve(&[0.0, 1.0]).unwrap();
-        assert!((c1[0] + 0.2).abs() < 1e-12 && (c1[1] - 0.4).abs() < 1e-12, "{c1:?}");
+        assert!(
+            (c1[0] + 0.2).abs() < 1e-12 && (c1[1] - 0.4).abs() < 1e-12,
+            "{c1:?}"
+        );
     }
 
     #[test]
@@ -487,10 +533,19 @@ mod tests {
     /// relies on this, since parallel branches each stamp their own entry.
     #[test]
     fn real_factorization_duplicate_entries_sum() {
-        let entries = vec![(0, 0, 1.0), (0, 0, 1.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)];
+        let entries = vec![
+            (0, 0, 1.0),
+            (0, 0, 1.0),
+            (0, 1, 1.0),
+            (1, 0, 1.0),
+            (1, 1, 3.0),
+        ];
         let sys = RealFactorization::new(2, &entries).unwrap();
         let x = sys.solve(&[5.0, 10.0]).unwrap();
-        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12, "{x:?}");
+        assert!(
+            (x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12,
+            "{x:?}"
+        );
     }
 
     /// The transposed solve must use the *same* factorization and still give
@@ -520,7 +575,10 @@ mod tests {
         // And it is genuinely the transpose, not the same solve twice.
         let forward = a.solve(&[1.0, 0.0]).unwrap();
         let adjoint = a.solve_transpose(&[1.0, 0.0]).unwrap();
-        assert!((forward[1] - adjoint[1]).abs() > 1e-6, "{forward:?} vs {adjoint:?}");
+        assert!(
+            (forward[1] - adjoint[1]).abs() > 1e-6,
+            "{forward:?} vs {adjoint:?}"
+        );
     }
 
     /// The complex adjoint solve must reuse the same factorization and agree
@@ -537,8 +595,10 @@ mod tests {
             (1, 0, c(5.0, 2.0)),
             (1, 1, c(3.0, 0.5)),
         ];
-        let adjoint_entries: Vec<(usize, usize, Complex<f64>)> =
-            entries.iter().map(|&(r, c_, v)| (c_, r, v.conj())).collect();
+        let adjoint_entries: Vec<(usize, usize, Complex<f64>)> = entries
+            .iter()
+            .map(|&(r, c_, v)| (c_, r, v.conj()))
+            .collect();
 
         let a = ComplexSparseSystem::new(2, &entries).unwrap();
         let ah = ComplexSparseSystem::new(2, &adjoint_entries).unwrap();
@@ -561,7 +621,10 @@ mod tests {
         // And it is genuinely the adjoint, not the same solve twice.
         let forward = a.solve(&[c(1.0, 0.0), c(0.0, 0.0)]).unwrap();
         let adjoint = a.solve_adjoint(&[c(1.0, 0.0), c(0.0, 0.0)]).unwrap();
-        assert!((forward[1] - adjoint[1]).norm() > 1e-6, "{forward:?} vs {adjoint:?}");
+        assert!(
+            (forward[1] - adjoint[1]).norm() > 1e-6,
+            "{forward:?} vs {adjoint:?}"
+        );
     }
 
     #[test]

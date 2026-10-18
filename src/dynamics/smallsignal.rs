@@ -67,8 +67,8 @@
 //! of a few thousand states wants a sparse Arnoldi method targeting a region of
 //! the complex plane instead, and that is not implemented.
 
-use faer::linalg::solvers::Solve;
 use faer::Mat;
+use faer::linalg::solvers::Solve;
 use num_complex::Complex;
 
 use crate::sparse::RealFactorization;
@@ -162,7 +162,10 @@ pub enum Method {
     /// Every mode, by a dense eigen-decomposition of the reduced `A`.
     Dense,
     /// The modes nearest `shift`, by shift-invert Arnoldi.
-    Sparse { shift: Complex<f64>, restarts: usize },
+    Sparse {
+        shift: Complex<f64>,
+        restarts: usize,
+    },
 }
 
 impl std::fmt::Display for Method {
@@ -218,9 +221,7 @@ impl SmallSignal {
     pub fn shape(&self, mode: &Mode) -> Vec<(String, f64, f64)> {
         mode.shape
             .iter()
-            .map(|&(k, c)| {
-                (self.state_names[k].clone(), c.norm(), c.arg().to_degrees())
-            })
+            .map(|&(k, c)| (self.state_names[k].clone(), c.norm(), c.arg().to_degrees()))
             .collect()
     }
 }
@@ -278,7 +279,10 @@ impl std::fmt::Display for SmallSignalError {
                  a linearization about a point the system is not sitting at describes nothing"
             ),
             SmallSignalError::SingularNetwork => {
-                write!(f, "the algebraic block is singular, so the network cannot be eliminated")
+                write!(
+                    f,
+                    "the algebraic block is singular, so the network cannot be eliminated"
+                )
             }
             SmallSignalError::Eigen => write!(f, "the eigen-decomposition did not converge"),
             SmallSignalError::TooLarge { states, limit } => write!(
@@ -442,10 +446,15 @@ pub(crate) fn reduced_state_matrix(
     // large system analyzed mid-transient has both problems.
     let drift = system.max_derivative();
     if drift > EQUILIBRIUM_TOL {
-        return Err(SmallSignalError::NotAnEquilibrium { max_derivative: drift });
+        return Err(SmallSignalError::NotAnEquilibrium {
+            max_derivative: drift,
+        });
     }
     if n_x > MAX_DENSE_STATES {
-        return Err(SmallSignalError::TooLarge { states: n_x, limit: MAX_DENSE_STATES });
+        return Err(SmallSignalError::TooLarge {
+            states: n_x,
+            limit: MAX_DENSE_STATES,
+        });
     }
 
     // One fill at h·a = 1 gives all four blocks — the same assembly every step
@@ -481,15 +490,16 @@ pub(crate) fn reduced_state_matrix(
     // numeric refactorization of a matrix that never moves. This is the same
     // one-factorization-many-columns shape `linear::sensitivity`'s PTDF and
     // `ac_sensitivity`'s forward mode already have.
-    let network =
-        RealFactorization::new(n_net, &c_v).ok_or(SmallSignalError::SingularNetwork)?;
+    let network = RealFactorization::new(n_net, &c_v).ok_or(SmallSignalError::SingularNetwork)?;
     let mut z = vec![0.0; n_net * n_x];
     let mut column = vec![0.0; n_net];
     for k in 0..n_x {
         for row in 0..n_net {
             column[row] = c_x[row * n_x + k];
         }
-        let solved = network.solve(&column).ok_or(SmallSignalError::SingularNetwork)?;
+        let solved = network
+            .solve(&column)
+            .ok_or(SmallSignalError::SingularNetwork)?;
         for row in 0..n_net {
             z[row * n_x + k] = solved[row];
         }
@@ -552,11 +562,13 @@ pub fn analyze(system: &DynamicSystem) -> Result<SmallSignal, SmallSignalError> 
     let mut modes = Vec::with_capacity(n_x);
     for i in 0..n_x {
         let lambda = Complex::new(s[i].re, s[i].im);
-        let right: Vec<Complex<f64>> =
-            (0..n_x).map(|k| Complex::new(u[(k, i)].re, u[(k, i)].im)).collect();
+        let right: Vec<Complex<f64>> = (0..n_x)
+            .map(|k| Complex::new(u[(k, i)].re, u[(k, i)].im))
+            .collect();
         // Row `i` of `U⁻¹` — already a row vector, so it needs no conjugating.
-        let left_row: Vec<Complex<f64>> =
-            (0..n_x).map(|k| Complex::new(w[(i, k)].re, w[(i, k)].im)).collect();
+        let left_row: Vec<Complex<f64>> = (0..n_x)
+            .map(|k| Complex::new(w[(i, k)].re, w[(i, k)].im))
+            .collect();
 
         modes.push(mode_from(
             lambda,
@@ -606,7 +618,9 @@ pub fn analyze_near(
     }
     let drift = system.max_derivative();
     if drift > EQUILIBRIUM_TOL {
-        return Err(SmallSignalError::NotAnEquilibrium { max_derivative: drift });
+        return Err(SmallSignalError::NotAnEquilibrium {
+            max_derivative: drift,
+        });
     }
 
     let sigma = opts.shift;
@@ -637,7 +651,10 @@ pub fn analyze_near(
             Some(z) => {
                 // `z` satisfies `Aᴴz = λ̄z`, so the *row* vector `wᴴ = zᴴ`.
                 let left_row: Vec<Complex<f64>> = z.iter().map(|c| c.conj()).collect();
-                (participation_of(&pair.vector, &left_row), normalized(z.to_vec()))
+                (
+                    participation_of(&pair.vector, &left_row),
+                    normalized(z.to_vec()),
+                )
             }
             None => (Vec::new(), Vec::new()),
         };
@@ -656,7 +673,10 @@ pub fn analyze_near(
     Ok(SmallSignal {
         modes,
         state_names: system.differential_state_names(),
-        method: Method::Sparse { shift: sigma, restarts: right.restarts },
+        method: Method::Sparse {
+            shift: sigma,
+            restarts: right.restarts,
+        },
         converged: right.converged(),
     })
 }
@@ -689,8 +709,10 @@ fn matching_left(pairs: &[RitzPair], theta: Complex<f64>) -> Option<&[Complex<f6
     // left eigenvector for this mode sits at `θ̄`.
     let target = theta.conj();
     let scale = theta.norm().max(f64::MIN_POSITIVE);
-    let mut ranked: Vec<(f64, &RitzPair)> =
-        pairs.iter().map(|p| ((p.theta - target).norm() / scale, p)).collect();
+    let mut ranked: Vec<(f64, &RitzPair)> = pairs
+        .iter()
+        .map(|p| ((p.theta - target).norm() / scale, p))
+        .collect();
     ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let (best, pair) = *ranked.first()?;
@@ -725,7 +747,11 @@ fn angle_states(system: &DynamicSystem) -> Vec<usize> {
 /// way, or the gate comparing them is comparing two conventions rather than two
 /// eigensolvers.
 fn participation_of(right: &[Complex<f64>], left_row: &[Complex<f64>]) -> Vec<(usize, f64)> {
-    let raw: Vec<f64> = right.iter().zip(left_row).map(|(u, w)| (u * w).norm()).collect();
+    let raw: Vec<f64> = right
+        .iter()
+        .zip(left_row)
+        .map(|(u, w)| (u * w).norm())
+        .collect();
     let total: f64 = raw.iter().sum();
     let mut participation: Vec<(usize, f64)> = raw
         .iter()
@@ -772,7 +798,11 @@ fn shape_of(
     let raw: Vec<(usize, Complex<f64>)> = angle_states.iter().map(|&k| (k, right[k])).collect();
     match raw
         .iter()
-        .max_by(|a, b| a.1.norm().partial_cmp(&b.1.norm()).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.1.norm()
+                .partial_cmp(&b.1.norm())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .filter(|(_, c)| c.norm() > 0.0)
     {
         Some(&(_, pivot)) => raw.into_iter().map(|(k, c)| (k, c / pivot)).collect(),
@@ -818,13 +848,21 @@ fn mode_from(
     let decaying = lambda.re.abs() > NEGLIGIBLE * magnitude;
     Mode {
         eigenvalue: lambda,
-        damping: if magnitude > 0.0 && decaying { -lambda.re / magnitude } else { 0.0 },
+        damping: if magnitude > 0.0 && decaying {
+            -lambda.re / magnitude
+        } else {
+            0.0
+        },
         frequency: if is_oscillatory(lambda) {
             lambda.im.abs() / std::f64::consts::TAU
         } else {
             0.0
         },
-        time_constant: if decaying { -1.0 / lambda.re } else { f64::INFINITY },
+        time_constant: if decaying {
+            -1.0 / lambda.re
+        } else {
+            f64::INFINITY
+        },
         participation,
         shape,
         residual,
@@ -836,7 +874,11 @@ fn mode_from(
 /// Least damped first: that is the order the question is asked in, and a
 /// conjugate pair sorts adjacently because both halves share a damping.
 fn sort_by_damping(modes: &mut [Mode]) {
-    modes.sort_by(|a, b| a.damping.partial_cmp(&b.damping).unwrap_or(std::cmp::Ordering::Equal));
+    modes.sort_by(|a, b| {
+        a.damping
+            .partial_cmp(&b.damping)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -941,8 +983,7 @@ pub fn sensitivities(
         .filter(|&&(r, c, _)| r >= n_x && c >= n_x)
         .map(|&(r, c, value)| (r - n_x, c - n_x, value))
         .collect();
-    let network =
-        RealFactorization::new(n_net, &c_v).ok_or(SmallSignalError::SingularNetwork)?;
+    let network = RealFactorization::new(n_net, &c_v).ok_or(SmallSignalError::SingularNetwork)?;
 
     let u = &mode.eigenvector;
     let w_x = &mode.left_eigenvector;
@@ -1013,7 +1054,11 @@ pub fn sensitivities(
         // reason.
         let mut numerator = Complex::new(0.0, 0.0);
         for (k, &(r, c, _)) in triplets.iter().enumerate() {
-            let entry = if r < n_x { -difference[k] } else { difference[k] };
+            let entry = if r < n_x {
+                -difference[k]
+            } else {
+                difference[k]
+            };
             if entry == 0.0 {
                 continue;
             }
@@ -1044,10 +1089,10 @@ pub fn tunable_parameters(system: &DynamicSystem) -> Vec<ParameterRef> {
         .iter()
         .enumerate()
         .flat_map(|(device, model)| {
-            model
-                .tunable()
-                .iter()
-                .map(move |name| ParameterRef { device, name: (*name).to_string() })
+            model.tunable().iter().map(move |name| ParameterRef {
+                device,
+                name: (*name).to_string(),
+            })
         })
         .collect()
 }
@@ -1067,11 +1112,19 @@ fn solve_complex_real(
     let real: Vec<f64> = rhs.iter().map(|c| c.re).collect();
     let imaginary: Vec<f64> = rhs.iter().map(|c| c.im).collect();
     let (real, imaginary) = if transpose {
-        (network.solve_transpose(&real)?, network.solve_transpose(&imaginary)?)
+        (
+            network.solve_transpose(&real)?,
+            network.solve_transpose(&imaginary)?,
+        )
     } else {
         (network.solve(&real)?, network.solve(&imaginary)?)
     };
-    Some(real.into_iter().zip(imaginary).map(|(re, im)| Complex::new(re, im)).collect())
+    Some(
+        real.into_iter()
+            .zip(imaginary)
+            .map(|(re, im)| Complex::new(re, im))
+            .collect(),
+    )
 }
 
 /// `dζ/dp` from `dλ/dp`, with `ζ = −σ/|λ|`.

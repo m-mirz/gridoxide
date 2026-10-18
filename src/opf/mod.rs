@@ -39,16 +39,16 @@
 //! `network::YBus::into_entries`. Each backend converts to whatever layout it
 //! wants internally, where that conversion can be tested in one place.
 
-#[cfg(feature = "opf-highs")]
-pub mod highs;
 pub mod ac;
 pub mod bnb;
 pub mod dc;
+#[cfg(feature = "opf-highs")]
+pub mod highs;
 pub mod ipm;
 #[cfg(feature = "opf-ipopt")]
 pub mod ipopt;
-pub mod nlp;
 pub mod model;
+pub mod nlp;
 
 /// A convex quadratic program — or a linear one, when [`hessian`] is `None`.
 ///
@@ -192,14 +192,23 @@ impl LinearProgram {
             ("col_cost", self.col_cost.len()),
         ] {
             if len != n {
-                return Err(OpfError::Shape { what: name, expected: n, got: len });
+                return Err(OpfError::Shape {
+                    what: name,
+                    expected: n,
+                    got: len,
+                });
             }
         }
-        for (name, len) in
-            [("row_lower", self.row_lower.len()), ("row_upper", self.row_upper.len())]
-        {
+        for (name, len) in [
+            ("row_lower", self.row_lower.len()),
+            ("row_upper", self.row_upper.len()),
+        ] {
             if len != self.n_rows {
-                return Err(OpfError::Shape { what: name, expected: self.n_rows, got: len });
+                return Err(OpfError::Shape {
+                    what: name,
+                    expected: self.n_rows,
+                    got: len,
+                });
             }
         }
         for &(row, col, _) in &self.rows {
@@ -219,12 +228,18 @@ impl LinearProgram {
         }
         for k in 0..n {
             if self.col_lower[k] > self.col_upper[k] {
-                return Err(OpfError::CrossedBounds { index: k, kind: "column" });
+                return Err(OpfError::CrossedBounds {
+                    index: k,
+                    kind: "column",
+                });
             }
         }
         for k in 0..self.n_rows {
             if self.row_lower[k] > self.row_upper[k] {
-                return Err(OpfError::CrossedBounds { index: k, kind: "row" });
+                return Err(OpfError::CrossedBounds {
+                    index: k,
+                    kind: "row",
+                });
             }
         }
         if !self.col_integral.is_empty() && self.col_integral.len() != n {
@@ -321,17 +336,33 @@ pub trait Solver {
 /// Why a problem could not be posed or solved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpfError {
-    Shape { what: &'static str, expected: usize, got: usize },
-    Index { row: usize, col: usize },
-    UpperTriangleHessian { row: usize, col: usize },
-    CrossedBounds { index: usize, kind: &'static str },
+    Shape {
+        what: &'static str,
+        expected: usize,
+        got: usize,
+    },
+    Index {
+        row: usize,
+        col: usize,
+    },
+    UpperTriangleHessian {
+        row: usize,
+        col: usize,
+    },
+    CrossedBounds {
+        index: usize,
+        kind: &'static str,
+    },
     /// The problem has integral columns and a Hessian. See
     /// [`LinearProgram::validate`].
     IntegerQuadratic,
     /// The problem has integral columns and this backend cannot honour them.
     /// Raised rather than solving the relaxation — see
     /// [`LinearProgram::col_integral`].
-    IntegralityUnsupported { backend: &'static str, columns: usize },
+    IntegralityUnsupported {
+        backend: &'static str,
+        columns: usize,
+    },
     /// The backend rejected the problem or failed internally.
     Backend(String),
 }
@@ -339,11 +370,18 @@ pub enum OpfError {
 impl std::fmt::Display for OpfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Shape { what, expected, got } => {
+            Self::Shape {
+                what,
+                expected,
+                got,
+            } => {
                 write!(f, "{what} has {got} entries, expected {expected}")
             }
             Self::Index { row, col } => {
-                write!(f, "entry ({row}, {col}) is outside the problem's dimensions")
+                write!(
+                    f,
+                    "entry ({row}, {col}) is outside the problem's dimensions"
+                )
             }
             Self::UpperTriangleHessian { row, col } => write!(
                 f,
@@ -351,7 +389,10 @@ impl std::fmt::Display for OpfError {
                  triangle only, or the off-diagonal term is counted twice"
             ),
             Self::CrossedBounds { index, kind } => {
-                write!(f, "{kind} {index} has its lower bound above its upper bound")
+                write!(
+                    f,
+                    "{kind} {index} has its lower bound above its upper bound"
+                )
             }
             Self::IntegerQuadratic => write!(
                 f,
@@ -413,7 +454,13 @@ mod tests {
     fn shape_and_index_mistakes_are_caught() {
         let mut lp = two_var();
         lp.col_cost.push(1.0);
-        assert!(matches!(lp.validate(), Err(OpfError::Shape { what: "col_cost", .. })));
+        assert!(matches!(
+            lp.validate(),
+            Err(OpfError::Shape {
+                what: "col_cost",
+                ..
+            })
+        ));
 
         let mut lp = two_var();
         lp.add_row(&[(5, 1.0)], 0.0, 1.0);
@@ -421,7 +468,13 @@ mod tests {
 
         let mut lp = two_var();
         lp.col_lower[1] = 20.0;
-        assert_eq!(lp.validate(), Err(OpfError::CrossedBounds { index: 1, kind: "column" }));
+        assert_eq!(
+            lp.validate(),
+            Err(OpfError::CrossedBounds {
+                index: 1,
+                kind: "column"
+            })
+        );
     }
 
     #[test]

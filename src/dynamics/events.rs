@@ -66,7 +66,13 @@ impl Event {
     /// factorable. Going much larger buys nothing and starts to cost
     /// conditioning.
     pub fn bolted_fault(time: f64, bus: usize) -> Self {
-        Self::new(time, EventKind::BusFault { bus, y: Complex::new(1e6, 0.0) })
+        Self::new(
+            time,
+            EventKind::BusFault {
+                bus,
+                y: Complex::new(1e6, 0.0),
+            },
+        )
     }
 }
 
@@ -152,13 +158,22 @@ impl std::fmt::Display for EventError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EventError::BusOutOfRange { bus, n_bus } => {
-                write!(f, "event names bus {bus}, but the network has {n_bus} buses")
+                write!(
+                    f,
+                    "event names bus {bus}, but the network has {n_bus} buses"
+                )
             }
             EventError::BranchOutOfRange { branch, n_branch } => {
-                write!(f, "event names branch {branch}, but the network has {n_branch} branches")
+                write!(
+                    f,
+                    "event names branch {branch}, but the network has {n_branch} branches"
+                )
             }
             EventError::UnitOutOfRange { unit, n_unit } => {
-                write!(f, "event names unit {unit}, but the system has {n_unit} devices")
+                write!(
+                    f,
+                    "event names unit {unit}, but the system has {n_unit} devices"
+                )
             }
         }
     }

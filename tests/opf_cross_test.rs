@@ -23,7 +23,6 @@
 
 #![cfg(all(feature = "opf", feature = "opf-highs"))]
 
-
 use gridoxide::linear::DcApproximation;
 use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
 use gridoxide::opf::highs::HighsSolver;
@@ -77,7 +76,10 @@ fn both(lp: &LinearProgram) -> (Solution, Solution) {
 }
 
 fn assert_objectives_agree(highs: &Solution, ipm: &Solution, what: &str) {
-    assert_eq!(highs.status, ipm.status, "{what}: the two backends disagree on status");
+    assert_eq!(
+        highs.status, ipm.status,
+        "{what}: the two backends disagree on status"
+    );
     if highs.status != OptStatus::Optimal {
         return;
     }
@@ -133,7 +135,10 @@ fn the_two_backends_agree_on_every_locational_marginal_price() {
         let mut binding_b: Vec<usize> = b.binding.iter().map(|x| x.branch).collect();
         binding_a.sort_unstable();
         binding_b.sort_unstable();
-        assert_eq!(binding_a, binding_b, "{name}: the backends disagree on what binds");
+        assert_eq!(
+            binding_a, binding_b,
+            "{name}: the backends disagree on what binds"
+        );
     }
 }
 
@@ -182,7 +187,11 @@ fn the_two_backends_agree_on_infeasible_and_unbounded_problems() {
 
     let (highs, ipm) = both(&infeasible);
     assert!(!highs.is_optimal() && !ipm.is_optimal());
-    assert_eq!(ipm.status, OptStatus::Infeasible, "the interior-point verdict");
+    assert_eq!(
+        ipm.status,
+        OptStatus::Infeasible,
+        "the interior-point verdict"
+    );
 
     let mut unbounded = LinearProgram::new(1);
     unbounded.col_lower = vec![f64::NEG_INFINITY];
@@ -191,7 +200,11 @@ fn the_two_backends_agree_on_infeasible_and_unbounded_problems() {
 
     let (highs, ipm) = both(&unbounded);
     assert!(!highs.is_optimal() && !ipm.is_optimal());
-    assert_eq!(ipm.status, OptStatus::Unbounded, "the interior-point verdict");
+    assert_eq!(
+        ipm.status,
+        OptStatus::Unbounded,
+        "the interior-point verdict"
+    );
 }
 
 /// A deterministic xorshift, so a failure is reproducible from the seed alone.
@@ -317,7 +330,8 @@ fn the_two_backends_agree_on_randomized_convex_qps() {
             };
         }
 
-        lp.validate().unwrap_or_else(|e| panic!("trial {trial} built an invalid problem: {e}"));
+        lp.validate()
+            .unwrap_or_else(|e| panic!("trial {trial} built an invalid problem: {e}"));
 
         let highs = HighsSolver::new().unwrap().solve(&lp).unwrap();
         let ipm = IpmSolver::new().solve(&lp).unwrap();
@@ -354,5 +368,8 @@ fn the_two_backends_agree_on_randomized_convex_qps() {
         compared += 1;
     }
 
-    assert!(compared > 250, "only {compared} of 300 trials produced a comparison");
+    assert!(
+        compared > 250,
+        "only {compared} of 300 trials produced a comparison"
+    );
 }

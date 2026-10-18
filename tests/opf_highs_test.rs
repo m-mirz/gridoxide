@@ -48,13 +48,18 @@ fn close(got: f64, want: f64, what: &str) {
 
 #[track_caller]
 fn close_qp(got: f64, want: f64, what: &str) {
-    assert!((got - want).abs() < QP_TOL, "{what}: got {got}, want {want}");
+    assert!(
+        (got - want).abs() < QP_TOL,
+        "{what}: got {got}, want {want}"
+    );
 }
 
 /// A solver tightened as far as HiGHS allows, for the QP tests.
 fn tight_solver() -> HighsSolver {
     let solver = solver();
-    solver.set_tolerance(1e-10, 1e-10).expect("HiGHS accepts 1e-10");
+    solver
+        .set_tolerance(1e-10, 1e-10)
+        .expect("HiGHS accepts 1e-10");
     solver
 }
 
@@ -222,8 +227,16 @@ fn qp_with_an_active_bound() {
     close_qp(solution.primal[0], 0.5, "x0 at its cap");
     close_qp(solution.primal[1], 1.25, "x1");
     close_qp(solution.objective, -2.8125, "objective");
-    close_qp(solution.col_dual[0], -0.75, "reduced cost at the active cap");
-    close_qp(solution.col_dual[1], 0.0, "reduced cost of the free variable");
+    close_qp(
+        solution.col_dual[0],
+        -0.75,
+        "reduced cost at the active cap",
+    );
+    close_qp(
+        solution.col_dual[1],
+        0.0,
+        "reduced cost of the free variable",
+    );
     assert_stationarity(&lp, &solution, QP_TOL);
 }
 
@@ -253,7 +266,11 @@ fn a_binding_upper_row_prices_negative_under_minimization() {
     close(solution.primal[0], 5.0, "x0 at the row limit");
     close(solution.objective, -5.0, "objective");
     close(solution.row_dual[0], -1.0, "the binding row's price");
-    close(solution.col_dual[0], 0.0, "reduced cost of the interior variable");
+    close(
+        solution.col_dual[0],
+        0.0,
+        "reduced cost of the interior variable",
+    );
     assert_stationarity(&lp, &solution, TOL);
 
     // And the sign is the claim, not just the magnitude.
@@ -281,7 +298,10 @@ fn an_infeasible_problem_is_reported_as_such() {
         "expected an infeasible verdict, got {:?}",
         solution.status
     );
-    assert!(solution.primal.is_empty(), "a failed solve must return no primal values");
+    assert!(
+        solution.primal.is_empty(),
+        "a failed solve must return no primal values"
+    );
 }
 
 #[test]

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::solver::{PowerFlowMethod, PowerFlowOptions, SolveStatus};
 use gridoxide::types::BusType;
 use gridoxide::ucte;
@@ -25,7 +25,9 @@ fn fixture(name: &str) -> PathBuf {
 
 /// pypowsybl's solution for a fixture, written by `scripts/bench/ucte_reference.py`.
 fn reference_file(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/ucte")
+        .join(name)
 }
 
 /// The reference document, flattened to the two maps the assertions need.
@@ -41,7 +43,10 @@ fn reference(name: &str) -> Reference {
     for (k, v) in doc["buses"].as_object().expect("buses") {
         buses.insert(
             k.clone(),
-            (v["v_pu"].as_f64().unwrap(), v["angle_deg"].as_f64().unwrap()),
+            (
+                v["v_pu"].as_f64().unwrap(),
+                v["angle_deg"].as_f64().unwrap(),
+            ),
         );
     }
     let mut branches = HashMap::new();
@@ -49,8 +54,10 @@ fn reference(name: &str) -> Reference {
         // A de-energised branch reports null. Skipping it is right: gridoxide
         // reports 0.0 there rather than a missing value, and asserting 0 == NaN
         // would be a test of JSON, not of the importer.
-        let flows: Option<Vec<f64>> =
-            ["p1", "q1", "p2", "q2"].iter().map(|f| v[*f].as_f64()).collect();
+        let flows: Option<Vec<f64>> = ["p1", "q1", "p2", "q2"]
+            .iter()
+            .map(|f| v[*f].as_f64())
+            .collect();
         if let Some(f) = flows {
             branches.insert(k.clone(), [f[0], f[1], f[2], f[3]]);
         }
@@ -62,8 +69,15 @@ fn reference(name: &str) -> Reference {
 /// `(element id -> [p1, q1, p2, q2] in MW/MVar)`.
 fn solve(
     net: &ucte::UcteImport,
-) -> (HashMap<String, (f64, f64)>, HashMap<String, [f64; 4]>, SolveStatus) {
-    let opts = PowerFlowOptions { method: PowerFlowMethod::NewtonRaphson, ..Default::default() };
+) -> (
+    HashMap<String, (f64, f64)>,
+    HashMap<String, [f64; 4]>,
+    SolveStatus,
+) {
+    let opts = PowerFlowOptions {
+        method: PowerFlowMethod::NewtonRaphson,
+        ..Default::default()
+    };
     // `as_switched`, not the raw arrays: an out-of-service branch is kept in the
     // model so it can be closed by a remedial action, and solving the network
     // "as given" means solving it with those branches open.
@@ -87,7 +101,10 @@ fn solve(
         .map(|(i, code)| {
             (
                 code.trim().to_string(),
-                (report.buses[i].voltage_mag, report.buses[i].voltage_ang.to_degrees()),
+                (
+                    report.buses[i].voltage_mag,
+                    report.buses[i].voltage_ang.to_degrees(),
+                ),
             )
         })
         .collect();
@@ -125,8 +142,10 @@ fn worst_deviation(net: &ucte::UcteImport, reference_name: &str) -> (f64, f64, f
     // as if it were would reject correct results. Everything physical — voltage
     // magnitudes, angle *differences*, branch flows — is unaffected.
     let datum = {
-        let mut shared: Vec<&String> =
-            buses.keys().filter(|c| reference.buses.contains_key(*c)).collect();
+        let mut shared: Vec<&String> = buses
+            .keys()
+            .filter(|c| reference.buses.contains_key(*c))
+            .collect();
         shared.sort();
         shared.first().copied().cloned().expect("no shared bus")
     };
@@ -142,7 +161,10 @@ fn worst_deviation(net: &ucte::UcteImport, reference_name: &str) -> (f64, f64, f
             compared += 1;
         }
     }
-    assert!(compared >= 5, "only {compared} buses matched the reference by name");
+    assert!(
+        compared >= 5,
+        "only {compared} buses matched the reference by name"
+    );
 
     let mut df: f64 = 0.0;
     let mut branches_compared = 0;
@@ -154,7 +176,10 @@ fn worst_deviation(net: &ucte::UcteImport, reference_name: &str) -> (f64, f64, f
             branches_compared += 1;
         }
     }
-    assert!(branches_compared >= 5, "only {branches_compared} branches matched by id");
+    assert!(
+        branches_compared >= 5,
+        "only {branches_compared} branches matched by id"
+    );
     (dv, da, df)
 }
 
@@ -226,7 +251,11 @@ fn generation_is_negative_in_the_file_and_positive_in_the_model() {
     // generated. Net injection is therefore -1000 MW, i.e. -10 pu at 100 MVA.
     let net = ucte::read(fixture("TestCase12Nodes.uct")).expect("import");
     let i = net.node_index["BBE1AA1 "];
-    assert!((net.buses[i].p_spec - (-10.0)).abs() < 1e-12, "p_spec {}", net.buses[i].p_spec);
+    assert!(
+        (net.buses[i].p_spec - (-10.0)).abs() < 1e-12,
+        "p_spec {}",
+        net.buses[i].p_spec
+    );
 }
 
 #[test]
@@ -261,9 +290,16 @@ fn a_transformer_is_reversed_relative_to_the_file() {
 #[test]
 fn a_line_carries_its_current_rating_as_a_permanent_limit() {
     let net = ucte::read(fixture("TestCase12Nodes.uct")).expect("import");
-    let b = net.branch_ids.iter().position(|id| id.starts_with("BBE1AA1  BBE2AA1")).unwrap();
+    let b = net
+        .branch_ids
+        .iter()
+        .position(|id| id.starts_with("BBE1AA1  BBE2AA1"))
+        .unwrap();
     assert_eq!(net.limits[b].patl_a, Some(5000.0));
-    assert!(net.limits[b].tatl.is_empty(), "UCTE states no temporary ratings");
+    assert!(
+        net.limits[b].tatl.is_empty(),
+        "UCTE states no temporary ratings"
+    );
 }
 
 #[test]
@@ -293,14 +329,23 @@ fn a_symmetrical_phase_shifter_yields_a_full_tap_table() {
     // the property that lets a PST push flow without pushing voltage.
     for pos in changer.low..=changer.high() {
         let ratio = changer.ratio(pos).unwrap();
-        assert!((ratio - 1.0).abs() < 1e-12, "tap {pos} changed |ratio| to {ratio}");
+        assert!(
+            (ratio - 1.0).abs() < 1e-12,
+            "tap {pos} changed |ratio| to {ratio}"
+        );
     }
     // Neutral is neutral, and the extremes are symmetric about it.
     assert!(changer.angle_deg(0).unwrap().abs() < 1e-12);
     let hi = changer.angle_deg(16).unwrap();
     let lo = changer.angle_deg(-16).unwrap();
-    assert!((hi + lo).abs() < 1e-12, "angles {hi} and {lo} are not symmetric");
-    assert!(hi.abs() > 5.0, "16 taps of 0.68% should be several degrees, got {hi}");
+    assert!(
+        (hi + lo).abs() < 1e-12,
+        "angles {hi} and {lo} are not symmetric"
+    );
+    assert!(
+        hi.abs() > 5.0,
+        "16 taps of 0.68% should be several degrees, got {hi}"
+    );
 }
 
 /// A phase shifter parked at its **extreme** tap, checked against pypowsybl.
@@ -339,7 +384,10 @@ fn a_shifted_pst_puts_its_current_step_on_the_transformer() {
     assert_eq!(changer.position, 5);
     let tap = net.transformers[i].tap;
     assert!((tap - changer.current().unwrap()).norm() < 1e-15);
-    assert!(tap.arg().abs() > 1e-6, "a tap-5 PST should have a nonzero shift");
+    assert!(
+        tap.arg().abs() > 1e-6,
+        "a tap-5 PST should have a nonzero shift"
+    );
 }
 
 #[test]
@@ -347,11 +395,19 @@ fn a_negative_tap_position_shifts_the_other_way() {
     // `3nodes_pst.uct` sits at tap -8. Sign errors in the tap formula survive
     // every positive-tap test, so this one exists purely to catch them.
     let net = ucte::read(fixture("3nodes_pst.uct")).expect("import");
-    let changer = net.tap_changers.iter().flatten().next().expect("tap changer");
+    let changer = net
+        .tap_changers
+        .iter()
+        .flatten()
+        .next()
+        .expect("tap changer");
     assert_eq!(changer.position, -8);
     let here = changer.angle_deg(-8).unwrap();
     let mirrored = changer.angle_deg(8).unwrap();
-    assert!(here * mirrored < 0.0, "taps -8 and +8 should shift opposite ways");
+    assert!(
+        here * mirrored < 0.0,
+        "taps -8 and +8 should shift opposite ways"
+    );
     assert!((here + mirrored).abs() < 1e-12, "and by equal amounts");
 }
 
@@ -363,7 +419,10 @@ fn setting_a_tap_position_moves_the_transformer_and_refuses_to_leave_the_range()
 
     assert!(changer.set_position(&mut net.transformers[0], 8));
     assert_eq!(changer.position, 8);
-    assert!((net.transformers[0].tap - before).norm() > 1e-6, "tap did not move");
+    assert!(
+        (net.transformers[0].tap - before).norm() > 1e-6,
+        "tap did not move"
+    );
 
     // Out of range leaves both objects untouched rather than clamping, so a
     // sweep cannot silently pile up at an endpoint.
@@ -401,7 +460,10 @@ fn out_of_service_branches_are_kept_open_rather_than_dropped() {
     assert_eq!(net.out_of_service.len(), net.initially_open.len());
     for (id, &branch) in net.out_of_service.iter().zip(&net.initially_open) {
         assert!(net.branch_ids.contains(id), "`{id}` was dropped");
-        assert_eq!(&net.branch_ids[branch], id, "initially_open does not line up with the ids");
+        assert_eq!(
+            &net.branch_ids[branch], id,
+            "initially_open does not line up with the ids"
+        );
     }
     if !net.out_of_service.is_empty() {
         assert!(net.notes.iter().any(|n| n.contains("out of operation")));
@@ -419,9 +481,17 @@ fn out_of_service_branches_are_kept_open_rather_than_dropped() {
 #[test]
 fn a_closed_busbar_coupler_becomes_a_low_impedance_branch() {
     let net = ucte::read(fixture("TestCase16Nodes_with_different_imax.uct")).expect("import");
-    let b = net.branch_ids.iter().position(|id| id.starts_with("BBE1AA1  BBE4AA1")).unwrap();
+    let b = net
+        .branch_ids
+        .iter()
+        .position(|id| id.starts_with("BBE1AA1  BBE4AA1"))
+        .unwrap();
     let line = &net.lines[b];
-    assert!(line.x > 0.0 && line.x < 1e-3, "coupler reactance {}", line.x);
+    assert!(
+        line.x > 0.0 && line.x < 1e-3,
+        "coupler reactance {}",
+        line.x
+    );
     assert!(net.notes.iter().any(|n| n.contains("busbar coupler")));
 }
 
@@ -444,7 +514,10 @@ fn the_slack_is_chosen_deterministically_and_announced() {
     assert_eq!(a.node_codes[a.slack].trim(), "BBE2AA1");
     assert!(a.notes.iter().any(|n| n.contains("slack chosen")));
     assert_eq!(
-        a.buses.iter().filter(|b| b.bus_type == BusType::Slack).count(),
+        a.buses
+            .iter()
+            .filter(|b| b.bus_type == BusType::Slack)
+            .count(),
         1,
         "exactly one slack"
     );
@@ -485,7 +558,10 @@ fn a_short_record_is_tolerated_when_only_trailing_fields_are_missing() {
     let net = ucte::parse(doc).expect("import");
     assert_eq!(net.buses.len(), 1);
     assert!((net.buses[0].p_spec - (-25.0)).abs() < 1e-12);
-    assert!(net.buses[0].q_min.is_infinite(), "absent limits are unbounded, not zero");
+    assert!(
+        net.buses[0].q_min.is_infinite(),
+        "absent limits are unbounded, not zero"
+    );
 }
 
 #[test]
@@ -567,7 +643,11 @@ fn an_angle_regulations_held_power_is_read() {
     let r = &net.regulation[0];
     match r.mode {
         gridoxide::outerloop::RegulationMode::ActivePower { branch, .. } => {
-            assert_eq!(branch, net.lines.len(), "a UCTE shifter holds its own branch's flow");
+            assert_eq!(
+                branch,
+                net.lines.len(),
+                "a UCTE shifter holds its own branch's flow"
+            );
         }
         m => panic!("expected an active-power control, got {m:?}"),
     }
@@ -581,8 +661,14 @@ fn an_angle_regulations_held_power_is_read() {
 #[test]
 fn no_vendored_file_declares_a_regulation_target() {
     let names = openrao::names_with_extension("uct");
-    assert!(!names.is_empty(), "tests/data/openrao-fixtures.txt lists no .uct files");
-    for name in names.into_iter().filter(|n| *n != "TestCase12Nodes_wrong.uct") {
+    assert!(
+        !names.is_empty(),
+        "tests/data/openrao-fixtures.txt lists no .uct files"
+    );
+    for name in names
+        .into_iter()
+        .filter(|n| *n != "TestCase12Nodes_wrong.uct")
+    {
         let net = ucte::read(fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             net.regulation.is_empty(),
@@ -603,9 +689,16 @@ fn country_codes_become_control_areas() {
     let net = ucte::read(fixture("TestCase12Nodes.uct")).expect("import");
     let (of_bus, names) = net.country_areas();
 
-    assert_eq!(names, ["BE", "DE", "FR", "NL"], "sorted, so the indices are stable across runs");
+    assert_eq!(
+        names,
+        ["BE", "DE", "FR", "NL"],
+        "sorted, so the indices are stable across runs"
+    );
     assert_eq!(of_bus.len(), net.buses.len());
-    assert!(of_bus.iter().all(|a| a.is_some()), "every node in this file states its country");
+    assert!(
+        of_bus.iter().all(|a| a.is_some()),
+        "every node in this file states its country"
+    );
     for (i, name) in names.iter().enumerate() {
         assert_eq!(
             of_bus.iter().filter(|a| **a == Some(i)).count(),
@@ -634,9 +727,16 @@ fn the_measured_positions_sum_to_the_tie_losses() {
         &transformers,
         &net.shunts,
         gridoxide::TapData::none(),
-        gridoxide::solver::PowerFlowOptions { tol: 1e-10, max_iter: 40, ..Default::default() },
+        gridoxide::solver::PowerFlowOptions {
+            tol: 1e-10,
+            max_iter: 40,
+            ..Default::default()
+        },
     );
-    assert_eq!(report.stats.status, gridoxide::solver::SolveStatus::Converged);
+    assert_eq!(
+        report.stats.status,
+        gridoxide::solver::SolveStatus::Converged
+    );
 
     let x = gridoxide::outerloop::AreaInterchange::measure(
         &report.buses,
@@ -647,7 +747,10 @@ fn the_measured_positions_sum_to_the_tie_losses() {
     );
     let mw: Vec<f64> = x.iter().map(|v| v * net.base_mva).collect();
     let losses: f64 = mw.iter().sum();
-    assert!(losses.abs() < 1e-6, "lossless ties here, so the positions cancel: {mw:?}");
+    assert!(
+        losses.abs() < 1e-6,
+        "lossless ties here, so the positions cancel: {mw:?}"
+    );
     // Two exporters and two importers, at the scale the file's schedules set.
     assert!(mw.iter().any(|v| *v > 500.0), "{mw:?}");
     assert!(mw.iter().any(|v| *v < -500.0), "{mw:?}");

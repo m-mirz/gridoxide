@@ -75,9 +75,9 @@ fn the_current_position_reads_back_exactly() {
         );
         for (i, changer) in net.tap_changers.iter().enumerate() {
             let Some(changer) = changer else { continue };
-            let from_table = changer
-                .current()
-                .unwrap_or_else(|| panic!("{name}: transformer {i} is at a position outside its own table"));
+            let from_table = changer.current().unwrap_or_else(|| {
+                panic!("{name}: transformer {i} is at a position outside its own table")
+            });
             let on_branch = net.transformers[i].tap;
             assert_eq!(
                 (from_table.re.to_bits(), from_table.im.to_bits()),
@@ -90,7 +90,10 @@ fn the_current_position_reads_back_exactly() {
                 let idx = (changer.position - changer.low) as usize;
                 assert_eq!(
                     (series[idx].re.to_bits(), series[idx].im.to_bits()),
-                    (net.transformers[i].y_series.re.to_bits(), net.transformers[i].y_series.im.to_bits()),
+                    (
+                        net.transformers[i].y_series.re.to_bits(),
+                        net.transformers[i].y_series.im.to_bits()
+                    ),
                     "{name}: transformer {i}'s per-step admittance disagrees with the branch"
                 );
             }
@@ -130,7 +133,10 @@ fn svedala_retains_every_position_of_every_changer() {
         // Every position must be reachable — the point of retaining the table.
         for p in c.low..=c.high() {
             assert!(c.at(p).is_some(), "position {p} missing");
-            assert!(c.ratio(p).unwrap() > 0.0, "position {p} has a non-positive ratio");
+            assert!(
+                c.ratio(p).unwrap() > 0.0,
+                "position {p} has a non-positive ratio"
+            );
         }
     }
 }
@@ -153,7 +159,9 @@ fn a_phase_shifter_rounds_to_a_position_it_has() {
 
     for p in changer.low..=changer.high() {
         let angle = changer.angle_deg(p).expect("every position has an angle");
-        let rounded = changer.nearest_to_angle(angle).expect("rounds to something");
+        let rounded = changer
+            .nearest_to_angle(angle)
+            .expect("rounds to something");
         // Rounding an angle the table itself holds must return a position with
         // that same angle — not necessarily `p`, since two positions may share
         // an angle, which is why this compares the angle rather than the index.
@@ -188,7 +196,10 @@ fn setting_a_position_moves_the_branch_and_stays_in_range() {
     let before = net.transformers[i].tap;
     let before_y = net.transformers[i].y_series;
     assert!(changer.set_position(&mut net.transformers[i], high));
-    assert_ne!(net.transformers[i].tap, before, "the extreme tap must differ from the current one");
+    assert_ne!(
+        net.transformers[i].tap, before,
+        "the extreme tap must differ from the current one"
+    );
     if varies {
         assert_ne!(
             net.transformers[i].y_series, before_y,

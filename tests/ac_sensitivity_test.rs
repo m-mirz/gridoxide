@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use num_complex::Complex;
 
 use gridoxide::ac_sensitivity::{AcSensitivity, Function, Variable};
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::network::build_ybus;
 use gridoxide::pgm::pgm_to_buses_and_branches;
 use gridoxide::run_power_flow;
@@ -57,7 +57,11 @@ impl Case {
     fn load(rel: &str) -> Self {
         let input = common::load_pgm_input(&fixture(rel));
         let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
-        Self { buses, lines, transformers }
+        Self {
+            buses,
+            lines,
+            transformers,
+        }
     }
 
     /// Solves the AC power flow with the given per-bus injection offsets
@@ -68,8 +72,19 @@ impl Case {
             b.p_spec += dp[i];
             b.q_spec += dq[i];
         }
-        let opts = PowerFlowOptions { tol: SOLVE_TOL, max_iter: 50, ..Default::default() };
-        let report = run_power_flow(buses, &self.lines, &self.transformers, &[], gridoxide::TapData::none(), opts);
+        let opts = PowerFlowOptions {
+            tol: SOLVE_TOL,
+            max_iter: 50,
+            ..Default::default()
+        };
+        let report = run_power_flow(
+            buses,
+            &self.lines,
+            &self.transformers,
+            &[],
+            gridoxide::TapData::none(),
+            opts,
+        );
         assert_eq!(
             report.stats.status,
             SolveStatus::Converged,
@@ -164,8 +179,18 @@ fn state_response_matches_a_finite_difference_of_the_ac_solve() {
     let (fd_theta, fd_vmag) = state_finite_difference(&case, bus, false);
 
     for i in 0..case.buses.len() {
-        close(analytic.d_theta[i], fd_theta[i], 1e-6, &format!("dtheta[{i}]/dP[{bus}]"));
-        close(analytic.d_vmag[i], fd_vmag[i], 1e-6, &format!("dvmag[{i}]/dP[{bus}]"));
+        close(
+            analytic.d_theta[i],
+            fd_theta[i],
+            1e-6,
+            &format!("dtheta[{i}]/dP[{bus}]"),
+        );
+        close(
+            analytic.d_vmag[i],
+            fd_vmag[i],
+            1e-6,
+            &format!("dvmag[{i}]/dP[{bus}]"),
+        );
     }
     // Not a trivially-zero answer.
     assert!(
@@ -184,12 +209,24 @@ fn reactive_state_response_matches_a_finite_difference() {
     let sens = case.sensitivity(&base);
     let bus = case.a_pq_bus();
 
-    let analytic = sens.state_response(Variable::ReactiveInjection(bus)).unwrap();
+    let analytic = sens
+        .state_response(Variable::ReactiveInjection(bus))
+        .unwrap();
     let (fd_theta, fd_vmag) = state_finite_difference(&case, bus, true);
 
     for i in 0..case.buses.len() {
-        close(analytic.d_theta[i], fd_theta[i], 1e-6, &format!("dtheta[{i}]/dQ[{bus}]"));
-        close(analytic.d_vmag[i], fd_vmag[i], 1e-6, &format!("dvmag[{i}]/dQ[{bus}]"));
+        close(
+            analytic.d_theta[i],
+            fd_theta[i],
+            1e-6,
+            &format!("dtheta[{i}]/dQ[{bus}]"),
+        );
+        close(
+            analytic.d_vmag[i],
+            fd_vmag[i],
+            1e-6,
+            &format!("dvmag[{i}]/dQ[{bus}]"),
+        );
     }
     assert!(analytic.d_vmag.iter().any(|d| d.abs() > 1e-4));
 }
@@ -205,7 +242,9 @@ fn branch_response_matches_a_finite_difference_of_the_flows() {
     let n = case.buses.len();
 
     for terminal in [Terminal::From, Terminal::To] {
-        let analytic = sens.branch_response(Variable::ActiveInjection(bus), terminal).unwrap();
+        let analytic = sens
+            .branch_response(Variable::ActiveInjection(bus), terminal)
+            .unwrap();
 
         let mut up = vec![0.0; n];
         let mut dn = vec![0.0; n];
@@ -218,8 +257,18 @@ fn branch_response_matches_a_finite_difference_of_the_flows() {
         for b in 0..analytic.len() {
             let fd_p = (plus[b].0 - minus[b].0) / (2.0 * H);
             let fd_q = (plus[b].1 - minus[b].1) / (2.0 * H);
-            close(analytic[b].0, fd_p, 1e-5, &format!("dP_branch[{b}]/dP[{bus}] ({terminal:?})"));
-            close(analytic[b].1, fd_q, 1e-5, &format!("dQ_branch[{b}]/dP[{bus}] ({terminal:?})"));
+            close(
+                analytic[b].0,
+                fd_p,
+                1e-5,
+                &format!("dP_branch[{b}]/dP[{bus}] ({terminal:?})"),
+            );
+            close(
+                analytic[b].1,
+                fd_q,
+                1e-5,
+                &format!("dQ_branch[{b}]/dP[{bus}] ({terminal:?})"),
+            );
         }
     }
 }
@@ -240,8 +289,10 @@ fn adjoint_rows_agree_with_forward_columns() {
                 .function_row(Function::BranchActivePower { branch, terminal })
                 .unwrap();
             for bus in 0..n {
-                let forward =
-                    sens.branch_response(Variable::ActiveInjection(bus), terminal).unwrap()[branch].0;
+                let forward = sens
+                    .branch_response(Variable::ActiveInjection(bus), terminal)
+                    .unwrap()[branch]
+                    .0;
                 close(
                     row.d_active[bus],
                     forward,
@@ -262,14 +313,22 @@ fn adjoint_reactive_column_agrees_with_the_forward_direction() {
     let sens = case.sensitivity(&base);
 
     let row = sens
-        .function_row(Function::BranchReactivePower { branch: 0, terminal: Terminal::From })
+        .function_row(Function::BranchReactivePower {
+            branch: 0,
+            terminal: Terminal::From,
+        })
         .unwrap();
     for bus in 0..case.buses.len() {
         let forward = sens
             .branch_response(Variable::ReactiveInjection(bus), Terminal::From)
             .unwrap()[0]
             .1;
-        close(row.d_reactive[bus], forward, 1e-9, &format!("dQ_branch[0]/dQ[{bus}]"));
+        close(
+            row.d_reactive[bus],
+            forward,
+            1e-9,
+            &format!("dQ_branch[0]/dQ[{bus}]"),
+        );
     }
 }
 
@@ -283,16 +342,34 @@ fn voltage_functions_agree_between_directions() {
     let sens = case.sensitivity(&base);
     let watched = case.a_pq_bus();
 
-    let row = sens.function_row(Function::VoltageMagnitude(watched)).unwrap();
+    let row = sens
+        .function_row(Function::VoltageMagnitude(watched))
+        .unwrap();
     for bus in 0..case.buses.len() {
-        let forward = sens.state_response(Variable::ActiveInjection(bus)).unwrap().d_vmag[watched];
-        close(row.d_active[bus], forward, 1e-9, &format!("dV[{watched}]/dP[{bus}]"));
+        let forward = sens
+            .state_response(Variable::ActiveInjection(bus))
+            .unwrap()
+            .d_vmag[watched];
+        close(
+            row.d_active[bus],
+            forward,
+            1e-9,
+            &format!("dV[{watched}]/dP[{bus}]"),
+        );
     }
 
     let row = sens.function_row(Function::VoltageAngle(watched)).unwrap();
     for bus in 0..case.buses.len() {
-        let forward = sens.state_response(Variable::ActiveInjection(bus)).unwrap().d_theta[watched];
-        close(row.d_active[bus], forward, 1e-9, &format!("dtheta[{watched}]/dP[{bus}]"));
+        let forward = sens
+            .state_response(Variable::ActiveInjection(bus))
+            .unwrap()
+            .d_theta[watched];
+        close(
+            row.d_active[bus],
+            forward,
+            1e-9,
+            &format!("dtheta[{watched}]/dP[{bus}]"),
+        );
     }
 }
 
@@ -311,15 +388,30 @@ fn quantities_the_solve_determines_have_no_sensitivity() {
         .expect("a slack bus")
         .idx;
 
-    let response = sens.state_response(Variable::ActiveInjection(slack)).unwrap();
-    assert!(response.d_theta.iter().all(|d| *d == 0.0), "{:?}", response.d_theta);
-    assert!(response.d_vmag.iter().all(|d| *d == 0.0), "{:?}", response.d_vmag);
+    let response = sens
+        .state_response(Variable::ActiveInjection(slack))
+        .unwrap();
+    assert!(
+        response.d_theta.iter().all(|d| *d == 0.0),
+        "{:?}",
+        response.d_theta
+    );
+    assert!(
+        response.d_vmag.iter().all(|d| *d == 0.0),
+        "{:?}",
+        response.d_vmag
+    );
 
-    let response = sens.state_response(Variable::ReactiveInjection(slack)).unwrap();
+    let response = sens
+        .state_response(Variable::ReactiveInjection(slack))
+        .unwrap();
     assert!(response.d_vmag.iter().all(|d| *d == 0.0));
 
     // And an out-of-range bus is an error, not a silent zero.
-    assert!(sens.state_response(Variable::ActiveInjection(base.len())).is_none());
+    assert!(
+        sens.state_response(Variable::ActiveInjection(base.len()))
+            .is_none()
+    );
 }
 
 /// The same core claim on a structurally different network — the distribution
@@ -342,11 +434,23 @@ fn sensitivities_hold_on_a_network_with_transformers() {
     let analytic = sens.state_response(Variable::ActiveInjection(bus)).unwrap();
     let (fd_theta, fd_vmag) = state_finite_difference(&case, bus, false);
     for i in 0..n {
-        close(analytic.d_theta[i], fd_theta[i], 1e-5, &format!("dtheta[{i}]/dP[{bus}]"));
-        close(analytic.d_vmag[i], fd_vmag[i], 1e-5, &format!("dvmag[{i}]/dP[{bus}]"));
+        close(
+            analytic.d_theta[i],
+            fd_theta[i],
+            1e-5,
+            &format!("dtheta[{i}]/dP[{bus}]"),
+        );
+        close(
+            analytic.d_vmag[i],
+            fd_vmag[i],
+            1e-5,
+            &format!("dvmag[{i}]/dP[{bus}]"),
+        );
     }
 
-    let analytic = sens.branch_response(Variable::ActiveInjection(bus), Terminal::From).unwrap();
+    let analytic = sens
+        .branch_response(Variable::ActiveInjection(bus), Terminal::From)
+        .unwrap();
     let mut up = vec![0.0; n];
     let mut dn = vec![0.0; n];
     up[bus] = H;
@@ -356,7 +460,12 @@ fn sensitivities_hold_on_a_network_with_transformers() {
     let minus = case.branch_flows(&case.solve_with(&dn, &zero), Terminal::From);
     for b in 0..analytic.len() {
         let fd_p = (plus[b].0 - minus[b].0) / (2.0 * H);
-        close(analytic[b].0, fd_p, 1e-4, &format!("dP_branch[{b}]/dP[{bus}]"));
+        close(
+            analytic[b].0,
+            fd_p,
+            1e-4,
+            &format!("dP_branch[{b}]/dP[{bus}]"),
+        );
     }
 }
 
@@ -376,15 +485,24 @@ fn flows_with_tap(
     let mut transformers = case.transformers.clone();
     let tap = transformers[transformer].tap;
     transformers[transformer].tap = match kind {
-        TapPerturbation::Ratio => {
-            Complex::from_polar(tap.norm() + delta, tap.arg())
-        }
+        TapPerturbation::Ratio => Complex::from_polar(tap.norm() + delta, tap.arg()),
         TapPerturbation::Phase => Complex::from_polar(tap.norm(), tap.arg() + delta),
     };
 
     let mut buses = case.buses.clone();
-    let opts = PowerFlowOptions { tol: SOLVE_TOL, max_iter: 50, ..Default::default() };
-    let report = run_power_flow(std::mem::take(&mut buses), &case.lines, &transformers, &[], gridoxide::TapData::none(), opts);
+    let opts = PowerFlowOptions {
+        tol: SOLVE_TOL,
+        max_iter: 50,
+        ..Default::default()
+    };
+    let report = run_power_flow(
+        std::mem::take(&mut buses),
+        &case.lines,
+        &transformers,
+        &[],
+        gridoxide::TapData::none(),
+        opts,
+    );
     assert_eq!(report.stats.status, SolveStatus::Converged);
 
     let v = bus_voltages(&report.buses);
@@ -428,8 +546,18 @@ fn transformer_ratio_sensitivity_matches_a_re_solve() {
         for b in 0..analytic.len() {
             let fd_p = (plus[b].0 - minus[b].0) / (2.0 * H);
             let fd_q = (plus[b].1 - minus[b].1) / (2.0 * H);
-            close(analytic[b].0, fd_p, 1e-3, &format!("dP[{b}]/dk ({terminal:?})"));
-            close(analytic[b].1, fd_q, 1e-3, &format!("dQ[{b}]/dk ({terminal:?})"));
+            close(
+                analytic[b].0,
+                fd_p,
+                1e-3,
+                &format!("dP[{b}]/dk ({terminal:?})"),
+            );
+            close(
+                analytic[b].1,
+                fd_q,
+                1e-3,
+                &format!("dQ[{b}]/dk ({terminal:?})"),
+            );
             if b == branch && analytic[b].0.abs() > 1e-3 {
                 saw_direct_term = true;
             }
@@ -477,7 +605,10 @@ fn adjoint_tap_columns_agree_with_the_forward_direction() {
     for watched in 0..sens.n_branches() {
         for terminal in [Terminal::From, Terminal::To] {
             let row = sens
-                .function_row(Function::BranchActivePower { branch: watched, terminal })
+                .function_row(Function::BranchActivePower {
+                    branch: watched,
+                    terminal,
+                })
                 .unwrap();
             for branch in 0..sens.n_branches() {
                 let ratio = sens
@@ -518,10 +649,16 @@ fn lines_have_no_tap_sensitivity() {
     assert!(response.d_theta.iter().all(|d| *d == 0.0));
     assert!(response.d_vmag.iter().all(|d| *d == 0.0));
 
-    assert!(sens.state_response(Variable::PhaseShift(sens.n_branches())).is_none());
+    assert!(
+        sens.state_response(Variable::PhaseShift(sens.n_branches()))
+            .is_none()
+    );
 
     let row = sens
-        .function_row(Function::BranchActivePower { branch: 0, terminal: Terminal::From })
+        .function_row(Function::BranchActivePower {
+            branch: 0,
+            terminal: Terminal::From,
+        })
         .unwrap();
     for line in 0..case.lines.len() {
         assert_eq!(row.d_ratio[line], 0.0);

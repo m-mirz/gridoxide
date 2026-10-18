@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
 use gridoxide::rao::evaluate::AcOptions;
-use gridoxide::rao::validate::{validate, ValidationOptions, Verdict};
-use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
+use gridoxide::rao::validate::{ValidationOptions, Verdict, validate};
+use gridoxide::rao::{Network, Resolution, SearchOptions, crac_json, run};
 use gridoxide::ucte;
 
 mod openrao;
@@ -59,12 +59,21 @@ impl Case {
 
     fn plan(&self) -> gridoxide::rao::Plan {
         let mut solver = IpmSolver::new();
-        run(&self.crac, &self.network(), &self.resolution(), &mut solver, &SearchOptions::default())
+        run(
+            &self.crac,
+            &self.network(),
+            &self.resolution(),
+            &mut solver,
+            &SearchOptions::default(),
+        )
     }
 
     fn options(&self) -> ValidationOptions<'_> {
         ValidationOptions {
-            ac: AcOptions { shunts: &self.net.shunts, ..Default::default() },
+            ac: AcOptions {
+                shunts: &self.net.shunts,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -83,7 +92,10 @@ fn every_perimeter_of_the_plan_gets_a_verdict() {
     );
     for (v, p) in report.perimeters.iter().zip(plan.perimeters()) {
         assert_eq!(v.states, p.states);
-        assert_eq!(v.dc_margin_mw, p.final_margin_mw, "the DC figure is the search's own");
+        assert_eq!(
+            v.dc_margin_mw, p.final_margin_mw,
+            "the DC figure is the search's own"
+        );
     }
 }
 
@@ -104,7 +116,10 @@ fn the_two_models_disagree_and_the_disagreement_is_reported() {
         biggest > 1e-6,
         "AC reproduced the DC margins exactly, which means it did not run"
     );
-    assert!(report.ac_margin_mw.is_finite(), "the plan should have measurable AC margins");
+    assert!(
+        report.ac_margin_mw.is_finite(),
+        "the plan should have measurable AC margins"
+    );
 }
 
 #[test]
@@ -115,7 +130,10 @@ fn a_threshold_no_plan_can_meet_rejects_it() {
     // acceptance.
     let c = case("crac-for-12nodes.json");
     let plan = c.plan();
-    let options = ValidationOptions { min_margin_mw: 1e6, ..c.options() };
+    let options = ValidationOptions {
+        min_margin_mw: 1e6,
+        ..c.options()
+    };
     let report = validate(&c.crac, &c.network(), &c.resolution(), &plan, &options);
 
     assert!(!report.is_accepted());
@@ -153,13 +171,22 @@ fn a_regression_bound_catches_a_model_disagreement_that_is_still_secure() {
         return;
     }
 
-    let options =
-        ValidationOptions { min_margin_mw: f64::NEG_INFINITY, max_regression_mw: worst / 2.0, ..c.options() };
+    let options = ValidationOptions {
+        min_margin_mw: f64::NEG_INFINITY,
+        max_regression_mw: worst / 2.0,
+        ..c.options()
+    };
     let strict = validate(&c.crac, &c.network(), &c.resolution(), &plan, &options);
     assert!(
-        strict.rejected().any(|p| matches!(p.verdict, Verdict::Regressed { .. })),
+        strict
+            .rejected()
+            .any(|p| matches!(p.verdict, Verdict::Regressed { .. })),
         "a bound below the observed regression should reject: {:?}",
-        strict.perimeters.iter().map(|p| (&p.verdict, p.regression_mw())).collect::<Vec<_>>()
+        strict
+            .perimeters
+            .iter()
+            .map(|p| (&p.verdict, p.regression_mw()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -173,7 +200,12 @@ fn a_secure_plan_is_accepted_under_the_default_thresholds() {
 
     for (v, p) in report.perimeters.iter().zip(plan.perimeters()) {
         if p.final_margin_mw >= 0.0 && v.ac_margin_mw >= 0.0 {
-            assert!(v.verdict.is_accepted(), "{:?} for {:?}", v.verdict, v.states);
+            assert!(
+                v.verdict.is_accepted(),
+                "{:?} for {:?}",
+                v.verdict,
+                v.states
+            );
         }
     }
 }

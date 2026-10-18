@@ -64,7 +64,7 @@
 //! terminal's all-zero stamp).
 
 use crate::jacobian::JacobianPattern;
-use crate::network::{effective_injection, power_injections, YBusSparse};
+use crate::network::{YBusSparse, effective_injection, power_injections};
 use crate::solver::{LinearSolver, SolveStats, SolveStatus};
 use crate::sparse::RealSparseSystem;
 use crate::types::{Bus, BusType};
@@ -156,13 +156,19 @@ pub fn solve_constrained_with<S: LinearSolver>(
         indeterminate: Vec::new(),
     };
 
-    if switches.iter().any(|s| s.from >= buses.len() || s.to >= buses.len()) {
+    if switches
+        .iter()
+        .any(|s| s.from >= buses.len() || s.to >= buses.len())
+    {
         return empty;
     }
 
     crate::network::mark_unreferenced_islands(
         buses,
-        &crate::network::classify(buses, &components_across_switches(buses.len(), ybus, switches)),
+        &crate::network::classify(
+            buses,
+            &components_across_switches(buses.len(), ybus, switches),
+        ),
     );
 
     // Which of each switch's two rows ties its ends, and which pins its flow.
@@ -201,10 +207,16 @@ pub fn solve_constrained_with<S: LinearSolver>(
     }
 
     // The base state vector, exactly as the unconstrained solver lays it out.
-    let non_slack_idx: Vec<usize> =
-        buses.iter().filter(|b| b.bus_type != BusType::Slack).map(|b| b.idx).collect();
-    let pq_idx: Vec<usize> =
-        buses.iter().filter(|b| b.bus_type == BusType::PQ).map(|b| b.idx).collect();
+    let non_slack_idx: Vec<usize> = buses
+        .iter()
+        .filter(|b| b.bus_type != BusType::Slack)
+        .map(|b| b.idx)
+        .collect();
+    let pq_idx: Vec<usize> = buses
+        .iter()
+        .filter(|b| b.bus_type == BusType::PQ)
+        .map(|b| b.idx)
+        .collect();
     let n_angle = non_slack_idx.len();
     let n_base = n_angle + pq_idx.len();
     let n = n_base + 2 * n_sw;

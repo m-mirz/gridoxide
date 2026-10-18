@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
 use gridoxide::rao::linear::LinearOptions;
-use gridoxide::rao::{crac_json, evaluate_with, search, Network, Resolution, SearchOptions};
+use gridoxide::rao::{Network, Resolution, SearchOptions, crac_json, evaluate_with, search};
 use gridoxide::ucte;
 
 mod openrao;
@@ -75,7 +75,14 @@ impl Case {
 
 fn run(c: &Case, options: &SearchOptions) -> gridoxide::rao::SearchResult {
     let mut solver = IpmSolver::new();
-    search(&c.crac, &c.network(), &c.resolution(), std::slice::from_ref(&c.preventive()), &mut solver, options)
+    search(
+        &c.crac,
+        &c.network(),
+        &c.resolution(),
+        std::slice::from_ref(&c.preventive()),
+        &mut solver,
+        options,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -86,10 +93,22 @@ fn run(c: &Case, options: &SearchOptions) -> gridoxide::rao::SearchResult {
 fn the_search_finds_a_topological_action_that_secures_the_network() {
     let c = topology_case();
     let with_topology = run(&c, &SearchOptions::default());
-    let without = run(&c, &SearchOptions { max_depth: 0, ..Default::default() });
+    let without = run(
+        &c,
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
+    );
 
-    assert!(with_topology.initial_margin_mw < 0.0, "the fixture should start overloaded");
-    assert!(!without.is_secure(), "without the action the network stays insecure");
+    assert!(
+        with_topology.initial_margin_mw < 0.0,
+        "the fixture should start overloaded"
+    );
+    assert!(
+        !without.is_secure(),
+        "without the action the network stays insecure"
+    );
     assert_eq!(with_topology.network_actions.len(), 1);
     assert!(
         with_topology.final_margin_mw > without.final_margin_mw + 1.0,
@@ -97,7 +116,10 @@ fn the_search_finds_a_topological_action_that_secures_the_network() {
         with_topology.final_margin_mw,
         without.final_margin_mw
     );
-    assert!(with_topology.is_secure(), "the action should secure the network");
+    assert!(
+        with_topology.is_secure(),
+        "the action should secure the network"
+    );
     assert!(with_topology.leaves > 0);
 }
 
@@ -128,10 +150,19 @@ fn the_search_declines_actions_that_would_make_the_margin_worse() {
 #[test]
 fn depth_zero_takes_no_network_action() {
     let c = case();
-    let result = run(&c, &SearchOptions { max_depth: 0, ..Default::default() });
+    let result = run(
+        &c,
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
+    );
     assert!(result.network_actions.is_empty());
     assert!(result.open_branches.is_empty());
-    assert_eq!(result.leaves, 0, "no candidate should be evaluated at depth 0");
+    assert_eq!(
+        result.leaves, 0,
+        "no candidate should be evaluated at depth 0"
+    );
     assert_eq!(result.depth, 0);
     // But the range actions are still optimized — the root leaf always runs.
     assert!(result.final_margin_mw >= result.initial_margin_mw - 1e-9);
@@ -164,7 +195,10 @@ fn the_chosen_actions_are_the_ones_reported_as_open() {
 fn the_reported_margin_matches_an_independent_evaluation_of_the_winning_network() {
     let c = topology_case();
     let result = run(&c, &SearchOptions::default());
-    assert!(!result.open_branches.is_empty(), "this test needs a chosen action");
+    assert!(
+        !result.open_branches.is_empty(),
+        "this test needs a chosen action"
+    );
 
     let network = Network {
         generation: &c.net.generation,
@@ -217,7 +251,10 @@ fn a_minimum_impact_threshold_stops_the_search_spending_actions_cheaply() {
     let free = run(&c, &SearchOptions::default());
     let strict = run(
         &c,
-        &SearchOptions { absolute_min_impact: 1e6, ..Default::default() },
+        &SearchOptions {
+            absolute_min_impact: 1e6,
+            ..Default::default()
+        },
     );
     assert!(!free.network_actions.is_empty());
     assert!(
@@ -231,16 +268,30 @@ fn a_minimum_impact_threshold_stops_the_search_spending_actions_cheaply() {
 #[test]
 fn a_relative_threshold_also_binds() {
     let c = topology_case();
-    let strict =
-        run(&c, &SearchOptions { relative_min_impact: 10.0, ..Default::default() });
-    assert!(strict.network_actions.is_empty(), "a 1000% improvement is not available");
+    let strict = run(
+        &c,
+        &SearchOptions {
+            relative_min_impact: 10.0,
+            ..Default::default()
+        },
+    );
+    assert!(
+        strict.network_actions.is_empty(),
+        "a 1000% improvement is not available"
+    );
 }
 
 #[test]
 fn depth_bounds_how_many_actions_stack() {
     let c = topology_case();
     for depth in 0..=2 {
-        let result = run(&c, &SearchOptions { max_depth: depth, ..Default::default() });
+        let result = run(
+            &c,
+            &SearchOptions {
+                max_depth: depth,
+                ..Default::default()
+            },
+        );
         assert!(
             result.network_actions.len() <= depth,
             "depth {depth} produced {} actions",
@@ -257,7 +308,13 @@ fn deeper_is_never_worse() {
     let c = topology_case();
     let mut previous = f64::NEG_INFINITY;
     for depth in 0..=2 {
-        let result = run(&c, &SearchOptions { max_depth: depth, ..Default::default() });
+        let result = run(
+            &c,
+            &SearchOptions {
+                max_depth: depth,
+                ..Default::default()
+            },
+        );
         assert!(
             result.final_margin_mw >= previous - 1e-9,
             "depth {depth} gave {} after {previous}",
@@ -281,10 +338,12 @@ fn an_action_it_cannot_express_is_refused_whole_rather_than_applied_in_part() {
     let mut crac = c.crac.clone();
     let index = 0;
     let element = crac.network_actions[index].elementary[0].elements()[0].to_string();
-    crac.network_actions[index].elementary.push(ElementaryAction::ShuntSection {
-        element: "some shunt".into(),
-        section: 2,
-    });
+    crac.network_actions[index]
+        .elementary
+        .push(ElementaryAction::ShuntSection {
+            element: "some shunt".into(),
+            section: 2,
+        });
 
     let mut solver = IpmSolver::new();
     let result = search(
@@ -300,7 +359,9 @@ fn an_action_it_cannot_express_is_refused_whole_rather_than_applied_in_part() {
         "an action with an inexpressible part was taken anyway"
     );
     // And its openable half must not appear in the result either.
-    let branch = Resolution::new(&crac, &c.net.branch_ids).branch(&element).expect("resolved");
+    let branch = Resolution::new(&crac, &c.net.branch_ids)
+        .branch(&element)
+        .expect("resolved");
     assert!(!result.open_branches.contains(&branch));
 }
 
@@ -343,7 +404,10 @@ fn actions_touching_the_same_element_are_not_stacked() {
         &Resolution::new(&crac, &c.net.branch_ids),
         std::slice::from_ref(&c.preventive()),
         &mut solver,
-        &SearchOptions { max_depth: 2, ..Default::default() },
+        &SearchOptions {
+            max_depth: 2,
+            ..Default::default()
+        },
     );
     assert!(
         result.network_actions.len() <= 1,
@@ -411,7 +475,13 @@ fn the_leaf_count_is_what_the_search_actually_cost() {
     // Per-leaf cost is where a search tree gets expensive, so the number has to
     // be reported honestly rather than estimated.
     let c = case();
-    let result = run(&c, &SearchOptions { max_depth: 1, ..Default::default() });
+    let result = run(
+        &c,
+        &SearchOptions {
+            max_depth: 1,
+            ..Default::default()
+        },
+    );
     let available = c.crac.network_actions_for(&c.preventive()).len();
     assert_eq!(
         result.leaves, available,
@@ -423,7 +493,13 @@ fn the_leaf_count_is_what_the_search_actually_cost() {
 #[test]
 fn a_leaf_is_scored_with_its_action_applied() {
     let c = topology_case();
-    let root = run(&c, &SearchOptions { max_depth: 0, ..Default::default() });
+    let root = run(
+        &c,
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
+    );
     let searched = run(&c, &SearchOptions::default());
     assert!(!searched.network_actions.is_empty());
     assert!(
@@ -468,7 +544,13 @@ fn each_leaf_reoptimizes_the_range_actions_around_its_topology() {
     assert!(!untuned.is_empty());
 
     // The search's own root margin, with the shifter tuned and no topology.
-    let root = run(&c, &SearchOptions { max_depth: 0, ..Default::default() });
+    let root = run(
+        &c,
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
+    );
     // Tuning strictly helps, so the root beats every untuned candidate here —
     // which is exactly why the search declines them all.
     for margin in &untuned {
@@ -500,13 +582,11 @@ fn each_leaf_reoptimizes_the_range_actions_around_its_topology() {
 #[test]
 fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
     use gridoxide::rao::linear::ObjectiveUnit;
-    use gridoxide::rao::usage::{branch_countries, Constrained};
+    use gridoxide::rao::usage::{Constrained, branch_countries};
 
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic16/SL_ep16us3case2.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic16/SL_ep16us3case2.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -525,7 +605,11 @@ fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
     // The margins the decision rests on, read rather than assumed.
     let start = evaluate_with(&crac, &network, &resolution, &[]);
     let margin = |id: &str| -> f64 {
-        let i = crac.flow_cnecs.iter().position(|c| c.id == id).expect("cnec");
+        let i = crac
+            .flow_cnecs
+            .iter()
+            .position(|c| c.id == id)
+            .expect("cnec");
         start
             .perimeters
             .iter()
@@ -538,11 +622,8 @@ fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
     assert!(margin("FFR4AA1  DDE1AA1  1 - preventive") > 0.0);
     assert!(margin("FFR4AA1  DDE1AA1  1 - co1_fr2_fr3_1 - curative") > 0.0);
 
-    let branches = gridoxide::linear::btheta::dc_branches(
-        &net.lines,
-        &net.transformers,
-        Default::default(),
-    );
+    let branches =
+        gridoxide::linear::btheta::dc_branches(&net.lines, &net.transformers, Default::default());
     let constrained = Constrained::from_result(
         &start,
         ObjectiveUnit::Megawatt,
@@ -550,19 +631,36 @@ fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
     );
     let preventive = State::preventive(crac.preventive_instant().expect("preventive"));
     let rules = |id: &str| {
-        crac.network_actions.iter().find(|a| a.id == id).expect("action").usage_rules.clone()
+        crac.network_actions
+            .iter()
+            .find(|a| a.id == id)
+            .expect("action")
+            .usage_rules
+            .clone()
     };
 
     assert!(
-        constrained.allows(&rules("open_fr1_fr3"), std::slice::from_ref(&preventive), &crac),
+        constrained.allows(
+            &rules("open_fr1_fr3"),
+            std::slice::from_ref(&preventive),
+            &crac
+        ),
         "an overloaded CNEC should authorize its action"
     );
     assert!(
-        !constrained.allows(&rules("open_be1_be4"), std::slice::from_ref(&preventive), &crac),
+        !constrained.allows(
+            &rules("open_be1_be4"),
+            std::slice::from_ref(&preventive),
+            &crac
+        ),
         "nothing authorizes open_be1_be4 and it must not be offered"
     );
     assert!(
-        constrained.allows(&rules("close_fr1_fr5"), std::slice::from_ref(&preventive), &crac),
+        constrained.allows(
+            &rules("close_fr1_fr5"),
+            std::slice::from_ref(&preventive),
+            &crac
+        ),
         "a free-to-use action is unaffected by any of this"
     );
 
@@ -574,10 +672,16 @@ fn an_action_conditional_on_a_healthy_cnec_is_never_offered() {
         &resolution,
         std::slice::from_ref(&preventive),
         &mut solver,
-        &SearchOptions { max_depth: 3, ..Default::default() },
+        &SearchOptions {
+            max_depth: 3,
+            ..Default::default()
+        },
     );
-    let taken: Vec<&str> =
-        result.network_actions.iter().map(|&i| crac.network_actions[i].id.as_str()).collect();
+    let taken: Vec<&str> = result
+        .network_actions
+        .iter()
+        .map(|&i| crac.network_actions[i].id.as_str())
+        .collect();
     assert!(
         !taken.contains(&"open_be1_be4"),
         "an action nothing authorized was taken: {taken:?}"
@@ -621,15 +725,30 @@ fn combination_run(c: &Case, combinations: Vec<Vec<String>>) -> gridoxide::rao::
 #[test]
 fn a_predefined_combination_is_offered_as_one_more_candidate() {
     let c = case();
-    let ids: Vec<String> = c.crac.network_actions.iter().map(|a| a.id.clone()).collect();
-    assert_eq!(ids.len(), 2, "this test needs exactly two actions to combine");
+    let ids: Vec<String> = c
+        .crac
+        .network_actions
+        .iter()
+        .map(|a| a.id.clone())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "this test needs exactly two actions to combine"
+    );
 
     let alone = combination_run(&c, Vec::new());
     let with_pair = combination_run(&c, vec![ids]);
 
     assert_eq!(alone.leaves, 2, "one leaf per individual action");
-    assert_eq!(with_pair.leaves, 3, "the combination adds exactly one leaf, not one per member");
-    assert!(with_pair.depth <= 1, "a combination costs one depth, not one per member");
+    assert_eq!(
+        with_pair.leaves, 3,
+        "the combination adds exactly one leaf, not one per member"
+    );
+    assert!(
+        with_pair.depth <= 1,
+        "a combination costs one depth, not one per member"
+    );
 }
 
 /// A combination is taken **whole or not at all**, so anything wrong with it
@@ -641,17 +760,31 @@ fn a_predefined_combination_is_offered_as_one_more_candidate() {
 #[test]
 fn a_malformed_predefined_combination_is_dropped_whole() {
     let c = case();
-    let ids: Vec<String> = c.crac.network_actions.iter().map(|a| a.id.clone()).collect();
+    let ids: Vec<String> = c
+        .crac
+        .network_actions
+        .iter()
+        .map(|a| a.id.clone())
+        .collect();
     let baseline = combination_run(&c, Vec::new()).leaves;
 
     for (why, combination) in [
-        ("an id no action carries", vec![ids[0].clone(), "no such action".to_string()]),
+        (
+            "an id no action carries",
+            vec![ids[0].clone(), "no such action".to_string()],
+        ),
         ("fewer than two members", vec![ids[0].clone()]),
-        ("the same action twice, which conflicts with itself", vec![ids[0].clone(), ids[0].clone()]),
+        (
+            "the same action twice, which conflicts with itself",
+            vec![ids[0].clone(), ids[0].clone()],
+        ),
         ("no members at all", Vec::new()),
     ] {
         let got = combination_run(&c, vec![combination]).leaves;
-        assert_eq!(got, baseline, "a combination with {why} should offer no candidate");
+        assert_eq!(
+            got, baseline,
+            "a combination with {why} should offer no candidate"
+        );
     }
 }
 
@@ -679,5 +812,8 @@ fn a_predefined_combination_of_conflicting_actions_is_dropped() {
 
     let baseline = combination_run(&c, Vec::new()).leaves;
     let got = combination_run(&c, vec![vec![first, "close the same line".to_string()]]).leaves;
-    assert_eq!(got, baseline, "two actions on one element should offer no combined candidate");
+    assert_eq!(
+        got, baseline,
+        "two actions on one element should offer no combined candidate"
+    );
 }

@@ -37,12 +37,17 @@ use std::time::Instant;
 
 use gridoxide::network::{build_ybus, linear_initial_guess, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
-use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend, PersistentSolver};
+use gridoxide::solver::{JacobianBackend, PersistentSolver, newton_raphson_with_backend};
 
 fn main() {
     let mut args = env::args().skip(1);
-    let path = args.next().expect("usage: bench_network <input.json> [repeat-count] [backend] [mode]");
-    let repeat: usize = args.next().map(|s| s.parse().expect("repeat-count must be an integer")).unwrap_or(1);
+    let path = args
+        .next()
+        .expect("usage: bench_network <input.json> [repeat-count] [backend] [mode]");
+    let repeat: usize = args
+        .next()
+        .map(|s| s.parse().expect("repeat-count must be an integer"))
+        .unwrap_or(1);
     let backend_arg = args.next().unwrap_or_else(|| "scalar".to_string());
     let backend = match backend_arg.as_str() {
         "scalar" => JacobianBackend::Scalar,
@@ -50,7 +55,9 @@ fn main() {
         #[cfg(feature = "klu")]
         "klu" => JacobianBackend::Klu,
         #[cfg(not(feature = "klu"))]
-        "klu" => panic!("the 'klu' backend needs `cargo run --features klu ...` (see docs/src/solvers/backends.md)"),
+        "klu" => panic!(
+            "the 'klu' backend needs `cargo run --features klu ...` (see docs/src/solvers/backends.md)"
+        ),
         "klu_native" => JacobianBackend::KluNative,
         #[cfg(feature = "pardiso")]
         "pardiso" => JacobianBackend::Pardiso,
@@ -59,7 +66,9 @@ fn main() {
             "the 'pardiso' backend needs `cargo run --features pardiso ...` with MKLROOT set \
              (see docs/src/solvers/backends.md)"
         ),
-        other => panic!("unknown backend '{other}', expected 'scalar', 'block', 'klu', 'klu_native', or 'pardiso'"),
+        other => panic!(
+            "unknown backend '{other}', expected 'scalar', 'block', 'klu', 'klu_native', or 'pardiso'"
+        ),
     };
     let mode_arg = args.next().unwrap_or_else(|| "cold".to_string());
     let warm = match mode_arg.as_str() {
@@ -83,13 +92,24 @@ fn main() {
     stamp_shunts(&mut ybus, &shunts);
     let t_parse = t_parse0.elapsed();
 
-    println!("nodes={} lines={} transformers={}", n, lines.len(), transformers.len());
-    println!("parse + build model + Y-bus: {:.3} ms", t_parse.as_secs_f64() * 1e3);
+    println!(
+        "nodes={} lines={} transformers={}",
+        n,
+        lines.len(),
+        transformers.len()
+    );
+    println!(
+        "parse + build model + Y-bus: {:.3} ms",
+        t_parse.as_secs_f64() * 1e3
+    );
 
     let t_finish0 = Instant::now();
     let ybus = ybus.finish();
     let t_finish = t_finish0.elapsed();
-    println!("Y-bus finish (COO -> sparse): {:.3} ms", t_finish.as_secs_f64() * 1e3);
+    println!(
+        "Y-bus finish (COO -> sparse): {:.3} ms",
+        t_finish.as_secs_f64() * 1e3
+    );
 
     let mut total_guess = std::time::Duration::ZERO;
     let mut total_nr = std::time::Duration::ZERO;
@@ -104,19 +124,40 @@ fn main() {
 
         let t_nr0 = Instant::now();
         match persistent_solver.as_mut() {
-            Some(solver) => { solver.solve(&mut buses, &ybus, 1e-6, 20); }
-            None => { newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, backend); }
+            Some(solver) => {
+                solver.solve(&mut buses, &ybus, 1e-6, 20);
+            }
+            None => {
+                newton_raphson_with_backend(&mut buses, &ybus, 1e-6, 20, backend);
+            }
         }
         total_nr += t_nr0.elapsed();
     }
 
-    println!("linear_initial_guess: {:.3} ms total, {:.3} ms/run over {} run(s)",
-        total_guess.as_secs_f64() * 1e3, total_guess.as_secs_f64() * 1e3 / repeat as f64, repeat);
-    println!("newton_raphson: {:.3} ms total, {:.3} ms/run over {} run(s)",
-        total_nr.as_secs_f64() * 1e3, total_nr.as_secs_f64() * 1e3 / repeat as f64, repeat);
+    println!(
+        "linear_initial_guess: {:.3} ms total, {:.3} ms/run over {} run(s)",
+        total_guess.as_secs_f64() * 1e3,
+        total_guess.as_secs_f64() * 1e3 / repeat as f64,
+        repeat
+    );
+    println!(
+        "newton_raphson: {:.3} ms total, {:.3} ms/run over {} run(s)",
+        total_nr.as_secs_f64() * 1e3,
+        total_nr.as_secs_f64() * 1e3 / repeat as f64,
+        repeat
+    );
 
-    let vmin = buses.iter().map(|b| b.voltage_mag).fold(f64::INFINITY, f64::min);
-    let vmax = buses.iter().map(|b| b.voltage_mag).fold(f64::NEG_INFINITY, f64::max);
+    let vmin = buses
+        .iter()
+        .map(|b| b.voltage_mag)
+        .fold(f64::INFINITY, f64::min);
+    let vmax = buses
+        .iter()
+        .map(|b| b.voltage_mag)
+        .fold(f64::NEG_INFINITY, f64::max);
     println!("voltage_mag min/max = {:.6} / {:.6}", vmin, vmax);
-    println!("total (guess + NR): {:.3} ms", ((total_guess + total_nr).as_secs_f64() * 1e3) / repeat as f64);
+    println!(
+        "total (guess + NR): {:.3} ms",
+        ((total_guess + total_nr).as_secs_f64() * 1e3) / repeat as f64
+    );
 }

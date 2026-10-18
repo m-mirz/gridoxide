@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
-use gridoxide::rao::{crac_json, evaluate_with, run, Network, Resolution, SearchOptions};
+use gridoxide::rao::{Network, Resolution, SearchOptions, crac_json, evaluate_with, run};
 use gridoxide::ucte;
 
 mod openrao;
@@ -63,7 +63,13 @@ impl Case {
 
     fn plan(&self) -> gridoxide::rao::Plan {
         let mut solver = IpmSolver::new();
-        run(&self.crac, &self.network(), &self.resolution(), &mut solver, &SearchOptions::default())
+        run(
+            &self.crac,
+            &self.network(),
+            &self.resolution(),
+            &mut solver,
+            &SearchOptions::default(),
+        )
     }
 }
 
@@ -79,10 +85,17 @@ fn the_preventive_perimeter_covers_the_outage_states_too() {
     let c = case("crac-for-12nodes.json");
     let plan = c.plan();
 
-    let kinds: Vec<InstantKind> =
-        plan.preventive.states.iter().map(|s| c.crac.instants[s.instant].kind).collect();
+    let kinds: Vec<InstantKind> = plan
+        .preventive
+        .states
+        .iter()
+        .map(|s| c.crac.instants[s.instant].kind)
+        .collect();
     assert!(kinds.contains(&InstantKind::Preventive), "{kinds:?}");
-    assert!(kinds.contains(&InstantKind::Outage), "the outage state must be secured here: {kinds:?}");
+    assert!(
+        kinds.contains(&InstantKind::Outage),
+        "the outage state must be secured here: {kinds:?}"
+    );
 
     // And no outage state may appear as a curative perimeter of its own.
     for scenario in &plan.scenarios {
@@ -101,11 +114,17 @@ fn a_curative_cnec_with_no_curative_action_is_pulled_forward() {
     let c = case("crac-topology-helps.json");
     let plan = c.plan();
 
-    assert!(!plan.pulled_forward.is_empty(), "this fixture has unactionable curative CNECs");
+    assert!(
+        !plan.pulled_forward.is_empty(),
+        "this fixture has unactionable curative CNECs"
+    );
     for &index in &plan.pulled_forward {
         let cnec = &c.crac.flow_cnecs[index];
         let kind = c.crac.instants[cnec.state.instant].kind;
-        assert!(matches!(kind, InstantKind::Curative | InstantKind::Auto), "{kind:?}");
+        assert!(
+            matches!(kind, InstantKind::Curative | InstantKind::Auto),
+            "{kind:?}"
+        );
         // Nothing may be available for it, or pulling it forward would be wrong.
         let actionable = c
             .crac
@@ -116,9 +135,17 @@ fn a_curative_cnec_with_no_curative_action_is_pulled_forward() {
                 .range_actions
                 .iter()
                 .any(|a| a.usage_rules.iter().any(|r| r.covers(&cnec.state)));
-        assert!(!actionable, "`{}` has a curative action and should not be pulled forward", cnec.id);
+        assert!(
+            !actionable,
+            "`{}` has a curative action and should not be pulled forward",
+            cnec.id
+        );
         // And its state must be in the preventive perimeter.
-        assert!(plan.preventive.states.contains(&cnec.state), "{:?}", plan.preventive.states);
+        assert!(
+            plan.preventive.states.contains(&cnec.state),
+            "{:?}",
+            plan.preventive.states
+        );
     }
 }
 
@@ -128,9 +155,16 @@ fn an_actionable_curative_state_gets_its_own_perimeter() {
     let plan = c.plan();
     // This CRAC has a curative network action and an auto range action, so both
     // states are actionable and neither is pulled forward.
-    let curative_states: Vec<&State> =
-        plan.scenarios.iter().flat_map(|s| s.perimeters.iter()).flat_map(|p| &p.states).collect();
-    assert!(!curative_states.is_empty(), "no curative perimeter was created");
+    let curative_states: Vec<&State> = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .flat_map(|p| &p.states)
+        .collect();
+    assert!(
+        !curative_states.is_empty(),
+        "no curative perimeter was created"
+    );
     for state in &curative_states {
         assert!(
             !plan.preventive.states.contains(state),
@@ -144,8 +178,11 @@ fn curative_perimeters_are_solved_in_chronological_order() {
     let c = case("crac-for-12nodes.json");
     let plan = c.plan();
     for scenario in &plan.scenarios {
-        let instants: Vec<usize> =
-            scenario.perimeters.iter().filter_map(|p| p.states.first().map(|s| s.instant)).collect();
+        let instants: Vec<usize> = scenario
+            .perimeters
+            .iter()
+            .filter_map(|p| p.states.first().map(|s| s.instant))
+            .collect();
         assert!(
             instants.windows(2).all(|w| w[0] < w[1]),
             "curative instants out of order: {instants:?}"
@@ -257,7 +294,11 @@ fn the_topology_fixture_ends_secure() {
     let c = case("crac-topology-helps.json");
     let plan = c.plan();
     assert!(plan.initial_margin_mw < 0.0, "it should start insecure");
-    assert!(plan.is_secure(), "one action secures it: {} MW", plan.final_margin_mw);
+    assert!(
+        plan.is_secure(),
+        "one action secures it: {} MW",
+        plan.final_margin_mw
+    );
     assert_eq!(plan.preventive.network_actions.len(), 1);
 }
 
@@ -280,7 +321,13 @@ fn a_crac_with_no_contingency_still_yields_a_preventive_plan() {
     crac.contingencies.clear();
     let resolution = Resolution::new(&crac, &c.net.branch_ids);
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &c.network(), &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &c.network(),
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
     assert!(plan.scenarios.is_empty());
     assert!(!plan.preventive.states.is_empty());
     assert!(plan.final_margin_mw >= plan.initial_margin_mw - 1e-9);
@@ -296,10 +343,16 @@ fn depth_zero_still_decomposes_even_when_it_finds_nothing() {
         &c.network(),
         &c.resolution(),
         &mut solver,
-        &SearchOptions { max_depth: 0, ..Default::default() },
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
     );
     assert!(plan.preventive.network_actions.is_empty());
-    assert!(plan.preventive.states.len() >= 2, "the decomposition should still happen");
+    assert!(
+        plan.preventive.states.len() >= 2,
+        "the decomposition should still happen"
+    );
     assert!(plan.final_margin_mw >= plan.initial_margin_mw - 1e-9);
 }
 
@@ -335,7 +388,10 @@ fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
     let plan = c.plan();
 
     // Both halves are in the answer.
-    assert!(!plan.preventive.network_actions.is_empty(), "no network action taken");
+    assert!(
+        !plan.preventive.network_actions.is_empty(),
+        "no network action taken"
+    );
     assert!(
         plan.preventive.setpoints.iter().any(|s| s.moved()),
         "no range action moved"
@@ -353,7 +409,10 @@ fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
         &c.network(),
         &c.resolution(),
         &mut solver,
-        &SearchOptions { max_depth: 0, ..Default::default() },
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
     );
     // Not "nothing" — a little. The claim is proportion: whatever the shifter
     // manages by itself is a rounding error beside the combination.
@@ -409,12 +468,21 @@ fn monitored_cnecs_hold_the_optimizer_back_to_the_floor_they_are_owed() {
         .filter(|(_, x)| x.monitored)
         .map(|(i, _)| i)
         .collect();
-    assert!(!monitored.is_empty(), "this fixture is supposed to declare MNECs");
+    assert!(
+        !monitored.is_empty(),
+        "this fixture is supposed to declare MNECs"
+    );
 
     let mut unconstrained = SearchOptions::default();
     unconstrained.linear.mnec.options.enabled = false;
     let mut solver = IpmSolver::new();
-    let loose = run(&c.crac, &c.network(), &c.resolution(), &mut solver, &unconstrained);
+    let loose = run(
+        &c.crac,
+        &c.network(),
+        &c.resolution(),
+        &mut solver,
+        &unconstrained,
+    );
     let held = c.plan();
 
     assert!(
@@ -488,10 +556,8 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
     use gridoxide::rao::crac::RangeActionKind;
 
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic19/SL_ep19us3case1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic19/SL_ep19us3case1.json")).expect("crac");
 
     let curative = crac
         .usage_limits
@@ -517,13 +583,23 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     let mut checked = 0;
     let mut most = 0;
     for scenario in &plan.scenarios {
         for perimeter in &scenario.perimeters {
-            if !perimeter.states.iter().any(|s| s.instant == curative.instant) {
+            if !perimeter
+                .states
+                .iter()
+                .any(|s| s.instant == curative.instant)
+            {
                 continue;
             }
             checked += 1;
@@ -539,19 +615,31 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
                 .map(|s| &crac.range_actions[s.action])
                 .filter(|a| a.operator.as_deref() == Some("be"))
                 .collect();
-            let psts =
-                moved.iter().filter(|a| matches!(a.kind, RangeActionKind::Pst { .. })).count();
+            let psts = moved
+                .iter()
+                .filter(|a| matches!(a.kind, RangeActionKind::Pst { .. }))
+                .count();
             assert!(topo <= 1, "{topo} BE topological actions, the cap is 1");
             assert!(psts <= 1, "{psts} BE shifters moved, the cap is 1");
-            assert!(topo + moved.len() <= 2, "{} BE actions, the cap is 2", topo + moved.len());
+            assert!(
+                topo + moved.len() <= 2,
+                "{} BE actions, the cap is 2",
+                topo + moved.len()
+            );
             most = most.max(topo + moved.len());
         }
     }
-    assert!(checked > 0, "no curative perimeter was examined, so nothing was tested");
+    assert!(
+        checked > 0,
+        "no curative perimeter was examined, so nothing was tested"
+    );
     // …and the caps are not being satisfied by a search that simply does
     // nothing. Some perimeter spends the whole allowance, so the assertions
     // above are on a plan that is actually pressing against them.
-    assert_eq!(most, 2, "no perimeter used its full allowance, so nothing was constrained");
+    assert_eq!(
+        most, 2,
+        "no perimeter used its full allowance, so nothing was constrained"
+    );
 }
 
 /// A curative perimeter stops once it beats the preventive one, and stopping
@@ -570,10 +658,8 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
 #[test]
 fn a_curative_perimeter_stops_once_it_is_better_than_preventive() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic13/SL_ep13us11case1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us11case1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -605,9 +691,7 @@ fn a_curative_perimeter_stops_once_it_is_better_than_preventive() {
         plan.scenarios
             .iter()
             .flat_map(|s| s.perimeters.iter())
-            .map(|p| {
-                p.network_actions.len() + p.setpoints.iter().filter(|s| s.moved()).count()
-            })
+            .map(|p| p.network_actions.len() + p.setpoints.iter().filter(|s| s.moved()).count())
             .sum()
     };
 
@@ -647,10 +731,8 @@ fn automatons_are_simulated_rather_than_chosen() {
     use gridoxide::rao::crac_json;
 
     let net = ucte::read(ucte_fixture("TestCase8Nodes_15_11_6_1.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/crac_15_11_6_1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/crac_15_11_6_1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -666,7 +748,13 @@ fn automatons_are_simulated_rather_than_chosen() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     let scenario = plan.scenarios.first().expect("a scenario");
     let automatons = scenario.automatons.as_ref().expect("an auto perimeter");
@@ -702,14 +790,21 @@ fn automatons_are_simulated_rather_than_chosen() {
 
     // The perimeter ends secure, having started well overloaded.
     assert!(automatons.initial_margin_mw < -100.0);
-    assert!(automatons.final_margin_mw > 0.0, "{}", automatons.final_margin_mw);
+    assert!(
+        automatons.final_margin_mw > 0.0,
+        "{}",
+        automatons.final_margin_mw
+    );
 }
 
 /// A standby circuit must survive import, or closing it is inexpressible.
 #[test]
 fn an_out_of_service_branch_can_be_closed_by_an_automaton() {
     let net = ucte::read(ucte_fixture("TestCase8Nodes_15_11_6_1.uct")).expect("network");
-    assert!(!net.initially_open.is_empty(), "this fixture has out-of-service circuits");
+    assert!(
+        !net.initially_open.is_empty(),
+        "this fixture has out-of-service circuits"
+    );
     for &branch in &net.initially_open {
         // Present in the model with real impedance — that is what makes it
         // closable — and open only by virtue of being in this list.
@@ -726,10 +821,8 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
     use gridoxide::rao::crac_json;
 
     let net = ucte::read(ucte_fixture("TestCase12Nodes_15_11_5_1.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/crac_15_11_5_1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/crac_15_11_5_1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -745,10 +838,18 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     for scenario in &plan.scenarios {
-        let Some(automatons) = &scenario.automatons else { continue };
+        let Some(automatons) = &scenario.automatons else {
+            continue;
+        };
         for perimeter in &scenario.perimeters {
             // Whatever the automatons opened is still open in the curative
             // perimeter: a curative decision adds to their result, it does not
@@ -782,10 +883,8 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
 #[test]
 fn a_curative_action_can_close_an_out_of_service_branch() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic13/SL_ep13us3case4.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us3case4.json")).expect("crac");
 
     let closes = crac
         .network_actions
@@ -794,9 +893,12 @@ fn a_curative_action_can_close_an_out_of_service_branch() {
         .expect("the CRAC declares close_fr1_fr5");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let branch = match &crac.network_actions[closes].elementary[..] {
-        [ElementaryAction::TerminalsConnection { element, connected: true }] => {
-            resolution.branch(element).expect("the branch resolves")
-        }
+        [
+            ElementaryAction::TerminalsConnection {
+                element,
+                connected: true,
+            },
+        ] => resolution.branch(element).expect("the branch resolves"),
         other => panic!("expected one closing elementary action, got {other:?}"),
     };
     assert!(
@@ -819,7 +921,13 @@ fn a_curative_action_can_close_an_out_of_service_branch() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     let taken = plan
         .scenarios
@@ -880,11 +988,19 @@ fn a_curative_perimeter_has_its_own_depth() {
         ..Default::default()
     };
     let together = curative_leaves(&shared);
-    let apart =
-        curative_leaves(&SearchOptions { curative_max_depth: Some(0), ..shared.clone() });
+    let apart = curative_leaves(&SearchOptions {
+        curative_max_depth: Some(0),
+        ..shared.clone()
+    });
 
-    assert!(together > 0, "the curative perimeters should evaluate something at depth 1");
-    assert_eq!(apart, 0, "held at curative depth 0, no curative leaf should be evaluated");
+    assert!(
+        together > 0,
+        "the curative perimeters should evaluate something at depth 1"
+    );
+    assert_eq!(
+        apart, 0,
+        "held at curative depth 0, no curative leaf should be evaluated"
+    );
 }
 
 /// A `relativeToPreviousInstant` range is anchored on where the **perimeter
@@ -903,10 +1019,8 @@ fn a_curative_perimeter_has_its_own_depth() {
 #[test]
 fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic13/SL_ep13us4case3.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us4case3.json")).expect("crac");
 
     let pst = crac
         .range_actions
@@ -940,11 +1054,20 @@ fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     // Preventive leaves it where the file had it, so the anchor is 5.
     assert!(
-        plan.preventive.setpoints.iter().all(|s| s.action != pst || !s.moved()),
+        plan.preventive
+            .setpoints
+            .iter()
+            .all(|s| s.action != pst || !s.moved()),
         "the preventive perimeter should not move pst_fr — it is curative-only here"
     );
 
@@ -974,13 +1097,23 @@ fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
 #[test]
 fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic13/SL_ep13us5case3.json"),
-    )
-    .expect("crac");
-    let pst = crac.range_actions.iter().position(|r| r.id == "pst_fr").expect("pst_fr");
-    let kinds: Vec<RangeKind> = crac.range_actions[pst].ranges.iter().map(|r| r.kind).collect();
-    assert_eq!(kinds.len(), 3, "this test needs all three kinds on one action");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us5case3.json")).expect("crac");
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_fr")
+        .expect("pst_fr");
+    let kinds: Vec<RangeKind> = crac.range_actions[pst]
+        .ranges
+        .iter()
+        .map(|r| r.kind)
+        .collect();
+    assert_eq!(
+        kinds.len(),
+        3,
+        "this test needs all three kinds on one action"
+    );
 
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
@@ -997,7 +1130,13 @@ fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     let preventive = plan
         .preventive
@@ -1006,10 +1145,17 @@ fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
         .find(|s| s.action == pst)
         .and_then(|s| s.tap)
         .expect("the preventive perimeter optimizes pst_fr here");
-    assert_eq!(preventive, -5, "the preventive answer, and the curative anchor");
+    assert_eq!(
+        preventive, -5,
+        "the preventive answer, and the curative anchor"
+    );
 
     for perimeter in plan.scenarios.iter().flat_map(|s| s.perimeters.iter()) {
-        let Some(tap) = perimeter.setpoints.iter().find(|s| s.action == pst).and_then(|s| s.tap)
+        let Some(tap) = perimeter
+            .setpoints
+            .iter()
+            .find(|s| s.action == pst)
+            .and_then(|s| s.tap)
         else {
             continue;
         };
@@ -1021,8 +1167,6 @@ fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
     }
 }
 
-
-
 /// An automaton range action stays inside its declared range.
 ///
 /// The reference's scenario 1.2.2.4: `pst_fr` sits at tap 5 and may travel ±5
@@ -1033,11 +1177,13 @@ fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
 #[test]
 fn an_automaton_may_not_shift_past_its_own_range() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/SL_ep15us11-3case4.json"),
-    )
-    .expect("crac");
-    let pst = crac.range_actions.iter().position(|r| r.id == "pst_fr").expect("pst_fr");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/SL_ep15us11-3case4.json")).expect("crac");
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_fr")
+        .expect("pst_fr");
     let RangeActionKind::Pst { initial_tap, .. } = &crac.range_actions[pst].kind else {
         panic!("pst_fr should be a phase shifter");
     };
@@ -1075,11 +1221,13 @@ fn an_automaton_may_not_shift_past_its_own_range() {
 #[test]
 fn an_automaton_stops_at_the_smallest_set_point_that_secures() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/SL_ep15us11-3case2.json"),
-    )
-    .expect("crac");
-    let pst = crac.range_actions.iter().position(|r| r.id == "pst_be").expect("pst_be");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/SL_ep15us11-3case2.json")).expect("crac");
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_be")
+        .expect("pst_be");
 
     let plan = ac_plan(&net, &crac);
     let automatons = plan
@@ -1095,7 +1243,10 @@ fn an_automaton_stops_at_the_smallest_set_point_that_secures() {
         .and_then(|(_, _, tap)| *tap)
         .expect("a tap");
 
-    assert_eq!(tap, -8, "-7 leaves the watched CNEC overloaded, -9 and beyond overshoot");
+    assert_eq!(
+        tap, -8,
+        "-7 leaves the watched CNEC overloaded, -9 and beyond overshoot"
+    );
     assert!(
         automatons.final_margin_mw >= 0.0,
         "the perimeter should end secure, not {} MW",
@@ -1146,13 +1297,21 @@ fn ac_plan(net: &ucte::UcteImport, crac: &Crac) -> gridoxide::rao::Plan {
 #[test]
 fn a_range_action_that_starts_outside_its_range_is_dropped() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/SL_ep15us11-3case2_withPstCra.json"),
-    )
+    let (crac, _) = crac_json::read(openrao::path(
+        "files/crac/epic15/SL_ep15us11-3case2_withPstCra.json",
+    ))
     .expect("crac");
 
-    let useless = crac.range_actions.iter().position(|r| r.id == "useless_pst").expect("useless_pst");
-    let cra = crac.range_actions.iter().position(|r| r.id == "pst_be_cra").expect("pst_be_cra");
+    let useless = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "useless_pst")
+        .expect("useless_pst");
+    let cra = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_be_cra")
+        .expect("pst_be_cra");
     // Both name the same shifter, which is what makes the useless one harmful
     // rather than merely pointless.
     let element_of = |i: usize| match &crac.range_actions[i].kind {
@@ -1175,7 +1334,10 @@ fn a_range_action_that_starts_outside_its_range_is_dropped() {
         .find(|s| s.action == cra)
         .and_then(|s| s.tap)
         .expect("a tap");
-    assert_eq!(tap, -16, "the reference's answer; -8 is the automaton's, left untouched");
+    assert_eq!(
+        tap, -16,
+        "the reference's answer; -8 is the automaton's, left untouched"
+    );
     assert!(
         !curative.setpoints.iter().any(|s| s.action == useless),
         "useless_pst permits only tap 0 and the shifter is at -8, so it should not be optimized"
@@ -1198,10 +1360,8 @@ fn a_range_action_that_starts_outside_its_range_is_dropped() {
 #[test]
 fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/SL_ep15us11-3case4.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/SL_ep15us11-3case4.json")).expect("crac");
 
     let opening = crac
         .network_actions
@@ -1209,8 +1369,16 @@ fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
         .position(|a| a.id == "open_be1_be4")
         .expect("open_be1_be4");
     assert_eq!(crac.network_actions[opening].speed, None, "the untimed one");
-    let be = crac.range_actions.iter().position(|r| r.id == "pst_be").expect("pst_be");
-    assert_eq!(crac.range_actions[be].speed, Some(2), "and a timed shifter after it");
+    let be = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_be")
+        .expect("pst_be");
+    assert_eq!(
+        crac.range_actions[be].speed,
+        Some(2),
+        "and a timed shifter after it"
+    );
 
     let plan = ac_plan(&net, &crac);
     let automatons = plan
@@ -1233,7 +1401,6 @@ fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
     );
 }
 
-
 /// A plan that ends worse than doing nothing is thrown away.
 ///
 /// Every perimeter only accepts a candidate that improves **its own**
@@ -1254,16 +1421,20 @@ fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
 #[test]
 fn a_plan_that_loses_ground_is_discarded() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic20/SL_ep20us5case2.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic20/SL_ep20us5case2.json")).expect("crac");
 
     let plan = ac_plan(&net, &crac);
 
-    assert!(plan.preventive.network_actions.is_empty(), "the preventive plan should be empty");
+    assert!(
+        plan.preventive.network_actions.is_empty(),
+        "the preventive plan should be empty"
+    );
     for perimeter in plan.scenarios.iter().flat_map(|s| s.perimeters.iter()) {
-        assert!(perimeter.network_actions.is_empty(), "and so should every curative one");
+        assert!(
+            perimeter.network_actions.is_empty(),
+            "and so should every curative one"
+        );
         assert!(
             !perimeter.setpoints.iter().any(|s| s.moved()),
             "including its set-points — the fixture's search moves pst_be to -16 before the \
@@ -1354,7 +1525,11 @@ fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
             .map(|&a| crac.network_actions[a].id.as_str())
             .collect::<Vec<_>>()
     );
-    let pst_fr = crac.range_actions.iter().position(|a| a.id == "pst_fr").expect("pst_fr");
+    let pst_fr = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr")
+        .expect("pst_fr");
     let tap = plan
         .preventive
         .setpoints
@@ -1414,7 +1589,11 @@ fn the_second_preventive_pass_holds_a_curative_close() {
     let mut solver = IpmSolver::new();
     let plan = run(&crac, &network, &resolution, &mut solver, &options);
 
-    let pra = crac.range_actions.iter().position(|a| a.id == "pst_fr_pra").expect("pst_fr_pra");
+    let pra = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr_pra")
+        .expect("pst_fr_pra");
     let tap = plan
         .preventive
         .setpoints
@@ -1482,7 +1661,11 @@ fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
     let mut solver = IpmSolver::new();
     let plan = run(&crac, &network, &resolution, &mut solver, &options);
 
-    let pst_fr = crac.range_actions.iter().position(|a| a.id == "pst_fr").expect("pst_fr");
+    let pst_fr = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr")
+        .expect("pst_fr");
     let tap = plan
         .preventive
         .setpoints
@@ -1546,9 +1729,17 @@ fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
         1,
         "the pass should spend a network action alongside the shifter"
     );
-    let pst_be = crac.range_actions.iter().position(|a| a.id == "pst_be").expect("pst_be");
+    let pst_be = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_be")
+        .expect("pst_be");
     assert!(
-        !plan.preventive.setpoints.iter().any(|s| s.action == pst_be && s.moved()),
+        !plan
+            .preventive
+            .setpoints
+            .iter()
+            .any(|s| s.action == pst_be && s.moved()),
         "the curative column is not the preventive perimeter's to report"
     );
     // The curative perimeter that follows makes the decision the column only
@@ -1560,7 +1751,10 @@ fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
         .find_map(|p| p.setpoints.iter().find(|s| s.action == pst_be))
         .and_then(|s| s.tap)
         .expect("pst_be set-point after the contingency");
-    assert_eq!(curative, -5, "pst_be should reach the reference's curative tap");
+    assert_eq!(
+        curative, -5,
+        "pst_be should reach the reference's curative tap"
+    );
 }
 
 /// A **chained** curative range, and the preventive answer it governs.
@@ -1591,8 +1785,10 @@ fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
 #[test]
 fn a_chained_curative_range_governs_the_preventive_tap() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) =
-        crac_json::read(openrao::path("files/crac/epic20/second_preventive_ls_1_4.json")).expect("crac");
+    let (crac, _) = crac_json::read(openrao::path(
+        "files/crac/epic20/second_preventive_ls_1_4.json",
+    ))
+    .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -1618,7 +1814,11 @@ fn a_chained_curative_range_governs_the_preventive_tap() {
     let mut solver = IpmSolver::new();
     let plan = run(&crac, &network, &resolution, &mut solver, &options);
 
-    let pst_fr = crac.range_actions.iter().position(|a| a.id == "pst_fr").expect("pst_fr");
+    let pst_fr = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr")
+        .expect("pst_fr");
     let preventive = plan
         .preventive
         .setpoints

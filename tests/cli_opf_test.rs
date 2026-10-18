@@ -29,7 +29,11 @@ fn opf(case: &str, extra: &[&str]) -> Output {
 }
 
 fn stdout_of(out: &Output) -> String {
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -77,7 +81,10 @@ fn generators_at_a_limit_are_marked() {
 #[test]
 fn the_companion_document_can_be_given_explicitly() {
     let data = pglib::path("pglib_opf_case5_pjm", ".opf.json");
-    let explicit = stdout_of(&opf("pglib_opf_case5_pjm", &["--data", data.to_str().unwrap()]));
+    let explicit = stdout_of(&opf(
+        "pglib_opf_case5_pjm",
+        &["--data", data.to_str().unwrap()],
+    ));
     let implicit = stdout_of(&opf("pglib_opf_case5_pjm", &[]));
     assert_eq!(explicit, implicit);
 }

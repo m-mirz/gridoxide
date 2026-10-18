@@ -46,9 +46,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gridoxide::cgmes::{cgmes_to_network, load_profiles, CgmesNetwork};
+use gridoxide::cgmes::{CgmesNetwork, cgmes_to_network, load_profiles};
 use gridoxide::solver::{PowerFlowOptions, SolveStatus};
-use gridoxide::{run_power_flow, TapData};
+use gridoxide::{TapData, run_power_flow};
 
 fn fullgrid() -> Option<CgmesNetwork> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -117,7 +117,11 @@ fn fullgrid_cannot_converge_and_the_shunt_is_why() {
         &net.transformers,
         &net.shunts,
         TapData::none(),
-        PowerFlowOptions { tol: 1e-8, max_iter: 40, ..Default::default() },
+        PowerFlowOptions {
+            tol: 1e-8,
+            max_iter: 40,
+            ..Default::default()
+        },
     );
     assert_eq!(
         report.stats.status,
@@ -154,9 +158,15 @@ fn fullgrid_cannot_converge_and_the_shunt_is_why() {
 #[test]
 fn fullgrid_remains_the_richest_import_fixture() {
     let Some(net) = fullgrid() else { return };
-    assert_eq!(net.tap_report.converted, 3, "both control modes, one disabled set");
+    assert_eq!(
+        net.tap_report.converted, 3,
+        "both control modes, one disabled set"
+    );
     assert_eq!(net.tap_report.disabled, 4);
-    assert_eq!(net.voltage_control.shared_buses, 2, "two buses held by several machines");
+    assert_eq!(
+        net.voltage_control.shared_buses, 2,
+        "two buses held by several machines"
+    );
     assert!(
         net.tap_changers.iter().filter(|c| c.is_some()).count() >= 10,
         "eleven tap tables across all the changer flavours"
@@ -164,6 +174,10 @@ fn fullgrid_remains_the_richest_import_fixture() {
     // A three-winding transformer converts to three star legs, so the
     // transformer count exceeds the `PowerTransformer` count and the bus list
     // gains a star point no terminal names.
-    assert!(net.transformers.len() >= 13, "{} transformers", net.transformers.len());
+    assert!(
+        net.transformers.len() >= 13,
+        "{} transformers",
+        net.transformers.len()
+    );
     assert!(net.buses.len() > 20, "including a synthesized star point");
 }

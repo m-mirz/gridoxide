@@ -79,7 +79,9 @@ fn solve(case: &Case, on: bool) -> gridoxide::PowerFlowReport {
         &case.net.transformers,
         &case.net.shunts,
         gridoxide::TapData::none(),
-        gridoxide::RemoteControlData { machines: &case.net.voltage_control.machines },
+        gridoxide::RemoteControlData {
+            machines: &case.net.voltage_control.machines,
+        },
         PowerFlowOptions {
             control_remote_voltage: on,
             enforce_q_limits: true,
@@ -103,15 +105,21 @@ fn microgrid_has_one_remote_machine_behind_its_own_transformer() {
         .iter()
         .filter(|m| m.at_bus != m.controls_bus)
         .collect();
-    assert_eq!(remote.len(), 1, "MicroGrid-Type1's single remote controller");
+    assert_eq!(
+        remote.len(),
+        1,
+        "MicroGrid-Type1's single remote controller"
+    );
 
     let m = remote[0];
-    let adjacent = case
-        .net
-        .transformers
-        .iter()
-        .any(|t| (t.from == m.at_bus && t.to == m.controls_bus) || (t.to == m.at_bus && t.from == m.controls_bus));
-    assert!(adjacent, "the two buses should be the ends of one transformer");
+    let adjacent = case.net.transformers.iter().any(|t| {
+        (t.from == m.at_bus && t.to == m.controls_bus)
+            || (t.to == m.at_bus && t.from == m.controls_bus)
+    });
+    assert!(
+        adjacent,
+        "the two buses should be the ends of one transformer"
+    );
     assert!(
         case.net.buses[m.at_bus].u_rated < case.net.buses[m.controls_bus].u_rated,
         "the machine should be on the low-voltage side"
@@ -136,7 +144,11 @@ fn the_control_moves_from_the_held_bus_onto_the_machine() {
         .find(|m| m.at_bus != m.controls_bus)
         .expect("one remote machine");
 
-    let mut y = build_ybus(case.net.buses.len(), &case.net.lines, &case.net.transformers);
+    let mut y = build_ybus(
+        case.net.buses.len(),
+        &case.net.lines,
+        &case.net.transformers,
+    );
     stamp_shunts(&mut y, &case.net.shunts);
     let ybus = y.finish();
 
@@ -156,8 +168,18 @@ fn the_control_moves_from_the_held_bus_onto_the_machine() {
 
     let outer = on.outer.as_ref().expect("the loop ran");
     assert_eq!(outer.remote.len(), 1);
-    assert_eq!(outer.remote[0].outcome, RemoteOutcome::Held, "{:?}", outer.remote[0]);
-    assert_eq!(outer.retyped.len(), 2, "one bus freed, one pinned: {:?}", outer.retyped);
+    assert_eq!(
+        outer.remote[0].outcome,
+        RemoteOutcome::Held,
+        "{:?}",
+        outer.remote[0]
+    );
+    assert_eq!(
+        outer.retyped.len(),
+        2,
+        "one bus freed, one pinned: {:?}",
+        outer.retyped
+    );
 
     // The target is still met — moving the control must not lose it.
     assert!(
@@ -258,7 +280,11 @@ fn the_machine_produces_what_the_published_solution_says() {
         .map(|e| e.q)
         .expect("the machine's own terminal has a published flow");
 
-    let mut y = build_ybus(case.net.buses.len(), &case.net.lines, &case.net.transformers);
+    let mut y = build_ybus(
+        case.net.buses.len(),
+        &case.net.lines,
+        &case.net.transformers,
+    );
     stamp_shunts(&mut y, &case.net.shunts);
     let ybus = y.finish();
 

@@ -2,7 +2,9 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -50,7 +52,8 @@ fn test_cgmes_minigrid() {
     let ssh = dir.join("MiniGrid_SSH.xml");
     let tp = dir.join("MiniGrid_TP.xml");
     let sv = dir.join("MiniGrid_SV.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
     let expected = cgmes_common::expected_voltages(&ds);
@@ -60,7 +63,12 @@ fn test_cgmes_minigrid() {
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
     // 13 physical TopologicalNode buses, plus one synthesized star bus per
     // 3-winding transformer (2 of them in this fixture).
-    assert!(buses.len() > tn_mrids.len(), "expected extra synthesized star buses beyond the {} physical ones, got {}", tn_mrids.len(), buses.len());
+    assert!(
+        buses.len() > tn_mrids.len(),
+        "expected extra synthesized star buses beyond the {} physical ones, got {}",
+        tn_mrids.len(),
+        buses.len()
+    );
 
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);

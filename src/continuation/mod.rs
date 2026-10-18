@@ -35,24 +35,24 @@ pub mod corrector;
 pub mod direction;
 pub mod events;
 
-use crate::network::{build_ybus, stamp_shunts, ShuntAdm, YBusSparse};
+use crate::klu_native::KluNativeSystem;
+use crate::network::{ShuntAdm, YBusSparse, build_ybus, stamp_shunts};
 use crate::outerloop::{OuterLoop, OuterLoopContext, ReactiveLimits, SolveContext};
 use crate::solver::{
     IslandReport, JacobianBackend, LinearSolver, PowerFlowMethod, PowerFlowOptions, SolveStatus,
 };
 use crate::sparse::RealSparseSystem;
-use crate::klu_native::KluNativeSystem;
 #[cfg(feature = "klu")]
 use crate::sparse_klu::KluRealSystem;
 #[cfg(feature = "pardiso")]
 use crate::sparse_pardiso::PardisoRealSystem;
 use crate::types::{Bus, BusType, Line, Transformer};
 
-use augmented::{dominant_index, Layout, Parametrization};
-use corrector::{zip_buses, Constraint, CorrectorStatus, Segment};
+use augmented::{Layout, Parametrization, dominant_index};
+use corrector::{Constraint, CorrectorStatus, Segment, zip_buses};
 pub use direction::{BaseSpec, LoadingDirection};
 pub use events::{ContinuationEvent, QLimitKind};
-use events::{worst_violation, Illinois};
+use events::{Illinois, worst_violation};
 
 /// Where to stop walking.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -140,11 +140,16 @@ pub enum ContinuationError {
     /// is off — but here the Jacobian's singularity *is* the answer, so a
     /// missing term puts the nose in the wrong place while still looking
     /// entirely plausible. Set `allow_zip` to proceed with a warning.
-    ZipTermsUnsupported { buses: Vec<usize> },
+    ZipTermsUnsupported {
+        buses: Vec<usize>,
+    },
     MethodUnsupported(PowerFlowMethod),
     /// Nothing moves, so there is no curve to trace.
     EmptyDirection,
-    DirectionLengthMismatch { got: usize, want: usize },
+    DirectionLengthMismatch {
+        got: usize,
+        want: usize,
+    },
 }
 
 /// A caveat that does not stop the run.
@@ -309,7 +314,10 @@ impl ContinuationCurve {
     /// One bus's voltage magnitude along the whole curve — a P-V curve, ready
     /// to plot.
     pub fn voltage_trace(&self, bus: usize) -> Vec<f64> {
-        self.points.iter().filter_map(|p| p.voltage_mag.get(bus).copied()).collect()
+        self.points
+            .iter()
+            .filter_map(|p| p.voltage_mag.get(bus).copied())
+            .collect()
     }
 
     /// Just the machines that saturated, in the order they did, as
@@ -322,9 +330,9 @@ impl ContinuationCurve {
         self.events
             .iter()
             .filter_map(|e| match e {
-                ContinuationEvent::QLimit { bus, limit, lambda, .. } => {
-                    Some((*bus, *limit, *lambda))
-                }
+                ContinuationEvent::QLimit {
+                    bus, limit, lambda, ..
+                } => Some((*bus, *limit, *lambda)),
                 _ => None,
             })
             .collect()
@@ -449,7 +457,11 @@ fn switch_q_limits(buses: &mut [Bus], ybus: &mut YBusSparse) -> Vec<usize> {
     let mut limits = ReactiveLimits::new();
     {
         let mut ctx = SolveContext::new(buses, ybus);
-        let mut lc = OuterLoopContext { net: &mut ctx, islands: &[], iteration: 0 };
+        let mut lc = OuterLoopContext {
+            net: &mut ctx,
+            islands: &[],
+            iteration: 0,
+        };
         let _ = limits.check(&mut lc);
     }
     limits.switches().to_vec()
@@ -506,23 +518,44 @@ fn probe<S: LinearSolver>(
         seg.layout.add(work, k, s * tangent[k]);
     }
     let lambda_pred = lambda0 + s * tangent[n];
-    let z_pred: Vec<f64> = (0..=n).map(|k| seg.layout.get(work, lambda_pred, k)).collect();
+    let z_pred: Vec<f64> = (0..=n)
+        .map(|k| seg.layout.get(work, lambda_pred, k))
+        .collect();
     // `k` is pinned by the caller rather than re-derived here. That matters for
     // the locator, which re-probes the same step at many arclengths: letting
     // each trial re-pick its own continuation index would change the matrix
     // pattern under the search, throwing away the factorization every trial.
     let constraint = match param {
-        Parametrization::Natural => Constraint::Natural { target: lambda_pred },
-        Parametrization::Local => Constraint::Local { k, target: z0[k] + s * tangent[k] },
-        Parametrization::PseudoArcLength => {
-            Constraint::Arc { tangent: tangent.to_vec(), z0: z0.to_vec(), step: s }
-        }
+        Parametrization::Natural => Constraint::Natural {
+            target: lambda_pred,
+        },
+        Parametrization::Local => Constraint::Local {
+            k,
+            target: z0[k] + s * tangent[k],
+        },
+        Parametrization::PseudoArcLength => Constraint::Arc {
+            tangent: tangent.to_vec(),
+            z0: z0.to_vec(),
+            step: s,
+        },
     };
-    let out = seg.correct(work, ybus, base, dir, &constraint, lambda_pred, tol, max_iter);
+    let out = seg.correct(
+        work,
+        ybus,
+        base,
+        dir,
+        &constraint,
+        lambda_pred,
+        tol,
+        max_iter,
+    );
     if out.status != CorrectorStatus::Converged {
         return None;
     }
-    if work.iter().any(|b| b.bus_type == BusType::PQ && b.voltage_mag <= 0.0) {
+    if work
+        .iter()
+        .any(|b| b.bus_type == BusType::PQ && b.voltage_mag <= 0.0)
+    {
         return None;
     }
     let moved: f64 = (0..=n)
@@ -589,13 +622,17 @@ fn locate<S: LinearSolver, F>(
 where
     F: FnMut(&mut Segment<S>, &[Bus], &YBusSparse) -> f64,
 {
-    let mut bracket = Illinois { lo: 0.0, hi: br.step, f_lo, f_hi };
+    let mut bracket = Illinois {
+        lo: 0.0,
+        hi: br.step,
+        f_lo,
+        f_hi,
+    };
     // Seeded with the step's own endpoint, which `work` still holds: the search
     // can only improve on it, and never has to report a point short of the
     // event. Keyed on the value of `f`, not on recency — a bracketing search's
     // last trial is not necessarily its best.
-    let mut best: (f64, f64, f64, Vec<Bus>) =
-        (endpoint_lambda, br.step, f_hi, work.clone());
+    let mut best: (f64, f64, f64, Vec<Bus>) = (endpoint_lambda, br.step, f_hi, work.clone());
     let mut iterations = 0usize;
 
     for _ in 0..max_trials {
@@ -663,7 +700,11 @@ fn build_critical<S: LinearSolver>(
         .filter(|&i| tangent_vmag[i] != 0.0)
         .map(|i| WeakBus {
             bus: i,
-            participation: if peak > 0.0 { tangent_vmag[i].abs() / peak } else { 0.0 },
+            participation: if peak > 0.0 {
+                tangent_vmag[i].abs() / peak
+            } else {
+                0.0
+            },
             voltage_mag: buses[i].voltage_mag,
         })
         .collect();
@@ -673,7 +714,14 @@ fn build_critical<S: LinearSolver>(
     CriticalPoint {
         kind,
         lambda_max: lambda,
-        point: snapshot(buses, lambda, arclength, tangent[seg.n()], 0, CurveBranch::Upper),
+        point: snapshot(
+            buses,
+            lambda,
+            arclength,
+            tangent[seg.n()],
+            0,
+            CurveBranch::Upper,
+        ),
         tangent_vmag,
         tangent_ang,
         weakest,
@@ -761,8 +809,11 @@ fn trace<S: LinearSolver>(
 
     let mut buses = base_report.buses;
     let islands = base_report.islands;
-    let base_switches: Vec<usize> =
-        base_report.outer.as_ref().map(|o| o.q_limit_switches.clone()).unwrap_or_default();
+    let base_switches: Vec<usize> = base_report
+        .outer
+        .as_ref()
+        .map(|o| o.q_limit_switches.clone())
+        .unwrap_or_default();
     let base_state = buses.clone();
 
     // Snapshot and direction are taken *after* the base solve, so
@@ -791,10 +842,18 @@ fn trace<S: LinearSolver>(
         dir.freeze_reactive(b, &mut base, clamped);
     }
 
-    let p_load_base_pu: f64 = buses.iter().filter(|b| b.p_spec < 0.0).map(|b| -b.p_spec).sum();
+    let p_load_base_pu: f64 = buses
+        .iter()
+        .filter(|b| b.p_spec < 0.0)
+        .map(|b| -b.p_spec)
+        .sum();
     let load_per_lambda = dir.total_active_load_increase();
 
-    let initial_border = tangent_border(opts.parametrization, None, Layout::analyze(&buses).n_unknowns);
+    let initial_border = tangent_border(
+        opts.parametrization,
+        None,
+        Layout::analyze(&buses).n_unknowns,
+    );
     let mut seg = Segment::<S>::analyze(&buses, &ybus, &dir, initial_border.0.clone());
     let mut segments = 1usize;
     let mut reanalyses = 0usize;
@@ -822,9 +881,13 @@ fn trace<S: LinearSolver>(
         };
     }
 
-    let Some(mut tangent) =
-        seg.tangent(&buses, &ybus, &initial_border.0, &initial_border.1, initial_border.2)
-    else {
+    let Some(mut tangent) = seg.tangent(
+        &buses,
+        &ybus,
+        &initial_border.0,
+        &initial_border.1,
+        initial_border.2,
+    ) else {
         finish!(ContinuationStatus::Singular, None);
     };
 
@@ -836,14 +899,23 @@ fn trace<S: LinearSolver>(
     let mut status = ContinuationStatus::MaxSteps;
     let mut steps_attempted = 0usize;
 
-    points.push(snapshot(&buses, lambda, arclength, tangent[seg.n()], 0, CurveBranch::Upper));
+    points.push(snapshot(
+        &buses,
+        lambda,
+        arclength,
+        tangent[seg.n()],
+        0,
+        CurveBranch::Upper,
+    ));
 
     while steps_attempted < opts.max_steps {
         steps_attempted += 1;
         let n = seg.n();
         let anchor = buses.clone();
         let lambda0 = lambda;
-        let z0: Vec<f64> = (0..=n).map(|k| seg.layout.get(&anchor, lambda0, k)).collect();
+        let z0: Vec<f64> = (0..=n)
+            .map(|k| seg.layout.get(&anchor, lambda0, k))
+            .collect();
         let t_lambda_before = tangent[n];
         // One continuation index for the whole step — the tangent solve, the
         // corrector, and every locator trial — so the sparsity pattern is
@@ -860,10 +932,25 @@ fn trace<S: LinearSolver>(
         };
 
         let Some((new_lambda, iterations)) = probe(
-            &mut seg, &mut work, &anchor, &ybus, &base, &dir, &tangent, &z0, lambda0, step,
-            opts.parametrization, k, tol, max_iter,
+            &mut seg,
+            &mut work,
+            &anchor,
+            &ybus,
+            &base,
+            &dir,
+            &tangent,
+            &z0,
+            lambda0,
+            step,
+            opts.parametrization,
+            k,
+            tol,
+            max_iter,
         ) else {
-            events.push(ContinuationEvent::StepRejected { lambda: lambda0, step });
+            events.push(ContinuationEvent::StepRejected {
+                lambda: lambda0,
+                step,
+            });
             step *= 0.5;
             if step < opts.step_min {
                 status = ContinuationStatus::StepFloor;
@@ -929,10 +1016,18 @@ fn trace<S: LinearSolver>(
             );
             for &b in &switched {
                 let clamped = buses[b].q_spec;
-                let limit =
-                    if clamped >= buses[b].q_max { QLimitKind::Max } else { QLimitKind::Min };
+                let limit = if clamped >= buses[b].q_max {
+                    QLimitKind::Max
+                } else {
+                    QLimitKind::Min
+                };
                 dir.freeze_reactive(b, &mut base, clamped);
-                events.push(ContinuationEvent::QLimit { bus: b, limit, lambda, iterations });
+                events.push(ContinuationEvent::QLimit {
+                    bus: b,
+                    limit,
+                    lambda,
+                    iterations,
+                });
             }
 
             // A bus type moved, so `n_unknowns` and the sparsity pattern moved
@@ -945,7 +1040,11 @@ fn trace<S: LinearSolver>(
             reanalyses += seg.reanalyses;
             let carried_layout = Layout::analyze(&buses);
             let carried = carried_layout.embed(&seg.layout, &tangent);
-            let border = tangent_border(opts.parametrization, Some(&carried), carried_layout.n_unknowns);
+            let border = tangent_border(
+                opts.parametrization,
+                Some(&carried),
+                carried_layout.n_unknowns,
+            );
             seg = Segment::<S>::analyze(&buses, &ybus, &dir, border.0.clone());
             segments += 1;
             let out = seg.correct(
@@ -1011,8 +1110,19 @@ fn trace<S: LinearSolver>(
             break;
         };
         let t_lambda_after = t_new[seg.n()];
-        let branch = if t_lambda_after < 0.0 { CurveBranch::Lower } else { CurveBranch::Upper };
-        points.push(snapshot(&buses, lambda, arclength, t_lambda_after, iterations, branch));
+        let branch = if t_lambda_after < 0.0 {
+            CurveBranch::Lower
+        } else {
+            CurveBranch::Upper
+        };
+        points.push(snapshot(
+            &buses,
+            lambda,
+            arclength,
+            t_lambda_after,
+            iterations,
+            branch,
+        ));
 
         // --- the nose ----------------------------------------------------------
         if critical.is_none() && t_lambda_before > 0.0 && t_lambda_after <= 0.0 {
@@ -1054,7 +1164,13 @@ fn trace<S: LinearSolver>(
                 None => (buses.clone(), lambda),
             };
             let nose_tangent = seg
-                .tangent(&nose_state, &ybus, &nose_border.0, &nose_border.1, nose_border.2)
+                .tangent(
+                    &nose_state,
+                    &ybus,
+                    &nose_border.0,
+                    &nose_border.1,
+                    nose_border.2,
+                )
                 .unwrap_or_else(|| t_new.clone());
             critical = Some(build_critical(
                 CriticalPointKind::SaddleNode,

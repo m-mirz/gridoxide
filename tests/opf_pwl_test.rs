@@ -33,8 +33,8 @@
 
 use std::collections::HashMap;
 
-use gridoxide::linear::btheta::DcBranch;
 use gridoxide::linear::DcApproximation;
+use gridoxide::linear::btheta::DcBranch;
 use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
 use gridoxide::opf::dc::{DcGenerator, DcLoad, DcOpf, DcOpfNetwork, DcOpfOptions};
 use gridoxide::opf::ipm::IpmSolver;
@@ -136,11 +136,29 @@ fn two_bus(cost_0: CostCurve, cost_1: CostCurve) -> DcOpfNetwork {
     DcOpfNetwork {
         n_buses: 2,
         reference: 0,
-        branches: vec![DcBranch { index: 0, from: 0, to: 1, b: 10.0, shift: 0.0 }],
+        branches: vec![DcBranch {
+            index: 0,
+            from: 0,
+            to: 1,
+            b: 10.0,
+            shift: 0.0,
+        }],
         limits: HashMap::new(),
         generators: vec![
-            DcGenerator { index: 0, bus: 0, p_min: 0.0, p_max: 1.0, cost: Some(cost_0) },
-            DcGenerator { index: 1, bus: 1, p_min: 0.0, p_max: 1.0, cost: Some(cost_1) },
+            DcGenerator {
+                index: 0,
+                bus: 0,
+                p_min: 0.0,
+                p_max: 1.0,
+                cost: Some(cost_0),
+            },
+            DcGenerator {
+                index: 1,
+                bus: 1,
+                p_min: 0.0,
+                p_max: 1.0,
+                cost: Some(cost_1),
+            },
         ],
         loads: vec![DcLoad { bus: 1, p: 1.0 }],
         base_mva: 100.0,
@@ -162,8 +180,12 @@ fn a_piecewise_linear_generator_is_not_treated_as_free() {
     // Unit 0: $10/MWh, polynomial. Unit 1: $90/MWh, piecewise-linear.
     // Per-unit on a 100 MVA base, so $10/MWh is 1000 $/pu.
     let result = solve_two_bus(two_bus(
-        CostCurve::Polynomial { coefficients: vec![0.0, 1000.0] },
-        CostCurve::PiecewiseLinear { points: vec![(0.0, 0.0), (1.0, 9000.0)] },
+        CostCurve::Polynomial {
+            coefficients: vec![0.0, 1000.0],
+        },
+        CostCurve::PiecewiseLinear {
+            points: vec![(0.0, 0.0), (1.0, 9000.0)],
+        },
     ));
 
     assert_eq!(result.status, OptStatus::Optimal);
@@ -202,7 +224,9 @@ fn a_kinked_convex_curve_is_priced_segment_by_segment() {
         CostCurve::PiecewiseLinear {
             points: vec![(0.0, 0.0), (0.5, 500.0), (1.0, 2000.0)],
         },
-        CostCurve::Polynomial { coefficients: vec![0.0, 2000.0] },
+        CostCurve::Polynomial {
+            coefficients: vec![0.0, 2000.0],
+        },
     ));
 
     assert_eq!(result.status, OptStatus::Optimal);
@@ -240,7 +264,9 @@ fn crossing_a_breakpoint_changes_the_marginal_price() {
     let cheap_first = || CostCurve::PiecewiseLinear {
         points: vec![(0.0, 0.0), (0.5, 500.0), (1.0, 2000.0)],
     };
-    let expensive = || CostCurve::Polynomial { coefficients: vec![0.0, 9000.0] };
+    let expensive = || CostCurve::Polynomial {
+        coefficients: vec![0.0, 9000.0],
+    };
 
     let mut below = two_bus(cheap_first(), expensive());
     below.loads[0].p = 0.25;
@@ -264,8 +290,16 @@ fn crossing_a_breakpoint_changes_the_marginal_price() {
         above.lmp[0]
     );
     // And the costs are the areas under the curve.
-    assert!((below.objective - 250.0).abs() < 1e-4, "cost {}", below.objective);
-    assert!((above.objective - 1250.0).abs() < 1e-4, "cost {}", above.objective);
+    assert!(
+        (below.objective - 250.0).abs() < 1e-4,
+        "cost {}",
+        below.objective
+    );
+    assert!(
+        (above.objective - 1250.0).abs() < 1e-4,
+        "cost {}",
+        above.objective
+    );
 }
 
 /// A **non-convex** piecewise curve is refused rather than silently relaxed.
@@ -281,10 +315,18 @@ fn a_non_convex_piecewise_curve_is_rejected() {
     let concave = CostCurve::PiecewiseLinear {
         points: vec![(0.0, 0.0), (0.5, 1500.0), (1.0, 2000.0)],
     };
-    assert!(!concave.is_convex(), "the fixture must actually be non-convex");
+    assert!(
+        !concave.is_convex(),
+        "the fixture must actually be non-convex"
+    );
 
     let built = DcOpf::build(
-        two_bus(concave, CostCurve::Polynomial { coefficients: vec![0.0, 2000.0] }),
+        two_bus(
+            concave,
+            CostCurve::Polynomial {
+                coefficients: vec![0.0, 2000.0],
+            },
+        ),
         DcOpfOptions::default(),
     );
     match built {
@@ -302,8 +344,12 @@ fn a_non_convex_piecewise_curve_is_rejected() {
 #[test]
 fn a_single_point_curve_is_a_constant_not_a_free_unit() {
     let result = solve_two_bus(two_bus(
-        CostCurve::PiecewiseLinear { points: vec![(0.0, 250.0)] },
-        CostCurve::Polynomial { coefficients: vec![0.0, 2000.0] },
+        CostCurve::PiecewiseLinear {
+            points: vec![(0.0, 250.0)],
+        },
+        CostCurve::Polynomial {
+            coefficients: vec![0.0, 2000.0],
+        },
     ));
 
     assert_eq!(result.status, OptStatus::Optimal);

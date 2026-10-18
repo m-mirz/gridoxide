@@ -25,10 +25,10 @@
 //! with different parameters would hide exactly the disagreement that is worth
 //! seeing.
 
+use super::Resolution;
 use super::castor::{PerimeterPlan, Plan};
 use super::crac::{Crac, State};
 use super::evaluate::{self, AcOptions, Network};
-use super::Resolution;
 
 /// Thresholds a perimeter must clear to be accepted.
 #[derive(Clone, Copy, Debug)]
@@ -48,7 +48,11 @@ pub struct ValidationOptions<'a> {
 
 impl Default for ValidationOptions<'_> {
     fn default() -> Self {
-        Self { min_margin_mw: 0.0, max_regression_mw: f64::INFINITY, ac: AcOptions::default() }
+        Self {
+            min_margin_mw: 0.0,
+            max_regression_mw: f64::INFINITY,
+            ac: AcOptions::default(),
+        }
     }
 }
 
@@ -60,10 +64,14 @@ pub enum Verdict {
     /// states.
     Diverged,
     /// Secure under DC, insecure under AC.
-    Insecure { margin_mw: f64 },
+    Insecure {
+        margin_mw: f64,
+    },
     /// Secure under both, but the two models disagree too much to trust the
     /// search that produced it.
-    Regressed { by_mw: f64 },
+    Regressed {
+        by_mw: f64,
+    },
 }
 
 impl Verdict {
@@ -130,9 +138,14 @@ pub fn validate(
         .perimeters()
         .map(|p| validate_perimeter(crac, network, resolution, p, options))
         .collect();
-    let ac_margin_mw =
-        perimeters.iter().map(|p| p.ac_margin_mw).fold(f64::INFINITY, f64::min);
-    Validation { perimeters, ac_margin_mw }
+    let ac_margin_mw = perimeters
+        .iter()
+        .map(|p| p.ac_margin_mw)
+        .fold(f64::INFINITY, f64::min);
+    Validation {
+        perimeters,
+        ac_margin_mw,
+    }
 }
 
 fn validate_perimeter(
@@ -159,8 +172,7 @@ fn validate_perimeter(
         base_mva: network.base_mva,
     };
 
-    let result =
-        evaluate::evaluate_ac(crac, &post, resolution, &plan.open_branches, &options.ac);
+    let result = evaluate::evaluate_ac(crac, &post, resolution, &plan.open_branches, &options.ac);
 
     // Only this perimeter's own states count. The evaluator measures every
     // state the CRAC defines, and the others belong to other perimeters, with
@@ -168,7 +180,11 @@ fn validate_perimeter(
     let mut ac_margin_mw = f64::INFINITY;
     let mut worst_cnec = None;
     let mut diverged = false;
-    for perimeter in result.perimeters.iter().filter(|p| plan.states.contains(&p.state)) {
+    for perimeter in result
+        .perimeters
+        .iter()
+        .filter(|p| plan.states.contains(&p.state))
+    {
         if perimeter.severed {
             diverged = true;
         }
@@ -184,9 +200,13 @@ fn validate_perimeter(
     let verdict = if diverged {
         Verdict::Diverged
     } else if ac_margin_mw < options.min_margin_mw {
-        Verdict::Insecure { margin_mw: ac_margin_mw }
+        Verdict::Insecure {
+            margin_mw: ac_margin_mw,
+        }
     } else if dc_margin_mw - ac_margin_mw > options.max_regression_mw {
-        Verdict::Regressed { by_mw: dc_margin_mw - ac_margin_mw }
+        Verdict::Regressed {
+            by_mw: dc_margin_mw - ac_margin_mw,
+        }
     } else {
         Verdict::Accepted
     };

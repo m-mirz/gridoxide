@@ -16,7 +16,7 @@
 //! untrue about the physics.
 
 use gridoxide::network::{build_ybus, power_injections};
-use gridoxide::qv::{qv_curve, QvError, QvOptions, QvStatus};
+use gridoxide::qv::{QvError, QvOptions, QvStatus, qv_curve};
 use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType, Line};
 
@@ -41,13 +41,23 @@ fn bus(idx: usize, bus_type: BusType, p: f64, q: f64) -> Bus {
 fn two_bus(x: f64, p: f64, q: f64) -> (Vec<Bus>, Vec<Line>) {
     (
         vec![bus(0, BusType::Slack, 0.0, 0.0), bus(1, BusType::PQ, p, q)],
-        vec![Line { from: 0, to: 1, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 }],
+        vec![Line {
+            from: 0,
+            to: 1,
+            r: 0.0,
+            x,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }],
     )
 }
 
 fn options(step: f64) -> QvOptions {
     QvOptions {
-        pf: PowerFlowOptions { max_iter: 60, ..Default::default() },
+        pf: PowerFlowOptions {
+            max_iter: 60,
+            ..Default::default()
+        },
         v_max: 1.20,
         v_min: 0.20,
         step,
@@ -110,8 +120,21 @@ fn refining_the_minimum_beats_the_nearest_sample() {
     let (buses, lines) = two_bus(x, p, 0.0);
     let (v_expected, _) = analytic_nose(x, p);
 
-    let coarse = QvOptions { step: 0.02, ..options(0.02) };
-    let raw = qv_curve(&buses, &lines, &[], &[], 1, QvOptions { refine: false, ..coarse.clone() });
+    let coarse = QvOptions {
+        step: 0.02,
+        ..options(0.02)
+    };
+    let raw = qv_curve(
+        &buses,
+        &lines,
+        &[],
+        &[],
+        1,
+        QvOptions {
+            refine: false,
+            ..coarse.clone()
+        },
+    );
     let refined = qv_curve(&buses, &lines, &[], &[], 1, coarse);
 
     let raw_err = (raw.nose.as_ref().unwrap().voltage - v_expected).abs();
@@ -150,9 +173,15 @@ fn every_point_is_a_power_flow_at_its_own_setpoint() {
             &[],
             &[],
             gridoxide::TapData::none(),
-            PowerFlowOptions { max_iter: 60, ..Default::default() },
+            PowerFlowOptions {
+                max_iter: 60,
+                ..Default::default()
+            },
         );
-        assert_eq!(report.stats.status, gridoxide::solver::SolveStatus::Converged);
+        assert_eq!(
+            report.stats.status,
+            gridoxide::solver::SolveStatus::Converged
+        );
 
         // The condenser supplies the bus's net injection less the bus's own.
         let (_, q_calc) = power_injections(&report.buses, &ybus);
@@ -186,7 +215,10 @@ fn the_curve_crosses_zero_at_the_buses_own_voltage() {
     let mut crossing = None;
     for w in curve.points.windows(2) {
         if w[0].q.signum() != w[1].q.signum() {
-            crossing = Some((w[0].voltage.max(w[1].voltage), w[0].voltage.min(w[1].voltage)));
+            crossing = Some((
+                w[0].voltage.max(w[1].voltage),
+                w[0].voltage.min(w[1].voltage),
+            ));
             break;
         }
     }
@@ -206,10 +238,20 @@ fn the_sign_of_q_says_which_way_the_bus_is_being_pushed() {
     let base = curve.base_voltage;
     for p in &curve.points {
         if p.voltage > base + 0.02 {
-            assert!(p.q > 0.0, "holding {} above {base} should need support, got {}", p.voltage, p.q);
+            assert!(
+                p.q > 0.0,
+                "holding {} above {base} should need support, got {}",
+                p.voltage,
+                p.q
+            );
         }
         if p.voltage < base - 0.02 && p.voltage > 0.7 {
-            assert!(p.q < 0.0, "holding {} below {base} should need absorption, got {}", p.voltage, p.q);
+            assert!(
+                p.q < 0.0,
+                "holding {} below {base} should need absorption, got {}",
+                p.voltage,
+                p.q
+            );
         }
     }
 }
@@ -240,9 +282,22 @@ fn a_weaker_line_leaves_a_smaller_margin() {
 fn a_sweep_that_stops_too_early_says_so() {
     let (buses, lines) = two_bus(0.10, -1.0, 0.0);
     // The nose is near 0.51; stop well above it.
-    let curve = qv_curve(&buses, &lines, &[], &[], 1, QvOptions { v_min: 0.80, ..options(0.01) });
+    let curve = qv_curve(
+        &buses,
+        &lines,
+        &[],
+        &[],
+        1,
+        QvOptions {
+            v_min: 0.80,
+            ..options(0.01)
+        },
+    );
     assert_eq!(curve.status, QvStatus::NoseNotReached);
-    let bound = curve.nose.as_ref().expect("a lowest sample is still reported");
+    let bound = curve
+        .nose
+        .as_ref()
+        .expect("a lowest sample is still reported");
     assert!(!bound.refined, "a bound is not an interpolated minimum");
 
     let full = qv_curve(&buses, &lines, &[], &[], 1, options(0.01));
@@ -269,8 +324,18 @@ fn impossible_requests_are_refused() {
         QvStatus::Rejected(QvError::BusOutOfRange { bus: 9, n: 2 })
     );
 
-    let backwards =
-        qv_curve(&buses, &lines, &[], &[], 1, QvOptions { v_min: 1.2, v_max: 0.8, ..options(0.01) });
+    let backwards = qv_curve(
+        &buses,
+        &lines,
+        &[],
+        &[],
+        1,
+        QvOptions {
+            v_min: 1.2,
+            v_max: 0.8,
+            ..options(0.01)
+        },
+    );
     assert_eq!(backwards.status, QvStatus::Rejected(QvError::EmptyRange));
 }
 
@@ -278,7 +343,7 @@ fn impossible_requests_are_refused() {
 /// coherent one, and the ranking is stable under a finer sweep.
 #[test]
 fn case14_margins_are_coherent_and_grid_independent() {
-    use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
+    use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 
     let path = pglib::path("pglib_opf_case14_ieee", ".json");
     let raw = std::fs::read_to_string(&path).expect("committed pglib fixture");
@@ -297,11 +362,19 @@ fn case14_margins_are_coherent_and_grid_independent() {
                 &transformers,
                 &[],
                 b,
-                QvOptions { v_min: 0.20, step, ..options(step) },
+                QvOptions {
+                    v_min: 0.20,
+                    step,
+                    ..options(step)
+                },
             );
             if c.status == QvStatus::NoseFound {
                 let n = c.nose.as_ref().unwrap();
-                assert!(n.margin_pu > 0.0, "bus {b}: a margin should be positive, got {}", n.margin_pu);
+                assert!(
+                    n.margin_pu > 0.0,
+                    "bus {b}: a margin should be positive, got {}",
+                    n.margin_pu
+                );
                 assert!(
                     n.voltage > 0.2 && n.voltage < 1.2,
                     "bus {b}: nose at {} is outside the swept range",
@@ -316,7 +389,11 @@ fn case14_margins_are_coherent_and_grid_independent() {
 
     let coarse = rank(0.02);
     let fine = rank(0.005);
-    assert!(coarse.len() >= 10, "most buses should yield a curve, got {}", coarse.len());
+    assert!(
+        coarse.len() >= 10,
+        "most buses should yield a curve, got {}",
+        coarse.len()
+    );
     assert_eq!(
         &coarse[..3],
         &fine[..3],

@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/CGMES-Test-Configurations/v3.0");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/CGMES-Test-Configurations/v3.0");
     for name in std::env::args().skip(1) {
         let dir = root.join(&name);
         if !dir.is_dir() {
@@ -26,10 +26,15 @@ fn main() {
         let r = &net.voltage_control;
         println!(
             "{name}: {} regulated bus(es), {} held by more than one machine, {} target conflict(s)",
-            r.regulated_buses, r.shared_buses, r.target_conflicts.len()
+            r.regulated_buses,
+            r.shared_buses,
+            r.target_conflicts.len()
         );
         for c in &r.target_conflicts {
-            println!("    bus {} : {} vs {} ({})", c.bus, c.existing, c.proposed, c.id);
+            println!(
+                "    bus {} : {} vs {} ({})",
+                c.bus, c.existing, c.proposed, c.id
+            );
         }
         // Which buses are shared, and what they ended up holding — the cells
         // a summed limit actually changes.
@@ -55,7 +60,10 @@ fn main() {
             .map(|(i, b)| (i, b.q_max - b.q_min))
             .collect();
         widths.sort_by(|a, b| b.1.total_cmp(&a.1));
-        println!("    {} PV bus(es) with a finite reactive band", widths.len());
+        println!(
+            "    {} PV bus(es) with a finite reactive band",
+            widths.len()
+        );
         for (i, w) in widths.iter().take(3) {
             println!(
                 "      bus {i:>5}: [{:.4}, {:.4}] pu, width {w:.4}",

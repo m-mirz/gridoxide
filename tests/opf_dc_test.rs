@@ -149,12 +149,23 @@ fn an_uncongested_two_bus_case_dispatches_the_cheap_unit_only() {
     assert_kkt(&opf, &solution, 1e-7);
 
     let result = opf.interpret(&solution);
-    assert!((result.dispatch[0] - 100.0).abs() < 1e-6, "{:?}", result.dispatch);
+    assert!(
+        (result.dispatch[0] - 100.0).abs() < 1e-6,
+        "{:?}",
+        result.dispatch
+    );
     assert!(result.dispatch[1].abs() < 1e-6, "{:?}", result.dispatch);
-    assert!((result.objective - 1000.0).abs() < 1e-6, "{}", result.objective);
+    assert!(
+        (result.objective - 1000.0).abs() < 1e-6,
+        "{}",
+        result.objective
+    );
 
     for (bus, lmp) in result.lmp.iter().enumerate() {
-        assert!((lmp - 10.0).abs() < 1e-6, "bus {bus} prices at {lmp}, expected 10");
+        assert!(
+            (lmp - 10.0).abs() < 1e-6,
+            "bus {bus} prices at {lmp}, expected 10"
+        );
     }
     assert!(result.binding.is_empty());
     assert!(result.shed.iter().all(|s| s.abs() < 1e-6));
@@ -177,9 +188,21 @@ fn a_congested_two_bus_case_splits_the_price() {
     assert_kkt(&opf, &solution, 1e-7);
 
     let result = opf.interpret(&solution);
-    assert!((result.dispatch[0] - 40.0).abs() < 1e-6, "{:?}", result.dispatch);
-    assert!((result.dispatch[1] - 60.0).abs() < 1e-6, "{:?}", result.dispatch);
-    assert!((result.objective - 2200.0).abs() < 1e-6, "{}", result.objective);
+    assert!(
+        (result.dispatch[0] - 40.0).abs() < 1e-6,
+        "{:?}",
+        result.dispatch
+    );
+    assert!(
+        (result.dispatch[1] - 60.0).abs() < 1e-6,
+        "{:?}",
+        result.dispatch
+    );
+    assert!(
+        (result.objective - 2200.0).abs() < 1e-6,
+        "{}",
+        result.objective
+    );
 
     assert!((result.lmp[0] - 10.0).abs() < 1e-6, "{:?}", result.lmp);
     assert!((result.lmp[1] - 30.0).abs() < 1e-6, "{:?}", result.lmp);
@@ -207,7 +230,10 @@ fn unservable_demand_is_shed_rather_than_reported_infeasible() {
 
     let result = opf.interpret(&solution);
     let shed: f64 = result.shed.iter().sum();
-    assert!((shed - 50.0).abs() < 1e-6, "expected 50 MW shed, got {shed}");
+    assert!(
+        (shed - 50.0).abs() < 1e-6,
+        "expected 50 MW shed, got {shed}"
+    );
     // And shedding prices at the penalty, which is what makes it a last resort.
     assert!(result.lmp[1] > 1000.0, "{:?}", result.lmp);
 }
@@ -218,7 +244,10 @@ fn without_shedding_unservable_demand_is_infeasible() {
     let mut network = two_bus(None);
     network.generators[0].p_max = 0.2;
     network.generators[1].p_max = 0.3;
-    let options = DcOpfOptions { allow_shedding: false, ..Default::default() };
+    let options = DcOpfOptions {
+        allow_shedding: false,
+        ..Default::default()
+    };
     let opf = DcOpf::build(network, options).unwrap();
     let solution = solver().solve(opf.problem()).unwrap();
     assert!(!solution.is_optimal(), "status was {:?}", solution.status);
@@ -248,7 +277,10 @@ fn every_pglib_case_solves_to_a_certified_optimum() {
             "{name}: generated {generated} + shed {shed} != load {}",
             total_load * base
         );
-        assert!(shed < 1e-6, "{name}: shed {shed} MW on a case that should be servable");
+        assert!(
+            shed < 1e-6,
+            "{name}: shed {shed} MW on a case that should be servable"
+        );
     }
 }
 
@@ -321,7 +353,9 @@ fn the_textbook_susceptance_is_measurably_further_from_the_baseline() {
         let network = DcOpfNetwork::from_pgm(input, &data, 50.0, approximation).unwrap();
         let opf = DcOpf::build(network, DcOpfOptions::default()).unwrap();
         let published = PUBLISHED_DC.iter().find(|(n, _)| *n == name).unwrap().1;
-        let objective = opf.interpret(&solver().solve(opf.problem()).unwrap()).objective;
+        let objective = opf
+            .interpret(&solver().solve(opf.problem()).unwrap())
+            .objective;
         (objective - published) / published
     };
 
@@ -374,7 +408,13 @@ fn two_bus(rate: Option<f64>) -> DcOpfNetwork {
     DcOpfNetwork {
         n_buses: 2,
         reference: 0,
-        branches: vec![DcBranch { index: 0, from: 0, to: 1, b: 10.0, shift: 0.0 }],
+        branches: vec![DcBranch {
+            index: 0,
+            from: 0,
+            to: 1,
+            b: 10.0,
+            shift: 0.0,
+        }],
         limits: HashMap::from([(0, rate)]),
         generators: vec![
             // $10/MWh on a 100 MVA base: 10 * 100 per per-unit MW.
@@ -383,7 +423,9 @@ fn two_bus(rate: Option<f64>) -> DcOpfNetwork {
                 bus: 0,
                 p_min: 0.0,
                 p_max: 2.0,
-                cost: Some(CostCurve::Polynomial { coefficients: vec![0.0, 1000.0] }),
+                cost: Some(CostCurve::Polynomial {
+                    coefficients: vec![0.0, 1000.0],
+                }),
             },
             // $30/MWh.
             DcGenerator {
@@ -391,7 +433,9 @@ fn two_bus(rate: Option<f64>) -> DcOpfNetwork {
                 bus: 1,
                 p_min: 0.0,
                 p_max: 2.0,
-                cost: Some(CostCurve::Polynomial { coefficients: vec![0.0, 3000.0] }),
+                cost: Some(CostCurve::Polynomial {
+                    coefficients: vec![0.0, 3000.0],
+                }),
             },
         ],
         loads: vec![DcLoad { bus: 1, p: 1.0 }],

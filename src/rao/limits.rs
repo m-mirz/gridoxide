@@ -57,11 +57,17 @@ fn cap(value: Option<usize>) -> usize {
 /// everything too; it would just stop reporting itself as unlimited, and the
 /// fast path that skips the whole check would quietly go unused.
 fn spend(limit: usize, used: usize) -> usize {
-    if limit == UNLIMITED { UNLIMITED } else { limit.saturating_sub(used) }
+    if limit == UNLIMITED {
+        UNLIMITED
+    } else {
+        limit.saturating_sub(used)
+    }
 }
 
 fn caps(map: &HashMap<String, usize>) -> HashMap<String, usize> {
-    map.iter().map(|(k, &v)| (k.clone(), cap(Some(v)))).collect()
+    map.iter()
+        .map(|(k, &v)| (k.clone(), cap(Some(v))))
+        .collect()
 }
 
 /// What a CRAC allows in one instant.
@@ -77,7 +83,10 @@ pub struct Limits {
 impl Limits {
     /// Everything allowed.
     pub fn unlimited() -> Self {
-        Self { max_ra: UNLIMITED, ..Default::default() }
+        Self {
+            max_ra: UNLIMITED,
+            ..Default::default()
+        }
     }
 
     /// The limits a CRAC declares for `instant`, or none.
@@ -156,7 +165,10 @@ impl Limits {
 }
 
 fn operators<'a>(crac: &'a Crac, chosen: &[usize]) -> Vec<&'a str> {
-    chosen.iter().filter_map(|&i| crac.network_actions[i].operator.as_deref()).collect()
+    chosen
+        .iter()
+        .filter_map(|&i| crac.network_actions[i].operator.as_deref())
+        .collect()
 }
 
 /// How many range actions one leaf may still move.
@@ -197,9 +209,7 @@ impl Budget {
         if moved.len() > self.max_ra {
             return false;
         }
-        let is = |i: usize, tso: &str| {
-            crac.range_actions[i].operator.as_deref() == Some(tso)
-        };
+        let is = |i: usize, tso: &str| crac.range_actions[i].operator.as_deref() == Some(tso);
         for (tso, &limit) in &self.max_ra_per_tso {
             if moved.iter().filter(|&&i| is(i, tso)).count() > limit {
                 return false;
@@ -210,7 +220,10 @@ impl Budget {
                 .iter()
                 .filter(|&&i| is(i, tso))
                 .filter(|&&i| {
-                    matches!(crac.range_actions[i].kind, super::crac::RangeActionKind::Pst { .. })
+                    matches!(
+                        crac.range_actions[i].kind,
+                        super::crac::RangeActionKind::Pst { .. }
+                    )
                 })
                 .count();
             if psts > limit {
@@ -236,7 +249,10 @@ mod tests {
             speed: None,
             activation_cost: None,
             elementary: (0..elementary)
-                .map(|i| ElementaryAction::Switch { element: format!("{id}-{i}"), open: true })
+                .map(|i| ElementaryAction::Switch {
+                    element: format!("{id}-{i}"),
+                    open: true,
+                })
                 .collect(),
             usage_rules: Vec::new(),
         }
@@ -256,7 +272,11 @@ mod tests {
                 initial_tap: 0,
                 tap_to_angle: Vec::new(),
             },
-            ranges: vec![Range { kind: RangeKind::Absolute, min: None, max: None }],
+            ranges: vec![Range {
+                kind: RangeKind::Absolute,
+                min: None,
+                max: None,
+            }],
             usage_rules: Vec::new(),
         }
     }
@@ -268,7 +288,11 @@ mod tests {
                 network_action("be-topo-2", "be", 3),
                 network_action("fr-topo", "fr", 1),
             ],
-            range_actions: vec![pst("be-pst-1", "be"), pst("be-pst-2", "be"), pst("fr-pst", "fr")],
+            range_actions: vec![
+                pst("be-pst-1", "be"),
+                pst("be-pst-2", "be"),
+                pst("fr-pst", "fr"),
+            ],
             ..Default::default()
         }
     }
@@ -288,7 +312,10 @@ mod tests {
         let crac = crac();
         let limits = limits();
         assert!(limits.admits(&crac, &[0]));
-        assert!(!limits.admits(&crac, &[0, 1]), "two BE topological actions, cap is one");
+        assert!(
+            !limits.admits(&crac, &[0, 1]),
+            "two BE topological actions, cap is one"
+        );
         // The cap is per TSO, so another operator's action is unaffected.
         assert!(limits.admits(&crac, &[0, 2]));
     }
@@ -296,7 +323,10 @@ mod tests {
     #[test]
     fn the_total_cap_counts_every_operator_together() {
         let crac = crac();
-        let limits = Limits { max_ra: 1, ..Limits::unlimited() };
+        let limits = Limits {
+            max_ra: 1,
+            ..Limits::unlimited()
+        };
         assert!(limits.admits(&crac, &[0]));
         assert!(!limits.admits(&crac, &[0, 2]));
     }
@@ -310,7 +340,10 @@ mod tests {
         let budget = limits().remaining(&crac, &[0]);
         assert_eq!(budget.max_ra, 2, "one of the three is spent");
         assert_eq!(budget.max_ra_per_tso["be"], 1, "BE spent one of its two");
-        assert_eq!(budget.max_pst_per_tso["be"], 1, "…but its shifter allowance is untouched");
+        assert_eq!(
+            budget.max_pst_per_tso["be"], 1,
+            "…but its shifter allowance is untouched"
+        );
 
         // So BE may still move one shifter, and only one.
         assert!(budget.admits(&crac, &[0]));
@@ -340,14 +373,16 @@ mod tests {
         let budget = limits().remaining(&crac, &[]);
         let all: Vec<usize> = (0..crac.range_actions.len()).collect();
         for mask in 0u32..(1 << all.len()) {
-            let subset: Vec<usize> =
-                all.iter().copied().filter(|&i| mask >> i & 1 == 1).collect();
+            let subset: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| mask >> i & 1 == 1)
+                .collect();
             if !budget.admits(&crac, &subset) {
                 continue;
             }
             for drop in &subset {
-                let smaller: Vec<usize> =
-                    subset.iter().copied().filter(|i| i != drop).collect();
+                let smaller: Vec<usize> = subset.iter().copied().filter(|i| i != drop).collect();
                 assert!(
                     budget.admits(&crac, &smaller),
                     "{subset:?} is admissible but {smaller:?} is not"

@@ -65,17 +65,28 @@ pub const DEFAULT_BASE_MVA: f64 = 100.0;
 pub enum UcteError {
     Io(std::io::Error),
     /// A record referred to a node that no `##N` record defines.
-    UnknownNode { record: String, node: String },
+    UnknownNode {
+        record: String,
+        node: String,
+    },
     /// A node code whose voltage-level character is not one of `0`–`9`.
-    BadVoltageLevel { node: String, code: char },
+    BadVoltageLevel {
+        node: String,
+        code: char,
+    },
     /// A line too short to hold even the fields that are mandatory.
-    TruncatedRecord { block: char, line: usize },
+    TruncatedRecord {
+        block: char,
+        line: usize,
+    },
     /// No node at all, so there is nothing to solve.
     NoNodes,
     /// A data record appeared before any `##` block header, so there is no way
     /// to know what it describes. The reference implementation rejects the
     /// same shape with "a node must be defined in a ##Z context".
-    DataOutsideBlock { line: usize },
+    DataOutsideBlock {
+        line: usize,
+    },
 }
 
 impl std::fmt::Display for UcteError {
@@ -355,12 +366,20 @@ impl<'a> Record<'a> {
 
     fn number(&self, from: usize, to: usize) -> Option<f64> {
         let s = self.trimmed(from, to);
-        if s.is_empty() { None } else { s.parse::<f64>().ok() }
+        if s.is_empty() {
+            None
+        } else {
+            s.parse::<f64>().ok()
+        }
     }
 
     fn integer(&self, from: usize, to: usize) -> Option<i32> {
         let s = self.trimmed(from, to);
-        if s.is_empty() { None } else { s.parse::<i32>().ok() }
+        if s.is_empty() {
+            None
+        } else {
+            s.parse::<i32>().ok()
+        }
     }
 
     fn char_at(&self, i: usize) -> Option<char> {
@@ -368,7 +387,9 @@ impl<'a> Record<'a> {
     }
 
     fn digit_at(&self, i: usize) -> Option<i32> {
-        self.char_at(i).and_then(|c| c.to_digit(10)).map(|d| d as i32)
+        self.char_at(i)
+            .and_then(|c| c.to_digit(10))
+            .map(|d| d as i32)
     }
 
     fn is_blank(&self) -> bool {
@@ -690,7 +711,10 @@ fn parse_transformer(record: &Record<'_>, line: usize) -> Result<RawBranch, Ucte
     })
 }
 
-fn parse_regulation(record: &Record<'_>, line: usize) -> Result<(String, RawRegulation), UcteError> {
+fn parse_regulation(
+    record: &Record<'_>,
+    line: usize,
+) -> Result<(String, RawRegulation), UcteError> {
     if record.raw.len() < 19 {
         return Err(UcteError::TruncatedRecord { block: 'R', line });
     }
@@ -807,8 +831,10 @@ fn convert(
 
     for (idx, node) in nodes.iter().enumerate() {
         let level = node.code.chars().nth(6).unwrap_or(' ');
-        let class = voltage_level_v(level)
-            .ok_or_else(|| UcteError::BadVoltageLevel { node: node.code.clone(), code: level })?;
+        let class = voltage_level_v(level).ok_or_else(|| UcteError::BadVoltageLevel {
+            node: node.code.clone(),
+            code: level,
+        })?;
         let u_rated = options
             .nominal_voltages
             .iter()
@@ -900,14 +926,18 @@ fn convert(
     let mut couplers = 0usize;
 
     for branch in &branches {
-        let node1 = *node_index.get(&branch.node1).ok_or_else(|| UcteError::UnknownNode {
-            record: branch.id.clone(),
-            node: branch.node1.clone(),
-        })?;
-        let node2 = *node_index.get(&branch.node2).ok_or_else(|| UcteError::UnknownNode {
-            record: branch.id.clone(),
-            node: branch.node2.clone(),
-        })?;
+        let node1 = *node_index
+            .get(&branch.node1)
+            .ok_or_else(|| UcteError::UnknownNode {
+                record: branch.id.clone(),
+                node: branch.node1.clone(),
+            })?;
+        let node2 = *node_index
+            .get(&branch.node2)
+            .ok_or_else(|| UcteError::UnknownNode {
+                record: branch.id.clone(),
+                node: branch.node2.clone(),
+            })?;
         // Lines keep the file's order. **Transformers are reversed**: UCTE
         // refers a transformer's impedance to its node-1 side and puts the tap
         // changer on node 2, whereas gridoxide's `branch_calc_param` — the
@@ -1060,10 +1090,15 @@ fn convert(
     }
 
     let unmatched = regulations.len().saturating_sub(
-        transformer_ids.iter().filter(|id| regulations.contains_key(*id)).count(),
+        transformer_ids
+            .iter()
+            .filter(|id| regulations.contains_key(*id))
+            .count(),
     );
     if unmatched > 0 {
-        notes.push(format!("{unmatched} `##R` record(s) matched no in-service transformer"));
+        notes.push(format!(
+            "{unmatched} `##R` record(s) matched no in-service transformer"
+        ));
     }
 
     let mut branch_ids = line_ids;
@@ -1105,12 +1140,25 @@ fn convert(
 /// for the same reason: the exact answer is a two-dimensional table indexed by
 /// both tap numbers, and no downstream consumer models a transformer with two
 /// independent changers. One vendored fixture out of 176 is affected.
-fn build_tap(nominal: f64, regulation: Option<&RawRegulation>) -> (Complex<f64>, Option<TapChanger>) {
+fn build_tap(
+    nominal: f64,
+    regulation: Option<&RawRegulation>,
+) -> (Complex<f64>, Option<TapChanger>) {
     let base = Complex::new(nominal, 0.0);
-    let Some(reg) = regulation else { return (base, None) };
+    let Some(reg) = regulation else {
+        return (base, None);
+    };
 
-    let ratio_at = |pos: i32| reg.ratio.map(|r| ratio_multiplier(&r, pos)).unwrap_or(Complex::new(1.0, 0.0));
-    let angle_at = |pos: i32| reg.angle.map(|a| angle_multiplier(&a, pos)).unwrap_or(Complex::new(1.0, 0.0));
+    let ratio_at = |pos: i32| {
+        reg.ratio
+            .map(|r| ratio_multiplier(&r, pos))
+            .unwrap_or(Complex::new(1.0, 0.0))
+    };
+    let angle_at = |pos: i32| {
+        reg.angle
+            .map(|a| angle_multiplier(&a, pos))
+            .unwrap_or(Complex::new(1.0, 0.0))
+    };
 
     // The angle regulation owns the tap table when present, since that is what
     // a phase-shifter remedial action moves.
@@ -1120,7 +1168,8 @@ fn build_tap(nominal: f64, regulation: Option<&RawRegulation>) -> (Complex<f64>,
         (None, None) => return (base, None),
     };
     if n <= 0 {
-        let tap = base * ratio_at(reg.ratio.map(|r| r.position).unwrap_or(0))
+        let tap = base
+            * ratio_at(reg.ratio.map(|r| r.position).unwrap_or(0))
             * angle_at(reg.angle.map(|a| a.position).unwrap_or(0));
         return (tap, None);
     }
@@ -1138,7 +1187,13 @@ fn build_tap(nominal: f64, regulation: Option<&RawRegulation>) -> (Complex<f64>,
         .collect();
 
     let position = position.clamp(-n, n);
-    let changer = TapChanger { low: -n, position, neutral: 0, steps, series: None };
+    let changer = TapChanger {
+        low: -n,
+        position,
+        neutral: 0,
+        steps,
+        series: None,
+    };
     let tap = changer.current().unwrap_or(base);
     (tap, Some(changer))
 }
@@ -1150,10 +1205,13 @@ fn choose_slack(
     notes: &mut Vec<String>,
 ) -> Result<usize, UcteError> {
     if let SlackPolicy::Node(code) = policy {
-        return node_index.get(code).copied().ok_or_else(|| UcteError::UnknownNode {
-            record: "slack policy".to_string(),
-            node: code.clone(),
-        });
+        return node_index
+            .get(code)
+            .copied()
+            .ok_or_else(|| UcteError::UnknownNode {
+                record: "slack policy".to_string(),
+                node: code.clone(),
+            });
     }
 
     // The file's own answer, if it gave one.
@@ -1170,7 +1228,9 @@ fn choose_slack(
             .enumerate()
             .filter(|(_, n)| filter(n) && n.generation_mw() > 0.0)
             .max_by(|(_, a), (_, b)| {
-                a.generation_mw().total_cmp(&b.generation_mw()).then_with(|| b.code.cmp(&a.code))
+                a.generation_mw()
+                    .total_cmp(&b.generation_mw())
+                    .then_with(|| b.code.cmp(&a.code))
             })
             .map(|(i, _)| i)
     };

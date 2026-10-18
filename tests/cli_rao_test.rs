@@ -13,7 +13,10 @@ use std::process::{Command, Output};
 mod openrao;
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide")).args(args).output().expect("run gridoxide")
+    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+        .args(args)
+        .output()
+        .expect("run gridoxide")
 }
 
 fn stdout(output: &Output) -> String {

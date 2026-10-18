@@ -2,7 +2,9 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 use gridoxide::types::BusType;
@@ -47,10 +49,15 @@ fn test_cgmes_svedala() {
     let ssh = dir.join("Svedala_SSH.xml");
     let tp = dir.join("Svedala_TP.xml");
     let sv = dir.join("Svedala_SV.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
-    assert_eq!(tn_mrids.len(), 191, "expected 191 physical TopologicalNode buses");
+    assert_eq!(
+        tn_mrids.len(),
+        191,
+        "expected 191 physical TopologicalNode buses"
+    );
     let expected = cgmes_common::expected_voltages(&ds);
 
     let s_base_va = 100e6;
@@ -58,10 +65,22 @@ fn test_cgmes_svedala() {
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
     // No closed switch needs merging here — unlike SmallGrid, this
     // fixture's own TP already fully pre-merges every one.
-    assert_eq!(buses.len(), 191, "expected no bus merging (TP already pre-merged)");
+    assert_eq!(
+        buses.len(),
+        191,
+        "expected no bus merging (TP already pre-merged)"
+    );
     assert_eq!(lines.len(), 90, "expected 90 ACLineSegment lines");
-    assert_eq!(transformers.len(), 53, "expected 53 two-winding transformers");
-    assert_eq!(shunts.len(), 46, "expected 46 LinearShuntCompensator shunts");
+    assert_eq!(
+        transformers.len(),
+        53,
+        "expected 53 two-winding transformers"
+    );
+    assert_eq!(
+        shunts.len(),
+        46,
+        "expected 46 LinearShuntCompensator shunts"
+    );
 
     // This fixture's own TopologicalIsland lists 108 of its 191 buses, so 83
     // are de-energized. This used to assert 78, which was five buses short:
@@ -72,8 +91,14 @@ fn test_cgmes_svedala() {
     // of them, `_f4cde1f4`, regulates a *remote* terminal, so it also pinned
     // an energized bus to its 21 kV target against the fixture's own published
     // 20.134 kV — Svedala's single worst deviation before this was fixed.
-    let n_deenergized = buses.iter().filter(|b| b.bus_type == BusType::Slack && b.voltage_mag == 0.0).count();
-    assert_eq!(n_deenergized, 83, "expected 83 de-energized (TopologicalIsland-absent) buses");
+    let n_deenergized = buses
+        .iter()
+        .filter(|b| b.bus_type == BusType::Slack && b.voltage_mag == 0.0)
+        .count();
+    assert_eq!(
+        n_deenergized, 83,
+        "expected 83 de-energized (TopologicalIsland-absent) buses"
+    );
 
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);

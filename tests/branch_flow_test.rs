@@ -15,9 +15,9 @@ mod common;
 
 use std::path::PathBuf;
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::network::{build_ybus, linear_initial_guess, stamp_shunts};
-use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network, PgmLineOutput};
+use gridoxide::pgm::{PgmLineOutput, node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
 use gridoxide::solver::{JacobianBackend, PersistentSolver};
 
 fn data_dir(rel: &str) -> PathBuf {
@@ -61,7 +61,10 @@ fn assert_branch_flows(fixture: &str, tol: f64) {
 
     let line_outputs: Vec<PgmLineOutput> =
         serde_json::from_value(expected["data"]["line"].clone()).expect("line output array");
-    assert!(!line_outputs.is_empty(), "{fixture}: fixture has no line output to check");
+    assert!(
+        !line_outputs.is_empty(),
+        "{fixture}: fixture has no line output to check"
+    );
 
     let mut checked = 0;
     for out in &line_outputs {

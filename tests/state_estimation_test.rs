@@ -36,16 +36,16 @@ mod common;
 use std::path::PathBuf;
 
 use gridoxide::measurement::measurements_from_pgm;
+use gridoxide::measurement::{Measurement, MeasurementKind, Target};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
-use gridoxide::measurement::{Measurement, MeasurementKind, Target};
+use gridoxide::se::SeNetwork;
 use gridoxide::se::bad_data;
-use gridoxide::se::measurement_functions;
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
-use gridoxide::se::nr::{estimate, linear_start, SeMethod, SeOptions, SeStatus};
+use gridoxide::se::measurement_functions;
+use gridoxide::se::nr::{SeMethod, SeOptions, SeStatus, estimate, linear_start};
 use gridoxide::se::observability::analyze;
-use gridoxide::se::SeNetwork;
 use gridoxide::solver::JacobianBackend;
 
 const S_BASE_VA: f64 = 1e6;
@@ -89,7 +89,12 @@ fn assert_estimate_matches_with(
 
     let mut buses = net.buses.clone();
     linear_start(&mut buses, &se_net, &measurements);
-    let options = SeOptions { backend, method, max_iter, ..SeOptions::default() };
+    let options = SeOptions {
+        backend,
+        method,
+        max_iter,
+        ..SeOptions::default()
+    };
     let report = estimate(&measurements, &mut buses, &se_net, &options);
 
     assert_eq!(
@@ -180,7 +185,11 @@ fn estimates_1os2msr_without_angle_measurements() {
 /// nothing at all rather than poisoning the gain matrix with a zero-weight row.
 #[test]
 fn estimates_with_an_infinite_sigma_measurement() {
-    assert_estimate_matches("inf-measurement-with-injection", JacobianBackend::Scalar, 1e-6);
+    assert_estimate_matches(
+        "inf-measurement-with-injection",
+        JacobianBackend::Scalar,
+        1e-6,
+    );
 }
 
 /// The largest fixture, with transformers as well as lines.
@@ -212,7 +221,11 @@ fn estimates_three_winding_transformer_side_sensors() {
 /// would not.
 #[test]
 fn estimates_from_an_asymmetric_voltage_phasor() {
-    assert_estimate_matches("single-node-source-asym-voltage-sensor", JacobianBackend::Scalar, 1e-6);
+    assert_estimate_matches(
+        "single-node-source-asym-voltage-sensor",
+        JacobianBackend::Scalar,
+        1e-6,
+    );
 }
 
 /// The same sensor without angles, which PGM reduces by the mean of the three
@@ -276,7 +289,13 @@ fn estimates_from_a_local_angle_current_sensor() {
 #[test]
 fn both_methods_agree_on_current_sensors() {
     for name in ["global-current-sensor", "local-current-sensor"] {
-        assert_estimate_matches_with(name, JacobianBackend::Scalar, SeMethod::IterativeLinear, 1e-6, 100);
+        assert_estimate_matches_with(
+            name,
+            JacobianBackend::Scalar,
+            SeMethod::IterativeLinear,
+            1e-6,
+            100,
+        );
     }
 }
 
@@ -319,7 +338,11 @@ fn a_flat_start_finds_the_wrong_basin_through_a_phase_shifting_transformer() {
     let (flat, flat_buses) = run(|b, _, m| gridoxide::se::nr::flat_start(b, m));
     let (linear, linear_buses) = run(gridoxide::se::nr::linear_start);
 
-    assert_eq!(flat.status, SeStatus::Converged, "the flat start does converge — that is the problem");
+    assert_eq!(
+        flat.status,
+        SeStatus::Converged,
+        "the flat start does converge — that is the problem"
+    );
     assert_eq!(linear.status, SeStatus::Converged);
 
     // The linear start finds the true optimum; the flat one finds a stationary
@@ -410,11 +433,18 @@ fn fixtures_are_observable_in_their_physical_unknowns() {
             &layout,
             &Constraints::new(&se_net),
         );
-        assert!(!report.skipped_numerical, "{name}: fixture should be small enough to analyze");
+        assert!(
+            !report.skipped_numerical,
+            "{name}: fixture should be small enough to analyze"
+        );
 
         // Physical nodes occupy the first `id_to_idx.len()` bus indices.
         let n_physical = id_to_idx.len();
-        for unknown in report.unobservable.iter().chain(&report.structurally_unmeasured) {
+        for unknown in report
+            .unobservable
+            .iter()
+            .chain(&report.structurally_unmeasured)
+        {
             assert!(
                 unknown.bus >= n_physical,
                 "{name}: physical bus {} ({:?}) is unobservable — report {report:?}",
@@ -552,9 +582,17 @@ fn the_two_methods_agree() {
         let solve = |method| {
             let mut buses = net.buses.clone();
             linear_start(&mut buses, &se_net, &measurements);
-            let options = SeOptions { method, max_iter: 100, ..SeOptions::default() };
+            let options = SeOptions {
+                method,
+                max_iter: 100,
+                ..SeOptions::default()
+            };
             let report = estimate(&measurements, &mut buses, &se_net, &options);
-            assert_eq!(report.status, SeStatus::Converged, "{name} [{method:?}]: {report:?}");
+            assert_eq!(
+                report.status,
+                SeStatus::Converged,
+                "{name} [{method:?}]: {report:?}"
+            );
             buses
         };
         let newton = solve(SeMethod::NewtonRaphson);
@@ -614,7 +652,9 @@ fn per_node_injections_survive_across_a_link() {
         for node in nodes {
             let id = node["id"].as_u64().expect("node id");
             let idx = net.node_idx[&id];
-            let (Some(p), Some(q)) = (node["p"].as_f64(), node["q"].as_f64()) else { continue };
+            let (Some(p), Some(q)) = (node["p"].as_f64(), node["q"].as_f64()) else {
+                continue;
+            };
 
             // power-grid-model's node injection: every appliance at the bus,
             // which for gridoxide means the bus injection plus the structural
@@ -644,7 +684,10 @@ fn per_node_injections_survive_across_a_link() {
             );
             checked += 1;
         }
-        assert!(checked >= 2, "{name}: expected both nodes of the link to be checked");
+        assert!(
+            checked >= 2,
+            "{name}: expected both nodes of the link to be checked"
+        );
 
         // And the endpoints really are distinct buses, asserted directly rather
         // than inferred from the numbers above.

@@ -42,8 +42,10 @@ mod capi {
         let generated = match generate(&manifest).map(inject_abi_version) {
             Some(text) => text,
             None => {
-                println!("cargo:warning=cbindgen could not parse src/capi; \
-                          include/gridoxide.h was left untouched");
+                println!(
+                    "cargo:warning=cbindgen could not parse src/capi; \
+                          include/gridoxide.h was left untouched"
+                );
                 return;
             }
         };
@@ -153,10 +155,11 @@ mod arpack {
     pub fn build() {
         let root = PathBuf::from(env::var("ARPACK_ROOT").unwrap_or_else(|_| "/usr".to_string()));
         let lib_dir = [
-            root.join("lib").join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
-                |_| "x86_64-linux-gnu".to_string(),
-                |arch| format!("{arch}-linux-gnu"),
-            )),
+            root.join("lib")
+                .join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
+                    |_| "x86_64-linux-gnu".to_string(),
+                    |arch| format!("{arch}-linux-gnu"),
+                )),
             root.join("lib"),
             root.join("lib64"),
             root.clone(),
@@ -217,10 +220,11 @@ mod ipopt {
         }
 
         let lib_dir = [
-            root.join("lib").join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
-                |_| "x86_64-linux-gnu".to_string(),
-                |arch| format!("{arch}-linux-gnu"),
-            )),
+            root.join("lib")
+                .join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
+                    |_| "x86_64-linux-gnu".to_string(),
+                    |arch| format!("{arch}-linux-gnu"),
+                )),
             root.join("lib"),
             root.join("lib64"),
         ]
@@ -269,7 +273,9 @@ mod ipopt {
         // installed header is the whole reason these bindings are generated:
         // a hard-coded guess would compile and then misread every index array
         // crossed.
-        let bindings = builder.generate().expect("failed to generate IPOPT FFI bindings");
+        let bindings = builder
+            .generate()
+            .expect("failed to generate IPOPT FFI bindings");
 
         bindings
             .write_to_file(out_dir.join("ipopt_bindings.rs"))
@@ -278,7 +284,10 @@ mod ipopt {
 
     fn find_gcc_builtin_include() -> Option<PathBuf> {
         let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
-        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        let output = std::process::Command::new(cc)
+            .arg("-print-file-name=include")
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -330,10 +339,11 @@ mod highs {
         // a from-source install uses a flat `lib/`. Probe both, as `pardiso`
         // probes `lib` and `lib/intel64`.
         let lib_dir = [
-            root.join("lib").join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
-                |_| "x86_64-linux-gnu".to_string(),
-                |arch| format!("{arch}-linux-gnu"),
-            )),
+            root.join("lib")
+                .join(env::var("CARGO_CFG_TARGET_ARCH").map_or_else(
+                    |_| "x86_64-linux-gnu".to_string(),
+                    |arch| format!("{arch}-linux-gnu"),
+                )),
             root.join("lib"),
             root.join("lib64"),
         ]
@@ -382,7 +392,9 @@ mod highs {
         // read that is the whole reason this is generated rather than
         // hand-written: hard-coding the wrong width would not fail to compile,
         // it would silently misread every index array handed across.
-        let bindings = builder.generate().expect("failed to generate HiGHS FFI bindings");
+        let bindings = builder
+            .generate()
+            .expect("failed to generate HiGHS FFI bindings");
 
         bindings
             .write_to_file(out_dir.join("highs_bindings.rs"))
@@ -391,7 +403,10 @@ mod highs {
 
     fn find_gcc_builtin_include() -> Option<PathBuf> {
         let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
-        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        let output = std::process::Command::new(cc)
+            .arg("-print-file-name=include")
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -448,8 +463,19 @@ mod klu {
         build.file(vendor.join("SuiteSparse_config/SuiteSparse_config.c"));
 
         for f in [
-            "amd_1", "amd_2", "amd_aat", "amd_control", "amd_defaults", "amd_dump", "amd_info",
-            "amd_order", "amd_post_tree", "amd_postorder", "amd_preprocess", "amd_valid", "amd_version",
+            "amd_1",
+            "amd_2",
+            "amd_aat",
+            "amd_control",
+            "amd_defaults",
+            "amd_dump",
+            "amd_info",
+            "amd_order",
+            "amd_post_tree",
+            "amd_postorder",
+            "amd_preprocess",
+            "amd_valid",
+            "amd_version",
         ] {
             build.file(vendor.join(format!("AMD/Source/{f}.c")));
         }
@@ -464,13 +490,37 @@ mod klu {
 
         for f in [
             // real (int32)
-            "klu", "klu_analyze", "klu_analyze_given", "klu_defaults", "klu_diagnostics", "klu_dump",
-            "klu_extract", "klu_factor", "klu_free_numeric", "klu_free_symbolic", "klu_kernel",
-            "klu_memory", "klu_refactor", "klu_scale", "klu_solve", "klu_sort", "klu_tsolve", "klu_version",
+            "klu",
+            "klu_analyze",
+            "klu_analyze_given",
+            "klu_defaults",
+            "klu_diagnostics",
+            "klu_dump",
+            "klu_extract",
+            "klu_factor",
+            "klu_free_numeric",
+            "klu_free_symbolic",
+            "klu_kernel",
+            "klu_memory",
+            "klu_refactor",
+            "klu_scale",
+            "klu_solve",
+            "klu_sort",
+            "klu_tsolve",
+            "klu_version",
             // complex (int32)
-            "klu_z", "klu_z_diagnostics", "klu_z_dump", "klu_z_extract", "klu_z_factor",
-            "klu_z_free_numeric", "klu_z_kernel", "klu_z_refactor", "klu_z_scale", "klu_z_solve",
-            "klu_z_sort", "klu_z_tsolve",
+            "klu_z",
+            "klu_z_diagnostics",
+            "klu_z_dump",
+            "klu_z_extract",
+            "klu_z_factor",
+            "klu_z_free_numeric",
+            "klu_z_kernel",
+            "klu_z_refactor",
+            "klu_z_scale",
+            "klu_z_solve",
+            "klu_z_sort",
+            "klu_z_tsolve",
         ] {
             build.file(vendor.join(format!("KLU/Source/{f}.c")));
         }
@@ -502,7 +552,9 @@ mod klu {
             builder = builder.clang_arg(format!("-I{}", gcc_builtin_include.display()));
         }
 
-        let bindings = builder.generate().expect("failed to generate KLU FFI bindings");
+        let bindings = builder
+            .generate()
+            .expect("failed to generate KLU FFI bindings");
 
         bindings
             .write_to_file(out_dir.join("klu_bindings.rs"))
@@ -511,7 +563,10 @@ mod klu {
 
     fn find_gcc_builtin_include() -> Option<PathBuf> {
         let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
-        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        let output = std::process::Command::new(cc)
+            .arg("-print-file-name=include")
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -590,7 +645,9 @@ mod pardiso {
             builder = builder.clang_arg(format!("-I{}", gcc_builtin_include.display()));
         }
 
-        let bindings = builder.generate().expect("failed to generate PARDISO FFI bindings");
+        let bindings = builder
+            .generate()
+            .expect("failed to generate PARDISO FFI bindings");
 
         bindings
             .write_to_file(out_dir.join("pardiso_bindings.rs"))
@@ -599,7 +656,10 @@ mod pardiso {
 
     fn find_gcc_builtin_include() -> Option<PathBuf> {
         let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
-        let output = std::process::Command::new(cc).arg("-print-file-name=include").output().ok()?;
+        let output = std::process::Command::new(cc)
+            .arg("-print-file-name=include")
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }

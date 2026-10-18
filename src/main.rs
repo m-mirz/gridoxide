@@ -14,21 +14,19 @@ use std::path::PathBuf;
 use gridoxide::ac_sensitivity::{AcSensitivity, Function, Variable};
 use gridoxide::branch_flow::Terminal;
 use gridoxide::json::NetworkData;
-use gridoxide::linear::{
-    dc_branches, dc_power_flow, DcApproximation, DcOptions, DcSensitivity,
-};
+use gridoxide::linear::{DcApproximation, DcOptions, DcSensitivity, dc_branches, dc_power_flow};
 use gridoxide::network::{build_ybus, stamp_shunts};
-use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
-use gridoxide::{run_power_flow, run_power_flow_analysis};
+use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
-use gridoxide::se::nr::{estimate, linear_start, SeMethod, SeOptions, SeStatus};
+use gridoxide::se::nr::{SeMethod, SeOptions, SeStatus, estimate, linear_start};
 use gridoxide::se::observability;
 use gridoxide::shortcircuit::{
-    short_circuit_from_pgm, SequenceValue, ShortCircuitOptions, VoltageScaling,
+    SequenceValue, ShortCircuitOptions, VoltageScaling, short_circuit_from_pgm,
 };
 use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::{run_power_flow, run_power_flow_analysis};
 
 const USAGE: &str = "\
 usage:
@@ -282,7 +280,11 @@ fn main() {
                 } else {
                     SeMethod::NewtonRaphson
                 };
-                let phases = if args.iter().any(|a| a == "--asymmetric") { 3 } else { 1 };
+                let phases = if args.iter().any(|a| a == "--asymmetric") {
+                    3
+                } else {
+                    1
+                };
                 if let Err(message) = run_estimate(path, method, phases) {
                     eprintln!("error: {message}");
                     std::process::exit(1);
@@ -443,7 +445,10 @@ fn power_flow_demo() {
     match report.stats.status {
         SolveStatus::Converged => println!("Converged in {} iterations", report.stats.iterations()),
         SolveStatus::MaxIterationsReached => {
-            println!("Failed to converge in {} iterations", report.stats.iterations())
+            println!(
+                "Failed to converge in {} iterations",
+                report.stats.iterations()
+            )
         }
         SolveStatus::Singular => println!("Jacobian is singular. Failed to solve."),
     }
@@ -460,19 +465,22 @@ fn power_flow_demo() {
 
     println!("\nIslands: {} connected component(s)", report.islands.len());
     for (i, island) in report.islands.iter().enumerate() {
-        println!("  island {i}: {} bus(es), status = {:?}", island.bus_indices.len(), island.status);
+        println!(
+            "  island {i}: {} bus(es), status = {:?}",
+            island.bus_indices.len(),
+            island.status
+        );
     }
 }
 
 /// Estimates the state of the grid in `path` and prints it, along with the two
 /// analyses that say whether the answer should be trusted.
 fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), String> {
-    use gridoxide::se::case::{SeCase, PHASE_NAMES};
+    use gridoxide::se::case::{PHASE_NAMES, SeCase};
 
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput =
-        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
 
     let case = if phases == 3 {
         SeCase::from_pgm_3ph(&input, s_base_va, 50.0)
@@ -483,7 +491,12 @@ fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), Strin
 
     let nodes = case.nodes();
     let n_physical = case.phases * nodes.len();
-    let SeCase { network: se_net, mut buses, measurements, .. } = case;
+    let SeCase {
+        network: se_net,
+        mut buses,
+        measurements,
+        ..
+    } = case;
 
     linear_start(&mut buses, &se_net, &measurements);
     // The linearized method converges linearly rather than quadratically, so it
@@ -497,13 +510,21 @@ fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), Strin
         &measurements,
         &mut buses,
         &se_net,
-        &SeOptions { method, max_iter, ..SeOptions::default() },
+        &SeOptions {
+            method,
+            max_iter,
+            ..SeOptions::default()
+        },
     );
 
     println!(
         "{} bus(es) ({}), {} measurement(s) after aggregation",
         buses.len(),
-        if phases == 3 { "phase domain, three per node" } else { "symmetric, one per node" },
+        if phases == 3 {
+            "phase domain, three per node"
+        } else {
+            "symmetric, one per node"
+        },
         measurements.len()
     );
     match report.status {
@@ -569,12 +590,20 @@ fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), Strin
     // The two lists overlap by design — a structurally unmeasured column is
     // also rank-deficient — so they are merged before printing rather than
     // reported twice.
-    let mut undetermined: Vec<_> =
-        obs.unobservable.iter().chain(&obs.structurally_unmeasured).copied().collect();
+    let mut undetermined: Vec<_> = obs
+        .unobservable
+        .iter()
+        .chain(&obs.structurally_unmeasured)
+        .copied()
+        .collect();
     undetermined.sort_by_key(|u| (u.bus, format!("{:?}", u.quantity)));
     undetermined.dedup();
     for unknown in undetermined {
-        let kind = if unknown.bus >= n_physical { "synthesized" } else { "physical" };
+        let kind = if unknown.bus >= n_physical {
+            "synthesized"
+        } else {
+            "physical"
+        };
         let where_ = if phases == 3 && unknown.bus < n_physical {
             format!(
                 "bus {} (node index {}, phase {})",
@@ -637,8 +666,9 @@ fn flag_value(args: &[String], flag: &str) -> Result<Option<String>, String> {
 }
 
 fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
-    let value: usize =
-        raw.parse().map_err(|_| format!("{flag}: {raw:?} is not a non-negative integer"))?;
+    let value: usize = raw
+        .parse()
+        .map_err(|_| format!("{flag}: {raw:?} is not a non-negative integer"))?;
     if value >= limit {
         return Err(format!("{flag}: {value} is out of range (0..{limit})"));
     }
@@ -712,15 +742,17 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     let solution = if flags.iter().any(|f| f == "--highs") {
         #[cfg(feature = "opf-highs")]
         {
-            let mut solver = gridoxide::opf::highs::HighsSolver::new()
-                .map_err(|e| e.to_string())?;
+            let mut solver =
+                gridoxide::opf::highs::HighsSolver::new().map_err(|e| e.to_string())?;
             solver.solve(opf.problem()).map_err(|e| e.to_string())?
         }
         #[cfg(not(feature = "opf-highs"))]
         {
-            return Err("--highs needs the `opf-highs` feature, which links a local \
+            return Err(
+                "--highs needs the `opf-highs` feature, which links a local \
                         HiGHS install (on Debian/Ubuntu, `apt install libhighs-dev`)"
-                .to_string());
+                    .to_string(),
+            );
         }
     } else {
         let mut solver = gridoxide::opf::ipm::IpmSolver::new();
@@ -807,16 +839,15 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
 /// together.
 #[cfg(feature = "opf")]
 fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::opf::OptStatus;
     use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
     use gridoxide::opf::model::OpfData;
-    use gridoxide::opf::OptStatus;
 
     let data_path = match flag_value(flags, "--data")? {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(path).with_extension("opf.json"),
     };
-    let network_text =
-        fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let network_text = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let data_text = fs::read_to_string(&data_path).map_err(|e| {
         format!(
             "reading {}: {e} — pass --data if the companion OPF document is elsewhere",
@@ -833,12 +864,13 @@ fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
         ..AcOpfOptions::default()
     };
     if let Some(raw) = flag_value(flags, "--max-iter")? {
-        options.nlp.max_iterations =
-            raw.parse().map_err(|_| format!("--max-iter: {raw:?} is not a number"))?;
+        options.nlp.max_iterations = raw
+            .parse()
+            .map_err(|_| format!("--max-iter: {raw:?} is not a number"))?;
     }
 
-    let network = AcOpfNetwork::from_pgm(input, &data, 50.0, &options)
-        .map_err(|e| e.to_string())?;
+    let network =
+        AcOpfNetwork::from_pgm(input, &data, 50.0, &options).map_err(|e| e.to_string())?;
     let n_buses = network.n_buses;
     let demand: f64 = network.p_load.iter().sum::<f64>() * network.base_mva;
     let opf = AcOpf::build(network, options).map_err(|e| e.to_string())?;
@@ -895,7 +927,11 @@ fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
 
     println!("\nlocational marginal price ($/MWh):");
     let min = result.lmp_p.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max = result.lmp_p.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let max = result
+        .lmp_p
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     if (max - min).abs() < 1e-6 {
         println!("  uniform at {min:.4} — nothing is congested");
     } else {
@@ -909,7 +945,9 @@ fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
     let mut loaded: Vec<(usize, f64, f64)> = Vec::new();
     for (flat, rate) in network.limits.iter() {
         let Some(rate) = rate else { continue };
-        let Some(&(p, q)) = result.flows.get(*flat) else { continue };
+        let Some(&(p, q)) = result.flows.get(*flat) else {
+            continue;
+        };
         let apparent = (p * p + q * q).sqrt() / base;
         if apparent > 0.99 * rate {
             loaded.push((*flat, apparent * base, rate * base));
@@ -973,7 +1011,7 @@ fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
 /// and how deep the voltage dipped are.
 #[cfg(feature = "dynamics")]
 fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
-    use gridoxide::dynamics::{json, run_dynamics, DynamicsOptions, DynamicsStatus};
+    use gridoxide::dynamics::{DynamicsOptions, DynamicsStatus, json, run_dynamics};
     use gridoxide::solver::JacobianBackend;
 
     let mut document = json::read(path).map_err(|e| e.to_string())?;
@@ -985,8 +1023,7 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
     if flags.iter().any(|f| f == "--no-speed-voltages") {
         document.dynamics.speed_voltages = false;
     }
-    let (mut system, events, relays) =
-        document.build_with_relays().map_err(|e| e.to_string())?;
+    let (mut system, events, relays) = document.build_with_relays().map_err(|e| e.to_string())?;
 
     // `--modes` asks a different question from a run, so it answers that one
     // and stops: not "what happens after this disturbance" but "what dynamic
@@ -1002,7 +1039,9 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
         None | Some("scalar") => JacobianBackend::Scalar,
         Some("klu-native") => JacobianBackend::KluNative,
         Some(other) => {
-            return Err(format!("--backend: expected scalar or klu-native, got {other:?}"))
+            return Err(format!(
+                "--backend: expected scalar or klu-native, got {other:?}"
+            ));
         }
     };
     let options = DynamicsOptions {
@@ -1070,11 +1109,20 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
         .map(|n| n.trim_end_matches(".omega").to_string())
         .collect();
     if !machines.is_empty() {
-        println!("\n{:<14}  {:>12}  {:>12}  {:>12}", "machine", "min speed", "max speed", "swing");
+        println!(
+            "\n{:<14}  {:>12}  {:>12}  {:>12}",
+            "machine", "min speed", "max speed", "swing"
+        );
         for id in &machines {
-            let omega = trajectory.series(&format!("{id}.omega")).unwrap_or_default();
-            let delta = trajectory.series(&format!("{id}.delta")).unwrap_or_default();
-            let (lo, hi) = omega.iter().fold((f64::MAX, f64::MIN), |(l, h), w| (l.min(*w), h.max(*w)));
+            let omega = trajectory
+                .series(&format!("{id}.omega"))
+                .unwrap_or_default();
+            let delta = trajectory
+                .series(&format!("{id}.delta"))
+                .unwrap_or_default();
+            let (lo, hi) = omega
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(l, h), w| (l.min(*w), h.max(*w)));
             let swing = delta
                 .iter()
                 .fold((f64::MAX, f64::MIN), |(l, h), d| (l.min(*d), h.max(*d)));
@@ -1085,7 +1133,11 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
         }
     }
 
-    let voltages: Vec<&String> = trajectory.names.iter().filter(|n| n.ends_with(".vmag")).collect();
+    let voltages: Vec<&String> = trajectory
+        .names
+        .iter()
+        .filter(|n| n.ends_with(".vmag"))
+        .collect();
     if !voltages.is_empty() {
         let mut lowest = (f64::MAX, String::new(), 0.0f64);
         for name in &voltages {
@@ -1131,7 +1183,11 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
             text.push('\n');
         }
         fs::write(&out, text).map_err(|e| format!("writing {out}: {e}"))?;
-        println!("wrote {} column(s) x {} row(s) to {out}", keep.len(), trajectory.rows.len());
+        println!(
+            "wrote {} column(s) x {} row(s) to {out}",
+            keep.len(),
+            trajectory.rows.len()
+        );
     }
 
     Ok(())
@@ -1139,8 +1195,10 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
 
 #[cfg(not(feature = "dynamics"))]
 fn run_dynamics_cli(_path: &str, _flags: &[String]) -> Result<(), String> {
-    Err("this build has no RMS dynamics; rebuild with `cargo build --features dynamics`"
-        .to_string())
+    Err(
+        "this build has no RMS dynamics; rebuild with `cargo build --features dynamics`"
+            .to_string(),
+    )
 }
 
 /// `gridoxide dynamics --modes` — the modes of the linearized system.
@@ -1158,7 +1216,11 @@ fn report_modes(
     let aimed = parse_shift(flags)?;
     let result = match aimed {
         Some(shift) => {
-            let opts = SmallSignalOptions { shift, count, ..SmallSignalOptions::default() };
+            let opts = SmallSignalOptions {
+                shift,
+                count,
+                ..SmallSignalOptions::default()
+            };
             smallsignal::analyze_near(system, &opts).map_err(|e| e.to_string())?
         }
         None => smallsignal::analyze(system).map_err(|e| e.to_string())?,
@@ -1208,7 +1270,11 @@ fn report_modes(
         // imaginary part is printed as zero too rather than as the `-1e-17` the
         // arithmetic left behind — the two columns should not contradict each
         // other over a rounding artefact.
-        let omega = if mode.is_oscillatory() { mode.eigenvalue.im } else { 0.0 };
+        let omega = if mode.is_oscillatory() {
+            mode.eigenvalue.im
+        } else {
+            0.0
+        };
         println!(
             "{:>+12.5} {:>+12.5}j  {:>9.4}  {:>10.4}  {tau:>9}  {:>9.1e}   {}",
             mode.eigenvalue.re,
@@ -1236,9 +1302,7 @@ fn report_modes(
             let shape: Vec<String> = shape
                 .into_iter()
                 .take(4)
-                .map(|(name, magnitude, phase)| {
-                    format!("{name} {magnitude:.2}∠{phase:+.0}°")
-                })
+                .map(|(name, magnitude, phase)| format!("{name} {magnitude:.2}∠{phase:+.0}°"))
                 .collect();
             println!("{:>73}   shape: {}", "", shape.join(", "));
         }
@@ -1306,15 +1370,17 @@ fn report_sensitivities(
         println!("\nno device carries a parameter a sensitivity can be taken with respect to");
         return Ok(());
     }
-    let mut sensitivities = smallsignal::sensitivities(system, &mode, &parameters)
-        .map_err(|e| e.to_string())?;
+    let mut sensitivities =
+        smallsignal::sensitivities(system, &mode, &parameters).map_err(|e| e.to_string())?;
 
     // Ranked by what a study is actually choosing between: how much damping a
     // change buys. Relative to the parameter's own size, since an inertia of
     // 5 s and a damping coefficient of 1 are not comparable per unit.
     sensitivities.sort_by(|a, b| {
         let (x, y) = (a.d_damping * a.value, b.d_damping * b.value);
-        y.abs().partial_cmp(&x.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        y.abs()
+            .partial_cmp(&x.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     println!(
@@ -1326,7 +1392,11 @@ fn report_sensitivities(
         "parameter", "value", "dlambda/dp", "dzeta/dp", "dzeta per 1%"
     );
     for s in sensitivities.iter().take(10) {
-        let name = format!("{}.{}", device_label(result, s.parameter.device), s.parameter.name);
+        let name = format!(
+            "{}.{}",
+            device_label(result, s.parameter.device),
+            s.parameter.name
+        );
         println!(
             "{name:>18}  {:>10.4}  {:>+12.5} {:>+12.5}j  {:>10.3e}  {:>12.3e}",
             s.value,
@@ -1344,10 +1414,7 @@ fn report_sensitivities(
 /// The state names are `unit.state`, and every state of one device shares the
 /// prefix, so the device's own name is recoverable without a second list.
 #[cfg(feature = "dynamics")]
-fn device_label(
-    result: &gridoxide::dynamics::smallsignal::SmallSignal,
-    device: usize,
-) -> String {
+fn device_label(result: &gridoxide::dynamics::smallsignal::SmallSignal, device: usize) -> String {
     let mut seen: Vec<&str> = Vec::new();
     for name in &result.state_names {
         let unit = name.split('.').next().unwrap_or(name);
@@ -1355,7 +1422,9 @@ fn device_label(
             seen.push(unit);
         }
     }
-    seen.get(device).map(|s| (*s).to_string()).unwrap_or_else(|| format!("device{device}"))
+    seen.get(device)
+        .map(|s| (*s).to_string())
+        .unwrap_or_else(|| format!("device{device}"))
 }
 
 /// Where `--modes` should look, if the caller said.
@@ -1378,9 +1447,9 @@ fn parse_shift(flags: &[String]) -> Result<Option<num_complex::Complex<f64>>, St
                         do not also give --modes-freq or --modes-damping"
                 .to_string());
         }
-        let (re, im) = near.split_once(',').ok_or_else(|| {
-            format!("--modes-near: expected <re>,<im>, got {near:?}")
-        })?;
+        let (re, im) = near
+            .split_once(',')
+            .ok_or_else(|| format!("--modes-near: expected <re>,<im>, got {near:?}"))?;
         let re: f64 = re
             .trim()
             .parse()
@@ -1394,33 +1463,37 @@ fn parse_shift(flags: &[String]) -> Result<Option<num_complex::Complex<f64>>, St
 
     match (freq, damping) {
         (None, None) => Ok(None),
-        (None, Some(_)) => Err(
-            "--modes-damping only says how far off the axis to aim; \
+        (None, Some(_)) => Err("--modes-damping only says how far off the axis to aim; \
              give --modes-freq to say where"
-                .to_string(),
-        ),
+            .to_string()),
         (Some(hz), zeta) => {
             if hz <= 0.0 {
-                return Err(format!("--modes-freq: expected a positive frequency, got {hz}"));
+                return Err(format!(
+                    "--modes-freq: expected a positive frequency, got {hz}"
+                ));
             }
-            Ok(Some(SmallSignalOptions::near_frequency(hz, zeta.unwrap_or(0.05)).shift))
+            Ok(Some(
+                SmallSignalOptions::near_frequency(hz, zeta.unwrap_or(0.05)).shift,
+            ))
         }
     }
 }
 
 /// `gridoxide qv` — a bus's reactive margin.
 fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
-    use gridoxide::qv::{qv_curve, QvOptions, QvStatus};
+    use gridoxide::qv::{QvOptions, QvStatus, qv_curve};
 
     let base_mva = parse_f64_flag(flags, "--base-mva")?.unwrap_or(100.0);
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput =
-        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, base_mva * 1e6, 50.0);
     let n = buses.len();
 
     let opts = QvOptions {
-        pf: PowerFlowOptions { max_iter: 60, ..Default::default() },
+        pf: PowerFlowOptions {
+            max_iter: 60,
+            ..Default::default()
+        },
         v_max: parse_f64_flag(flags, "--v-max")?.unwrap_or(1.10),
         v_min: parse_f64_flag(flags, "--v-min")?.unwrap_or(0.40),
         step: parse_f64_flag(flags, "--step")?.unwrap_or(0.01),
@@ -1447,7 +1520,11 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
         opts.v_max,
         opts.v_min,
         opts.step,
-        if opts.refine { ", minimum interpolated" } else { "" }
+        if opts.refine {
+            ", minimum interpolated"
+        } else {
+            ""
+        }
     );
 
     if let Some(bus) = one {
@@ -1468,18 +1545,30 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
         if flags.iter().any(|f| f == "--curve") {
             println!("\n     |V|      Q needed (MVAr)   iterations");
             for p in &curve.points {
-                println!("  {:7.4}   {:15.2}   {:5}", p.voltage, p.q * base_mva, p.iterations);
+                println!(
+                    "  {:7.4}   {:15.2}   {:5}",
+                    p.voltage,
+                    p.q * base_mva,
+                    p.iterations
+                );
             }
         }
         if !curve.failed.is_empty() {
-            println!("\n  {} setpoint(s) did not converge: {:?}", curve.failed.len(), curve.failed);
+            println!(
+                "\n  {} setpoint(s) did not converge: {:?}",
+                curve.failed.len(),
+                curve.failed
+            );
         }
         match (&curve.nose, &curve.status) {
             (Some(nose), QvStatus::NoseFound) => {
                 println!("\nreactive margin");
-                println!("  {:.2} MVAr, at |V| = {:.5}{}",
-                    nose.margin_mvar(base_mva), nose.voltage,
-                    if nose.refined { " (interpolated)" } else { "" });
+                println!(
+                    "  {:.2} MVAr, at |V| = {:.5}{}",
+                    nose.margin_mvar(base_mva),
+                    nose.voltage,
+                    if nose.refined { " (interpolated)" } else { "" }
+                );
             }
             (Some(bound), QvStatus::NoseNotReached) => {
                 println!(
@@ -1518,7 +1607,11 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
         println!(
             "  {bus:6}   {:13.2}   {v:11.5}{}",
             m * base_mva,
-            if *found { "" } else { "   (lower bound — curve still falling)" }
+            if *found {
+                ""
+            } else {
+                "   (lower bound — curve still falling)"
+            }
         );
     }
     if skipped > 0 {
@@ -1535,20 +1628,21 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
 fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::continuation::augmented::Parametrization;
     use gridoxide::continuation::{
-        run_continuation, ContinuationOptions, ContinuationStatus, CriticalPointKind,
-        CurveBranch, LoadingDirection, QLimitKind, StopCriterion,
+        ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch, LoadingDirection,
+        QLimitKind, StopCriterion, run_continuation,
     };
 
     let base_mva = parse_f64_flag(flags, "--base-mva")?.unwrap_or(100.0);
     let s_base_va = base_mva * 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput =
-        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
     let n = buses.len();
 
     let direction = match flag_value(flags, "--buses")? {
-        Some(list) => LoadingDirection::scale_buses(&buses, &parse_index_list(&list, "--buses", n)?),
+        Some(list) => {
+            LoadingDirection::scale_buses(&buses, &parse_index_list(&list, "--buses", n)?)
+        }
         None => LoadingDirection::scale_loads(&buses),
     };
     let direction = match flag_value(flags, "--pickup")? {
@@ -1574,7 +1668,7 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
         Some(other) => {
             return Err(format!(
                 "--parametrization: expected arclength, local or natural, got {other:?}"
-            ))
+            ));
         }
     };
     let target_lambda = parse_f64_flag(flags, "--target-lambda")?;
@@ -1587,7 +1681,10 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
     let opts = ContinuationOptions {
         direction: direction.clone(),
         parametrization,
-        stop: StopCriterion { target_lambda, trace_lower_branch: lower_branch },
+        stop: StopCriterion {
+            target_lambda,
+            trace_lower_branch: lower_branch,
+        },
         step: parse_f64_flag(flags, "--step")?.unwrap_or(0.1),
         max_steps: match flag_value(flags, "--max-steps")? {
             None => 200,
@@ -1655,7 +1752,11 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
                 bus,
                 p.tangent_lambda,
                 p.corrector_iterations,
-                if p.branch == CurveBranch::Upper { "upper" } else { "lower" }
+                if p.branch == CurveBranch::Upper {
+                    "upper"
+                } else {
+                    "lower"
+                }
             );
         }
     }
@@ -1666,7 +1767,11 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
         for (bus, limit, lambda) in &events {
             println!(
                 "  lambda {lambda:.6}: bus {bus} reached q_{} and stopped holding its voltage",
-                if *limit == QLimitKind::Max { "max" } else { "min" }
+                if *limit == QLimitKind::Max {
+                    "max"
+                } else {
+                    "min"
+                }
             );
         }
     }
@@ -1691,13 +1796,26 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
                      saturates, not a fold"
                 ),
             }
-            println!("  lambda_max      {:.6}  ({:.4}x the base load)", c.lambda_max, 1.0 + c.lambda_max);
-            println!("  margin          {:.1} MW  ({:.4} p.u.)", c.margin_mw, c.margin_pu);
-            println!("  load at limit   {:.1} MW (from {:.1} MW)",
-                c.p_load_nose_pu * base_mva, c.p_load_base_pu * base_mva);
+            println!(
+                "  lambda_max      {:.6}  ({:.4}x the base load)",
+                c.lambda_max,
+                1.0 + c.lambda_max
+            );
+            println!(
+                "  margin          {:.1} MW  ({:.4} p.u.)",
+                c.margin_mw, c.margin_pu
+            );
+            println!(
+                "  load at limit   {:.1} MW (from {:.1} MW)",
+                c.p_load_nose_pu * base_mva,
+                c.p_load_base_pu * base_mva
+            );
             println!("  weakest buses (share of the collapse mode):");
             for w in c.weakest.iter().take(5) {
-                println!("    bus {:5}  {:.3}   |V| = {:.4}", w.bus, w.participation, w.voltage_mag);
+                println!(
+                    "    bus {:5}  {:.3}   |V| = {:.4}",
+                    w.bus, w.participation, w.voltage_mag
+                );
             }
         }
     }
@@ -1707,8 +1825,7 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
 fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput =
-        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
 
     let terminal = match flag_value(flags, "--terminal")?.as_deref() {
@@ -1720,7 +1837,14 @@ fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
     // The linearization is only as meaningful as the point it is taken at, so
     // this refuses to differentiate a solve that did not converge rather than
     // printing derivatives of nothing.
-    let report = run_power_flow(buses, &lines, &transformers, &[], gridoxide::TapData::none(), PowerFlowOptions::default());
+    let report = run_power_flow(
+        buses,
+        &lines,
+        &transformers,
+        &[],
+        gridoxide::TapData::none(),
+        PowerFlowOptions::default(),
+    );
     if report.stats.status != SolveStatus::Converged {
         return Err(format!(
             "the power flow did not converge ({:?}), so there is no operating point to \
@@ -1745,12 +1869,18 @@ fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
         n_branches,
         report.stats.mismatch_history.len()
     );
-    println!("branch indices are lines first ({}), then transformers", lines.len());
+    println!(
+        "branch indices are lines first ({}), then transformers",
+        lines.len()
+    );
 
     let mut did_something = false;
 
     for (flag, make) in [
-        ("--dp", &Variable::ActiveInjection as &dyn Fn(usize) -> Variable),
+        (
+            "--dp",
+            &Variable::ActiveInjection as &dyn Fn(usize) -> Variable,
+        ),
         ("--dq", &Variable::ReactiveInjection),
     ] {
         if let Some(raw) = flag_value(flags, flag)? {
@@ -1760,7 +1890,10 @@ fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
         }
     }
     for (flag, make) in [
-        ("--dk", &Variable::TransformerRatio as &dyn Fn(usize) -> Variable),
+        (
+            "--dk",
+            &Variable::TransformerRatio as &dyn Fn(usize) -> Variable,
+        ),
         ("--dalpha", &Variable::PhaseShift),
     ] {
         if let Some(raw) = flag_value(flags, flag)? {
@@ -1860,8 +1993,7 @@ fn print_forward(
 fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput =
-        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
 
     let scaling = match flag_value(flags, "--scaling")?.as_deref() {
         None | Some("max") | Some("maximum") => VoltageScaling::Maximum,
@@ -1870,8 +2002,8 @@ fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
     };
     let opts = ShortCircuitOptions { scaling };
 
-    let (net, report) = short_circuit_from_pgm(&input, s_base_va, 50.0, opts)
-        .map_err(|e| format!("{e}"))?;
+    let (net, report) =
+        short_circuit_from_pgm(&input, s_base_va, 50.0, opts).map_err(|e| format!("{e}"))?;
 
     if report.faults.is_empty() {
         println!(
@@ -1991,8 +2123,7 @@ fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
 fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput =
-        serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (mut buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
 
     let approximation = if flags.iter().any(|a| a == "--ignore-g") {
@@ -2000,7 +2131,10 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
     } else {
         DcApproximation::IgnoreR
     };
-    let opts = DcOptions { approximation, ..DcOptions::default() };
+    let opts = DcOptions {
+        approximation,
+        ..DcOptions::default()
+    };
 
     let n_branches = lines.len() + transformers.len();
     let solution = dc_power_flow(&mut buses, &lines, &transformers, opts);
@@ -2050,7 +2184,11 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
 
     println!("\nbranch flows (at the from terminal):");
     for (i, p) in solution.branch_p.iter().enumerate() {
-        println!("  Branch {i:>4}: {:>12.6} p.u. = {:>10.3} MW", p, p * s_base_va / 1e6);
+        println!(
+            "  Branch {i:>4}: {:>12.6} p.u. = {:>10.3} MW",
+            p,
+            p * s_base_va / 1e6
+        );
     }
 
     let ptdf = flag_value(flags, "--ptdf")?;
@@ -2095,7 +2233,6 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-
 /// Lists a CGMES model's switching devices, and optionally solves with them
 /// retained as real elements.
 ///
@@ -2122,21 +2259,20 @@ fn run_switches(args: &[String]) -> Result<(), String> {
         other => {
             return Err(format!(
                 "--retain: unknown policy {other:?}, expected none, busbar_adjacent or all"
-            ))
+            ));
         }
     };
     let open = flag_value(flags, "--open")?;
     let solve = flags.iter().any(|a| a == "--solve");
 
-    let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| std::path::Path::new(p.as_str())).collect();
+    let path_refs: Vec<&std::path::Path> = paths
+        .iter()
+        .map(|p| std::path::Path::new(p.as_str()))
+        .collect();
     let ds = load_profiles(&path_refs).map_err(|e| format!("decoding CGMES profiles: {e}"))?;
-    let mut net = cgmes_node_breaker_to_buses_and_branches(
-        &ds,
-        100e6,
-        &policy,
-        SwitchTreatment::Regularize,
-    )
-    .map_err(|e| format!("converting CGMES model: {e}"))?;
+    let mut net =
+        cgmes_node_breaker_to_buses_and_branches(&ds, 100e6, &policy, SwitchTreatment::Regularize)
+            .map_err(|e| format!("converting CGMES model: {e}"))?;
 
     if let Some(wanted) = &open {
         let target = net
@@ -2149,7 +2285,9 @@ fn run_switches(args: &[String]) -> Result<(), String> {
                 format!("--open: no retained switch matches {wanted:?} (try --retain all)")
             })?;
         if !net.set_switch_open(target, true) {
-            return Err(format!("--open: switch {wanted} is degenerate, so its position is moot"));
+            return Err(format!(
+                "--open: switch {wanted} is degenerate, so its position is moot"
+            ));
         }
         println!("opened {}\n", net.switch_label(target));
     }
@@ -2177,7 +2315,11 @@ fn run_switches(args: &[String]) -> Result<(), String> {
         let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
         stamp_shunts(&mut ybus, &net.shunts);
         let report = gridoxide::run_power_flow_analysis_from_ybus(net.buses.clone(), ybus);
-        println!("\npower flow: {:?} in {} iteration(s)", report.stats.status, report.stats.iterations());
+        println!(
+            "\npower flow: {:?} in {} iteration(s)",
+            report.stats.status,
+            report.stats.iterations()
+        );
         let v = gridoxide::branch_flow::bus_voltages(&report.buses);
         Some(
             stamped
@@ -2190,20 +2332,34 @@ fn run_switches(args: &[String]) -> Result<(), String> {
     };
 
     println!();
-    print!("{:<40} {:<28} {:>6} {:>6} {:>7} {:>7}", "mrid", "kind", "bus", "bus", "state", "branch");
+    print!(
+        "{:<40} {:<28} {:>6} {:>6} {:>7} {:>7}",
+        "mrid", "kind", "bus", "bus", "state", "branch"
+    );
     if flows.is_some() {
         print!(" {:>12}", "P (MW)");
     }
     println!();
     for (n, (switch, branch)) in stamped.iter().enumerate() {
-        let r = net.view.retained().iter().find(|r| r.switch == *switch).expect("stamped");
+        let r = net
+            .view
+            .retained()
+            .iter()
+            .find(|r| r.switch == *switch)
+            .expect("stamped");
         print!(
             "{:<40} {:<28} {:>6} {:>6} {:>7} {:>7}",
             net.switch_label(*switch),
-            net.switch_kind(*switch).map(|k| format!("{k:?}")).unwrap_or_default(),
+            net.switch_kind(*switch)
+                .map(|k| format!("{k:?}"))
+                .unwrap_or_default(),
             r.buses[0].0,
             r.buses[1].0,
-            if net.is_switch_open(*switch).unwrap_or(false) { "open" } else { "closed" },
+            if net.is_switch_open(*switch).unwrap_or(false) {
+                "open"
+            } else {
+                "closed"
+            },
             branch,
         );
         if let Some(flows) = &flows {
@@ -2229,15 +2385,14 @@ fn run_switches(_args: &[String]) -> Result<(), String> {
 /// two is how a study silently passes because the CRAC failed to load.
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
 fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
-    use gridoxide::rao::{crac_json, evaluate, Network, Resolution};
+    use gridoxide::rao::{Network, Resolution, crac_json, evaluate};
 
-    let crac_path = flag_value(flags, "--crac")?
-        .ok_or("security needs --crac <crac.json>")?;
+    let crac_path = flag_value(flags, "--crac")?.ok_or("security needs --crac <crac.json>")?;
     let as_json = flags.iter().any(|f| f == "--json");
 
     let network = load_network_for_security(path)?;
-    let text = std::fs::read_to_string(&crac_path)
-        .map_err(|e| format!("reading {crac_path}: {e}"))?;
+    let text =
+        std::fs::read_to_string(&crac_path).map_err(|e| format!("reading {crac_path}: {e}"))?;
     // gridoxide's own companion document first, then OpenRAO's format. Trying
     // ours first means a malformed companion reports its own error rather than
     // the less helpful "document is not a CRAC".
@@ -2286,7 +2441,10 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
         );
     }
     if !result.skipped.is_empty() {
-        println!("warning: {} CNEC(s) skipped for want of their element", result.skipped.len());
+        println!(
+            "warning: {} CNEC(s) skipped for want of their element",
+            result.skipped.len()
+        );
     }
 
     for perimeter in &result.perimeters {
@@ -2296,7 +2454,11 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
             .contingency
             .map(|c| crac.contingencies[c].id.as_str())
             .unwrap_or("base case");
-        let severed = if perimeter.severed { "  [not screenable; re-solved]" } else { "" };
+        let severed = if perimeter.severed {
+            "  [not screenable; re-solved]"
+        } else {
+            ""
+        };
         println!(
             "\n{instant} / {contingency}: {} monitored, worst margin {:.1} MW{severed}",
             perimeter.cnecs.len(),
@@ -2316,7 +2478,11 @@ fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
     let violations = result.violations().count();
     println!(
         "\n{}: {violations} overload(s) across {} perimeter(s)",
-        if result.is_secure() { "SECURE" } else { "INSECURE" },
+        if result.is_secure() {
+            "SECURE"
+        } else {
+            "INSECURE"
+        },
         result.perimeters.len()
     );
     Ok(result.is_secure())
@@ -2426,18 +2592,28 @@ fn load_network_for_security(path: &str) -> Result<SecurityNetwork, String> {
 /// told apart by content rather than by name — a CGMES profile declares the CIM
 /// namespace in its first few hundred bytes, an IIDM document declares
 /// `http://www.powsybl.org/schema/iidm`.
-#[cfg(all(feature = "rao", feature = "cgmes", any(feature = "ucte", feature = "iidm")))]
+#[cfg(all(
+    feature = "rao",
+    feature = "cgmes",
+    any(feature = "ucte", feature = "iidm")
+))]
 fn is_cgmes_profile(path: &str) -> bool {
     if !path.to_ascii_lowercase().ends_with(".xml") {
         return false;
     }
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
     let head = &text[..text.len().min(4096)];
     head.contains("iec.ch/TC57") && !head.contains("powsybl.org/schema/iidm")
 }
 
 /// A CGMES model: the profiles beside `path`, converted and named.
-#[cfg(all(feature = "rao", feature = "cgmes", any(feature = "ucte", feature = "iidm")))]
+#[cfg(all(
+    feature = "rao",
+    feature = "cgmes",
+    any(feature = "ucte", feature = "iidm")
+))]
 fn load_cgmes_for_security(path: &str) -> Result<SecurityNetwork, String> {
     let dir = std::path::Path::new(path);
     let dir = if dir.is_dir() {
@@ -2532,7 +2708,10 @@ fn security_json(
     format!(
         "{{\n \"secure\": {},\n \"min_margin_mw\": {},\n \"unresolved\": {},\n \"skipped_cnecs\": {},\n \"perimeters\": [{perimeters}\n ]\n}}",
         result.is_secure(),
-        result.min_margin().map(|m| m.to_string()).unwrap_or("null".into()),
+        result
+            .min_margin()
+            .map(|m| m.to_string())
+            .unwrap_or("null".into()),
         resolution.unresolved.len(),
         result.skipped.len()
     )
@@ -2540,9 +2719,11 @@ fn security_json(
 
 #[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
 fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
-    Err("security needs the `rao` feature and an importer (`ucte` or `iidm`); \
+    Err(
+        "security needs the `rao` feature and an importer (`ucte` or `iidm`); \
          rebuild with `--features rao,ucte`"
-        .to_string())
+            .to_string(),
+    )
 }
 
 /// Counts by name, in a stable order — a `HashMap`'s iteration order is
@@ -2564,13 +2745,15 @@ fn sorted_counts(counts: &std::collections::HashMap<String, usize>) -> Vec<(&Str
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
 fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     use gridoxide::opf::ipm::IpmSolver;
-    use gridoxide::rao::{crac_json, Network, Resolution, SearchOptions};
+    use gridoxide::rao::{Network, Resolution, SearchOptions, crac_json};
 
     let crac_path = flag_value(flags, "--crac")?.ok_or("rao needs --crac <crac.json>")?;
     let depth_flag = flag_value(flags, "--depth")?;
     let depth_given = depth_flag.is_some();
     let depth = match depth_flag {
-        Some(value) => value.parse::<usize>().map_err(|_| format!("bad --depth `{value}`"))?,
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| format!("bad --depth `{value}`"))?,
         None => 2,
     };
     let parameters_path = flag_value(flags, "--parameters")?;
@@ -2578,8 +2761,8 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     let validate_ac = flags.iter().any(|f| f == "--validate-ac");
 
     let network = load_network_for_security(path)?;
-    let text = std::fs::read_to_string(&crac_path)
-        .map_err(|e| format!("reading {crac_path}: {e}"))?;
+    let text =
+        std::fs::read_to_string(&crac_path).map_err(|e| format!("reading {crac_path}: {e}"))?;
     // The reader's report travels with the CRAC. Dropping it — which this used
     // to do, with `?.0` — means a remedial action the reader could not resolve
     // is simply absent from the optimization while every margin still looks
@@ -2618,15 +2801,18 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     // should beat a file they pointed at.
     let options = match parameters_path {
         Some(path) => {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("reading {path}: {e}"))?;
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))?;
             let mut options = gridoxide::rao::parameters::from_json(&text);
             if depth_given {
                 options.max_depth = depth;
             }
             options
         }
-        None => SearchOptions { max_depth: depth, ..Default::default() },
+        None => SearchOptions {
+            max_depth: depth,
+            ..Default::default()
+        },
     };
 
     // A cost objective's LP is one violation column per CNEC priced against
@@ -2635,8 +2821,9 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     // backend. Say so rather than answering by margin without a word.
     let costly = options.linear.objective_kind.costly().is_some();
     #[cfg(feature = "opf-highs")]
-    let mut highs =
-        costly.then(|| gridoxide::opf::highs::HighsSolver::new().ok()).flatten();
+    let mut highs = costly
+        .then(|| gridoxide::opf::highs::HighsSolver::new().ok())
+        .flatten();
     let mut ipm = IpmSolver::new();
     #[cfg(feature = "opf-highs")]
     let have_mip = highs.is_some();
@@ -2662,9 +2849,12 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     // that never changes the plan — it only decides whether to believe it.
     let validation = validate_ac.then(|| {
         use gridoxide::rao::evaluate::AcOptions;
-        use gridoxide::rao::validate::{validate, ValidationOptions};
+        use gridoxide::rao::validate::{ValidationOptions, validate};
         let options = ValidationOptions {
-            ac: AcOptions { shunts: &network.shunts, ..Default::default() },
+            ac: AcOptions {
+                shunts: &network.shunts,
+                ..Default::default()
+            },
             ..Default::default()
         };
         validate(&crac, &view, &resolution, &plan, &options)
@@ -2752,15 +2942,24 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
 
     println!(
         "\n{}: worst margin {:.1} MW (was {:.1})",
-        if plan.is_secure() { "SECURE" } else { "INSECURE" },
+        if plan.is_secure() {
+            "SECURE"
+        } else {
+            "INSECURE"
+        },
         plan.final_margin_mw,
         plan.initial_margin_mw
     );
 
-    let Some(validation) = validation else { return Ok(plan.is_secure()) };
+    let Some(validation) = validation else {
+        return Ok(plan.is_secure());
+    };
 
     use gridoxide::rao::validate::Verdict;
-    println!("\nAC re-validation: worst margin {:.1} MW", validation.ac_margin_mw);
+    println!(
+        "\nAC re-validation: worst margin {:.1} MW",
+        validation.ac_margin_mw
+    );
     for p in &validation.perimeters {
         let instant = p
             .states
@@ -2787,7 +2986,11 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
 /// A finite float, or `null` for an infinity JSON cannot represent.
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
 fn json_number(value: f64) -> String {
-    if value.is_finite() { value.to_string() } else { "null".to_string() }
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
+    }
 }
 
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
@@ -2860,7 +3063,10 @@ fn rao_json(
     let mut body = vec![format!("\n  {}", one(&plan.preventive, None))];
     for scenario in &plan.scenarios {
         for perimeter in &scenario.perimeters {
-            body.push(format!("\n  {}", one(perimeter, Some(scenario.contingency))));
+            body.push(format!(
+                "\n  {}",
+                one(perimeter, Some(scenario.contingency))
+            ));
         }
     }
     // Absent unless asked for, rather than present and null: a consumer that
@@ -2915,9 +3121,11 @@ fn rao_json(
 
 #[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
 fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
-    Err("rao needs the `rao` feature and an importer (`ucte` or `iidm`); \
+    Err(
+        "rao needs the `rao` feature and an importer (`ucte` or `iidm`); \
          rebuild with `--features rao,ucte`"
-        .to_string())
+            .to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -3012,9 +3220,17 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
             shunts: n.shunts,
             areas: (
                 n.areas.of_bus.clone(),
-                n.areas.ids.iter().map(|(id, name)| {
-                    if name.trim().is_empty() { id.clone() } else { name.trim().to_string() }
-                }).collect(),
+                n.areas
+                    .ids
+                    .iter()
+                    .map(|(id, name)| {
+                        if name.trim().is_empty() {
+                            id.clone()
+                        } else {
+                            name.trim().to_string()
+                        }
+                    })
+                    .collect(),
             ),
             area_targets: n.areas.targets.clone(),
             tap_changers: n.tap_changers,
@@ -3034,7 +3250,11 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
         // rest of the set — which is how every conformity configuration is
         // laid out, and how a user actually has them on disk.
         let dir = std::path::Path::new(path);
-        let dir = if dir.is_dir() { dir.to_path_buf() } else { dir.parent().unwrap_or(dir).to_path_buf() };
+        let dir = if dir.is_dir() {
+            dir.to_path_buf()
+        } else {
+            dir.parent().unwrap_or(dir).to_path_buf()
+        };
         let mut profiles: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
             .map_err(|e| format!("reading {}: {e}", dir.display()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -3080,7 +3300,10 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
         let machines = net.voltage_control.machines;
         let nonregulating_q = net.voltage_control.nonregulating_q;
         return Ok(SolveNetwork {
-            areas: (areas.of_bus, areas.ids.into_iter().map(|(_, n)| n).collect()),
+            areas: (
+                areas.of_bus,
+                areas.ids.into_iter().map(|(_, n)| n).collect(),
+            ),
             area_targets: areas.targets,
             buses: net.buses,
             lines: net.lines,
@@ -3110,13 +3333,17 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     let number = |flag: &str, default: f64| -> Result<f64, String> {
         match flag_value(flags, flag)? {
             None => Ok(default),
-            Some(raw) => raw.parse().map_err(|_| format!("{flag}: {raw:?} is not a number")),
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| format!("{flag}: {raw:?} is not a number")),
         }
     };
     let count = |flag: &str, default: usize| -> Result<usize, String> {
         match flag_value(flags, flag)? {
             None => Ok(default),
-            Some(raw) => raw.parse().map_err(|_| format!("{flag}: {raw:?} is not an integer")),
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| format!("{flag}: {raw:?} is not an integer")),
         }
     };
 
@@ -3125,10 +3352,12 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     let distribute = flags.iter().any(|f| f == "--distribute-slack");
     let area_control = flags.iter().any(|f| f == "--area-interchange");
     if distribute && area_control {
-        return Err("--distribute-slack and --area-interchange cannot both be given: area \
+        return Err(
+            "--distribute-slack and --area-interchange cannot both be given: area \
                     interchange subsumes distributed slack (one area with a zero target *is* \
                     distributed slack)"
-            .to_string());
+                .to_string(),
+        );
     }
     let tol = number("--tol", 1e-8)?;
     let max_iter = count("--max-iter", 30)?;
@@ -3142,8 +3371,8 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
         println!("note: {note}");
     }
 
-    let distribution = distribute
-        .then(|| gridoxide::outerloop::SlackDistribution::uniform(&net.buses));
+    let distribution =
+        distribute.then(|| gridoxide::outerloop::SlackDistribution::uniform(&net.buses));
     let (of_bus, area_names) = net.areas.clone();
     let area_definition = if area_control {
         if area_names.is_empty() {
@@ -3175,8 +3404,13 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
         &net.lines,
         &net.transformers,
         &net.shunts,
-        gridoxide::TapData { changers: &net.tap_changers, regulation: &net.regulation },
-        gridoxide::RemoteControlData { machines: &net.machines },
+        gridoxide::TapData {
+            changers: &net.tap_changers,
+            regulation: &net.regulation,
+        },
+        gridoxide::RemoteControlData {
+            machines: &net.machines,
+        },
         PowerFlowOptions {
             control_taps,
             control_remote_voltage: remote_voltage,
@@ -3212,7 +3446,11 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
             trivial_buses += island.bus_indices.len();
             continue;
         }
-        println!("  island {i}: {} bus(es), {:?}", island.bus_indices.len(), island.status);
+        println!(
+            "  island {i}: {} bus(es), {:?}",
+            island.bus_indices.len(),
+            island.status
+        );
     }
     if trivial > 0 {
         println!("  ... and {trivial} de-energized island(s) covering {trivial_buses} bus(es)");
@@ -3225,16 +3463,23 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
                  is nothing to attribute (only CGMES does)"
             );
         } else {
-            let mut y = gridoxide::network::build_ybus(net.buses.len(), &net.lines, &net.transformers);
+            let mut y =
+                gridoxide::network::build_ybus(net.buses.len(), &net.lines, &net.transformers);
             gridoxide::network::stamp_shunts(&mut y, &net.shunts);
             let ybus = y.finish();
             let split = gridoxide::dispatch::allocate(
-                &net.machines, &net.nonregulating_q, &report.buses, &ybus);
+                &net.machines,
+                &net.nonregulating_q,
+                &report.buses,
+                &ybus,
+            );
 
             let base_mva = net.s_base_va / 1e6;
             let shared: Vec<_> = split.iter().filter(|b| b.machines.len() > 1).collect();
-            let unattributed: Vec<_> =
-                split.iter().filter(|b| b.unattributed.abs() > 1e-6).collect();
+            let unattributed: Vec<_> = split
+                .iter()
+                .filter(|b| b.unattributed.abs() > 1e-6)
+                .collect();
             println!(
                 "\nreactive dispatch: {} machine(s) over {} regulated bus(es), {} of them held \
                  by more than one",
@@ -3297,25 +3542,42 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
                 r.total_iterations,
                 r.solves,
                 r.converged,
-                if r.budget_exhausted { " (budget exhausted)" } else { "" }
+                if r.budget_exhausted {
+                    " (budget exhausted)"
+                } else {
+                    ""
+                }
             );
             for l in &r.loops {
-                println!("  {:<26} {:>3} iteration(s)  {:?}", l.name, l.iterations, l.status);
+                println!(
+                    "  {:<26} {:>3} iteration(s)  {:?}",
+                    l.name, l.iterations, l.status
+                );
             }
         }
         if !outer.remote.is_empty() {
-            println!("\nremote voltage control: {} machine(s)", outer.remote.len());
+            println!(
+                "\nremote voltage control: {} machine(s)",
+                outer.remote.len()
+            );
             for r in &outer.remote {
                 println!(
                     "  {:<40} bus {} holds bus {}: reached {:.5} against {:.5} in {} move(s), {:?}",
-                    r.machine, r.controller_bus, r.controlled_bus, r.reached, r.target, r.moves,
+                    r.machine,
+                    r.controller_bus,
+                    r.controlled_bus,
+                    r.reached,
+                    r.target,
+                    r.moves,
                     r.outcome
                 );
             }
             // The network solved is not quite the one handed over, which is
             // worth saying rather than leaving to be noticed.
             for (bus, from, to) in &outer.retyped {
-                println!("  bus {bus} re-typed {from:?} -> {to:?} to put the control on the machine");
+                println!(
+                    "  bus {bus} re-typed {from:?} -> {to:?} to put the control on the machine"
+                );
             }
         }
         if !outer.q_limit_switches.is_empty() {
@@ -3349,7 +3611,11 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
                     name,
                     a.interchange.get(i).copied().unwrap_or(0.0) * net.s_base_va / 1e6,
                     a.residual.get(i).copied().unwrap_or(0.0) * net.s_base_va / 1e6,
-                    if dependent { "  (dependent: takes the residual)" } else { "" }
+                    if dependent {
+                        "  (dependent: takes the residual)"
+                    } else {
+                        ""
+                    }
                 );
             }
             for (area, why) in &a.unbalanced {
@@ -3403,7 +3669,9 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
 
 #[cfg(not(any(feature = "ucte", feature = "iidm", feature = "cgmes")))]
 fn run_solve(_path: &str, _flags: &[String]) -> Result<(), String> {
-    Err("solve needs an importer feature (`cgmes`, `ucte` or `iidm`); \
+    Err(
+        "solve needs an importer feature (`cgmes`, `ucte` or `iidm`); \
          rebuild with `--features cgmes`"
-        .to_string())
+            .to_string(),
+    )
 }

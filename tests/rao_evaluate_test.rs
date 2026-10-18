@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use gridoxide::rao::crac::*;
-use gridoxide::rao::{crac_json, evaluate, Network, Resolution};
+use gridoxide::rao::{Network, Resolution, crac_json, evaluate};
 use gridoxide::ucte;
 
 mod openrao;
@@ -29,7 +29,9 @@ fn rao_fixture(name: &str) -> PathBuf {
 
 /// pypowsybl's solution for a UCTE fixture, written by `scripts/bench/ucte_reference.py`.
 fn reference_file(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/ucte")
+        .join(name)
 }
 
 struct Case {
@@ -84,7 +86,10 @@ fn ids_match_with_or_without_ucte_column_padding() {
     // exactly would leave every CNEC unresolved on half the corpus.
     let c = case();
     let padded = c.net.branch_ids[0].clone();
-    assert!(padded.contains("  "), "fixture should have padded ids: {padded:?}");
+    assert!(
+        padded.contains("  "),
+        "fixture should have padded ids: {padded:?}"
+    );
 
     let crac = Crac {
         flow_cnecs: vec![FlowCnec {
@@ -99,11 +104,18 @@ fn ids_match_with_or_without_ucte_column_padding() {
             i_max: None,
             nominal_v: None,
         }],
-        instants: vec![Instant { id: "preventive".into(), kind: InstantKind::Preventive }],
+        instants: vec![Instant {
+            id: "preventive".into(),
+            kind: InstantKind::Preventive,
+        }],
         ..Default::default()
     };
     let resolution = Resolution::new(&crac, &c.net.branch_ids);
-    assert!(resolution.is_complete(), "trimmed id did not match: {:?}", resolution.unresolved);
+    assert!(
+        resolution.is_complete(),
+        "trimmed id did not match: {:?}",
+        resolution.unresolved
+    );
 }
 
 #[test]
@@ -203,8 +215,13 @@ fn base_case_flows_are_the_dc_solution() {
     use gridoxide::linear::btheta::dc_power_flow;
     let c = case();
     let mut buses = c.net.buses.clone();
-    let expected =
-        dc_power_flow(&mut buses, &c.net.lines, &c.net.transformers, Default::default()).branch_p;
+    let expected = dc_power_flow(
+        &mut buses,
+        &c.net.lines,
+        &c.net.transformers,
+        Default::default(),
+    )
+    .branch_p;
 
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
     let result = evaluate(&c.crac, &c.network(), &resolution);
@@ -215,7 +232,12 @@ fn base_case_flows_are_the_dc_solution() {
         .expect("a preventive perimeter");
     for r in &preventive.cnecs {
         let want = expected[r.branch] * c.net.base_mva;
-        assert!((r.flow_mw - want).abs() < 1e-9, "branch {}: {} vs {want}", r.branch, r.flow_mw);
+        assert!(
+            (r.flow_mw - want).abs() < 1e-9,
+            "branch {}: {} vs {want}",
+            r.branch,
+            r.flow_mw
+        );
     }
 }
 
@@ -244,7 +266,9 @@ fn screened_outage_flows_match_a_full_resolve() {
         if sensitivity.is_breaking_set(&[outage]) {
             continue;
         }
-        let Some(screened) = sensitivity.multi_outage_flows(&base, &[outage]) else { continue };
+        let Some(screened) = sensitivity.multi_outage_flows(&base, &[outage]) else {
+            continue;
+        };
 
         // Re-solve with that line effectively removed.
         let mut lines = c.net.lines.clone();
@@ -276,7 +300,11 @@ fn a_contingency_actually_changes_the_flows() {
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
     let result = evaluate(&c.crac, &c.network(), &resolution);
 
-    let preventive = result.perimeters.iter().find(|p| p.state.is_preventive()).unwrap();
+    let preventive = result
+        .perimeters
+        .iter()
+        .find(|p| p.state.is_preventive())
+        .unwrap();
     let outage = result
         .perimeters
         .iter()
@@ -287,10 +315,17 @@ fn a_contingency_actually_changes_the_flows() {
         .cnecs
         .iter()
         .filter_map(|a| {
-            preventive.cnecs.iter().find(|b| b.branch == a.branch).map(|b| (a.flow_mw, b.flow_mw))
+            preventive
+                .cnecs
+                .iter()
+                .find(|b| b.branch == a.branch)
+                .map(|b| (a.flow_mw, b.flow_mw))
         })
         .collect();
-    assert!(!shared.is_empty(), "no branch is monitored in both perimeters");
+    assert!(
+        !shared.is_empty(),
+        "no branch is monitored in both perimeters"
+    );
     assert!(
         shared.iter().any(|(a, b)| (a - b).abs() > 1.0),
         "the contingency moved nothing: {shared:?}"
@@ -309,7 +344,12 @@ fn every_state_the_crac_defines_gets_a_perimeter() {
         );
     }
     // Preventive first, then by instant — the order an optimization visits them.
-    assert!(result.perimeters.windows(2).all(|w| w[0].state.instant <= w[1].state.instant));
+    assert!(
+        result
+            .perimeters
+            .windows(2)
+            .all(|w| w[0].state.instant <= w[1].state.instant)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +386,10 @@ fn a_margin_is_the_distance_to_the_nearer_bound() {
             }
         }
     }
-    assert!(one_sided > 0, "this fixture should exercise a one-sided threshold");
+    assert!(
+        one_sided > 0,
+        "this fixture should exercise a one-sided threshold"
+    );
 }
 
 #[test]
@@ -357,9 +400,7 @@ fn direction_does_not_change_whether_a_branch_is_overloaded() {
     let c = case();
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
     let result = evaluate(&c.crac, &c.network(), &resolution);
-    let negative_and_violated = result
-        .violations()
-        .any(|(_, r)| r.flow_mw < 0.0);
+    let negative_and_violated = result.violations().any(|(_, r)| r.flow_mw < 0.0);
     assert!(
         negative_and_violated,
         "this fixture has a violated branch flowing backwards; none was found"
@@ -381,7 +422,10 @@ fn the_worst_margin_is_reported_across_every_perimeter() {
     assert!((worst - by_hand).abs() < 1e-12);
     assert_eq!(result.is_secure(), worst >= 0.0);
     // This fixture is genuinely insecure, which is what makes it useful.
-    assert!(!result.is_secure(), "the fixture should have violations to find");
+    assert!(
+        !result.is_secure(),
+        "the fixture should have violations to find"
+    );
 }
 
 #[test]
@@ -396,7 +440,11 @@ fn a_severing_contingency_is_flagged_rather_than_silently_wrong() {
     let resolution = Resolution::new(&crac, &c.net.branch_ids);
     let result = evaluate(&crac, &c.network(), &resolution);
     assert!(
-        result.perimeters.iter().filter(|p| p.state.contingency.is_some()).all(|p| p.severed),
+        result
+            .perimeters
+            .iter()
+            .filter(|p| p.state.contingency.is_some())
+            .all(|p| p.severed),
         "an unsimulatable contingency must be flagged"
     );
 }
@@ -442,9 +490,11 @@ fn ac_currents_match_the_reference_load_flow() {
     let c = case();
     let reference = reference_flows("TestCase12Nodes.pypowsybl.json");
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
-    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
-    let result =
-        evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
+    let ac = evaluate::AcOptions {
+        shunts: &c.net.shunts,
+        ..Default::default()
+    };
+    let result = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
 
     let base = result
         .perimeters
@@ -476,7 +526,9 @@ fn ac_currents_match_the_reference_load_flow() {
         let bus = c.net.lines.get(cnec.branch).map(|l| l.from);
         if let Some(bus) = bus {
             let code = c.net.node_codes[bus].trim().to_string();
-            let Some(v_pu) = reference_voltages.get(&code) else { continue };
+            let Some(v_pu) = reference_voltages.get(&code) else {
+                continue;
+            };
             let u = c.net.buses[bus].u_rated * v_pu;
             let expected = p1.hypot(*q1) * 1e6 / (3f64.sqrt() * u);
             assert!(
@@ -487,13 +539,22 @@ fn ac_currents_match_the_reference_load_flow() {
             checked += 1;
         }
     }
-    assert!(checked >= 3, "expected several comparable branches, got {checked}");
+    assert!(
+        checked >= 3,
+        "expected several comparable branches, got {checked}"
+    );
 
     // Converting at nominal instead of at the solved voltage would still pass a
     // loose tolerance on a flat network, so assert the fixture is not flat: the
     // rule under test only has teeth where the voltages actually move.
-    let spread = reference_voltages.values().map(|v| (v - 1.0).abs()).fold(0.0f64, f64::max);
-    assert!(spread > 0.01, "flat voltages would make this test vacuous (spread {spread})");
+    let spread = reference_voltages
+        .values()
+        .map(|v| (v - 1.0).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        spread > 0.01,
+        "flat voltages would make this test vacuous (spread {spread})"
+    );
 }
 
 #[test]
@@ -503,7 +564,10 @@ fn dc_and_ac_disagree_by_the_reactive_flow() {
     // margin would match to the last decimal and this would fail.
     let c = case();
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
-    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let ac = evaluate::AcOptions {
+        shunts: &c.net.shunts,
+        ..Default::default()
+    };
     let dc = evaluate::evaluate(&c.crac, &c.network(), &resolution);
     let acr = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
 
@@ -515,8 +579,14 @@ fn dc_and_ac_disagree_by_the_reactive_flow() {
             .fold(f64::INFINITY, f64::min)
     };
     let (a, b) = (worst(&dc), worst(&acr));
-    assert!(a.is_finite() && b.is_finite(), "both models should measure something");
-    assert!((a - b).abs() > 1e-6, "AC and DC gave identical margins ({a} vs {b})");
+    assert!(
+        a.is_finite() && b.is_finite(),
+        "both models should measure something"
+    );
+    assert!(
+        (a - b).abs() > 1e-6,
+        "AC and DC gave identical margins ({a} vs {b})"
+    );
 
     // The reactive charge only ever consumes headroom, so no AC limit can
     // exceed its DC counterpart on the same CNEC.
@@ -542,20 +612,27 @@ fn an_outaged_branch_carries_nothing_in_ac() {
     // there — a violation on an element that is out of service.
     let c = case();
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
-    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let ac = evaluate::AcOptions {
+        shunts: &c.net.shunts,
+        ..Default::default()
+    };
 
-    let monitored: Vec<usize> = c.crac.flow_cnecs
+    let monitored: Vec<usize> = c
+        .crac
+        .flow_cnecs
         .iter()
         .filter_map(|cnec| resolution.branch(&cnec.network_element))
         .collect();
     let target = *monitored.first().expect("a monitored branch");
 
-    let result =
-        evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[target], &ac);
+    let result = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[target], &ac);
     for p in &result.perimeters {
         for cnec in p.cnecs.iter().filter(|c| c.branch == target) {
             assert_eq!(cnec.flow_mw, 0.0, "an open branch should carry no power");
-            assert_eq!(cnec.current_a, 0.0, "an open branch should carry no current");
+            assert_eq!(
+                cnec.current_a, 0.0,
+                "an open branch should carry no current"
+            );
         }
     }
 }
@@ -567,23 +644,44 @@ fn the_model_selector_dispatches_to_the_two_paths() {
     // would silently get DC answers.
     let c = case();
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
-    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let ac = evaluate::AcOptions {
+        shunts: &c.net.shunts,
+        ..Default::default()
+    };
 
     let via_dc = evaluate::evaluate_model(
-        &c.crac, &c.network(), &resolution, &[], evaluate::FlowModel::Dc, &ac,
+        &c.crac,
+        &c.network(),
+        &resolution,
+        &[],
+        evaluate::FlowModel::Dc,
+        &ac,
     );
     let via_ac = evaluate::evaluate_model(
-        &c.crac, &c.network(), &resolution, &[], evaluate::FlowModel::Ac, &ac,
+        &c.crac,
+        &c.network(),
+        &resolution,
+        &[],
+        evaluate::FlowModel::Ac,
+        &ac,
     );
     let direct_dc = evaluate::evaluate_with(&c.crac, &c.network(), &resolution, &[]);
     let direct_ac = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
 
-    assert_eq!(via_dc.perimeters, direct_dc.perimeters, "the DC arm must be the DC path");
-    assert_eq!(via_ac.perimeters, direct_ac.perimeters, "the AC arm must be the AC path");
-    assert_ne!(via_dc.perimeters, via_ac.perimeters, "the two arms must differ");
+    assert_eq!(
+        via_dc.perimeters, direct_dc.perimeters,
+        "the DC arm must be the DC path"
+    );
+    assert_eq!(
+        via_ac.perimeters, direct_ac.perimeters,
+        "the AC arm must be the AC path"
+    );
+    assert_ne!(
+        via_dc.perimeters, via_ac.perimeters,
+        "the two arms must differ"
+    );
     assert_eq!(evaluate::FlowModel::default(), evaluate::FlowModel::Dc);
 }
-
 
 #[test]
 fn distributing_the_slack_solves_and_agrees_where_losses_are_negligible() {
@@ -595,8 +693,14 @@ fn distributing_the_slack_solves_and_agrees_where_losses_are_negligible() {
     // distribution that quietly failed to converge would not land here.
     let c = case();
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
-    let single = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
-    let spread = evaluate::AcOptions { distribute_slack: true, ..single };
+    let single = evaluate::AcOptions {
+        shunts: &c.net.shunts,
+        ..Default::default()
+    };
+    let spread = evaluate::AcOptions {
+        distribute_slack: true,
+        ..single
+    };
 
     let a = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &single);
     let b = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &spread);
@@ -604,7 +708,11 @@ fn distributing_the_slack_solves_and_agrees_where_losses_are_negligible() {
     assert_eq!(a.perimeters.len(), b.perimeters.len());
     let mut compared = 0;
     for (p, q) in a.perimeters.iter().zip(&b.perimeters) {
-        assert_eq!(p.severed, q.severed, "convergence should not differ on {:?}", p.state);
+        assert_eq!(
+            p.severed, q.severed,
+            "convergence should not differ on {:?}",
+            p.state
+        );
         for (x, y) in p.cnecs.iter().zip(&q.cnecs) {
             assert!(
                 (x.margin_mw - y.margin_mw).abs() < 1.0,
@@ -634,7 +742,10 @@ fn side_two_is_the_far_end_of_the_same_flow() {
     let c = case();
     let reference = reference_flows("TestCase12Nodes.pypowsybl.json");
     let resolution = Resolution::new(&c.crac, &c.net.branch_ids);
-    let ac = evaluate::AcOptions { shunts: &c.net.shunts, ..Default::default() };
+    let ac = evaluate::AcOptions {
+        shunts: &c.net.shunts,
+        ..Default::default()
+    };
     let result = evaluate::evaluate_ac(&c.crac, &c.network(), &resolution, &[], &ac);
 
     let base = result
@@ -722,10 +833,8 @@ fn a_dc_far_end_carries_exactly_what_the_near_end_took() {
 #[test]
 fn an_ampere_margin_is_measured_in_amperes() {
     let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic5/SL_ep5us1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic5/SL_ep5us1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -740,7 +849,10 @@ fn an_ampere_margin_is_measured_in_amperes() {
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
-    let ac = gridoxide::rao::AcOptions { shunts: &net.shunts, ..Default::default() };
+    let ac = gridoxide::rao::AcOptions {
+        shunts: &net.shunts,
+        ..Default::default()
+    };
     let result = gridoxide::rao::evaluate_model(
         &crac,
         &network,
@@ -817,10 +929,8 @@ fn an_ampere_margin_is_measured_in_amperes() {
 #[test]
 fn the_slack_is_shared_out_in_proportion_to_generation() {
     let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic5/SL_ep5us1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic5/SL_ep5us1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         buses: &net.buses,
@@ -839,7 +949,11 @@ fn the_slack_is_shared_out_in_proportion_to_generation() {
     // Both of the islanded node's branches.
     let mut open = net.initially_open.clone();
     for name in ["Open tie-line FR1 FR2", "Open tie-line FR1 FR3"] {
-        let action = crac.network_actions.iter().find(|a| a.id == name).expect(name);
+        let action = crac
+            .network_actions
+            .iter()
+            .find(|a| a.id == name)
+            .expect(name);
         for elementary in &action.elementary {
             for element in elementary.elements() {
                 if let Some(b) = resolution.branch(element) {
@@ -901,8 +1015,15 @@ fn generation_is_retained_alongside_the_net_injection() {
     // FFR1AA1: 2000 MW of generation behind 1000 MW of load. The net figure
     // cannot tell it apart from a node generating 1000 behind nothing, which is
     // exactly why it is kept.
-    let fr1 = net.node_codes.iter().position(|c| c.trim() == "FFR1AA1").expect("FFR1AA1");
+    let fr1 = net
+        .node_codes
+        .iter()
+        .position(|c| c.trim() == "FFR1AA1")
+        .expect("FFR1AA1");
     assert!((net.generation[fr1] * net.base_mva - 2000.0).abs() < 1e-6);
     assert!((net.buses[fr1].p_spec * net.base_mva - 1000.0).abs() < 1e-6);
-    assert!(net.generation.iter().all(|g| *g >= 0.0), "generation is stored positive");
+    assert!(
+        net.generation.iter().all(|g| *g >= 0.0),
+        "generation is stored positive"
+    );
 }

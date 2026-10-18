@@ -23,12 +23,10 @@
 //! about six usable digits against the ten a first difference of an exact
 //! Jacobian gives.
 
-use gridoxide::injection_hessian::{
-    injection_jacobian, to_dense, weighted_injection_hessian,
-};
+use gridoxide::injection_hessian::{injection_jacobian, to_dense, weighted_injection_hessian};
 use gridoxide::jacobian::JacobianPattern;
-use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
-use gridoxide::network::{build_ybus, power_injections, YBusSparse};
+use gridoxide::network::{YBusSparse, build_ybus, power_injections};
+use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 use gridoxide::types::{Bus, BusType, Line, Transformer};
 use num_complex::Complex;
 
@@ -68,9 +66,30 @@ fn network() -> (Vec<Bus>, YBusSparse) {
     ];
 
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.05, x: 0.11, b_shunt: 0.02, g_shunt: 0.004 },
-        Line { from: 0, to: 2, r: 0.03, x: 0.09, b_shunt: 0.025, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.03,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.05,
+            x: 0.11,
+            b_shunt: 0.02,
+            g_shunt: 0.004,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.03,
+            x: 0.09,
+            b_shunt: 0.025,
+            g_shunt: 0.0,
+        },
     ];
     let transformers = vec![Transformer {
         from: 2,
@@ -112,14 +131,29 @@ fn the_full_jacobian_agrees_with_the_power_flow_assembler() {
 
     // `JacobianPattern`'s reduced layout: non-slack buses supply the angle
     // rows/columns in order, then PQ buses the magnitude ones.
-    let non_slack: Vec<usize> =
-        (0..n).filter(|&i| !matches!(buses[i].bus_type, BusType::Slack)).collect();
-    let pq: Vec<usize> = (0..n).filter(|&i| matches!(buses[i].bus_type, BusType::PQ)).collect();
+    let non_slack: Vec<usize> = (0..n)
+        .filter(|&i| !matches!(buses[i].bus_type, BusType::Slack))
+        .collect();
+    let pq: Vec<usize> = (0..n)
+        .filter(|&i| matches!(buses[i].bus_type, BusType::PQ))
+        .collect();
     let n_angle = non_slack.len();
 
     // Reduced index -> (equation row, state column) in the full 2n space.
-    let row_of = |r: usize| if r < n_angle { non_slack[r] } else { n + pq[r - n_angle] };
-    let col_of = |c: usize| if c < n_angle { non_slack[c] } else { n + pq[c - n_angle] };
+    let row_of = |r: usize| {
+        if r < n_angle {
+            non_slack[r]
+        } else {
+            n + pq[r - n_angle]
+        }
+    };
+    let col_of = |c: usize| {
+        if c < n_angle {
+            non_slack[c]
+        } else {
+            n + pq[c - n_angle]
+        }
+    };
 
     assert!(!reduced.is_empty());
     // Coverage per block — dP/dθ, dP/d|V|, dQ/dθ, dQ/d|V| — and per diagonal
@@ -142,7 +176,10 @@ fn the_full_jacobian_agrees_with_the_power_flow_assembler() {
         }
     }
     for (block, count) in blocks.iter().enumerate() {
-        assert!(*count > 0, "block {block} of the Jacobian was never compared");
+        assert!(
+            *count > 0,
+            "block {block} of the Jacobian was never compared"
+        );
     }
     assert!(diagonal > 0, "no diagonal entry was compared");
     assert!(
@@ -218,7 +255,9 @@ fn the_weighted_hessian_matches_central_differences_of_the_jacobian() {
         let j = dense_jacobian(state, &ybus);
         (0..2 * n)
             .map(|col| {
-                (0..n).map(|i| lambda[i] * j[i][col] + mu[i] * j[n + i][col]).sum()
+                (0..n)
+                    .map(|i| lambda[i] * j[i][col] + mu[i] * j[n + i][col])
+                    .sum()
             })
             .collect()
     };
@@ -257,7 +296,10 @@ fn the_weighted_hessian_is_symmetric() {
     let n = buses.len();
     let lambda = [1.3, -0.7, 2.1, 0.45];
     let mu = [-0.9, 1.7, 0.25, -1.1];
-    let h = to_dense(&weighted_injection_hessian(&buses, &ybus, &lambda, &mu), 2 * n);
+    let h = to_dense(
+        &weighted_injection_hessian(&buses, &ybus, &lambda, &mu),
+        2 * n,
+    );
 
     for i in 0..2 * n {
         for j in 0..i {
@@ -293,7 +335,10 @@ fn the_weighted_hessian_is_linear_in_the_multipliers() {
 
     let a = to_dense(&weighted_injection_hessian(&buses, &ybus, &l1, &m1), dim);
     let b = to_dense(&weighted_injection_hessian(&buses, &ybus, &l2, &m2), dim);
-    let both = to_dense(&weighted_injection_hessian(&buses, &ybus, &sum_l, &sum_m), dim);
+    let both = to_dense(
+        &weighted_injection_hessian(&buses, &ybus, &sum_l, &sum_m),
+        dim,
+    );
 
     for i in 0..dim {
         for j in 0..dim {
@@ -322,12 +367,21 @@ fn the_hessian_adds_no_fill_beyond_the_jacobian() {
     let dim = 2 * n;
 
     let zero = vec![0.0; n];
-    let empty = to_dense(&weighted_injection_hessian(&buses, &ybus, &zero, &zero), dim);
-    assert!(empty.iter().flatten().all(|v| *v == 0.0), "zero multipliers must give zero");
+    let empty = to_dense(
+        &weighted_injection_hessian(&buses, &ybus, &zero, &zero),
+        dim,
+    );
+    assert!(
+        empty.iter().flatten().all(|v| *v == 0.0),
+        "zero multipliers must give zero"
+    );
 
     let lambda = vec![1.0; n];
     let mu = vec![1.0; n];
-    let hessian = to_dense(&weighted_injection_hessian(&buses, &ybus, &lambda, &mu), dim);
+    let hessian = to_dense(
+        &weighted_injection_hessian(&buses, &ybus, &lambda, &mu),
+        dim,
+    );
     let jacobian = dense_jacobian(&buses, &ybus);
 
     // The Jacobian's own pattern, folded into the state-space square: an
@@ -352,7 +406,6 @@ fn the_hessian_adds_no_fill_beyond_the_jacobian() {
         }
     }
 }
-
 
 /// A real network, because a four-bus toy exercises only a handful of index
 /// combinations.
@@ -390,20 +443,43 @@ fn the_full_jacobian_agrees_with_the_power_flow_assembler_on_a_real_network() {
     pattern.fill(&buses, &p_calc, &q_calc, &mut values);
     let reduced = pattern.to_triplets(&values);
 
-    let non_slack: Vec<usize> =
-        (0..n).filter(|&i| !matches!(buses[i].bus_type, BusType::Slack)).collect();
-    let pq: Vec<usize> = (0..n).filter(|&i| matches!(buses[i].bus_type, BusType::PQ)).collect();
+    let non_slack: Vec<usize> = (0..n)
+        .filter(|&i| !matches!(buses[i].bus_type, BusType::Slack))
+        .collect();
+    let pq: Vec<usize> = (0..n)
+        .filter(|&i| matches!(buses[i].bus_type, BusType::PQ))
+        .collect();
     let n_angle = non_slack.len();
-    let row_of = |r: usize| if r < n_angle { non_slack[r] } else { n + pq[r - n_angle] };
-    let col_of = |c: usize| if c < n_angle { non_slack[c] } else { n + pq[c - n_angle] };
+    let row_of = |r: usize| {
+        if r < n_angle {
+            non_slack[r]
+        } else {
+            n + pq[r - n_angle]
+        }
+    };
+    let col_of = |c: usize| {
+        if c < n_angle {
+            non_slack[c]
+        } else {
+            n + pq[c - n_angle]
+        }
+    };
 
     let mut worst = 0.0f64;
     for &(r, c, value) in &reduced {
         let (fr, fc) = (row_of(r), col_of(c));
         worst = worst.max((full[fr][fc] - value).abs());
     }
-    assert!(reduced.len() > 1000, "only {} entries compared", reduced.len());
-    assert!(worst < 1e-9, "worst disagreement {worst:.3e} over {} entries", reduced.len());
+    assert!(
+        reduced.len() > 1000,
+        "only {} entries compared",
+        reduced.len()
+    );
+    assert!(
+        worst < 1e-9,
+        "worst disagreement {worst:.3e} over {} entries",
+        reduced.len()
+    );
 }
 
 /// The Hessian on the same real network, finite-differenced.
@@ -419,12 +495,19 @@ fn the_weighted_hessian_matches_central_differences_on_a_real_network() {
     let lambda: Vec<f64> = (0..n).map(|i| 1.7 * (i as f64 * 0.9).cos()).collect();
     let mu: Vec<f64> = (0..n).map(|i| -1.1 * (i as f64 * 0.55).sin()).collect();
 
-    let analytic = to_dense(&weighted_injection_hessian(&buses, &ybus, &lambda, &mu), 2 * n);
+    let analytic = to_dense(
+        &weighted_injection_hessian(&buses, &ybus, &lambda, &mu),
+        2 * n,
+    );
 
     let weighted_gradient = |state: &[Bus]| -> Vec<f64> {
         let j = dense_jacobian(state, &ybus);
         (0..2 * n)
-            .map(|col| (0..n).map(|i| lambda[i] * j[i][col] + mu[i] * j[n + i][col]).sum())
+            .map(|col| {
+                (0..n)
+                    .map(|i| lambda[i] * j[i][col] + mu[i] * j[n + i][col])
+                    .sum()
+            })
             .collect()
     };
 

@@ -15,13 +15,13 @@
 //!
 //! Run with `cargo run --release --features dynamics --example dynamics_scale`.
 
-use gridoxide::dynamics::json::{DynamicsData, DynamicsDocument, EventSpec, MachineSpec};
-use gridoxide::dynamics::models::machine::GenRoundParams;
-use gridoxide::dynamics::models::Limits;
 use gridoxide::dynamics::json::{AvrSpec, GovSpec, UnitSpec};
+use gridoxide::dynamics::json::{DynamicsData, DynamicsDocument, EventSpec, MachineSpec};
+use gridoxide::dynamics::models::Limits;
 use gridoxide::dynamics::models::avr::SexsParams;
 use gridoxide::dynamics::models::gov::Tgov1Params;
-use gridoxide::dynamics::{run_dynamics, DynamicsOptions, DynamicsStatus};
+use gridoxide::dynamics::models::machine::GenRoundParams;
+use gridoxide::dynamics::{DynamicsOptions, DynamicsStatus, run_dynamics};
 use gridoxide::json::NetworkData;
 use gridoxide::types::{Bus, BusType, Line};
 
@@ -86,7 +86,13 @@ fn case(n_bus: usize) -> DynamicsDocument {
                     tq0pp: 0.05,
                     mbase: S_BASE,
                 }),
-                avr: Some(AvrSpec::Sexs(SexsParams { k: 200.0, ta: 0.1, tb: 1.0, te: 0.05, limits: Limits::NONE })),
+                avr: Some(AvrSpec::Sexs(SexsParams {
+                    k: 200.0,
+                    ta: 0.1,
+                    tb: 1.0,
+                    te: 0.05,
+                    limits: Limits::NONE,
+                })),
                 gov: Some(GovSpec::Tgov1(Tgov1Params {
                     r: 0.05,
                     t1: 0.5,
@@ -122,7 +128,11 @@ fn case(n_bus: usize) -> DynamicsDocument {
             loads: Vec::new(),
             fixed_buses: Vec::new(),
             events: vec![
-                EventSpec::BusFault { t: 1.0, bus: 1, y: None },
+                EventSpec::BusFault {
+                    t: 1.0,
+                    bus: 1,
+                    y: None,
+                },
                 EventSpec::ClearFault { t: 1.08, bus: 1 },
             ],
             relays: Vec::new(),

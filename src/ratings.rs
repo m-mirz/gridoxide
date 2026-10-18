@@ -65,7 +65,10 @@ pub struct BranchLimits {
 impl BranchLimits {
     /// A limit set with a permanent rating and nothing else.
     pub fn permanent(value_a: f64) -> Self {
-        Self { patl_a: Some(value_a), tatl: Vec::new() }
+        Self {
+            patl_a: Some(value_a),
+            tatl: Vec::new(),
+        }
     }
 
     /// True when this terminal has no rating of any kind — the state every
@@ -107,7 +110,11 @@ impl BranchLimits {
     /// duration. The conservative reading, and the right one for a plain
     /// "is anything overloaded" check that has no time axis.
     pub fn tightest(&self) -> Option<f64> {
-        let temporary = self.tatl.iter().map(|t| t.value_a).fold(f64::INFINITY, f64::min);
+        let temporary = self
+            .tatl
+            .iter()
+            .map(|t| t.value_a)
+            .fold(f64::INFINITY, f64::min);
         match (temporary.is_finite(), self.patl_a) {
             (true, Some(patl)) => Some(temporary.min(patl)),
             (true, None) => Some(temporary),
@@ -142,7 +149,10 @@ mod tests {
     fn a_temporary_limit_applies_only_while_its_duration_covers_the_request() {
         let limits = BranchLimits {
             patl_a: Some(1000.0),
-            tatl: vec![TemporaryLimit { acceptable_duration_s: Some(1200.0), value_a: 1200.0 }],
+            tatl: vec![TemporaryLimit {
+                acceptable_duration_s: Some(1200.0),
+                value_a: 1200.0,
+            }],
         };
         // Asking for a 20-minute overload gets the temporary rating ...
         assert_eq!(limits.limit_for(1200.0), Some(1200.0));
@@ -157,8 +167,14 @@ mod tests {
         let limits = BranchLimits {
             patl_a: Some(1000.0),
             tatl: vec![
-                TemporaryLimit { acceptable_duration_s: Some(600.0), value_a: 1500.0 },
-                TemporaryLimit { acceptable_duration_s: Some(900.0), value_a: 1300.0 },
+                TemporaryLimit {
+                    acceptable_duration_s: Some(600.0),
+                    value_a: 1500.0,
+                },
+                TemporaryLimit {
+                    acceptable_duration_s: Some(900.0),
+                    value_a: 1300.0,
+                },
             ],
         };
         // Both cover 600 s; honouring both means honouring 1300.
@@ -171,7 +187,10 @@ mod tests {
         // make a short overload stricter than a permanent one.
         let limits = BranchLimits {
             patl_a: Some(1000.0),
-            tatl: vec![TemporaryLimit { acceptable_duration_s: Some(60.0), value_a: 800.0 }],
+            tatl: vec![TemporaryLimit {
+                acceptable_duration_s: Some(60.0),
+                value_a: 800.0,
+            }],
         };
         assert_eq!(limits.limit_for(60.0), Some(1000.0));
     }

@@ -24,30 +24,39 @@ mod dynamics_ring;
 
 use num_complex::Complex;
 
+use gridoxide::dynamics::DynamicSystem;
 use gridoxide::dynamics::arnoldi::{self, ArnoldiOptions};
 use gridoxide::dynamics::arpack;
 use gridoxide::dynamics::shift::ShiftedDae;
-use gridoxide::dynamics::DynamicSystem;
 
 /// Both solvers on one operator, returning `(ours, theirs)` as eigenvalues of
 /// the *original* problem — the shift undone the same way for both.
-fn both(system: &DynamicSystem, sigma: Complex<f64>, count: usize) -> (Vec<Complex<f64>>, Vec<Complex<f64>>) {
+fn both(
+    system: &DynamicSystem,
+    sigma: Complex<f64>,
+    count: usize,
+) -> (Vec<Complex<f64>>, Vec<Complex<f64>>) {
     let op = ShiftedDae::new(system, sigma).expect("a shift off the spectrum");
-    let opts = ArnoldiOptions { count, tol: 1e-12, ..Default::default() };
+    let opts = ArnoldiOptions {
+        count,
+        tol: 1e-12,
+        ..Default::default()
+    };
 
-    let ours = arnoldi::eigenpairs(op.n_states(), |b| op.apply(b), &opts)
-        .expect("our own iteration runs");
+    let ours =
+        arnoldi::eigenpairs(op.n_states(), |b| op.apply(b), &opts).expect("our own iteration runs");
     assert!(ours.converged(), "ours did not converge: {:?}", ours.pairs);
 
-    let theirs = arpack::eigenpairs(op.n_states(), |b| op.apply(b), &opts)
-        .expect("ARPACK runs");
+    let theirs = arpack::eigenpairs(op.n_states(), |b| op.apply(b), &opts).expect("ARPACK runs");
 
     let undo = |pairs: &[arnoldi::RitzPair]| -> Vec<Complex<f64>> {
         let mut out: Vec<Complex<f64>> = pairs.iter().map(|p| sigma + 1.0 / p.theta).collect();
         // Sorted so the comparison is between sets, not between orderings —
         // which are ARPACK's business and not a claim either method makes.
         out.sort_by(|a, b| {
-            (a.re, a.im).partial_cmp(&(b.re, b.im)).unwrap_or(std::cmp::Ordering::Equal)
+            (a.re, a.im)
+                .partial_cmp(&(b.re, b.im))
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         out
     };
@@ -57,7 +66,9 @@ fn both(system: &DynamicSystem, sigma: Complex<f64>, count: usize) -> (Vec<Compl
 /// The two agree on a small case.
 #[test]
 fn arpack_and_the_in_house_iteration_agree_on_a_small_case() {
-    let (system, _) = dynamics_ring::ring(16, 0.4).build().expect("the ring initializes");
+    let (system, _) = dynamics_ring::ring(16, 0.4)
+        .build()
+        .expect("the ring initializes");
     let sigma = Complex::new(-0.4, std::f64::consts::TAU);
 
     let (ours, theirs) = both(&system, sigma, 4);
@@ -84,7 +95,10 @@ fn arpack_and_the_in_house_iteration_agree_on_a_real_subspace() {
     ] {
         let (ours, theirs) = both(&system, sigma, 6);
         for (a, b) in ours.iter().zip(&theirs) {
-            assert!((a - b).norm() < 1e-9, "at σ={sigma}: {a} against ARPACK's {b}");
+            assert!(
+                (a - b).norm() < 1e-9,
+                "at σ={sigma}: {a} against ARPACK's {b}"
+            );
         }
     }
 }
@@ -100,14 +114,27 @@ fn the_two_agree_on_their_residuals() {
     let (system, _) = dynamics_ring::ring(32, 0.4).build().unwrap();
     let sigma = Complex::new(-0.4, std::f64::consts::TAU);
     let op = ShiftedDae::new(&system, sigma).unwrap();
-    let opts = ArnoldiOptions { count: 4, tol: 1e-12, ..Default::default() };
+    let opts = ArnoldiOptions {
+        count: 4,
+        tol: 1e-12,
+        ..Default::default()
+    };
 
     let ours = arnoldi::eigenpairs(op.n_states(), |b| op.apply(b), &opts).unwrap();
     let theirs = arpack::eigenpairs(op.n_states(), |b| op.apply(b), &opts).unwrap();
 
     for pair in ours.pairs.iter().chain(&theirs.pairs) {
-        assert!(pair.converged, "{} did not converge: {}", pair.theta, pair.residual);
-        assert!(pair.residual < 1e-10, "{}: residual {}", pair.theta, pair.residual);
+        assert!(
+            pair.converged,
+            "{} did not converge: {}",
+            pair.theta, pair.residual
+        );
+        assert!(
+            pair.residual < 1e-10,
+            "{}: residual {}",
+            pair.theta,
+            pair.residual
+        );
     }
 
     // Same eigenvector, up to the phase an eigenvector has no opinion about.
@@ -122,8 +149,12 @@ fn the_two_agree_on_their_residuals() {
                     .unwrap()
             })
             .unwrap();
-        let overlap: Complex<f64> =
-            ours.vector.iter().zip(&twin.vector).map(|(a, b)| a.conj() * b).sum();
+        let overlap: Complex<f64> = ours
+            .vector
+            .iter()
+            .zip(&twin.vector)
+            .map(|(a, b)| a.conj() * b)
+            .sum();
         let scale = twin.vector.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt();
         assert!(
             (overlap.norm() / scale - 1.0).abs() < 1e-8,

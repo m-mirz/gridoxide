@@ -71,8 +71,8 @@
 use num_complex::Complex;
 
 use crate::topology::bus_view::{BusView, RetainedSwitch};
-use crate::topology::model::SwitchIdx;
 use crate::topology::ideal_connection_z;
+use crate::topology::model::SwitchIdx;
 use crate::types::Transformer;
 
 /// What a retained switch becomes in the solver's equations.
@@ -161,7 +161,11 @@ pub fn regularized_branches(view: &BusView) -> Vec<Transformer> {
 /// Not an error — a bus coupler in a closed ring is legitimately degenerate —
 /// but a caller reporting switch flows needs to know that these have none.
 pub fn degenerate_switches(view: &BusView) -> Vec<RetainedSwitch> {
-    view.retained().iter().filter(|r| view.is_degenerate(r)).copied().collect()
+    view.retained()
+        .iter()
+        .filter(|r| view.is_degenerate(r))
+        .copied()
+        .collect()
 }
 
 /// The switch arrangement a [`conditioning_probe`] builds.
@@ -296,8 +300,9 @@ pub fn conditioning_probe(
             let (_, stats) = PersistentSolver::new(JacobianBackend::Scalar)
                 .solve_with_stats(&mut buses, &ybus, tol, max_iter);
 
-            let finite =
-                buses.iter().all(|b| b.voltage_mag.is_finite() && b.voltage_ang.is_finite());
+            let finite = buses
+                .iter()
+                .all(|b| b.voltage_mag.is_finite() && b.voltage_ang.is_finite());
             let ok = stats.status == SolveStatus::Converged && finite;
             (n, ok.then(|| stats.iterations()), buses[load].voltage_mag)
         })
@@ -308,7 +313,7 @@ pub fn conditioning_probe(
 mod tests {
     use super::*;
     use crate::topology::model::{NodeBreakerTopology, NodeIdx, Switch, SwitchKind};
-    use crate::topology::{bus_view, RetentionPolicy};
+    use crate::topology::{RetentionPolicy, bus_view};
 
     fn sw(a: usize, b: usize, open: bool) -> Switch {
         Switch {
@@ -451,7 +456,14 @@ mod tests {
         let mut topo = NodeBreakerTopology::new(3);
         topo.add_switch(sw(0, 1, false));
         let view = bus_view(&topo, &RetentionPolicy::RetainAll);
-        let lines = vec![Line { from: 1, to: 2, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 }];
+        let lines = vec![Line {
+            from: 1,
+            to: 2,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }];
 
         let ybus = build_ybus(3, &lines, &regularized_branches(&view)).finish();
         newton_raphson(&mut buses, &ybus, 1e-8, 30);
@@ -462,7 +474,10 @@ mod tests {
             drop < 1e-4,
             "a closed switch dropped {drop} p.u., which is not 'ideal enough'"
         );
-        assert!(drop < across_line / 100.0, "{drop} vs {across_line} across a real branch");
+        assert!(
+            drop < across_line / 100.0,
+            "{drop} vs {across_line} across a real branch"
+        );
     }
 
     /// The measured ceiling, pinned so it cannot drift silently.
@@ -510,8 +525,15 @@ mod tests {
         // The structural entry survives — that is the point, since it is what
         // keeps the sparsity pattern constant across a position change — so
         // the *value* is what carries the position.
-        assert!(ybus.row(0).iter().any(|&(j, _)| j == 1), "structural entry was dropped");
-        assert_eq!(ybus.get(0, 1), Complex::new(0.0, 0.0), "an open switch still conducts");
+        assert!(
+            ybus.row(0).iter().any(|&(j, _)| j == 1),
+            "structural entry was dropped"
+        );
+        assert_eq!(
+            ybus.get(0, 1),
+            Complex::new(0.0, 0.0),
+            "an open switch still conducts"
+        );
         // And `connected_components` reads the value, not merely the structure,
         // so it sees the separation: two components, not one.
         assert_eq!(connected_components(&ybus).len(), 2);
@@ -644,7 +666,11 @@ impl NodeBreakerNetwork {
     /// The flat branch index of a switch named by its position in the source
     /// topology, or `None` if it was not retained or was degenerate.
     pub fn branch_of_switch(&self, switch: SwitchIdx) -> Option<usize> {
-        let n = self.view.retained().iter().position(|r| r.switch == switch)?;
+        let n = self
+            .view
+            .retained()
+            .iter()
+            .position(|r| r.switch == switch)?;
         self.branch_of_retained(n)
     }
 
@@ -683,7 +709,9 @@ impl NodeBreakerNetwork {
     ///
     /// Returns `false` if the switch is not retained or was degenerate.
     pub fn set_switch_open(&mut self, switch: SwitchIdx, open: bool) -> bool {
-        let Some(branch) = self.branch_of_switch(switch) else { return false };
+        let Some(branch) = self.branch_of_switch(switch) else {
+            return false;
+        };
         let status = u8::from(!open);
         let t = &mut self.transformers[branch - self.lines.len()];
         t.from_status = status;

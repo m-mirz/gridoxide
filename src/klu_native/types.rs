@@ -94,7 +94,12 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         // Matches KLU_defaults exactly for every field this port consumes.
-        Self { tol: 0.001, scale: 2, btf: true, halt_if_singular: true }
+        Self {
+            tol: 0.001,
+            scale: 2,
+            btf: true,
+            halt_if_singular: true,
+        }
     }
 }
 
@@ -127,7 +132,11 @@ mod tests {
     fn unflip_recovers_original_regardless_of_flip_state() {
         for j in [0i64, 1, 5, 1000] {
             assert_eq!(unflip(j), j, "unflip of an already-plain index is a no-op");
-            assert_eq!(unflip(flip(j)), j, "unflip should recover the original index");
+            assert_eq!(
+                unflip(flip(j)),
+                j,
+                "unflip should recover the original index"
+            );
         }
     }
 

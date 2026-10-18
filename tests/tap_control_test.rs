@@ -17,11 +17,11 @@
 
 use std::path::{Path, PathBuf};
 
-use gridoxide::cgmes::{cgmes_to_network, load_profiles, CgmesNetwork};
+use gridoxide::cgmes::{CgmesNetwork, cgmes_to_network, load_profiles};
 use gridoxide::outerloop::{ControllerOutcome, RegulationMode, TapRegulation};
 use gridoxide::solver::{PowerFlowOptions, SolveStatus};
 use gridoxide::types::{Bus, BusType, Line, TapChanger, Transformer};
-use gridoxide::{run_power_flow, PowerFlowReport, TapData};
+use gridoxide::{PowerFlowReport, TapData, run_power_flow};
 
 use num_complex::Complex;
 
@@ -32,22 +32,50 @@ use num_complex::Complex;
 /// Slack — transformer — load. The transformer's ratio changer has eleven
 /// positions from 0.90 to 1.10 in steps of 0.02, and the load bus's voltage is
 /// monotone in the ratio, so the right position is a lookup.
-fn two_bus(position: i32) -> (Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<Option<TapChanger>>) {
+fn two_bus(
+    position: i32,
+) -> (
+    Vec<Bus>,
+    Vec<Line>,
+    Vec<Transformer>,
+    Vec<Option<TapChanger>>,
+) {
     let buses = vec![
         Bus {
-            idx: 0, bus_type: BusType::Slack, voltage_mag: 1.0, voltage_ang: 0.0,
-            p_spec: 0.0, q_spec: 0.0, q_min: f64::NEG_INFINITY, q_max: f64::INFINITY,
-            u_rated: 1.0, zip_terms: Vec::new(),
+            idx: 0,
+            bus_type: BusType::Slack,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            q_min: f64::NEG_INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 1.0,
+            zip_terms: Vec::new(),
         },
         Bus {
-            idx: 1, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-            p_spec: -0.8, q_spec: -0.3, q_min: f64::NEG_INFINITY, q_max: f64::INFINITY,
-            u_rated: 1.0, zip_terms: Vec::new(),
+            idx: 1,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: -0.8,
+            q_spec: -0.3,
+            q_min: f64::NEG_INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 1.0,
+            zip_terms: Vec::new(),
         },
     ];
-    let steps: Vec<Complex<f64>> =
-        (0..11).map(|i| Complex::new(0.90 + 0.02 * i as f64, 0.0)).collect();
-    let changer = TapChanger { low: 0, position, neutral: 5, steps, series: None };
+    let steps: Vec<Complex<f64>> = (0..11)
+        .map(|i| Complex::new(0.90 + 0.02 * i as f64, 0.0))
+        .collect();
+    let changer = TapChanger {
+        low: 0,
+        position,
+        neutral: 5,
+        steps,
+        series: None,
+    };
     let mut transformer = Transformer {
         from: 0,
         to: 1,
@@ -86,7 +114,10 @@ fn solve(
         lines,
         transformers,
         &[],
-        TapData { changers, regulation },
+        TapData {
+            changers,
+            regulation,
+        },
         PowerFlowOptions {
             control_taps,
             max_outer_iter: 60,
@@ -142,7 +173,14 @@ fn the_loop_finds_the_position_a_sweep_names() {
         let (buses, lines, transformers, changers) = two_bus(start);
         // A deadband narrower than one step forces the loop to the argmin
         // rather than letting it stop at the first acceptable position.
-        let report = solve(buses, &lines, &transformers, &changers, &voltage_control(target, 1e-6), true);
+        let report = solve(
+            buses,
+            &lines,
+            &transformers,
+            &changers,
+            &voltage_control(target, 1e-6),
+            true,
+        );
         let outer = report.outer.as_ref().expect("loops ran");
         let landed = outer.changers[0].as_ref().unwrap().position;
         assert_eq!(
@@ -171,7 +209,11 @@ fn a_bus_inside_its_deadband_does_not_move() {
         true,
     );
     let outer = report.outer.as_ref().expect("loops ran");
-    assert_eq!(outer.changers[0].as_ref().unwrap().position, 5, "nothing to do");
+    assert_eq!(
+        outer.changers[0].as_ref().unwrap().position,
+        5,
+        "nothing to do"
+    );
     assert_eq!(outer.taps[0].outcome, ControllerOutcome::InDeadband);
     assert_eq!(outer.taps[0].steps_moved, 0);
 }
@@ -190,16 +232,29 @@ fn an_unreachable_target_stops_at_the_limit_and_reports_it() {
     let table = sweep(&buses, &lines, &transformers, &changers, 0, 1);
     let highest = table.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap().0;
 
-    let report = solve(buses, &lines, &transformers, &changers, &voltage_control(2.0, 1e-6), true);
+    let report = solve(
+        buses,
+        &lines,
+        &transformers,
+        &changers,
+        &voltage_control(2.0, 1e-6),
+        true,
+    );
     let outer = report.outer.as_ref().expect("loops ran");
     let changer = outer.changers[0].as_ref().unwrap();
-    assert_eq!(changer.position, highest, "it should have gone as far as it can: {table:?}");
+    assert_eq!(
+        changer.position, highest,
+        "it should have gone as far as it can: {table:?}"
+    );
     assert!(
         changer.position == changer.low || changer.position == changer.high(),
         "and that is one end of the range"
     );
     assert_eq!(outer.taps[0].outcome, ControllerOutcome::AtLimit);
-    assert!(outer.report.as_ref().unwrap().converged, "stopping at a limit is a settled answer");
+    assert!(
+        outer.report.as_ref().unwrap().converged,
+        "stopping at a limit is a settled answer"
+    );
 }
 
 /// Tap control is opt-in. With `control_taps` off, the same network solves to
@@ -208,16 +263,30 @@ fn an_unreachable_target_stops_at_the_limit_and_reports_it() {
 fn control_taps_off_changes_nothing() {
     let (buses, lines, transformers, changers) = two_bus(3);
     let regulation = voltage_control(1.0, 1e-6);
-    let plain = solve(buses.clone(), &lines, &transformers, &changers, &regulation, false);
+    let plain = solve(
+        buses.clone(),
+        &lines,
+        &transformers,
+        &changers,
+        &regulation,
+        false,
+    );
     let bare = run_power_flow(
         buses,
         &lines,
         &transformers,
         &[],
         TapData::none(),
-        PowerFlowOptions { tol: 1e-10, max_iter: 40, ..Default::default() },
+        PowerFlowOptions {
+            tol: 1e-10,
+            max_iter: 40,
+            ..Default::default()
+        },
     );
-    assert!(plain.outer.is_none(), "no loop was configured, so none should be reported");
+    assert!(
+        plain.outer.is_none(),
+        "no loop was configured, so none should be reported"
+    );
     for (a, b) in plain.buses.iter().zip(&bare.buses) {
         assert_eq!(a.voltage_mag.to_bits(), b.voltage_mag.to_bits());
         assert_eq!(a.voltage_ang.to_bits(), b.voltage_ang.to_bits());
@@ -252,7 +321,10 @@ fn solve_fixture(net: &CgmesNetwork, control_taps: bool) -> PowerFlowReport {
         &net.lines,
         &net.transformers,
         &net.shunts,
-        TapData { changers: &net.tap_changers, regulation: &net.regulation },
+        TapData {
+            changers: &net.tap_changers,
+            regulation: &net.regulation,
+        },
         PowerFlowOptions {
             control_taps,
             max_outer_iter: 60,
@@ -312,11 +384,21 @@ fn svedala_brings_every_controller_into_its_deadband() {
     let report = solve_fixture(&net, true);
     assert_eq!(report.stats.status, SolveStatus::Converged);
     let outer = report.outer.as_ref().expect("loops ran");
-    assert!(outer.report.as_ref().unwrap().converged, "{:?}", outer.report);
+    assert!(
+        outer.report.as_ref().unwrap().converged,
+        "{:?}",
+        outer.report
+    );
 
     assert_eq!(outer.taps.len(), 11);
     for c in &outer.taps {
-        assert_eq!(c.outcome, ControllerOutcome::InDeadband, "controller {} on {}", c.id, c.transformer);
+        assert_eq!(
+            c.outcome,
+            ControllerOutcome::InDeadband,
+            "controller {} on {}",
+            c.id,
+            c.transformer
+        );
     }
     // Checked against the *state*, not against the loop's own verdict.
     for r in &net.regulation {
@@ -333,7 +415,10 @@ fn svedala_brings_every_controller_into_its_deadband() {
     // worth asserting at the level a caller reads.
     for (i, c) in outer.changers.iter().enumerate() {
         let Some(c) = c else { continue };
-        assert!(c.position >= c.low && c.position <= c.high(), "transformer {i}");
+        assert!(
+            c.position >= c.low && c.position <= c.high(),
+            "transformer {i}"
+        );
     }
 }
 
@@ -357,7 +442,9 @@ fn every_chosen_position_is_confirmed_by_a_sweep() {
     let changers = &outer.changers;
 
     for r in &net.regulation {
-        let chosen = changers[r.transformer].as_ref().expect("a controlled transformer has a table");
+        let chosen = changers[r.transformer]
+            .as_ref()
+            .expect("a controlled transformer has a table");
         let mut acceptable = Vec::new();
         for p in chosen.low..=chosen.high() {
             let mut t = settled.clone();
@@ -369,7 +456,11 @@ fn every_chosen_position_is_confirmed_by_a_sweep() {
                 &t,
                 &net.shunts,
                 TapData::none(),
-                PowerFlowOptions { tol: 1e-8, max_iter: 30, ..Default::default() },
+                PowerFlowOptions {
+                    tol: 1e-8,
+                    max_iter: 30,
+                    ..Default::default()
+                },
             );
             if probe.stats.status != SolveStatus::Converged {
                 continue;
@@ -398,7 +489,11 @@ fn every_chosen_position_is_confirmed_by_a_sweep() {
 /// be checked against a loop that *is* running, which the analytic case does.
 #[test]
 fn no_control_means_no_movement() {
-    for name in ["SmallGrid/SmallGrid-Merged", "PowerFlow/PowerFlow", "MiniGrid/MiniGrid-Merged"] {
+    for name in [
+        "SmallGrid/SmallGrid-Merged",
+        "PowerFlow/PowerFlow",
+        "MiniGrid/MiniGrid-Merged",
+    ] {
         let Some(net) = fixture(name) else { continue };
         assert!(net.regulation.is_empty(), "{name}: fixture assumption");
         let report = solve_fixture(&net, true);
@@ -413,8 +508,14 @@ fn no_control_means_no_movement() {
     let mut regulation = voltage_control(1.0, 1e-6);
     regulation[0].enabled = false;
     let report = solve(buses, &lines, &transformers, &changers, &regulation, true);
-    let outer = report.outer.as_ref().expect("control_taps was on with regulation present");
-    assert!(outer.taps.is_empty(), "a disabled control must produce no controller");
+    let outer = report
+        .outer
+        .as_ref()
+        .expect("control_taps was on with regulation present");
+    assert!(
+        outer.taps.is_empty(),
+        "a disabled control must produce no controller"
+    );
     assert_eq!(
         outer.changers[0].as_ref().unwrap().position,
         3,
@@ -434,9 +535,21 @@ fn no_control_means_no_movement() {
 #[test]
 fn the_pst_fixtures_reach_the_best_position_their_table_offers() {
     for (name, expect_move, expected) in [
-        ("PST/PST_PhaseTapChangerLinear_Type1", false, ControllerOutcome::InDeadband),
-        ("PST/PST_PhaseTapChangerLinear_Type2", true, ControllerOutcome::Closest),
-        ("PST/PST_PhaseTapChangerTable_Type3", true, ControllerOutcome::Closest),
+        (
+            "PST/PST_PhaseTapChangerLinear_Type1",
+            false,
+            ControllerOutcome::InDeadband,
+        ),
+        (
+            "PST/PST_PhaseTapChangerLinear_Type2",
+            true,
+            ControllerOutcome::Closest,
+        ),
+        (
+            "PST/PST_PhaseTapChangerTable_Type3",
+            true,
+            ControllerOutcome::Closest,
+        ),
     ] {
         let Some(net) = fixture(name) else { continue };
         assert_eq!(net.regulation.len(), 1, "{name}");
@@ -467,7 +580,11 @@ fn the_pst_fixtures_reach_the_best_position_their_table_offers() {
                 &t,
                 &net.shunts,
                 TapData::none(),
-                PowerFlowOptions { tol: 1e-10, max_iter: 40, ..Default::default() },
+                PowerFlowOptions {
+                    tol: 1e-10,
+                    max_iter: 40,
+                    ..Default::default()
+                },
             );
             (probe.stats.status == SolveStatus::Converged).then(|| {
                 let params = gridoxide::branch_flow::branch_params(&net.lines, &t);

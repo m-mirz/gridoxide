@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use gridoxide::batch::{BatchError, BatchSolver, BusOverride, Scenario};
 use gridoxide::json::NetworkData;
-use gridoxide::network::{build_ybus, linear_initial_guess, YBusSparse};
+use gridoxide::network::{YBusSparse, build_ybus, linear_initial_guess};
 use gridoxide::solver::{JacobianBackend, PersistentSolver, SolveStatus};
 use gridoxide::types::Bus;
 
@@ -28,7 +28,9 @@ fn scenarios(template: &[Bus], n: usize) -> Vec<Scenario> {
         .map(|k| {
             let f = 0.5 + 1.5 * (k as f64) / (n as f64);
             Scenario::new(vec![
-                BusOverride::new(2).p(template[2].p_spec * f).q(template[2].q_spec * f),
+                BusOverride::new(2)
+                    .p(template[2].p_spec * f)
+                    .q(template[2].q_spec * f),
             ])
         })
         .collect()
@@ -72,7 +74,9 @@ fn assert_batch_matches_sequential(backend: JacobianBackend) {
     let expected = solve_sequentially(&template, &ybus, &scs, backend);
 
     let batch = BatchSolver::with_threads(backend, 8).expect("build pool");
-    let got = batch.solve(&template, &ybus, &scs, 1e-6, 20).expect("batch solve");
+    let got = batch
+        .solve(&template, &ybus, &scs, 1e-6, 20)
+        .expect("batch solve");
 
     assert_eq!(got.len(), scs.len(), "one report per scenario");
     for (k, (report, want)) in got.iter().zip(&expected).enumerate() {
@@ -133,12 +137,19 @@ fn results_are_thread_count_invariant() {
     let one = BatchSolver::with_threads(JacobianBackend::Scalar, 1).expect("build pool");
     let many = BatchSolver::with_threads(JacobianBackend::Scalar, 8).expect("build pool");
 
-    let a = one.solve(&template, &ybus, &scs, 1e-6, 20).expect("1-thread batch");
-    let b = many.solve(&template, &ybus, &scs, 1e-6, 20).expect("8-thread batch");
+    let a = one
+        .solve(&template, &ybus, &scs, 1e-6, 20)
+        .expect("1-thread batch");
+    let b = many
+        .solve(&template, &ybus, &scs, 1e-6, 20)
+        .expect("8-thread batch");
 
     assert_eq!(a.len(), b.len());
     for (k, (ra, rb)) in a.iter().zip(&b).enumerate() {
-        assert_eq!(ra.stats, rb.stats, "scenario {k} stats differ across thread counts");
+        assert_eq!(
+            ra.stats, rb.stats,
+            "scenario {k} stats differ across thread counts"
+        );
         for (i, (x, y)) in ra.buses.iter().zip(&rb.buses).enumerate() {
             assert_eq!(x.voltage_mag, y.voltage_mag, "scenario {k} bus {i} |V|");
             assert_eq!(x.voltage_ang, y.voltage_ang, "scenario {k} bus {i} angle");
@@ -161,7 +172,9 @@ fn divergent_scenario_does_not_poison_the_batch() {
     scs[bad] = Scenario::new(vec![BusOverride::new(2).p(-1.0e6).q(-1.0e6)]);
 
     let batch = BatchSolver::with_threads(JacobianBackend::Scalar, 4).expect("build pool");
-    let got = batch.solve(&template, &ybus, &scs, 1e-6, 20).expect("batch solve");
+    let got = batch
+        .solve(&template, &ybus, &scs, 1e-6, 20)
+        .expect("batch solve");
 
     assert_ne!(
         got[bad].stats.status,
@@ -172,12 +185,24 @@ fn divergent_scenario_does_not_poison_the_batch() {
     // Every other scenario is untouched — compare against a batch that never
     // contained the bad scenario at all.
     let clean = scenarios(&template, 8);
-    let reference = batch.solve(&template, &ybus, &clean, 1e-6, 20).expect("reference batch");
+    let reference = batch
+        .solve(&template, &ybus, &clean, 1e-6, 20)
+        .expect("reference batch");
     for k in (0..8).filter(|&k| k != bad) {
-        assert_eq!(got[k].stats.status, SolveStatus::Converged, "scenario {k} should still converge");
+        assert_eq!(
+            got[k].stats.status,
+            SolveStatus::Converged,
+            "scenario {k} should still converge"
+        );
         for (i, (x, y)) in got[k].buses.iter().zip(&reference[k].buses).enumerate() {
-            assert_eq!(x.voltage_mag, y.voltage_mag, "scenario {k} bus {i} |V| perturbed by its neighbor");
-            assert_eq!(x.voltage_ang, y.voltage_ang, "scenario {k} bus {i} angle perturbed by its neighbor");
+            assert_eq!(
+                x.voltage_mag, y.voltage_mag,
+                "scenario {k} bus {i} |V| perturbed by its neighbor"
+            );
+            assert_eq!(
+                x.voltage_ang, y.voltage_ang,
+                "scenario {k} bus {i} angle perturbed by its neighbor"
+            );
         }
     }
 }
@@ -190,11 +215,16 @@ fn branch_outages_are_rejected() {
     let (template, ybus) = load_network();
     let scs = vec![
         Scenario::new(vec![BusOverride::new(2).p(-0.5)]),
-        Scenario { bus_overrides: Vec::new(), branch_outages: vec![0] },
+        Scenario {
+            bus_overrides: Vec::new(),
+            branch_outages: vec![0],
+        },
     ];
 
     let batch = BatchSolver::new(JacobianBackend::Scalar);
-    let err = batch.solve(&template, &ybus, &scs, 1e-6, 20).expect_err("outages must be rejected");
+    let err = batch
+        .solve(&template, &ybus, &scs, 1e-6, 20)
+        .expect_err("outages must be rejected");
     assert_eq!(err, BatchError::OutagesUnsupported { scenario: 1 });
 }
 
@@ -204,14 +234,25 @@ fn out_of_range_bus_override_is_rejected() {
     let scs = vec![Scenario::new(vec![BusOverride::new(99).p(-0.5)])];
 
     let batch = BatchSolver::new(JacobianBackend::Scalar);
-    let err = batch.solve(&template, &ybus, &scs, 1e-6, 20).expect_err("bad index must be rejected");
-    assert_eq!(err, BatchError::BusOutOfRange { scenario: 0, bus: 99, n_buses: template.len() });
+    let err = batch
+        .solve(&template, &ybus, &scs, 1e-6, 20)
+        .expect_err("bad index must be rejected");
+    assert_eq!(
+        err,
+        BatchError::BusOutOfRange {
+            scenario: 0,
+            bus: 99,
+            n_buses: template.len()
+        }
+    );
 }
 
 #[test]
 fn empty_batch_is_not_an_error() {
     let (template, ybus) = load_network();
     let batch = BatchSolver::new(JacobianBackend::Scalar);
-    let got = batch.solve(&template, &ybus, &[], 1e-6, 20).expect("empty batch");
+    let got = batch
+        .solve(&template, &ybus, &[], 1e-6, 20)
+        .expect("empty batch");
     assert!(got.is_empty());
 }

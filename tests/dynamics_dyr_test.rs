@@ -10,10 +10,8 @@
 use std::collections::HashMap;
 
 use gridoxide::dynamics::dyr::{self, DyrError, DyrWarning, MachineData};
-use gridoxide::dynamics::json::{
-    AvrSpec, DynamicsData, DynamicsDocument, GovSpec, MachineSpec,
-};
-use gridoxide::dynamics::{run_dynamics, DynamicsOptions, DynamicsStatus};
+use gridoxide::dynamics::json::{AvrSpec, DynamicsData, DynamicsDocument, GovSpec, MachineSpec};
+use gridoxide::dynamics::{DynamicsOptions, DynamicsStatus, run_dynamics};
 use gridoxide::json::NetworkData;
 use gridoxide::types::{Bus, BusType, Line};
 
@@ -21,8 +19,26 @@ const FIXTURE: &str = "tests/data/dynamics/two_machine.dyr";
 
 fn supplied() -> HashMap<(i64, String), (MachineData, f64)> {
     HashMap::from([
-        ((1, "1".to_string()), (MachineData { mbase: 100.0, ra: 0.003 }, 0.30)),
-        ((2, "1".to_string()), (MachineData { mbase: 100.0, ra: 0.0 }, 0.30)),
+        (
+            (1, "1".to_string()),
+            (
+                MachineData {
+                    mbase: 100.0,
+                    ra: 0.003,
+                },
+                0.30,
+            ),
+        ),
+        (
+            (2, "1".to_string()),
+            (
+                MachineData {
+                    mbase: 100.0,
+                    ra: 0.0,
+                },
+                0.30,
+            ),
+        ),
     ])
 }
 
@@ -43,8 +59,15 @@ fn records_span_lines_and_end_at_the_slash() {
     let genrou = &doc.records[0];
     assert_eq!(genrou.bus, 1);
     assert_eq!(genrou.model, "GENROU");
-    assert_eq!(genrou.id, "1", "the quoted identifier should be unquoted and trimmed");
-    assert_eq!(genrou.params.len(), 14, "a three-line GENROU record has all 14 parameters");
+    assert_eq!(
+        genrou.id, "1",
+        "the quoted identifier should be unquoted and trimmed"
+    );
+    assert_eq!(
+        genrou.params.len(),
+        14,
+        "a three-line GENROU record has all 14 parameters"
+    );
 
     assert_eq!(doc.records[3].model, "GENCLS");
     assert_eq!(doc.records[3].bus, 2);
@@ -93,7 +116,10 @@ fn the_positional_mapping_is_right() {
             assert_eq!(p.k, 200.0);
             assert_eq!(p.tb, 1.0);
             assert_eq!(p.te, 0.05);
-            assert_eq!(p.ta, 0.1, "T_a is the ratio times T_b, not the field itself");
+            assert_eq!(
+                p.ta, 0.1,
+                "T_a is the ratio times T_b, not the field itself"
+            );
         }
         ref other => panic!("expected SEXS, got {other:?}"),
     }
@@ -129,9 +155,15 @@ fn dropped_data_is_reported_and_limits_are_carried() {
         .iter()
         .filter(|w| matches!(w, DyrWarning::SaturationIgnored { .. }))
         .count();
-    assert_eq!(saturation, 1, "the GENROU's nonzero S(1.0)/S(1.2) should be reported");
     assert_eq!(
-        warnings.iter().filter(|w| matches!(w, DyrWarning::LimitsIgnored { .. })).count(),
+        saturation, 1,
+        "the GENROU's nonzero S(1.0)/S(1.2) should be reported"
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| matches!(w, DyrWarning::LimitsIgnored { .. }))
+            .count(),
         0,
         "limits are no longer dropped, so nothing should warn about them"
     );
@@ -160,7 +192,11 @@ fn dropped_data_is_reported_and_limits_are_carried() {
     }
     match g1.gov {
         Some(GovSpec::Tgov1(p)) => {
-            assert_eq!(p.limits.min, Some(0.0), "VMIN is the fourth field, not the third");
+            assert_eq!(
+                p.limits.min,
+                Some(0.0),
+                "VMIN is the fourth field, not the third"
+            );
             assert_eq!(p.limits.max, Some(1.0));
         }
         ref other => panic!("{other:?}"),
@@ -178,7 +214,10 @@ fn missing_machine_data_is_refused_by_name() {
         matches!(err, DyrError::MissingMachineData { bus: 2, ref id } if id == "1"),
         "got {err}"
     );
-    assert!(err.to_string().contains("ZSORCE"), "the message should say where they live");
+    assert!(
+        err.to_string().contains("ZSORCE"),
+        "the message should say where they live"
+    );
 
     let mut short = bus_index();
     short.remove(&2);
@@ -204,7 +243,15 @@ fn a_short_record_is_caught_with_its_line() {
     let doc = dyr::parse(&with_machine).unwrap();
     let err = dyr::to_units(&doc, &bus_index(), &supplied()).expect_err("must refuse");
     assert!(
-        matches!(err, DyrError::WrongArity { line: 2, expected: 7, found: 3, .. }),
+        matches!(
+            err,
+            DyrError::WrongArity {
+                line: 2,
+                expected: 7,
+                found: 3,
+                ..
+            }
+        ),
         "got {err}"
     );
 }
@@ -227,8 +274,22 @@ fn a_dyr_case_initializes_and_runs() {
             make_bus(2, BusType::PQ, -1.2, -0.4),
         ],
         lines: vec![
-            Line { from: 0, to: 2, r: 0.005, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
-            Line { from: 1, to: 2, r: 0.005, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
+            Line {
+                from: 0,
+                to: 2,
+                r: 0.005,
+                x: 0.08,
+                b_shunt: 0.0,
+                g_shunt: 0.0,
+            },
+            Line {
+                from: 1,
+                to: 2,
+                r: 0.005,
+                x: 0.08,
+                b_shunt: 0.0,
+                g_shunt: 0.0,
+            },
         ],
     };
 
@@ -259,13 +320,22 @@ fn a_dyr_case_initializes_and_runs() {
 
     let report = run_dynamics(
         &mut system,
-        &DynamicsOptions { end_time: 5.0, step: 0.005, ..Default::default() },
+        &DynamicsOptions {
+            end_time: 5.0,
+            step: 0.005,
+            ..Default::default()
+        },
     );
     assert_eq!(report.status, DynamicsStatus::Completed);
     for name in ["1_1.omega", "2_1.omega"] {
         let series = report.trajectory.series(name).unwrap();
-        let drift = series.iter().fold(0.0f64, |m, w| m.max((w - series[0]).abs()));
-        assert!(drift < 1e-9, "{name} drifted by {drift:e} with no disturbance");
+        let drift = series
+            .iter()
+            .fold(0.0f64, |m, w| m.max((w - series[0]).abs()));
+        assert!(
+            drift < 1e-9,
+            "{name} drifted by {drift:e} with no disturbance"
+        );
     }
 }
 

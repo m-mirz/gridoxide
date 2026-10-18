@@ -150,7 +150,11 @@ pub enum Target {
     /// `se::iterative` keys its row builder on `Target` — which makes
     /// power-grid-model's "no mixing power and current on one terminal" rule
     /// fall out of the type rather than needing to be enforced downstream.
-    BranchTerminalCurrent { branch: usize, terminal: Terminal, frame: AngleFrame },
+    BranchTerminalCurrent {
+        branch: usize,
+        terminal: Terminal,
+        frame: AngleFrame,
+    },
 }
 
 /// One scalar observation with its uncertainty, in per-unit.
@@ -206,13 +210,25 @@ impl std::fmt::Display for MeasurementError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownObject { sensor, object } => {
-                write!(f, "sensor {sensor} measures object {object}, which is not in the network")
+                write!(
+                    f,
+                    "sensor {sensor} measures object {object}, which is not in the network"
+                )
             }
-            Self::UnsupportedTerminalType { sensor, terminal_type } => {
-                write!(f, "sensor {sensor} has unsupported measured_terminal_type {terminal_type}")
+            Self::UnsupportedTerminalType {
+                sensor,
+                terminal_type,
+            } => {
+                write!(
+                    f,
+                    "sensor {sensor} has unsupported measured_terminal_type {terminal_type}"
+                )
             }
             Self::InvalidSigma { sensor, sigma } => {
-                write!(f, "sensor {sensor} has non-positive or missing sigma {sigma}")
+                write!(
+                    f,
+                    "sensor {sensor} has non-positive or missing sigma {sigma}"
+                )
             }
             Self::CurrentSensorOnLink { sensor, link } => write!(
                 f,
@@ -282,8 +298,7 @@ impl MergedPhasor {
 
     /// `(phasor, sigma)`, or `None` if nothing was ever added.
     fn finish(self) -> Option<(num_complex::Complex<f64>, f64)> {
-        (self.weight > 0.0)
-            .then(|| (self.weighted_sum / self.weight, (1.0 / self.weight).sqrt()))
+        (self.weight > 0.0).then(|| (self.weighted_sum / self.weight, (1.0 / self.weight).sqrt()))
     }
 }
 
@@ -416,7 +431,10 @@ impl Resolver for PhaseView<'_> {
         }
     }
     fn source_branch(&self, id: u64) -> Option<usize> {
-        self.net.source_branch_idx.get(&id).map(|&b| 3 * b + self.phase)
+        self.net
+            .source_branch_idx
+            .get(&id)
+            .map(|&b| 3 * b + self.phase)
     }
     fn appliance_bus(&self, id: u64) -> Option<usize> {
         self.net.appliance_bus.get(&id).map(|&k| 3 * k + self.phase)
@@ -457,7 +475,11 @@ fn route_power_reading(
     match terminal_type {
         // Branch terminals: same direction convention as `terminal_flow`.
         0 | 1 => {
-            let terminal = if terminal_type == 0 { Terminal::From } else { Terminal::To };
+            let terminal = if terminal_type == 0 {
+                Terminal::From
+            } else {
+                Terminal::To
+            };
             let Some(key) = net.resolve_terminal(measured_object, terminal) else {
                 // The branch is absent or this is its open end. PGM reports
                 // zero flow there, so the reading carries no information about
@@ -499,15 +521,21 @@ fn route_power_reading(
                 _ => 1.0,
             };
             let Some(bus) = net.appliance_bus(measured_object) else {
-                return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
+                return Err(MeasurementError::UnknownObject {
+                    sensor,
+                    object: measured_object,
+                });
             };
-            let entry = acc.appliances.entry(measured_object).or_insert(ApplianceAccumulator {
-                bus,
-                sign,
-                is_shunt: terminal_type == 3,
-                p: Merged::default(),
-                q: Merged::default(),
-            });
+            let entry = acc
+                .appliances
+                .entry(measured_object)
+                .or_insert(ApplianceAccumulator {
+                    bus,
+                    sign,
+                    is_shunt: terminal_type == 3,
+                    p: Merged::default(),
+                    q: Merged::default(),
+                });
             if let Some((v, s)) = p {
                 entry.p.add(v, s);
             }
@@ -533,7 +561,10 @@ fn route_power_reading(
         // disagrees.
         6 | 7 | 8 => {
             let Some(legs) = net.three_winding_legs(measured_object) else {
-                return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
+                return Err(MeasurementError::UnknownObject {
+                    sensor,
+                    object: measured_object,
+                });
             };
             let key = (legs[(terminal_type - 6) as usize], Terminal::From);
             if let Some((v, s)) = p {
@@ -546,7 +577,10 @@ fn route_power_reading(
         // Node injection: already a bus injection, generator direction.
         9 => {
             let Some(bus) = net.node_bus(measured_object) else {
-                return Err(MeasurementError::UnknownObject { sensor, object: measured_object });
+                return Err(MeasurementError::UnknownObject {
+                    sensor,
+                    object: measured_object,
+                });
             };
             let entry = acc.buses.entry(bus).or_default();
             if let Some((v, s)) = p {
@@ -560,7 +594,7 @@ fn route_power_reading(
             return Err(MeasurementError::UnsupportedTerminalType {
                 sensor,
                 terminal_type: other,
-            })
+            });
         }
     }
     Ok(())
@@ -616,8 +650,7 @@ fn component_sigmas(
             checked_sigma(sensor, q_sigma)? / s_base_va,
         ));
     }
-    let shared =
-        apparent_power_component_sigma(checked_sigma(sensor, power_sigma)? / s_base_va);
+    let shared = apparent_power_component_sigma(checked_sigma(sensor, power_sigma)? / s_base_va);
     Ok((shared, shared))
 }
 
@@ -659,7 +692,10 @@ fn decompose_polar(
         + 0.5 * mag2 * ang_var * ang_var * sin2
         + mag_var * ang_var * cos2;
 
-    ((magnitude * cos, re_var.sqrt()), (magnitude * sin, im_var.sqrt()))
+    (
+        (magnitude * cos, re_var.sqrt()),
+        (magnitude * sin, im_var.sqrt()),
+    )
 }
 
 /// A current sensor's terminal, resolved against the network.
@@ -686,14 +722,21 @@ fn resolve_current_terminal(
     // A `link`'s admittance is a chosen constant, so the current through one is
     // not a measurable quantity. power-grid-model refuses it too.
     if input.data.link.iter().any(|l| l.id == object) {
-        return Err(MeasurementError::CurrentSensorOnLink { sensor, link: object });
+        return Err(MeasurementError::CurrentSensorOnLink {
+            sensor,
+            link: object,
+        });
     }
 
     let node_of = |id: u64| net.node_idx.get(&id).map(|&b| net.buses[b].u_rated);
 
     match terminal_type {
         0 | 1 => {
-            let terminal = if terminal_type == 0 { Terminal::From } else { Terminal::To };
+            let terminal = if terminal_type == 0 {
+                Terminal::From
+            } else {
+                Terminal::To
+            };
             let Some((branch, terminal)) = net.resolve_terminal(object, terminal) else {
                 return Ok(None);
             };
@@ -705,19 +748,35 @@ fn resolve_current_terminal(
                 .line
                 .iter()
                 .find(|l| l.id == object)
-                .map(|l| if terminal_type == 0 { l.from_node } else { l.to_node })
+                .map(|l| {
+                    if terminal_type == 0 {
+                        l.from_node
+                    } else {
+                        l.to_node
+                    }
+                })
                 .or_else(|| {
                     input
                         .data
                         .transformer
                         .iter()
                         .find(|t| t.id == object)
-                        .map(|t| if terminal_type == 0 { t.from_node } else { t.to_node })
+                        .map(|t| {
+                            if terminal_type == 0 {
+                                t.from_node
+                            } else {
+                                t.to_node
+                            }
+                        })
                 });
             let Some(u_rated) = node.and_then(node_of) else {
                 return Err(MeasurementError::UnknownObject { sensor, object });
             };
-            Ok(Some(CurrentTerminal { branch, terminal, u_rated }))
+            Ok(Some(CurrentTerminal {
+                branch,
+                terminal,
+                u_rated,
+            }))
         }
         6 | 7 | 8 => {
             let Some(&legs) = net.three_winding_branch_idx.get(&object) else {
@@ -733,12 +792,19 @@ fn resolve_current_terminal(
             let Some(u_rated) = node.and_then(node_of) else {
                 return Err(MeasurementError::UnknownObject { sensor, object });
             };
-            Ok(Some(CurrentTerminal { branch: legs[side], terminal: Terminal::From, u_rated }))
+            Ok(Some(CurrentTerminal {
+                branch: legs[side],
+                terminal: Terminal::From,
+                u_rated,
+            }))
         }
         // power-grid-model's `CurrentSensor` constructor rejects every other
         // terminal type outright: a current sensor belongs on a branch, and
         // there is no current to speak of at a bus or an appliance.
-        other => Err(MeasurementError::UnsupportedTerminalType { sensor, terminal_type: other }),
+        other => Err(MeasurementError::UnsupportedTerminalType {
+            sensor,
+            terminal_type: other,
+        }),
     }
 }
 
@@ -801,9 +867,10 @@ pub fn measurements_from_pgm(
             } else {
                 sigma
             };
-            bus_acc
-                .u_phasor
-                .add(num_complex::Complex::from_polar(magnitude, s.u_angle_measured), sigma);
+            bus_acc.u_phasor.add(
+                num_complex::Complex::from_polar(magnitude, s.u_angle_measured),
+                sigma,
+            );
         } else {
             bus_acc.u_mag.add(magnitude, sigma);
         }
@@ -836,7 +903,9 @@ pub fn measurements_from_pgm(
         // PGM requires *every* phase angle to be present before it treats the
         // sensor as a phasor (`has_angle()` is `!isNaN().any()`).
         if s.u_angle_measured.iter().all(|a| a.is_finite()) {
-            bus_acc.u_phasor.add(positive_sequence(&mag, &s.u_angle_measured), sigma);
+            bus_acc
+                .u_phasor
+                .add(positive_sequence(&mag, &s.u_angle_measured), sigma);
         } else {
             bus_acc.u_mag.add(mag.iter().sum::<f64>() / 3.0, sigma);
         }
@@ -850,8 +919,12 @@ pub fn measurements_from_pgm(
         let (p_sigma, q_sigma) =
             component_sigmas(s.id, s.p_sigma, s.q_sigma, s.power_sigma, s_base_va)?;
         let reading = (
-            s.p_measured.is_finite().then(|| (s.p_measured / s_base_va, p_sigma)),
-            s.q_measured.is_finite().then(|| (s.q_measured / s_base_va, q_sigma)),
+            s.p_measured
+                .is_finite()
+                .then(|| (s.p_measured / s_base_va, p_sigma)),
+            s.q_measured
+                .is_finite()
+                .then(|| (s.q_measured / s_base_va, q_sigma)),
         );
         route_power_reading(
             &mut acc,
@@ -884,17 +957,18 @@ pub fn measurements_from_pgm(
         let mean = |vs: &[f64; 3]| vs.iter().sum::<f64>() / 3.0 / s_base_1ph;
         // A sigma is per-phase here, unlike the voltage sensor's. Reduce the
         // three variances to their mean and hand back one standard deviation.
-        let rms = |vs: &[f64; 3]| {
-            (vs.iter().map(|v| (v / s_base_1ph).powi(2)).sum::<f64>() / 3.0).sqrt()
-        };
+        let rms =
+            |vs: &[f64; 3]| (vs.iter().map(|v| (v / s_base_1ph).powi(2)).sum::<f64>() / 3.0).sqrt();
         let per_phase_finite = |vs: &[f64; 3]| vs.iter().all(|v| v.is_finite());
 
         let (p_sigma, q_sigma) = if per_phase_finite(&s.p_sigma) && per_phase_finite(&s.q_sigma) {
-            (checked_sigma(s.id, rms(&s.p_sigma))?, checked_sigma(s.id, rms(&s.q_sigma))?)
+            (
+                checked_sigma(s.id, rms(&s.p_sigma))?,
+                checked_sigma(s.id, rms(&s.q_sigma))?,
+            )
         } else {
-            let shared = apparent_power_component_sigma(
-                checked_sigma(s.id, s.power_sigma)? / s_base_1ph,
-            );
+            let shared =
+                apparent_power_component_sigma(checked_sigma(s.id, s.power_sigma)? / s_base_1ph);
             (shared, shared)
         };
         let reading = (
@@ -963,7 +1037,11 @@ pub fn measurements_from_pgm(
         let Some(t) = resolve_current_terminal(input, net, id, object, terminal_type)? else {
             continue;
         };
-        let frame = if frame_code == 0 { AngleFrame::Local } else { AngleFrame::Global };
+        let frame = if frame_code == 0 {
+            AngleFrame::Local
+        } else {
+            AngleFrame::Global
+        };
 
         // Per-unit against the base current of the node at this terminal:
         // `I_base = S_base / (√3 · u_rated)`.
@@ -980,10 +1058,10 @@ pub fn measurements_from_pgm(
         if acc.branch_p.contains_key(&key) || acc.branch_q.contains_key(&key) {
             return Err(MeasurementError::MixedPowerAndCurrent { sensor: id, object });
         }
-        let entry = acc
-            .currents
-            .entry(key)
-            .or_insert((frame, Merged::default(), Merged::default()));
+        let entry =
+            acc.currents
+                .entry(key)
+                .or_insert((frame, Merged::default(), Merged::default()));
         if entry.0 != frame {
             return Err(MeasurementError::ConflictingAngleFrame { sensor: id, object });
         }
@@ -993,7 +1071,6 @@ pub fn measurements_from_pgm(
 
     Ok(flatten(acc))
 }
-
 
 /// Turns the accumulators into measurement rows, in a deterministic order.
 ///
@@ -1039,7 +1116,12 @@ fn flatten(mut acc: Accumulators) -> Vec<Measurement> {
             u_mag.add(value.norm(), sigma);
         }
         if let Some((value, sigma)) = u_mag.finish() {
-            out.push(Measurement { kind: MeasurementKind::VoltageMagnitude, target, value, sigma });
+            out.push(Measurement {
+                kind: MeasurementKind::VoltageMagnitude,
+                target,
+                value,
+                sigma,
+            });
         }
         if let Some((value, sigma)) = phasor {
             out.push(Measurement {
@@ -1070,7 +1152,12 @@ fn flatten(mut acc: Accumulators) -> Vec<Measurement> {
             ),
         ] {
             if let Some((value, sigma)) = appliance {
-                out.push(Measurement { kind, target, value, sigma });
+                out.push(Measurement {
+                    kind,
+                    target,
+                    value,
+                    sigma,
+                });
             }
             if let Some((value, sigma)) = shunt {
                 out.push(Measurement {
@@ -1097,25 +1184,49 @@ fn flatten(mut acc: Accumulators) -> Vec<Measurement> {
         let (p, q) = acc.sources[&branch];
         let target = Target::SourceInjection { branch };
         if let Some((value, sigma)) = p.finish() {
-            out.push(Measurement { kind: MeasurementKind::ActivePower, target, value, sigma });
+            out.push(Measurement {
+                kind: MeasurementKind::ActivePower,
+                target,
+                value,
+                sigma,
+            });
         }
         if let Some((value, sigma)) = q.finish() {
-            out.push(Measurement { kind: MeasurementKind::ReactivePower, target, value, sigma });
+            out.push(Measurement {
+                kind: MeasurementKind::ReactivePower,
+                target,
+                value,
+                sigma,
+            });
         }
     }
 
-    let mut branch_keys: Vec<(usize, Terminal)> =
-        acc.branch_p.keys().chain(acc.branch_q.keys()).copied().collect();
+    let mut branch_keys: Vec<(usize, Terminal)> = acc
+        .branch_p
+        .keys()
+        .chain(acc.branch_q.keys())
+        .copied()
+        .collect();
     branch_keys.sort_unstable_by_key(|&(b, t)| (b, t == Terminal::To));
     branch_keys.dedup();
     for key in branch_keys {
         let (branch, terminal) = key;
         let target = Target::BranchTerminal { branch, terminal };
         if let Some((value, sigma)) = acc.branch_p.get(&key).copied().unwrap_or_default().finish() {
-            out.push(Measurement { kind: MeasurementKind::ActivePower, target, value, sigma });
+            out.push(Measurement {
+                kind: MeasurementKind::ActivePower,
+                target,
+                value,
+                sigma,
+            });
         }
         if let Some((value, sigma)) = acc.branch_q.get(&key).copied().unwrap_or_default().finish() {
-            out.push(Measurement { kind: MeasurementKind::ReactivePower, target, value, sigma });
+            out.push(Measurement {
+                kind: MeasurementKind::ReactivePower,
+                target,
+                value,
+                sigma,
+            });
         }
     }
 
@@ -1124,12 +1235,26 @@ fn flatten(mut acc: Accumulators) -> Vec<Measurement> {
     for key in current_keys {
         let (branch, terminal) = key;
         let (frame, re, im) = acc.currents[&key];
-        let target = Target::BranchTerminalCurrent { branch, terminal, frame };
+        let target = Target::BranchTerminalCurrent {
+            branch,
+            terminal,
+            frame,
+        };
         if let Some((value, sigma)) = re.finish() {
-            out.push(Measurement { kind: MeasurementKind::CurrentReal, target, value, sigma });
+            out.push(Measurement {
+                kind: MeasurementKind::CurrentReal,
+                target,
+                value,
+                sigma,
+            });
         }
         if let Some((value, sigma)) = im.finish() {
-            out.push(Measurement { kind: MeasurementKind::CurrentImag, target, value, sigma });
+            out.push(Measurement {
+                kind: MeasurementKind::CurrentImag,
+                target,
+                value,
+                sigma,
+            });
         }
     }
 
@@ -1220,8 +1345,12 @@ pub fn measurements_from_pgm_3ph(
             let (p_sigma, q_sigma) =
                 component_sigmas(s.id, s.p_sigma, s.q_sigma, s.power_sigma, s_base_va)?;
             let reading = (
-                s.p_measured.is_finite().then(|| (s.p_measured / s_base_va, p_sigma)),
-                s.q_measured.is_finite().then(|| (s.q_measured / s_base_va, q_sigma)),
+                s.p_measured
+                    .is_finite()
+                    .then(|| (s.p_measured / s_base_va, p_sigma)),
+                s.q_measured
+                    .is_finite()
+                    .then(|| (s.q_measured / s_base_va, q_sigma)),
             );
             route_power_reading(
                 &mut acc,
@@ -1261,9 +1390,10 @@ pub fn measurements_from_pgm_3ph(
             if s.u_angle_measured[phase].is_finite() {
                 // Already this phase's own absolute angle: no 120° rotation, and
                 // no requirement that the other phases carry one either.
-                bus_acc
-                    .u_phasor
-                    .add(num_complex::Complex::from_polar(magnitude, s.u_angle_measured[phase]), sigma);
+                bus_acc.u_phasor.add(
+                    num_complex::Complex::from_polar(magnitude, s.u_angle_measured[phase]),
+                    sigma,
+                );
             } else {
                 bus_acc.u_mag.add(magnitude, sigma);
             }
@@ -1279,18 +1409,18 @@ pub fn measurements_from_pgm_3ph(
             // `base_power_1p`. Per-component sigmas are per-phase here too,
             // unlike the voltage sensor's.
             let s_base_1ph = s_base_va / 3.0;
-            let (p_sigma, q_sigma) =
-                if s.p_sigma[phase].is_finite() && s.q_sigma[phase].is_finite() {
-                    (
-                        checked_sigma(s.id, s.p_sigma[phase])? / s_base_1ph,
-                        checked_sigma(s.id, s.q_sigma[phase])? / s_base_1ph,
-                    )
-                } else {
-                    let shared = apparent_power_component_sigma(
-                        checked_sigma(s.id, s.power_sigma)? / s_base_1ph,
-                    );
-                    (shared, shared)
-                };
+            let (p_sigma, q_sigma) = if s.p_sigma[phase].is_finite() && s.q_sigma[phase].is_finite()
+            {
+                (
+                    checked_sigma(s.id, s.p_sigma[phase])? / s_base_1ph,
+                    checked_sigma(s.id, s.q_sigma[phase])? / s_base_1ph,
+                )
+            } else {
+                let shared = apparent_power_component_sigma(
+                    checked_sigma(s.id, s.power_sigma)? / s_base_1ph,
+                );
+                (shared, shared)
+            };
             let reading = (
                 p_finite.then(|| (s.p_measured[phase] / s_base_1ph, p_sigma)),
                 q_finite.then(|| (s.q_measured[phase] / s_base_1ph, q_sigma)),
@@ -1353,7 +1483,10 @@ pub fn measurements_from_pgm_3ph(
             // reports the link as an unknown object — true in a sense, and the
             // wrong diagnosis.
             if input.data.link.iter().any(|l| l.id == object) {
-                return Err(MeasurementError::CurrentSensorOnLink { sensor: id, link: object });
+                return Err(MeasurementError::CurrentSensorOnLink {
+                    sensor: id,
+                    link: object,
+                });
             }
             // `pgm_3ph_maps` refuses three-winding transformers outright, so a
             // current sensor here is on an ordinary branch terminal or on
@@ -1364,18 +1497,44 @@ pub fn measurements_from_pgm_3ph(
                     terminal_type,
                 });
             }
-            let terminal = if terminal_type == 0 { Terminal::From } else { Terminal::To };
+            let terminal = if terminal_type == 0 {
+                Terminal::From
+            } else {
+                Terminal::To
+            };
             let Some(key) = view.resolve_terminal(object, terminal) else {
                 continue;
             };
             let near = if terminal_type == 0 {
-                input.data.line.iter().find(|l| l.id == object).map(|l| l.from_node).or_else(|| {
-                    input.data.transformer.iter().find(|t| t.id == object).map(|t| t.from_node)
-                })
+                input
+                    .data
+                    .line
+                    .iter()
+                    .find(|l| l.id == object)
+                    .map(|l| l.from_node)
+                    .or_else(|| {
+                        input
+                            .data
+                            .transformer
+                            .iter()
+                            .find(|t| t.id == object)
+                            .map(|t| t.from_node)
+                    })
             } else {
-                input.data.line.iter().find(|l| l.id == object).map(|l| l.to_node).or_else(|| {
-                    input.data.transformer.iter().find(|t| t.id == object).map(|t| t.to_node)
-                })
+                input
+                    .data
+                    .line
+                    .iter()
+                    .find(|l| l.id == object)
+                    .map(|l| l.to_node)
+                    .or_else(|| {
+                        input
+                            .data
+                            .transformer
+                            .iter()
+                            .find(|t| t.id == object)
+                            .map(|t| t.to_node)
+                    })
             };
             let Some(near_bus) = near.and_then(|id| view.node_bus(id)) else {
                 return Err(MeasurementError::UnknownObject { sensor: id, object });
@@ -1387,14 +1546,18 @@ pub fn measurements_from_pgm_3ph(
                 checked_sigma(id, i_sigma)? / i_base,
                 checked_sigma(id, i_angle_sigma)?,
             );
-            let frame = if frame_code == 0 { AngleFrame::Local } else { AngleFrame::Global };
+            let frame = if frame_code == 0 {
+                AngleFrame::Local
+            } else {
+                AngleFrame::Global
+            };
             if acc.branch_p.contains_key(&key) || acc.branch_q.contains_key(&key) {
                 return Err(MeasurementError::MixedPowerAndCurrent { sensor: id, object });
             }
-            let entry = acc
-                .currents
-                .entry(key)
-                .or_insert((frame, Merged::default(), Merged::default()));
+            let entry =
+                acc.currents
+                    .entry(key)
+                    .or_insert((frame, Merged::default(), Merged::default()));
             if entry.0 != frame {
                 return Err(MeasurementError::ConflictingAngleFrame { sensor: id, object });
             }
@@ -1421,7 +1584,10 @@ mod tests {
         m.add(2.0, 0.1);
         let (value, sigma) = m.finish().unwrap();
         assert!((value - 1.5).abs() < 1e-12);
-        assert!((sigma - 0.1 / 2.0_f64.sqrt()).abs() < 1e-12, "sigma={sigma}");
+        assert!(
+            (sigma - 0.1 / 2.0_f64.sqrt()).abs() < 1e-12,
+            "sigma={sigma}"
+        );
     }
 
     /// A much noisier second reading barely moves the estimate.
@@ -1432,7 +1598,10 @@ mod tests {
         m.add(5.0, 1.0);
         let (value, sigma) = m.finish().unwrap();
         // Weights are 100 and 1, so the mean sits 1/101 of the way to 5.
-        assert!((value - (100.0 + 5.0) / 101.0).abs() < 1e-12, "value={value}");
+        assert!(
+            (value - (100.0 + 5.0) / 101.0).abs() < 1e-12,
+            "value={value}"
+        );
         assert!(sigma < 0.1, "merging must not lose certainty: {sigma}");
     }
 
@@ -1522,14 +1691,26 @@ mod tests {
         // `u = 10.570170726436285`, `u_angle = -0.0661620368126038` for them —
         // so this pins the aggregation against PGM's own arithmetic, not just
         // against gridoxide's.
-        assert!((mag.value - 1.0570170726436283).abs() < 1e-12, "magnitude={}", mag.value);
-        assert!((ang.value + 0.0661620368126038).abs() < 1e-12, "angle={}", ang.value);
+        assert!(
+            (mag.value - 1.0570170726436283).abs() < 1e-12,
+            "magnitude={}",
+            mag.value
+        );
+        assert!(
+            (ang.value + 0.0661620368126038).abs() < 1e-12,
+            "angle={}",
+            ang.value
+        );
         assert!(
             (mag.value - 1.06).abs() > 1e-4,
             "merging the magnitudes alone would give exactly 1.06 — the point is that it does not"
         );
         // Both rows carry the merged phasor's own sigma, 1/√125.
-        assert!((mag.sigma - 125.0f64.sqrt().recip()).abs() < 1e-12, "sigma={}", mag.sigma);
+        assert!(
+            (mag.sigma - 125.0f64.sqrt().recip()).abs() < 1e-12,
+            "sigma={}",
+            mag.sigma
+        );
         assert!((ang.sigma - 125.0f64.sqrt().recip()).abs() < 1e-12);
     }
 
@@ -1574,8 +1755,16 @@ mod tests {
 
         // I_base = 1e6/(√3·1e4) = 57.735 A, so 10 A is 0.173205 p.u.
         let i_pu = 10.0 * SQRT_3 * 10000.0 / 1e6;
-        assert!((re.value - i_pu * 0.5f64.cos()).abs() < 1e-12, "Re={}", re.value);
-        assert!((im.value - i_pu * 0.5f64.sin()).abs() < 1e-12, "Im={}", im.value);
+        assert!(
+            (re.value - i_pu * 0.5f64.cos()).abs() < 1e-12,
+            "Re={}",
+            re.value
+        );
+        assert!(
+            (im.value - i_pu * 0.5f64.sin()).abs() < 1e-12,
+            "Im={}",
+            im.value
+        );
 
         // Var(Re) = σ²cos²θ + i²σ_θ²sin²θ + ½i²σ_θ⁴cos²θ + σ²σ_θ²sin²θ
         let sigma = 5.0 * SQRT_3 * 10000.0 / 1e6;
@@ -1586,7 +1775,11 @@ mod tests {
             + 0.5 * i_pu * i_pu * a * a * cos * cos
             + v * a * sin * sin)
             .sqrt();
-        assert!((re.sigma - want_re).abs() < 1e-14, "σ_Re={} want {want_re}", re.sigma);
+        assert!(
+            (re.sigma - want_re).abs() < 1e-14,
+            "σ_Re={} want {want_re}",
+            re.sigma
+        );
     }
 
     /// A current sensor and a power sensor may not share a terminal.
@@ -1605,7 +1798,10 @@ mod tests {
         );
         assert_eq!(
             measurements_from_pgm(&input, &net, 1e6),
-            Err(MeasurementError::MixedPowerAndCurrent { sensor: 9, object: 3 })
+            Err(MeasurementError::MixedPowerAndCurrent {
+                sensor: 9,
+                object: 3
+            })
         );
     }
 
@@ -1622,7 +1818,10 @@ mod tests {
         );
         assert_eq!(
             measurements_from_pgm(&input, &net, 1e6),
-            Err(MeasurementError::ConflictingAngleFrame { sensor: 10, object: 3 })
+            Err(MeasurementError::ConflictingAngleFrame {
+                sensor: 10,
+                object: 3
+            })
         );
     }
 
@@ -1637,7 +1836,10 @@ mod tests {
         );
         assert_eq!(
             measurements_from_pgm(&input, &net, 1e6),
-            Err(MeasurementError::UnsupportedTerminalType { sensor: 9, terminal_type: 4 })
+            Err(MeasurementError::UnsupportedTerminalType {
+                sensor: 9,
+                terminal_type: 4
+            })
         );
     }
 
@@ -1683,7 +1885,10 @@ mod tests {
             let m = find(
                 &ms,
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: legs[side], terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: legs[side],
+                    terminal: Terminal::From,
+                },
             );
             assert!(
                 (m.value - expected_p).abs() < 1e-12,
@@ -1704,7 +1909,10 @@ mod tests {
         );
         assert_eq!(
             measurements_from_pgm(&input, &net, 1e6),
-            Err(MeasurementError::UnsupportedTerminalType { sensor: 9, terminal_type: 11 })
+            Err(MeasurementError::UnsupportedTerminalType {
+                sensor: 9,
+                terminal_type: 11
+            })
         );
     }
 
@@ -1817,7 +2025,10 @@ mod tests {
         );
         let ms = measurements_from_pgm(&input, &net, 1e6).unwrap();
         let branch = net.branch_idx[&3];
-        let target = Target::BranchTerminal { branch, terminal: Terminal::To };
+        let target = Target::BranchTerminal {
+            branch,
+            terminal: Terminal::To,
+        };
         let p = find(&ms, MeasurementKind::ActivePower, target);
         assert!((p.value + 0.0015).abs() < 1e-12, "p={}", p.value);
     }
@@ -1849,7 +2060,10 @@ mod tests {
         );
         assert_eq!(
             measurements_from_pgm(&input, &net, 1e6),
-            Err(MeasurementError::UnknownObject { sensor: 16, object: 999 })
+            Err(MeasurementError::UnknownObject {
+                sensor: 16,
+                object: 999
+            })
         );
     }
 
@@ -1857,7 +2071,10 @@ mod tests {
     fn zero_sigma_is_rejected() {
         assert_eq!(
             checked_sigma(7, 0.0),
-            Err(MeasurementError::InvalidSigma { sensor: 7, sigma: 0.0 })
+            Err(MeasurementError::InvalidSigma {
+                sensor: 7,
+                sigma: 0.0
+            })
         );
         assert!(checked_sigma(7, f64::NAN).is_err());
         assert!(checked_sigma(7, -1.0).is_err());

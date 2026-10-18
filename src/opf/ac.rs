@@ -62,11 +62,11 @@ use std::collections::HashMap;
 
 use num_complex::Complex;
 
-use crate::branch_flow::{branch_params, BranchParams, Terminal};
+use crate::branch_flow::{BranchParams, Terminal, branch_params};
 use crate::injection_hessian::{injection_jacobian, weighted_injection_hessian};
-use crate::network::{power_injections, YBusSparse};
+use crate::network::{YBusSparse, power_injections};
 use crate::opf::model::{CostCurve, OpfData};
-use crate::opf::nlp::{NonlinearProblem, NlpOptions, NlpSolution};
+use crate::opf::nlp::{NlpOptions, NlpSolution, NonlinearProblem};
 use crate::opf::{OpfError, OptStatus};
 use crate::types::{Bus, BusType, Line, Transformer};
 
@@ -401,8 +401,7 @@ impl AcOpf {
     pub fn build(network: AcOpfNetwork, options: AcOpfOptions) -> Result<Self, OpfError> {
         let n = network.n_buses;
         let g = network.generators.len();
-        let mut ybus_builder =
-            crate::network::build_ybus(n, &network.lines, &network.transformers);
+        let mut ybus_builder = crate::network::build_ybus(n, &network.lines, &network.transformers);
         for &(at, y) in &network.shunts {
             ybus_builder.add(at, at, y);
         }
@@ -430,7 +429,11 @@ impl AcOpf {
         let template: Vec<Bus> = (0..n)
             .map(|i| Bus {
                 idx: i,
-                bus_type: if i == network.reference { BusType::Slack } else { BusType::PQ },
+                bus_type: if i == network.reference {
+                    BusType::Slack
+                } else {
+                    BusType::PQ
+                },
                 voltage_mag: 1.0,
                 voltage_ang: 0.0,
                 p_spec: 0.0,
@@ -722,12 +725,7 @@ impl NonlinearProblem for AcOpf {
         let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
         let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
         for (r, limit) in self.limit_rows.iter().enumerate() {
-            let d = terminal_derivatives(
-                &self.params[limit.branch],
-                limit.terminal,
-                &theta,
-                &vm,
-            );
+            let d = terminal_derivatives(&self.params[limit.branch], limit.terminal, &theta, &vm);
             out[2 * n + r] = d.p * d.p + d.q * d.q;
         }
         let base = 2 * n + self.limit_rows.len();
@@ -849,12 +847,20 @@ impl NonlinearProblem for AcOpf {
         let n = self.network.n_buses;
         let mut x = vec![0.0; self.n_vars];
         for i in 0..n {
-            x[self.vm + i] = self.network.v_start.unwrap_or(1.0)
+            x[self.vm + i] = self
+                .network
+                .v_start
+                .unwrap_or(1.0)
                 .clamp(self.network.v_min[i], self.network.v_max[i]);
         }
 
         let demand: f64 = self.network.p_load.iter().sum();
-        let floor: f64 = self.network.generators.iter().map(|u| u.p_min.max(0.0)).sum();
+        let floor: f64 = self
+            .network
+            .generators
+            .iter()
+            .map(|u| u.p_min.max(0.0))
+            .sum();
         let headroom: f64 = self
             .network
             .generators
@@ -899,7 +905,12 @@ impl AcOpf {
             Terminal::From => (branch.from, branch.to),
             Terminal::To => (branch.to, branch.from),
         };
-        [self.theta + near, self.theta + far, self.vm + near, self.vm + far]
+        [
+            self.theta + near,
+            self.theta + far,
+            self.vm + near,
+            self.vm + far,
+        ]
     }
 }
 
