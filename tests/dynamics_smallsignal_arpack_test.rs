@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! ARPACK_ROOT=/usr cargo test --features smallsignal-arpack \
-//!     --test dynamics_smallsignal_arpack_test
+//!     --test all dynamics_smallsignal_arpack_test::
 //! ```
 
 mod dynamics_ring;
