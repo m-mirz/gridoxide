@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod openrao;
+
 fn config(name: &str) -> Option<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/CGMES-Test-Configurations/v3.0")
@@ -124,11 +126,7 @@ fn a_bad_flag_value_is_rejected() {
 /// extension rather than by flag.
 #[test]
 fn a_ucte_network_solves_through_the_same_path() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte/TestCase12Nodes.uct");
-    if !path.exists() {
-        eprintln!("skipping: no UCTE fixture");
-        return;
-    }
+    let path = openrao::fixture("TestCase12Nodes.uct");
     let out = run(&["solve", path.to_str().unwrap(), "--enforce-q-limits"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = stdout(&out);
@@ -166,11 +164,7 @@ fn cgmes_supplies_both_the_areas_and_the_schedule() {
 /// every target is zero — each country asked to serve its own load.
 #[test]
 fn ucte_supplies_areas_from_country_codes() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte/TestCase12Nodes.uct");
-    if !path.exists() {
-        eprintln!("skipping: no UCTE fixture");
-        return;
-    }
+    let path = openrao::fixture("TestCase12Nodes.uct");
     let out = run(&["solve", path.to_str().unwrap(), "--area-interchange"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = stdout(&out);
@@ -184,10 +178,7 @@ fn ucte_supplies_areas_from_country_codes() {
 /// one — area interchange subsumes distributed slack.
 #[test]
 fn the_two_active_power_controls_are_refused_together() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte/TestCase12Nodes.uct");
-    if !path.exists() {
-        return;
-    }
+    let path = openrao::fixture("TestCase12Nodes.uct");
     let out = run(&["solve", path.to_str().unwrap(), "--area-interchange", "--distribute-slack"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
@@ -197,12 +188,9 @@ fn the_two_active_power_controls_are_refused_together() {
 /// IIDM states membership directly, as `<voltageLevelRef>`, so the twelve-node
 /// case's four areas come straight out of the file.
 #[test]
+#[cfg(feature = "iidm")]
 fn iidm_supplies_areas_from_its_own_elements() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/iidm/TestCase12Nodes.xiidm");
-    if !path.exists() {
-        eprintln!("skipping: no IIDM fixture");
-        return;
-    }
+    let path = openrao::fixture("TestCase12Nodes.xiidm");
     let out = run(&["solve", path.to_str().unwrap(), "--area-interchange"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = stdout(&out);
@@ -217,12 +205,9 @@ fn iidm_supplies_areas_from_its_own_elements() {
 /// Asking for area control on a format that states no areas is a usage error,
 /// not a silent no-op. PGM JSON carries no area concept at all.
 #[test]
+#[cfg(feature = "iidm")]
 fn area_interchange_without_areas_is_refused() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/iidm/nordic32.xiidm");
-    if !path.exists() {
-        eprintln!("skipping: no IIDM fixture");
-        return;
-    }
+    let path = openrao::fixture("nordic32.xiidm");
     let out = run(&["solve", path.to_str().unwrap(), "--area-interchange"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
@@ -257,11 +242,7 @@ fn dispatch_attributes_reactive_power_to_individual_machines() {
 /// empty table or pretending every bus has one machine.
 #[test]
 fn dispatch_says_so_when_the_format_carries_no_machines() {
-    let uct = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ucte/2Nodes.uct");
-    if !uct.exists() {
-        eprintln!("skipping: {} not found", uct.display());
-        return;
-    }
+    let uct = openrao::fixture("2Nodes.uct");
     let text = stdout(&run(&["solve", uct.to_str().unwrap(), "--dispatch"]));
     assert!(
         text.contains("no per-machine reactive capability"),
