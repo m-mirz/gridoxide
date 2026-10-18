@@ -418,8 +418,8 @@ them, and leaving them in would put one contingency's curative switching into th
 hence into force for every other contingency.
 
 What the reference does here and this does not is re-optimize the curative **range** actions inside
-that same problem, which needs a set-point per action per state. `plans/RAO_PLAN.md` §8.7 records an
-attempt at it, and the more interesting half of that record is why it does not pay yet: the reference
+that same problem, which needs a set-point per action per state. It has been attempted, and the
+more interesting half of that attempt is why it does not pay yet: the reference
 keeps its curative answer afterwards *because* its second preventive computed one, and gridoxide's
 curative search — a full search tree, with its own stop criterion and per-leaf LP — is currently
 better than any curative column its second preventive problem can produce.

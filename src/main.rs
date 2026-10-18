@@ -2630,8 +2630,8 @@ fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
     };
 
     // A cost objective's LP is one violation column per CNEC priced against
-    // movement, and an interior-point method reports `Unbounded` on it
-    // (`plans/RAO_PLAN.md` §8.14) — so a `MIN_COST` run needs a simplex or MIP
+    // movement, and an interior-point method reports `Unbounded` on it — so a
+    // `MIN_COST` run needs a simplex or MIP
     // backend. Say so rather than answering by margin without a word.
     let costly = options.linear.objective_kind.costly().is_some();
     #[cfg(feature = "opf-highs")]

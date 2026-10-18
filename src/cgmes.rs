@@ -1103,7 +1103,7 @@ pub struct CgmesNetwork {
     ///
     /// Summed over the connected `SynchronousMachine`s at each bus, then
     /// clamped at zero, exactly as `ucte.rs` does it. It matters more than it
-    /// looks: `plans/RAO_PLAN.md` §8.5 measured what happens when a slack is
+    /// looks: it has been measured what happens when a slack is
     /// weighted by *net injection* instead — on one fixture it pushes an entire
     /// 1000 MW make-up back through the country that just lost it and over the
     /// line being measured, 1165 A against a true 1000. An importer that leaves

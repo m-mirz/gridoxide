@@ -361,7 +361,7 @@ fn a_phase_shifter_range_action_works_on_a_cgmes_network() {
 
 /// Per-bus generation, which is what a distributed slack weights by.
 ///
-/// Not a refinement. `plans/RAO_PLAN.md` §8.5 measured what happens when an AC
+/// Not a refinement. It has been measured what happens when an AC
 /// slack is weighted by *net injection* instead — on one fixture it pushes an
 /// entire 1000 MW make-up back through the country that just lost it and over
 /// the line being measured, 1165 A against a true 1000 — and records that the

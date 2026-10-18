@@ -54,7 +54,7 @@ exercise rather than by where they came from upstream.
 The first three exclude the features that have a corpus of their own, which is
 why the other two exist. `min_cost.txt` is the odd one: it was selected
 **before** the capability, so its score is a recorded *before* figure rather
-than an achievement — the order `plans/RAO_PLAN.md` records as the only one that
+than an achievement — the only order that
 works, and the one that found every defect in the second-preventive corpus.
 
 Tolerance is the reference's own, `max(5, 1.5%)` in whichever unit the step is
@@ -64,7 +64,7 @@ gridoxide never worse — and the gate refuses to let a scenario disagree withou
 one; see `RECORDED_DISAGREEMENTS` in `tests/rao_cucumber_test.rs`.
 
 Getting here took **thirty-two defects**, every one internally consistent and
-externally wrong, all listed in `plans/RAO_PLAN.md` §8.3 and §8.8–§8.12. Two
+externally wrong. Two
 worth knowing when adding scenarios: `Given network file is "..." for CORE CC`
 is **not** decoration — it rewrites every voltage level (380 kV to 400, 220 to
 225), and since the nominal voltage is the per-unit base that moves every
@@ -82,6 +82,6 @@ copy by one column's alignment.
 the whole of it rather than the part that was convenient. It was not always so,
 and the last one to go was worth the trouble: five `setpoint of RangeAction`
 steps sat skipped as "not comparable", and wiring them up uncovered two defects
-in redispatch, one a hundredfold sensitivity error that had passed for years
-(§8.12). A skip that states what it is waiting for is a defect report nobody has
+in redispatch, one a hundredfold sensitivity error that had passed for years.
+A skip that states what it is waiting for is a defect report nobody has
 read yet.

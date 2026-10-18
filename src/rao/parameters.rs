@@ -23,11 +23,11 @@
 //! for a stated reason:
 //!
 //! - `pst-model` — `TapModel::Discrete` is declared and unbuilt, and
-//!   `plans/RAO_PLAN.md` §8.21 measured that as unjustified rather than assumed
-//!   it: all 24 scenarios whose configuration asks for `APPROXIMATED_INTEGERS`
-//!   already match with the continuous model and rounding.
+//!   that was measured as unjustified rather than assumed: all 24 scenarios
+//!   whose configuration asks for `APPROXIMATED_INTEGERS` already match with
+//!   the continuous model and rounding.
 //! - `linear-optimization-solver` — the solver follows the objective. A cost LP
-//!   needs a simplex or MIP backend (§8.14), and the caller supplies one.
+//!   needs a simplex or MIP backend, and the caller supplies one.
 //! - `ra-range-shrinking`, `available-cpus`, `sensitivity-failure-overcost`,
 //!   `do-not-optimize-curative-cnecs-for-tsos-without-cras` — no counterpart
 //!   exists in `src/rao/`.

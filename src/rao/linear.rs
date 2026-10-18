@@ -156,7 +156,7 @@ pub enum TapModel {
     /// Optimize the tap itself as an integer variable. **Declared, not built**:
     /// selecting it today behaves exactly as [`Continuous`](Self::Continuous).
     ///
-    /// Not an oversight, and §8.21 is the measurement rather than the excuse. Of
+    /// Not an oversight, and this is the measurement rather than the excuse. Of
     /// 37 vendored configurations 5 ask for `APPROXIMATED_INTEGERS`, governing 24
     /// scenarios — and the reference built eight of them as a **controlled
     /// pair**, 2.2.1.5.1 through 2.2.1.5.6 each labelled "copy of 2.6.2.x with
@@ -168,7 +168,7 @@ pub enum TapModel {
     /// Continuous-plus-rounding therefore reaches the reference's discrete answer
     /// everywhere the reference asked for a discrete answer. Building the integer
     /// tap could win nothing against this corpus and could only lose, which makes
-    /// it a change the gate cannot validate — and §8.6's rule for those is that
+    /// it a change the gate cannot validate — and the rule for those is that
     /// the measurement comes first. It wants a case the corpus does not have: a
     /// tap table nonuniform enough that the rounding lands wrong.
     Discrete,
@@ -235,7 +235,7 @@ pub struct LinearOptions {
     ///
     /// Only the second preventive perimeter sets this, and only because it is
     /// the one perimeter that spans every state at once. See
-    /// [`Held`](super::evaluate::Held) and `plans/RAO_PLAN.md` §8.10. `None`
+    /// [`Held`](super::evaluate::Held). `None`
     /// everywhere else, which is one network, one open set, and one evaluation.
     pub held: Option<super::evaluate::Held>,
     /// Range actions an upstream stage has already decided, which this perimeter
@@ -244,7 +244,7 @@ pub struct LinearOptions {
     /// The one caller is the curative stage after a kept second preventive pass:
     /// that pass decided these on the whole plan's objective, and searching them
     /// again here would overrule it with this perimeter's own — which values a
-    /// curative margin the plan's worst case cannot use (§8.25). The set-points
+    /// curative margin the plan's worst case cannot use. The set-points
     /// are applied to the network separately; this only stops the action being
     /// offered again.
     pub decided: Vec<usize>,
@@ -353,7 +353,7 @@ pub struct LinearResult {
     /// plan", which is the judgement the reference keeps: `CastorSecondPreventive`
     /// composes its final plan from the first curative pass's *network* actions
     /// and the second pass's *range* set-points, and runs no curative
-    /// range-action search afterwards. See `plans/RAO_PLAN.md` §8.25.
+    /// range-action search afterwards.
     pub held_setpoints: Vec<Setpoint>,
     /// Minimum margin over the perimeter's optimized CNECs, **MW**, before and
     /// after — whatever unit the objective was maximized in.
@@ -1283,7 +1283,7 @@ fn build_program(
         // and one, so the pass "improves" its way to the more expensive answer;
         // read relative, it is 110 against 130 and the right plan wins.
         //
-        // This is the coupling row §8.11 said the LP could not state. That was
+        // This is the coupling row an earlier version said the LP could not state. That was
         // true of a *bound* — a window relative to another column, which needs
         // per-column bounds this program does not have — and not of a row, which
         // takes whatever coefficients it is given.
@@ -1293,7 +1293,7 @@ fn build_program(
         // tie-break that exists to stop the optimizer moving a shifter by a
         // rounding error's worth for no gain — it is not a price and does not
         // claim to be one. Re-anchoring it costs three assertions on
-        // `second_preventive.feature`, which §8.11 tuned against 1.4.1.6. Under
+        // `second_preventive.txt`, which `A(r, s)` was tuned against on 1.4.1.6. Under
         // a cost objective the same columns carry the CRAC's real money, and
         // then the relative reading is the only defensible one.
         let previous = costly.is_some().then(|| anchor_of(controls, k)).flatten();
@@ -1337,10 +1337,10 @@ fn build_program(
         //
         //     min ≤ A(r, s) − A(r) ≤ max
         //
-        // §8.11 declined this column because its window is relative to another
+        // An earlier version declined this column because its window is relative to another
         // column rather than to a number, and "this LP carries one bound pair
         // per column and no row coupling two of them". That was true of a
-        // *bound*; §8.17's movement row had already shown a row can name two
+        // *bound*; the movement row had already shown a row can name two
         // columns, and this is the same observation applied to the constraint
         // the decline was actually about.
         //
@@ -1756,7 +1756,7 @@ fn build_controls(
             && options.available.allows(&action.usage_rules, &held.states, crac)
             // A range written `relativeToPreviousInstant` used to be declined
             // here. Its window is relative to another *column* — the preventive
-            // set-point this same problem is deciding — and §8.11 read that as
+            // set-point this same problem is deciding — and an earlier version read that as
             // beyond the LP, "one bound pair per column and no row coupling two
             // of them". True of a bound, and the window is now stated as a row
             // instead: see `tap_bounds_split` and the chained row in
@@ -2104,7 +2104,7 @@ pub(super) fn tap_bounds(
 ///
 /// `chain = true` is for the second preventive problem, where the previous
 /// instant is **being decided in the same LP**. There the window is relative to
-/// another column, and §8.11 declined the whole column rather than mis-state it,
+/// another column, and an earlier version declined the whole column rather than mis-state it,
 /// on the grounds that "this LP carries one bound pair per column and no row
 /// coupling two of them". That was true of a *bound*. So the chained ranges come
 /// back separately, in taps, for [`build_program`] to emit as a row; the
@@ -2203,7 +2203,7 @@ struct SensitivityPoints {
     /// switching is in force in one and not the other, and a perimeter that
     /// spans both — which is only ever the second preventive one — was
     /// differentiating the preventive CNECs against a network with a curative
-    /// branch open in it. See `plans/RAO_PLAN.md` §8.10.
+    /// branch open in it.
     points: Vec<SensitivityPoint>,
     /// Which point each CNEC position reads from.
     per_cnec: Vec<usize>,
@@ -2261,7 +2261,7 @@ impl SensitivityPoints {
             // The open set this point's states actually see. Only stated when
             // the perimeter is split: everywhere else the caller has already
             // zeroed the branches it opened, and re-deriving them here would
-            // change a path that is not what §8.10 is about.
+            // change a path that is not what `Held` is about.
             if let Some(held) = held {
                 let open = if held_here {
                     held.applied_to(network.initially_open)
@@ -2383,7 +2383,7 @@ fn starts_inside_its_range(current: f64, lower: f64, upper: f64) -> bool {
 /// states no `rangeType` at all, so nothing pins what the anchors should be —
 /// a redispatch's "previous instant" is a megawatt set-point read off the
 /// machines (`injection_origin`), not a tap, and building that blind is the
-/// thing §8.21 declined to do for `TapModel::Discrete`. Naming it here is the
+/// thing that was declined for `TapModel::Discrete`. Naming it here is the
 /// alternative to leaving the next reader to find it.
 fn standard_bounds(action: &super::crac::RangeAction) -> (f64, f64) {
     let mut low = f64::NEG_INFINITY;
@@ -2565,7 +2565,7 @@ fn chained_taps_hold(controls: &[Control], proposed: &[(f64, Option<i32>)]) -> b
 /// shifter as `pst_fr_pra` and `pst_fr_cra`, two actions with no index in
 /// common. Keyed on the action, this would find nothing on exactly the scenario
 /// it exists for, and the column would then be offered with no window at all —
-/// which is the regression §8.11 measured, arrived at silently.
+/// which is a regression already measured once, arrived at silently.
 ///
 /// Searches **all** of `controls`, not `controls[..k]`. `build_controls` walks
 /// `crac.range_actions` in declaration order, and 1.4.1.6 declares the curative

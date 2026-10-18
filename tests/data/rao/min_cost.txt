@@ -11,8 +11,8 @@
 # a *sum* over CNECs where max-min-margin is a *min*, which is why it is a
 # different objective rather than a penalty bolted onto the existing one.
 #
-# Selected **before the capability exists**, which is the order
-# `plans/RAO_PLAN.md` records as the only one that works: the second-preventive
+# Selected **before the capability exists**, which is the only order that
+# works: the second-preventive
 # corpus came first too, scored 45 of 108 with nothing implemented, and the gate
 # then found every defect in it. A low score here is the deliverable, not a
 # failure — it is the number the work is measured against.

@@ -109,7 +109,7 @@ pub enum StepsExecuted {
     #[default]
     FirstPreventiveOnly,
     /// One preventive optimization, and it lost ground — so the plan was
-    /// thrown away and the untouched network reported. See §8.3's defect 28.
+    /// thrown away and the untouched network reported.
     FirstPreventiveFellBackToInitial,
     /// A second preventive pass ran and beat the first.
     SecondPreventiveImproved,
@@ -189,7 +189,7 @@ impl Plan {
     ///
     /// Exposed because the gate computes the same thing independently, and two
     /// implementations of one question should be asserted equal rather than
-    /// trusted to stay so. They were changed together once — §8.15 removed a
+    /// trusted to stay so. They were changed together once — a fix removed a
     /// `dedup()` from each — which is exactly the situation in which they drift.
     pub fn spent(&self, crac: &Crac) -> (Vec<usize>, Vec<(usize, f64)>) {
         (activated_by(&self.preventive, &self.scenarios), moved_by(crac, &self.preventive, &self.scenarios))
@@ -318,7 +318,7 @@ pub fn run(
     ) {
         // The curative range actions are **not** searched again. The second
         // pass has just decided them on the whole plan's objective, and that is
-        // the judgement the reference keeps — see §8.25.
+        // the judgement the reference keeps.
         let after = scenarios_after(
             crac, network, resolution, solver, options, &second, &second.held_setpoints,
         );
@@ -688,11 +688,11 @@ fn scenarios_after(
     // answer of −7.
     //
     // A `relativeToPreviousInstant` column moves *because preventive moved*
-    // (§8.23's coupling row makes it follow), so `moved()` is true even when the
+    // (the coupling row makes it follow), so `moved()` is true even when the
     // curative state is doing nothing of its own. The second condition asks the
     // question that actually matters: does it end somewhere other than where
     // preventive left the machine? A column that tracks preventive exactly is
-    // inheriting a decision, not making one — the same distinction §8.18 draws
+    // inheriting a decision, not making one — the same distinction the rounding step draws
     // when it rounds coupled columns together. 1.4.1.6 is 1.4.1.5 with exactly
     // that range added, and it is the whole difference between them.
     let preventive_tap = |action: usize| -> Option<i32> {
@@ -723,7 +723,7 @@ fn scenarios_after(
     // Taken from the preventive perimeter's report for the same *machine*,
     // whatever range action names it there: 1.4.1.5 states the two permissions
     // as `pst_fr_pra` and `pst_fr_cra`, two actions on one shifter, the same
-    // identity §8.23 needed.
+    // identity the coupling row needed.
     let before_decided: Vec<(usize, f64)> = activated
         .iter()
         .filter_map(|s| {
@@ -1048,8 +1048,8 @@ fn perimeter_plan(result: &SearchResult, states: Vec<State>) -> PerimeterPlan {
 /// # What this does not do
 ///
 /// The reference also **re-optimizes curative range actions** inside that same
-/// problem, which needs a set-point per range action *per state* — `A(r, s)` in
-/// `plans/RAO_PLAN.md` §7.3, which is declared there and not built: this LP
+/// problem, which needs a set-point per range action *per state* — `A(r, s)`,
+/// which is not built here: this LP
 /// carries one set-point per action. So a shifter the CRAC allows in both
 /// instants is held at whatever the curative stage chose rather than re-tuned
 /// against the preventive answer, and four of the reference's fifteen
@@ -1077,7 +1077,7 @@ fn second_preventive(
     // In force **where they are in force**, though, and not everywhere. This
     // set governs the auto and curative states only; the preventive and outage
     // ones keep the file's, because a curative decision has not been taken yet
-    // when they are measured. See [`Held`] and §8.10.
+    // when they are measured. See [`Held`].
     // The **delta**, not a set: what the automatons and the curative stage did
     // to the network the preventive stage handed them. A delta because the set
     // it applies to is not fixed — this pass is choosing the preventive
@@ -1144,7 +1144,7 @@ fn second_preventive(
     // pass's whole landscape at 553 A, so it takes `close_fr1_fr5` and a
     // preventive shifter at its bound for 645 A, where releasing the set-point
     // lets it find 798 A with no network action at all — the reference's own
-    // answer. `plans/RAO_PLAN.md` §8.8 has the measurement.
+    // answer.
     //
     // Curative redispatch was never held: `buses` comes from `network`
     // untouched. This makes the shifter agree with it. Nothing but the held
@@ -1165,7 +1165,7 @@ fn second_preventive(
     // vendored configuration sets; what the corpus shows is that its answers
     // need it regardless — 1.4.1.2 asserts a preventive tap of 4 that is only
     // reachable if the pass can see the curative `pst_be` moving to −5 to pay
-    // for it. See §8.11.
+    // for it.
     linear.a_r_s = true;
     let options = SearchOptions {
         linear,

@@ -944,7 +944,7 @@ fn optimize_with_open(
     // baking either into the shared line list would make the other wrong.
     // `SensitivityPoints::build` opens each point's own branches instead, and
     // the evaluator has always taken its open set as data rather than from the
-    // lines. See `plans/RAO_PLAN.md` §8.10.
+    // lines.
     let split = options.held.as_ref().is_some_and(|h| !h.states.is_empty());
     let mut lines = network.lines.to_vec();
     let mut transformers = network.transformers.clone();

@@ -163,7 +163,7 @@ gridoxide rao tests/data/ucte/3nodes_pst.uct \
 `--parameters` reads OpenRAO's own `RaoParameters` document: the objective (including `MIN_COST`),
 the flow model, MNEC handling, the second-preventive execution condition, the curative stop
 criterion and the search thresholds. Without it a run is max-min-margin on DC with no MNECs and no
-second pass, which is a fraction of what the optimizer does — and until §8.24 that was the *only*
+second pass, which is a fraction of what the optimizer does — and until `--parameters` existed that was the *only*
 thing the binary could be asked for, so the gate validated behaviour no user could reach. Settings
 the file states and gridoxide does not read are ignored rather than refused, and
 `src/rao/parameters.rs` lists which and why.
@@ -216,10 +216,10 @@ worse: some are its `BestTapFinder` rounding a set-point on minimum margin alone
 cost its own javadoc warns about; two are gridoxide securing the network more cheaply than the
 reference asks under `MIN_COST`, which is the objective working rather than a defect; the rest are
 ties reached by a different route. The gate names each with the measurement behind it and refuses to
-let a scenario disagree without one — see `plans/RAO_PLAN.md` §8.6.
+let a scenario disagree without one — see `RECORDED_DISAGREEMENTS` in `tests/rao_cucumber_test.rs`.
 
 The last open defect — 1.4.1.5 and 1.4.1.6, a curative perimeter spending three actions where the
-reference spends one — closed in §8.25. Seven mechanisms had been implemented, measured and refuted
+reference spends one — is closed. Seven mechanisms had been implemented, measured and refuted
 for it; the eighth was **read** out of the reference's own source rather than guessed, which took a
 morning where the seven had taken weeks. `second_preventive.feature` went 118 → 123.
 
@@ -241,7 +241,7 @@ morning where the seven had taken weeks. `second_preventive.feature` went 118 �
   is declared and unbuilt — measured rather than assumed. Of 37 vendored configurations 5 ask for it,
   governing 24 scenarios, and the reference built eight of them as controlled pairs ("copy of 2.6.2.x
   with MIP for PSTs"). All 24 match with the continuous model and rounding, so building the integer
-  tap could win nothing here and could only lose. `plans/RAO_PLAN.md` §8.21.
+  tap could win nothing here and could only lose.
 - **Multi-timestamp (MARMOT) runs.**
 - **A `relativeToPreviousInstant` curative range inside the second preventive problem.** The rest of
   that problem is here. After the curative stage, the preventive perimeter is optimized again with
@@ -251,16 +251,16 @@ morning where the seven had taken weeks. `second_preventive.feature` went 118 �
   shifter paying for a preventive push; the column is scoped to the states it governs and is not
   reported, because the curative perimeter that follows decides it properly.
 
-  A range written **relative to the previous instant** is expressed too, as of §8.23, and the way it
+  A range written **relative to the previous instant** is expressed too, and the way it
   had to be is the interesting part: its window is relative to another *column* — the preventive
   set-point the same problem is deciding — so it is stated as a **row**, `min ≤ A(r,s) − A(r) ≤ max`,
-  rather than as the column's own bounds. §8.11 declined such a column on the grounds that the LP
+  rather than as the column's own bounds. An earlier version declined such a column on the grounds that the LP
   carries one bound pair per column and no row coupling two of them, which was true of a bound and
   not of a row. It changes no answer in the vendored corpus; what it removes is a case where the
   second pass could not see a curative shifter at all.
 
   What the reference additionally does is *keep* the curative decisions afterwards rather than
-  re-deriving them. That is a separate change, and §8.9 records it costing 2 and fixing nothing.
+  re-deriving them. That is a separate change, and measured on its own it cost 2 and fixed nothing.
 
   What that pass holds is exact about two things it used to get wrong, and both were worth more than
   any of the architecture around them. A curative **set-point** is deliberately *not* held: the pass
@@ -278,8 +278,7 @@ morning where the seven had taken weeks. `second_preventive.feature` went 118 �
   outage states, where no curative decision has been taken, and reads their CNECs somewhere they do
   not live. `evaluate::Held` carries the difference as a delta and the objective, the base flows and
   the sensitivities all read a CNEC in its own state's network — which is why an outage CNEC and a
-  curative one under the same contingency no longer share a linearization. §8.8, §8.9 and §8.10 have
-  the measurements.
+  curative one under the same contingency no longer share a linearization.
 - **Several perimeters' set-points as variables in one LP.** Each perimeter is solved against the
   previous one's fixed decisions, which is the CASTOR decomposition rather than a shortcut past it.
   The `relativeToPreviousInstant` range kind *is* honoured — what chains across perimeters is the

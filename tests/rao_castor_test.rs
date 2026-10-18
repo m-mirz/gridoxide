@@ -1362,7 +1362,7 @@ fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
         .find(|s| s.action == pst_fr)
         .and_then(|s| s.tap)
         .expect("pst_fr set-point");
-    // The reference's own tap. It was 1 until §8.10 gave the second pass a
+    // The reference's own tap. It was 1 until `Held` gave the second pass a
     // per-state open set; the last tap of the gap was the preventive CNEC being
     // read in a network with the curative branch open.
     assert_eq!(tap, 2, "pst_fr should end on the reference's tap");
@@ -1447,7 +1447,7 @@ fn the_second_preventive_pass_holds_a_curative_close() {
 /// The search was finding the exact optimum of a landscape that was wrong for
 /// half its states.
 ///
-/// The assertion is **4** rather than 3 because §8.11 landed after this: with
+/// The assertion is **4** rather than 3 because `A(r, s)` landed after this: with
 /// the curative `pst_be` given a column of its own the pass can see it moving to
 /// −5 to pay for a preventive push, and reaches the reference's own tap. Tap 3
 /// was the per-state optimum with that shifter frozen, and both numbers are
@@ -1491,7 +1491,7 @@ fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
         .and_then(|s| s.tap)
         .expect("pst_fr set-point");
     // 2 while the preventive CNEC was read with the curative branch open; 3
-    // once it was not; 4 once §8.11 gave the curative shifter its own column.
+    // once it was not; 4 once `A(r, s)` gave the curative shifter its own column.
     assert_eq!(tap, 4, "pst_fr should reach the reference's tap");
 }
 

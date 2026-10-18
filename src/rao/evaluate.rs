@@ -673,7 +673,7 @@ pub fn evaluate(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> 
 ///
 /// `Held` is the correction. It names the states that see a different network
 /// and what is open in them, and every measurement reads a CNEC in the network
-/// its own state describes. See `plans/RAO_PLAN.md` §8.10.
+/// its own state describes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Held {
     /// Branches open in [`states`](Self::states) and not elsewhere.

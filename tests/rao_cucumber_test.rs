@@ -1102,7 +1102,7 @@ fn check(scenario: &Scenario) -> Outcome {
     // `spent_by` above is this file's own reading of the plan; `Plan::spent` is
     // the library's, and `castor`'s whole-plan judgement prices with it. If they
     // drift, every cost figure below is measured against one of them and decided
-    // by the other — and they *were* changed together once, when §8.15 removed a
+    // by the other — and they *were* changed together once, when a fix removed a
     // `dedup()` from each.
     //
     // Checked only under a cost objective, which is the only place either is
@@ -1543,7 +1543,7 @@ const FILES: [(&str, usize, usize, Option<&str>); 5] = [
         //
         // The reason it used to give — that the second pass held curative range
         // actions rather than re-optimizing them — stopped being true when
-        // §8.11 gave them columns of their own. What is left is narrower and
+        // `A(r, s)` gave them columns of their own. What is left is narrower and
         // worth naming precisely, because a stale exemption is how a corpus
         // stops being measured just as surely as a missing one.
         // No exemption. This corpus scored 45 of 108 when it was vendored with
@@ -1766,7 +1766,7 @@ fn recorded_reason(name: &str) -> Option<&'static str> {
 /// **This file now skips nothing.** The last five were `setpoint of
 /// RangeAction`, recorded as not comparable because gridoxide reported a
 /// redispatch's *shift* where the reference reports the machine's absolute
-/// target. Wiring them up turned out to need §8.12's two defects fixed first,
+/// target. Wiring them up turned out to need two redispatch defects fixed first,
 /// which is what a skipped assertion is for: it kept the ratio honest until the
 /// thing behind it was.
 const BASELINE_MATCHED_DC: usize = 180;
@@ -1949,12 +1949,12 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// 14 of the 15 `execution details` assertions hold. The one that does not is
 /// 1.4.1.5, and it is honest: gridoxide's second pass ran and was **declined**,
 /// so it says so, where the reference's improved. That scenario is already one
-/// of the four §8.7 records as a genuine gap — the step is reporting the gap
+/// of the four recorded as a genuine gap — the step is reporting the gap
 /// rather than adding one.
 ///
 /// The corpus was vendored first and scored at 45 with nothing implemented,
 /// which is the order everything else in this file was built in and the only
-/// order that works: the gate found all twenty-nine defects in §8.3, and
+/// order that works: the gate found all twenty-nine defects before it, and
 /// building a capability with nothing to check it against is how the
 /// twenty-ninth survived three refuted hypotheses.
 ///
@@ -1963,32 +1963,31 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// Four scenarios need one range action at **two set-points** — a PST at +5 in
 /// preventive and −5 in curative, say. The reference re-optimizes curative range
 /// actions inside the second preventive problem, which needs a set-point per
-/// action *per state*: `A(r, s)` in `plans/RAO_PLAN.md` §7.3, declared there and
-/// not built, because this LP carries one set-point per action. Until it does, a
-/// shifter the CRAC allows in both instants is held where the curative stage put
-/// it rather than re-tuned, and 1.4.1.1.3, 1.4.1.2, 1.4.1.5 and 1.4.1.6 turn on
-/// exactly that.
+/// action *per state*: `A(r, s)`, not built, because this LP carries one
+/// set-point per action. Until it does, a shifter the CRAC allows in both
+/// instants is held where the curative stage put it rather than re-tuned, and
+/// 1.4.1.1.3, 1.4.1.2, 1.4.1.5 and 1.4.1.6 turn on exactly that.
 ///
 /// Four scenarios' worth used to be counted with the `A(r, s)` gap and were not
 /// it. All three defects were found by dropping the architecture question and
-/// diagnosing **one scenario to a mechanism**, which is how every defect in §8.3
+/// diagnosing **one scenario to a mechanism**, which is how every earlier defect
 /// was found, and all three were in what the second pass holds from the curative
 /// stage:
 ///
-/// - It **inherited a curative set-point** (§8.8, defect 30). On 1.4.4.4
+/// - It **inherited a curative set-point** (defect 30). On 1.4.4.4
 ///   `pst_be` at −16 — chosen against preventive decisions the second pass was
 ///   in the act of discarding — capped its whole landscape at 553 A. Released,
 ///   the pass finds the reference's answer with no network action at all, and
 ///   1.4.5.1, the scenario named for fixing CRA set-points, closed completely.
-/// - It **dropped a curative close** (§8.9, defect 31). The held set was built
+/// - It **dropped a curative close** (defect 31). The held set was built
 ///   by adding every branch a curative perimeter leaves open, and a close is
 ///   invisible to an add-only rule. 1.4.1.5 and 1.4.1.6 both turn on
 ///   `close_fr1_fr5`, and without it the second pass maximizes a curve peaking
 ///   at −3 where the true one peaks at the shifter's bound of −7. Worth 12.
 ///
 /// - It held that switching in **one network**, so the preventive and outage
-///   CNECs were read where a curative branch is open and they are not (§8.10,
-///   defect 32). The two landscapes are 77 A apart on 1.4.1.2 and peak at
+///   CNECs were read where a curative branch is open and they are not (defect
+///   32). The two landscapes are 77 A apart on 1.4.1.2 and peak at
 ///   different taps. `Held` now carries the switching as a *delta* and every
 ///   measurement — the objective, the base flows, and the sensitivities, which
 ///   stop sharing a linearization between an outage and a curative CNEC under
@@ -1999,14 +1998,14 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// old code.
 ///
 /// With those three landed the second preventive problem was finally rich enough
-/// to earn **`A(r, s)`** (§8.11), which §8.7 had ranked last for exactly that
+/// to earn **`A(r, s)`**, which had been ranked last for exactly that
 /// reason and which had cost on all three previous attempts. It carries a column
 /// per range action per state — including a **second** column for an action a
 /// CRAC allows in both instants, which is what 1.4.1.1.3 turns on — so the pass
 /// can see a curative shifter paying for a preventive push. Worth 9 across two
 /// steps, and it closed 1.4.1.2 and 1.4.1.1.3.
 ///
-/// It also settled a question §8.8 had answered the other way. A second
+/// It also settled a question defect 30's fix had answered the other way. A second
 /// preventive result reported `final_margin_mw` over **every** state with only
 /// the preventive decisions in force, and narrowing it to the states the
 /// perimeter governs cost 4 when it was tried. It now **gains** 1: the wide
@@ -2030,7 +2029,7 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// LP's own margin column. Every one cost elsewhere.
 ///
 /// The eighth was **read** rather than guessed, out of
-/// `references/powsybl-open-rao` (§8.25): after a kept second preventive pass
+/// `references/powsybl-open-rao`: after a kept second preventive pass
 /// the reference composes its plan from the first curative pass's *network*
 /// actions plus the second pass's own *range* set-points, and runs no curative
 /// range-action search afterwards. The two differ in objective — a curative
@@ -2038,7 +2037,7 @@ const BASELINE_MATCHED_AC16: usize = 963;
 /// and on 1.4.1.5 that is 285 A of curative margin the plan's 43 A preventive
 /// bottleneck cannot use.
 ///
-/// §8.26 closed the rest: the rounding step could offer a column its other
+/// The rest closed with one more fix: the rounding step could offer a column its other
 /// adjacent tap but never *not moving at all*, and for a chained column "not
 /// moving" is where its anchor ended up rather than where it started.
 ///
@@ -2048,20 +2047,19 @@ const BASELINE_MATCHED_AC16: usize = 963;
 const BASELINE_MATCHED_2P: usize = 123;
 
 /// The 26 costly-optimization scenarios: **288 of 294**, from 165 with the
-/// objective unbuilt, 178 once the search tree could rank by cost (§8.13), 221
-/// once the LP could minimize it (§8.14), 252 once the cost was *aggregated* the
-/// way the reference aggregates it (§8.15), and 272 once a range action's
+/// objective unbuilt, 178 once the search tree could rank by cost, 221
+/// once the LP could minimize it, 252 once the cost was *aggregated* the
+/// way the reference aggregates it, and 272 once a range action's
 /// *activation* was priced — a binary, a MIP, and the row that makes a curative
-/// set-point mean "further than preventive went" (§8.17) — and 277 once two
+/// set-point mean "further than preventive went" — and 277 once two
 /// defects in that same machinery were found: a `start` that did not survive
 /// relinearization, and a rounding step that pulled a coupled column apart
-/// (§8.18) — and 286 once the curative stop target was dropped under a cost,
+/// — and 286 once the curative stop target was dropped under a cost,
 /// where it compares a whole preventive perimeter's violation against a single
 /// curative state's and is therefore met before that state has done anything
-/// (§8.19) — and 288 once the last defect went: a curative state of a
+/// — and 288 once the last defect went: a curative state of a
 /// contingency with a forced automaton and nothing to decide curatively, read
-/// in a network where its automaton never fired, in the optimizer *and* here
-/// (§8.20).
+/// in a network where its automaton never fired, in the optimizer *and* here.
 ///
 /// That last step was two corrections and no new capability, which is why it was
 /// worth 31:
@@ -2092,13 +2090,13 @@ const BASELINE_MATCHED_2P: usize = 123;
 ///   violation: −16 leaves 214762 where the reference's −3 leaves 282717.
 ///
 /// The corpus's blanket exemption went with the last defect and is now cfg-gated
-/// — see [`MIN_COST_PENDING`]. See `plans/RAO_PLAN.md` §8.13 through §8.20.
+/// — see [`MIN_COST_PENDING`].
 ///
 /// The rest of this note is the original *before* comment, kept because the
 /// order it describes is the point:
 ///
-/// Vendored first on purpose. `plans/RAO_PLAN.md` records the order as the only
-/// one that works — the second-preventive corpus was vendored before anything
+/// Vendored first on purpose. That is the only order
+/// that works — the second-preventive corpus was vendored before anything
 /// implemented it, scored 45 of 108, and the gate then found every defect in it
 /// one scenario at a time. A corpus vendored after the fact only ever confirms
 /// what its author already believed.
