@@ -8,12 +8,9 @@
 //! could ask for none of it. The Cucumber gate validated 1862 assertions' worth
 //! of behaviour no user could reach.
 
-use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn data(sub: &str, name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(sub).join(name)
-}
+mod openrao;
 
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_gridoxide")).args(args).output().expect("run gridoxide")
@@ -34,9 +31,9 @@ fn stdout(output: &Output) -> String {
 /// happened to pick it.
 #[test]
 fn rao_parameters_select_the_objective() {
-    let network = data("ucte", "2Nodes4ParallelLines.uct");
-    let crac = data("rao/features", "crac-92-1-1.json");
-    let config = data("rao/features", "RaoParameters_dc_minObjective.json");
+    let network = openrao::path("files/cases/epic92/2Nodes4ParallelLines.uct");
+    let crac = openrao::path("files/crac/epic92/crac-92-1-1.json");
+    let config = openrao::path("files/configurations/epic92/RaoParameters_dc_minObjective.json");
 
     // Max-min-margin, the default: buy the most room, whatever it costs.
     let margin = stdout(&run(&[
@@ -72,8 +69,8 @@ fn rao_parameters_select_the_objective() {
 /// own output.
 #[test]
 fn a_missing_parameters_file_is_refused() {
-    let network = data("ucte", "2Nodes4ParallelLines.uct");
-    let crac = data("rao/features", "crac-92-1-1.json");
+    let network = openrao::path("files/cases/epic92/2Nodes4ParallelLines.uct");
+    let crac = openrao::path("files/crac/epic92/crac-92-1-1.json");
     let out = run(&[
         "rao",
         network.to_str().unwrap(),
@@ -89,9 +86,9 @@ fn a_missing_parameters_file_is_refused() {
 /// they pointed at.
 #[test]
 fn an_explicit_depth_wins_over_the_configuration() {
-    let network = data("ucte", "2Nodes4ParallelLines.uct");
-    let crac = data("rao/features", "crac-92-1-1.json");
-    let config = data("rao/features", "RaoParameters_dc_minObjective.json");
+    let network = openrao::path("files/cases/epic92/2Nodes4ParallelLines.uct");
+    let crac = openrao::path("files/crac/epic92/crac-92-1-1.json");
+    let config = openrao::path("files/configurations/epic92/RaoParameters_dc_minObjective.json");
     let out = run(&[
         "rao",
         network.to_str().unwrap(),

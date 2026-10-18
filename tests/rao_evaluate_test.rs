@@ -723,8 +723,7 @@ fn a_dc_far_end_carries_exactly_what_the_near_end_took() {
 fn an_ampere_margin_is_measured_in_amperes() {
     let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep5us1.json"),
+        openrao::path("files/crac/epic5/SL_ep5us1.json"),
     )
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
@@ -819,8 +818,7 @@ fn an_ampere_margin_is_measured_in_amperes() {
 fn the_slack_is_shared_out_in_proportion_to_generation() {
     let net = ucte::read(ucte_fixture("TestCase12Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep5us1.json"),
+        openrao::path("files/crac/epic5/SL_ep5us1.json"),
     )
     .expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);

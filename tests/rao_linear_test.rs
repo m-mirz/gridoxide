@@ -641,7 +641,7 @@ fn an_ampere_objective_is_reported_in_megawatts_all_the_same() {
 #[test]
 fn a_redispatch_starts_at_the_set_point_its_machines_are_already_on() {
     let net = ucte::read(ucte_fixture("2Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(rao_fixture("features/crac-93-1-1.json")).expect("crac");
+    let (crac, _) = crac_json::read(openrao::path("files/crac/epic93/crac-93-1-1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -710,8 +710,8 @@ fn a_cost_objective_buys_the_cheapest_answer_not_the_roomiest() {
     use gridoxide::rao::{Costly, CostlyOptions};
     use gridoxide::rao::linear::ObjectiveKind;
 
-    let net = ucte::read(ucte_fixture("2Nodes4ParallelLines.uct")).expect("network");
-    let (crac, _) = crac_json::read(rao_fixture("features/crac-92-1-1.json")).expect("crac");
+    let net = ucte::read(openrao::path("files/cases/epic92/2Nodes4ParallelLines.uct")).expect("network");
+    let (crac, _) = crac_json::read(openrao::path("files/crac/epic92/crac-92-1-1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,

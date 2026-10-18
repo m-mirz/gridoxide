@@ -783,8 +783,7 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
 fn a_curative_action_can_close_an_out_of_service_branch() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep13us3case4.json"),
+        openrao::path("files/crac/epic13/SL_ep13us3case4.json"),
     )
     .expect("crac");
 
@@ -905,8 +904,7 @@ fn a_curative_perimeter_has_its_own_depth() {
 fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep13us4case3.json"),
+        openrao::path("files/crac/epic13/SL_ep13us4case3.json"),
     )
     .expect("crac");
 
@@ -977,8 +975,7 @@ fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
 fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep13us5case3.json"),
+        openrao::path("files/crac/epic13/SL_ep13us5case3.json"),
     )
     .expect("crac");
     let pst = crac.range_actions.iter().position(|r| r.id == "pst_fr").expect("pst_fr");
@@ -1037,8 +1034,7 @@ fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
 fn an_automaton_may_not_shift_past_its_own_range() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep15us11-3case4.json"),
+        openrao::path("files/crac/epic15/SL_ep15us11-3case4.json"),
     )
     .expect("crac");
     let pst = crac.range_actions.iter().position(|r| r.id == "pst_fr").expect("pst_fr");
@@ -1080,8 +1076,7 @@ fn an_automaton_may_not_shift_past_its_own_range() {
 fn an_automaton_stops_at_the_smallest_set_point_that_secures() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep15us11-3case2.json"),
+        openrao::path("files/crac/epic15/SL_ep15us11-3case2.json"),
     )
     .expect("crac");
     let pst = crac.range_actions.iter().position(|r| r.id == "pst_be").expect("pst_be");
@@ -1152,8 +1147,7 @@ fn ac_plan(net: &ucte::UcteImport, crac: &Crac) -> gridoxide::rao::Plan {
 fn a_range_action_that_starts_outside_its_range_is_dropped() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep15us11-3case2_withPstCra.json"),
+        openrao::path("files/crac/epic15/SL_ep15us11-3case2_withPstCra.json"),
     )
     .expect("crac");
 
@@ -1205,8 +1199,7 @@ fn a_range_action_that_starts_outside_its_range_is_dropped() {
 fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep15us11-3case4.json"),
+        openrao::path("files/crac/epic15/SL_ep15us11-3case4.json"),
     )
     .expect("crac");
 
@@ -1262,8 +1255,7 @@ fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
 fn a_plan_that_loses_ground_is_discarded() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) = crac_json::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/rao/features/SL_ep20us5case2.json"),
+        openrao::path("files/crac/epic20/SL_ep20us5case2.json"),
     )
     .expect("crac");
 
@@ -1318,7 +1310,7 @@ fn a_plan_that_loses_ground_is_discarded() {
 fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) =
-        crac_json::read(rao_fixture("features/SL_ep20us5case2.json")).expect("crac");
+        crac_json::read(openrao::path("files/crac/epic20/SL_ep20us5case2.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -1395,7 +1387,7 @@ fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
 fn the_second_preventive_pass_holds_a_curative_close() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) =
-        crac_json::read(rao_fixture("features/crac_ep20us1case1_6.json")).expect("crac");
+        crac_json::read(openrao::path("files/crac/epic20/crac_ep20us1case1_6.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -1464,7 +1456,7 @@ fn the_second_preventive_pass_holds_a_curative_close() {
 fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) =
-        crac_json::read(rao_fixture("features/SL_ep13us3case1.json")).expect("crac");
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us3case1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -1522,7 +1514,7 @@ fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
 fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) =
-        crac_json::read(rao_fixture("features/SL_ep13us3case1.json")).expect("crac");
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us3case1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
@@ -1600,7 +1592,7 @@ fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
 fn a_chained_curative_range_governs_the_preventive_tap() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
     let (crac, _) =
-        crac_json::read(rao_fixture("features/second_preventive_ls_1_4.json")).expect("crac");
+        crac_json::read(openrao::path("files/crac/epic20/second_preventive_ls_1_4.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
         generation: &net.generation,
