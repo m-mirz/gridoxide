@@ -1,4 +1,9 @@
 fn main() {
+    // Without at least one `rerun-if` line cargo reruns this script whenever
+    // *any* file in the package changes — which, in a build with none of the
+    // features below, makes every edit to a test rebuild the library and
+    // relink all of the test binaries. Each feature declares its own inputs.
+    println!("cargo:rerun-if-changed=build.rs");
     #[cfg(feature = "klu")]
     klu::build();
     #[cfg(feature = "pardiso")]
