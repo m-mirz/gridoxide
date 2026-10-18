@@ -369,3 +369,9 @@ required-features = ["cgmes"]
 
 
 
+# Line tables only: backtraces and panics keep file and line, but a debugger
+# loses local variables. Full debug info made `target/debug` tens of gigabytes
+# and was most of what the linker had to write. Override for a debugging
+# session with `CARGO_PROFILE_DEV_DEBUG=true`.
+[profile.dev]
+debug = "line-tables-only"
