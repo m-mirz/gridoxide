@@ -1576,7 +1576,7 @@ fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
 /// # Why this test exists separately from the gate
 ///
 /// The Cucumber gate cannot protect this scenario. `run_gate` asserts only
-/// `matched >= baseline`, and `second_preventive.feature` carries a `pending`
+/// `matched >= baseline`, and `second_preventive.txt` carries a `pending`
 /// string that disables the per-scenario check — so losing five assertions here
 /// while gaining five on 1.4.1.6 passes silently, and the two are exactly the
 /// scenarios a change to chained ranges touches. Written before any such change,

@@ -197,11 +197,11 @@ so the ratio is the whole of it rather than the part that was convenient.
 
 | file | | |
 |---|---|---|
-| `dc_scenarios.feature` | 180 of 186 | |
-| `ac_scenarios.feature` | 276 of 282 | TestCase12Nodes |
-| `ac_scenarios_16nodes.feature` | 963 of 977 | TestCase16Nodes |
-| `second_preventive.feature` | **123 of 123** | |
-| `min_cost.feature` | 288 of 294 | costly optimization |
+| `dc_scenarios.txt` | 180 of 186 | |
+| `ac_scenarios.txt` | 276 of 282 | TestCase12Nodes |
+| `ac_scenarios_16nodes.txt` | 963 of 977 | TestCase16Nodes |
+| `second_preventive.txt` | **123 of 123** | |
+| `min_cost.txt` | 288 of 294 | costly optimization |
 
 Two of the five were vendored **before** the capability they test existed, which is the order the
 rest of this was built in and the only one that works. The second-preventive corpus scored 45 of 108
@@ -221,7 +221,7 @@ let a scenario disagree without one — see `RECORDED_DISAGREEMENTS` in `tests/r
 The last open defect — 1.4.1.5 and 1.4.1.6, a curative perimeter spending three actions where the
 reference spends one — is closed. Seven mechanisms had been implemented, measured and refuted
 for it; the eighth was **read** out of the reference's own source rather than guessed, which took a
-morning where the seven had taken weeks. `second_preventive.feature` went 118 → 123.
+morning where the seven had taken weeks. `second_preventive.txt` went 118 → 123.
 
 ## What is not here
 

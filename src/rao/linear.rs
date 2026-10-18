@@ -1348,7 +1348,7 @@ fn build_program(
         // That gate is about pricing, where two readings of a penalty are each
         // defensible. This is a permission the CRAC states, and the alternatives
         // are declining the column or ignoring a limit the file wrote down. It
-        // would also be dead code: no `min_cost.feature` CRAC carries a chained
+        // would also be dead code: no `min_cost.txt` CRAC carries a chained
         // range, and the corpus that does has no second preventive pass.
         if let (Some(window), Some(p)) = (control.chained, previous_instant_of(controls, k))
             && let Some(pst) = controls[p].pst.as_ref()

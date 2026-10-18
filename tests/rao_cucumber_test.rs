@@ -855,7 +855,7 @@ fn check(scenario: &Scenario) -> Outcome {
     // it**. It reports `Unbounded` for problems whose objective is bounded
     // below by zero with every column bounded below, the caller reads that as
     // "the LP failed" and moves nothing, and a shifter sits on tap 0 beside a
-    // two-hundred-thousand overload. HiGHS solves them: `min_cost.feature`
+    // two-hundred-thousand overload. HiGHS solves them: `min_cost.txt`
     // scores 221 against the barrier method's 177.
     //
     // Faithful as well as expedient — the reference's own costly configurations
@@ -863,7 +863,7 @@ fn check(scenario: &Scenario) -> Outcome {
     // (`"linear-optimization-solver": {"solver": "CBC"}`).
     //
     // Only for `MIN_COST`. Switching every scenario to HiGHS costs 6 on
-    // `ac_scenarios_16nodes.feature`, which is a question about tap rounding and
+    // `ac_scenarios_16nodes.txt`, which is a question about tap rounding and
     // not one to settle by changing solver underneath it.
     let mut ipm = IpmSolver::new();
     #[cfg(feature = "opf-highs")]
@@ -1771,7 +1771,7 @@ fn recorded_reason(name: &str) -> Option<&'static str> {
 /// thing behind it was.
 const BASELINE_MATCHED_DC: usize = 180;
 
-/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **276 of 282**.
+/// The same, for the 38 AC scenarios in `ac_scenarios.txt`: **276 of 282**.
 ///
 /// Lower than the DC file's score, and expected to be. These scenarios are
 /// judged on margins the reference measured with an AC load flow that also
