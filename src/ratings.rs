@@ -58,7 +58,7 @@ pub struct BranchLimits {
     /// Permanent admissible transmission loading, amperes. `None` = unlimited.
     pub patl_a: Option<f64>,
     /// Temporary ratings, in no particular order. Use
-    /// [`tatl_for`](Self::tatl_for) rather than indexing.
+    /// [`limit_for`](Self::limit_for) rather than indexing.
     pub tatl: Vec<TemporaryLimit>,
 }
 

@@ -100,9 +100,6 @@ also say which machine parameter moves a mode, and by how much.
 
 Deliberately **not** implemented, each for a stated reason:
 
-- **Rate limits** on a governor valve. Position limits are implemented — non-windup, and carried
-  through from both readers; see [The Model Library](./models.md) — but a rate limit constrains a
-  derivative rather than a state and is a different piece of machinery.
 - **Saturation.** PSS/E states it as two points on a curve, Dynawo as an exponential characteristic,
   and the two are not convertible without committing to a shape. Both readers parse it, neither
   uses it, and both report a nonzero value rather than dropping it silently.

@@ -190,7 +190,7 @@ impl GeneratingUnit {
 impl DynamicModel for GeneratingUnit {
     /// Delegated straight to the machine: the tunable parameters are the
     /// rotor's, and a control's would move the equilibrium — see
-    /// [`Machine::tunable`](super::machine::Machine::tunable).
+    /// [`Machine::tunable`].
     fn tunable(&self) -> &'static [&'static str] {
         self.machine.tunable()
     }

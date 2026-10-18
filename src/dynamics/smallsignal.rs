@@ -111,7 +111,7 @@ pub struct Mode {
     /// Zero from the dense method, which does not iterate and so has no
     /// residual to report. From the sparse method it is the Ritz residual
     /// scaled into λ's units, and it is the number that says whether an answer
-    /// is an answer. See [`arnoldi::RitzPair`](super::arnoldi::RitzPair).
+    /// is an answer. See [`arnoldi::RitzPair`].
     pub residual: f64,
     /// The right eigenvector, one entry per differential state, normalized to
     /// unit length.
@@ -583,7 +583,7 @@ pub fn analyze(system: &DynamicSystem) -> Result<SmallSignal, SmallSignalError> 
 ///
 /// The method [`analyze`] cannot be at scale. It never forms the reduced `A`:
 /// see [`shift`](super::shift) for the operator and
-/// [`arnoldi`](super::arnoldi) for the iteration. What it costs is
+/// [`arnoldi`] for the iteration. What it costs is
 /// completeness — this returns `count` modes and says nothing about the rest,
 /// so "no unstable modes here" means *near this shift*, and a caller has to aim
 /// it. What it buys is the twenty-thousand-state case, where the dense method

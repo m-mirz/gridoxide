@@ -352,7 +352,7 @@ fn objective(measurements: &[Measurement], residuals: &[f64]) -> f64 {
 /// # When a cached factorization stays valid
 ///
 /// Four things are cached — the state layout, the constraint set, each
-/// measurement's resolved [`MeasurementModel`](super::MeasurementModel), and one
+/// measurement's resolved [`MeasurementModel`], and one
 /// symbolic factorization — and all four hold under the same condition, which is
 /// what makes it one condition to state rather than four.
 ///

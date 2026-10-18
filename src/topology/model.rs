@@ -2,7 +2,7 @@
 //! them.
 //!
 //! This is what an importer produces *before* deciding what an electrical bus
-//! is. Turning it into buses is [`bus_view`](super::bus_view)'s job, and the
+//! is. Turning it into buses is [`bus_view`](fn@super::bus_view)'s job, and the
 //! two are separate precisely so that the decision can be made per solve
 //! rather than baked in at import — which is what gridoxide did until now, and
 //! why switching state was frozen the moment a file was read.

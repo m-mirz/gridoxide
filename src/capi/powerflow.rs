@@ -1,6 +1,6 @@
 //! The power-flow handle.
 //!
-//! Follows the rule [`python`](crate::python) sets out: a handle exists because
+//! Follows the rule `src/python.rs` sets out: a handle exists because
 //! a factorization survives between calls. Construct once per topology, solve
 //! as many times as you like — the symbolic factorization inside
 //! [`PersistentSolver`] is computed on the first solve and reused by every one
@@ -467,7 +467,7 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_enforcing_q_limits(
 /// every `Slack` and `PV` bus.
 ///
 /// After this returns,
-/// [`gridoxide_powerflow_slack_shift`](gridoxide_powerflow_slack_shift) reports
+/// [`gridoxide_powerflow_slack_shift`] reports
 /// how far each bus's schedule moved.
 ///
 /// # Safety
@@ -488,7 +488,7 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_distributing_slack(
         };
         model.buses.clone_from(&model.template);
 
-        // Checked here rather than left to `newton_raphson_distributing_slack`,
+        // Checked here rather than left to `outerloop::DistributedSlack`,
         // which asserts — and an assert crossing this boundary would abort the
         // caller's process. `guard` would catch it, but reporting it as the
         // caller's mistake is far more useful than reporting it as our bug.

@@ -11,7 +11,7 @@
 //! # The sign conventions, derived from gridoxide's own AC code
 //!
 //! Rather than copy MATPOWER's formulas and hope the conventions line up, the
-//! ones below are derived from [`network::branch_calc_param`], which is this
+//! ones below are derived from [`crate::network::branch_calc_param`], which is this
 //! crate's authority on branch orientation. With `tap = k·e^{jα}` that
 //! function produces `yft = −y_s/conj(tap)` and `yff = (y_s + y_sh/2)/k²`, so
 //! for `y_s = g + j·b_s`, `y_sh = 0`, `|V| = 1` and `δ = θ_f − θ_t − α`:
@@ -173,7 +173,7 @@ pub struct DcSolution {
     /// (gridoxide's half-open representation), transformers with an open
     /// terminal, and any branch whose susceptance came out non-finite (a
     /// purely resistive branch under
-    /// [`DcApproximation::IgnoreR`](super::DcApproximation::IgnoreR)).
+    /// [`DcApproximation::IgnoreR`]).
     pub ignored_branches: Vec<usize>,
 }
 

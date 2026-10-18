@@ -4,7 +4,7 @@
 //! trigger condition is met, whether or not that helps anything else, and the
 //! job here is to reproduce what the equipment does rather than to choose what
 //! it should do. That is the whole difference between this module and
-//! [`search`](super::search): the search asks "which of these would be best?",
+//! [`search`](mod@super::search): the search asks "which of these would be best?",
 //! and this asks "which of these will actually operate?".
 //!
 //! # The order matters, and it is `speed`
