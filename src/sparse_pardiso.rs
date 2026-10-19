@@ -112,7 +112,7 @@ fn pack_real_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> V
 }
 
 /// `pack_real_values` for callers that already hold just the values — see
-/// `solver::LinearSolver::factor_and_solve_values`.
+/// `sparse::LinearSolver::factor_and_solve_values`.
 fn pack_real_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
     groups
         .iter()
@@ -278,7 +278,7 @@ impl PardisoRealSystem {
     }
 }
 
-impl crate::solver::LinearSolver for PardisoRealSystem {
+impl crate::sparse::LinearSolver for PardisoRealSystem {
     fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
         PardisoRealSystem::new(n, entries)
     }

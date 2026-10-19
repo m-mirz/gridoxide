@@ -6,59 +6,14 @@ use super::network::{
     mark_unreferenced_islands, power_injections,
 };
 use super::sparse::RealSparseSystem;
+// Defined beside the backends it abstracts over, so that they need nothing
+// from this module; re-exported here, where the Newton loop is generic over it.
+pub use super::sparse::LinearSolver;
 #[cfg(feature = "klu")]
 use super::sparse_klu::KluRealSystem;
 #[cfg(feature = "pardiso")]
 use super::sparse_pardiso::PardisoRealSystem;
 use super::types::{Bus, BusType};
-
-/// The one operation the Newton loop needs from a sparse-LU backend: build a
-/// reusable symbolic factorization from a sparsity pattern once, then
-/// numerically refactorize and solve against that same pattern every
-/// iteration.
-///
-/// Every backend already had this exact pair of inherent methods before this
-/// trait existed — `sparse::RealSparseSystem`, `sparse_klu::KluRealSystem`,
-/// `klu_native::KluNativeSystem` and `sparse_pardiso::PardisoRealSystem` are
-/// all four one-line forwarders. The trait is what lets `newton_raphson_cached`
-/// be a single generic function instead of four near-identical copies of the
-/// same Newton loop, one per backend.
-///
-/// **Precondition, shared by every implementor:** the `entries` passed to
-/// `factor_and_solve` must carry the exact same `(row, col)` pairs in the
-/// exact same order as those passed to `new` — only the values may differ.
-/// Each backend caches a positional mapping from triplet index into its own
-/// CSC layout, so this is positional correspondence, not merely set equality.
-/// `jacobian::JacobianPattern` guarantees it by construction: it emits every
-/// topological neighbor regardless of computed value, in a fixed order
-/// derived once from the topology.
-pub trait LinearSolver: Sized {
-    /// Analyzes `entries`' sparsity pattern (fill-reducing ordering,
-    /// elimination structure) and factors it once. `None` if the pattern is
-    /// structurally invalid or the matrix is singular.
-    fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self>;
-
-    /// Numeric-only refactorization against the cached pattern, then solves
-    /// `A x = b`. `None` if the matrix is singular at these values.
-    fn factor_and_solve(
-        &mut self,
-        entries: &[(usize, usize, f64)],
-        rhs: &[f64],
-    ) -> Option<Vec<f64>>;
-
-    /// As [`factor_and_solve`](Self::factor_and_solve), but taking only the
-    /// nonzero *values*, positionally matching the `entries` passed to
-    /// [`new`](Self::new).
-    ///
-    /// Every implementor already ignores the `(row, col)` half of `entries`
-    /// after construction — each caches its own positional mapping into its
-    /// CSC layout and reads nothing but `entries[i].2`. Handing over just the
-    /// values lets the Newton loop refill one reused `Vec<f64>` per iteration
-    /// via [`jacobian::JacobianPattern`](crate::jacobian::JacobianPattern)
-    /// instead of rebuilding a `Vec<(usize, usize, f64)>` from scratch, which
-    /// is 3x the bytes and a fresh allocation every time.
-    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>>;
-}
 
 /// Selects which sparse-LU backend `newton_raphson_with_backend` uses to
 /// solve the Jacobian system each iteration.

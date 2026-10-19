@@ -125,7 +125,7 @@ fn pack_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> Vec<f6
 
 /// `pack_values` for callers that already hold just the values, positionally
 /// matching the triplets `new` was given — see
-/// `solver::LinearSolver::factor_and_solve_values`.
+/// `sparse::LinearSolver::factor_and_solve_values`.
 fn pack_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
     groups
         .iter()
@@ -232,7 +232,7 @@ impl KluNativeSystem {
     }
 }
 
-impl crate::solver::LinearSolver for KluNativeSystem {
+impl crate::sparse::LinearSolver for KluNativeSystem {
     fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
         KluNativeSystem::new(n, entries)
     }
