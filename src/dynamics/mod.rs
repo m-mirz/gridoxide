@@ -68,16 +68,10 @@ pub mod smallsignal;
 
 use num_complex::Complex;
 
-use crate::klu_native::KluNativeSystem;
 use crate::network::{
     ShuntAdm, YBusSparse, build_ybus_with_outages, connected_components, stamp_shunts,
 };
 use crate::solver::JacobianBackend;
-use crate::sparse::RealSparseSystem;
-#[cfg(feature = "klu")]
-use crate::sparse_klu::KluRealSystem;
-#[cfg(feature = "pardiso")]
-use crate::sparse_pardiso::PardisoRealSystem;
 use crate::types::{Line, Transformer};
 
 use dae::DaePattern;
@@ -474,22 +468,7 @@ impl DynamicSystem {
 /// be applied across it. It is also what any direct write through
 /// [`DynamicSystem::state_mut`] needs, for the same reason.
 pub fn settle(system: &mut DynamicSystem, opts: &DynamicsOptions) -> integrator::StepOutcome {
-    match opts.backend {
-        JacobianBackend::Scalar | JacobianBackend::Block => {
-            integrator::solve_algebraic::<RealSparseSystem>(system, opts.tol, opts.max_newton)
-        }
-        JacobianBackend::KluNative => {
-            integrator::solve_algebraic::<KluNativeSystem>(system, opts.tol, opts.max_newton)
-        }
-        #[cfg(feature = "klu")]
-        JacobianBackend::Klu => {
-            integrator::solve_algebraic::<KluRealSystem>(system, opts.tol, opts.max_newton)
-        }
-        #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => {
-            integrator::solve_algebraic::<PardisoRealSystem>(system, opts.tol, opts.max_newton)
-        }
-    }
+    integrator::solve_algebraic(system, opts.backend.lu_backend(), opts.tol, opts.max_newton)
 }
 
 /// Integrates `system` from its current state to `opts.end_time`.
@@ -497,14 +476,5 @@ pub fn settle(system: &mut DynamicSystem, opts: &DynamicsOptions) -> integrator:
 /// The system is advanced in place, so a caller can run in segments — which is
 /// what event handling does.
 pub fn run_dynamics(system: &mut DynamicSystem, opts: &DynamicsOptions) -> DynamicsReport {
-    match opts.backend {
-        JacobianBackend::Scalar | JacobianBackend::Block => {
-            integrator::integrate::<RealSparseSystem>(system, opts)
-        }
-        JacobianBackend::KluNative => integrator::integrate::<KluNativeSystem>(system, opts),
-        #[cfg(feature = "klu")]
-        JacobianBackend::Klu => integrator::integrate::<KluRealSystem>(system, opts),
-        #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => integrator::integrate::<PardisoRealSystem>(system, opts),
-    }
+    integrator::integrate(system, opts)
 }

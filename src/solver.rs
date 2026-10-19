@@ -1,18 +1,13 @@
 use super::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
 use super::jacobian::JacobianPattern;
-use super::klu_native::KluNativeSystem;
 use super::network::{
     Classified, Verdict, YBusSparse, classify, connected_components, effective_injection,
     mark_unreferenced_islands, power_injections,
 };
-use super::sparse::RealSparseSystem;
 // Defined beside the backends it abstracts over, so that they need nothing
 // from this module; re-exported here, where the Newton loop is generic over it.
+use super::lu::{LuBackend, SparseLu};
 pub use super::sparse::LinearSolver;
-#[cfg(feature = "klu")]
-use super::sparse_klu::KluRealSystem;
-#[cfg(feature = "pardiso")]
-use super::sparse_pardiso::PardisoRealSystem;
 use super::types::{Bus, BusType};
 
 /// Selects which sparse-LU backend `newton_raphson_with_backend` uses to
@@ -64,6 +59,22 @@ pub enum JacobianBackend {
     /// CI runners) — local/manual-verification-only.
     #[cfg(feature = "pardiso")]
     Pardiso,
+}
+
+impl JacobianBackend {
+    /// The sparse LU this backend factors with. `Block` has no general sparse
+    /// LU of its own, so wherever a Jacobian is not power flow's block-per-bus
+    /// shape it falls back to `faer`, as `Scalar` does.
+    pub fn lu_backend(self) -> LuBackend {
+        match self {
+            JacobianBackend::Scalar | JacobianBackend::Block => LuBackend::Faer,
+            JacobianBackend::KluNative => LuBackend::KluNative,
+            #[cfg(feature = "klu")]
+            JacobianBackend::Klu => LuBackend::Klu,
+            #[cfg(feature = "pardiso")]
+            JacobianBackend::Pardiso => LuBackend::Pardiso,
+        }
+    }
 }
 
 /// How a Newton-Raphson solve terminated, plus the per-iteration convergence
@@ -297,41 +308,15 @@ pub fn newton_raphson_with_backend(
     mark_unreferenced_islands(buses, &classified);
 
     let stats = match backend {
-        JacobianBackend::Scalar => newton_raphson_cached(
-            buses,
-            ybus,
-            tol,
-            max_iter,
-            &mut None::<RealSparseSystem>,
-            &mut None,
-        ),
         JacobianBackend::Block => {
             newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut None)
         }
-        #[cfg(feature = "klu")]
-        JacobianBackend::Klu => newton_raphson_cached(
+        _ => newton_raphson_cached(
             buses,
             ybus,
             tol,
             max_iter,
-            &mut None::<KluRealSystem>,
-            &mut None,
-        ),
-        JacobianBackend::KluNative => newton_raphson_cached(
-            buses,
-            ybus,
-            tol,
-            max_iter,
-            &mut None::<KluNativeSystem>,
-            &mut None,
-        ),
-        #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => newton_raphson_cached(
-            buses,
-            ybus,
-            tol,
-            max_iter,
-            &mut None::<PardisoRealSystem>,
+            &mut SparseLu::new(backend.lu_backend()),
             &mut None,
         ),
     };
@@ -385,13 +370,9 @@ pub struct PersistentSolver {
     /// shares one Y-bus) and is not automatic for a contingency sweep (each
     /// outage has its own). See [`invalidate_admittances`](Self::invalidate_admittances).
     jacobian: Option<JacobianPattern>,
-    scalar: Option<RealSparseSystem>,
+    /// The general sparse LU, for every backend but `Block`.
+    lu: SparseLu,
     block: Option<BlockSymbolic>,
-    #[cfg(feature = "klu")]
-    klu: Option<KluRealSystem>,
-    klu_native: Option<KluNativeSystem>,
-    #[cfg(feature = "pardiso")]
-    pardiso: Option<PardisoRealSystem>,
 }
 
 impl PersistentSolver {
@@ -399,13 +380,8 @@ impl PersistentSolver {
         Self {
             backend,
             jacobian: None,
-            scalar: None,
+            lu: SparseLu::new(backend.lu_backend()),
             block: None,
-            #[cfg(feature = "klu")]
-            klu: None,
-            klu_native: None,
-            #[cfg(feature = "pardiso")]
-            pardiso: None,
         }
     }
 
@@ -445,43 +421,12 @@ impl PersistentSolver {
         mark_unreferenced_islands(buses, &classified);
 
         let stats = match self.backend {
-            JacobianBackend::Scalar => newton_raphson_cached(
-                buses,
-                ybus,
-                tol,
-                max_iter,
-                &mut self.scalar,
-                &mut self.jacobian,
-            ),
             JacobianBackend::Block => {
                 newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut self.block)
             }
-            #[cfg(feature = "klu")]
-            JacobianBackend::Klu => newton_raphson_cached(
-                buses,
-                ybus,
-                tol,
-                max_iter,
-                &mut self.klu,
-                &mut self.jacobian,
-            ),
-            JacobianBackend::KluNative => newton_raphson_cached(
-                buses,
-                ybus,
-                tol,
-                max_iter,
-                &mut self.klu_native,
-                &mut self.jacobian,
-            ),
-            #[cfg(feature = "pardiso")]
-            JacobianBackend::Pardiso => newton_raphson_cached(
-                buses,
-                ybus,
-                tol,
-                max_iter,
-                &mut self.pardiso,
-                &mut self.jacobian,
-            ),
+            _ => {
+                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.lu, &mut self.jacobian)
+            }
         };
 
         let reports = finish_island_reports(classified, buses, ybus, stats.status, tol);
@@ -518,28 +463,18 @@ impl PersistentSolver {
 
     pub fn reset(&mut self) {
         self.jacobian = None;
-        self.scalar = None;
+        self.lu.reset();
         self.block = None;
-        #[cfg(feature = "klu")]
-        {
-            self.klu = None;
-        }
-        self.klu_native = None;
-        #[cfg(feature = "pardiso")]
-        {
-            self.pardiso = None;
-        }
     }
 }
 
-/// The one Newton-Raphson loop, generic over the sparse-LU backend via
-/// [`LinearSolver`]. Until this became generic there were four separate
-/// copies of this function — `Scalar`, `Klu`, `KluNative` and `Pardiso` —
-/// differing only in the concrete system type and `as_ref()` vs `as_mut()`.
-/// `newton_raphson_block_cached` stays separate: it has a genuinely
+/// The one Newton-Raphson loop, for every general sparse-LU backend: the
+/// [`SparseLu`] carries the choice. There were once four copies of this
+/// function, one per backend, and then one generic over [`LinearSolver`]
+/// with a `match` at every call site. `newton_raphson_block_cached` stays separate: it has a genuinely
 /// different matrix type and a `[f64; 2]`-shaped mismatch vector.
 ///
-/// The cached symbolic factorization lives in a caller-supplied `cache`
+/// The cached symbolic factorization lives in a caller-supplied `lu`
 /// rather than a function-local variable — what lets `PersistentSolver`
 /// reuse it across repeated `solve()` calls on unchanged topology, not just
 /// across the iterations within a single call. `newton_raphson_with_backend`
@@ -551,12 +486,12 @@ impl PersistentSolver {
 /// [`crate::batch::BatchSolver`] run on the stdout lock; `src/main.rs`
 /// reproduces the old console output from `SolveStats::mismatch_history`
 /// instead.
-fn newton_raphson_cached<S: LinearSolver>(
+fn newton_raphson_cached(
     buses: &mut [Bus],
     ybus: &YBusSparse,
     tol: f64,
     max_iter: usize,
-    cache: &mut Option<S>,
+    lu: &mut SparseLu,
     pattern: &mut Option<JacobianPattern>,
 ) -> SolveStats {
     // Every non-slack bus carries an angle unknown; PQ buses additionally
@@ -623,13 +558,10 @@ fn newton_raphson_cached<S: LinearSolver>(
         // The backend's symbolic analysis needs the `(row, col)` pairs, but
         // only once per topology — every subsequent iteration hands over
         // nothing but the values.
-        if cache.is_none() {
-            *cache = S::new(n_unknowns, &pattern.to_triplets(&values));
-        }
-        let Some(system) = cache.as_mut() else {
+        if !lu.is_analyzed() && !lu.analyze(n_unknowns, &pattern.to_triplets(&values)) {
             return SolveStats::from_loop(SolveStatus::Singular, history);
-        };
-        let Some(dx) = system.factor_and_solve_values(&values, &mismatch) else {
+        }
+        let Some(dx) = lu.factor_and_solve_values(&values, &mismatch) else {
             return SolveStats::from_loop(SolveStatus::Singular, history);
         };
 

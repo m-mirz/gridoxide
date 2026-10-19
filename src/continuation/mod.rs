@@ -35,15 +35,9 @@ pub mod corrector;
 pub mod direction;
 pub mod events;
 
-use crate::klu_native::KluNativeSystem;
 use crate::network::{ShuntAdm, YBusSparse, build_ybus, stamp_shunts};
 use crate::outerloop::{OuterLoop, OuterLoopContext, ReactiveLimits, SolveContext};
-use crate::solver::{IslandReport, JacobianBackend, LinearSolver, SolveStatus};
-use crate::sparse::RealSparseSystem;
-#[cfg(feature = "klu")]
-use crate::sparse_klu::KluRealSystem;
-#[cfg(feature = "pardiso")]
-use crate::sparse_pardiso::PardisoRealSystem;
+use crate::solver::{IslandReport, JacobianBackend, SolveStatus};
 use crate::types::{Bus, BusType, Line, Transformer};
 use crate::{PowerFlowMethod, PowerFlowOptions};
 
@@ -426,23 +420,7 @@ pub fn run_continuation(
         );
     }
 
-    match opts.power_flow.backend {
-        JacobianBackend::Scalar => {
-            trace::<RealSparseSystem>(buses, lines, transformers, shunts, opts, zip)
-        }
-        JacobianBackend::KluNative => {
-            trace::<KluNativeSystem>(buses, lines, transformers, shunts, opts, zip)
-        }
-        #[cfg(feature = "klu")]
-        JacobianBackend::Klu => {
-            trace::<KluRealSystem>(buses, lines, transformers, shunts, opts, zip)
-        }
-        #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => {
-            trace::<PardisoRealSystem>(buses, lines, transformers, shunts, opts, zip)
-        }
-        JacobianBackend::Block => unreachable!("refused above"),
-    }
+    trace(buses, lines, transformers, shunts, opts, zip)
 }
 
 /// Runs `ReactiveLimits` exactly once against the current state.
@@ -495,8 +473,8 @@ fn switch_q_limits(buses: &mut [Bus], ybus: &mut YBusSparse) -> Vec<usize> {
 /// Both are reported as `None`, which puts the caller on its existing
 /// step-halving path.
 #[allow(clippy::too_many_arguments)]
-fn probe<S: LinearSolver>(
-    seg: &mut Segment<S>,
+fn probe(
+    seg: &mut Segment,
     work: &mut [Bus],
     anchor: &[Bus],
     ybus: &YBusSparse,
@@ -602,8 +580,8 @@ struct Bracket<'a> {
 /// step's own endpoint — known to be past the event, since that is what
 /// bracketed it — guarantees such a point always exists.
 #[allow(clippy::too_many_arguments)]
-fn locate<S: LinearSolver, F>(
-    seg: &mut Segment<S>,
+fn locate<F>(
+    seg: &mut Segment,
     work: &mut Vec<Bus>,
     ybus: &YBusSparse,
     base: &BaseSpec,
@@ -619,7 +597,7 @@ fn locate<S: LinearSolver, F>(
     mut event: F,
 ) -> Option<(f64, f64, usize)>
 where
-    F: FnMut(&mut Segment<S>, &[Bus], &YBusSparse) -> f64,
+    F: FnMut(&mut Segment, &[Bus], &YBusSparse) -> f64,
 {
     let mut bracket = Illinois {
         lo: 0.0,
@@ -670,9 +648,9 @@ where
 
 /// Assembles the answer at a located critical point.
 #[allow(clippy::too_many_arguments)]
-fn build_critical<S: LinearSolver>(
+fn build_critical(
     kind: CriticalPointKind,
-    seg: &Segment<S>,
+    seg: &Segment,
     buses: &[Bus],
     tangent: &[f64],
     lambda: f64,
@@ -751,9 +729,8 @@ fn snapshot(
     }
 }
 
-/// The walk itself, generic over the sparse-LU backend for the same reason
-/// `solver::newton_raphson_cached` is: four near-identical copies otherwise.
-fn trace<S: LinearSolver>(
+/// The walk itself, factoring with the sparse LU the power-flow options select.
+fn trace(
     buses: Vec<Bus>,
     lines: &[Line],
     transformers: &[Transformer],
@@ -764,6 +741,7 @@ fn trace<S: LinearSolver>(
     let n_buses = buses.len();
     let mut ybus = finished_ybus(n_buses, lines, transformers, shunts);
     let (tol, max_iter) = (opts.power_flow.tol, opts.power_flow.max_iter);
+    let lu_backend = opts.power_flow.backend.lu_backend();
 
     let mut warnings = Vec::new();
     if !zip.is_empty() {
@@ -853,7 +831,7 @@ fn trace<S: LinearSolver>(
         None,
         Layout::analyze(&buses).n_unknowns,
     );
-    let mut seg = Segment::<S>::analyze(&buses, &ybus, &dir, initial_border.0.clone());
+    let mut seg = Segment::analyze(&buses, &ybus, &dir, initial_border.0.clone(), lu_backend);
     let mut segments = 1usize;
     let mut reanalyses = 0usize;
     let mut solves = 0usize;
@@ -1044,7 +1022,7 @@ fn trace<S: LinearSolver>(
                 Some(&carried),
                 carried_layout.n_unknowns,
             );
-            seg = Segment::<S>::analyze(&buses, &ybus, &dir, border.0.clone());
+            seg = Segment::analyze(&buses, &ybus, &dir, border.0.clone(), lu_backend);
             segments += 1;
             let out = seg.correct(
                 &mut buses,
@@ -1150,7 +1128,7 @@ fn trace<S: LinearSolver>(
                     // the same way, which is what lets `t_λ` be read as a
                     // signed quantity at all.
                     new_lambda,
-                    |s: &mut Segment<S>, b: &[Bus], y: &YBusSparse| {
+                    |s: &mut Segment, b: &[Bus], y: &YBusSparse| {
                         -s.tangent(b, y, &nose_border.0, &nose_border.1, nose_border.2)
                             .map_or(0.0, |t| t[s.n()])
                     },

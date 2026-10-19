@@ -20,6 +20,7 @@ pub mod jacobian;
 pub mod json;
 pub mod klu_native;
 pub mod linear;
+pub mod lu;
 pub mod measurement;
 pub mod network;
 #[cfg(feature = "opf")]

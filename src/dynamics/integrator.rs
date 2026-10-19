@@ -59,7 +59,7 @@
 
 use num_complex::Complex;
 
-use crate::solver::LinearSolver;
+use crate::lu::{LuBackend, SparseLu};
 
 use super::dae::residual;
 use super::events::{DynamicsWarning, Event, EventError, EventKind, Relay, RelayAction};
@@ -137,9 +137,9 @@ impl Workspace {
 /// `pin_states` enforces that rather than approximating it. This costs
 /// nothing and removes the leak entirely.
 #[allow(clippy::too_many_arguments)]
-fn newton<S: LinearSolver>(
+fn newton(
     system: &DynamicSystem,
-    solver: &mut Option<S>,
+    solver: &mut SparseLu,
     ws: &mut Workspace,
     x_prev: &[f64],
     f0: &[f64],
@@ -193,13 +193,10 @@ fn newton<S: LinearSolver>(
         // Analyzed lazily, against real values: `KluNative` and `Klu` factor
         // numerically inside `new` and would refuse a placeholder pattern. Once
         // built it serves the whole run — every event preserves the sparsity.
-        if solver.is_none() {
-            *solver = S::new(n, &pattern.to_triplets(&ws.values));
-        }
-        let Some(lu) = solver.as_mut() else {
+        if !solver.is_analyzed() && !solver.analyze(n, &pattern.to_triplets(&ws.values)) {
             return StepOutcome::Singular;
-        };
-        let Some(dz) = lu.factor_and_solve_values(&ws.values, &ws.rhs) else {
+        }
+        let Some(dz) = solver.factor_and_solve_values(&ws.values, &ws.rhs) else {
             return StepOutcome::Singular;
         };
 
@@ -250,16 +247,11 @@ fn apply(system: &mut DynamicSystem, kind: EventKind) -> Result<(), EventError> 
     Ok(())
 }
 
-/// The integration loop, generic over the sparse-LU backend for the same
-/// reason `solver::newton_raphson_cached` and `continuation::trace` are: four
-/// near-identical copies otherwise.
-pub fn integrate<S: LinearSolver>(
-    system: &mut DynamicSystem,
-    opts: &DynamicsOptions,
-) -> DynamicsReport {
+/// The integration loop, factoring with the sparse LU `opts.backend` selects.
+pub fn integrate(system: &mut DynamicSystem, opts: &DynamicsOptions) -> DynamicsReport {
     let layout = system.pattern.layout().clone();
 
-    let mut solver: Option<S> = None;
+    let mut solver = SparseLu::new(opts.backend.lu_backend());
     let mut ws = Workspace::new(system);
     let mut f0 = vec![0.0; layout.n_diff];
 
@@ -333,7 +325,7 @@ pub fn integrate<S: LinearSolver>(
                 t: f64,
                 x: &mut Vec<f64>,
                 v: &mut Vec<Complex<f64>>,
-                solver: &mut Option<S>,
+                solver: &mut SparseLu,
                 ws: &mut Workspace,
                 traj: &mut Trajectory,
                 warnings: &mut Vec<DynamicsWarning>,
@@ -700,12 +692,13 @@ pub fn integrate<S: LinearSolver>(
 /// The same operation an event performs, exposed for a caller that has written
 /// through [`DynamicSystem::state_mut`](super::DynamicSystem::state_mut) and
 /// needs the network brought back into agreement with the new state.
-pub fn solve_algebraic<S: LinearSolver>(
+pub fn solve_algebraic(
     system: &mut DynamicSystem,
+    backend: LuBackend,
     tol: f64,
     max_newton: usize,
 ) -> StepOutcome {
-    let mut solver: Option<S> = None;
+    let mut solver = SparseLu::new(backend);
     let mut ws = Workspace::new(system);
     let x_prev = system.x0.clone();
     let mut x = system.x0.clone();

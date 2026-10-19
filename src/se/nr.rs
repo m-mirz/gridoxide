@@ -8,8 +8,9 @@
 //! ```
 //!
 //! and applying `Δx` to the state. `G` is square and symmetric, so every
-//! [`LinearSolver`] backend gridoxide already has for power flow works here
-//! unchanged — see [`super::jacobian`] for why that shaped the whole design.
+//! [`LinearSolver`](crate::sparse::LinearSolver) backend gridoxide already has
+//! for power flow works here unchanged — see [`super::jacobian`] for why that
+//! shaped the whole design.
 //!
 //! # How this differs from the power-flow Newton loop
 //!
@@ -21,9 +22,9 @@
 //! to converge; it means the measurements disagree with each other, which is
 //! what bad-data detection is for.
 
+use crate::lu::SparseLu;
 use crate::measurement::Measurement;
-use crate::solver::{JacobianBackend, LinearSolver};
-use crate::sparse::RealSparseSystem;
+use crate::solver::JacobianBackend;
 use crate::types::Bus;
 
 use super::constraints::Constraints;
@@ -216,7 +217,7 @@ fn apply_measured_magnitudes(buses: &mut [Bus], measurements: &[Measurement]) {
     }
 }
 
-fn estimate_with<S: LinearSolver>(
+fn estimate_with(
     measurements: &[Measurement],
     buses: &mut [Bus],
     net: &SeNetwork,
@@ -224,7 +225,7 @@ fn estimate_with<S: LinearSolver>(
     constraints: &Constraints,
     model: &MeasurementModel,
     options: &SeOptions,
-    cache: &mut Option<S>,
+    lu: &mut SparseLu,
 ) -> SeReport {
     let mut residuals = Vec::new();
     let mut last_step = f64::INFINITY;
@@ -259,10 +260,7 @@ fn estimate_with<S: LinearSolver>(
         // measurement set, so the symbolic factorization is built once and
         // reused across iterations — the same property `PersistentSolver`
         // relies on for power flow.
-        if cache.is_none() {
-            *cache = S::new(n_aug, &triplets);
-        }
-        let Some(system) = cache.as_mut() else {
+        if !lu.is_analyzed() && !lu.analyze(n_aug, &triplets) {
             return SeReport {
                 status: SeStatus::Singular,
                 iterations: iteration,
@@ -271,8 +269,8 @@ fn estimate_with<S: LinearSolver>(
                 residuals,
                 unconstrained,
             };
-        };
-        let Some(dx) = system.factor_and_solve(&triplets, &rhs) else {
+        }
+        let Some(dx) = lu.factor_and_solve(&triplets, &rhs) else {
             return SeReport {
                 status: SeStatus::Singular,
                 iterations: iteration,
@@ -378,27 +376,18 @@ pub struct PersistentEstimator {
     /// Each measurement's target resolved to a current functional, valid under
     /// exactly this struct's own stated condition.
     model: Option<MeasurementModel>,
-    scalar: Option<RealSparseSystem>,
-    klu_native: Option<crate::klu_native::KluNativeSystem>,
-    #[cfg(feature = "klu")]
-    klu: Option<crate::sparse_klu::KluRealSystem>,
-    #[cfg(feature = "pardiso")]
-    pardiso: Option<crate::sparse_pardiso::PardisoRealSystem>,
+    lu: SparseLu,
 }
 
 impl PersistentEstimator {
     pub fn new(options: SeOptions) -> Self {
+        let lu = SparseLu::new(options.backend.lu_backend());
         Self {
             options,
             layout: None,
             constraints: None,
             model: None,
-            scalar: None,
-            klu_native: None,
-            #[cfg(feature = "klu")]
-            klu: None,
-            #[cfg(feature = "pardiso")]
-            pardiso: None,
+            lu,
         }
     }
 
@@ -408,16 +397,7 @@ impl PersistentEstimator {
         self.layout = None;
         self.constraints = None;
         self.model = None;
-        self.scalar = None;
-        self.klu_native = None;
-        #[cfg(feature = "klu")]
-        {
-            self.klu = None;
-        }
-        #[cfg(feature = "pardiso")]
-        {
-            self.pardiso = None;
-        }
+        self.lu.reset();
     }
 
     /// Estimates, reusing whatever this estimator already holds.
@@ -450,50 +430,16 @@ impl PersistentEstimator {
         let constraints = self.constraints.as_ref().expect("just populated");
         let model = self.model.as_ref().expect("just populated");
 
-        match self.options.backend {
-            JacobianBackend::KluNative => estimate_with(
-                measurements,
-                buses,
-                net,
-                layout,
-                constraints,
-                model,
-                &self.options,
-                &mut self.klu_native,
-            ),
-            #[cfg(feature = "klu")]
-            JacobianBackend::Klu => estimate_with(
-                measurements,
-                buses,
-                net,
-                layout,
-                constraints,
-                model,
-                &self.options,
-                &mut self.klu,
-            ),
-            #[cfg(feature = "pardiso")]
-            JacobianBackend::Pardiso => estimate_with(
-                measurements,
-                buses,
-                net,
-                layout,
-                constraints,
-                model,
-                &self.options,
-                &mut self.pardiso,
-            ),
-            JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
-                measurements,
-                buses,
-                net,
-                layout,
-                constraints,
-                model,
-                &self.options,
-                &mut self.scalar,
-            ),
-        }
+        estimate_with(
+            measurements,
+            buses,
+            net,
+            layout,
+            constraints,
+            model,
+            &self.options,
+            &mut self.lu,
+        )
     }
 }
 
@@ -515,55 +461,16 @@ pub fn estimate(
     let layout = StateLayout::new(buses, measurements, net);
     let constraints = Constraints::new(net);
     let model = MeasurementModel::new(measurements, net);
-    match options.backend {
-        JacobianBackend::KluNative => estimate_with(
-            measurements,
-            buses,
-            net,
-            &layout,
-            &constraints,
-            &model,
-            options,
-            &mut None::<crate::klu_native::KluNativeSystem>,
-        ),
-        #[cfg(feature = "klu")]
-        JacobianBackend::Klu => estimate_with(
-            measurements,
-            buses,
-            net,
-            &layout,
-            &constraints,
-            &model,
-            options,
-            &mut None::<crate::sparse_klu::KluRealSystem>,
-        ),
-        #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => estimate_with(
-            measurements,
-            buses,
-            net,
-            &layout,
-            &constraints,
-            &model,
-            options,
-            &mut None::<crate::sparse_pardiso::PardisoRealSystem>,
-        ),
-        // `Block` assumes power flow's two-unknowns-per-bus structure, which the
-        // 2N−1 state vector here does not have (the reference bus contributes
-        // one unknown, not two), so it falls back to the scalar path rather
-        // than silently mis-assembling. Every other backend is a general sparse
-        // LU and carries the gain matrix unchanged.
-        JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
-            measurements,
-            buses,
-            net,
-            &layout,
-            &constraints,
-            &model,
-            options,
-            &mut None::<RealSparseSystem>,
-        ),
-    }
+    estimate_with(
+        measurements,
+        buses,
+        net,
+        &layout,
+        &constraints,
+        &model,
+        options,
+        &mut SparseLu::new(options.backend.lu_backend()),
+    )
 }
 
 #[cfg(test)]

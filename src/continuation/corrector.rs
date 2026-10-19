@@ -12,8 +12,8 @@
 //! cheapest guard against the augmented form quietly disagreeing with the
 //! solver it is supposed to extend.
 
+use crate::lu::{LuBackend, SparseLu};
 use crate::network::{YBusSparse, effective_injection, power_injections};
-use crate::solver::LinearSolver;
 use crate::types::{Bus, BusType};
 
 use super::augmented::{AugmentedPattern, Layout, Parametrization, border_columns};
@@ -92,12 +92,12 @@ pub(crate) struct CorrectorOutcome {
 /// A Q-limit switch ends a segment: it moves `n_unknowns`, which is exactly the
 /// condition `PersistentSolver::reset` documents, so the pattern, the direction
 /// rows and the cached factorization are all rebuilt.
-pub(crate) struct Segment<S: LinearSolver> {
+pub(crate) struct Segment {
     pub layout: Layout,
     pattern: AugmentedPattern,
     /// The direction in Newton row order, rebuilt with the segment.
     ds: Vec<f64>,
-    solver: Option<S>,
+    solver: SparseLu,
     values: Vec<f64>,
     /// Augmented solves performed — reported so the cost model is visible
     /// rather than folded into a wall-clock number.
@@ -106,12 +106,13 @@ pub(crate) struct Segment<S: LinearSolver> {
     pub reanalyses: usize,
 }
 
-impl<S: LinearSolver> Segment<S> {
+impl Segment {
     pub fn analyze(
         buses: &[Bus],
         ybus: &YBusSparse,
         dir: &LoadingDirection,
         border_cols: Vec<usize>,
+        backend: LuBackend,
     ) -> Self {
         let layout = Layout::analyze(buses);
         let pattern = AugmentedPattern::analyze(buses, ybus, border_cols);
@@ -121,7 +122,7 @@ impl<S: LinearSolver> Segment<S> {
             layout,
             pattern,
             ds,
-            solver: None,
+            solver: SparseLu::new(backend),
             values,
             solves: 0,
             reanalyses: 0,
@@ -141,7 +142,7 @@ impl<S: LinearSolver> Segment<S> {
             return;
         }
         self.pattern = AugmentedPattern::analyze(buses, ybus, cols.to_vec());
-        self.solver = None;
+        self.solver.reset();
         self.reanalyses += 1;
     }
 
@@ -180,12 +181,15 @@ impl<S: LinearSolver> Segment<S> {
         self.ensure_border(buses, ybus, border_cols);
         let (pattern, ds, values) = (&self.pattern, &self.ds, &mut self.values);
         pattern.fill(buses, p_calc, q_calc, ds, border, values);
-        if self.solver.is_none() {
-            self.solver = S::new(pattern.dim(), &pattern.to_triplets(values));
+        if !self.solver.is_analyzed()
+            && !self
+                .solver
+                .analyze(pattern.dim(), &pattern.to_triplets(values))
+        {
+            return None;
         }
-        let solver = self.solver.as_mut()?;
         self.solves += 1;
-        solver.factor_and_solve_values(values, rhs)
+        self.solver.factor_and_solve_values(values, rhs)
     }
 
     /// The unit tangent to the solution curve at the current (converged) state.
