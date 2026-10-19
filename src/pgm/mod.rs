@@ -11,6 +11,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 pub mod measurement;
+#[cfg(feature = "opf")]
+pub mod opf;
 pub mod se;
 pub mod shortcircuit;
 

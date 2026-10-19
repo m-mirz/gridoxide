@@ -686,7 +686,7 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     if flags.iter().any(|f| f == "--ac") {
         return run_ac_opf(path, flags);
     }
-    use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+    use gridoxide::opf::dc::{DcOpf, DcOpfOptions};
     use gridoxide::opf::model::OpfData;
     use gridoxide::opf::{OptStatus, Solver};
 
@@ -727,8 +727,8 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     } else {
         gridoxide::linear::DcApproximation::IgnoreG
     };
-    let network =
-        DcOpfNetwork::from_pgm(input, &data, 50.0, approximation).map_err(|e| e.to_string())?;
+    let network = gridoxide::pgm::opf::dc_opf_network_from_pgm(input, &data, 50.0, approximation)
+        .map_err(|e| e.to_string())?;
     let n_buses = network.n_buses;
     let generators = network.generators.clone();
     let total_load: f64 = network.loads.iter().map(|l| l.p).sum::<f64>() * network.base_mva;
@@ -840,7 +840,7 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
 #[cfg(feature = "opf")]
 fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::opf::OptStatus;
-    use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+    use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
     use gridoxide::opf::model::OpfData;
 
     let data_path = match flag_value(flags, "--data")? {
@@ -869,8 +869,8 @@ fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
             .map_err(|_| format!("--max-iter: {raw:?} is not a number"))?;
     }
 
-    let network =
-        AcOpfNetwork::from_pgm(input, &data, 50.0, &options).map_err(|e| e.to_string())?;
+    let network = gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options)
+        .map_err(|e| e.to_string())?;
     let n_buses = network.n_buses;
     let demand: f64 = network.p_load.iter().sum::<f64>() * network.base_mva;
     let opf = AcOpf::build(network, options).map_err(|e| e.to_string())?;

@@ -56,7 +56,8 @@ fn load_documents(name: &str) -> (PgmInput, OpfData) {
 /// that is `IgnoreG` and not the `1/x` the `dc` command uses.
 fn load_case(name: &str) -> DcOpfNetwork {
     let (input, data) = load_documents(name);
-    DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG).unwrap()
+    gridoxide::pgm::opf::dc_opf_network_from_pgm(input, &data, 50.0, DcApproximation::IgnoreG)
+        .unwrap()
 }
 
 /// Checks the returned point satisfies the KKT conditions of the program it
@@ -350,7 +351,9 @@ fn objectives_match_the_published_dc_baseline() {
 fn the_textbook_susceptance_is_measurably_further_from_the_baseline() {
     let gap = |name: &str, approximation| {
         let (input, data) = load_documents(name);
-        let network = DcOpfNetwork::from_pgm(input, &data, 50.0, approximation).unwrap();
+        let network =
+            gridoxide::pgm::opf::dc_opf_network_from_pgm(input, &data, 50.0, approximation)
+                .unwrap();
         let opf = DcOpf::build(network, DcOpfOptions::default()).unwrap();
         let published = PUBLISHED_DC.iter().find(|(n, _)| *n == name).unwrap().1;
         let objective = opf

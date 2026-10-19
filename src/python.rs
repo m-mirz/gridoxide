@@ -3362,7 +3362,7 @@ fn dc_opf(
     solver: &str,
     freq_hz: f64,
 ) -> PyResult<DcOpfResult> {
-    use crate::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+    use crate::opf::dc::{DcOpf, DcOpfOptions};
     use crate::opf::ipm::IpmSolver;
     use crate::opf::model::OpfData;
     use crate::opf::{OptStatus, Solver};
@@ -3391,7 +3391,7 @@ fn dc_opf(
         allow_shedding,
     };
     let approximation = parse_dc_approximation(dc_approximation)?;
-    let network = DcOpfNetwork::from_pgm(input, &data, freq_hz, approximation)
+    let network = crate::pgm::opf::dc_opf_network_from_pgm(input, &data, freq_hz, approximation)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let generator_index: Vec<usize> = network.generators.iter().map(|g| g.index).collect();
 
@@ -3490,7 +3490,7 @@ fn ac_opf(
     tolerance: f64,
     freq_hz: f64,
 ) -> PyResult<AcOpfResult> {
-    use crate::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+    use crate::opf::ac::{AcOpf, AcOpfOptions};
     use crate::opf::model::OpfData;
 
     let data_path = match data_path {
@@ -3522,7 +3522,7 @@ fn ac_opf(
     // interpreter lock through it would serialize callers for no reason.
     // (`detach` is pyo3 0.29's name for what was `allow_threads`.)
     let result = py.detach(|| {
-        let network = AcOpfNetwork::from_pgm(input, &data, freq_hz, &options)?;
+        let network = crate::pgm::opf::ac_opf_network_from_pgm(input, &data, freq_hz, &options)?;
         AcOpf::build(network, options)?.solve()
     });
     let result = result.map_err(|e| PyValueError::new_err(e.to_string()))?;

@@ -24,7 +24,7 @@
 #![cfg(all(feature = "opf", feature = "opf-highs"))]
 
 use gridoxide::linear::DcApproximation;
-use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+use gridoxide::opf::dc::{DcOpf, DcOpfOptions};
 use gridoxide::opf::highs::HighsSolver;
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::opf::model::OpfData;
@@ -65,7 +65,9 @@ fn dc_opf(name: &str, options: DcOpfOptions) -> DcOpf {
     let data =
         OpfData::from_json(&std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap())
             .unwrap();
-    let network = DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG).unwrap();
+    let network =
+        gridoxide::pgm::opf::dc_opf_network_from_pgm(input, &data, 50.0, DcApproximation::IgnoreG)
+            .unwrap();
     DcOpf::build(network, options).unwrap()
 }
 

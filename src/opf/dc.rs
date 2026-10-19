@@ -52,7 +52,7 @@
 use std::collections::HashMap;
 
 use crate::linear::btheta::DcBranch;
-use crate::opf::model::{CostCurve, OpfData};
+use crate::opf::model::CostCurve;
 use crate::opf::{LinearProgram, OpfError, OptStatus, Solution};
 
 /// A generator, resolved onto a bus index with everything in per-unit.
@@ -93,131 +93,14 @@ pub struct DcOpfNetwork {
     pub base_mva: f64,
 }
 
-impl DcOpfNetwork {
-    /// Builds the network from a PGM document and its companion OPF document.
-    ///
-    /// Three things need care, and each is a place a naive assembly goes
-    /// wrong:
-    ///
-    /// - **The per-unit base must be the OPF document's.** `pgm_to_network`
-    ///   takes `s_base_va`, and passing anything other than
-    ///   `base_mva · 1e6` would put the network's per-unit powers on a
-    ///   different base from the cost curves', which is invisible until the
-    ///   dispatch comes out scaled.
-    /// - **The synthesized source branches and buses are dropped.** Converting
-    ///   a PGM document appends a virtual slack bus per `source`, joined by an
-    ///   impedance branch. That is right for a power flow, where the source's
-    ///   output is an unknown; here the source's generator is a decision
-    ///   variable listed in the OPF document, so the virtual pair would double
-    ///   it. The physical end of a source branch is the reference bus.
-    /// - **Branch limits are keyed by PGM component id, not by flat index.**
-    ///   `PgmNetwork::branch_idx` is the translation.
-    ///
-    /// `approximation` picks how branch susceptance is formed, and it is not a
-    /// cosmetic choice — see [`DcOpfOptions`] for the measured effect on the
-    /// published baseline. [`DcApproximation::IgnoreG`] is what OPF should
-    /// normally use.
-    ///
-    /// [`DcApproximation::IgnoreG`]: crate::linear::DcApproximation::IgnoreG
-    pub fn from_pgm(
-        input: crate::pgm::PgmInput,
-        opf: &OpfData,
-        freq_hz: f64,
-        approximation: crate::linear::DcApproximation,
-    ) -> Result<Self, OpfError> {
-        let base_mva = opf.base_mva;
-        let s_base_va = base_mva * 1e6;
-
-        let loads_raw: Vec<(u64, f64)> = input
-            .data
-            .sym_load
-            .iter()
-            .filter(|l| l.status != 0)
-            .map(|l| (l.node, l.p_specified))
-            .collect();
-        let n_physical = input.data.node.len();
-
-        let net = crate::pgm::pgm_to_network(input, s_base_va, freq_hz);
-        let branches: Vec<DcBranch> = crate::linear::btheta::dc_branches(
-            &net.lines,
-            &net.transformers,
-            crate::linear::DcOptions {
-                approximation,
-                ..crate::linear::DcOptions::default()
-            },
-        )
-        .into_iter()
-        // A branch touching a virtual bus is a synthesized source connection.
-        .filter(|b| b.from < n_physical && b.to < n_physical)
-        .collect();
-
-        // The reference is the physical bus a source attaches to. Falling back
-        // to bus 0 keeps a source-less document solvable rather than erroring
-        // on something the OPF itself does not need.
-        let reference = net
-            .source_branch_idx
-            .values()
-            .filter_map(|&flat| net.lines.get(flat))
-            .map(|line| line.to.min(line.from))
-            .find(|&bus| bus < n_physical)
-            .unwrap_or(0);
-
-        let mut limits = HashMap::new();
-        for limit in &opf.branch_limit {
-            let Some(&flat) = net.branch_idx.get(&limit.id) else {
-                continue;
-            };
-            limits.insert(flat, limit.rate_pu(base_mva));
-        }
-
-        let mut generators = Vec::with_capacity(opf.generator.len());
-        for g in &opf.generator {
-            let Some(&bus) = net.node_idx.get(&g.node) else {
-                return Err(OpfError::Backend(format!(
-                    "generator {} sits on node {}, which is not in the network document",
-                    g.index, g.node
-                )));
-            };
-            let (p_min, p_max) = g.p_limits_pu(base_mva);
-            generators.push(DcGenerator {
-                index: g.index,
-                bus,
-                p_min,
-                p_max,
-                cost: g.cost.as_ref().map(|c| c.to_per_unit(base_mva)),
-            });
-        }
-
-        let mut loads = Vec::new();
-        for (node, p_specified) in loads_raw {
-            let Some(&bus) = net.node_idx.get(&node) else {
-                continue;
-            };
-            loads.push(DcLoad {
-                bus,
-                p: p_specified / s_base_va,
-            });
-        }
-
-        Ok(Self {
-            n_buses: n_physical,
-            reference,
-            branches,
-            limits,
-            generators,
-            loads,
-            base_mva,
-        })
-    }
-}
-
 /// Options for a DC-OPF.
 ///
 /// # Which susceptance the branches get
 ///
 /// Not held here — it is fixed when the network is built, by the
-/// `approximation` argument to [`DcOpfNetwork::from_pgm`] — but this is where
-/// a caller will look for it, so the reasoning is recorded here.
+/// `approximation` argument to
+/// [`dc_opf_network_from_pgm`](crate::pgm::opf::dc_opf_network_from_pgm) — but
+/// this is where a caller will look for it, so the reasoning is recorded here.
 ///
 /// DC has two defensible susceptances, and OPF is far more sensitive to the
 /// choice than DC power flow is, because it moves the *constraint set* and not
