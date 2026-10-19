@@ -1,8 +1,9 @@
 use super::branch_flow::Terminal;
 use super::network::{
-    ShuntAdm, ShuntAdm3Ph, branch_calc_param, half_open_branch_shunt, source_impedance_pu,
-    source_impedance_pu_seq, tap_ratio_from_voltages, three_winding_star_params,
-    transformer_admittances, transformer_admittances_ex, transformer_seq_params, transformer_tap,
+    ShuntAdm, ShuntAdm3Ph, YBusSparse, branch_calc_param, half_open_branch_shunt,
+    source_impedance_pu, source_impedance_pu_seq, tap_ratio_from_voltages,
+    three_winding_star_params, transformer_admittances, transformer_admittances_ex,
+    transformer_seq_params, transformer_tap,
 };
 use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use num_complex::Complex;
@@ -1228,6 +1229,19 @@ impl PgmNetwork {
             Some(_) => None,
             None => Some((branch, terminal)),
         }
+    }
+
+    /// The state-estimation model of this network, given its Y-bus and the
+    /// shunts stamped into it — see [`SeNetwork::new`](crate::se::SeNetwork::new).
+    pub fn se_network(&self, ybus: YBusSparse, shunts: &[ShuntAdm]) -> crate::se::SeNetwork {
+        crate::se::SeNetwork::new(
+            ybus,
+            &self.lines,
+            &self.transformers,
+            shunts,
+            &self.source_branch_idx,
+            &self.zero_injection,
+        )
     }
 }
 

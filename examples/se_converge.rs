@@ -41,7 +41,7 @@ fn main() {
     let mut truth = net.buses.clone();
     linear_initial_guess(&mut truth, &ybus);
     PersistentSolver::new(JacobianBackend::Scalar).solve(&mut truth, &ybus, 1e-10, 40);
-    let se_net = SeNetwork::new(&net, ybus, &shunts);
+    let se_net = net.se_network(ybus, &shunts);
     let measurements = synthesize(&truth, &se_net, &net);
 
     println!(

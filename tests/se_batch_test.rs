@@ -69,7 +69,7 @@ fn load(name: &str) -> Loaded {
     );
     let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+    let se_net = net.se_network(ybus.finish(), &shunts);
 
     let per_scenario: Vec<Vec<Measurement>> = batch["data"]
         .as_array()

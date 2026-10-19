@@ -185,7 +185,7 @@ fn main() {
         let mut solver = PersistentSolver::new(JacobianBackend::Scalar);
         solver.solve(&mut truth, &ybus, 1e-10, 40);
 
-        let se_net = SeNetwork::new(&net, ybus, &shunts);
+        let se_net = net.se_network(ybus, &shunts);
         let measurements = synthesize(&truth, &se_net, &net);
 
         // 2N-1 unknowns; redundancy below ~1 cannot possibly be observable.

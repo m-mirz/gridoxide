@@ -99,7 +99,7 @@ impl SeCase {
         stamp_shunts(&mut ybus, &shunts);
         let buses = net.buses.clone();
         let node_idx = net.node_idx.clone();
-        let network = SeNetwork::new(&net, ybus.finish(), &shunts);
+        let network = net.se_network(ybus.finish(), &shunts);
 
         Self::finish(network, buses, measurements, node_idx, 1)
     }

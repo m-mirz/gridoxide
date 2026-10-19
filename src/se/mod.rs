@@ -122,15 +122,24 @@ impl SeNetwork {
     /// [`network::stamp_shunts`](crate::network::stamp_shunts) — the shunt
     /// measurement function needs the admittance itself, and the Y-bus has
     /// already summed it together with everything else on that diagonal.
+    ///
+    /// `source_branch_idx` maps each source to the branch synthesized for it,
+    /// and `zero_injection` flags the buses known to inject nothing; the PGM
+    /// converter records both, and
+    /// [`PgmNetwork::se_network`](crate::pgm::PgmNetwork::se_network) passes
+    /// them on.
     pub fn new(
-        net: &crate::pgm::PgmNetwork,
         ybus: YBusSparse,
+        lines: &[crate::types::Line],
+        transformers: &[crate::types::Transformer],
         shunts: &[crate::network::ShuntAdm],
+        source_branch_idx: &std::collections::HashMap<u64, usize>,
+        zero_injection: &[bool],
     ) -> Self {
         let n = ybus.n();
-        let terminals = terminals_from_params(&branch_params(&net.lines, &net.transformers));
+        let terminals = terminals_from_params(&branch_params(lines, transformers));
         let mut source_branches = vec![Vec::new(); n];
-        for (&_id, &branch) in &net.source_branch_idx {
+        for &branch in source_branch_idx.values() {
             // The synthesized branch runs virtual -> node, so the node it feeds
             // is its `to` end.
             source_branches[terminals[branch][1].at].push(branch);
@@ -156,7 +165,7 @@ impl SeNetwork {
             terminals,
             shunts,
             source_branches,
-            net.zero_injection.clone(),
+            zero_injection.to_vec(),
             energized,
         )
     }

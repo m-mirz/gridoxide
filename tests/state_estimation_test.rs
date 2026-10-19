@@ -85,7 +85,7 @@ fn assert_estimate_matches_with(
 
     let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+    let se_net = net.se_network(ybus.finish(), &shunts);
 
     let mut buses = net.buses.clone();
     linear_start(&mut buses, &se_net, &measurements);
@@ -326,7 +326,7 @@ fn a_flat_start_finds_the_wrong_basin_through_a_phase_shifting_transformer() {
     let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
     let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+    let se_net = net.se_network(ybus.finish(), &shunts);
 
     let run = |seed: fn(&mut [gridoxide::types::Bus], &SeNetwork, &[Measurement])| {
         let mut buses = net.buses.clone();
@@ -418,7 +418,7 @@ fn fixtures_are_observable_in_their_physical_unknowns() {
         let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
         let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
         stamp_shunts(&mut ybus, &shunts);
-        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+        let se_net = net.se_network(ybus.finish(), &shunts);
 
         let mut buses = net.buses.clone();
         linear_start(&mut buses, &se_net, &measurements);
@@ -484,7 +484,7 @@ fn bad_data_analysis_flags_only_the_inconsistent_fixture() {
         let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
         let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
         stamp_shunts(&mut ybus, &shunts);
-        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+        let se_net = net.se_network(ybus.finish(), &shunts);
 
         let mut buses = net.buses.clone();
         linear_start(&mut buses, &se_net, &measurements);
@@ -577,7 +577,7 @@ fn the_two_methods_agree() {
         let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
         let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
         stamp_shunts(&mut ybus, &shunts);
-        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+        let se_net = net.se_network(ybus.finish(), &shunts);
 
         let solve = |method| {
             let mut buses = net.buses.clone();
@@ -640,7 +640,7 @@ fn per_node_injections_survive_across_a_link() {
         let measurements = measurements_from_pgm(&input, &net, S_BASE_VA).expect("measurements");
         let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
         stamp_shunts(&mut ybus, &shunts);
-        let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+        let se_net = net.se_network(ybus.finish(), &shunts);
 
         let mut buses = net.buses.clone();
         linear_start(&mut buses, &se_net, &measurements);
