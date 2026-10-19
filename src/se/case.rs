@@ -22,11 +22,12 @@
 
 use std::collections::HashMap;
 
-use crate::measurement::{Measurement, MeasurementError};
+use crate::measurement::Measurement;
 use crate::network::{
     build_ybus, build_ybus_3ph, stamp_shunts, stamp_shunts_3ph, stamp_transformers_3ph,
 };
 use crate::pgm::PgmInput;
+use crate::pgm::measurement::MeasurementError;
 use crate::types::Bus;
 
 use super::SeNetwork;
@@ -93,7 +94,7 @@ impl SeCase {
         let id_to_idx = crate::pgm::node_id_to_idx(input);
         let shunts = crate::pgm::pgm_shunts_1ph(input, &id_to_idx, s_base_va);
         let net = crate::pgm::pgm_to_network(input.clone(), s_base_va, f_nom);
-        let measurements = crate::measurement::measurements_from_pgm(input, &net, s_base_va)?;
+        let measurements = crate::pgm::measurement::measurements_from_pgm(input, &net, s_base_va)?;
 
         let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
         stamp_shunts(&mut ybus, &shunts);
@@ -136,7 +137,7 @@ impl SeCase {
 
         let u_rated = |bus: usize| buses[bus].u_rated;
         let measurements =
-            crate::measurement::measurements_from_pgm_3ph(input, &maps, s_base_va, &u_rated)?;
+            crate::pgm::measurement::measurements_from_pgm_3ph(input, &maps, s_base_va, &u_rated)?;
 
         Self::finish(network, buses, measurements, maps.node_idx.clone(), 3)
     }

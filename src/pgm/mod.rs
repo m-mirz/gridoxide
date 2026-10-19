@@ -10,6 +10,8 @@ use num_complex::Complex;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+pub mod measurement;
+
 // ── Input structs ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Deserialize)]
