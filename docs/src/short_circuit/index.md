@@ -140,7 +140,8 @@ gridoxide short-circuit network.json --scaling max
 From Rust:
 
 ```rust
-use gridoxide::shortcircuit::{short_circuit_from_pgm, ShortCircuitOptions, VoltageScaling};
+use gridoxide::pgm::shortcircuit::short_circuit_from_pgm;
+use gridoxide::shortcircuit::{ShortCircuitOptions, VoltageScaling};
 
 let opts = ShortCircuitOptions { scaling: VoltageScaling::Maximum };
 let (net, report) = short_circuit_from_pgm(&input, 1e6, 50.0, opts)?;

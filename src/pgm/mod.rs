@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 pub mod measurement;
 pub mod se;
+pub mod shortcircuit;
 
 // ── Input structs ─────────────────────────────────────────────────────────────
 
@@ -1852,9 +1853,10 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> PgmNetwork3Ph {
 /// Converts a document's `line` entries to per-unit three-phase branches.
 ///
 /// Extracted from [`pgm_to_3ph_network`] so the short-circuit path
-/// ([`pgm_to_3ph_sc_network`]) can reuse the conversion without also picking
-/// up that function's injection accumulation and virtual slack buses, neither
-/// of which a short-circuit calculation wants. `pgm_transformers_3ph` and
+/// ([`pgm_to_3ph_sc_network`](shortcircuit::pgm_to_3ph_sc_network)) can reuse
+/// the conversion without also picking up that function's injection
+/// accumulation and virtual slack buses, neither of which a short-circuit
+/// calculation wants. `pgm_transformers_3ph` and
 /// `pgm_shunts_3ph` were already standalone; the line conversion was the last
 /// piece still inlined.
 ///
@@ -1939,180 +1941,6 @@ pub fn pgm_lines_3ph(
         }
     }
     lines
-}
-
-/// One active `source`, reduced to the Norton equivalent a short-circuit
-/// calculation needs: an internal admittance at its node, behind a fixed EMF.
-#[derive(Clone, Copy, Debug)]
-pub struct ScSource {
-    /// The document's own `source` id.
-    pub id: u64,
-    /// Physical node index the source sits on.
-    pub node: usize,
-    /// Positive- (= negative-) sequence internal admittance, per unit.
-    pub y1: Complex<f64>,
-    /// Zero-sequence internal admittance, per unit.
-    pub y0: Complex<f64>,
-    /// `u_ref_angle`, the only part of the source's voltage specification that
-    /// survives into a short-circuit calculation — see
-    /// [`pgm_to_3ph_sc_network`].
-    pub u_ref_angle: f64,
-    /// Rated line-to-line voltage of the node this source sits on, which is
-    /// what selects its IEC 60909 voltage-scaling factor `c`.
-    pub u_rated: f64,
-}
-
-/// The network a short-circuit calculation solves: the passive circuit plus
-/// its sources as Norton equivalents.
-pub struct ScNetwork3Ph {
-    /// Physical node count. Bus `k`'s phases are rows `3k`, `3k+1`, `3k+2`.
-    pub n_nodes: usize,
-    pub lines: Vec<Line3Ph>,
-    pub transformers: Vec<Transformer3PhSeq>,
-    pub shunts: Vec<ShuntAdm3Ph>,
-    pub sources: Vec<ScSource>,
-    /// The PGM id behind each branch, in the flat order the report uses: the
-    /// lines that yield a branch, then the transformers, then the links. A
-    /// fully open line or link yields no branch and has no entry, which is why
-    /// this cannot be derived from document position.
-    pub branch_ids: Vec<u64>,
-    /// Whether each branch's `[from, to]` terminal is closed, parallel to
-    /// `branch_ids`. A line with one live terminal has already collapsed to a
-    /// self-loop on that terminal's node, which carries its current at `from`
-    /// either way; this says which PGM terminal that current belongs to.
-    pub branch_closed: Vec<[bool; 2]>,
-    /// The PGM id of each entry of `shunts`.
-    pub shunt_ids: Vec<u64>,
-    /// Node id → physical node index.
-    pub node_idx: HashMap<u64, usize>,
-    /// Per physical node, its rated line-to-line voltage — needed to convert
-    /// per-unit result voltages back to volts.
-    pub u_rated: Vec<f64>,
-    /// The three-phase base power the per-unit quantities are referred to.
-    /// Carried alongside so results can be converted back to volts and amperes
-    /// without the caller having to remember what it passed in.
-    pub s_base_va: f64,
-}
-
-/// Builds the three-phase network a short-circuit calculation solves.
-///
-/// Differs from [`pgm_to_3ph_network`] in exactly two ways, both required by
-/// IEC 60909:
-///
-/// 1. **No loads and no generation.** The standard deliberately isolates the
-///    short-circuit current from the pre-fault dispatch, so every `sym_load`,
-///    `asym_load`, `sym_gen` and `asym_gen` is ignored. Shunt admittances are
-///    *kept* — power-grid-model's own documentation calls that exception out
-///    explicitly, and it is a passive element rather than a dispatch decision.
-/// 2. **Sources become Norton equivalents, not virtual slack buses.**
-///    `pgm_to_3ph_network` appends a virtual slack bus and an impedance branch
-///    per source, which is right for a power flow whose unknowns include the
-///    source's own power. Here the source's internal admittance is folded onto
-///    its node's own diagonal and its EMF becomes a current injection, which
-///    is what power-grid-model's `add_sources` does and what keeps the result
-///    indexed by physical node.
-///
-/// The EMF itself is *not* built here — it depends on the voltage-scaling
-/// choice, which is a per-calculation option rather than a property of the
-/// network, so [`ScSource`] carries the angle and the rated voltage and
-/// `shortcircuit` combines them with `c`.
-pub fn pgm_to_3ph_sc_network(input: &PgmInput, s_base_va: f64, freq_hz: f64) -> ScNetwork3Ph {
-    let node_idx = node_id_to_idx(input);
-    let id_to_u_rated: HashMap<u64, f64> =
-        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
-
-    let lines = pgm_lines_3ph(input, &node_idx, s_base_va, freq_hz);
-    let transformers = pgm_transformers_3ph(input, &node_idx, s_base_va);
-    let shunts = pgm_shunts_3ph(input, &node_idx, s_base_va);
-
-    // The ids behind those, replaying the rules the conversions above apply —
-    // the same approach `pgm_3ph_maps` takes, and checked against the lengths
-    // below so the two cannot drift apart silently.
-    let mut branch_ids = Vec::new();
-    let mut branch_closed = Vec::new();
-    for ln in &input.data.line {
-        if !matches!((ln.from_status, ln.to_status), (1, 1) | (1, 0) | (0, 1)) {
-            continue;
-        }
-        branch_ids.push(ln.id);
-        branch_closed.push([ln.from_status != 0, ln.to_status != 0]);
-    }
-    assert_eq!(
-        branch_ids.len(),
-        lines.len(),
-        "line ids out of step with pgm_lines_3ph"
-    );
-    for t in &input.data.transformer {
-        branch_ids.push(t.id);
-        branch_closed.push([t.from_status != 0, t.to_status != 0]);
-    }
-    let shunt_ids: Vec<u64> = input
-        .data
-        .shunt
-        .iter()
-        .filter(|s| s.status != 0)
-        .map(|s| s.id)
-        .collect();
-    assert_eq!(
-        shunt_ids.len(),
-        shunts.len(),
-        "shunt ids out of step with pgm_shunts_3ph"
-    );
-
-    // Links, which `pgm_transformers_3ph` appends after the transformers with
-    // the same both-open rule, so this path and the estimator cannot disagree
-    // about what a link is. Only their ids are recorded here.
-    for lk in &input.data.link {
-        if lk.from_status == 0 && lk.to_status == 0 {
-            continue;
-        }
-        branch_ids.push(lk.id);
-        branch_closed.push([lk.from_status != 0, lk.to_status != 0]);
-    }
-    assert_eq!(
-        branch_ids.len(),
-        lines.len() + transformers.len(),
-        "transformer and link ids out of step with pgm_transformers_3ph",
-    );
-
-    let sources = input
-        .data
-        .source
-        .iter()
-        .filter(|s| s.status != 0)
-        .map(|src| {
-            let (r1, x1, r0, x0) =
-                source_impedance_pu_seq(src.sk, src.rx_ratio, src.z01_ratio, s_base_va);
-            let one = Complex::new(1.0, 0.0);
-            ScSource {
-                id: src.id,
-                node: node_idx[&src.node],
-                y1: one / Complex::new(r1, x1),
-                y0: one / Complex::new(r0, x0),
-                u_ref_angle: src.u_ref_angle,
-                u_rated: id_to_u_rated[&src.node],
-            }
-        })
-        .collect();
-
-    let mut u_rated = vec![0.0; input.data.node.len()];
-    for n in &input.data.node {
-        u_rated[node_idx[&n.id]] = n.u_rated;
-    }
-
-    ScNetwork3Ph {
-        n_nodes: input.data.node.len(),
-        lines,
-        transformers,
-        shunts,
-        sources,
-        branch_ids,
-        branch_closed,
-        shunt_ids,
-        node_idx,
-        u_rated,
-        s_base_va,
-    }
 }
 
 pub fn pgm_to_3ph_network(

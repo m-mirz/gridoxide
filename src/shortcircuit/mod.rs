@@ -51,11 +51,13 @@
 //! models and what the standard's own vocabulary is written in.
 
 pub mod fortescue;
+pub mod network;
 pub mod solver;
 
 use num_complex::Complex;
 
 pub use fortescue::SequenceValue;
+pub use network::{ScNetwork3Ph, ScSource};
 pub use solver::{
     BranchResult, FaultResult, NodeResult, ShortCircuitError, ShortCircuitReport, ShuntResult,
     SourceResult, short_circuit,
@@ -234,65 +236,6 @@ pub struct Fault {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShortCircuitOptions {
     pub scaling: VoltageScaling,
-}
-
-/// Resolves a document's `fault` entries against the network they apply to.
-///
-/// Inactive faults are dropped. `fault_phase` left at its default sentinel is
-/// resolved through [`FaultType::default_phase`], and a zero `r_f`/`x_f` pair
-/// becomes [`FaultAdmittance::Bolted`] rather than a zero admittance — see
-/// [`crate::pgm::PgmFault`] for why that reading is the right one.
-///
-/// The fault admittance is per-unit against the **faulted node's** own base,
-/// `z_base = u_rated² / s_base`, which is why this needs the network and not
-/// just the document.
-pub fn faults_from_pgm(
-    input: &crate::pgm::PgmInput,
-    net: &crate::pgm::ScNetwork3Ph,
-) -> Result<Vec<Fault>, ShortCircuitError> {
-    let mut out = Vec::new();
-    for f in input.data.fault.iter().filter(|f| f.status != 0) {
-        let bus = *net
-            .node_idx
-            .get(&f.fault_object)
-            .ok_or(ShortCircuitError::UnknownFaultObject(f.fault_object))?;
-        let fault_type = FaultType::from_code(f.fault_type)?;
-        let fault_phase =
-            FaultPhase::from_code(f.fault_phase)?.unwrap_or_else(|| fault_type.default_phase());
-
-        let y_fault = if f.r_f == 0.0 && f.x_f == 0.0 {
-            FaultAdmittance::Bolted
-        } else {
-            let u_rated = net.u_rated[bus];
-            let z_base = u_rated * u_rated / net.s_base_va;
-            FaultAdmittance::Finite(z_base / Complex::new(f.r_f, f.x_f))
-        };
-
-        out.push(Fault {
-            id: f.id,
-            bus,
-            fault_type,
-            fault_phase,
-            y_fault,
-        });
-    }
-    Ok(out)
-}
-
-/// Runs a short-circuit calculation straight from a PGM-format document.
-///
-/// The shortest path from a file to an answer; [`short_circuit`] is the entry
-/// point for callers that already hold a network.
-pub fn short_circuit_from_pgm(
-    input: &crate::pgm::PgmInput,
-    s_base_va: f64,
-    freq_hz: f64,
-    opts: ShortCircuitOptions,
-) -> Result<(crate::pgm::ScNetwork3Ph, ShortCircuitReport), ShortCircuitError> {
-    let net = crate::pgm::pgm_to_3ph_sc_network(input, s_base_va, freq_hz);
-    let faults = faults_from_pgm(input, &net)?;
-    let report = short_circuit(&net, &faults, opts)?;
-    Ok((net, report))
 }
 
 #[cfg(test)]

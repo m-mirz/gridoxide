@@ -15,10 +15,9 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
+use gridoxide::pgm::shortcircuit::short_circuit_from_pgm;
 use gridoxide::pgm::{PgmScBatchOutput, PgmScOutput, PgmScOutputData};
-use gridoxide::shortcircuit::{
-    ShortCircuitOptions, ShortCircuitReport, VoltageScaling, short_circuit_from_pgm,
-};
+use gridoxide::shortcircuit::{ShortCircuitOptions, ShortCircuitReport, VoltageScaling};
 
 const S_BASE_VA: f64 = 1e6;
 const FREQ_HZ: f64 = 50.0;
@@ -133,7 +132,7 @@ fn close_angle(got: f64, want: f64, magnitude: f64, tol: f64, what: &str) {
 
 fn check_scenario(
     report: &ShortCircuitReport,
-    net: &gridoxide::pgm::ScNetwork3Ph,
+    net: &gridoxide::shortcircuit::ScNetwork3Ph,
     expected: &PgmScOutputData,
     fixture: &str,
     scenario: usize,

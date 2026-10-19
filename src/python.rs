@@ -2871,9 +2871,8 @@ fn short_circuit(
     s_base_va: f64,
     freq_hz: f64,
 ) -> PyResult<ShortCircuitResult> {
-    use crate::shortcircuit::{
-        SequenceValue, ShortCircuitOptions, VoltageScaling, short_circuit_from_pgm,
-    };
+    use crate::pgm::shortcircuit::short_circuit_from_pgm;
+    use crate::shortcircuit::{SequenceValue, ShortCircuitOptions, VoltageScaling};
 
     let scaling = match scaling {
         "max" | "maximum" => VoltageScaling::Maximum,

@@ -17,15 +17,14 @@ use gridoxide::branch_flow::Terminal;
 use gridoxide::json::NetworkData;
 use gridoxide::linear::{DcApproximation, DcOptions, DcSensitivity, dc_branches, dc_power_flow};
 use gridoxide::network::{build_ybus, stamp_shunts};
+use gridoxide::pgm::shortcircuit::short_circuit_from_pgm;
 use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
 use gridoxide::se::nr::{SeMethod, SeOptions, SeStatus, estimate, linear_start};
 use gridoxide::se::observability;
-use gridoxide::shortcircuit::{
-    SequenceValue, ShortCircuitOptions, VoltageScaling, short_circuit_from_pgm,
-};
+use gridoxide::shortcircuit::{SequenceValue, ShortCircuitOptions, VoltageScaling};
 use gridoxide::solver::SolveStatus;
 use gridoxide::{run_power_flow, run_power_flow_analysis};
 

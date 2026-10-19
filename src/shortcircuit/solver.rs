@@ -11,11 +11,11 @@ use std::collections::HashMap;
 
 use num_complex::Complex;
 
+use super::ScNetwork3Ph;
 use crate::network::{
     build_ybus_3ph, connected_components, line3ph_blocks, seq_to_phase_shunt, stamp_shunts_3ph,
     stamp_transformers_3ph, transformer3ph_blocks,
 };
-use crate::pgm::ScNetwork3Ph;
 use crate::sparse;
 
 use super::{Fault, FaultAdmittance, FaultType, PHASE_ANG, ShortCircuitOptions, c_factor};
