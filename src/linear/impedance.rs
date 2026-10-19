@@ -32,13 +32,10 @@
 //! the reason this mode is offered alongside Newton-Raphson rather than
 //! instead of it.
 
-use num_complex::Complex;
-
 use crate::network::{
-    Verdict, YBusSparse, classify, connected_components, effective_injection,
-    mark_unreferenced_islands,
+    Verdict, YBusSparse, classify, connected_components, mark_unreferenced_islands,
+    solve_constant_admittance,
 };
-use crate::sparse;
 use crate::types::{Bus, BusType};
 
 /// How one connected component's constant-admittance solve turned out.
@@ -77,72 +74,6 @@ pub struct LinearIslandReport {
 #[derive(Clone, Debug)]
 pub struct LinearReport {
     pub islands: Vec<LinearIslandReport>,
-}
-
-/// Solves one reduced constant-admittance system over `unknown_idx`, writing
-/// `voltage_mag`/`voltage_ang` back for those buses only.
-///
-/// Every bus not in `unknown_idx` is treated as a fixed voltage source at its
-/// present `voltage_mag`/`voltage_ang` and moves to the right-hand side.
-/// Returns `false` if the reduced system is singular, in which case no bus is
-/// modified — leaving the caller's starting values intact is what makes this
-/// safe to use as a warm start.
-///
-/// Walks each unknown bus's actual admittance neighbours from the sparse
-/// Y-bus's row structure rather than the full unknown×unknown cross product,
-/// so the assembly cost is proportional to the number of branches, not to the
-/// square of the number of buses.
-pub(crate) fn solve_constant_admittance(
-    buses: &mut [Bus],
-    ybus: &YBusSparse,
-    unknown_idx: &[usize],
-) -> bool {
-    let m = unknown_idx.len();
-    if m == 0 {
-        return true;
-    }
-
-    let mut reduced_pos: Vec<Option<usize>> = vec![None; buses.len()];
-    for (r, &i) in unknown_idx.iter().enumerate() {
-        reduced_pos[i] = Some(r);
-    }
-
-    let mut triplets: Vec<(usize, usize, Complex<f64>)> = Vec::new();
-    let mut rhs = vec![Complex::new(0.0, 0.0); m];
-    for (r, &i) in unknown_idx.iter().enumerate() {
-        let (p, q) = effective_injection(&buses[i]);
-        let y_load = -Complex::new(p, q).conj();
-        let mut diag_seen = false;
-        for &(j, y_ij) in ybus.row(i) {
-            let y_ij = if j == i {
-                diag_seen = true;
-                y_ij + y_load
-            } else {
-                y_ij
-            };
-            match reduced_pos[j] {
-                Some(c) => triplets.push((r, c, y_ij)),
-                None => {
-                    let u_j = Complex::from_polar(buses[j].voltage_mag, buses[j].voltage_ang);
-                    rhs[r] -= y_ij * u_j;
-                }
-            }
-        }
-        if !diag_seen {
-            triplets.push((r, r, y_load));
-        }
-    }
-
-    match sparse::solve_complex(m, &triplets, &rhs) {
-        Some(sol) => {
-            for (r, &i) in unknown_idx.iter().enumerate() {
-                buses[i].voltage_mag = sol[r].norm();
-                buses[i].voltage_ang = sol[r].arg();
-            }
-            true
-        }
-        None => false,
-    }
 }
 
 /// Runs the constant-admittance linearization as a standalone power flow.
@@ -199,6 +130,7 @@ mod tests {
     use super::*;
     use crate::network::build_ybus;
     use crate::types::Line;
+    use num_complex::Complex;
 
     fn bus(idx: usize, bus_type: BusType, p_spec: f64, q_spec: f64) -> Bus {
         Bus {

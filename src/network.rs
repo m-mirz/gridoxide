@@ -948,6 +948,72 @@ pub fn effective_injection(bus: &Bus) -> (f64, f64) {
     (s.re, s.im)
 }
 
+/// Solves one reduced constant-admittance system over `unknown_idx`, writing
+/// `voltage_mag`/`voltage_ang` back for those buses only.
+///
+/// Every bus not in `unknown_idx` is treated as a fixed voltage source at its
+/// present `voltage_mag`/`voltage_ang` and moves to the right-hand side.
+/// Returns `false` if the reduced system is singular, in which case no bus is
+/// modified — leaving the caller's starting values intact is what makes this
+/// safe to use as a warm start.
+///
+/// Walks each unknown bus's actual admittance neighbours from the sparse
+/// Y-bus's row structure rather than the full unknown×unknown cross product,
+/// so the assembly cost is proportional to the number of branches, not to the
+/// square of the number of buses.
+pub fn solve_constant_admittance(
+    buses: &mut [Bus],
+    ybus: &YBusSparse,
+    unknown_idx: &[usize],
+) -> bool {
+    let m = unknown_idx.len();
+    if m == 0 {
+        return true;
+    }
+
+    let mut reduced_pos: Vec<Option<usize>> = vec![None; buses.len()];
+    for (r, &i) in unknown_idx.iter().enumerate() {
+        reduced_pos[i] = Some(r);
+    }
+
+    let mut triplets: Vec<(usize, usize, Complex<f64>)> = Vec::new();
+    let mut rhs = vec![Complex::new(0.0, 0.0); m];
+    for (r, &i) in unknown_idx.iter().enumerate() {
+        let (p, q) = effective_injection(&buses[i]);
+        let y_load = -Complex::new(p, q).conj();
+        let mut diag_seen = false;
+        for &(j, y_ij) in ybus.row(i) {
+            let y_ij = if j == i {
+                diag_seen = true;
+                y_ij + y_load
+            } else {
+                y_ij
+            };
+            match reduced_pos[j] {
+                Some(c) => triplets.push((r, c, y_ij)),
+                None => {
+                    let u_j = Complex::from_polar(buses[j].voltage_mag, buses[j].voltage_ang);
+                    rhs[r] -= y_ij * u_j;
+                }
+            }
+        }
+        if !diag_seen {
+            triplets.push((r, r, y_load));
+        }
+    }
+
+    match sparse::solve_complex(m, &triplets, &rhs) {
+        Some(sol) => {
+            for (r, &i) in unknown_idx.iter().enumerate() {
+                buses[i].voltage_mag = sol[r].norm();
+                buses[i].voltage_ang = sol[r].arg();
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 /// Computes a smarter-than-flat-start initial voltage guess for Newton-Raphson
 /// by solving one linearized constant-admittance system, mirroring PGM's
 /// `NewtonRaphsonPFSolver::initialize_derived_solver`. Each energized (`PQ`)
@@ -963,9 +1029,9 @@ pub fn effective_injection(bus: &Bus) -> (f64, f64) {
 /// its only robustness mechanism, needed on networks combining weak sources
 /// with large transformer phase shifts where plain flat-start NR diverges.
 ///
-/// The solve itself lives in
-/// [`linear::impedance`](crate::linear::impedance), which offers the same
-/// linearization as a standalone power-flow method
+/// [`linear::impedance`](crate::linear::impedance) offers the same
+/// linearization, built on the same [`solve_constant_admittance`], as a
+/// standalone power-flow method
 /// ([`linear::linear_power_flow`](crate::linear::linear_power_flow)). This
 /// entry point stays deliberately island-unaware: it runs *before* the
 /// solver's own `classify`/`mark_unreferenced_islands` pass, so it must not
@@ -976,7 +1042,7 @@ pub fn linear_initial_guess(buses: &mut [Bus], ybus: &YBusSparse) {
     let unknown_idx: Vec<usize> = (0..n)
         .filter(|&i| matches!(buses[i].bus_type, BusType::PQ))
         .collect();
-    crate::linear::impedance::solve_constant_admittance(buses, ybus, &unknown_idx);
+    solve_constant_admittance(buses, ybus, &unknown_idx);
 }
 
 pub fn power_injections(buses: &[Bus], ybus: &YBusSparse) -> (Vec<f64>, Vec<f64>) {
