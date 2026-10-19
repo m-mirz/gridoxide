@@ -612,13 +612,13 @@ fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
 /// above it.
 fn case_3ph(path: &str) -> gridoxide::se::case::SeCase {
     let input = common::load_pgm_input(&fixture(path).join("input.json"));
-    gridoxide::se::case::SeCase::from_pgm_3ph(&input, S_BASE_VA, 50.0)
+    gridoxide::pgm::se::se_case_from_pgm_3ph(&input, S_BASE_VA, 50.0)
         .expect("this fixture uses no unsupported component")
 }
 
 fn case_1ph(path: &str) -> gridoxide::se::case::SeCase {
     let input = common::load_pgm_input(&fixture(path).join("input.json"));
-    gridoxide::se::case::SeCase::from_pgm(&input, S_BASE_VA, 50.0).expect("builds")
+    gridoxide::pgm::se::se_case_from_pgm(&input, S_BASE_VA, 50.0).expect("builds")
 }
 
 /// The entry point builds what the eight-call assembly built.
@@ -1026,8 +1026,6 @@ fn the_batch_solver_carries_over_to_the_phase_domain() {
 /// symmetric path read the same document without comment.
 #[test]
 fn a_voltage_regulator_does_not_stop_an_estimate() {
-    use gridoxide::se::case::SeCase;
-
     let dir = fixture("tests/data/pgm/state_estimation/transmission-case");
     let raw = std::fs::read_to_string(dir.join("input.json")).unwrap();
     let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -1055,7 +1053,8 @@ fn a_voltage_regulator_does_not_stop_an_estimate() {
     let input: gridoxide::pgm::PgmInput =
         serde_json::from_value(doc).expect("the document still parses");
 
-    let with = SeCase::from_pgm_3ph(&input, S_BASE_VA, 50.0).expect("estimable");
+    let with =
+        gridoxide::pgm::se::se_case_from_pgm_3ph(&input, S_BASE_VA, 50.0).expect("estimable");
     let without = case_3ph("tests/data/pgm/state_estimation/transmission-case");
 
     // And it changes nothing: same buses, same measurements, same model.

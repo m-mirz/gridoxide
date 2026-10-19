@@ -484,9 +484,9 @@ fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), Strin
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
 
     let case = if phases == 3 {
-        SeCase::from_pgm_3ph(&input, s_base_va, 50.0)
+        gridoxide::pgm::se::se_case_from_pgm_3ph(&input, s_base_va, 50.0)
     } else {
-        SeCase::from_pgm(&input, s_base_va, 50.0)
+        gridoxide::pgm::se::se_case_from_pgm(&input, s_base_va, 50.0)
     }
     .map_err(|e| format!("{path}: {e}"))?;
 

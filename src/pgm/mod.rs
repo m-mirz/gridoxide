@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 pub mod measurement;
+pub mod se;
 
 // ── Input structs ─────────────────────────────────────────────────────────────
 

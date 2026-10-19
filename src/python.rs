@@ -1645,9 +1645,9 @@ impl StateEstimationModel {
         // that this binding and the CLI cannot drift apart in how they build a
         // model.
         let case = if asymmetric {
-            crate::se::case::SeCase::from_pgm_3ph(&input, s_base_va, freq_hz)
+            crate::pgm::se::se_case_from_pgm_3ph(&input, s_base_va, freq_hz)
         } else {
-            crate::se::case::SeCase::from_pgm(&input, s_base_va, freq_hz)
+            crate::pgm::se::se_case_from_pgm(&input, s_base_va, freq_hz)
         }
         .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
 
