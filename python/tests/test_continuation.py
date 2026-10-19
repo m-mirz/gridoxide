@@ -6,13 +6,10 @@ bisection. What is checked here is that the binding reaches it, and that the
 arguments mean what the docstring says.
 """
 
-from pathlib import Path
-
 import pytest
 
 import gridoxide
-
-CASE14 = Path(__file__).resolve().parent.parent.parent / "tests/data/pglib-opf/pglib_opf_case14_ieee.json"
+from _pglib import fixtures
 
 
 pytestmark = pytest.mark.skipif(
@@ -22,9 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def case14():
-    if not CASE14.exists():
-        pytest.skip(f"missing fixture: {CASE14}")
-    return str(CASE14)
+    return str(fixtures() / "pglib_opf_case14_ieee.json")
 
 
 def test_it_traces_a_curve_and_finds_the_limit(case14):
