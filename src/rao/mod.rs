@@ -12,36 +12,42 @@
 //! re-measures the answer under a full AC power flow. [`crac`] and
 //! [`crac_json`] are the data layer underneath.
 
+pub mod automaton;
+pub mod castor;
+pub mod costly;
 pub mod crac;
 pub mod crac_json;
 pub mod evaluate;
-pub mod linear;
-pub mod automaton;
-pub mod castor;
-pub mod search;
-pub mod mnec;
 pub mod limits;
+pub mod linear;
+pub mod mnec;
+pub mod parameters;
+pub mod search;
 pub mod usage;
 pub mod validate;
 
+pub use automaton::{AutomatonResult, simulate};
+pub use castor::{PerimeterPlan, Plan, ScenarioPlan, StepsExecuted, run};
+pub use costly::{Costly, CostlyOptions};
 pub use crac::{
-    RaoDocument, DOCUMENT_TYPE, DOCUMENT_VERSION,
-    Contingency, Crac, ElementaryAction, FlowCnec, Instant, InstantKind, RaUsageLimits, Range,
-    RangeAction, RangeActionKind, RangeKind, Side, State, Threshold, Unit, UsageRule,
+    Contingency, Crac, DOCUMENT_TYPE, DOCUMENT_VERSION, ElementaryAction, FlowCnec, Instant,
+    InstantKind, RaUsageLimits, Range, RangeAction, RangeActionKind, RangeKind, RaoDocument, Side,
+    State, Threshold, Unit, UsageRule,
 };
 pub use crac_json::{CracError, CracReport};
-pub use automaton::{simulate, AutomatonResult};
-pub use castor::{run, PerimeterPlan, Plan, ScenarioPlan};
-pub use search::{search, SearchOptions, SearchResult};
-pub use linear::{
-    optimize, LinearOptions, LinearResult, LinearStatus, NetworkMut, ObjectiveUnit, Setpoint,
-    TapModel,
-};
 pub use evaluate::{
-    evaluate, evaluate_ac, evaluate_model, evaluate_with, AcOptions, CnecResult, FlowModel,
-    Network, PerimeterResult, Resolution, SecurityResult,
+    AcOptions, CnecResult, FlowModel, Held, Network, PerimeterResult, Resolution, SecurityResult,
+    ac_options, evaluate, evaluate_ac, evaluate_model, evaluate_split, evaluate_with,
+};
+pub use limits::{Budget, Limits};
+pub use linear::{
+    LinearOptions, LinearResult, LinearStatus, NetworkMut, ObjectiveUnit, Setpoint, TapModel,
+    injection_setpoint, optimize,
 };
 pub use mnec::{Baseline, Mnec, MnecOptions};
-pub use limits::{Budget, Limits};
+pub use search::{
+    SearchOptions, SearchResult, SecondPreventive, SecondPreventiveCondition, search,
+    search_with_open,
+};
 pub use usage::Constrained;
-pub use validate::{validate, Validation, ValidationOptions, Verdict};
+pub use validate::{Validation, ValidationOptions, Verdict, validate};

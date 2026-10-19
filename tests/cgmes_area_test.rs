@@ -9,10 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
-use gridoxide::cgmes::{cgmes_control_areas, cgmes_to_network, load_profiles, CgmesNetwork};
+use gridoxide::cgmes::{CgmesNetwork, cgmes_control_areas, cgmes_to_network, load_profiles};
 use gridoxide::outerloop::{AreaDefinition, AreaInterchange, OuterLoop, SolveContext};
 use gridoxide::solver::{JacobianBackend, PowerFlowOptions, SolveStatus};
-use gridoxide::{run_power_flow, TapData};
+use gridoxide::{TapData, run_power_flow};
 
 const S_BASE: f64 = 100e6;
 
@@ -46,7 +46,10 @@ fn microgrid_resolves_two_areas_and_their_schedules() {
     let areas = cgmes_control_areas(&ds, &net, S_BASE).expect("control areas");
 
     assert_eq!(areas.report.areas, 2);
-    assert_eq!(areas.report.tie_flows, 10, "five ties, named from both sides");
+    assert_eq!(
+        areas.report.tie_flows, 10,
+        "five ties, named from both sides"
+    );
     assert_eq!(areas.report.unresolved_tie_flows, 0);
     assert!(areas.report.without_boundary.is_empty());
     assert!(areas.report.without_target.is_empty());
@@ -57,7 +60,10 @@ fn microgrid_resolves_two_areas_and_their_schedules() {
     // area's seed on the same node. That produced five contested buses and one
     // area owning nothing; the fix is to seed from the branch's far end.
     assert_eq!(areas.report.contested_buses, 0);
-    assert_eq!(areas.report.unassigned_buses, 5, "the five boundary X-nodes belong to neither");
+    assert_eq!(
+        areas.report.unassigned_buses, 5,
+        "the five boundary X-nodes belong to neither"
+    );
 
     let names: Vec<&str> = areas.ids.iter().map(|(_, n)| n.as_str()).collect();
     assert!(names.contains(&"NL") && names.contains(&"BE"), "{names:?}");
@@ -103,7 +109,11 @@ fn smallgrids_published_state_already_meets_its_own_schedule() {
         &net.transformers,
         &net.shunts,
         TapData::none(),
-        PowerFlowOptions { tol: 1e-8, max_iter: 40, ..Default::default() },
+        PowerFlowOptions {
+            tol: 1e-8,
+            max_iter: 40,
+            ..Default::default()
+        },
     );
     assert_eq!(solved.stats.status, SolveStatus::Converged);
 
@@ -138,7 +148,10 @@ fn an_area_without_tie_flows_is_reported() {
     assert_eq!(areas.report.areas, 1);
     assert_eq!(areas.report.tie_flows, 0);
     assert_eq!(areas.report.without_boundary, vec![0]);
-    assert!(areas.of_bus.iter().all(|a| a.is_none()), "no boundary means no membership either");
+    assert!(
+        areas.of_bus.iter().all(|a| a.is_none()),
+        "no boundary means no membership either"
+    );
 }
 
 /// End to end: the loop moves MicroGrid's two areas onto the schedules its own
@@ -161,7 +174,11 @@ fn the_loop_moves_microgrid_onto_its_declared_schedule() {
             &net.transformers,
             &net.shunts,
             TapData::none(),
-            PowerFlowOptions { tol: 1e-8, max_iter: 40, ..Default::default() },
+            PowerFlowOptions {
+                tol: 1e-8,
+                max_iter: 40,
+                ..Default::default()
+            },
         )
         .buses,
         &net.lines,
@@ -189,7 +206,14 @@ fn the_loop_moves_microgrid_onto_its_declared_schedule() {
             .with_branches(&net.lines, &mut transformers, &net.shunts)
             .with_taps(&mut changers, &[]);
         let mut list: Vec<&mut dyn OuterLoop> = vec![&mut area_loop];
-        gridoxide::outerloop::solve_with_loops(&mut ctx, 1e-9, 40, JacobianBackend::Scalar, &mut list, 60)
+        gridoxide::outerloop::solve_with_loops(
+            &mut ctx,
+            1e-9,
+            40,
+            JacobianBackend::Scalar,
+            &mut list,
+            60,
+        )
     };
     let area_report = area_loop.into_report();
 
@@ -203,7 +227,13 @@ fn the_loop_moves_microgrid_onto_its_declared_schedule() {
     );
     assert!(report.converged, "{report:?}");
 
-    let after = AreaInterchange::measure(&buses, &net.lines, &transformers, &areas.of_bus, areas.ids.len());
+    let after = AreaInterchange::measure(
+        &buses,
+        &net.lines,
+        &transformers,
+        &areas.of_bus,
+        areas.ids.len(),
+    );
     let dependent = area_report.dependent.expect("one area holds the slack");
 
     // Every area but the dependent one lands on its declared schedule.

@@ -38,14 +38,27 @@ fn bus_of(dyd: &dyd::DydDocument) -> HashMap<String, usize> {
 #[test]
 fn the_architecture_file_yields_its_models() {
     let (dyd, _) = documents();
-    assert_eq!(dyd.models.len(), 19, "the vendored case has nineteen black boxes");
+    assert_eq!(
+        dyd.models.len(),
+        19,
+        "the vendored case has nineteen black boxes"
+    );
 
-    let generators: Vec<_> =
-        dyd.models.iter().filter(|m| m.lib.starts_with("GeneratorSynchronous")).collect();
+    let generators: Vec<_> = dyd
+        .models
+        .iter()
+        .filter(|m| m.lib.starts_with("GeneratorSynchronous"))
+        .collect();
     assert_eq!(generators.len(), 5);
 
-    let g1 = generators.iter().find(|m| m.id == "GEN____1_SM").expect("GEN____1_SM is present");
-    assert_eq!(g1.lib, "GeneratorSynchronousFourWindingsProportionalRegulations");
+    let g1 = generators
+        .iter()
+        .find(|m| m.id == "GEN____1_SM")
+        .expect("GEN____1_SM is present");
+    assert_eq!(
+        g1.lib,
+        "GeneratorSynchronousFourWindingsProportionalRegulations"
+    );
     assert_eq!(g1.par_id.as_deref(), Some("Generator1"));
     assert_eq!(g1.par_file.as_deref(), Some("IEEE14.par"));
     assert_eq!(
@@ -56,7 +69,11 @@ fn the_architecture_file_yields_its_models() {
 
     // Loads share one parameter set between many models, which is the whole
     // reason parId is separate from id.
-    let loads: Vec<_> = dyd.models.iter().filter(|m| m.lib.starts_with("Load")).collect();
+    let loads: Vec<_> = dyd
+        .models
+        .iter()
+        .filter(|m| m.lib.starts_with("Load"))
+        .collect();
     assert!(loads.len() > 5);
     assert!(loads.iter().all(|m| m.par_id.is_some()));
 }
@@ -104,7 +121,10 @@ fn a_four_windings_generator_maps_onto_the_subtransient_machine() {
     let (dyd, par) = documents();
     let (units, _) = dyd::to_units(&dyd, &par, &bus_of(&dyd), 100.0).expect("converts");
 
-    let g1 = units.iter().find(|u| u.id == "GEN____1_SM").expect("mapped");
+    let g1 = units
+        .iter()
+        .find(|u| u.id == "GEN____1_SM")
+        .expect("mapped");
     match g1.machine {
         MachineSpec::GenRound(p) => {
             assert_eq!(p.h, 5.4);
@@ -115,7 +135,10 @@ fn a_four_windings_generator_maps_onto_the_subtransient_machine() {
             assert_eq!(p.xdp, 0.384);
             assert_eq!(p.xqp, 0.393);
             assert_eq!(p.xdpp, 0.264);
-            assert_eq!(p.xqpp, 0.262, "unlike GENROU, Dynawo states the two separately");
+            assert_eq!(
+                p.xqpp, 0.262,
+                "unlike GENROU, Dynawo states the two separately"
+            );
             assert_eq!(p.xl, 0.202);
             assert_eq!(p.td0p, 8.094);
             assert_eq!(p.tq0pp, 0.084);
@@ -190,17 +213,29 @@ fn both_generator_libraries_map() {
 
     assert_eq!(units.len(), 5, "all five generators should map now");
     assert_eq!(
-        warnings.iter().filter(|w| matches!(w, DydWarning::UnsupportedLib { .. })).count(),
+        warnings
+            .iter()
+            .filter(|w| matches!(w, DydWarning::UnsupportedLib { .. }))
+            .count(),
         0,
         "nothing in this case is unsupported any more"
     );
 
-    let round = units.iter().filter(|u| matches!(u.machine, MachineSpec::GenRound(_))).count();
-    let salient = units.iter().filter(|u| matches!(u.machine, MachineSpec::GenSalient(_))).count();
+    let round = units
+        .iter()
+        .filter(|u| matches!(u.machine, MachineSpec::GenRound(_)))
+        .count();
+    let salient = units
+        .iter()
+        .filter(|u| matches!(u.machine, MachineSpec::GenSalient(_)))
+        .count();
     assert_eq!((round, salient), (3, 2));
 
     // The fifth-order machine's own values, from the file.
-    let g6 = units.iter().find(|u| u.id == "GEN____6_SM").expect("mapped");
+    let g6 = units
+        .iter()
+        .find(|u| u.id == "GEN____6_SM")
+        .expect("mapped");
     match g6.machine {
         MachineSpec::GenSalient(p) => {
             assert_eq!(p.h, 4.975);
@@ -233,11 +268,17 @@ fn saturation_and_limits_are_reported() {
         .iter()
         .filter(|w| matches!(w, DydWarning::SaturationIgnored { .. }))
         .collect();
-    assert!(!saturation.is_empty(), "the vendored case states nonzero md/mq");
+    assert!(
+        !saturation.is_empty(),
+        "the vendored case states nonzero md/mq"
+    );
     assert!(saturation[0].to_string().contains("exponential saturation"));
 
     // Limits are carried, not dropped, so nothing warns about them.
-    let limits = warnings.iter().filter(|w| matches!(w, DydWarning::LimitsIgnored { .. })).count();
+    let limits = warnings
+        .iter()
+        .filter(|w| matches!(w, DydWarning::LimitsIgnored { .. }))
+        .count();
     assert_eq!(limits, 0, "limits reach the models now");
 }
 
@@ -260,7 +301,10 @@ fn an_unmapped_static_id_is_refused() {
 #[test]
 fn a_missing_parameter_is_named() {
     let (dyd, mut par) = documents();
-    par.sets.get_mut("Generator1").unwrap().remove("generator_XppqPu");
+    par.sets
+        .get_mut("Generator1")
+        .unwrap()
+        .remove("generator_XppqPu");
     let err = dyd::to_units(&dyd, &par, &bus_of(&dyd), 100.0).expect_err("must refuse");
     assert!(
         matches!(err, DydError::MissingParameter { ref name, .. } if name == "generator_XppqPu"),
@@ -274,7 +318,9 @@ fn the_curve_file_yields_its_requests() {
     let curves = dyd::read_crv(format!("{DIR}/IEEE14.crv")).expect("parses");
     assert!(!curves.is_empty());
     assert!(
-        curves.iter().any(|c| c.model == "NETWORK" && c.variable.contains("_U_value")),
+        curves
+            .iter()
+            .any(|c| c.model == "NETWORK" && c.variable.contains("_U_value")),
         "the case asks for bus voltages"
     );
     // This particular case is a tap-changer study, so what it asks for beyond
@@ -287,7 +333,9 @@ fn the_curve_file_yields_its_requests() {
     );
     assert!(curves.iter().any(|c| c.variable == "load_PPu"));
     assert!(
-        curves.iter().all(|c| !c.model.is_empty() && !c.variable.is_empty()),
+        curves
+            .iter()
+            .all(|c| !c.model.is_empty() && !c.variable.is_empty()),
         "every request should carry both halves"
     );
 }
@@ -329,11 +377,18 @@ fn a_whole_case_loads_from_its_two_halves() {
     // warn about. Reporting only what was actually discarded is the point —
     // a warning on a machine with no saturation would be noise a reader learns
     // to ignore.
-    let saturation =
-        warnings.iter().filter(|w| matches!(w, DydWarning::SaturationIgnored { .. })).count();
-    assert_eq!(saturation, 4, "four of the five machines state nonzero saturation");
-    let skipped: Vec<&DydWarning> =
-        warnings.iter().filter(|w| matches!(w, DydWarning::UnsupportedLib { .. })).collect();
+    let saturation = warnings
+        .iter()
+        .filter(|w| matches!(w, DydWarning::SaturationIgnored { .. }))
+        .count();
+    assert_eq!(
+        saturation, 4,
+        "four of the five machines state nonzero saturation"
+    );
+    let skipped: Vec<&DydWarning> = warnings
+        .iter()
+        .filter(|w| matches!(w, DydWarning::UnsupportedLib { .. }))
+        .collect();
     assert!(
         skipped.iter().any(|w| w.to_string().contains("TapChanger")),
         "the tap-changing loads should be named, not silently treated as static: {skipped:?}"
@@ -364,14 +419,21 @@ fn a_machine_sharing_its_bus_with_a_load_still_initializes() {
     // Bus 5 carries generator 1; the case puts load on several machine buses,
     // so at least one machine is sharing.
     let network = gridoxide::iidm::read(format!("{DIR}/IEEE14.iidm")).unwrap();
-    let generator_buses: Vec<usize> =
-        network.injections.iter().filter(|i| i.generator).map(|i| i.bus).collect();
+    let generator_buses: Vec<usize> = network
+        .injections
+        .iter()
+        .filter(|i| i.generator)
+        .map(|i| i.bus)
+        .collect();
     let shared = network
         .injections
         .iter()
         .filter(|i| !i.generator && generator_buses.contains(&i.bus))
         .count();
-    assert!(shared > 0, "the case should have at least one machine sharing a bus with a load");
+    assert!(
+        shared > 0,
+        "the case should have at least one machine sharing a bus with a load"
+    );
 
     assert!(system.max_derivative() < 1e-11);
 }

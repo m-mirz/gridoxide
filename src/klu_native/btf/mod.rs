@@ -9,7 +9,7 @@
 mod maxtrans;
 mod strongcomp;
 
-use super::types::{flip, EMPTY};
+use super::types::{EMPTY, flip};
 
 /// Permutes a square `n`-by-`n` sparse matrix (CSC: `col_ptr`/`row_idx`,
 /// `col_ptr.len() == n + 1`) to upper block-triangular form. Returns
@@ -30,7 +30,11 @@ use super::types::{flip, EMPTY};
 /// though not every diagonal entry is a real nonzero) before the
 /// strongly-connected-components step, which needs a full permutation to
 /// operate on.
-pub fn btf_order(n: usize, col_ptr: &[i64], row_idx: &[i64]) -> (Vec<i64>, Vec<i64>, Vec<i64>, usize) {
+pub fn btf_order(
+    n: usize,
+    col_ptr: &[i64],
+    row_idx: &[i64],
+) -> (Vec<i64>, Vec<i64>, Vec<i64>, usize) {
     let (mut q, nmatch) = maxtrans::maxtrans(n, n, col_ptr, row_idx);
 
     if nmatch < n {
@@ -43,9 +47,14 @@ pub fn btf_order(n: usize, col_ptr: &[i64], row_idx: &[i64]) -> (Vec<i64>, Vec<i
                 matched[j as usize] = true;
             }
         }
-        let mut leftover_cols: Vec<i64> = (0..n as i64).rev().filter(|&j| !matched[j as usize]).collect();
+        let mut leftover_cols: Vec<i64> = (0..n as i64)
+            .rev()
+            .filter(|&j| !matched[j as usize])
+            .collect();
         for qi in q.iter_mut() {
-            if *qi == EMPTY && let Some(j) = leftover_cols.pop() {
+            if *qi == EMPTY
+                && let Some(j) = leftover_cols.pop()
+            {
                 *qi = flip(j);
             }
         }
@@ -65,16 +74,31 @@ mod tests {
     fn assert_is_bijection(perm: &[i64], n: usize) {
         let mut sorted: Vec<i64> = perm.to_vec();
         sorted.sort_unstable();
-        assert_eq!(sorted, (0..n as i64).collect::<Vec<_>>(), "not a bijection of 0..{n}: {perm:?}");
+        assert_eq!(
+            sorted,
+            (0..n as i64).collect::<Vec<_>>(),
+            "not a bijection of 0..{n}: {perm:?}"
+        );
     }
 
-    fn assert_valid_btf(n: usize, col_ptr: &[i64], row_idx: &[i64], p: &[i64], q: &[i64], r: &[i64], nmatch: usize) {
+    fn assert_valid_btf(
+        n: usize,
+        col_ptr: &[i64],
+        row_idx: &[i64],
+        p: &[i64],
+        q: &[i64],
+        r: &[i64],
+        nmatch: usize,
+    ) {
         assert_is_bijection(p, n);
         let q_unflipped: Vec<i64> = q.iter().map(|&x| unflip(x)).collect();
         assert_is_bijection(&q_unflipped, n);
         assert_eq!(r[0], 0);
         assert_eq!(*r.last().unwrap(), n as i64);
-        assert!(r.windows(2).all(|w| w[0] < w[1]), "R must be strictly increasing: {r:?}");
+        assert!(
+            r.windows(2).all(|w| w[0] < w[1]),
+            "R must be strictly increasing: {r:?}"
+        );
 
         // Build Pinv (original index -> permuted position).
         let mut pinv = vec![0usize; n];
@@ -89,7 +113,10 @@ mod tests {
             for &row in &row_idx[col_ptr[jold] as usize..col_ptr[jold + 1] as usize] {
                 let inew = pinv[row as usize];
                 // Find jnew's block.
-                let block = r.windows(2).position(|w| jnew >= w[0] as usize && jnew < w[1] as usize).unwrap();
+                let block = r
+                    .windows(2)
+                    .position(|w| jnew >= w[0] as usize && jnew < w[1] as usize)
+                    .unwrap();
                 let (lo, hi) = (r[block] as usize, r[block + 1] as usize);
                 assert!(
                     inew < hi,
@@ -151,11 +178,15 @@ mod tests {
     #[test]
     fn matches_ffi_oracle_on_curated_matrices() {
         let cases: Vec<(usize, Vec<i32>, Vec<i32>)> = vec![
-            (3, vec![0, 1, 2, 3], vec![0, 1, 2]),                 // diagonal
-            (2, vec![0, 1, 2], vec![1, 0]),                       // needs swap
-            (2, vec![0, 1, 2], vec![0, 0]),                       // structurally singular
-            (3, vec![0, 1, 3, 4], vec![1, 0, 2, 2]),              // 2-block mesh
-            (5, vec![0, 2, 4, 6, 8, 10], vec![0, 4, 1, 0, 2, 1, 3, 2, 4, 3]), // ring
+            (3, vec![0, 1, 2, 3], vec![0, 1, 2]),    // diagonal
+            (2, vec![0, 1, 2], vec![1, 0]),          // needs swap
+            (2, vec![0, 1, 2], vec![0, 0]),          // structurally singular
+            (3, vec![0, 1, 3, 4], vec![1, 0, 2, 2]), // 2-block mesh
+            (
+                5,
+                vec![0, 2, 4, 6, 8, 10],
+                vec![0, 4, 1, 0, 2, 1, 3, 2, 4, 3],
+            ), // ring
         ];
         for (n, col_ptr, row_idx) in cases {
             let col_ptr64: Vec<i64> = col_ptr.iter().map(|&x| x as i64).collect();
@@ -225,8 +256,14 @@ mod tests {
             let cq64: Vec<i64> = cq.iter().map(|&x| x as i64).collect();
             let cr64: Vec<i64> = cr.iter().map(|&x| x as i64).collect();
 
-            assert_eq!(rnmatch as i32, cnmatch, "trial {trial} (n={n}): nmatch mismatch");
-            assert_eq!(rr, cr64, "trial {trial} (n={n}): block boundaries R mismatch");
+            assert_eq!(
+                rnmatch as i32, cnmatch,
+                "trial {trial} (n={n}): nmatch mismatch"
+            );
+            assert_eq!(
+                rr, cr64,
+                "trial {trial} (n={n}): block boundaries R mismatch"
+            );
             assert_eq!(rp, cp64, "trial {trial} (n={n}): P mismatch");
             assert_eq!(rq, cq64, "trial {trial} (n={n}): Q mismatch");
         }

@@ -109,15 +109,28 @@ it equally between both ends.
 
 ## Not modelled
 
-- **HVDC.** `hvdcLine` and `vscConverterStation` are parsed enough to be
-  counted and are then skipped with a note. gridoxide has a real DC-side network
+- **HVDC.** `hvdcLine`, `vscConverterStation` and `lccConverterStation` are
+  counted and then skipped with a note. gridoxide has a real DC-side network
   (`src/dc.rs`) reachable from CGMES, and wiring IIDM into it is its own piece of
-  work.
+  work — one no fixture in the tree calls for, since none contains an HVDC
+  element.
+
+  This page used to say the same thing while the importer did something else: a
+  `vscConverterStation` shared the `generator` arm, and since a converter station
+  states no `targetP` it became a generator producing **zero**, silently losing
+  the transfer. Counting it is what the page claimed and what it now does.
 - **Extensions.** `slackTerminal`, `referenceTerminal`, `mergedXnode`,
   `busbarSectionPosition`, virtual hubs — all named in `notes` and skipped.
   Notably `slackTerminal` is where powsybl records a chosen slack, so gridoxide
   currently picks its own (largest generation, preferring a voltage-regulating
   bus, ties broken on the bus label) and says so in `notes`.
+- **A generator's reactive capability as a curve.** `reactiveCapabilityCurve`
+  states `minQ`/`maxQ` as a function of P; `types::Bus` carries one pair. The
+  importer takes the curve's **envelope** and reports how many generators it did
+  that for. It is an outer approximation — never forbidding an output the machine
+  can produce, possibly permitting one it cannot at its dispatched P — and it
+  replaces no limit at all, which was the same kind of approximation and a worse
+  one. A `minMaxReactiveLimits` pair is read exactly.
 - **Asymmetric line shunts.** IIDM states `g1`/`b1` and `g2`/`b2` separately;
   `Line` carries one total that the π-model splits equally. Every line in every
   vendored fixture is symmetric, and any that is not is counted in `notes`

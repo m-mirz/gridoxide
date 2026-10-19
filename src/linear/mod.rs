@@ -31,11 +31,11 @@ pub mod btheta;
 pub mod impedance;
 pub mod sensitivity;
 
-pub use btheta::{
-    dc_branches, dc_power_flow, DcBranch, DcIslandReport, DcIslandStatus, DcSolution,
-};
 pub use batch::{DcBatchResult, DcBatchSolver};
-pub use impedance::{linear_power_flow, LinearIslandReport, LinearIslandStatus, LinearReport};
+pub use btheta::{
+    DcBranch, DcIslandReport, DcIslandStatus, DcSolution, dc_branches, dc_power_flow,
+};
+pub use impedance::{LinearIslandReport, LinearIslandStatus, LinearReport, linear_power_flow};
 pub use sensitivity::{DcSensitivity, DenseMatrix};
 
 /// Which terms the DC susceptance keeps.
@@ -84,6 +84,9 @@ pub struct DcOptions {
 
 impl Default for DcOptions {
     fn default() -> Self {
-        Self { approximation: DcApproximation::default(), use_transformer_ratio: true }
+        Self {
+            approximation: DcApproximation::default(),
+            use_transformer_ratio: true,
+        }
     }
 }

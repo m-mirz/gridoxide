@@ -50,13 +50,19 @@
 //! variable names (`deg`, `degme`, `nvpiv`, `mindeg`, `wflg`, `hash`, ...)
 //! from `amd_2.c` for traceability.
 
-use super::super::types::{flip, EMPTY};
+use super::super::types::{EMPTY, flip};
 use super::postorder::postorder;
 
 const AMD_DEFAULT_DENSE: f64 = 10.0;
 const AMD_DEFAULT_AGGRESSIVE: bool = true;
 
-fn remove_from_degree_list(i: usize, degree: &[i64], head: &mut [i64], next: &mut [i64], last: &mut [i64]) {
+fn remove_from_degree_list(
+    i: usize,
+    degree: &[i64],
+    head: &mut [i64],
+    next: &mut [i64],
+    last: &mut [i64],
+) {
     let ilast = last[i];
     let inext = next[i];
     if inext != EMPTY {
@@ -295,7 +301,8 @@ pub fn amd_2(n: usize, mut lists: Vec<Vec<i64>>) -> (Vec<i64>, Vec<i64>) {
                 // permutation than the vendored C on a random 6-node test
                 // graph). So: replicate the exact rotation, not just the
                 // set of members.
-                let mut new_i_list = Vec::with_capacity(1 + kept_elements.len() + kept_supervars.len());
+                let mut new_i_list =
+                    Vec::with_capacity(1 + kept_elements.len() + kept_supervars.len());
                 new_i_list.push(me as i64);
                 if let [first, rest @ ..] = kept_elements.as_slice() {
                     new_i_list.extend_from_slice(rest);

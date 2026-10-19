@@ -55,10 +55,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::json::{AvrSpec, GovSpec, MachineSpec, UnitSpec};
+use super::models::Limits;
 use super::models::avr::SexsParams;
 use super::models::gov::Tgov1Params;
 use super::models::machine::{GenClsParams, GenRoundParams};
-use super::models::Limits;
 
 /// One record, tokenized but not yet interpreted.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,19 +84,40 @@ pub struct DyrDocument {
 pub enum DyrError {
     Io(String),
     /// A record that does not begin `bus 'MODEL' id`.
-    Malformed { line: usize, detail: String },
+    Malformed {
+        line: usize,
+        detail: String,
+    },
     /// A model this reader knows, given the wrong number of parameters.
-    WrongArity { line: usize, model: String, expected: usize, found: usize },
+    WrongArity {
+        line: usize,
+        model: String,
+        expected: usize,
+        found: usize,
+    },
     /// A parameter that must be positive was not, or an ordering the model
     /// requires does not hold. Caught here rather than at construction so the
     /// message can name the line.
-    BadParameter { line: usize, model: String, detail: String },
+    BadParameter {
+        line: usize,
+        model: String,
+        detail: String,
+    },
     /// A machine record for which the caller supplied no `MBASE`/`ZSORCE`.
-    MissingMachineData { bus: i64, id: String },
+    MissingMachineData {
+        bus: i64,
+        id: String,
+    },
     /// A bus number with no corresponding index.
-    UnknownBus { bus: i64 },
+    UnknownBus {
+        bus: i64,
+    },
     /// A control record whose machine has no `GENCLS`/`GENROU` record.
-    OrphanedControl { bus: i64, id: String, model: String },
+    OrphanedControl {
+        bus: i64,
+        id: String,
+        model: String,
+    },
 }
 
 impl std::fmt::Display for DyrError {
@@ -104,11 +125,20 @@ impl std::fmt::Display for DyrError {
         match self {
             DyrError::Io(message) => write!(f, "{message}"),
             DyrError::Malformed { line, detail } => write!(f, "line {line}: {detail}"),
-            DyrError::WrongArity { line, model, expected, found } => write!(
+            DyrError::WrongArity {
+                line,
+                model,
+                expected,
+                found,
+            } => write!(
                 f,
                 "line {line}: {model} takes {expected} parameters, found {found}"
             ),
-            DyrError::BadParameter { line, model, detail } => {
+            DyrError::BadParameter {
+                line,
+                model,
+                detail,
+            } => {
                 write!(f, "line {line}: {model}: {detail}")
             }
             DyrError::MissingMachineData { bus, id } => write!(
@@ -133,9 +163,19 @@ impl std::error::Error for DyrError {}
 #[derive(Clone, Debug, PartialEq)]
 pub enum DyrWarning {
     /// A model this reader does not implement. Skipped, and named.
-    UnsupportedModel { bus: i64, id: String, model: String, line: usize },
+    UnsupportedModel {
+        bus: i64,
+        id: String,
+        model: String,
+        line: usize,
+    },
     /// A nonzero saturation characteristic, which no model here uses.
-    SaturationIgnored { bus: i64, id: String, s10: f64, s12: f64 },
+    SaturationIgnored {
+        bus: i64,
+        id: String,
+        s10: f64,
+        s12: f64,
+    },
     /// A limit this reader carries through but that the model does not use.
     /// Retained for anything that gains a limit the library still cannot
     /// represent — a valve *rate* limit, say.
@@ -145,8 +185,16 @@ pub enum DyrWarning {
 impl std::fmt::Display for DyrWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DyrWarning::UnsupportedModel { bus, id, model, line } => {
-                write!(f, "line {line}: {model} at bus {bus} machine {id} is not implemented; skipped")
+            DyrWarning::UnsupportedModel {
+                bus,
+                id,
+                model,
+                line,
+            } => {
+                write!(
+                    f,
+                    "line {line}: {model} at bus {bus} machine {id} is not implemented; skipped"
+                )
             }
             DyrWarning::SaturationIgnored { bus, id, s10, s12 } => write!(
                 f,
@@ -274,7 +322,10 @@ fn build_record(tokens: &[String], line: usize) -> Result<DyrRecord, DyrError> {
     if tokens.len() < 3 {
         return Err(DyrError::Malformed {
             line,
-            detail: format!("expected `bus 'MODEL' id …`, found {} field(s)", tokens.len()),
+            detail: format!(
+                "expected `bus 'MODEL' id …`, found {} field(s)",
+                tokens.len()
+            ),
         });
     }
     let bus = tokens[0].parse::<i64>().map_err(|_| DyrError::Malformed {
@@ -398,7 +449,10 @@ impl DyrRecord {
             ta: p[0] * p[1],
             tb: p[1],
             te: p[3],
-            limits: Limits { min: Some(p[4]), max: Some(p[5]) },
+            limits: Limits {
+                min: Some(p[4]),
+                max: Some(p[5]),
+            },
         }))
     }
 
@@ -412,7 +466,10 @@ impl DyrRecord {
             t2: p[4],
             t3: p[5],
             dt: p[6],
-            limits: Limits { min: Some(p[3]), max: Some(p[2]) },
+            limits: Limits {
+                min: Some(p[3]),
+                max: Some(p[2]),
+            },
             // PSS/E's TGOV1 states no rate limit.
             rate: Limits::NONE,
         }))
@@ -444,11 +501,15 @@ pub fn to_units(
     // order the file lists them in.
     for record in doc.records.iter().filter(|r| r.is_machine()) {
         let key = (record.bus, record.id.clone());
-        let &bus = bus_index.get(&record.bus).ok_or(DyrError::UnknownBus { bus: record.bus })?;
-        let &(data, xdp) = machine_data.get(&key).ok_or_else(|| DyrError::MissingMachineData {
-            bus: record.bus,
-            id: record.id.clone(),
-        })?;
+        let &bus = bus_index
+            .get(&record.bus)
+            .ok_or(DyrError::UnknownBus { bus: record.bus })?;
+        let &(data, xdp) = machine_data
+            .get(&key)
+            .ok_or_else(|| DyrError::MissingMachineData {
+                bus: record.bus,
+                id: record.id.clone(),
+            })?;
         let machine = match record.model.as_str() {
             "GENCLS" => record.as_gencls(data, xdp)?,
             "GENROU" => record.as_genrou(data, &mut warnings)?,
@@ -473,11 +534,14 @@ pub fn to_units(
         // an orphan rather than as whatever its parameters happen to be wrong
         // about.
         let owner = || {
-            index_of.get(&key).copied().ok_or_else(|| DyrError::OrphanedControl {
-                bus: record.bus,
-                id: record.id.clone(),
-                model: record.model.clone(),
-            })
+            index_of
+                .get(&key)
+                .copied()
+                .ok_or_else(|| DyrError::OrphanedControl {
+                    bus: record.bus,
+                    id: record.id.clone(),
+                    model: record.model.clone(),
+                })
         };
         match record.model.as_str() {
             "SEXS" => {

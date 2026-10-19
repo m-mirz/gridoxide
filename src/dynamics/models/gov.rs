@@ -98,13 +98,22 @@ const TGOV1_STATES: [&str; 2] = ["gov_valve", "gov_turbine"];
 impl Tgov1 {
     pub fn new(params: Tgov1Params) -> Result<Self, InitError> {
         if params.r <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "gov r", value: params.r });
+            return Err(InitError::NonPositiveParameter {
+                name: "gov r",
+                value: params.r,
+            });
         }
         if params.t1 <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "gov t1", value: params.t1 });
+            return Err(InitError::NonPositiveParameter {
+                name: "gov t1",
+                value: params.t1,
+            });
         }
         if params.t3 <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "gov t3", value: params.t3 });
+            return Err(InitError::NonPositiveParameter {
+                name: "gov t3",
+                value: params.t3,
+            });
         }
         Ok(Self {
             r: params.r,
@@ -142,7 +151,10 @@ impl Tgov1 {
 
     /// The valve's derivative under whichever limits are latched for this step.
     fn valve_derivative(&self, x: &[f64], u: f64) -> f64 {
-        let raw = self.held_rate.get().unwrap_or_else(|| self.raw_valve_derivative(x, u));
+        let raw = self
+            .held_rate
+            .get()
+            .unwrap_or_else(|| self.raw_valve_derivative(x, u));
         self.limits.held(self.limit.get(), raw)
     }
 }
@@ -242,9 +254,17 @@ impl GoverProportional {
     /// clamp.
     pub fn limited(k: f64, limits: Limits) -> Result<Self, InitError> {
         if k <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "gov gain", value: k });
+            return Err(InitError::NonPositiveParameter {
+                name: "gov gain",
+                value: k,
+            });
         }
-        Ok(Self { k, limits, limit: Cell::new(LimitState::Free), p_ref: 0.0 })
+        Ok(Self {
+            k,
+            limits,
+            limit: Cell::new(LimitState::Free),
+            p_ref: 0.0,
+        })
     }
 
     pub fn p_ref(&self) -> f64 {
@@ -282,11 +302,17 @@ impl Control for GoverProportional {
     }
 
     fn output(&self, _x: &[f64], u: f64) -> f64 {
-        self.limits.under(self.limit.get(), self.p_ref - self.k * u).0
+        self.limits
+            .under(self.limit.get(), self.p_ref - self.k * u)
+            .0
     }
 
     fn output_jacobian(&self, _x: &[f64], u: f64, _dydx: &mut [f64]) -> f64 {
-        -self.k * self.limits.under(self.limit.get(), self.p_ref - self.k * u).1
+        -self.k
+            * self
+                .limits
+                .under(self.limit.get(), self.p_ref - self.k * u)
+                .1
     }
 
     fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {

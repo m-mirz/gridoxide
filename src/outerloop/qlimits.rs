@@ -42,7 +42,9 @@ impl ReactiveLimits {
 
     /// What it did, readable after the solve.
     pub fn report(&self) -> QLimitReport {
-        QLimitReport { switches: self.switches.clone() }
+        QLimitReport {
+            switches: self.switches.clone(),
+        }
     }
 
     /// Buses switched `PV → PQ`, in switch order.

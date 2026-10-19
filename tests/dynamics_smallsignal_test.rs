@@ -10,16 +10,18 @@ mod dynamics_ring;
 
 use num_complex::Complex;
 
-use gridoxide::dynamics::models::machine::{GenCls, GenClsParams, GenTransient, GenTransientParams};
-use gridoxide::dynamics::models::{DynamicModel, GeneratingUnit};
 use gridoxide::dynamics::arnoldi::{self, ArnoldiOptions};
+use gridoxide::dynamics::models::machine::{
+    GenCls, GenClsParams, GenTransient, GenTransientParams,
+};
+use gridoxide::dynamics::models::{DynamicModel, GeneratingUnit};
 use gridoxide::dynamics::shift::{ShiftError, ShiftedDae};
 use gridoxide::dynamics::smallsignal::{
     self, Method, ParameterRef, SmallSignalError, SmallSignalOptions,
 };
 use gridoxide::dynamics::{
-    build, run_dynamics, settle, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus,
-    SystemSpec,
+    DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus, SystemSpec, build, run_dynamics,
+    settle,
 };
 use gridoxide::network::{build_ybus, power_injections};
 use gridoxide::types::{Bus, BusType, Line};
@@ -57,7 +59,14 @@ fn smib(damping: f64) -> (DynamicSystem, f64) {
 /// difference of two whole analyses.
 fn smib_with(h: f64, damping: f64) -> (DynamicSystem, f64) {
     let buses = vec![bus(0, BusType::PV, P_GEN), bus(1, BusType::Slack, 0.0)];
-    let lines = vec![Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = vec![Line {
+        from: 0,
+        to: 1,
+        r: 0.0,
+        x: X_LINE,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
         lines: lines.clone(),
@@ -68,7 +77,13 @@ fn smib_with(h: f64, damping: f64) -> (DynamicSystem, f64) {
     let s_dev = Complex::new(p_calc[0], q_calc[0]);
 
     let machine = GenCls::new(
-        GenClsParams { h, d: damping, ra: 0.0, xdp: XDP, mbase: S_BASE },
+        GenClsParams {
+            h,
+            d: damping,
+            ra: 0.0,
+            xdp: XDP,
+            mbase: S_BASE,
+        },
         S_BASE,
         F_NOM,
     )
@@ -118,7 +133,11 @@ fn the_eigenvalue_is_the_closed_form() {
     let (system, k_s) = smib(0.0);
     let result = smallsignal::analyze(&system).expect("an equilibrium can be analyzed");
 
-    assert_eq!(result.modes.len(), 2, "a classical machine has two states, so two modes");
+    assert_eq!(
+        result.modes.len(),
+        2,
+        "a classical machine has two states, so two modes"
+    );
     assert_eq!(result.state_names, vec!["G1.delta", "G1.omega"]);
 
     let expected = (OMEGA_B * k_s / (2.0 * H)).sqrt();
@@ -133,7 +152,10 @@ fn the_eigenvalue_is_the_closed_form() {
         "an undamped machine's mode should be purely imaginary, got {}",
         mode.eigenvalue
     );
-    assert!(mode.damping.abs() < 1e-9, "and therefore have zero damping ratio");
+    assert!(
+        mode.damping.abs() < 1e-9,
+        "and therefore have zero damping ratio"
+    );
     assert!(
         (mode.frequency - expected / std::f64::consts::TAU).abs() < 1e-9,
         "the reported frequency should be the imaginary part in Hz"
@@ -143,7 +165,11 @@ fn the_eigenvalue_is_the_closed_form() {
     let pair: Vec<f64> = result.modes.iter().map(|m| m.eigenvalue.im).collect();
     assert!(pair.iter().any(|v| *v > 0.0) && pair.iter().any(|v| *v < 0.0));
     let names = result.participants(mode);
-    assert_eq!(names.len(), 2, "a swing mode is the angle and the speed together");
+    assert_eq!(
+        names.len(),
+        2,
+        "a swing mode is the angle and the speed together"
+    );
     assert!(
         (names[0].1 - 0.5).abs() < 1e-6,
         "and they take part equally: {names:?}"
@@ -165,7 +191,12 @@ fn the_eigenvalue_predicts_the_observed_oscillation() {
     // the nudge — not where the run starts. Centring on the perturbed value
     // makes every crossing a tangency instead.
     let about = system.state()[0];
-    let opts = DynamicsOptions { end_time: 6.0, step: 0.001, damping_steps: 0, ..Default::default() };
+    let opts = DynamicsOptions {
+        end_time: 6.0,
+        step: 0.001,
+        damping_steps: 0,
+        ..Default::default()
+    };
     system.state_mut()[0] += 1e-3;
     settle(&mut system, &opts);
     let report = run_dynamics(&mut system, &opts);
@@ -198,8 +229,15 @@ fn the_real_part_predicts_the_decay() {
     let (mut system, _) = smib(10.0);
     let result = smallsignal::analyze(&system).unwrap();
     let mode = result.critical().unwrap();
-    assert!(mode.eigenvalue.re < 0.0, "a damped machine's mode must decay");
-    assert!(mode.damping > 0.0 && mode.damping < 1.0, "damping ratio {}", mode.damping);
+    assert!(
+        mode.eigenvalue.re < 0.0,
+        "a damped machine's mode must decay"
+    );
+    assert!(
+        mode.damping > 0.0 && mode.damping < 1.0,
+        "damping ratio {}",
+        mode.damping
+    );
     assert!(!result.modes.iter().any(|m| m.is_unstable()));
 
     let sigma = mode.eigenvalue.re;
@@ -207,7 +245,12 @@ fn the_real_part_predicts_the_decay() {
     // the decaying oscillation leaves a constant offset behind, which does not
     // decay and swamps the envelope.
     let about = system.state()[0];
-    let opts = DynamicsOptions { end_time: 8.0, step: 0.001, damping_steps: 0, ..Default::default() };
+    let opts = DynamicsOptions {
+        end_time: 8.0,
+        step: 0.001,
+        damping_steps: 0,
+        ..Default::default()
+    };
     system.state_mut()[0] += 1e-3;
     settle(&mut system, &opts);
     let report = run_dynamics(&mut system, &opts);
@@ -224,7 +267,11 @@ fn the_real_part_predicts_the_decay() {
             peaks.push((time[k], b));
         }
     }
-    assert!(peaks.len() >= 4, "expected several peaks, found {}", peaks.len());
+    assert!(
+        peaks.len() >= 4,
+        "expected several peaks, found {}",
+        peaks.len()
+    );
 
     let (t0, a0) = peaks[0];
     let (t1, a1) = *peaks.last().unwrap();
@@ -242,7 +289,14 @@ fn the_real_part_predicts_the_decay() {
 /// two, and an `A` with no symmetry to hide a transposition mistake behind.
 fn smib_transient() -> DynamicSystem {
     let buses = vec![bus(0, BusType::PV, P_GEN), bus(1, BusType::Slack, 0.0)];
-    let lines = vec![Line { from: 0, to: 1, r: 0.0, x: X_LINE, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = vec![Line {
+        from: 0,
+        to: 1,
+        r: 0.0,
+        x: X_LINE,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
         lines: lines.clone(),
@@ -277,7 +331,8 @@ fn smib_transient() -> DynamicSystem {
             id: "G1".to_string(),
             bus: 0,
             s: Complex::new(p_calc[0], q_calc[0]),
-            model: Box::new(GeneratingUnit::machine_only(Box::new(machine))) as Box<dyn DynamicModel>,
+            model: Box::new(GeneratingUnit::machine_only(Box::new(machine)))
+                as Box<dyn DynamicModel>,
         }],
         fixed_buses: vec![1],
     })
@@ -298,7 +353,10 @@ fn participation_factors_separate_the_flux_mode_from_the_swing() {
     assert_eq!(result.modes.len(), 4);
     for mode in &result.modes {
         let total: f64 = mode.participation.iter().map(|&(_, p)| p).sum();
-        assert!((total - 1.0).abs() < 1e-9, "participations normalize: {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "participations normalize: {total}"
+        );
     }
 
     // The swing mode: the fastest oscillation, and the rotor's.
@@ -314,7 +372,10 @@ fn participation_factors_separate_the_flux_mode_from_the_swing() {
         .filter(|(n, _)| n.ends_with(".delta") || n.ends_with(".omega"))
         .map(|(_, p)| p)
         .sum();
-    assert!(rotor > 0.8, "the swing mode belongs to the rotor: {owners:?}");
+    assert!(
+        rotor > 0.8,
+        "the swing mode belongs to the rotor: {owners:?}"
+    );
 
     // The slow real mode: the field flux, on the order of T'_d0.
     let slow = result
@@ -359,7 +420,13 @@ fn a_non_equilibrium_is_refused() {
 fn two_machine_island() -> DynamicSystem {
     let machine = |p: f64| {
         GenCls::new(
-            GenClsParams { h: H, d: 1.0, ra: 0.0, xdp: XDP, mbase: S_BASE },
+            GenClsParams {
+                h: H,
+                d: 1.0,
+                ra: 0.0,
+                xdp: XDP,
+                mbase: S_BASE,
+            },
             S_BASE,
             F_NOM,
         )
@@ -372,8 +439,22 @@ fn two_machine_island() -> DynamicSystem {
         bus(2, BusType::PQ, -0.8),
     ];
     let lines = vec![
-        Line { from: 0, to: 2, r: 0.0, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.0, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.0,
+            x: 0.10,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.0,
+            x: 0.10,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
@@ -453,14 +534,22 @@ fn the_mode_shape_separates_a_swing_from_a_drift() {
     let free = result
         .modes
         .iter()
-        .min_by(|a, b| a.eigenvalue.norm().partial_cmp(&b.eigenvalue.norm()).unwrap())
+        .min_by(|a, b| {
+            a.eigenvalue
+                .norm()
+                .partial_cmp(&b.eigenvalue.norm())
+                .unwrap()
+        })
         .unwrap();
     assert!(
         free.eigenvalue.norm() < 1e-8,
         "an islanded pair should have a zero mode, found {}",
         free.eigenvalue
     );
-    assert!(free.shape.is_empty(), "a non-oscillatory mode has no shape to report");
+    assert!(
+        free.shape.is_empty(),
+        "a non-oscillatory mode has no shape to report"
+    );
 }
 
 /// Past the dense limit, `analyze` answers by the other method rather than
@@ -483,14 +572,22 @@ fn past_the_dense_limit_the_sparse_method_answers() {
     match result.method {
         smallsignal::Method::Sparse { shift, .. } => {
             // The default aim is the electromechanical band.
-            assert!((shift.im / std::f64::consts::TAU - 1.0).abs() < 1e-9, "{shift}");
+            assert!(
+                (shift.im / std::f64::consts::TAU - 1.0).abs() < 1e-9,
+                "{shift}"
+            );
         }
         other => panic!("expected the sparse method past the limit, got {other}"),
     }
     assert!(result.converged, "{:?}", result.modes);
     assert!(!result.modes.is_empty());
     for mode in &result.modes {
-        assert!(mode.residual < 1e-6, "{}: residual {}", mode.eigenvalue, mode.residual);
+        assert!(
+            mode.residual < 1e-6,
+            "{}: residual {}",
+            mode.eigenvalue,
+            mode.residual
+        );
     }
 
     // The dense object itself is still refused, with a reason that names what
@@ -508,7 +605,11 @@ fn past_the_dense_limit_the_sparse_method_answers() {
 /// mixture so a bug that only shows up off the axes has somewhere to show.
 fn probes(n: usize) -> Vec<Vec<Complex<f64>>> {
     let mut out: Vec<Vec<Complex<f64>>> = (0..n)
-        .map(|k| (0..n).map(|i| Complex::new(if i == k { 1.0 } else { 0.0 }, 0.0)).collect())
+        .map(|k| {
+            (0..n)
+                .map(|i| Complex::new(if i == k { 1.0 } else { 0.0 }, 0.0))
+                .collect()
+        })
         .collect();
     out.push(
         (0..n)
@@ -547,7 +648,9 @@ fn the_shifted_operator_inverts_the_dense_state_matrix() {
             assert_eq!(op.sigma(), sigma, "{name}");
 
             for b in probes(n) {
-                let y = op.apply(&b).expect("the shifted system is nonsingular here");
+                let y = op
+                    .apply(&b)
+                    .expect("the shifted system is nonsingular here");
                 let mut worst = 0.0f64;
                 for i in 0..n {
                     let mut acc = -sigma * y[i];
@@ -617,7 +720,9 @@ fn a_shift_on_the_spectrum_is_refused() {
         // then required to produce a finite answer.
         Ok(op) => {
             let b = probes(system.n_states()).remove(0);
-            let y = op.apply(&b).expect("a factorization that succeeded must solve");
+            let y = op
+                .apply(&b)
+                .expect("a factorization that succeeded must solve");
             assert!(y.iter().all(|c| c.re.is_finite() && c.im.is_finite()));
         }
         Err(other) => panic!("unexpected refusal: {other}"),
@@ -627,17 +732,26 @@ fn a_shift_on_the_spectrum_is_refused() {
 /// Every eigenvalue the sparse method reports, given a shift.
 fn modes_near(system: &DynamicSystem, sigma: Complex<f64>, count: usize) -> Vec<Complex<f64>> {
     let op = ShiftedDae::new(system, sigma).expect("a shift off the spectrum");
-    let opts = ArnoldiOptions { count, ..Default::default() };
-    let result = arnoldi::eigenpairs(op.n_states(), |b| op.apply(b), &opts)
-        .expect("the operator applies");
-    assert!(result.converged(), "unconverged at σ={sigma}: {:?}", result.pairs);
+    let opts = ArnoldiOptions {
+        count,
+        ..Default::default()
+    };
+    let result =
+        arnoldi::eigenpairs(op.n_states(), |b| op.apply(b), &opts).expect("the operator applies");
+    assert!(
+        result.converged(),
+        "unconverged at σ={sigma}: {:?}",
+        result.pairs
+    );
     // λ = σ + 1/θ undoes the shift-invert transform.
     result.pairs.iter().map(|p| sigma + 1.0 / p.theta).collect()
 }
 
 /// The distance from `lambda` to the nearest of `candidates`.
 fn nearest(lambda: Complex<f64>, candidates: &[Complex<f64>]) -> f64 {
-    candidates.iter().fold(f64::INFINITY, |m, c| m.min((c - lambda).norm()))
+    candidates
+        .iter()
+        .fold(f64::INFINITY, |m, c| m.min((c - lambda).norm()))
 }
 
 /// The sparse method finds the dense method's eigenvalues.
@@ -658,7 +772,11 @@ fn the_sparse_method_finds_the_dense_eigenvalues() {
             .map(|m| m.eigenvalue)
             .collect();
 
-        for sigma in [Complex::new(-0.5, 3.0), Complex::new(-1.0, 0.0), Complex::new(0.0, 8.0)] {
+        for sigma in [
+            Complex::new(-0.5, 3.0),
+            Complex::new(-1.0, 0.0),
+            Complex::new(0.0, 8.0),
+        ] {
             let sparse = modes_near(&system, sigma, 2);
             for lambda in &sparse {
                 assert!(
@@ -670,9 +788,7 @@ fn the_sparse_method_finds_the_dense_eigenvalues() {
             // And they are the *nearest* ones, not merely genuine ones. Ranking
             // the dense set by distance to σ must reproduce what came back.
             let mut ranked = dense.clone();
-            ranked.sort_by(|a, b| {
-                (a - sigma).norm().partial_cmp(&(b - sigma).norm()).unwrap()
-            });
+            ranked.sort_by(|a, b| (a - sigma).norm().partial_cmp(&(b - sigma).norm()).unwrap());
             for lambda in &sparse {
                 assert!(
                     nearest(*lambda, &ranked[..sparse.len()]) < 1e-8,
@@ -711,7 +827,10 @@ fn the_eigenvalue_does_not_depend_on_the_shift() {
             "the same mode came back differently: {found:?}"
         );
     }
-    assert!(found[0].im.abs() > 0.0, "expected the oscillatory mode, got {found:?}");
+    assert!(
+        found[0].im.abs() > 0.0,
+        "expected the oscillatory mode, got {found:?}"
+    );
 }
 
 /// The closed form, through the sparse path.
@@ -735,8 +854,16 @@ fn the_sparse_method_recovers_the_closed_form() {
         .expect("the swing pair is what sits nearest this shift");
 
     let relative = (oscillatory.im.abs() - expected).abs() / expected;
-    assert!(relative < 1e-9, "got {} against {expected}", oscillatory.im.abs());
-    assert!(oscillatory.re.abs() < 1e-8, "undamped, but got σ = {}", oscillatory.re);
+    assert!(
+        relative < 1e-9,
+        "got {} against {expected}",
+        oscillatory.im.abs()
+    );
+    assert!(
+        oscillatory.re.abs() < 1e-8,
+        "undamped, but got σ = {}",
+        oscillatory.re
+    );
 }
 
 /// The sparse method on a case big enough for the Krylov space to matter.
@@ -769,7 +896,10 @@ fn the_sparse_method_matches_the_dense_one_on_a_real_subspace() {
     // is where a stability study looks and where the interesting modes are.
     let sigma = Complex::new(-0.4, std::f64::consts::TAU);
     let op = ShiftedDae::new(&system, sigma).unwrap();
-    let opts = ArnoldiOptions { count: 8, ..Default::default() };
+    let opts = ArnoldiOptions {
+        count: 8,
+        ..Default::default()
+    };
     let result = arnoldi::eigenpairs(op.n_states(), |b| op.apply(b), &opts).unwrap();
     assert!(result.converged(), "unconverged: {:?}", result.pairs);
     assert!(
@@ -788,13 +918,15 @@ fn the_sparse_method_matches_the_dense_one_on_a_real_subspace() {
         );
         assert!(
             nearest(lambda, &ranked[..opts.count]) < 1e-7,
-            "{lambda} is not among the {} nearest σ", opts.count
+            "{lambda} is not among the {} nearest σ",
+            opts.count
         );
         // The reported residual is in the units of λ, so it must actually bound
         // the error against the oracle.
         assert!(
             pair.residual < 1e-6,
-            "{lambda}: residual {} does not look converged", pair.residual
+            "{lambda}: residual {} does not look converged",
+            pair.residual
         );
     }
 }
@@ -826,12 +958,18 @@ fn a_degenerate_ring_returns_distinct_converged_modes() {
 
     let sigma = Complex::new(-0.4, std::f64::consts::TAU);
     let op = ShiftedDae::new(&system, sigma).unwrap();
-    let opts = ArnoldiOptions { count: 6, ..Default::default() };
+    let opts = ArnoldiOptions {
+        count: 6,
+        ..Default::default()
+    };
     let result = arnoldi::eigenpairs(op.n_states(), |b| op.apply(b), &opts).unwrap();
 
     let found: Vec<Complex<f64>> = result.pairs.iter().map(|p| sigma + 1.0 / p.theta).collect();
     for lambda in &found {
-        assert!(nearest(*lambda, &dense) < 1e-6, "{lambda} is not a genuine eigenvalue");
+        assert!(
+            nearest(*lambda, &dense) < 1e-6,
+            "{lambda} is not a genuine eigenvalue"
+        );
     }
     // Distinct: a duplicated Ritz value here would be an orthogonality failure,
     // not a discovered multiplicity.
@@ -865,7 +1003,11 @@ fn the_two_methods_report_the_same_mode() {
 
     let opts = SmallSignalOptions::near_frequency(1.2, 0.05).count(4);
     let sparse = smallsignal::analyze_near(&system, &opts).unwrap();
-    assert!(matches!(sparse.method, Method::Sparse { .. }), "{}", sparse.method);
+    assert!(
+        matches!(sparse.method, Method::Sparse { .. }),
+        "{}",
+        sparse.method
+    );
     assert!(sparse.converged);
     assert_eq!(sparse.state_names, dense.state_names);
 
@@ -882,7 +1024,8 @@ fn the_two_methods_report_the_same_mode() {
             .unwrap();
         assert!(
             (twin.eigenvalue - mode.eigenvalue).norm() < 1e-9,
-            "{} has no dense twin", mode.eigenvalue
+            "{} has no dense twin",
+            mode.eigenvalue
         );
 
         // Damping, frequency and time constant are derived from the eigenvalue
@@ -894,14 +1037,24 @@ fn the_two_methods_report_the_same_mode() {
         // Participation: the same states, in the same order, with the same
         // factors.
         assert_eq!(
-            twin.participation.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
-            mode.participation.iter().map(|&(k, _)| k).collect::<Vec<_>>(),
-            "{}: participation ordering differs", mode.eigenvalue
+            twin.participation
+                .iter()
+                .map(|&(k, _)| k)
+                .collect::<Vec<_>>(),
+            mode.participation
+                .iter()
+                .map(|&(k, _)| k)
+                .collect::<Vec<_>>(),
+            "{}: participation ordering differs",
+            mode.eigenvalue
         );
         for (a, b) in twin.participation.iter().zip(&mode.participation) {
             assert!(
                 (a.1 - b.1).abs() < 1e-6,
-                "{}: participation {} vs {}", mode.eigenvalue, a.1, b.1
+                "{}: participation {} vs {}",
+                mode.eigenvalue,
+                a.1,
+                b.1
             );
         }
 
@@ -910,7 +1063,13 @@ fn the_two_methods_report_the_same_mode() {
         assert_eq!(twin.shape.len(), mode.shape.len());
         for (a, b) in twin.shape.iter().zip(&mode.shape) {
             assert_eq!(a.0, b.0);
-            assert!((a.1 - b.1).norm() < 1e-6, "{}: shape {} vs {}", mode.eigenvalue, a.1, b.1);
+            assert!(
+                (a.1 - b.1).norm() < 1e-6,
+                "{}: shape {} vs {}",
+                mode.eigenvalue,
+                a.1,
+                b.1
+            );
         }
 
         // The eigenvectors: parallel, not equal. An eigenvector has no
@@ -934,7 +1093,12 @@ fn the_two_methods_report_the_same_mode() {
 
     // The dense method carries no residual to report; the sparse one does.
     assert!(dense.modes.iter().all(|m| m.residual == 0.0));
-    assert!(sparse.modes.iter().all(|m| m.residual > 0.0 && m.residual < 1e-9));
+    assert!(
+        sparse
+            .modes
+            .iter()
+            .all(|m| m.residual > 0.0 && m.residual < 1e-9)
+    );
 }
 
 /// The mode shape survives the sparse path, on the case that makes a shape mean
@@ -967,7 +1131,11 @@ fn the_sparse_method_reads_the_same_mode_shape() {
     assert!((found.eigenvalue - swing.eigenvalue).norm() < 1e-9);
     assert_eq!(found.shape.len(), 2, "one component per rotor");
 
-    let phases: Vec<f64> = sparse.shape(found).iter().map(|&(_, _, phase)| phase).collect();
+    let phases: Vec<f64> = sparse
+        .shape(found)
+        .iter()
+        .map(|&(_, _, phase)| phase)
+        .collect();
     let separation = (phases[0] - phases[1]).abs();
     assert!(
         (separation - 180.0).abs() < 5.0,
@@ -1055,7 +1223,11 @@ fn the_sparse_eigenvalue_predicts_the_rings_own_oscillation() {
             zeros.push(time[k - 1] + (a / (a - b)) * (time[k] - time[k - 1]));
         }
     }
-    assert!(zeros.len() >= 6, "expected several crossings in 8 s, got {}", zeros.len());
+    assert!(
+        zeros.len() >= 6,
+        "expected several crossings in 8 s, got {}",
+        zeros.len()
+    );
     let observed = 2.0 * (zeros[zeros.len() - 1] - zeros[0]) / (zeros.len() - 1) as f64;
     assert!(
         (observed - predicted_period).abs() / predicted_period < 2e-3,
@@ -1081,7 +1253,11 @@ fn the_sparse_eigenvalue_predicts_the_rings_own_oscillation() {
             peaks.push(best);
         }
     }
-    assert!(peaks.len() >= 4, "expected several peaks, got {}", peaks.len());
+    assert!(
+        peaks.len() >= 4,
+        "expected several peaks, got {}",
+        peaks.len()
+    );
     let (t0, a0) = peaks[0];
     let (t1, a1) = peaks[peaks.len() - 1];
     let expected = (mode.eigenvalue.re * (t1 - t0)).exp();
@@ -1117,8 +1293,14 @@ fn the_inertia_sensitivity_is_the_closed_form() {
     assert_eq!(
         parameters,
         vec![
-            ParameterRef { device: 0, name: "h".to_string() },
-            ParameterRef { device: 0, name: "d".to_string() },
+            ParameterRef {
+                device: 0,
+                name: "h".to_string()
+            },
+            ParameterRef {
+                device: 0,
+                name: "d".to_string()
+            },
         ],
         "a classical machine's tunable set is its inertia and its damping"
     );
@@ -1137,7 +1319,10 @@ fn the_inertia_sensitivity_is_the_closed_form() {
 
     // Raising the inertia slows the oscillation, and does not damp it.
     assert!(inertia.d_frequency < 0.0, "{}", inertia.d_frequency);
-    assert!(inertia.d_damping.abs() < 1e-9, "nothing dissipates, so nothing damps it");
+    assert!(
+        inertia.d_damping.abs() < 1e-9,
+        "nothing dissipates, so nothing damps it"
+    );
 }
 
 /// And it agrees with a difference of two whole analyses.
@@ -1186,7 +1371,10 @@ fn the_sensitivity_matches_a_difference_of_two_analyses() {
         "dλ/dD: {} against a difference of {numeric}",
         sensitivity[1].d_eigenvalue
     );
-    assert!(sensitivity[1].d_damping > 0.0, "more damping coefficient, more damping ratio");
+    assert!(
+        sensitivity[1].d_damping > 0.0,
+        "more damping coefficient, more damping ratio"
+    );
 }
 
 /// The sparse method's modes carry sensitivities too, and the same ones.
@@ -1194,14 +1382,27 @@ fn the_sensitivity_matches_a_difference_of_two_analyses() {
 fn the_sparse_method_supports_sensitivities() {
     let (mut system, k_s) = smib(1.5);
     let dense = smallsignal::analyze(&system).unwrap();
-    let dense_mode = dense.modes.iter().find(|m| m.eigenvalue.im > 0.0).unwrap().clone();
+    let dense_mode = dense
+        .modes
+        .iter()
+        .find(|m| m.eigenvalue.im > 0.0)
+        .unwrap()
+        .clone();
 
     let hz = (OMEGA_B * k_s / (2.0 * H)).sqrt() / std::f64::consts::TAU;
     let opts = SmallSignalOptions::near_frequency(hz, 0.05).count(2);
     let sparse = smallsignal::analyze_near(&system, &opts).unwrap();
-    let sparse_mode = sparse.modes.iter().find(|m| m.eigenvalue.im > 0.0).unwrap().clone();
+    let sparse_mode = sparse
+        .modes
+        .iter()
+        .find(|m| m.eigenvalue.im > 0.0)
+        .unwrap()
+        .clone();
     assert!((sparse_mode.eigenvalue - dense_mode.eigenvalue).norm() < 1e-9);
-    assert!(!sparse_mode.left_eigenvector.is_empty(), "paired, so it has a left vector");
+    assert!(
+        !sparse_mode.left_eigenvector.is_empty(),
+        "paired, so it has a left vector"
+    );
 
     let parameters = smallsignal::tunable_parameters(&system);
     let from_dense = smallsignal::sensitivities(&mut system, &dense_mode, &parameters).unwrap();
@@ -1209,7 +1410,13 @@ fn the_sparse_method_supports_sensitivities() {
 
     for (a, b) in from_dense.iter().zip(&from_sparse) {
         let error = (a.d_eigenvalue - b.d_eigenvalue).norm() / a.d_eigenvalue.norm();
-        assert!(error < 1e-8, "{}: {} vs {}", a.parameter.name, a.d_eigenvalue, b.d_eigenvalue);
+        assert!(
+            error < 1e-8,
+            "{}: {} vs {}",
+            a.parameter.name,
+            a.d_eigenvalue,
+            b.d_eigenvalue
+        );
     }
 }
 
@@ -1220,8 +1427,14 @@ fn an_unknown_parameter_is_refused() {
     let mode = smallsignal::analyze(&system).unwrap().modes[0].clone();
 
     for bad in [
-        ParameterRef { device: 0, name: "xdp".to_string() },
-        ParameterRef { device: 7, name: "h".to_string() },
+        ParameterRef {
+            device: 0,
+            name: "xdp".to_string(),
+        },
+        ParameterRef {
+            device: 7,
+            name: "h".to_string(),
+        },
     ] {
         match smallsignal::sensitivities(&mut system, &mode, std::slice::from_ref(&bad)) {
             Err(SmallSignalError::NoSuchParameter(named)) => assert_eq!(named, bad),
@@ -1234,11 +1447,17 @@ fn an_unknown_parameter_is_refused() {
     let err = smallsignal::sensitivities(
         &mut system,
         &mode,
-        &[ParameterRef { device: 0, name: "xdp".to_string() }],
+        &[ParameterRef {
+            device: 0,
+            name: "xdp".to_string(),
+        }],
     )
     .unwrap_err();
     assert!(err.to_string().contains("no tunable parameter"), "{err}");
 
     // And the system is unharmed by a refused request.
-    assert_eq!(smallsignal::analyze(&system).unwrap().modes[0].eigenvalue, mode.eigenvalue);
+    assert_eq!(
+        smallsignal::analyze(&system).unwrap().modes[0].eigenvalue,
+        mode.eigenvalue
+    );
 }

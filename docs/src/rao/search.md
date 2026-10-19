@@ -28,7 +28,34 @@ The price is the usual one: greedy picks the best single action at each level, a
 not always two actions that are individually best. `SearchResult::leaves` reports the count actually
 evaluated, and it is the number to watch when a case gets big.
 
-The default depth is 2.
+The default depth is 2, and a **curative** perimeter may be given its own. The reference keeps
+`max-preventive-search-tree-depth` and `max-curative-search-tree-depth` apart because they answer
+different questions: how much may be planned in advance, against how much may be carried out under
+time pressure by people who did not plan it.
+
+### Combinations are configuration, not algorithm
+
+The greedy price above is real but smaller than it looks, because the reference is greedy too.
+`SearchTreeBloomer.bloom` returns exactly two things: one candidate per individual network action,
+and each **predefined combination** named in the RAO parameters. It never enumerates subsets. So
+`predefined-combinations` is the whole of its breadth, and gridoxide offers the same:
+
+```text
+candidates = every individual action + every predefined combination
+```
+
+A combination is **one** candidate. It costs one depth, not one per member; it spends one usage
+allowance per member, because the limits count remedial actions and taking three at once is still
+taking three; and it is taken whole or not at all. An entry naming an unknown action, naming fewer
+than two, whose members conflict with one another, or any of whose members is unavailable or
+inexpressible in this perimeter is dropped entirely — half a combination is a network nobody
+described, which is the rule elementary actions inside a single network action already follow one
+level down.
+
+Worth stating because it settled an argument: this parameter is `[]` in *every* configuration the
+reference ships with its own test suite. So on the scenarios where the two implementations disagree,
+the reference reaches its answer with the same single-action chain — and a plan to build a
+combinatorial search would have been closing a gap that is not there.
 
 ### Every leaf re-runs the whole linear optimization
 
@@ -214,6 +241,36 @@ instant's result fixed before the next begins.
         (its own perimeters, chronological, independent of the others)
 ```
 
+### How the decisions are carried forward
+
+A curative perimeter inherits an open set: the network file's own out-of-service circuits, whatever
+the preventive stage opened, and whatever the automatons opened or closed. That set is passed to the
+search **as a list**, and this is the one implementation detail in this layer worth stating in a
+book, because the obvious alternative is wrong in a way that produces no error.
+
+The alternative is to bake the set into the network — write a 10⁹ Ω impedance into a copy of the
+lines and search the result. It reads as equivalent. It is not, because a **closing** remedial action
+is expressed by removing a branch *from the open set*:
+
+```text
+open = base_open ∪ action.open ∖ action.close
+```
+
+With the set already spent on the impedances, `base_open` is empty, the removal removes nothing, and
+the branch stays at 10⁹ Ω whatever the CRAC says. The action is not refused — it evaluates as a
+change that does nothing, loses to every candidate that does something, and the perimeter reports
+that no remedial action was worth taking. Every margin downstream stays perfectly self-consistent
+while describing a network in which the standby circuit was never reconnected.
+
+Against the reference's suite that was **21 curative closes declined out of 21 offered**, while the
+same actions were taken 8 times out of 8 in the preventive perimeter and 3 out of 3 by automatons —
+which is how it was found. The automaton simulator had always carried its open set as a list; only
+the curative path had not.
+
+The same rule governs what a perimeter hands the next one: the effective set is the search's own
+result, never a union with what went in. A union is safe only while nothing can ever be closed, since
+it puts back exactly the branch the closing action just shut.
+
 ### Why curative actions are not optimized jointly
 
 Refusing to put every contingency's curative actions into one problem is **not** an approximation for
@@ -238,8 +295,17 @@ The `auto` instant is not a decision. A protection scheme fires when its trigger
 whether or not that helps anything else, and the job is to reproduce what the equipment does rather
 than to choose what it should do.
 
-Automatons fire in ascending order of their stated `speed`, **in batches**, and the trigger conditions
-are re-evaluated between batches but not within one. Both halves are load-bearing:
+Automatons fire in ascending order of `speed`, **in batches**, and the trigger conditions are
+re-evaluated between batches but not within one. An automaton that states **no** speed is read as
+speed zero, so it fires *first* — before everything that named a speed at all. The opposite reading
+is the tempting one ("no speed stated" sounds like "no claim to be fast") and it changes answers, not
+just order: on scenario 1.2.2.4 an untimed automaton opens a Belgian circuit, and the two phase
+shifters that follow are sized against the network that leaves behind. Fired last instead, they size
+themselves against an overload the line opening was about to remove and spend four taps where one is
+enough. Actions that all omit the speed still share one batch, so the sampling rule below is
+untouched.
+
+Both halves of that rule are load-bearing:
 
 - Re-evaluating *between* batches is why a fast automaton that relieves an overload stops a slower one
   from ever seeing the condition that would have triggered it.
@@ -259,9 +325,104 @@ A_{\text{new}} \;=\; A_{\text{current}} \;+\; \operatorname{sign}\bigl(F(c)\bigr
 \frac{\min\bigl(0,\ m(c)\bigr)}{\sigma}
 \\]
 
-taking \\(c\\) as the worst-overloaded CNEC the action is watching: shift just far enough to clear it,
-capped by the action's own range. \\(\min(0, m)\\) is zero on a healthy CNEC, so a triggered action
-whose CNEC is no longer overloaded moves nothing.
+taking \\(c\\) as the worst-overloaded CNEC the action is watching, ranked in the unit the flow model
+implies — megawatts under DC, amperes under AC, since two CNECs at different voltages order
+differently in the two. \\(\min(0, m)\\) is zero on a healthy CNEC, so a triggered action whose CNEC is
+no longer overloaded moves nothing. The result is capped by the action's own range: an automaton is
+not exempt from the permission a TSO wrote for it, and without the cap it stops only when it runs out
+of tap changer.
+
+### One shot is not enough, and why the answer is measured rather than computed
+
+That formula is a *linear* estimate applied to a network that is not linear, so a single shift is
+systematically wrong in whichever direction the curvature runs. It is not a rounding-error effect: on
+the reference's own scenario 1.2.2.2 one shot lands on tap −7 with the watched circuit still over its
+limit, where −8 clears it. So the shift **iterates** — re-measure, re-size, shift again — and stops on
+whichever comes first:
+
+- nothing it watches is overloaded any more (the goal is a secure perimeter, not the best margin
+  available: an automaton is protection equipment, and it acts until the thing it watches is inside
+  its limit);
+- the estimate asks for a move back the way it came (a scheme does not hunt);
+- an iteration guard.
+
+There is one deliberate departure from the reference here, and it is worth stating plainly. The
+reference divides by a sensitivity taken from the same analysis that measures the flow, so its
+computed set-point is the *smallest* one that secures the circuit and rounding to the next tap away
+from the start costs at most one position. gridoxide's gradient is the DC phase-shift sensitivity,
+and under an AC flow model that is a different number — 5.44 MW per degree against a delivered 8.8 on
+1.2.2.2 — right in direction and 60% too far in distance. Rounding *away* then compounds the error
+into several taps, and nothing downstream can catch it: unlike the search tree, this layer has no
+keep-it-only-if-it-improved filter, so whatever it lands on is the answer.
+
+So gridoxide reproduces the **specification** rather than the arithmetic. "Shift until the circuits
+are secure and no further" is a claim about measured flows, so the estimate is used to get into the
+neighbourhood and the tap is then settled by measuring: the position nearest the starting point that
+secures everything watched wins. That makes the answer independent of how good the gradient was,
+which is the property the reference gets for free by having an exact one.
+
+## The last check: was it worth doing?
+
+Every perimeter accepts only candidates that improve **its own** objective, so it looks as though the
+finished plan cannot come out worse than the network it started from. It can, because the perimeters
+do not partition the harm.
+
+A preventive action is judged on the base case and the outage states. What it costs a **curative**
+state is invisible there — and by the time a curative perimeter sees it, the preventive decisions are
+fixed and it can only make the best of them. The reference's scenario 1.4.4.2 is built on exactly
+that shape:
+
+```text
+                        preventive perimeter      curative state
+  do nothing                    590.6 MW               (secure, +113 A overall)
+  close two circuits            681.7 MW   ← improved       −342 MW   ← wrecked
+  curative recovers what it can                            −167.7 MW
+```
+
+Both perimeters did their jobs and the plan still ends below where it began. So the last thing the
+optimization does is compare the finished plan against the untouched network and, if it lost ground,
+**throw the whole plan away** and report doing nothing. The comparison is on the objective rather
+than on the megawatt margin: under an ampere objective two CNECs at different voltages order
+differently in the two units, and a monitored CNEC's violation is part of the cost at stake.
+
+Two details of what "throw it away" means. The automatons go with it — which is the reference's own
+behaviour, and worth flagging as a position rather than an accident, since an automaton is not a
+choice and an operator reading the plan is being told what the optimizer decided rather than what the
+equipment will do. And the leaf counts survive: they record what the search evaluated on the way to
+deciding, and the search did evaluate them.
+
+## Second preventive
+
+The decomposition is sequential, and that is its one weakness: the first preventive perimeter is
+judged on the base case and the outage states, so a curative constraint **no curative action can
+fix** is invisible to it — it is not in the perimeter, and the perimeter that does contain it comes
+later and cannot revisit preventive decisions.
+
+So the preventive perimeter is optimized a second time, with three things changed:
+
+- **every CNEC is optimized**, whatever its state — the whole point, since the curative constraints
+  are now in front of the preventive optimizer;
+- the **automatons** are held applied, so it works on what they cannot fix;
+- the **curative decisions** are held applied too, for the same reason.
+
+It runs only when the configuration asks and the first pass leaves something to gain — either a
+curative perimeter that did not reach its stop criterion, or a plan that ended up costing more than
+doing nothing. What it produces is kept only if the whole plan it leads to is better, judged the same
+way a plan is judged against doing nothing.
+
+Two things fall out of "the preventive perimeter, optimizing every CNEC". It optimizes every state
+while remaining a preventive perimeter, so *which CNECs are optimized* and *which actions may be
+taken* stop being the same question — the second is still the preventive instant's. And the held
+decisions have to be stripped back out of its answer: they were in force so the pass could see past
+them, and leaving them in would put one contingency's curative switching into the preventive plan,
+hence into force for every other contingency.
+
+What the reference does here and this does not is re-optimize the curative **range** actions inside
+that same problem, which needs a set-point per action per state. It has been attempted, and the
+more interesting half of that attempt is why it does not pay yet: the reference
+keeps its curative answer afterwards *because* its second preventive computed one, and gridoxide's
+curative search — a full search tree, with its own stop criterion and per-leaf LP — is currently
+better than any curative column its second preventive problem can produce.
 
 ## Reading the plan
 

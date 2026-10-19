@@ -233,7 +233,14 @@ mod tests {
     use super::*;
 
     fn test_line() -> Line {
-        Line { from: 0, to: 1, r: 0.05, x: 0.2, b_shunt: 0.04, g_shunt: 0.01 }
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.05,
+            x: 0.2,
+            b_shunt: 0.04,
+            g_shunt: 0.01,
+        }
     }
 
     /// Two buses at different magnitudes *and* angles, so no derivative term can
@@ -273,7 +280,14 @@ mod tests {
     /// leaves the other.
     #[test]
     fn lossless_branch_conserves_active_power() {
-        let line = Line { from: 0, to: 1, r: 0.0, x: 0.2, b_shunt: 0.0, g_shunt: 0.0 };
+        let line = Line {
+            from: 0,
+            to: 1,
+            r: 0.0,
+            x: 0.2,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        };
         let p = line_params(&line);
         let v = test_voltages();
         let (p_from, _) = terminal_flow(&p, Terminal::From, &v);
@@ -297,15 +311,20 @@ mod tests {
             // Perturb one polar component of one bus and re-evaluate.
             let bump = |bus: usize, d_mag: f64, d_ang: f64| {
                 let mut v = base.clone();
-                v[bus] = Complex::from_polar(
-                    base[bus].norm() + d_mag,
-                    base[bus].arg() + d_ang,
-                );
+                v[bus] = Complex::from_polar(base[bus].norm() + d_mag, base[bus].arg() + d_ang);
                 terminal_flow(&branch, terminal, &v)
             };
             let central = |bus: usize, mag: bool| {
-                let (pp, qp) = if mag { bump(bus, h, 0.0) } else { bump(bus, 0.0, h) };
-                let (pm, qm) = if mag { bump(bus, -h, 0.0) } else { bump(bus, 0.0, -h) };
+                let (pp, qp) = if mag {
+                    bump(bus, h, 0.0)
+                } else {
+                    bump(bus, 0.0, h)
+                };
+                let (pm, qm) = if mag {
+                    bump(bus, -h, 0.0)
+                } else {
+                    bump(bus, 0.0, -h)
+                };
                 ((pp - pm) / (2.0 * h), (qp - qm) / (2.0 * h))
             };
 
@@ -315,7 +334,10 @@ mod tests {
             let (dp_dv_far, dq_dv_far) = central(far, true);
 
             let close = |a: f64, b: f64, what: &str| {
-                assert!((a - b).abs() < 1e-6, "{terminal:?} {what}: analytic {a}, numeric {b}");
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "{terminal:?} {what}: analytic {a}, numeric {b}"
+                );
             };
             close(d.dp_dtheta_near, dp_dth_near, "dP/dtheta_near");
             close(d.dp_dtheta_far, dp_dth_far, "dP/dtheta_far");
@@ -332,7 +354,14 @@ mod tests {
     /// from-terminal.
     #[test]
     fn self_loop_line_is_shunt_only() {
-        let line = Line { from: 2, to: 2, r: 0.0, x: 0.0, b_shunt: 0.03, g_shunt: 0.0 };
+        let line = Line {
+            from: 2,
+            to: 2,
+            r: 0.0,
+            x: 0.0,
+            b_shunt: 0.03,
+            g_shunt: 0.0,
+        };
         let p = line_params(&line);
         assert_eq!(p.y[1], Complex::new(0.0, 0.0));
         assert_eq!(p.y[3], Complex::new(0.0, 0.0));
@@ -360,7 +389,10 @@ mod tests {
             tap: Complex::new(1.05, 0.0),
         };
         let p = transformer_params(&t);
-        assert!((p.y[0] - p.y[3]).norm() > 1e-9, "tap should make yff != ytt");
+        assert!(
+            (p.y[0] - p.y[3]).norm() > 1e-9,
+            "tap should make yff != ytt"
+        );
 
         let v = test_voltages();
         let (p_from, _) = terminal_flow(&p, Terminal::From, &v);

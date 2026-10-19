@@ -1,16 +1,16 @@
-use super::types::{Bus, BusType};
-use super::network::{
-    classify, connected_components, effective_injection, mark_unreferenced_islands,
-    power_injections, Classified, Verdict, YBusSparse,
-};
-use super::jacobian::JacobianPattern;
-use super::sparse::RealSparseSystem;
 use super::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
+use super::jacobian::JacobianPattern;
+use super::klu_native::KluNativeSystem;
+use super::network::{
+    Classified, Verdict, YBusSparse, classify, connected_components, effective_injection,
+    mark_unreferenced_islands, power_injections,
+};
+use super::sparse::RealSparseSystem;
 #[cfg(feature = "klu")]
 use super::sparse_klu::KluRealSystem;
-use super::klu_native::KluNativeSystem;
 #[cfg(feature = "pardiso")]
 use super::sparse_pardiso::PardisoRealSystem;
+use super::types::{Bus, BusType};
 
 /// The one operation the Newton loop needs from a sparse-LU backend: build a
 /// reusable symbolic factorization from a sparsity pattern once, then
@@ -40,7 +40,11 @@ pub trait LinearSolver: Sized {
 
     /// Numeric-only refactorization against the cached pattern, then solves
     /// `A x = b`. `None` if the matrix is singular at these values.
-    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>>;
+    fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>>;
 
     /// As [`factor_and_solve`](Self::factor_and_solve), but taking only the
     /// nonzero *values*, positionally matching the `entries` passed to
@@ -267,7 +271,10 @@ pub struct SolveStats {
 
 impl SolveStats {
     pub(crate) fn from_loop(status: SolveStatus, mismatch_history: Vec<f64>) -> Self {
-        Self { status, mismatch_history }
+        Self {
+            status,
+            mismatch_history,
+        }
     }
 
     /// Iterations actually run. Derived from `mismatch_history` rather than
@@ -385,7 +392,11 @@ fn resolve_pending(
             } else {
                 IslandStatus::MaxIterationsReached
             };
-            IslandReport { bus_indices, slack_indices, status }
+            IslandReport {
+                bus_indices,
+                slack_indices,
+                status,
+            }
         })
         .collect()
 }
@@ -434,10 +445,18 @@ pub(crate) fn finish_island_reports(
         reports[pos] = Some(report);
     }
 
-    reports.into_iter().map(|r| r.expect("every component classified exactly once")).collect()
+    reports
+        .into_iter()
+        .map(|r| r.expect("every component classified exactly once"))
+        .collect()
 }
 
-pub fn newton_raphson(buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) -> Vec<IslandReport> {
+pub fn newton_raphson(
+    buses: &mut [Bus],
+    ybus: &YBusSparse,
+    tol: f64,
+    max_iter: usize,
+) -> Vec<IslandReport> {
     newton_raphson_with_backend(buses, ybus, tol, max_iter, JacobianBackend::Scalar)
 }
 
@@ -463,23 +482,43 @@ pub fn newton_raphson_with_backend(
     mark_unreferenced_islands(buses, &classified);
 
     let stats = match backend {
-        JacobianBackend::Scalar => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<RealSparseSystem>, &mut None)
-        }
+        JacobianBackend::Scalar => newton_raphson_cached(
+            buses,
+            ybus,
+            tol,
+            max_iter,
+            &mut None::<RealSparseSystem>,
+            &mut None,
+        ),
         JacobianBackend::Block => {
             newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut None)
         }
         #[cfg(feature = "klu")]
-        JacobianBackend::Klu => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<KluRealSystem>, &mut None)
-        }
-        JacobianBackend::KluNative => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<KluNativeSystem>, &mut None)
-        }
+        JacobianBackend::Klu => newton_raphson_cached(
+            buses,
+            ybus,
+            tol,
+            max_iter,
+            &mut None::<KluRealSystem>,
+            &mut None,
+        ),
+        JacobianBackend::KluNative => newton_raphson_cached(
+            buses,
+            ybus,
+            tol,
+            max_iter,
+            &mut None::<KluNativeSystem>,
+            &mut None,
+        ),
         #[cfg(feature = "pardiso")]
-        JacobianBackend::Pardiso => {
-            newton_raphson_cached(buses, ybus, tol, max_iter, &mut None::<PardisoRealSystem>, &mut None)
-        }
+        JacobianBackend::Pardiso => newton_raphson_cached(
+            buses,
+            ybus,
+            tol,
+            max_iter,
+            &mut None::<PardisoRealSystem>,
+            &mut None,
+        ),
     };
 
     finish_island_reports(classified, buses, ybus, stats.status, tol)
@@ -565,7 +604,13 @@ impl PersistentSolver {
     /// `classify`/`mark_unreferenced_islands`) so a disconnected, sourceless
     /// region can't make the whole Jacobian singular, and returns each
     /// component's own outcome rather than one flat status.
-    pub fn solve(&mut self, buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize) -> Vec<IslandReport> {
+    pub fn solve(
+        &mut self,
+        buses: &mut [Bus],
+        ybus: &YBusSparse,
+        tol: f64,
+        max_iter: usize,
+    ) -> Vec<IslandReport> {
         self.solve_with_stats(buses, ybus, tol, max_iter).0
     }
 
@@ -585,21 +630,43 @@ impl PersistentSolver {
         mark_unreferenced_islands(buses, &classified);
 
         let stats = match self.backend {
-            JacobianBackend::Scalar => {
-                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.scalar, &mut self.jacobian)
+            JacobianBackend::Scalar => newton_raphson_cached(
+                buses,
+                ybus,
+                tol,
+                max_iter,
+                &mut self.scalar,
+                &mut self.jacobian,
+            ),
+            JacobianBackend::Block => {
+                newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut self.block)
             }
-            JacobianBackend::Block => newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut self.block),
             #[cfg(feature = "klu")]
-            JacobianBackend::Klu => {
-                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.klu, &mut self.jacobian)
-            }
-            JacobianBackend::KluNative => {
-                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.klu_native, &mut self.jacobian)
-            }
+            JacobianBackend::Klu => newton_raphson_cached(
+                buses,
+                ybus,
+                tol,
+                max_iter,
+                &mut self.klu,
+                &mut self.jacobian,
+            ),
+            JacobianBackend::KluNative => newton_raphson_cached(
+                buses,
+                ybus,
+                tol,
+                max_iter,
+                &mut self.klu_native,
+                &mut self.jacobian,
+            ),
             #[cfg(feature = "pardiso")]
-            JacobianBackend::Pardiso => {
-                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.pardiso, &mut self.jacobian)
-            }
+            JacobianBackend::Pardiso => newton_raphson_cached(
+                buses,
+                ybus,
+                tol,
+                max_iter,
+                &mut self.pardiso,
+                &mut self.jacobian,
+            ),
         };
 
         let reports = finish_island_reports(classified, buses, ybus, stats.status, tol);
@@ -649,7 +716,6 @@ impl PersistentSolver {
         }
     }
 }
-
 
 /// The one Newton-Raphson loop, generic over the sparse-LU backend via
 /// [`LinearSolver`]. Until this became generic there were four separate
@@ -809,7 +875,16 @@ pub(crate) fn jacobian_triplets_reference(
     let cap = jacobian_triplet_capacity(ybus, &non_slack_idx, &pq_idx);
 
     build_jacobian_triplets(
-        buses, ybus, &non_slack_idx, &pq_idx, &non_slack_pos, &pq_pos, n_angle, p_calc, q_calc, cap,
+        buses,
+        ybus,
+        &non_slack_idx,
+        &pq_idx,
+        &non_slack_pos,
+        &pq_pos,
+        n_angle,
+        p_calc,
+        q_calc,
+        cap,
     )
 }
 
@@ -821,7 +896,11 @@ pub(crate) fn jacobian_triplets_reference(
 /// neighbor contributes at most 2 triplets to the H/N block (one per
 /// non-slack row) and at most 2 to the M/L block (one per PQ row).
 #[cfg(test)]
-fn jacobian_triplet_capacity(ybus: &YBusSparse, non_slack_idx: &[usize], pq_idx: &[usize]) -> usize {
+fn jacobian_triplet_capacity(
+    ybus: &YBusSparse,
+    non_slack_idx: &[usize],
+    pq_idx: &[usize],
+) -> usize {
     let non_slack_degree: usize = non_slack_idx.iter().map(|&i| ybus.row(i).len()).sum();
     let pq_degree: usize = pq_idx.iter().map(|&i| ybus.row(i).len()).sum();
     2 * non_slack_degree + 2 * pq_degree
@@ -873,7 +952,11 @@ fn build_jacobian_triplets(
                 triplets.push((row_idx, row_idx, -q_calc[i] - vm[i].powi(2) * y_ik.im));
                 // N_ii = P_i/V_i + V_i * G_ii (only if i has a magnitude unknown)
                 if let Some(col_idx) = pq_pos[i] {
-                    triplets.push((row_idx, n_angle + col_idx, p_calc[i] / vm[i] + vm[i] * y_ik.re));
+                    triplets.push((
+                        row_idx,
+                        n_angle + col_idx,
+                        p_calc[i] / vm[i] + vm[i] * y_ik.re,
+                    ));
                 }
                 continue;
             }
@@ -899,9 +982,17 @@ fn build_jacobian_triplets(
                 // *all* non-slack buses, not just PQ ones (may differ from
                 // row_idx once PV buses exist).
                 let col_idx = non_slack_pos[i].expect("a PQ bus is always non-slack");
-                triplets.push((n_angle + row_idx, col_idx, p_calc[i] - vm[i].powi(2) * y_ik.re));
+                triplets.push((
+                    n_angle + row_idx,
+                    col_idx,
+                    p_calc[i] - vm[i].powi(2) * y_ik.re,
+                ));
                 // L_ii = Q_i/V_i - V_i * B_ii
-                triplets.push((n_angle + row_idx, n_angle + row_idx, q_calc[i] / vm[i] - vm[i] * y_ik.im));
+                triplets.push((
+                    n_angle + row_idx,
+                    n_angle + row_idx,
+                    q_calc[i] / vm[i] - vm[i] * y_ik.im,
+                ));
                 continue;
             }
             let angle_ik = va[i] - va[k];
@@ -930,7 +1021,10 @@ fn build_jacobian_triplets(
 /// See `newton_raphson_scalar_cached` — same caller-supplied-cache pattern,
 /// for the `Block` backend.
 fn newton_raphson_block_cached(
-    buses: &mut [Bus], ybus: &YBusSparse, tol: f64, max_iter: usize,
+    buses: &mut [Bus],
+    ybus: &YBusSparse,
+    tol: f64,
+    max_iter: usize,
     symbolic: &mut Option<BlockSymbolic>,
 ) -> SolveStats {
     let non_slack_idx: Vec<usize> = buses
@@ -967,13 +1061,18 @@ fn newton_raphson_block_cached(
             })
             .collect();
 
-        let max_mis = mismatch.iter().flatten().fold(0.0f64, |a, &b| a.max(b.abs()));
+        let max_mis = mismatch
+            .iter()
+            .flatten()
+            .fold(0.0f64, |a, &b| a.max(b.abs()));
         history.push(max_mis);
         if max_mis < tol {
             return SolveStats::from_loop(SolveStatus::Converged, history);
         }
 
-        let blocks = build_jacobian_blocks(buses, ybus, &non_slack_idx, &block_pos, &p_calc, &q_calc).finish();
+        let blocks =
+            build_jacobian_blocks(buses, ybus, &non_slack_idx, &block_pos, &p_calc, &q_calc)
+                .finish();
         if symbolic.is_none() {
             *symbolic = Some(BlockSymbolic::analyze(&blocks));
         }
@@ -1026,7 +1125,10 @@ fn build_jacobian_blocks(
                 let (m_ii, l_ii) = if is_pv {
                     (0.0, 1.0)
                 } else {
-                    (p_calc[i] - vm[i].powi(2) * y_ik.re, q_calc[i] / vm[i] - vm[i] * y_ik.im)
+                    (
+                        p_calc[i] - vm[i].powi(2) * y_ik.re,
+                        q_calc[i] / vm[i] - vm[i] * y_ik.im,
+                    )
                 };
                 blocks.add(row, row, [[h_ii, n_ii], [m_ii, l_ii]]);
                 continue;
@@ -1049,4 +1151,3 @@ fn build_jacobian_blocks(
 
     blocks
 }
-

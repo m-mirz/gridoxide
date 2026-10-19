@@ -58,7 +58,11 @@ fn main() {
     let solution = dc_power_flow(&mut buses, &net.lines, &net.transformers, options);
     println!("\n--- DC flows (MW, positive into the `from` terminal) ---");
     for br in &branches {
-        println!("{:>22}  {:+10.3}", name(br.index), solution.branch_p[br.index] * net.base_mva);
+        println!(
+            "{:>22}  {:+10.3}",
+            name(br.index),
+            solution.branch_p[br.index] * net.base_mva
+        );
     }
 
     let sensitivity =

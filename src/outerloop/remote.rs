@@ -240,10 +240,9 @@ impl OuterLoop for RemoteVoltageControl {
         // dropped and named.
         let mut keep: Vec<bool> = vec![true; self.controllers.len()];
         for (i, c) in self.controllers.iter().enumerate() {
-            let held_locally = self
-                .controllers
-                .iter()
-                .any(|o| o.controller_bus == c.controlled_bus && o.controlled_bus == c.controlled_bus);
+            let held_locally = self.controllers.iter().any(|o| {
+                o.controller_bus == c.controlled_bus && o.controlled_bus == c.controlled_bus
+            });
             if held_locally {
                 keep[i] = false;
                 self.contested.push(c.machine.clone());

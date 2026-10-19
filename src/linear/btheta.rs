@@ -57,9 +57,9 @@
 
 use num_complex::Complex;
 
-use crate::network::{classify, mark_unreferenced_islands, Classified, Verdict};
+use crate::network::{Classified, Verdict, classify, mark_unreferenced_islands};
 use crate::sparse::RealFactorization;
-use crate::topology::{clamp_branch_impedance, ideal_connection_z, union_all, IDEAL_CONNECTION_Y};
+use crate::topology::{IDEAL_CONNECTION_Y, clamp_branch_impedance, ideal_connection_z, union_all};
 use crate::types::{Bus, BusType, Line, Transformer};
 
 use super::{DcApproximation, DcOptions};
@@ -225,11 +225,7 @@ fn susceptance(r: f64, x: f64, approximation: DcApproximation) -> f64 {
 ///
 /// See [`DcBranch::index`] for the index contract and the module doc for the
 /// susceptance and phase-shift conventions.
-pub fn dc_branches(
-    lines: &[Line],
-    transformers: &[Transformer],
-    opts: DcOptions,
-) -> Vec<DcBranch> {
+pub fn dc_branches(lines: &[Line], transformers: &[Transformer], opts: DcOptions) -> Vec<DcBranch> {
     let mut out = Vec::with_capacity(lines.len() + transformers.len());
 
     for (i, ln) in lines.iter().enumerate() {
@@ -242,7 +238,13 @@ pub fn dc_branches(
         if !b.is_finite() {
             continue;
         }
-        out.push(DcBranch { index: i, from: ln.from, to: ln.to, b, shift: 0.0 });
+        out.push(DcBranch {
+            index: i,
+            from: ln.from,
+            to: ln.to,
+            b,
+            shift: 0.0,
+        });
     }
 
     for (j, t) in transformers.iter().enumerate() {
@@ -282,7 +284,13 @@ pub fn dc_branches(
         if !b.is_finite() {
             continue;
         }
-        out.push(DcBranch { index, from: t.from, to: t.to, b, shift: t.tap.arg() });
+        out.push(DcBranch {
+            index,
+            from: t.from,
+            to: t.to,
+            b,
+            shift: t.tap.arg(),
+        });
     }
 
     out
@@ -353,7 +361,10 @@ pub(crate) fn partition(buses: &[Bus], branches: &[DcBranch]) -> Partition {
     for (pos, br) in branches.iter().enumerate() {
         island_branches[island_of[br.from]].push(pos);
     }
-    Partition { classified: classify(buses, &components), island_branches }
+    Partition {
+        classified: classify(buses, &components),
+        island_branches,
+    }
 }
 
 /// Stamps one island's reduced susceptance matrix `B_NN`.
@@ -424,7 +435,10 @@ pub fn dc_power_flow(
     let n_branches = lines.len() + transformers.len();
     let branches = dc_branches(lines, transformers, opts);
 
-    let Partition { classified, island_branches } = partition(buses, &branches);
+    let Partition {
+        classified,
+        island_branches,
+    } = partition(buses, &branches);
     mark_unreferenced_islands(buses, &classified);
 
     let mut contributing = vec![false; n_branches];
@@ -435,8 +449,7 @@ pub fn dc_power_flow(
             negative_reactance_branches.push(br.index);
         }
     }
-    let ignored_branches: Vec<usize> =
-        (0..n_branches).filter(|&i| !contributing[i]).collect();
+    let ignored_branches: Vec<usize> = (0..n_branches).filter(|&i| !contributing[i]).collect();
 
     let mut branch_p = vec![0.0; n_branches];
     let mut max_residual: f64 = 0.0;
@@ -534,8 +547,7 @@ pub fn dc_power_flow(
         let mut net_out = vec![0.0; n];
         for &pos in &island_branches[ci] {
             let br = &branches[pos];
-            let p = br.b
-                * (buses[br.from].voltage_ang - buses[br.to].voltage_ang - br.shift);
+            let p = br.b * (buses[br.from].voltage_ang - buses[br.to].voltage_ang - br.shift);
             branch_p[br.index] = p;
             net_out[br.from] += p;
             net_out[br.to] -= p;
@@ -590,7 +602,14 @@ mod tests {
     }
 
     fn line(from: usize, to: usize, x: f64) -> Line {
-        Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 }
+        Line {
+            from,
+            to,
+            r: 0.0,
+            x,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }
     }
 
     /// Three buses in a line, slack at 0. With no meshing the flows are fixed
@@ -614,8 +633,16 @@ mod tests {
 
         let theta1 = -0.8 * 0.1;
         let theta2 = theta1 - 0.5 * 0.2;
-        assert!((buses[1].voltage_ang - theta1).abs() < 1e-12, "{}", buses[1].voltage_ang);
-        assert!((buses[2].voltage_ang - theta2).abs() < 1e-12, "{}", buses[2].voltage_ang);
+        assert!(
+            (buses[1].voltage_ang - theta1).abs() < 1e-12,
+            "{}",
+            buses[1].voltage_ang
+        );
+        assert!(
+            (buses[2].voltage_ang - theta2).abs() < 1e-12,
+            "{}",
+            buses[2].voltage_ang
+        );
         assert!((sol.branch_p[0] - 0.8).abs() < 1e-12, "{}", sol.branch_p[0]);
         assert!((sol.branch_p[1] - 0.5).abs() < 1e-12, "{}", sol.branch_p[1]);
         assert!((sol.islands[0].slack_pickup - 0.8).abs() < 1e-12);
@@ -662,9 +689,18 @@ mod tests {
     fn radial_phase_shifter_displaces_the_angle_and_carries_nothing() {
         let alpha = 0.05_f64;
         let mut buses = vec![bus(0, BusType::Slack, 0.0), bus(1, BusType::PQ, 0.0)];
-        let sol = dc_power_flow(&mut buses, &[], &[pst(0, 1, 0.25, alpha)], DcOptions::default());
+        let sol = dc_power_flow(
+            &mut buses,
+            &[],
+            &[pst(0, 1, 0.25, alpha)],
+            DcOptions::default(),
+        );
 
-        assert!((buses[1].voltage_ang - (-alpha)).abs() < 1e-12, "{}", buses[1].voltage_ang);
+        assert!(
+            (buses[1].voltage_ang - (-alpha)).abs() < 1e-12,
+            "{}",
+            buses[1].voltage_ang
+        );
         assert!(sol.branch_p[0].abs() < 1e-12, "{}", sol.branch_p[0]);
         assert!(sol.islands[0].slack_pickup.abs() < 1e-12);
     }
@@ -687,19 +723,35 @@ mod tests {
 
         let mut buses = vec![bus(0, BusType::Slack, 0.0), bus(1, BusType::PQ, 0.0)];
         let lines = vec![line(0, 1, x_line)];
-        let sol =
-            dc_power_flow(&mut buses, &lines, &[pst(0, 1, x_pst, alpha)], DcOptions::default());
+        let sol = dc_power_flow(
+            &mut buses,
+            &lines,
+            &[pst(0, 1, x_pst, alpha)],
+            DcOptions::default(),
+        );
 
         let circulating = b_l * b_t * alpha / (b_l + b_t);
-        assert!((sol.branch_p[0] - circulating).abs() < 1e-12, "line: {}", sol.branch_p[0]);
-        assert!((sol.branch_p[1] + circulating).abs() < 1e-12, "pst: {}", sol.branch_p[1]);
+        assert!(
+            (sol.branch_p[0] - circulating).abs() < 1e-12,
+            "line: {}",
+            sol.branch_p[0]
+        );
+        assert!(
+            (sol.branch_p[1] + circulating).abs() < 1e-12,
+            "pst: {}",
+            sol.branch_p[1]
+        );
         assert!(
             (buses[1].voltage_ang - (-b_t * alpha / (b_l + b_t))).abs() < 1e-12,
             "{}",
             buses[1].voltage_ang
         );
         // No load and no losses, so the reference supplies nothing.
-        assert!(sol.islands[0].slack_pickup.abs() < 1e-12, "{}", sol.islands[0].slack_pickup);
+        assert!(
+            sol.islands[0].slack_pickup.abs() < 1e-12,
+            "{}",
+            sol.islands[0].slack_pickup
+        );
         assert!(sol.max_residual < 1e-12);
     }
 
@@ -721,7 +773,10 @@ mod tests {
         let got = dc_branches(&[], std::slice::from_ref(&t), DcOptions::default());
         assert!((got[0].b - 1.0 / (x * k)).abs() < 1e-12, "{}", got[0].b);
 
-        let no_ratio = DcOptions { use_transformer_ratio: false, ..Default::default() };
+        let no_ratio = DcOptions {
+            use_transformer_ratio: false,
+            ..Default::default()
+        };
         let got = dc_branches(&[], std::slice::from_ref(&t), no_ratio);
         assert!((got[0].b - 1.0 / x).abs() < 1e-12, "{}", got[0].b);
     }
@@ -732,8 +787,18 @@ mod tests {
     /// offering the choice.
     #[test]
     fn ignore_g_uses_the_true_series_susceptance() {
-        let ln = Line { from: 0, to: 1, r: 0.1, x: 0.1, b_shunt: 0.0, g_shunt: 0.0 };
-        let opts = DcOptions { approximation: DcApproximation::IgnoreG, ..Default::default() };
+        let ln = Line {
+            from: 0,
+            to: 1,
+            r: 0.1,
+            x: 0.1,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        };
+        let opts = DcOptions {
+            approximation: DcApproximation::IgnoreG,
+            ..Default::default()
+        };
         let got = dc_branches(std::slice::from_ref(&ln), &[], opts);
         let y_series = Complex::new(1.0, 0.0) / Complex::new(ln.r, ln.x);
         assert!((got[0].b - (-y_series.im)).abs() < 1e-12, "{}", got[0].b);
@@ -801,7 +866,10 @@ mod tests {
         let lines = vec![line(0, 1, 0.2), line(1, 2, 0.2)];
         let sol = dc_power_flow(&mut buses, &lines, &[], DcOptions::default());
 
-        assert_eq!(sol.islands[0].status, DcIslandStatus::SolvedMultipleReferences);
+        assert_eq!(
+            sol.islands[0].status,
+            DcIslandStatus::SolvedMultipleReferences
+        );
         assert!(sol.max_residual < 1e-12, "{}", sol.max_residual);
         assert!((sol.islands[0].slack_pickup - 0.6).abs() < 1e-12);
         // Equal reactances and equal reference angles ⇒ an even split here,
@@ -857,11 +925,19 @@ mod tests {
         };
         // The hazard, spelled out: the naive route really does go negative.
         let z = Complex::new(1.0, 0.0) / IDEAL_CONNECTION_Y;
-        assert!(z.im < 0.0, "fixture assumption broken: link reactance is {}", z.im);
+        assert!(
+            z.im < 0.0,
+            "fixture assumption broken: link reactance is {}",
+            z.im
+        );
 
         let got = dc_branches(&[], std::slice::from_ref(&t), DcOptions::default());
         assert!(got[0].b > 0.0, "link susceptance came out {}", got[0].b);
-        assert!((got[0].b - 1.0 / ideal_connection_z()).abs() < 1e-6, "{}", got[0].b);
+        assert!(
+            (got[0].b - 1.0 / ideal_connection_z()).abs() < 1e-6,
+            "{}",
+            got[0].b
+        );
     }
 
     /// A series capacitor is legitimate and must pass through with its sign
@@ -910,9 +986,24 @@ mod tests {
     fn components_match_the_documented_ordering_contract() {
         // Deliberately wire the higher-numbered buses together first.
         let branches = vec![
-            DcBranch { index: 0, from: 3, to: 1, b: 1.0, shift: 0.0 },
-            DcBranch { index: 1, from: 4, to: 2, b: 1.0, shift: 0.0 },
+            DcBranch {
+                index: 0,
+                from: 3,
+                to: 1,
+                b: 1.0,
+                shift: 0.0,
+            },
+            DcBranch {
+                index: 1,
+                from: 4,
+                to: 2,
+                b: 1.0,
+                shift: 0.0,
+            },
         ];
-        assert_eq!(dc_components(5, &branches), vec![vec![0], vec![1, 3], vec![2, 4]]);
+        assert_eq!(
+            dc_components(5, &branches),
+            vec![vec![0], vec![1, 3], vec![2, 4]]
+        );
     }
 }

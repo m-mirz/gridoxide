@@ -107,7 +107,12 @@ pub struct ArnoldiOptions {
 
 impl Default for ArnoldiOptions {
     fn default() -> Self {
-        Self { count: 6, max_dim: 0, tol: 1e-10, max_restarts: 8 }
+        Self {
+            count: 6,
+            max_dim: 0,
+            tol: 1e-10,
+            max_restarts: 8,
+        }
     }
 }
 
@@ -180,7 +185,10 @@ impl std::fmt::Display for ArnoldiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ArnoldiError::OperatorFailed => {
-                write!(f, "the operator could not be applied — a singular factorization")
+                write!(
+                    f,
+                    "the operator could not be applied — a singular factorization"
+                )
             }
             ArnoldiError::Eigen => write!(f, "the projected eigenproblem did not decompose"),
             ArnoldiError::Empty => write!(f, "nothing to iterate on"),
@@ -240,7 +248,11 @@ where
         return Err(ArnoldiError::Empty);
     }
     let count = opts.count.min(n);
-    let requested = if opts.max_dim == 0 { (2 * count + 20).max(30) } else { opts.max_dim };
+    let requested = if opts.max_dim == 0 {
+        (2 * count + 20).max(30)
+    } else {
+        opts.max_dim
+    };
     let cap = dimension_cap(n, count);
     let mut m = requested.max(count + 1).min(cap);
 
@@ -267,7 +279,11 @@ where
         // which the module doc records as barely worth the solves.
         if converged || dim < m || m >= cap || restarts >= opts.max_restarts {
             let (pairs, dim) = best.expect("at least one cycle ran");
-            return Ok(ArnoldiResult { pairs, restarts, dim });
+            return Ok(ArnoldiResult {
+                pairs,
+                restarts,
+                dim,
+            });
         }
 
         // Grow, and re-aim. The growth is what actually converges a clustered
@@ -370,9 +386,7 @@ where
     }
 
     // The projected operator, `m × m`.
-    let hm = Mat::<Complex<f64>>::from_fn(m, m, |i, j| {
-        if i < h[j].len() { h[j][i] } else { zero }
-    });
+    let hm = Mat::<Complex<f64>>::from_fn(m, m, |i, j| if i < h[j].len() { h[j][i] } else { zero });
     let eigen = hm.eigen().map_err(|_| ArnoldiError::Eigen)?;
     let s = eigen.S();
     let y = eigen.U();
@@ -417,8 +431,17 @@ where
 
         let magnitude = theta.norm();
         let converged = magnitude > 0.0 && raw <= tol * magnitude;
-        let residual = if magnitude > 0.0 { raw / (magnitude * magnitude) } else { f64::INFINITY };
-        pairs.push(RitzPair { theta, vector, residual, converged });
+        let residual = if magnitude > 0.0 {
+            raw / (magnitude * magnitude)
+        } else {
+            f64::INFINITY
+        };
+        pairs.push(RitzPair {
+            theta,
+            vector,
+            residual,
+            converged,
+        });
     }
 
     Ok((pairs, m))

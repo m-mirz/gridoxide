@@ -1,6 +1,6 @@
-use num_complex::Complex;
-use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind};
 use super::sparse;
+use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind};
+use num_complex::Complex;
 
 /// A lumped shunt admittance to be added to the Y-bus diagonal at bus `at`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,7 +40,10 @@ pub struct YBus {
 
 impl YBus {
     pub fn new(n: usize) -> Self {
-        Self { n, entries: Vec::new() }
+        Self {
+            n,
+            entries: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, i: usize, j: usize, val: Complex<f64>) {
@@ -72,7 +75,8 @@ impl YBus {
         // row's actual admittance neighbors (including its own diagonal) —
         // used by `linear_initial_guess` and `build_jacobian` to walk only
         // real neighbors instead of every other bus.
-        let mut merged: std::collections::HashMap<(usize, usize), Complex<f64>> = std::collections::HashMap::new();
+        let mut merged: std::collections::HashMap<(usize, usize), Complex<f64>> =
+            std::collections::HashMap::new();
         for &(i, j, v) in &self.entries {
             *merged.entry((i, j)).or_insert(Complex::new(0.0, 0.0)) += v;
         }
@@ -85,7 +89,11 @@ impl YBus {
         }
         let matrix = sparse::SparseMatrix::build(self.n, &self.entries)
             .expect("Y-bus triplet set should always form a valid sparse matrix");
-        YBusSparse { n: self.n, adjacency, matrix }
+        YBusSparse {
+            n: self.n,
+            adjacency,
+            matrix,
+        }
     }
 }
 
@@ -222,7 +230,11 @@ pub(crate) fn classify(buses: &[Bus], components: &[Vec<usize>]) -> Vec<Classifi
                 1 => Verdict::Solvable,
                 _ => Verdict::AmbiguousReferenceBus,
             };
-            Classified { bus_indices: members.clone(), slack_indices, verdict }
+            Classified {
+                bus_indices: members.clone(),
+                slack_indices,
+                verdict,
+            }
         })
         .collect()
 }
@@ -293,8 +305,12 @@ pub fn build_ybus_with_outages(
 
     // Stamp the in-service network through the ordinary builder, so the
     // π-model, tap and open-terminal rules stay defined in exactly one place.
-    let in_service_lines: Vec<Line> =
-        lines.iter().enumerate().filter(|(i, _)| !out(*i)).map(|(_, l)| l.clone()).collect();
+    let in_service_lines: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !out(*i))
+        .map(|(_, l)| l.clone())
+        .collect();
     let in_service_transformers: Vec<Transformer> = transformers
         .iter()
         .enumerate()
@@ -445,10 +461,12 @@ pub fn build_ybus_3ph(n: usize, lines: &[Line3Ph]) -> YBus {
         let [yff, yft, ytf, ytt] = line3ph_blocks(ln);
         // A half-open branch collapses to `from == to`, where all four blocks
         // land on one diagonal and the three zero ones add nothing.
-        for (block, (bi, bj)) in [yff, yft, ytf, ytt]
-            .iter()
-            .zip([(ln.from, ln.from), (ln.from, ln.to), (ln.to, ln.from), (ln.to, ln.to)])
-        {
+        for (block, (bi, bj)) in [yff, yft, ytf, ytt].iter().zip([
+            (ln.from, ln.from),
+            (ln.from, ln.to),
+            (ln.to, ln.from),
+            (ln.to, ln.to),
+        ]) {
             for p in 0..3 {
                 for q in 0..3 {
                     y.add(3 * bi + p, 3 * bj + q, block[p][q]);
@@ -499,15 +517,23 @@ pub fn half_open_branch_shunt(y_series: Complex<f64>, y_shunt: Complex<f64>) -> 
 ///   (1,0)/(0,1): effective shunt = y_sh/2 + 1/(1/y_s + 2/y_sh) at connected end
 ///   (0,0): all zero
 pub fn branch_calc_param(
-    y_series: Complex<f64>, y_shunt: Complex<f64>, tap: Complex<f64>,
-    from_status: u8, to_status: u8,
+    y_series: Complex<f64>,
+    y_shunt: Complex<f64>,
+    tap: Complex<f64>,
+    from_status: u8,
+    to_status: u8,
 ) -> [Complex<f64>; 4] {
     let zero = Complex::new(0.0, 0.0);
     let k = tap.norm();
     match (from_status, to_status) {
         (1, 1) => {
             let y_diag = y_series + y_shunt * 0.5;
-            [y_diag / (k * k), -y_series / tap.conj(), -y_series / tap, y_diag]
+            [
+                y_diag / (k * k),
+                -y_series / tap.conj(),
+                -y_series / tap,
+                y_diag,
+            ]
         }
         (1, 0) => {
             let branch_shunt = half_open_branch_shunt(y_series, y_shunt);
@@ -538,7 +564,11 @@ fn stamp_transformers(ybus: &mut YBus, transformers: &[Transformer]) {
 /// tensor via the Fortescue transform `Yabc = A · diag(y0,y1,y2) · A⁻¹`, where
 /// `A = [[1,1,1],[1,a²,a],[1,a,a²]]`, `a = exp(j·2π/3)`. Degenerates to
 /// `seq_to_phase_shunt`'s `(2y1+y0)/3` / `(y0−y1)/3` formula when `y1 == y2`.
-fn fortescue_to_phase(y0: Complex<f64>, y1: Complex<f64>, y2: Complex<f64>) -> [[Complex<f64>; 3]; 3] {
+fn fortescue_to_phase(
+    y0: Complex<f64>,
+    y1: Complex<f64>,
+    y2: Complex<f64>,
+) -> [[Complex<f64>; 3]; 3] {
     let one = Complex::new(1.0, 0.0);
     let a = Complex::from_polar(1.0, 2.0 * std::f64::consts::PI / 3.0);
     let a2 = a * a;
@@ -629,10 +659,17 @@ fn zero_seq_available(this_side: u8, other_side: u8) -> bool {
 /// y_series` — and drops the `3·z_grounding` term from the one-port cases,
 /// where it would otherwise sit in series with `1/y0`.
 pub fn transformer_seq_params(
-    y_series: Complex<f64>, y_shunt: Complex<f64>, tap: Complex<f64>,
-    from_status: u8, to_status: u8,
-    winding_from: u8, winding_to: u8,
-    sn: f64, uk: f64, s_base_va: f64, clock: i32,
+    y_series: Complex<f64>,
+    y_shunt: Complex<f64>,
+    tap: Complex<f64>,
+    from_status: u8,
+    to_status: u8,
+    winding_from: u8,
+    winding_to: u8,
+    sn: f64,
+    uk: f64,
+    s_base_va: f64,
+    clock: i32,
 ) -> ([Complex<f64>; 4], [Complex<f64>; 4], [Complex<f64>; 4]) {
     let zero = Complex::new(0.0, 0.0);
     let y1 = branch_calc_param(y_series, y_shunt, tap, from_status, to_status);
@@ -647,7 +684,11 @@ pub fn transformer_seq_params(
     if winding_from == WYE_N && winding_to == WYE_N {
         // YNyn. With both grounding impedances zero, `z0_series` collapses to
         // `1/y_series`, so `y0_series` is just `y_series`.
-        let phase_shift_0 = if matches!(clock, 2 | 6 | 10) { std::f64::consts::PI } else { 0.0 };
+        let phase_shift_0 = if matches!(clock, 2 | 6 | 10) {
+            std::f64::consts::PI
+        } else {
+            0.0
+        };
         let tap0 = Complex::from_polar(k, phase_shift_0);
         y0 = branch_calc_param(y_series, y0_shunt, tap0, from_status, to_status);
     } else if winding_from == WYE_N && from_status == 1 {
@@ -700,7 +741,12 @@ pub fn transformer_seq_params(
 pub fn stamp_transformers_3ph(ybus: &mut YBus, transformers: &[Transformer3PhSeq]) {
     for t in transformers {
         let blocks = transformer3ph_blocks(t);
-        let ends = [(t.from, t.from), (t.from, t.to), (t.to, t.from), (t.to, t.to)];
+        let ends = [
+            (t.from, t.from),
+            (t.from, t.to),
+            (t.to, t.from),
+            (t.to, t.to),
+        ];
         for (block, (bi, bj)) in blocks.iter().zip(ends) {
             for p in 0..3 {
                 for q in 0..3 {
@@ -744,7 +790,10 @@ pub fn source_impedance_pu(sk: f64, rx_ratio: f64, s_base_va: f64) -> (f64, f64)
 /// `(r1, x1, r0, x0)`, where `z01_ratio = z0 / z1` (PGM convention), so the
 /// zero-sequence impedance is `z1 * z01_ratio`.
 pub fn source_impedance_pu_seq(
-    sk: f64, rx_ratio: f64, z01_ratio: f64, s_base_va: f64,
+    sk: f64,
+    rx_ratio: f64,
+    z01_ratio: f64,
+    s_base_va: f64,
 ) -> (f64, f64, f64, f64) {
     let (r1, x1) = source_impedance_pu(sk, rx_ratio, s_base_va);
     let (r0, x0) = (r1 * z01_ratio, x1 * z01_ratio);
@@ -759,9 +808,17 @@ pub fn source_impedance_pu_seq(
 /// changer (`tap_min == tap_max`), and PGM's reference implementation silently clamps rather than
 /// applying the out-of-range offset.
 pub fn transformer_tap(
-    u1: f64, u2: f64, tap_side: u8,
-    tap_pos: i32, tap_min: i32, tap_max: i32, tap_nom: i32, tap_size: f64, clock: i32,
-    u1_rated: f64, u2_rated: f64,
+    u1: f64,
+    u2: f64,
+    tap_side: u8,
+    tap_pos: i32,
+    tap_min: i32,
+    tap_max: i32,
+    tap_nom: i32,
+    tap_size: f64,
+    clock: i32,
+    u1_rated: f64,
+    u2_rated: f64,
 ) -> Complex<f64> {
     let tap_pos = tap_pos.clamp(tap_min.min(tap_max), tap_min.max(tap_max));
     let delta = (tap_pos - tap_nom) as f64 * tap_size;
@@ -798,7 +855,14 @@ pub fn transformer_tap(
 /// PGM's three-winding delta→wye conversion can produce); the sign of `uk` is
 /// carried onto the series reactance, matching PGM's `transformer_params()`.
 pub fn transformer_admittances_ex(
-    u_field: f64, u_base: f64, sn: f64, uk: f64, pk: f64, i0: f64, p0: f64, s_base_va: f64,
+    u_field: f64,
+    u_base: f64,
+    sn: f64,
+    uk: f64,
+    pk: f64,
+    i0: f64,
+    p0: f64,
+    s_base_va: f64,
 ) -> (Complex<f64>, Complex<f64>) {
     let base_y_to = s_base_va / (u_base * u_base);
     let uk_sign = if uk >= 0.0 { 1.0 } else { -1.0 };
@@ -816,7 +880,13 @@ pub fn transformer_admittances_ex(
 }
 
 pub fn transformer_admittances(
-    u2: f64, sn: f64, uk: f64, pk: f64, i0: f64, p0: f64, s_base_va: f64,
+    u2: f64,
+    sn: f64,
+    uk: f64,
+    pk: f64,
+    i0: f64,
+    p0: f64,
+    s_base_va: f64,
 ) -> (Complex<f64>, Complex<f64>) {
     transformer_admittances_ex(u2, u2, sn, uk, pk, i0, p0, s_base_va)
 }
@@ -828,9 +898,15 @@ pub fn transformer_admittances(
 /// `uk_min`/`uk_max` adjustment is not implemented — this three-winding
 /// support only covers fixtures with no such tap-dependent impedance range).
 pub fn three_winding_star_params(
-    sn_1: f64, sn_2: f64, sn_3: f64,
-    uk_12: f64, uk_13: f64, uk_23: f64,
-    pk_12: f64, pk_13: f64, pk_23: f64,
+    sn_1: f64,
+    sn_2: f64,
+    sn_3: f64,
+    uk_12: f64,
+    uk_13: f64,
+    uk_23: f64,
+    pk_12: f64,
+    pk_13: f64,
+    pk_23: f64,
 ) -> ((f64, f64, f64), (f64, f64, f64)) {
     let uk_12r = uk_12 * sn_1 / sn_1.min(sn_2);
     let uk_13r = uk_13 * sn_1 / sn_1.min(sn_3);
@@ -846,7 +922,11 @@ pub fn three_winding_star_params(
     let pk_t1p = 0.5 * (pk_12r + pk_13r - pk_23r);
     let pk_t2p = 0.5 * (pk_12r + pk_23r - pk_13r);
     let pk_t3p = 0.5 * (pk_13r + pk_23r - pk_12r);
-    let pk = (pk_t1p, pk_t2p * (sn_2 / sn_1).powi(2), pk_t3p * (sn_3 / sn_1).powi(2));
+    let pk = (
+        pk_t1p,
+        pk_t2p * (sn_2 / sn_1).powi(2),
+        pk_t3p * (sn_3 / sn_1).powi(2),
+    );
 
     (uk, pk)
 }
@@ -893,15 +973,13 @@ pub fn effective_injection(bus: &Bus) -> (f64, f64) {
 /// did not happen rather than a failure to report.
 pub fn linear_initial_guess(buses: &mut [Bus], ybus: &YBusSparse) {
     let n = buses.len();
-    let unknown_idx: Vec<usize> =
-        (0..n).filter(|&i| matches!(buses[i].bus_type, BusType::PQ)).collect();
+    let unknown_idx: Vec<usize> = (0..n)
+        .filter(|&i| matches!(buses[i].bus_type, BusType::PQ))
+        .collect();
     crate::linear::impedance::solve_constant_admittance(buses, ybus, &unknown_idx);
 }
 
-pub fn power_injections(
-    buses: &[Bus],
-    ybus: &YBusSparse,
-) -> (Vec<f64>, Vec<f64>) {
+pub fn power_injections(buses: &[Bus], ybus: &YBusSparse) -> (Vec<f64>, Vec<f64>) {
     // Calculates the complex power injection into each bus.
     // S = V .* conj(I) where I = Ybus * V
     // S_k = V_k * I_k^*
@@ -909,7 +987,10 @@ pub fn power_injections(
     let mut p = vec![0.0; n];
     let mut q = vec![0.0; n];
 
-    let v: Vec<Complex<f64>> = buses.iter().map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang)).collect();
+    let v: Vec<Complex<f64>> = buses
+        .iter()
+        .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
+        .collect();
     let i = ybus.mul_vec(&v);
 
     for k in 0..n {
@@ -939,8 +1020,17 @@ mod tests {
     fn seq_params_for(winding_from: u8, winding_to: u8, clock: i32) -> [Complex<f64>; 4] {
         let (y_series, y_shunt, tap) = seq_fixture();
         let (y0, _, _) = transformer_seq_params(
-            y_series, y_shunt, tap, 1, 1, winding_from, winding_to,
-            2e7, 0.05, 1e6, clock,
+            y_series,
+            y_shunt,
+            tap,
+            1,
+            1,
+            winding_from,
+            winding_to,
+            2e7,
+            0.05,
+            1e6,
+            clock,
         );
         y0
     }
@@ -958,11 +1048,19 @@ mod tests {
         let y0 = seq_params_for(WYE_N, DELTA, 1);
 
         let expected_yff = (y_shunt + y_series) / (k * k);
-        assert!((y0[0] - expected_yff).norm() < 1e-15, "yff = {}, want {expected_yff}", y0[0]);
+        assert!(
+            (y0[0] - expected_yff).norm() < 1e-15,
+            "yff = {}, want {expected_yff}",
+            y0[0]
+        );
         // A delta winding has no zero-sequence path of its own, so the to side
         // carries only the artificial low-susceptance term.
         let low = -1e-8 * 2e7 / 1e6 / 0.05;
-        assert!((y0[3] - Complex::new(0.0, low)).norm() < 1e-18, "ytt = {}", y0[3]);
+        assert!(
+            (y0[3] - Complex::new(0.0, low)).norm() < 1e-18,
+            "ytt = {}",
+            y0[3]
+        );
         // A one-port term couples nothing across the branch.
         assert_eq!(y0[1], Complex::new(0.0, 0.0));
         assert_eq!(y0[2], Complex::new(0.0, 0.0));
@@ -977,9 +1075,17 @@ mod tests {
         let y0 = seq_params_for(DELTA, WYE_N, 5);
 
         // The `*yn` arm carries no `1/k²` — the to side is the per-unit base.
-        assert!((y0[3] - (y_shunt + y_series)).norm() < 1e-15, "ytt = {}", y0[3]);
+        assert!(
+            (y0[3] - (y_shunt + y_series)).norm() < 1e-15,
+            "ytt = {}",
+            y0[3]
+        );
         let low = -1e-8 * 2e7 / 1e6 / 0.05;
-        assert!((y0[0] - Complex::new(0.0, low)).norm() < 1e-18, "yff = {}", y0[0]);
+        assert!(
+            (y0[0] - Complex::new(0.0, low)).norm() < 1e-18,
+            "yff = {}",
+            y0[0]
+        );
     }
 
     /// The reverse-connected clock positions flip the zero-sequence tap by
@@ -993,8 +1099,18 @@ mod tests {
         // the flip, and a 180° rotation is exactly a sign change.
         assert!((straight[0] - reversed[0]).norm() < 1e-15);
         assert!((straight[3] - reversed[3]).norm() < 1e-15);
-        assert!((straight[1] + reversed[1]).norm() < 1e-15, "{} vs {}", straight[1], reversed[1]);
-        assert!((straight[2] + reversed[2]).norm() < 1e-15, "{} vs {}", straight[2], reversed[2]);
+        assert!(
+            (straight[1] + reversed[1]).norm() < 1e-15,
+            "{} vs {}",
+            straight[1],
+            reversed[1]
+        );
+        assert!(
+            (straight[2] + reversed[2]).norm() < 1e-15,
+            "{} vs {}",
+            straight[2],
+            reversed[2]
+        );
         // Both sides are wye_n, so neither picks up a low-susceptance term.
         assert!(straight[1].norm() > 0.0);
     }
@@ -1006,8 +1122,16 @@ mod tests {
     fn a_pair_with_no_zero_sequence_path_is_not_left_floating() {
         let y0 = seq_params_for(WYE, DELTA, 1);
         let low = -1e-8 * 2e7 / 1e6 / 0.05;
-        assert!((y0[0] - Complex::new(0.0, low)).norm() < 1e-18, "yff = {}", y0[0]);
-        assert!((y0[3] - Complex::new(0.0, low)).norm() < 1e-18, "ytt = {}", y0[3]);
+        assert!(
+            (y0[0] - Complex::new(0.0, low)).norm() < 1e-18,
+            "yff = {}",
+            y0[0]
+        );
+        assert!(
+            (y0[3] - Complex::new(0.0, low)).norm() < 1e-18,
+            "ytt = {}",
+            y0[3]
+        );
     }
 
     /// A zigzag_n winding's zero-sequence impedance is taken as 10% of its
@@ -1080,7 +1204,11 @@ mod tests {
         mark_unreferenced_islands(&mut buses, &classified);
         assert_eq!(buses[1].bus_type, BusType::Slack);
         assert_eq!(buses[1].voltage_mag, 0.0);
-        assert_eq!(buses[3].bus_type, BusType::PQ, "the referenced island is untouched");
+        assert_eq!(
+            buses[3].bus_type,
+            BusType::PQ,
+            "the referenced island is untouched"
+        );
     }
 
     /// A real reference alongside a placeholder still counts: the component is
@@ -1122,7 +1250,9 @@ mod tests {
     /// is 1:1, so the fix does not disturb the ordinary case.
     #[test]
     fn a_matched_transformer_at_nominal_tap_is_unity() {
-        let k = transformer_tap(110000.0, 10500.0, 0, 0, -12, 12, 0, 1320.0, 0, 110000.0, 10500.0);
+        let k = transformer_tap(
+            110000.0, 10500.0, 0, 0, -12, 12, 0, 1320.0, 0, 110000.0, 10500.0,
+        );
         assert!((k.norm() - 1.0).abs() < 1e-12, "got {}", k.norm());
     }
 
@@ -1130,12 +1260,24 @@ mod tests {
     #[test]
     fn the_tap_position_shifts_the_tapped_side() {
         // tap_side 0: -3 steps of 1320 V off a 110 kV winding.
-        let k = transformer_tap(110000.0, 10500.0, 0, -3, -12, 12, 0, 1320.0, 0, 110000.0, 10500.0);
-        assert!((k.norm() - (110000.0 - 3960.0) / 110000.0).abs() < 1e-12, "got {}", k.norm());
+        let k = transformer_tap(
+            110000.0, 10500.0, 0, -3, -12, 12, 0, 1320.0, 0, 110000.0, 10500.0,
+        );
+        assert!(
+            (k.norm() - (110000.0 - 3960.0) / 110000.0).abs() < 1e-12,
+            "got {}",
+            k.norm()
+        );
 
         // tap_side 1 moves u2 instead, which inverts the direction.
-        let k = transformer_tap(110000.0, 10500.0, 1, -3, -12, 12, 0, 100.0, 0, 110000.0, 10500.0);
-        assert!((k.norm() - 10500.0 / (10500.0 - 300.0)).abs() < 1e-12, "got {}", k.norm());
+        let k = transformer_tap(
+            110000.0, 10500.0, 1, -3, -12, 12, 0, 100.0, 0, 110000.0, 10500.0,
+        );
+        assert!(
+            (k.norm() - 10500.0 / (10500.0 - 300.0)).abs() < 1e-12,
+            "got {}",
+            k.norm()
+        );
     }
 
     /// `clock` is a vector-group phase shift of 30 degrees per unit, and must
@@ -1143,7 +1285,11 @@ mod tests {
     #[test]
     fn the_clock_still_sets_the_phase() {
         let k = transformer_tap(10750.0, 420.0, 0, 3, 5, 1, 3, 250.0, 5, 10500.0, 420.0);
-        assert!((k.arg() - 5.0 * std::f64::consts::PI / 6.0).abs() < 1e-12, "got {}", k.arg());
+        assert!(
+            (k.arg() - 5.0 * std::f64::consts::PI / 6.0).abs() < 1e-12,
+            "got {}",
+            k.arg()
+        );
     }
 
     #[test]
@@ -1188,9 +1334,16 @@ mod tests {
 
     fn test_bus(idx: usize, bus_type: BusType) -> Bus {
         Bus {
-            idx, bus_type, voltage_mag: 1.0, voltage_ang: 0.0,
-            p_spec: 0.3, q_spec: 0.1, q_min: -f64::INFINITY, q_max: f64::INFINITY,
-            u_rated: 0.0, zip_terms: Vec::new(),
+            idx,
+            bus_type,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: 0.3,
+            q_spec: 0.1,
+            q_min: -f64::INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 0.0,
+            zip_terms: Vec::new(),
         }
     }
 
@@ -1215,15 +1368,18 @@ mod tests {
     fn classify_two_slack_is_ambiguous() {
         let buses = vec![test_bus(0, BusType::Slack), test_bus(1, BusType::Slack)];
         let classified = classify(&buses, &[vec![0, 1]]);
-        assert!(matches!(classified[0].verdict, Verdict::AmbiguousReferenceBus));
+        assert!(matches!(
+            classified[0].verdict,
+            Verdict::AmbiguousReferenceBus
+        ));
         assert_eq!(classified[0].slack_indices, vec![0, 1]);
     }
 
     #[test]
     fn mark_unreferenced_islands_zeroes_no_reference_component_only() {
         let mut buses = vec![
-            test_bus(0, BusType::PQ),  // component 0: no slack
-            test_bus(1, BusType::PV),  // component 0: no slack
+            test_bus(0, BusType::PQ),    // component 0: no slack
+            test_bus(1, BusType::PV),    // component 0: no slack
             test_bus(2, BusType::Slack), // component 1: solvable, untouched
             test_bus(3, BusType::PQ),    // component 1: solvable, untouched
         ];
@@ -1247,7 +1403,11 @@ mod tests {
 
     #[test]
     fn mark_unreferenced_islands_leaves_ambiguous_component_untouched() {
-        let mut buses = vec![test_bus(0, BusType::Slack), test_bus(1, BusType::Slack), test_bus(2, BusType::PQ)];
+        let mut buses = vec![
+            test_bus(0, BusType::Slack),
+            test_bus(1, BusType::Slack),
+            test_bus(2, BusType::PQ),
+        ];
         let components = vec![vec![0, 1, 2]];
         let classified = classify(&buses, &components);
         mark_unreferenced_islands(&mut buses, &classified);

@@ -1,35 +1,77 @@
 use gridoxide::network::{build_ybus, linear_initial_guess};
+use gridoxide::run_power_flow_analysis_from_ybus;
 use gridoxide::solver::{IslandStatus, JacobianBackend, PersistentSolver};
 use gridoxide::types::{Bus, BusType, Line};
-use gridoxide::run_power_flow_analysis_from_ybus;
 
 /// A minimal 2-bus slack+PQ pair, given as its own `(from, to)` bus-index
 /// pair so callers can place it anywhere in a larger multi-island fixture.
 fn slack_pq_pair(from: usize, to: usize, p_spec: f64, q_spec: f64) -> (Vec<Bus>, Line) {
     let buses = vec![
         Bus {
-            idx: from, bus_type: BusType::Slack, voltage_mag: 1.0, voltage_ang: 0.0,
-            p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY, u_rated: 1.0, zip_terms: vec![],
+            idx: from,
+            bus_type: BusType::Slack,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            q_min: -f64::INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
         Bus {
-            idx: to, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-            p_spec, q_spec, q_min: -f64::INFINITY, q_max: f64::INFINITY, u_rated: 1.0, zip_terms: vec![],
+            idx: to,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec,
+            q_spec,
+            q_min: -f64::INFINITY,
+            q_max: f64::INFINITY,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
     ];
-    (buses, Line { from, to, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 })
+    (
+        buses,
+        Line {
+            from,
+            to,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+    )
 }
 
 fn pq_bus(idx: usize, p_spec: f64, q_spec: f64) -> Bus {
     Bus {
-        idx, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-        p_spec, q_spec, q_min: -f64::INFINITY, q_max: f64::INFINITY, u_rated: 1.0, zip_terms: vec![],
+        idx,
+        bus_type: BusType::PQ,
+        voltage_mag: 1.0,
+        voltage_ang: 0.0,
+        p_spec,
+        q_spec,
+        q_min: -f64::INFINITY,
+        q_max: f64::INFINITY,
+        u_rated: 1.0,
+        zip_terms: vec![],
     }
 }
 
 fn slack_bus(idx: usize) -> Bus {
     Bus {
-        idx, bus_type: BusType::Slack, voltage_mag: 1.0, voltage_ang: 0.0,
-        p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY, u_rated: 1.0, zip_terms: vec![],
+        idx,
+        bus_type: BusType::Slack,
+        voltage_mag: 1.0,
+        voltage_ang: 0.0,
+        p_spec: 0.0,
+        q_spec: 0.0,
+        q_min: -f64::INFINITY,
+        q_max: f64::INFINITY,
+        u_rated: 1.0,
+        zip_terms: vec![],
     }
 }
 
@@ -44,12 +86,14 @@ fn slack_bus(idx: usize) -> Bus {
 #[test]
 fn two_well_formed_islands_match_independent_single_island_solves() {
     let (a, line_a) = slack_pq_pair(0, 1, -0.1, -0.05);
-    let a_alone = run_power_flow_analysis_from_ybus(a.clone(), build_ybus(2, &[line_a.clone()], &[]));
+    let a_alone =
+        run_power_flow_analysis_from_ybus(a.clone(), build_ybus(2, &[line_a.clone()], &[]));
     assert_eq!(a_alone.islands.len(), 1);
     assert_eq!(a_alone.islands[0].status, IslandStatus::Converged);
 
     let (b, line_b) = slack_pq_pair(0, 1, -0.2, -0.02);
-    let b_alone = run_power_flow_analysis_from_ybus(b.clone(), build_ybus(2, &[line_b.clone()], &[]));
+    let b_alone =
+        run_power_flow_analysis_from_ybus(b.clone(), build_ybus(2, &[line_b.clone()], &[]));
     assert_eq!(b_alone.islands.len(), 1);
     assert_eq!(b_alone.islands[0].status, IslandStatus::Converged);
 
@@ -59,7 +103,12 @@ fn two_well_formed_islands_match_independent_single_island_solves() {
     let report = run_power_flow_analysis_from_ybus(buses, build_ybus(4, &[line_a2, line_b2], &[]));
 
     assert_eq!(report.islands.len(), 2);
-    assert!(report.islands.iter().all(|isl| isl.status == IslandStatus::Converged));
+    assert!(
+        report
+            .islands
+            .iter()
+            .all(|isl| isl.status == IslandStatus::Converged)
+    );
 
     assert!((report.buses[1].voltage_mag - a_alone.buses[1].voltage_mag).abs() < 1e-9);
     assert!((report.buses[1].voltage_ang - a_alone.buses[1].voltage_ang).abs() < 1e-9);
@@ -78,7 +127,14 @@ fn no_slack_island_reports_placeholder_without_poisoning_the_other_island() {
     let (mut buses, line_a) = slack_pq_pair(0, 1, -0.1, -0.05);
     buses.push(pq_bus(2, -0.2, -0.05));
     buses.push(pq_bus(3, -0.1, -0.02));
-    let line_b = Line { from: 2, to: 3, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 };
+    let line_b = Line {
+        from: 2,
+        to: 3,
+        r: 0.02,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
 
     let report = run_power_flow_analysis_from_ybus(buses, build_ybus(4, &[line_a, line_b], &[]));
     assert_eq!(report.islands.len(), 2);
@@ -102,8 +158,22 @@ fn no_slack_island_reports_placeholder_without_poisoning_the_other_island() {
 fn ambiguous_island_does_not_poison_a_well_formed_island_either() {
     let mut buses = vec![slack_bus(0), slack_bus(1), pq_bus(2, -0.05, -0.02)];
     let lines = vec![
-        Line { from: 0, to: 2, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let (well_formed, line_c) = slack_pq_pair(3, 4, -0.1, -0.05);
     buses.extend(well_formed);
@@ -113,7 +183,10 @@ fn ambiguous_island_does_not_poison_a_well_formed_island_either() {
     assert_eq!(report.islands.len(), 2);
 
     assert_eq!(report.islands[0].bus_indices, vec![0, 1, 2]);
-    assert_eq!(report.islands[0].status, IslandStatus::AmbiguousReferenceBus);
+    assert_eq!(
+        report.islands[0].status,
+        IslandStatus::AmbiguousReferenceBus
+    );
     assert_eq!(report.islands[0].slack_indices, vec![0, 1]);
 
     assert_eq!(report.islands[1].bus_indices, vec![3, 4]);
@@ -132,13 +205,34 @@ fn three_islands_at_once_report_all_three_statuses_in_ascending_bus_order() {
 
     buses.push(pq_bus(2, -0.2, -0.05));
     buses.push(pq_bus(3, -0.1, -0.02));
-    let line_b = Line { from: 2, to: 3, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 };
+    let line_b = Line {
+        from: 2,
+        to: 3,
+        r: 0.02,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
 
     buses.push(slack_bus(4));
     buses.push(slack_bus(5));
     buses.push(pq_bus(6, -0.05, -0.02));
-    let line_c1 = Line { from: 4, to: 6, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 };
-    let line_c2 = Line { from: 5, to: 6, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 };
+    let line_c1 = Line {
+        from: 4,
+        to: 6,
+        r: 0.02,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
+    let line_c2 = Line {
+        from: 5,
+        to: 6,
+        r: 0.02,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
 
     let lines = vec![line_a, line_b, line_c1, line_c2];
     let report = run_power_flow_analysis_from_ybus(buses, build_ybus(7, &lines, &[]));
@@ -149,7 +243,10 @@ fn three_islands_at_once_report_all_three_statuses_in_ascending_bus_order() {
     assert_eq!(report.islands[1].bus_indices, vec![2, 3]);
     assert_eq!(report.islands[1].status, IslandStatus::NoReferenceBus);
     assert_eq!(report.islands[2].bus_indices, vec![4, 5, 6]);
-    assert_eq!(report.islands[2].status, IslandStatus::AmbiguousReferenceBus);
+    assert_eq!(
+        report.islands[2].status,
+        IslandStatus::AmbiguousReferenceBus
+    );
 }
 
 /// One easy (trivially small loading) island alongside one that's
@@ -165,7 +262,14 @@ fn easy_island_converges_independently_of_a_hard_one_under_a_custom_max_iter() {
     let (mut buses, line_easy) = slack_pq_pair(0, 1, -0.01, -0.005); // easy: negligible loading
     buses.push(slack_bus(2));
     buses.push(pq_bus(3, -3.0, -2.5)); // hard: heavily overloaded for this line
-    let line_hard = Line { from: 2, to: 3, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 };
+    let line_hard = Line {
+        from: 2,
+        to: 3,
+        r: 0.02,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
 
     let ybus = build_ybus(4, &[line_easy, line_hard], &[]).finish();
     linear_initial_guess(&mut buses, &ybus);
@@ -174,7 +278,15 @@ fn easy_island_converges_independently_of_a_hard_one_under_a_custom_max_iter() {
 
     assert_eq!(islands.len(), 2);
     assert_eq!(islands[0].bus_indices, vec![0, 1]);
-    assert_eq!(islands[0].status, IslandStatus::Converged, "easy island should have already converged");
+    assert_eq!(
+        islands[0].status,
+        IslandStatus::Converged,
+        "easy island should have already converged"
+    );
     assert_eq!(islands[1].bus_indices, vec![2, 3]);
-    assert_eq!(islands[1].status, IslandStatus::MaxIterationsReached, "hard island should still be unconverged after only 2 iterations");
+    assert_eq!(
+        islands[1].status,
+        IslandStatus::MaxIterationsReached,
+        "hard island should still be unconverged after only 2 iterations"
+    );
 }

@@ -8,9 +8,9 @@
 //! The cases are converted from the `benchmark-grids` submodule by
 //! `tests/data/pglib_opf.py`, the same as the tests do, which needs a Python
 //! with numpy (`python3` unless `PYTHON` names another).
-use gridoxide::continuation::{run_continuation, ContinuationOptions, LoadingDirection};
-use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
-use gridoxide::qv::{qv_curve, QvOptions, QvStatus};
+use gridoxide::continuation::{ContinuationOptions, LoadingDirection, run_continuation};
+use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
+use gridoxide::qv::{QvOptions, QvStatus, qv_curve};
 use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType};
 
@@ -52,7 +52,10 @@ fn margins(
             &[],
             b,
             QvOptions {
-                pf: PowerFlowOptions { max_iter: 60, ..Default::default() },
+                pf: PowerFlowOptions {
+                    max_iter: 60,
+                    ..Default::default()
+                },
                 v_min: 0.20,
                 ..Default::default()
             },
@@ -69,7 +72,10 @@ fn margins(
 fn main() {
     let names: Vec<String> = std::env::args().skip(1).collect();
     let names = if names.is_empty() {
-        vec!["pglib_opf_case14_ieee".into(), "pglib_opf_case30_ieee".into()]
+        vec![
+            "pglib_opf_case14_ieee".into(),
+            "pglib_opf_case30_ieee".into(),
+        ]
     } else {
         names
     };
@@ -88,7 +94,10 @@ fn main() {
         let rows = margins(&buses, &lines, &transformers);
         println!("  weakest by Q-V reactive margin:");
         for (m, bus, v) in rows.iter().take(5) {
-            println!("     bus {bus:3}  {:8.2} MVAr   nose at |V| {v:.4}", m * 100.0);
+            println!(
+                "     bus {bus:3}  {:8.2} MVAr   nose at |V| {v:.4}",
+                m * 100.0
+            );
         }
 
         // The same networks, ranked by the P-V collapse mode instead.
@@ -98,7 +107,10 @@ fn main() {
             &lines,
             &transformers,
             &[],
-            ContinuationOptions { direction, ..Default::default() },
+            ContinuationOptions {
+                direction,
+                ..Default::default()
+            },
         );
         let pv: Vec<usize> = curve
             .critical

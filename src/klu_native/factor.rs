@@ -17,7 +17,7 @@
 //! case entirely.
 
 use super::analyze::Symbolic;
-use super::kernel::{factor_block, BlockFactor};
+use super::kernel::{BlockFactor, factor_block};
 use super::types::flip;
 
 /// The result of factoring the whole matrix: one `BlockFactor` per BTF
@@ -44,7 +44,14 @@ pub struct Numeric {
 /// structurally or numerically singular (`halt_if_singular` is always true
 /// for gridoxide's fixed `Options`, matching `kernel::factor_block`'s own
 /// contract).
-pub fn factor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym: &Symbolic, tol: f64) -> Option<Numeric> {
+pub fn factor(
+    n: usize,
+    col_ptr: &[i64],
+    row_idx: &[i64],
+    values: &[f64],
+    sym: &Symbolic,
+    tol: f64,
+) -> Option<Numeric> {
     // Inverse of the symbolic P: pinv_sym[oldrow] = the symbolic pivot
     // *position* oldrow maps to -- used to decide whether an entry falls
     // inside the current block (position >= k1) or belongs to an earlier
@@ -127,7 +134,14 @@ pub fn factor(n: usize, col_ptr: &[i64], row_idx: &[i64], values: &[f64], sym: &
         *i = pinv[*i as usize];
     }
 
-    Some(Numeric { blocks, pnum, pinv, off_p, off_i, off_x })
+    Some(Numeric {
+        blocks,
+        pnum,
+        pinv,
+        off_p,
+        off_i,
+        off_x,
+    })
 }
 
 #[cfg(test)]
@@ -141,7 +155,9 @@ mod tests {
         let mut a: Vec<Vec<f64>> = a.to_vec();
         let mut rhs = b.to_vec();
         for col in 0..n {
-            let pivot_row = (col..n).max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs())).unwrap();
+            let pivot_row = (col..n)
+                .max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs()))
+                .unwrap();
             a.swap(col, pivot_row);
             rhs.swap(col, pivot_row);
             for row in (col + 1)..n {
@@ -218,7 +234,12 @@ mod tests {
         let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &entries), &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -245,14 +266,23 @@ mod tests {
         ];
         let (col_ptr, row_idx, values) = to_csc(n, &entries);
         let sym = analyze(n, &col_ptr, &row_idx);
-        assert!(sym.nblocks() >= 2, "fixture should produce multiple BTF blocks, got {}", sym.nblocks());
+        assert!(
+            sym.nblocks() >= 2,
+            "fixture should produce multiple BTF blocks, got {}",
+            sym.nblocks()
+        );
 
         let num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
         let b = vec![1.0, -2.0, 0.5, 3.0, -1.0];
         let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &entries), &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -272,7 +302,8 @@ mod tests {
             let mut entries: Vec<(usize, usize, f64)> = Vec::new();
             let mut row_sums = vec![0.0f64; n];
             let mut off_entries: Vec<(usize, usize, f64)> = Vec::new();
-            #[allow(clippy::needless_range_loop)] // `i` is also compared against `j`, not just an index
+            #[allow(clippy::needless_range_loop)]
+            // `i` is also compared against `j`, not just an index
             for i in 0..n {
                 let mut js: std::collections::BTreeSet<usize> = Default::default();
                 let degree = 1 + (next_f64() * 3.0) as usize;

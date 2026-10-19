@@ -1,14 +1,13 @@
-use std::collections::HashMap;
-use serde::Deserialize;
 use super::branch_flow::Terminal;
-use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use super::network::{
-    branch_calc_param, half_open_branch_shunt,
-    source_impedance_pu, source_impedance_pu_seq, transformer_tap, transformer_admittances,
-    transformer_admittances_ex, transformer_seq_params, tap_ratio_from_voltages, three_winding_star_params,
-    ShuntAdm, ShuntAdm3Ph,
+    ShuntAdm, ShuntAdm3Ph, branch_calc_param, half_open_branch_shunt, source_impedance_pu,
+    source_impedance_pu_seq, tap_ratio_from_voltages, three_winding_star_params,
+    transformer_admittances, transformer_admittances_ex, transformer_seq_params, transformer_tap,
 };
+use super::types::{Bus, BusType, Line, Line3Ph, Transformer, Transformer3PhSeq, ZipKind, ZipTerm};
 use num_complex::Complex;
+use serde::Deserialize;
+use std::collections::HashMap;
 
 // ── Input structs ─────────────────────────────────────────────────────────────
 
@@ -126,20 +125,36 @@ pub const PGM_LINK_Y: Complex<f64> = Complex::new(1e8, 1e8);
 /// same thing.
 pub use crate::topology::IDEAL_CONNECTION_Y as LINK_Y;
 
-fn one() -> f64 { 1.0 }
+fn one() -> f64 {
+    1.0
+}
 /// A three-winding transformer's winding default — see `PgmThreeWindingTransformer`.
-fn wye_n() -> u8 { crate::network::WYE_N }
-fn nan() -> f64 { f64::NAN }
+fn wye_n() -> u8 {
+    crate::network::WYE_N
+}
+fn nan() -> f64 {
+    f64::NAN
+}
 /// power-grid-model's documented `source.sk` default (`components.md`).
-fn default_sk() -> f64 { 1e10 }
+fn default_sk() -> f64 {
+    1e10
+}
 /// power-grid-model's documented `source.rx_ratio` default (`components.md`).
-fn default_rx_ratio() -> f64 { 0.1 }
-fn nan3() -> [f64; 3] { [f64::NAN; 3] }
-fn one_u8() -> u8 { 1 }
+fn default_rx_ratio() -> f64 {
+    0.1
+}
+fn nan3() -> [f64; 3] {
+    [f64::NAN; 3]
+}
+fn one_u8() -> u8 {
+    1
+}
 /// power-grid-model's `FaultPhase::default_value`. Not a phase: a sentinel
 /// meaning "whichever phases this fault type implies", resolved against the
 /// fault type by `shortcircuit::FaultPhase::resolve`.
-fn default_fault_phase() -> i8 { -1 }
+fn default_fault_phase() -> i8 {
+    -1
+}
 
 /// Deserializes a number that power-grid-model may also write as the string
 /// `"inf"`.
@@ -212,7 +227,9 @@ pub struct PgmSource {
 
 /// PGM's ZIP-model type code: 0 = constant power, 1 = constant impedance
 /// (S ∝ |V|²), 2 = constant current (S ∝ |V|).
-fn default_load_type() -> u8 { 0 }
+fn default_load_type() -> u8 {
+    0
+}
 
 #[derive(Clone, Deserialize)]
 pub struct PgmSymLoad {
@@ -780,14 +797,24 @@ fn half_open_line(ln: &PgmLine, omega: f64, z_base: f64, idx: usize) -> Line {
     let (r, x) = crate::topology::clamp_branch_impedance(ln.r1 / z_base, ln.x1 / z_base);
     let y_series = Complex::new(1.0, 0.0) / Complex::new(r, x);
     let y_eq = half_open_branch_shunt(y_series, y_shunt);
-    Line { from: idx, to: idx, r: 0.0, x: 0.0, b_shunt: y_eq.im, g_shunt: y_eq.re }
+    Line {
+        from: idx,
+        to: idx,
+        r: 0.0,
+        x: 0.0,
+        b_shunt: y_eq.im,
+        g_shunt: y_eq.re,
+    }
 }
 
 /// Returns a stable node-ID → 0-based-index map (sorted by node ID).
 pub fn node_id_to_idx(input: &PgmInput) -> HashMap<u64, usize> {
     let mut ids: Vec<u64> = input.data.node.iter().map(|n| n.id).collect();
     ids.sort_unstable();
-    ids.into_iter().enumerate().map(|(idx, id)| (id, idx)).collect()
+    ids.into_iter()
+        .enumerate()
+        .map(|(idx, id)| (id, idx))
+        .collect()
 }
 
 /// Converts active `shunt` entries to per-unit self-admittances, for stamping
@@ -798,13 +825,20 @@ pub fn pgm_shunts_1ph(
     id_to_idx: &HashMap<u64, usize>,
     s_base_va: f64,
 ) -> Vec<ShuntAdm> {
-    let id_to_u_rated: HashMap<u64, f64> = input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
-    input.data.shunt.iter()
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
+    input
+        .data
+        .shunt
+        .iter()
         .filter(|s| s.status != 0)
         .map(|s| {
             let u_rated = id_to_u_rated[&s.node];
             let base_y = s_base_va / (u_rated * u_rated);
-            ShuntAdm { at: id_to_idx[&s.node], y: Complex::new(s.g1, s.b1) / base_y }
+            ShuntAdm {
+                at: id_to_idx[&s.node],
+                y: Complex::new(s.g1, s.b1) / base_y,
+            }
         })
         .collect()
 }
@@ -818,8 +852,12 @@ pub fn pgm_shunts_3ph(
     id_to_idx: &HashMap<u64, usize>,
     s_base_va: f64,
 ) -> Vec<ShuntAdm3Ph> {
-    let id_to_u_rated: HashMap<u64, f64> = input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
-    input.data.shunt.iter()
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
+    input
+        .data
+        .shunt
+        .iter()
         .filter(|s| s.status != 0)
         .map(|s| {
             let u_rated = id_to_u_rated[&s.node];
@@ -931,12 +969,15 @@ pub fn three_winding_legs(
     // is pinned to `u1_rated` (physical, fixed), which is why
     // `transformer_admittances_ex` always takes `(u1_local, u1_rated)` whichever
     // leg is being built.
-    let (t1_series, t1_shunt) =
-        transformer_admittances_ex(u1_local, u1_rated, t.sn_1, uk_t1, pk_t1, t.i0, t.p0, s_base_va);
-    let (t2_series, t2_shunt) =
-        transformer_admittances_ex(u1_local, u1_rated, t.sn_2, uk_t2, pk_t2, 0.0, 0.0, s_base_va);
-    let (t3_series, t3_shunt) =
-        transformer_admittances_ex(u1_local, u1_rated, t.sn_3, uk_t3, pk_t3, 0.0, 0.0, s_base_va);
+    let (t1_series, t1_shunt) = transformer_admittances_ex(
+        u1_local, u1_rated, t.sn_1, uk_t1, pk_t1, t.i0, t.p0, s_base_va,
+    );
+    let (t2_series, t2_shunt) = transformer_admittances_ex(
+        u1_local, u1_rated, t.sn_2, uk_t2, pk_t2, 0.0, 0.0, s_base_va,
+    );
+    let (t3_series, t3_shunt) = transformer_admittances_ex(
+        u1_local, u1_rated, t.sn_3, uk_t3, pk_t3, 0.0, 0.0, s_base_va,
+    );
 
     [
         ThreeWindingLeg {
@@ -986,57 +1027,100 @@ pub fn pgm_transformers_3ph(
     let id_to_u_rated: HashMap<u64, f64> =
         input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
     let n_nodes = input.data.node.len();
-    input.data.transformer.iter()
+    input
+        .data
+        .transformer
+        .iter()
         .map(|t| {
             let tap = transformer_tap(
-                t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size,
-                t.clock, id_to_u_rated[&t.from_node], id_to_u_rated[&t.to_node],
+                t.u1,
+                t.u2,
+                t.tap_side,
+                t.tap_pos,
+                t.tap_min,
+                t.tap_max,
+                t.tap_nom,
+                t.tap_size,
+                t.clock,
+                id_to_u_rated[&t.from_node],
+                id_to_u_rated[&t.to_node],
             );
-            let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
+            let (y_series, y_shunt) =
+                transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
             let (y0, y1, y2) = transformer_seq_params(
-                y_series, y_shunt, tap, t.from_status, t.to_status,
-                t.winding_from, t.winding_to, t.sn, t.uk, s_base_va, t.clock,
+                y_series,
+                y_shunt,
+                tap,
+                t.from_status,
+                t.to_status,
+                t.winding_from,
+                t.winding_to,
+                t.sn,
+                t.uk,
+                s_base_va,
+                t.clock,
             );
             Transformer3PhSeq {
                 from: id_to_idx[&t.from_node],
                 to: id_to_idx[&t.to_node],
-                y0, y1, y2,
+                y0,
+                y1,
+                y2,
             }
         })
         // Links, after the transformers — the position `pgm_3ph_maps` assigns
         // them, and the one the short-circuit path already used. A link is a
         // branch like any other here; dropping it leaves whatever hangs off it
         // de-energized and absent from the answer.
-        .chain(input.data.link.iter().filter_map(|lk| link_seq_params(lk, id_to_idx)))
+        .chain(
+            input
+                .data
+                .link
+                .iter()
+                .filter_map(|lk| link_seq_params(lk, id_to_idx)),
+        )
         // Then the three-winding transformers, three legs each, to the star
         // node `pgm_to_3ph_network` appended for them. Same order as the
         // symmetric conversion, so the two agree about what a branch index is.
-        .chain(input.data.three_winding_transformer.iter().enumerate().flat_map(|(i, t)| {
-            let star = n_nodes + i;
-            three_winding_legs(t, &id_to_u_rated, s_base_va)
-                .into_iter()
-                .map(move |leg| {
-                    // The star side is always in service — it is an internal
-                    // node, not a terminal anyone can open — so only the
-                    // physical side's status varies, exactly as in
-                    // power-grid-model's own two-winding equivalents.
-                    let (y0, y1, y2) = crate::network::transformer_seq_params(
-                        leg.y_series,
-                        leg.y_shunt,
-                        leg.tap,
-                        leg.status,
-                        1,
-                        leg.winding_from,
-                        leg.winding_to,
-                        leg.sn,
-                        leg.uk,
-                        s_base_va,
-                        leg.clock,
-                    );
-                    Transformer3PhSeq { from: id_to_idx[&leg.node], to: star, y0, y1, y2 }
-                })
-                .collect::<Vec<_>>()
-        }))
+        .chain(
+            input
+                .data
+                .three_winding_transformer
+                .iter()
+                .enumerate()
+                .flat_map(|(i, t)| {
+                    let star = n_nodes + i;
+                    three_winding_legs(t, &id_to_u_rated, s_base_va)
+                        .into_iter()
+                        .map(move |leg| {
+                            // The star side is always in service — it is an internal
+                            // node, not a terminal anyone can open — so only the
+                            // physical side's status varies, exactly as in
+                            // power-grid-model's own two-winding equivalents.
+                            let (y0, y1, y2) = crate::network::transformer_seq_params(
+                                leg.y_series,
+                                leg.y_shunt,
+                                leg.tap,
+                                leg.status,
+                                1,
+                                leg.winding_from,
+                                leg.winding_to,
+                                leg.sn,
+                                leg.uk,
+                                s_base_va,
+                                leg.clock,
+                            );
+                            Transformer3PhSeq {
+                                from: id_to_idx[&leg.node],
+                                to: star,
+                                y0,
+                                y1,
+                                y2,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                }),
+        )
         .collect()
 }
 
@@ -1152,15 +1236,10 @@ impl PgmNetwork {
 /// afterwards.
 ///
 /// [`pgm_to_buses_and_branches`] is the same conversion with the maps dropped.
-pub fn pgm_to_network(
-    input: PgmInput,
-    s_base_va: f64,
-    freq_hz: f64,
-) -> PgmNetwork {
+pub fn pgm_to_network(input: PgmInput, s_base_va: f64, freq_hz: f64) -> PgmNetwork {
     let id_to_idx = node_id_to_idx(&input);
-    let id_to_u_rated: HashMap<u64, f64> = input.data.node.iter()
-        .map(|n| (n.id, n.u_rated))
-        .collect();
+    let id_to_u_rated: HashMap<u64, f64> =
+        input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
 
     // Accumulate per-node net injection from active loads (load = negative
     // injection) and gens (generation = positive injection). Constant-power
@@ -1182,8 +1261,14 @@ pub fn pgm_to_network(
         let q = if q.is_finite() { q } else { 0.0 };
         let s = Complex::new(p, q) * sign / s_base_va;
         match load_type {
-            1 => zip_map.entry(node).or_default().push(ZipTerm { s_const: s, kind: ZipKind::ConstImpedance }),
-            2 => zip_map.entry(node).or_default().push(ZipTerm { s_const: s, kind: ZipKind::ConstCurrent }),
+            1 => zip_map.entry(node).or_default().push(ZipTerm {
+                s_const: s,
+                kind: ZipKind::ConstImpedance,
+            }),
+            2 => zip_map.entry(node).or_default().push(ZipTerm {
+                s_const: s,
+                kind: ZipKind::ConstCurrent,
+            }),
             _ => {
                 *p_inj.entry(node).or_insert(0.0) += s.re;
                 *q_inj.entry(node).or_insert(0.0) += s.im;
@@ -1191,23 +1276,43 @@ pub fn pgm_to_network(
         }
     };
     for load in &input.data.sym_load {
-        if load.status == 0 { continue; }
-        accumulate(load.node, load.load_type, load.p_specified, load.q_specified, -1.0);
+        if load.status == 0 {
+            continue;
+        }
+        accumulate(
+            load.node,
+            load.load_type,
+            load.p_specified,
+            load.q_specified,
+            -1.0,
+        );
     }
     for sgen in &input.data.sym_gen {
-        if sgen.status == 0 { continue; }
-        accumulate(sgen.node, sgen.load_type, sgen.p_specified, sgen.q_specified, 1.0);
+        if sgen.status == 0 {
+            continue;
+        }
+        accumulate(
+            sgen.node,
+            sgen.load_type,
+            sgen.p_specified,
+            sgen.q_specified,
+            1.0,
+        );
     }
     // Asymmetric (3-phase) loads/gens are folded into their total three-phase
     // power for the symmetric (positive-sequence) equivalent.
     for load in &input.data.asym_load {
-        if load.status == 0 { continue; }
+        if load.status == 0 {
+            continue;
+        }
         let p: f64 = load.p_specified.iter().sum();
         let q: f64 = load.q_specified.iter().sum();
         accumulate(load.node, load.load_type, p, q, -1.0);
     }
     for agen in &input.data.asym_gen {
-        if agen.status == 0 { continue; }
+        if agen.status == 0 {
+            continue;
+        }
         let p: f64 = agen.p_specified.iter().sum();
         let q: f64 = agen.q_specified.iter().sum();
         accumulate(agen.node, agen.load_type, p, q, 1.0);
@@ -1243,16 +1348,29 @@ pub fn pgm_to_network(
 
     // PV buses: an active `voltage_regulator` pins its regulated `sym_gen`'s
     // bus voltage magnitude to `u_ref`, letting Q float (see `PgmVoltageRegulator`).
-    let sym_gen_node: HashMap<u64, u64> = input.data.sym_gen.iter().map(|g| (g.id, g.node)).collect();
+    let sym_gen_node: HashMap<u64, u64> =
+        input.data.sym_gen.iter().map(|g| (g.id, g.node)).collect();
     for vr in &input.data.voltage_regulator {
-        if vr.status == 0 { continue; }
-        let Some(&node) = sym_gen_node.get(&vr.regulated_object) else { continue };
+        if vr.status == 0 {
+            continue;
+        }
+        let Some(&node) = sym_gen_node.get(&vr.regulated_object) else {
+            continue;
+        };
         let idx = id_to_idx[&node];
         if buses[idx].bus_type == BusType::PQ {
             buses[idx].bus_type = BusType::PV;
             buses[idx].voltage_mag = vr.u_ref;
-            buses[idx].q_min = if vr.q_min.is_nan() { -f64::INFINITY } else { vr.q_min / s_base_va };
-            buses[idx].q_max = if vr.q_max.is_nan() { f64::INFINITY } else { vr.q_max / s_base_va };
+            buses[idx].q_min = if vr.q_min.is_nan() {
+                -f64::INFINITY
+            } else {
+                vr.q_min / s_base_va
+            };
+            buses[idx].q_max = if vr.q_max.is_nan() {
+                f64::INFINITY
+            } else {
+                vr.q_max / s_base_va
+            };
         }
     }
 
@@ -1273,10 +1391,8 @@ pub fn pgm_to_network(
                 // A line short enough to be a jumper would otherwise put an
                 // unbounded admittance into the Y-bus; see
                 // `topology::ZERO_IMPEDANCE_THRESHOLD`.
-                let (r, x) = crate::topology::clamp_branch_impedance(
-                    ln.r1 / z_base,
-                    ln.x1 / z_base,
-                );
+                let (r, x) =
+                    crate::topology::clamp_branch_impedance(ln.r1 / z_base, ln.x1 / z_base);
                 branch_idx.insert(ln.id, lines.len());
                 lines.push(Line {
                     from: id_to_idx[&ln.from_node],
@@ -1316,10 +1432,20 @@ pub fn pgm_to_network(
     let mut three_winding_pos: HashMap<u64, [usize; 3]> = HashMap::new();
     for t in &input.data.transformer {
         let tap = transformer_tap(
-            t.u1, t.u2, t.tap_side, t.tap_pos, t.tap_min, t.tap_max, t.tap_nom, t.tap_size, t.clock,
-            id_to_u_rated[&t.from_node], id_to_u_rated[&t.to_node],
+            t.u1,
+            t.u2,
+            t.tap_side,
+            t.tap_pos,
+            t.tap_min,
+            t.tap_max,
+            t.tap_nom,
+            t.tap_size,
+            t.clock,
+            id_to_u_rated[&t.from_node],
+            id_to_u_rated[&t.to_node],
         );
-        let (y_series, y_shunt) = transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
+        let (y_series, y_shunt) =
+            transformer_admittances(t.u2, t.sn, t.uk, t.pk, t.i0, t.p0, s_base_va);
         transformer_pos.insert(t.id, transformers.len());
         transformers.push(Transformer {
             from: id_to_idx[&t.from_node],
@@ -1376,7 +1502,11 @@ pub fn pgm_to_network(
 
         three_winding_pos.insert(
             t.id,
-            [transformers.len(), transformers.len() + 1, transformers.len() + 2],
+            [
+                transformers.len(),
+                transformers.len() + 1,
+                transformers.len() + 2,
+            ],
         );
         for leg in &legs {
             transformers.push(Transformer {
@@ -1393,7 +1523,13 @@ pub fn pgm_to_network(
     let n_3wdg = input.data.three_winding_transformer.len();
 
     // Virtual Slack bus + source-impedance Line for each active source.
-    for (i, src) in input.data.source.iter().filter(|s| s.status != 0).enumerate() {
+    for (i, src) in input
+        .data
+        .source
+        .iter()
+        .filter(|s| s.status != 0)
+        .enumerate()
+    {
         let virtual_idx = n_nodes + n_3wdg + i;
         let (r_s, x_s) = source_impedance_pu(src.sk, src.rx_ratio, s_base_va);
         buses.push(Bus {
@@ -1409,12 +1545,23 @@ pub fn pgm_to_network(
             zip_terms: Vec::new(),
         });
         source_branch_idx.insert(src.id, lines.len());
-        lines.push(Line { from: virtual_idx, to: id_to_idx[&src.node], r: r_s, x: x_s, b_shunt: 0.0, g_shunt: 0.0 });
+        lines.push(Line {
+            from: virtual_idx,
+            to: id_to_idx[&src.node],
+            r: r_s,
+            x: x_s,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        });
     }
 
     // `lines` is final now, so transformer positions can become flat indices.
     let n_lines = lines.len();
-    branch_idx.extend(transformer_pos.into_iter().map(|(id, pos)| (id, n_lines + pos)));
+    branch_idx.extend(
+        transformer_pos
+            .into_iter()
+            .map(|(id, pos)| (id, n_lines + pos)),
+    );
     three_winding_branch_idx.extend(
         three_winding_pos
             .into_iter()
@@ -1425,7 +1572,11 @@ pub fn pgm_to_network(
     // accumulation closure above, which only sees active constant-power
     // appliances; a sensor may reference an inactive or ZIP-modelled one.
     let mut appliance_bus: HashMap<u64, usize> = HashMap::new();
-    for (id, node) in input.data.sym_load.iter().map(|a| (a.id, a.node))
+    for (id, node) in input
+        .data
+        .sym_load
+        .iter()
+        .map(|a| (a.id, a.node))
         .chain(input.data.asym_load.iter().map(|a| (a.id, a.node)))
         .chain(input.data.sym_gen.iter().map(|a| (a.id, a.node)))
         .chain(input.data.asym_gen.iter().map(|a| (a.id, a.node)))
@@ -1442,7 +1593,11 @@ pub fn pgm_to_network(
     // enters. Star buses of three-winding transformers qualify, which is the
     // textbook example of the constraint being worth having.
     let mut zero_injection = vec![true; buses.len()];
-    for (node, status) in input.data.sym_load.iter().map(|a| (a.node, a.status))
+    for (node, status) in input
+        .data
+        .sym_load
+        .iter()
+        .map(|a| (a.node, a.status))
         .chain(input.data.asym_load.iter().map(|a| (a.node, a.status)))
         .chain(input.data.sym_gen.iter().map(|a| (a.node, a.status)))
         .chain(input.data.asym_gen.iter().map(|a| (a.node, a.status)))
@@ -1621,7 +1776,11 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> PgmNetwork3Ph {
     }
 
     let mut appliance_bus = HashMap::new();
-    for (id, node) in input.data.sym_load.iter().map(|a| (a.id, a.node))
+    for (id, node) in input
+        .data
+        .sym_load
+        .iter()
+        .map(|a| (a.id, a.node))
         .chain(input.data.asym_load.iter().map(|a| (a.id, a.node)))
         .chain(input.data.sym_gen.iter().map(|a| (a.id, a.node)))
         .chain(input.data.asym_gen.iter().map(|a| (a.id, a.node)))
@@ -1647,7 +1806,11 @@ pub fn pgm_3ph_maps(input: &PgmInput) -> PgmNetwork3Ph {
     for flag in zero_injection.iter_mut().skip(n_physical + n_3wdg) {
         *flag = false;
     }
-    for node in input.data.sym_load.iter().map(|a| a.node)
+    for node in input
+        .data
+        .sym_load
+        .iter()
+        .map(|a| a.node)
         .chain(input.data.asym_load.iter().map(|a| a.node))
         .chain(input.data.sym_gen.iter().map(|a| a.node))
         .chain(input.data.asym_gen.iter().map(|a| a.node))
@@ -1717,22 +1880,42 @@ pub fn pgm_lines_3ph(
                 lines.push(Line3Ph {
                     from: from_phys,
                     to: to_phys,
-                    r1: r1_pu, x1: x1_pu, b1, g1,
-                    r0: r0_pu, x0: x0_pu, b0, g0,
+                    r1: r1_pu,
+                    x1: x1_pu,
+                    b1,
+                    g1,
+                    r0: r0_pu,
+                    x0: x0_pu,
+                    b0,
+                    g0,
                 });
             }
             (1, 0) => {
                 lines.push(Line3Ph {
-                    from: from_phys, to: from_phys,
-                    r1: 0.0, x1: 0.0, b1, g1,
-                    r0: 0.0, x0: 0.0, b0, g0,
+                    from: from_phys,
+                    to: from_phys,
+                    r1: 0.0,
+                    x1: 0.0,
+                    b1,
+                    g1,
+                    r0: 0.0,
+                    x0: 0.0,
+                    b0,
+                    g0,
                 });
             }
             (0, 1) => {
                 lines.push(Line3Ph {
-                    from: to_phys, to: to_phys,
-                    r1: 0.0, x1: 0.0, b1, g1,
-                    r0: 0.0, x0: 0.0, b0, g0,
+                    from: to_phys,
+                    to: to_phys,
+                    r1: 0.0,
+                    x1: 0.0,
+                    b1,
+                    g1,
+                    r0: 0.0,
+                    x0: 0.0,
+                    b0,
+                    g0,
                 });
             }
             _ => {}
@@ -1816,11 +1999,7 @@ pub struct ScNetwork3Ph {
 /// choice, which is a per-calculation option rather than a property of the
 /// network, so [`ScSource`] carries the angle and the rated voltage and
 /// `shortcircuit` combines them with `c`.
-pub fn pgm_to_3ph_sc_network(
-    input: &PgmInput,
-    s_base_va: f64,
-    freq_hz: f64,
-) -> ScNetwork3Ph {
+pub fn pgm_to_3ph_sc_network(input: &PgmInput, s_base_va: f64, freq_hz: f64) -> ScNetwork3Ph {
     let node_idx = node_id_to_idx(input);
     let id_to_u_rated: HashMap<u64, f64> =
         input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
@@ -1841,14 +2020,27 @@ pub fn pgm_to_3ph_sc_network(
         branch_ids.push(ln.id);
         branch_closed.push([ln.from_status != 0, ln.to_status != 0]);
     }
-    assert_eq!(branch_ids.len(), lines.len(), "line ids out of step with pgm_lines_3ph");
+    assert_eq!(
+        branch_ids.len(),
+        lines.len(),
+        "line ids out of step with pgm_lines_3ph"
+    );
     for t in &input.data.transformer {
         branch_ids.push(t.id);
         branch_closed.push([t.from_status != 0, t.to_status != 0]);
     }
-    let shunt_ids: Vec<u64> =
-        input.data.shunt.iter().filter(|s| s.status != 0).map(|s| s.id).collect();
-    assert_eq!(shunt_ids.len(), shunts.len(), "shunt ids out of step with pgm_shunts_3ph");
+    let shunt_ids: Vec<u64> = input
+        .data
+        .shunt
+        .iter()
+        .filter(|s| s.status != 0)
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(
+        shunt_ids.len(),
+        shunts.len(),
+        "shunt ids out of step with pgm_shunts_3ph"
+    );
 
     // Links, which `pgm_transformers_3ph` appends after the transformers with
     // the same both-open rule, so this path and the estimator cannot disagree
@@ -1916,7 +2108,11 @@ pub fn pgm_to_3ph_network(
         input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
 
     let n_nodes = input.data.node.len();
-    let phase_ang = [0.0_f64, -2.0 * std::f64::consts::PI / 3.0, 2.0 * std::f64::consts::PI / 3.0];
+    let phase_ang = [
+        0.0_f64,
+        -2.0 * std::f64::consts::PI / 3.0,
+        2.0 * std::f64::consts::PI / 3.0,
+    ];
 
     // Per-node, per-phase net injection [phase_a, phase_b, phase_c] in p.u.,
     // plus per-phase ZIP terms for constant-current/-impedance loads and gens.
@@ -1926,13 +2122,27 @@ pub fn pgm_to_3ph_network(
     let mut q_inj: HashMap<u64, [f64; 3]> = HashMap::new();
     let mut zip_map: HashMap<u64, [Vec<ZipTerm>; 3]> = HashMap::new();
     let s_base_1ph = s_base_va / 3.0;
-    let mut accumulate3 = |node: u64, load_type: u8, p: [f64; 3], q: [f64; 3], sign: f64, base: f64| {
+    let mut accumulate3 = |node: u64,
+                           load_type: u8,
+                           p: [f64; 3],
+                           q: [f64; 3],
+                           sign: f64,
+                           base: f64| {
         match load_type {
             1 | 2 => {
-                let kind = if load_type == 1 { ZipKind::ConstImpedance } else { ZipKind::ConstCurrent };
-                let entry = zip_map.entry(node).or_insert_with(|| [Vec::new(), Vec::new(), Vec::new()]);
+                let kind = if load_type == 1 {
+                    ZipKind::ConstImpedance
+                } else {
+                    ZipKind::ConstCurrent
+                };
+                let entry = zip_map
+                    .entry(node)
+                    .or_insert_with(|| [Vec::new(), Vec::new(), Vec::new()]);
                 for ph in 0..3 {
-                    entry[ph].push(ZipTerm { s_const: Complex::new(p[ph], q[ph]) * sign / base, kind });
+                    entry[ph].push(ZipTerm {
+                        s_const: Complex::new(p[ph], q[ph]) * sign / base,
+                        kind,
+                    });
                 }
             }
             _ => {
@@ -1946,23 +2156,45 @@ pub fn pgm_to_3ph_network(
         }
     };
     for load in &input.data.asym_load {
-        if load.status == 0 { continue; }
-        accumulate3(load.node, load.load_type, load.p_specified, load.q_specified, -1.0, s_base_1ph);
+        if load.status == 0 {
+            continue;
+        }
+        accumulate3(
+            load.node,
+            load.load_type,
+            load.p_specified,
+            load.q_specified,
+            -1.0,
+            s_base_1ph,
+        );
     }
     for agen in &input.data.asym_gen {
-        if agen.status == 0 { continue; }
-        accumulate3(agen.node, agen.load_type, agen.p_specified, agen.q_specified, 1.0, s_base_1ph);
+        if agen.status == 0 {
+            continue;
+        }
+        accumulate3(
+            agen.node,
+            agen.load_type,
+            agen.p_specified,
+            agen.q_specified,
+            1.0,
+            s_base_1ph,
+        );
     }
     // sym_load/sym_gen p_specified is 3-phase total; each phase gets 1/3 of
     // total, and P_1ph_pu = (P_total/3) / (s_base/3) = P_total / s_base.
     for load in &input.data.sym_load {
-        if load.status == 0 { continue; }
+        if load.status == 0 {
+            continue;
+        }
         let p = [load.p_specified; 3];
         let q = [load.q_specified; 3];
         accumulate3(load.node, load.load_type, p, q, -1.0, s_base_va);
     }
     for sgen in &input.data.sym_gen {
-        if sgen.status == 0 { continue; }
+        if sgen.status == 0 {
+            continue;
+        }
         let p = [sgen.p_specified; 3];
         let q = [sgen.q_specified; 3];
         accumulate3(sgen.node, sgen.load_type, p, q, 1.0, s_base_va);
@@ -2036,7 +2268,13 @@ pub fn pgm_to_3ph_network(
     let n_3wdg = input.data.three_winding_transformer.len();
 
     // Virtual Slack buses + source-impedance lines for each active source.
-    for (i, src) in input.data.source.iter().filter(|s| s.status != 0).enumerate() {
+    for (i, src) in input
+        .data
+        .source
+        .iter()
+        .filter(|s| s.status != 0)
+        .enumerate()
+    {
         let virtual_phys = n_nodes + n_3wdg + i;
         let (r1_s, x1_s, r0_s, x0_s) =
             source_impedance_pu_seq(src.sk, src.rx_ratio, src.z01_ratio, s_base_va);
@@ -2062,8 +2300,14 @@ pub fn pgm_to_3ph_network(
         lines.push(Line3Ph {
             from: virtual_phys,
             to: id_to_idx[&src.node],
-            r1: r1_s, x1: x1_s, b1: 0.0, g1: 0.0,
-            r0: r0_s, x0: x0_s, b0: 0.0, g0: 0.0,
+            r1: r1_s,
+            x1: x1_s,
+            b1: 0.0,
+            g1: 0.0,
+            r0: r0_s,
+            x0: x0_s,
+            b0: 0.0,
+            g0: 0.0,
         });
     }
 

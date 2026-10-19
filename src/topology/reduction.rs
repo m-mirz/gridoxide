@@ -149,7 +149,9 @@ pub struct UnionFind {
 
 impl UnionFind {
     pub fn new(n: usize) -> Self {
-        UnionFind { parent: (0..n).collect() }
+        UnionFind {
+            parent: (0..n).collect(),
+        }
     }
 
     pub fn find(&mut self, x: usize) -> usize {
@@ -282,7 +284,10 @@ mod tests {
     /// A branch at exactly zero has no ratio to preserve.
     #[test]
     fn exactly_zero_becomes_purely_reactive() {
-        assert_eq!(clamp_branch_impedance(0.0, 0.0), (0.0, ideal_connection_z()));
+        assert_eq!(
+            clamp_branch_impedance(0.0, 0.0),
+            (0.0, ideal_connection_z())
+        );
     }
 
     /// The smallest legitimate branch in the committed fixtures is 1.0e-6 p.u.

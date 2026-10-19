@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use gridoxide::linear::{DcApproximation, DcIslandStatus, DcOptions, LinearIslandStatus};
-use gridoxide::network::{build_ybus, stamp_shunts, ShuntAdm};
+use gridoxide::network::{ShuntAdm, build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
 use gridoxide::solver::{
     IslandStatus, PowerFlowInit, PowerFlowMethod, PowerFlowOptions, SolveStatus,
@@ -61,8 +61,16 @@ fn default_options_reproduce_the_original_entry_point() {
             "{name}: iteration count differs"
         );
         for (a, b) in original.buses.iter().zip(&via_options.buses) {
-            assert_eq!(a.voltage_mag.to_bits(), b.voltage_mag.to_bits(), "{name}: |V| differs");
-            assert_eq!(a.voltage_ang.to_bits(), b.voltage_ang.to_bits(), "{name}: angle differs");
+            assert_eq!(
+                a.voltage_mag.to_bits(),
+                b.voltage_mag.to_bits(),
+                "{name}: |V| differs"
+            );
+            assert_eq!(
+                a.voltage_ang.to_bits(),
+                b.voltage_ang.to_bits(),
+                "{name}: angle differs"
+            );
         }
         assert!(via_options.dc.is_none() && via_options.linear.is_none());
     }
@@ -76,7 +84,14 @@ fn each_method_reports_through_its_own_channel() {
     let path = fixture("symmetric/transmission-case");
 
     let (buses, lines, transformers, shunts) = load(&path);
-    let newton = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), PowerFlowOptions::default());
+    let newton = run_power_flow(
+        buses,
+        &lines,
+        &transformers,
+        &shunts,
+        gridoxide::TapData::none(),
+        PowerFlowOptions::default(),
+    );
     assert!(!newton.islands.is_empty());
     assert!(newton.stats.iterations() > 0);
     assert!(newton.dc.is_none() && newton.linear.is_none());
@@ -88,10 +103,18 @@ fn each_method_reports_through_its_own_channel() {
         &transformers,
         &shunts,
         gridoxide::TapData::none(),
-        PowerFlowOptions { method: PowerFlowMethod::Dc, ..Default::default() },
+        PowerFlowOptions {
+            method: PowerFlowMethod::Dc,
+            ..Default::default()
+        },
     );
     let solution = dc.dc.as_ref().expect("DC must report a DcSolution");
-    assert!(solution.islands.iter().all(|i| i.status == DcIslandStatus::Solved));
+    assert!(
+        solution
+            .islands
+            .iter()
+            .all(|i| i.status == DcIslandStatus::Solved)
+    );
     assert_eq!(dc.stats.status, SolveStatus::Converged);
     // A direct solve takes no iterations, and says so rather than claiming one.
     assert_eq!(dc.stats.iterations(), 0);
@@ -104,10 +127,21 @@ fn each_method_reports_through_its_own_channel() {
         &transformers,
         &shunts,
         gridoxide::TapData::none(),
-        PowerFlowOptions { method: PowerFlowMethod::LinearImpedance, ..Default::default() },
+        PowerFlowOptions {
+            method: PowerFlowMethod::LinearImpedance,
+            ..Default::default()
+        },
     );
-    let solution = linear.linear.as_ref().expect("linear must report a LinearReport");
-    assert!(solution.islands.iter().all(|i| i.status == LinearIslandStatus::Solved));
+    let solution = linear
+        .linear
+        .as_ref()
+        .expect("linear must report a LinearReport");
+    assert!(
+        solution
+            .islands
+            .iter()
+            .all(|i| i.status == LinearIslandStatus::Solved)
+    );
     assert!(linear.islands.is_empty() && linear.dc.is_none());
 }
 
@@ -118,9 +152,24 @@ fn dc_options_reach_the_solver() {
     let path = fixture("symmetric/transmission-case");
     let solve = |dc: DcOptions| {
         let (buses, lines, transformers, shunts) = load(&path);
-        let opts = PowerFlowOptions { method: PowerFlowMethod::Dc, dc, ..Default::default() };
-        let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
-        report.buses.iter().map(|b| b.voltage_ang).collect::<Vec<_>>()
+        let opts = PowerFlowOptions {
+            method: PowerFlowMethod::Dc,
+            dc,
+            ..Default::default()
+        };
+        let report = run_power_flow(
+            buses,
+            &lines,
+            &transformers,
+            &shunts,
+            gridoxide::TapData::none(),
+            opts,
+        );
+        report
+            .buses
+            .iter()
+            .map(|b| b.voltage_ang)
+            .collect::<Vec<_>>()
     };
 
     // Uniform r/x on this fixture means the two approximations rescale every
@@ -128,14 +177,19 @@ fn dc_options_reach_the_solver() {
     // not — which is exactly what makes this a usable probe that the option
     // was threaded through.
     let ignore_r = solve(DcOptions::default());
-    let ignore_g =
-        solve(DcOptions { approximation: DcApproximation::IgnoreG, ..Default::default() });
+    let ignore_g = solve(DcOptions {
+        approximation: DcApproximation::IgnoreG,
+        ..Default::default()
+    });
     let moved = ignore_r
         .iter()
         .zip(&ignore_g)
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
-    assert!(moved > 1e-9, "DcOptions did not reach the solver: angles identical");
+    assert!(
+        moved > 1e-9,
+        "DcOptions did not reach the solver: angles identical"
+    );
 }
 
 /// Every initializer that converges must land on the *same* solution — they
@@ -152,17 +206,34 @@ fn every_converging_initializer_reaches_the_same_solution() {
         let mut reference: Option<Vec<(f64, f64)>> = None;
         let mut converged = 0;
 
-        for init in [PowerFlowInit::Flat, PowerFlowInit::LinearImpedance, PowerFlowInit::Dc] {
+        for init in [
+            PowerFlowInit::Flat,
+            PowerFlowInit::LinearImpedance,
+            PowerFlowInit::Dc,
+        ] {
             let (buses, lines, transformers, shunts) = load(&path);
-            let opts = PowerFlowOptions { init, ..Default::default() };
-            let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
+            let opts = PowerFlowOptions {
+                init,
+                ..Default::default()
+            };
+            let report = run_power_flow(
+                buses,
+                &lines,
+                &transformers,
+                &shunts,
+                gridoxide::TapData::none(),
+                opts,
+            );
             if report.stats.status != SolveStatus::Converged {
                 continue;
             }
             converged += 1;
 
-            let solution: Vec<(f64, f64)> =
-                report.buses.iter().map(|b| (b.voltage_mag, b.voltage_ang)).collect();
+            let solution: Vec<(f64, f64)> = report
+                .buses
+                .iter()
+                .map(|b| (b.voltage_mag, b.voltage_ang))
+                .collect();
             match &reference {
                 None => reference = Some(solution),
                 Some(expected) => {
@@ -182,7 +253,10 @@ fn every_converging_initializer_reaches_the_same_solution() {
                 }
             }
         }
-        assert!(converged >= 2, "{name}: only {converged} initializer(s) converged");
+        assert!(
+            converged >= 2,
+            "{name}: only {converged} initializer(s) converged"
+        );
     }
 }
 
@@ -197,8 +271,19 @@ fn both_warm_starts_rescue_a_case_flat_start_cannot_solve() {
     let path = fixture("symmetric/distribution-case");
     let solve = |init| {
         let (buses, lines, transformers, shunts) = load(&path);
-        let opts = PowerFlowOptions { init, ..Default::default() };
-        run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts).stats
+        let opts = PowerFlowOptions {
+            init,
+            ..Default::default()
+        };
+        run_power_flow(
+            buses,
+            &lines,
+            &transformers,
+            &shunts,
+            gridoxide::TapData::none(),
+            opts,
+        )
+        .stats
     };
 
     let flat = solve(PowerFlowInit::Flat);
@@ -207,12 +292,24 @@ fn both_warm_starts_rescue_a_case_flat_start_cannot_solve() {
         SolveStatus::MaxIterationsReached,
         "fixture no longer defeats a flat start, so this proves nothing"
     );
-    assert!(flat.final_mismatch() > 1.0, "flat start got closer than expected: {}", flat.final_mismatch());
+    assert!(
+        flat.final_mismatch() > 1.0,
+        "flat start got closer than expected: {}",
+        flat.final_mismatch()
+    );
 
     for init in [PowerFlowInit::LinearImpedance, PowerFlowInit::Dc] {
         let stats = solve(init);
-        assert_eq!(stats.status, SolveStatus::Converged, "{init:?} failed to rescue the case");
-        assert!(stats.iterations() < 10, "{init:?} took {} iterations", stats.iterations());
+        assert_eq!(
+            stats.status,
+            SolveStatus::Converged,
+            "{init:?} failed to rescue the case"
+        );
+        assert!(
+            stats.iterations() < 10,
+            "{init:?} took {} iterations",
+            stats.iterations()
+        );
     }
 }
 
@@ -224,17 +321,42 @@ fn dc_init_starts_somewhere_other_than_flat() {
     let path = fixture("symmetric/transmission-case");
     let start = |init| {
         let (buses, lines, transformers, shunts) = load(&path);
-        let opts = PowerFlowOptions { init, max_iter: 0, ..Default::default() };
-        let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
-        report.buses.iter().map(|b| b.voltage_ang).collect::<Vec<_>>()
+        let opts = PowerFlowOptions {
+            init,
+            max_iter: 0,
+            ..Default::default()
+        };
+        let report = run_power_flow(
+            buses,
+            &lines,
+            &transformers,
+            &shunts,
+            gridoxide::TapData::none(),
+            opts,
+        );
+        report
+            .buses
+            .iter()
+            .map(|b| b.voltage_ang)
+            .collect::<Vec<_>>()
     };
 
     let flat = start(PowerFlowInit::Flat);
     let dc = start(PowerFlowInit::Dc);
-    assert!(flat.iter().all(|a| *a == 0.0), "flat start should leave every angle at zero");
+    assert!(
+        flat.iter().all(|a| *a == 0.0),
+        "flat start should leave every angle at zero"
+    );
 
-    let moved = flat.iter().zip(&dc).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
-    assert!(moved > 1e-3, "DC init barely moved the starting angles ({moved})");
+    let moved = flat
+        .iter()
+        .zip(&dc)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        moved > 1e-3,
+        "DC init barely moved the starting angles ({moved})"
+    );
 }
 
 /// An initializer must supply a *starting point* and change nothing else.
@@ -264,7 +386,14 @@ fn the_dc_initializer_changes_nothing_but_the_starting_angles() {
             u_rated: 0.0,
             zip_terms: Vec::new(),
         };
-        let line = |from, to, r, x| Line { from, to, r, x, b_shunt: 0.0, g_shunt: 0.0 };
+        let line = |from, to, r, x| Line {
+            from,
+            to,
+            r,
+            x,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        };
         (
             vec![
                 mk(0, BusType::Slack, 1.06, 0.0),
@@ -285,7 +414,10 @@ fn the_dc_initializer_changes_nothing_but_the_starting_angles() {
 
     let solve = |init| {
         let (buses, lines) = network();
-        let opts = PowerFlowOptions { init, ..Default::default() };
+        let opts = PowerFlowOptions {
+            init,
+            ..Default::default()
+        };
         run_power_flow(buses, &lines, &[], &[], gridoxide::TapData::none(), opts)
     };
 
@@ -294,7 +426,10 @@ fn the_dc_initializer_changes_nothing_but_the_starting_angles() {
 
     // The PV bus's setpoint is an input the solver holds fixed; it must come
     // back untouched, and so must everything downstream of it.
-    assert_eq!(reference.buses[1].voltage_mag, 1.04, "fixture assumption broken");
+    assert_eq!(
+        reference.buses[1].voltage_mag, 1.04,
+        "fixture assumption broken"
+    );
     for (i, (a, b)) in reference.buses.iter().zip(&dc.buses).enumerate() {
         assert!(
             (a.voltage_mag - b.voltage_mag).abs() < 1e-9
@@ -310,11 +445,16 @@ fn the_dc_initializer_changes_nothing_but_the_starting_angles() {
     // And the island report must be the one Newton's own pass produces, not
     // one the initializer pre-decided.
     let statuses = |r: &gridoxide::PowerFlowReport| {
-        r.islands.iter().map(|i| (i.bus_indices.clone(), i.status)).collect::<Vec<_>>()
+        r.islands
+            .iter()
+            .map(|i| (i.bus_indices.clone(), i.status))
+            .collect::<Vec<_>>()
     };
     assert_eq!(statuses(&reference), statuses(&dc));
     assert!(
-        statuses(&reference).iter().any(|(_, s)| *s == IslandStatus::NoReferenceBus),
+        statuses(&reference)
+            .iter()
+            .any(|(_, s)| *s == IslandStatus::NoReferenceBus),
         "fixture no longer contains a sourceless island: {:?}",
         statuses(&reference)
     );
@@ -326,13 +466,26 @@ fn the_dc_initializer_changes_nothing_but_the_starting_angles() {
 fn enforce_q_limits_reaches_the_outer_loop() {
     let path = fixture("symmetric/transmission-case");
     let (buses, lines, transformers, shunts) = load(&path);
-    let opts = PowerFlowOptions { enforce_q_limits: true, ..Default::default() };
-    let report = run_power_flow(buses, &lines, &transformers, &shunts, gridoxide::TapData::none(), opts);
+    let opts = PowerFlowOptions {
+        enforce_q_limits: true,
+        ..Default::default()
+    };
+    let report = run_power_flow(
+        buses,
+        &lines,
+        &transformers,
+        &shunts,
+        gridoxide::TapData::none(),
+        opts,
+    );
 
     assert_eq!(report.stats.status, SolveStatus::Converged);
     // This fixture has no PV buses to switch, so the loop is stable on its
     // first check — the point is that it ran at all and reported doing so.
-    let outer = report.outer.as_ref().expect("a configured loop must report");
+    let outer = report
+        .outer
+        .as_ref()
+        .expect("a configured loop must report");
     assert!(outer.q_limit_switches.is_empty());
     let loop_report = outer.report.as_ref().expect("the driver reports per loop");
     assert!(loop_report.converged, "{loop_report:?}");

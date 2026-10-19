@@ -35,8 +35,8 @@
 use num_complex::Complex;
 
 use crate::network::{
-    classify, connected_components, effective_injection, mark_unreferenced_islands, Verdict,
-    YBusSparse,
+    Verdict, YBusSparse, classify, connected_components, effective_injection,
+    mark_unreferenced_islands,
 };
 use crate::sparse;
 use crate::types::{Bus, BusType};
@@ -221,8 +221,18 @@ mod tests {
     /// error here.
     #[test]
     fn a_constant_impedance_load_is_reproduced_exactly() {
-        let mut buses = vec![bus(0, BusType::Slack, 0.0, 0.0), bus(1, BusType::PQ, -0.2, -0.1)];
-        let lines = vec![Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 }];
+        let mut buses = vec![
+            bus(0, BusType::Slack, 0.0, 0.0),
+            bus(1, BusType::PQ, -0.2, -0.1),
+        ];
+        let lines = vec![Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }];
         let ybus = build_ybus(2, &lines, &[]).finish();
         let report = linear_power_flow(&mut buses, &ybus);
         assert_eq!(report.islands[0].status, LinearIslandStatus::Solved);
@@ -243,8 +253,18 @@ mod tests {
     /// — the sanity check that the sign of `Y_load` is right way round.
     #[test]
     fn load_depresses_voltage_and_lags_the_source() {
-        let mut buses = vec![bus(0, BusType::Slack, 0.0, 0.0), bus(1, BusType::PQ, -0.5, -0.2)];
-        let lines = vec![Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 }];
+        let mut buses = vec![
+            bus(0, BusType::Slack, 0.0, 0.0),
+            bus(1, BusType::PQ, -0.5, -0.2),
+        ];
+        let lines = vec![Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }];
         let ybus = build_ybus(2, &lines, &[]).finish();
         linear_power_flow(&mut buses, &ybus);
         assert!(buses[1].voltage_mag < 1.0, "{}", buses[1].voltage_mag);
@@ -262,8 +282,22 @@ mod tests {
             bus(3, BusType::PQ, 0.1, 0.0),
         ];
         let lines = vec![
-            Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-            Line { from: 2, to: 3, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
+            Line {
+                from: 0,
+                to: 1,
+                r: 0.02,
+                x: 0.06,
+                b_shunt: 0.0,
+                g_shunt: 0.0,
+            },
+            Line {
+                from: 2,
+                to: 3,
+                r: 0.02,
+                x: 0.06,
+                b_shunt: 0.0,
+                g_shunt: 0.0,
+            },
         ];
         let ybus = build_ybus(4, &lines, &[]).finish();
         let report = linear_power_flow(&mut buses, &ybus);
@@ -281,8 +315,22 @@ mod tests {
     #[test]
     fn agrees_with_the_warm_start_entry_point() {
         let lines = vec![
-            Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03, g_shunt: 0.0 },
-            Line { from: 1, to: 2, r: 0.04, x: 0.10, b_shunt: 0.02, g_shunt: 0.0 },
+            Line {
+                from: 0,
+                to: 1,
+                r: 0.02,
+                x: 0.06,
+                b_shunt: 0.03,
+                g_shunt: 0.0,
+            },
+            Line {
+                from: 1,
+                to: 2,
+                r: 0.04,
+                x: 0.10,
+                b_shunt: 0.02,
+                g_shunt: 0.0,
+            },
         ];
         let ybus = build_ybus(3, &lines, &[]).finish();
 

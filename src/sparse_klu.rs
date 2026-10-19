@@ -16,13 +16,19 @@
 
 use num_complex::Complex;
 
-#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all)]
+#[allow(
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    dead_code,
+    clippy::all
+)]
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/klu_bindings.rs"));
 }
 use bindings::{
-    klu_analyze, klu_common, klu_defaults, klu_factor, klu_free_numeric, klu_free_symbolic, klu_numeric,
-    klu_refactor, klu_solve, klu_symbolic, klu_z_factor, klu_z_solve,
+    klu_analyze, klu_common, klu_defaults, klu_factor, klu_free_numeric, klu_free_symbolic,
+    klu_numeric, klu_refactor, klu_solve, klu_symbolic, klu_z_factor, klu_z_solve,
 };
 
 /// Re-exported for `klu_native::ffi_oracle`'s differential tests: `klu_scale`
@@ -32,7 +38,10 @@ use bindings::{
 /// same ABI, the approach `ffi_oracle.rs` otherwise uses for `btf_order`/
 /// `amd_order` (neither of which takes a `klu_common`).
 #[cfg(test)]
-pub(crate) use bindings::{klu_common as klu_common_for_oracle, klu_defaults as klu_defaults_for_oracle, klu_scale as klu_scale_for_oracle};
+pub(crate) use bindings::{
+    klu_common as klu_common_for_oracle, klu_defaults as klu_defaults_for_oracle,
+    klu_scale as klu_scale_for_oracle,
+};
 
 const KLU_OK: i32 = 0;
 
@@ -42,7 +51,10 @@ const KLU_OK: i32 = 0;
 /// (e.g. `network::YBus`, parallel branches between the same two buses).
 /// Returns `(col_ptr, row_idx, groups)`, where `groups[k]` lists the
 /// original `entries` indices contributing to the `k`-th CSC position.
-fn build_csc_structure(n: usize, pairs: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>, Vec<Vec<usize>>) {
+fn build_csc_structure(
+    n: usize,
+    pairs: &[(usize, usize)],
+) -> (Vec<i32>, Vec<i32>, Vec<Vec<usize>>) {
     let mut order: Vec<usize> = (0..pairs.len()).collect();
     order.sort_by_key(|&i| (pairs[i].1, pairs[i].0));
 
@@ -71,16 +83,25 @@ fn build_csc_structure(n: usize, pairs: &[(usize, usize)]) -> (Vec<i32>, Vec<i32
 }
 
 fn pack_real_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups.iter().map(|g| g.iter().map(|&i| entries[i].2).sum()).collect()
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&i| entries[i].2).sum())
+        .collect()
 }
 
 /// `pack_real_values` for callers that already hold just the values — see
 /// `solver::LinearSolver::factor_and_solve_values`.
 fn pack_real_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups.iter().map(|g| g.iter().map(|&i| values[i]).sum()).collect()
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&i| values[i]).sum())
+        .collect()
 }
 
-fn pack_complex_values(entries: &[(usize, usize, Complex<f64>)], groups: &[Vec<usize>]) -> Vec<f64> {
+fn pack_complex_values(
+    entries: &[(usize, usize, Complex<f64>)],
+    groups: &[Vec<usize>],
+) -> Vec<f64> {
     let mut out = Vec::with_capacity(groups.len() * 2);
     for g in groups {
         let sum: Complex<f64> = g.iter().map(|&i| entries[i].2).sum();
@@ -124,12 +145,25 @@ impl KluRealSystem {
         let mut values = pack_real_values(entries, &groups);
 
         let mut common = new_common();
-        let symbolic = unsafe { klu_analyze(n as i32, col_ptr.as_mut_ptr(), row_idx.as_mut_ptr(), &mut common) };
+        let symbolic = unsafe {
+            klu_analyze(
+                n as i32,
+                col_ptr.as_mut_ptr(),
+                row_idx.as_mut_ptr(),
+                &mut common,
+            )
+        };
         if symbolic.is_null() {
             return None;
         }
         let mut numeric = unsafe {
-            klu_factor(col_ptr.as_mut_ptr(), row_idx.as_mut_ptr(), values.as_mut_ptr(), symbolic, &mut common)
+            klu_factor(
+                col_ptr.as_mut_ptr(),
+                row_idx.as_mut_ptr(),
+                values.as_mut_ptr(),
+                symbolic,
+                &mut common,
+            )
         };
         if numeric.is_null() || common.status != KLU_OK {
             let mut symbolic = symbolic;
@@ -141,7 +175,15 @@ impl KluRealSystem {
         // via `&mut` in Drop).
         let _ = &mut numeric;
 
-        Some(Self { n, col_ptr, row_idx, groups, common, symbolic, numeric })
+        Some(Self {
+            n,
+            col_ptr,
+            row_idx,
+            groups,
+            common,
+            symbolic,
+            numeric,
+        })
     }
 
     /// Numeric-only refactorization against the cached symbolic pattern,
@@ -157,7 +199,11 @@ impl KluRealSystem {
     /// otherwise") rather than `klu_factor`'s/`klu_analyze`'s "0 = OK, < 0 =
     /// error" status-code convention. Mixing the two up here previously
     /// caused every successful refactor to be misread as a failure.
-    pub fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    pub fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         let values = pack_real_values(entries, &self.groups);
         self.solve_packed(values, rhs)
     }
@@ -180,7 +226,16 @@ impl KluRealSystem {
         }
 
         let mut b = rhs.to_vec();
-        unsafe { klu_solve(self.symbolic, self.numeric, self.n as i32, 1, b.as_mut_ptr(), &mut self.common) };
+        unsafe {
+            klu_solve(
+                self.symbolic,
+                self.numeric,
+                self.n as i32,
+                1,
+                b.as_mut_ptr(),
+                &mut self.common,
+            )
+        };
         if self.common.status != KLU_OK || b.iter().any(|v| !v.is_finite()) {
             return None;
         }
@@ -193,7 +248,11 @@ impl crate::solver::LinearSolver for KluRealSystem {
         KluRealSystem::new(n, entries)
     }
 
-    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         KluRealSystem::factor_and_solve(self, entries, rhs)
     }
 
@@ -224,12 +283,25 @@ pub fn klu_solve_complex(
     let mut values = pack_complex_values(entries, &groups);
 
     let mut common = new_common();
-    let mut symbolic = unsafe { klu_analyze(n as i32, col_ptr.as_mut_ptr(), row_idx.as_mut_ptr(), &mut common) };
+    let mut symbolic = unsafe {
+        klu_analyze(
+            n as i32,
+            col_ptr.as_mut_ptr(),
+            row_idx.as_mut_ptr(),
+            &mut common,
+        )
+    };
     if symbolic.is_null() {
         return None;
     }
     let mut numeric = unsafe {
-        klu_z_factor(col_ptr.as_mut_ptr(), row_idx.as_mut_ptr(), values.as_mut_ptr(), symbolic, &mut common)
+        klu_z_factor(
+            col_ptr.as_mut_ptr(),
+            row_idx.as_mut_ptr(),
+            values.as_mut_ptr(),
+            symbolic,
+            &mut common,
+        )
     };
 
     let result = if numeric.is_null() || common.status != KLU_OK {
@@ -244,7 +316,11 @@ pub fn klu_solve_complex(
         if common.status != KLU_OK || b.iter().any(|v| !v.is_finite()) {
             None
         } else {
-            Some((0..n).map(|i| Complex::new(b[2 * i], b[2 * i + 1])).collect())
+            Some(
+                (0..n)
+                    .map(|i| Complex::new(b[2 * i], b[2 * i + 1]))
+                    .collect(),
+            )
         }
     };
 

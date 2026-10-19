@@ -13,19 +13,21 @@ use std::path::PathBuf;
 
 use num_complex::Complex;
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::linear::{
-    dc_branches, dc_power_flow, DcApproximation, DcIslandStatus, DcOptions, DcSolution,
+    DcApproximation, DcIslandStatus, DcOptions, DcSolution, dc_branches, dc_power_flow,
 };
 use gridoxide::network::{build_ybus, stamp_shunts};
-use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches, PgmInput};
+use gridoxide::pgm::{PgmInput, node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
 use gridoxide::run_power_flow_analysis_from_ybus;
 use gridoxide::types::{Bus, BusType, Line, Transformer};
 
 mod common;
 
 fn data_dir(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/pgm/powerflow").join(rel)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/pgm/powerflow")
+        .join(rel)
 }
 
 fn bus(idx: usize, bus_type: BusType, p_spec: f64) -> Bus {
@@ -47,7 +49,14 @@ fn bus(idx: usize, bus_type: BusType, p_spec: f64) -> Bus {
 /// component into the AC flow that DC cannot represent, and the comparison
 /// below would be measuring the wrong thing.
 fn lossless_line(from: usize, to: usize, x: f64) -> Line {
-    Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 }
+    Line {
+        from,
+        to,
+        r: 0.0,
+        x,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }
 }
 
 fn lossless_transformer(from: usize, to: usize, x: f64, k: f64, alpha: f64) -> Transformer {
@@ -114,8 +123,11 @@ fn dc_flows_match_the_lossless_ac_limit() {
         bus(2, BusType::PQ, -0.003),
         bus(3, BusType::PQ, 0.002),
     ];
-    let lines =
-        vec![lossless_line(0, 1, 0.10), lossless_line(1, 2, 0.15), lossless_line(2, 3, 0.20)];
+    let lines = vec![
+        lossless_line(0, 1, 0.10),
+        lossless_line(1, 2, 0.15),
+        lossless_line(2, 3, 0.20),
+    ];
     let transformers = vec![
         // Off-nominal ratio, no shift: exercises the `1/k` divisor.
         lossless_transformer(0, 3, 0.25, 1.05, 0.0),
@@ -131,7 +143,10 @@ fn dc_flows_match_the_lossless_ac_limit() {
 
     // Fixture assumption: the comparison is only meaningful in the small-angle
     // regime, and only if flow is actually moving.
-    assert!(max_delta < 5e-3, "fixture left the small-angle regime: max δ = {max_delta}");
+    assert!(
+        max_delta < 5e-3,
+        "fixture left the small-angle regime: max δ = {max_delta}"
+    );
     assert!(
         solution.branch_p.iter().any(|p| p.abs() > 1e-3),
         "fixture carries no flow, so the comparison proves nothing: {:?}",
@@ -157,9 +172,30 @@ fn ignore_g_matches_ac_on_a_network_with_resistance() {
     };
     // r/x = 0.5, far outside the range where 1/x is a good approximation.
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.05, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.075, x: 0.15, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 0, to: 2, r: 0.10, x: 0.20, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.05,
+            x: 0.10,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.075,
+            x: 0.15,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.10,
+            x: 0.20,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
 
     // The AC oracle here keeps `r` in the branch admittance, so its P also
@@ -167,7 +203,10 @@ fn ignore_g_matches_ac_on_a_network_with_resistance() {
     // in δ, so at this scale they stay well under the tolerance — but they are
     // why this comparison is looser than the lossless one above.
     let mut buses = make_buses();
-    let opts = DcOptions { approximation: DcApproximation::IgnoreG, ..Default::default() };
+    let opts = DcOptions {
+        approximation: DcApproximation::IgnoreG,
+        ..Default::default()
+    };
     let (_, diff_ignore_g, max_delta) = dc_versus_lossless_ac(&mut buses, &lines, &[], opts);
     assert!(max_delta < 5e-3, "max δ = {max_delta}");
 
@@ -179,7 +218,10 @@ fn ignore_g_matches_ac_on_a_network_with_resistance() {
         diff_ignore_g < diff_ignore_r,
         "IgnoreG ({diff_ignore_g}) should beat IgnoreR ({diff_ignore_r}) where r/x is large"
     );
-    assert!(diff_ignore_g < 1e-5, "IgnoreG disagrees with AC by {diff_ignore_g}");
+    assert!(
+        diff_ignore_g < 1e-5,
+        "IgnoreG disagrees with AC by {diff_ignore_g}"
+    );
 }
 
 /// Exact identities that hold for any DC solution whatsoever, checked on a
@@ -194,13 +236,24 @@ fn dc_conserves_power_exactly_on_the_transmission_case() {
 
     let solution = dc_power_flow(&mut buses, &lines, &transformers, DcOptions::default());
     assert!(
-        solution.islands.iter().all(|i| i.status == DcIslandStatus::Solved),
+        solution
+            .islands
+            .iter()
+            .all(|i| i.status == DcIslandStatus::Solved),
         "{:?}",
-        solution.islands.iter().map(|i| i.status).collect::<Vec<_>>()
+        solution
+            .islands
+            .iter()
+            .map(|i| i.status)
+            .collect::<Vec<_>>()
     );
 
     // Per bus: what flows out equals what is injected.
-    assert!(solution.max_residual < 1e-9, "max residual = {}", solution.max_residual);
+    assert!(
+        solution.max_residual < 1e-9,
+        "max residual = {}",
+        solution.max_residual
+    );
 
     // Per island: the references supply exactly the rest of the island's load.
     let params = branch_params(&lines, &transformers);
@@ -247,7 +300,10 @@ fn link_branches_get_a_positive_susceptance() {
         .iter()
         .filter(|t| t.y_series == gridoxide::topology::IDEAL_CONNECTION_Y)
         .count();
-    assert!(links > 0, "fixture has no link branches, so this proves nothing");
+    assert!(
+        links > 0,
+        "fixture has no link branches, so this proves nothing"
+    );
 
     for br in dc_branches(&lines, &transformers, DcOptions::default()) {
         assert!(br.b > 0.0, "branch {} has susceptance {}", br.index, br.b);
@@ -256,13 +312,24 @@ fn link_branches_get_a_positive_susceptance() {
     let solution = dc_power_flow(&mut buses, &lines, &transformers, DcOptions::default());
     assert!(solution.negative_reactance_branches.is_empty());
     assert!(
-        solution.islands.iter().all(|i| i.status == DcIslandStatus::Solved),
+        solution
+            .islands
+            .iter()
+            .all(|i| i.status == DcIslandStatus::Solved),
         "{:?}",
-        solution.islands.iter().map(|i| i.status).collect::<Vec<_>>()
+        solution
+            .islands
+            .iter()
+            .map(|i| i.status)
+            .collect::<Vec<_>>()
     );
     // A stiff clamped branch spreads B's condition number by ~1e4, so this
     // records how much accuracy that actually costs rather than assuming none.
-    assert!(solution.max_residual < 1e-9, "max residual = {}", solution.max_residual);
+    assert!(
+        solution.max_residual < 1e-9,
+        "max residual = {}",
+        solution.max_residual
+    );
 }
 
 fn solve_ac(input: PgmInput) -> (Vec<Bus>, HashMap<u64, usize>) {
@@ -271,7 +338,10 @@ fn solve_ac(input: PgmInput) -> (Vec<Bus>, HashMap<u64, usize>) {
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, 1e6, 50.0);
     let mut ybus = build_ybus(buses.len(), &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
-    (run_power_flow_analysis_from_ybus(buses, ybus).buses, id_to_idx)
+    (
+        run_power_flow_analysis_from_ybus(buses, ybus).buses,
+        id_to_idx,
+    )
 }
 
 /// How closely DC tracks AC, and — more usefully — *where* it stops doing so.
@@ -300,8 +370,14 @@ fn dc_angle_error_tracks_the_voltage_assumption_it_rests_on() {
 
     // Fixture assumption: this case really does leave the near-nominal band,
     // which is what makes the two bounds below different questions.
-    let peak_vm = ac_buses.iter().map(|b| b.voltage_mag).fold(0.0f64, f64::max);
-    assert!(peak_vm > 1.15, "fixture no longer departs from 1 pu (peak {peak_vm})");
+    let peak_vm = ac_buses
+        .iter()
+        .map(|b| b.voltage_mag)
+        .fold(0.0f64, f64::max);
+    assert!(
+        peak_vm > 1.15,
+        "fixture no longer departs from 1 pu (peak {peak_vm})"
+    );
 
     let mut worst_overall = 0.0f64;
     let mut worst_near_nominal = 0.0f64;
@@ -318,7 +394,10 @@ fn dc_angle_error_tracks_the_voltage_assumption_it_rests_on() {
         }
     }
 
-    assert!(near_nominal_buses >= 4, "only {near_nominal_buses} near-nominal buses to check");
+    assert!(
+        near_nominal_buses >= 4,
+        "only {near_nominal_buses} near-nominal buses to check"
+    );
     assert!(
         worst_near_nominal < 5e-3,
         "DC should be close where |V| ≈ 1, but the worst gap there is {worst_near_nominal} rad"
@@ -341,11 +420,22 @@ fn dc_solves_the_distribution_case_and_conserves_power() {
 
     let solution = dc_power_flow(&mut buses, &lines, &transformers, DcOptions::default());
     assert!(
-        solution.islands.iter().all(|i| i.status == DcIslandStatus::Solved),
+        solution
+            .islands
+            .iter()
+            .all(|i| i.status == DcIslandStatus::Solved),
         "{:?}",
-        solution.islands.iter().map(|i| i.status).collect::<Vec<_>>()
+        solution
+            .islands
+            .iter()
+            .map(|i| i.status)
+            .collect::<Vec<_>>()
     );
-    assert!(solution.max_residual < 1e-9, "max residual = {}", solution.max_residual);
+    assert!(
+        solution.max_residual < 1e-9,
+        "max residual = {}",
+        solution.max_residual
+    );
 }
 
 /// The flat branch index is a contract: `DcSolution::branch_p[i]` and
@@ -391,37 +481,91 @@ fn the_approximations_differ_exactly_when_r_over_x_varies() {
             bus(1, BusType::PQ, -0.05),
             bus(2, BusType::PQ, -0.08),
         ];
-        let opts = DcOptions { approximation, ..Default::default() };
+        let opts = DcOptions {
+            approximation,
+            ..Default::default()
+        };
         dc_power_flow(&mut buses, lines, &[], opts).branch_p
     };
     let worst = |a: Vec<f64>, b: Vec<f64>| {
-        a.iter().zip(&b).map(|(p, q)| (p - q).abs()).fold(0.0f64, f64::max)
+        a.iter()
+            .zip(&b)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0f64, f64::max)
     };
 
     // A loop whose two paths have deliberately different r/x (0.2 versus 2.0).
     let varying = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.03, x: 0.15, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 0, to: 2, r: 0.40, x: 0.20, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.10,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.03,
+            x: 0.15,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.40,
+            x: 0.20,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let spread = worst(
         solve(&varying, DcApproximation::IgnoreR),
         solve(&varying, DcApproximation::IgnoreG),
     );
-    assert!(spread > 1e-3, "non-uniform r/x should move flow, but the gap is {spread}");
+    assert!(
+        spread > 1e-3,
+        "non-uniform r/x should move flow, but the gap is {spread}"
+    );
 
     // The same topology with r/x = 0.2 throughout: now the difference is a
     // pure rescaling of B, and the flows must agree to round-off.
     let uniform = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.10, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.03, x: 0.15, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 0, to: 2, r: 0.04, x: 0.20, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.10,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.03,
+            x: 0.15,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.04,
+            x: 0.20,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let spread = worst(
         solve(&uniform, DcApproximation::IgnoreR),
         solve(&uniform, DcApproximation::IgnoreG),
     );
-    assert!(spread < 1e-12, "uniform r/x should rescale angles only, but flows moved by {spread}");
+    assert!(
+        spread < 1e-12,
+        "uniform r/x should rescale angles only, but flows moved by {spread}"
+    );
 }
 
 /// A line with `x = 0` is a short circuit in `IgnoreR`'s world, since that
@@ -432,17 +576,39 @@ fn the_approximations_differ_exactly_when_r_over_x_varies() {
 /// angle-driven power, so the network there really does island.
 #[test]
 fn a_purely_resistive_branch_shorts_under_ignore_r_and_opens_under_ignore_g() {
-    let lines = vec![Line { from: 0, to: 1, r: 0.1, x: 0.0, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = vec![Line {
+        from: 0,
+        to: 1,
+        r: 0.1,
+        x: 0.0,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
 
     let ignore_r = dc_branches(&lines, &[], DcOptions::default());
-    assert_eq!(ignore_r.len(), 1, "IgnoreR dropped a purely resistive branch");
-    assert!(ignore_r[0].b.is_finite() && ignore_r[0].b > 1e4, "b = {}", ignore_r[0].b);
+    assert_eq!(
+        ignore_r.len(),
+        1,
+        "IgnoreR dropped a purely resistive branch"
+    );
+    assert!(
+        ignore_r[0].b.is_finite() && ignore_r[0].b > 1e4,
+        "b = {}",
+        ignore_r[0].b
+    );
 
-    let opts = DcOptions { approximation: DcApproximation::IgnoreG, ..Default::default() };
+    let opts = DcOptions {
+        approximation: DcApproximation::IgnoreG,
+        ..Default::default()
+    };
     assert_eq!(dc_branches(&lines, &[], opts)[0].b, 0.0);
 
     let mut buses = vec![bus(0, BusType::Slack, 0.0), bus(1, BusType::PQ, -0.2)];
     let solution = dc_power_flow(&mut buses, &lines, &[], DcOptions::default());
-    assert_eq!(solution.islands.len(), 1, "IgnoreR should keep the network in one piece");
+    assert_eq!(
+        solution.islands.len(),
+        1,
+        "IgnoreR should keep the network in one piece"
+    );
     assert_eq!(solution.islands[0].status, DcIslandStatus::Solved);
 }

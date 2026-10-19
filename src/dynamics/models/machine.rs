@@ -137,7 +137,6 @@ pub struct MachineInit {
     pub p_m: f64,
 }
 
-
 /// `tunable`/`parameter`/`with_parameter` for a machine that keeps its params.
 ///
 /// The same three lines four times over, and the only thing that varies is the
@@ -264,14 +263,7 @@ pub trait Machine: std::fmt::Debug {
     /// The machine's own current plus `y_norton·V`.
     fn injection(&self, x: &[f64], v: Complex<f64>) -> Complex<f64>;
 
-    fn jacobian(
-        &self,
-        x: &[f64],
-        v: Complex<f64>,
-        e_fd: f64,
-        p_m: f64,
-        out: &mut MachineJacobian,
-    );
+    fn jacobian(&self, x: &[f64], v: Complex<f64>, e_fd: f64, p_m: f64, out: &mut MachineJacobian);
 
     /// Choose states so every derivative is zero at this terminal condition,
     /// and report the `E_fd` and `P_m` that requires.
@@ -287,7 +279,10 @@ pub trait Machine: std::fmt::Debug {
 /// frequency and nothing else looks wrong.
 fn base_ratio(mbase: f64, s_base: f64) -> Result<f64, InitError> {
     if mbase <= 0.0 {
-        return Err(InitError::NonPositiveParameter { name: "mbase", value: mbase });
+        return Err(InitError::NonPositiveParameter {
+            name: "mbase",
+            value: mbase,
+        });
     }
     Ok(mbase / s_base)
 }
@@ -436,7 +431,12 @@ impl GenCls {
         let current = (e * w - v) * y;
         // dy/dω = −j·x'_d·y²·dw, by differentiating 1/(r_a + j·w·x'_d).
         let dy = -Complex::new(0.0, 1.0) * self.xdp * y * y * dw;
-        Stator { y, current, di_domega: e * dw * y + (e * w - v) * dy, w }
+        Stator {
+            y,
+            current,
+            di_domega: e * dw * y + (e * w - v) * dy,
+            w,
+        }
     }
 
     /// The air-gap **torque**, `Re(E·conj(I))` with `E` the unscaled internal
@@ -552,7 +552,11 @@ impl Machine for GenCls {
         out.dfde[0] = 0.0;
         out.dfde[1] = 0.0;
         out.dfdp[0] = 0.0;
-        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
+        out.dfdp[1] = if self.speed_voltages {
+            1.0 / (omega * two_h)
+        } else {
+            1.0 / two_h
+        };
 
         out.didx[0] = di_ddelta.re;
         out.didx[1] = stator.di_domega.re;
@@ -719,7 +723,11 @@ impl GenTransient {
 
     /// The speed factor on the flux-derived terms, and its derivative.
     fn speed(&self, omega: f64) -> (f64, f64) {
-        if self.speed_voltages { (omega, 1.0) } else { (1.0, 0.0) }
+        if self.speed_voltages {
+            (omega, 1.0)
+        } else {
+            (1.0, 0.0)
+        }
     }
 
     fn mechanical(&self, p_m: f64, omega: f64) -> (f64, f64) {
@@ -834,12 +842,12 @@ impl Machine for GenTransient {
         //   ∂v_d/∂(v_re, v_im) = (sin δ, −cos δ)
         //   ∂v_q/∂(v_re, v_im) = (cos δ,  sin δ)
         let dab: [(f64, f64); 6] = [
-            (-v_q, v_d),       // δ
-            (0.0, 0.0),        // ω — the speed factor is not linear here, see below
-            (0.0, w),          // e'_q
-            (w, 0.0),          // e'_d
-            (-sd, -cd),        // v_re
-            (cd, -sd),         // v_im
+            (-v_q, v_d), // δ
+            (0.0, 0.0),  // ω — the speed factor is not linear here, see below
+            (0.0, w),    // e'_q
+            (w, 0.0),    // e'_d
+            (-sd, -cd),  // v_re
+            (cd, -sd),   // v_im
         ];
         let mut di_d = [0.0; 6];
         let mut di_q = [0.0; 6];
@@ -890,13 +898,16 @@ impl Machine for GenTransient {
         }
 
         out.dfde[2] = 1.0 / self.td0p;
-        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
+        out.dfdp[1] = if self.speed_voltages {
+            1.0 / (omega * two_h)
+        } else {
+            1.0 / two_h
+        };
 
         // I_machine = (i_d·sin δ + i_q·cos δ) + j(−i_d·cos δ + i_q·sin δ), so
         // δ moves it both through the currents and through the rotation.
         for k in 0..4 {
-            let (mut d_re, mut d_im) =
-                (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
+            let (mut d_re, mut d_im) = (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
             if k == 0 {
                 d_re += i_d * cd - i_q * sd;
                 d_im += i_d * sd + i_q * cd;
@@ -941,7 +952,11 @@ impl Machine for GenTransient {
         let e_fd = eqp + (self.xd - self.xdp) * i_d;
         let p_m = self.air_gap_power(eqp, edp, i_d, i_q);
 
-        Ok(MachineInit { states: vec![delta, 1.0, eqp, edp], e_fd, p_m })
+        Ok(MachineInit {
+            states: vec![delta, 1.0, eqp, edp],
+            e_fd,
+            p_m,
+        })
     }
 }
 
@@ -1091,7 +1106,10 @@ impl GenRound {
             ("xq - xqp", params.xqp, params.xq),
         ] {
             if hi <= lo {
-                return Err(InitError::NonPositiveParameter { name, value: hi - lo });
+                return Err(InitError::NonPositiveParameter {
+                    name,
+                    value: hi - lo,
+                });
             }
         }
 
@@ -1149,7 +1167,11 @@ impl GenRound {
 
     /// The speed factor on the flux-derived terms, and its derivative.
     fn speed(&self, omega: f64) -> (f64, f64) {
-        if self.speed_voltages { (omega, 1.0) } else { (1.0, 0.0) }
+        if self.speed_voltages {
+            (omega, 1.0)
+        } else {
+            (1.0, 0.0)
+        }
     }
 
     fn mechanical(&self, p_m: f64, omega: f64) -> (f64, f64) {
@@ -1170,21 +1192,17 @@ impl GenRound {
     /// The subtransient EMFs, interpolated between the transient flux states
     /// and the damper fluxes.
     fn subtransient_emf(&self, eqp: f64, edp: f64, psi1d: f64, psi2q: f64) -> (f64, f64) {
-        (self.ad * eqp + self.bd * psi1d, self.aq * edp + self.bq * psi2q)
+        (
+            self.ad * eqp + self.bd * psi1d,
+            self.aq * edp + self.bq * psi2q,
+        )
     }
 
     fn det(&self, w: f64) -> f64 {
         self.ra * self.ra + w * w * self.xdpp * self.xqpp
     }
 
-    fn currents(
-        &self,
-        eqpp: f64,
-        edpp: f64,
-        v_d: f64,
-        v_q: f64,
-        w: f64,
-    ) -> (f64, f64, f64, f64) {
+    fn currents(&self, eqpp: f64, edpp: f64, v_d: f64, v_q: f64, w: f64) -> (f64, f64, f64, f64) {
         let (a, b) = (w * edpp - v_d, w * eqpp - v_q);
         let det = self.det(w);
         (
@@ -1269,14 +1287,14 @@ impl Machine for GenRound {
         // on, and the subtransient EMFs are linear in the flux states, so each
         // column is one `(∂a, ∂b)` pair pushed through one fixed 2×2 inverse.
         let dab: [(f64, f64); 8] = [
-            (-v_q, v_d),             // δ
-            (0.0, 0.0),              // ω — handled below, not linear here
-            (0.0, w * self.ad),      // e'_q
-            (w * self.aq, 0.0),      // e'_d
-            (0.0, w * self.bd),      // ψ_1d
-            (w * self.bq, 0.0),      // ψ_2q
-            (-sd, -cd),              // v_re
-            (cd, -sd),               // v_im
+            (-v_q, v_d),        // δ
+            (0.0, 0.0),         // ω — handled below, not linear here
+            (0.0, w * self.ad), // e'_q
+            (w * self.aq, 0.0), // e'_d
+            (0.0, w * self.bd), // ψ_1d
+            (w * self.bq, 0.0), // ψ_2q
+            (-sd, -cd),         // v_re
+            (cd, -sd),          // v_im
         ];
         // ∂e''_q and ∂e''_d, in the same column order.
         let deqpp = [0.0, 0.0, self.ad, 0.0, self.bd, 0.0, 0.0, 0.0];
@@ -1345,11 +1363,14 @@ impl Machine for GenRound {
         }
 
         out.dfde[2] = 1.0 / self.td0p;
-        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
+        out.dfdp[1] = if self.speed_voltages {
+            1.0 / (omega * two_h)
+        } else {
+            1.0 / two_h
+        };
 
         for k in 0..n {
-            let (mut d_re, mut d_im) =
-                (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
+            let (mut d_re, mut d_im) = (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
             if k == 0 {
                 d_re += i_d * cd - i_q * sd;
                 d_im += i_d * sd + i_q * cd;
@@ -1502,7 +1523,10 @@ impl GenSalient {
             ("xq - xqpp", params.xqpp, params.xq),
         ] {
             if hi <= lo {
-                return Err(InitError::NonPositiveParameter { name, value: hi - lo });
+                return Err(InitError::NonPositiveParameter {
+                    name,
+                    value: hi - lo,
+                });
             }
         }
 
@@ -1548,7 +1572,11 @@ impl GenSalient {
     }
 
     fn speed(&self, omega: f64) -> (f64, f64) {
-        if self.speed_voltages { (omega, 1.0) } else { (1.0, 0.0) }
+        if self.speed_voltages {
+            (omega, 1.0)
+        } else {
+            (1.0, 0.0)
+        }
     }
 
     fn mechanical(&self, p_m: f64, omega: f64) -> (f64, f64) {
@@ -1701,11 +1729,14 @@ impl Machine for GenSalient {
         }
 
         out.dfde[2] = 1.0 / self.td0p;
-        out.dfdp[1] = if self.speed_voltages { 1.0 / (omega * two_h) } else { 1.0 / two_h };
+        out.dfdp[1] = if self.speed_voltages {
+            1.0 / (omega * two_h)
+        } else {
+            1.0 / two_h
+        };
 
         for k in 0..n {
-            let (mut d_re, mut d_im) =
-                (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
+            let (mut d_re, mut d_im) = (di_d[k] * sd + di_q[k] * cd, -di_d[k] * cd + di_q[k] * sd);
             if k == 0 {
                 d_re += i_d * cd - i_q * sd;
                 d_im += i_d * sd + i_q * cd;
@@ -1752,6 +1783,10 @@ impl Machine for GenSalient {
         let e_fd = eqp + (self.xd - self.xdp) * i_d;
         let p_m = edpp * i_d + eqpp * i_q + (self.xqpp - self.xdpp) * i_d * i_q;
 
-        Ok(MachineInit { states: vec![delta, 1.0, eqp, psi1d, edpp], e_fd, p_m })
+        Ok(MachineInit {
+            states: vec![delta, 1.0, eqp, psi1d, edpp],
+            e_fd,
+            p_m,
+        })
     }
 }

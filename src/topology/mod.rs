@@ -34,13 +34,13 @@ pub mod bus_view;
 pub mod model;
 pub mod reduction;
 
-pub use bus_view::{bus_view, BusView, RetainedSwitch, RetentionPolicy};
+pub use bus_view::{BusView, RetainedSwitch, RetentionPolicy, bus_view};
 pub use model::{NodeBreakerTopology, NodeIdx, Switch, SwitchIdx, SwitchKind};
 
 // The reduction layer's items keep their historical `topology::` paths, so no
 // existing caller moves.
-pub use reduction::{
-    clamp_branch_impedance, merge_groups, union_all, UnionFind, IDEAL_CONNECTION_Y,
-    ZERO_IMPEDANCE_THRESHOLD,
-};
 pub(crate) use reduction::ideal_connection_z;
+pub use reduction::{
+    IDEAL_CONNECTION_Y, UnionFind, ZERO_IMPEDANCE_THRESHOLD, clamp_branch_impedance, merge_groups,
+    union_all,
+};

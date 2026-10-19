@@ -9,10 +9,11 @@
 //!
 //! # The order matters, and it is `speed`
 //!
-//! Automatons fire in ascending order of their stated speed, in batches, and
-//! **the trigger conditions are re-evaluated between batches but not within
-//! one**. Both halves of that are load-bearing, and two vendored scenarios pin
-//! them from opposite sides:
+//! Automatons fire in ascending order of their speed — [`DEFAULT_SPEED`] for
+//! one that states none, which puts it **first** — in batches, and **the
+//! trigger conditions are re-evaluated between batches but not within one**.
+//! Both halves of that are load-bearing, and two vendored scenarios pin them
+//! from opposite sides:
 //!
 //! - Re-evaluating *between* batches is why a fast automaton that relieves an
 //!   overload stops a slower one from ever seeing the condition that would have
@@ -46,13 +47,13 @@
 //! has moved in one direction it will not be moved back, since a protection
 //! scheme does not hunt.
 
+use crate::linear::DcOptions;
 use crate::linear::btheta::dc_branches;
 use crate::linear::sensitivity::DcSensitivity;
-use crate::linear::DcOptions;
 use crate::types::Transformer;
 
 use super::crac::{Crac, ElementaryAction, InstantKind, RangeActionKind, State, UsageRule};
-use super::evaluate::{evaluate_with, Network, Resolution};
+use super::evaluate::{CnecResult, FlowModel, Network, Resolution, evaluate_model};
 use super::linear::{phase_shift_sensitivity, tap_table};
 
 /// What fired, and what it left behind.
@@ -86,6 +87,50 @@ impl AutomatonResult {
 /// tolerance.
 const MAX_ROUNDS: usize = 20;
 
+/// How many times one automaton may re-size its own set-point.
+///
+/// The reference's `MAX_NUMBER_OF_SENSI_IN_AUTO_SETPOINT_SHIFT`, and like
+/// [`MAX_ROUNDS`] a guard rather than a tolerance: the loop is expected to stop
+/// because the perimeter is secure or because the direction reversed, not
+/// because it ran out of turns.
+const MAX_SHIFTS: usize = 11;
+
+/// How far the assumed sensitivity is shrunk each time the same CNEC comes back
+/// as the worst one, and the floor it shrinks to.
+///
+/// Shrinking the sensitivity *grows* the next step, which is the point: a
+/// shifter whose true response is weaker than its linear one otherwise creeps
+/// toward the limit a fraction of a tap at a time and hits [`MAX_SHIFTS`] still
+/// overloaded. Both numbers are the reference's.
+const SENSI_UNDERESTIMATOR_STEP: f64 = 0.15;
+const SENSI_UNDERESTIMATOR_MIN: f64 = 0.5;
+
+/// Where an automaton that states no speed fires: **first**.
+///
+/// The reference's `DEFAULT_SPEED`, and it is worth spelling out because the
+/// opposite reading is the tempting one. "No speed stated" looks like "no claim
+/// to be fast", which argues for firing such an action last so it cannot
+/// pre-empt equipment the file actually timed. The reference reads it the other
+/// way: an unstated speed is zero, so an untimed automaton goes before
+/// everything that named a speed at all.
+///
+/// It changes answers rather than just ordering. On scenario 1.2.2.4 the
+/// untimed `open_be1_be4` opens a Belgian circuit, and the two phase shifters
+/// that follow are sized against the network that leaves behind. Fired last
+/// instead, they size themselves against an overload the line opening was about
+/// to remove and spend four taps where one is enough — with every margin after
+/// that correspondingly adrift.
+///
+/// Actions that all leave the speed out still share one batch, so the rule that
+/// a batch samples the grid once is untouched; what moves is where that batch
+/// sits relative to the timed ones.
+const DEFAULT_SPEED: i64 = 0;
+
+/// An automaton's firing order, with [`DEFAULT_SPEED`] for one that states none.
+fn speed_of(speed: Option<i64>) -> i64 {
+    speed.unwrap_or(DEFAULT_SPEED)
+}
+
 /// Simulate the automatons of one contingency's `auto` state.
 ///
 /// `open` and `transformers` come in as the preventive perimeter left them and
@@ -98,12 +143,16 @@ pub fn simulate(
     contingency: usize,
     open: &[usize],
     transformers: &[Transformer],
+    model: FlowModel,
 ) -> Option<AutomatonResult> {
     let instant = crac
         .instants
         .iter()
         .position(|i| i.kind == InstantKind::Auto)?;
-    let state = State { instant, contingency: Some(contingency) };
+    let state = State {
+        instant,
+        contingency: Some(contingency),
+    };
     if !crac.flow_cnecs.iter().any(|c| c.state == state) {
         return None;
     }
@@ -113,19 +162,47 @@ pub fn simulate(
         transformers: transformers.to_vec(),
         ..Default::default()
     };
-    result.initial_margin_mw =
-        margin(crac, network, resolution, &state, &result.open_branches, &result.transformers);
+    result.initial_margin_mw = margin(
+        crac,
+        network,
+        resolution,
+        &state,
+        &result.open_branches,
+        &result.transformers,
+        model,
+    );
     result.final_margin_mw = result.initial_margin_mw;
 
-    // Speeds, ascending. An action without one goes last: an unstated speed is
-    // not "instant", and assuming it were would let it pre-empt equipment the
-    // file actually timed.
+    // Where each shifter stood when this perimeter began, which is what a
+    // `relativeToPreviousInstant` range is anchored on. For an auto perimeter
+    // the previous instant is preventive, and `transformers` arrives as the
+    // preventive perimeter left it — so this is measured before any automaton
+    // fires and never re-measured, exactly as [`search`](super::search) does it.
+    let anchors = super::linear::taps_now(
+        crac,
+        &Network {
+            transformers,
+            ..*network
+        },
+        resolution,
+    );
+
+    // Speeds, ascending — see [`DEFAULT_SPEED`] for where an action that states
+    // none belongs, which is not where it looks like it belongs.
     let mut speeds: Vec<i64> = Vec::new();
-    for action in crac.network_actions.iter().filter(|a| covers(&a.usage_rules, &state)) {
-        speeds.push(action.speed.unwrap_or(i64::MAX));
+    for action in crac
+        .network_actions
+        .iter()
+        .filter(|a| covers(&a.usage_rules, &state))
+    {
+        speeds.push(speed_of(action.speed));
     }
-    for action in crac.range_actions.iter().filter(|a| covers(&a.usage_rules, &state)) {
-        speeds.push(action.speed.unwrap_or(i64::MAX));
+    for action in crac
+        .range_actions
+        .iter()
+        .filter(|a| covers(&a.usage_rules, &state))
+    {
+        speeds.push(speed_of(action.speed));
     }
     speeds.sort_unstable();
     speeds.dedup();
@@ -137,13 +214,20 @@ pub fn simulate(
         // same speed class samples the grid at the same moment; asking each in
         // turn what its sibling just did is a different — and, on the vendored
         // evidence, wrong — model.
-        let snapshot =
-            violated(crac, network, resolution, &state, &result.open_branches, &result.transformers);
+        let snapshot = violated(
+            crac,
+            network,
+            resolution,
+            &state,
+            &result.open_branches,
+            &result.transformers,
+            model,
+        );
         for (index, action) in crac.network_actions.iter().enumerate() {
             if result.network_actions.contains(&index) {
                 continue;
             }
-            if action.speed.unwrap_or(i64::MAX) != speed {
+            if speed_of(action.speed) != speed {
                 continue;
             }
             if !triggered(&action.usage_rules, &state, &snapshot) {
@@ -163,25 +247,59 @@ pub fn simulate(
             if rounds > MAX_ROUNDS {
                 break;
             }
-            let violations =
-                violated(crac, network, resolution, &state, &result.open_branches, &result.transformers);
+            let violations = violated(
+                crac,
+                network,
+                resolution,
+                &state,
+                &result.open_branches,
+                &result.transformers,
+                model,
+            );
             let mut moved = false;
             for (index, action) in crac.range_actions.iter().enumerate() {
                 if result.range_actions.iter().any(|(i, _, _)| *i == index) {
                     continue;
                 }
-                if action.speed.unwrap_or(i64::MAX) != speed {
+                if speed_of(action.speed) != speed {
                     continue;
                 }
                 if !triggered(&action.usage_rules, &state, &violations) {
                     continue;
                 }
-                let RangeActionKind::Pst { element, tap_to_angle, .. } = &action.kind else {
+                let RangeActionKind::Pst {
+                    element,
+                    tap_to_angle,
+                    initial_tap,
+                } = &action.kind
+                else {
                     continue;
                 };
-                let Some(branch) = resolution.branch(element) else { continue };
-                let table =
-                    tap_table(tap_to_angle, network.tap_changers, branch, network.lines.len());
+                let Some(branch) = resolution.branch(element) else {
+                    continue;
+                };
+                let table = tap_table(
+                    tap_to_angle,
+                    network.tap_changers,
+                    branch,
+                    network.lines.len(),
+                );
+                // Restricted to what the CRAC actually permits, *before* the
+                // shift is sized. An automaton is not exempt from its own
+                // range: the reference clamps the computed set-point to
+                // `[minAdmissible, maxAdmissible]` and so must this, or a
+                // shifter allowed five taps of travel runs to the end of the
+                // tap changer instead — 16 where the CRAC said 10, and every
+                // margin downstream too good to be true.
+                let previous = anchors
+                    .iter()
+                    .find(|(i, _)| *i == index)
+                    .map_or(*initial_tap, |(_, t)| *t);
+                let (low, high) = super::linear::tap_bounds(action, &table, *initial_tap, previous);
+                let table: Vec<(i32, f64)> = table
+                    .into_iter()
+                    .filter(|(_, a)| *a >= low - 1e-9 && *a <= high + 1e-9)
+                    .collect();
                 // Sized against the CNECs *this* action watches, not the worst
                 // in the perimeter. A scheme is wired to a particular circuit;
                 // sizing it against somebody else's overload asks it to relieve
@@ -191,27 +309,13 @@ pub fn simulate(
                 if watched.is_empty() {
                     continue;
                 }
-                let Some((tap, angle)) = shift_to_relieve(
-                    crac, network, resolution, &state, &result, branch, &table, &watched,
+                let Some((tap, angle)) = shift_until_secure(
+                    crac, network, resolution, &state, &result, branch, &table, &watched, model,
                 ) else {
                     continue;
                 };
                 if let Some(i) = branch.checked_sub(network.lines.len()) {
-                    // The network's own step at the chosen tap — see the note in
-                    // `linear::apply`. A tap changer is equipment; a CRAC's table
-                    // describes it, and the equipment wins when they disagree.
-                    let from_network = network
-                        .tap_changers
-                        .get(i)
-                        .and_then(|c| c.as_ref())
-                        .and_then(|c| c.at(tap));
-                    if let Some(t) = result.transformers.get_mut(i) {
-                        let ratio = t.tap.norm();
-                        t.tap = match from_network {
-                            Some(step) => num_complex::Complex::from_polar(ratio, step.arg()),
-                            None => num_complex::Complex::from_polar(ratio, (-angle).to_radians()),
-                        };
-                    }
+                    apply_tap(network, &mut result.transformers, i, tap, angle);
                 }
                 result.range_actions.push((index, angle, Some(tap)));
                 moved = true;
@@ -223,8 +327,15 @@ pub fn simulate(
         }
     }
 
-    result.final_margin_mw =
-        margin(crac, network, resolution, &state, &result.open_branches, &result.transformers);
+    result.final_margin_mw = margin(
+        crac,
+        network,
+        resolution,
+        &state,
+        &result.open_branches,
+        &result.transformers,
+        model,
+    );
     Some(result)
 }
 
@@ -238,20 +349,36 @@ fn covers(rules: &[UsageRule], state: &State) -> bool {
 /// equipment operates on the contingency itself. An `OnConstraint` rule names
 /// the CNEC it watches and fires only while that CNEC is over its threshold,
 /// which is what makes the order of firing matter.
-fn triggered(rules: &[UsageRule], state: &State, violations: &[String]) -> bool {
+fn triggered(rules: &[UsageRule], state: &State, violations: &[Violated]) -> bool {
     let mut conditional = false;
     for rule in rules.iter().filter(|r| r.covers(state)) {
         match rule {
             UsageRule::OnInstant { .. } | UsageRule::OnContingencyState { .. } => return true,
+            // Agrees with `usage::Constrained::activates` — which additionally
+            // refuses a non-preventive rule whose CNEC belongs to another
+            // contingency — but only because `violations` is **state-local**:
+            // `violated` filters to this state's own perimeter, so a rule naming
+            // another contingency's CNEC finds nothing to match. The scoping is
+            // enforced by the data rather than by the test.
+            //
+            // Stated because it is the kind of agreement that stops being true
+            // quietly. If `violations` ever widens to more than one state, this
+            // arm needs the contingency check `usage.rs` has.
             UsageRule::OnConstraint { cnec, .. } => {
                 conditional = true;
-                if violations.iter().any(|v| v == cnec) {
+                if violations.iter().any(|v| v.cnec == *cnec) {
                     return true;
                 }
             }
-            UsageRule::OnFlowConstraintInCountry { .. } => {
+            // The country is part of the condition, not decoration. Firing on
+            // any violation anywhere is what this used to do, and it made an
+            // automaton scoped to one country answer for every other.
+            UsageRule::OnFlowConstraintInCountry { country, .. } => {
                 conditional = true;
-                if !violations.is_empty() {
+                if violations
+                    .iter()
+                    .any(|v| v.countries.iter().any(|c| c.eq_ignore_ascii_case(country)))
+                {
                     return true;
                 }
             }
@@ -267,16 +394,27 @@ fn triggered(rules: &[UsageRule], state: &State, violations: &[String]) -> bool 
 ///
 /// An unconditional rule watches everything, since it fires on the contingency
 /// rather than on a constraint.
-fn watched_cnecs(rules: &[UsageRule], state: &State, violations: &[String]) -> Vec<String> {
+fn watched_cnecs(rules: &[UsageRule], state: &State, violations: &[Violated]) -> Vec<String> {
     let mut named = Vec::new();
     for rule in rules.iter().filter(|r| r.covers(state)) {
         match rule {
             UsageRule::OnConstraint { cnec, .. } => {
-                if violations.iter().any(|v| v == cnec) {
+                if violations.iter().any(|v| v.cnec == *cnec) {
                     named.push(cnec.clone());
                 }
             }
-            _ => return violations.to_vec(),
+            // Scoped to the country too: an action authorized by an overload in
+            // Belgium watches Belgium's CNECs, not everything that happens to be
+            // over its threshold.
+            UsageRule::OnFlowConstraintInCountry { country, .. } => {
+                named.extend(
+                    violations
+                        .iter()
+                        .filter(|v| v.countries.iter().any(|c| c.eq_ignore_ascii_case(country)))
+                        .map(|v| v.cnec.clone()),
+                );
+            }
+            _ => return violations.iter().map(|v| v.cnec.clone()).collect(),
         }
     }
     named
@@ -292,7 +430,9 @@ fn apply_network_action(
     for elementary in &action.elementary {
         match elementary {
             ElementaryAction::TerminalsConnection { element, connected } => {
-                let Some(branch) = resolution.branch(element) else { return false };
+                let Some(branch) = resolution.branch(element) else {
+                    return false;
+                };
                 if *connected {
                     closed.push(branch);
                 } else {
@@ -300,7 +440,9 @@ fn apply_network_action(
                 }
             }
             ElementaryAction::Switch { element, open } => {
-                let Some(branch) = resolution.branch(element) else { return false };
+                let Some(branch) = resolution.branch(element) else {
+                    return false;
+                };
                 if *open {
                     opened.push(branch);
                 } else {
@@ -319,13 +461,43 @@ fn apply_network_action(
     true
 }
 
-/// The set-point that just clears the worst CNEC this action is watching.
+/// Shift this automaton's set-point until the CNECs it watches are secure.
 ///
-/// Returns the tap and its angle, or `None` when nothing would help — the
-/// sensitivity is negligible, the range is exhausted, or the shift needed is
-/// the direction the action has already been moved away from.
+/// Returns the tap it settles on and that tap's angle, or `None` when it does
+/// not move at all.
+///
+/// # Why this iterates
+///
+/// The shift is sized from a *linear* estimate — margin over sensitivity — and
+/// the network it is applied to is not linear. One shot is therefore
+/// systematically wrong in whichever direction the curvature runs, and the
+/// error is not small: on the reference's own scenario 1.2.2.2 a single shift
+/// lands on tap −7 with the watched CNEC still 5 A short of secure, where the
+/// answer is −8.
+///
+/// So it re-measures after every move and shifts again, which is what the
+/// reference does. Three things stop it, all of them needed:
+///
+/// - **Nothing is violated.** The goal is a secure perimeter, not the best
+///   margin available. An automaton is protection equipment: it acts until the
+///   thing it watches is inside its limit and then it is finished.
+/// - **The direction reverses.** A scheme does not hunt. Once the estimate
+///   starts asking for a move back the way it came, the previous position was
+///   the answer.
+/// - **[`MAX_SHIFTS`] iterations.** A guard, not a tolerance.
+///
+/// # The sensitivity under-estimator
+///
+/// When the same CNEC comes back as the worst one twice running, the linear
+/// estimate is converging too slowly to reach zero — so the assumed sensitivity
+/// is shrunk by [`SENSI_UNDERESTIMATOR_STEP`], down to
+/// [`SENSI_UNDERESTIMATOR_MIN`], which makes the next step *larger*. Without it
+/// a shifter whose true response is weaker than its linear one creeps toward
+/// the limit a fraction of a tap at a time and hits the iteration guard while
+/// still overloaded. It is the reference's own device, with the reference's own
+/// constants.
 #[allow(clippy::too_many_arguments)]
-fn shift_to_relieve(
+fn shift_until_secure(
     crac: &Crac,
     network: &Network<'_>,
     resolution: &Resolution,
@@ -333,90 +505,313 @@ fn shift_to_relieve(
     result: &AutomatonResult,
     branch: usize,
     tap_to_angle: &[(i32, f64)],
-    violations: &[String],
+    watched: &[String],
+    model: FlowModel,
 ) -> Option<(i32, f64)> {
-    if tap_to_angle.is_empty() {
-        return None;
-    }
-    let view = Network {
-        buses: network.buses,
-        lines: network.lines,
-        transformers: &result.transformers,
-        branch_ids: network.branch_ids,
-        bus_ids: network.bus_ids,
-        initially_open: network.initially_open,
-        bus_countries: network.bus_countries,
-        shunts: network.shunts,
-        tap_changers: network.tap_changers,
-        base_mva: network.base_mva,
-    };
-    let assessment = evaluate_with(crac, &view, resolution, &result.open_branches);
-    let perimeter = assessment.perimeters.iter().find(|p| p.state == *state)?;
-
-    // The worst CNEC this automaton is watching, among those actually violated.
-    let worst = perimeter
-        .cnecs
-        .iter()
-        .filter(|c| violations.iter().any(|v| *v == crac.flow_cnecs[c.cnec].id))
-        .min_by(|a, b| a.margin_mw.total_cmp(&b.margin_mw))?;
-
-    let options = DcOptions::default();
-    let branches = dc_branches(network.lines, &result.transformers, options);
-    let sensitivity = DcSensitivity::new(
-        network.buses,
-        &branches,
-        network.lines.len() + result.transformers.len(),
-    )?;
-    let column = phase_shift_sensitivity(&sensitivity, &branches, branch)?;
-    // MW per degree of the CRAC's angle — the same sign convention the linear
-    // optimizer uses, and for the same reason.
-    let sigma = -column.get(worst.branch).copied().unwrap_or(0.0)
-        * network.base_mva
-        * std::f64::consts::PI
-        / 180.0;
-    if sigma.abs() < 1e-6 {
-        return None;
-    }
-
-    // Shift just far enough to bring |flow| back to the limit.
-    let overload = worst.margin_mw.min(0.0);
-    let needed = worst.flow_mw.signum() * overload / sigma;
-    let current = tap_to_angle
-        .iter()
-        .find(|(t, _)| Some(*t) == current_tap(result, branch, network.lines.len(), tap_to_angle))
-        .map(|(_, a)| *a)
-        .unwrap_or(0.0);
-    let target = current + needed;
-
-    // Capped by the table, and rounded *away* from the current position so the
-    // shift is at least as large as required rather than fractionally short.
-    let mut best: Option<(i32, f64)> = None;
-    for &(tap, angle) in tap_to_angle {
-        let far_enough = if needed >= 0.0 { angle >= target } else { angle <= target };
-        let right_way = if needed >= 0.0 { angle >= current } else { angle <= current };
-        if !right_way {
-            continue;
-        }
-        if far_enough {
-            let better = best.is_none_or(|(_, b)| (angle - current).abs() < (b - current).abs());
-            if better {
-                best = Some((tap, angle));
-            }
-        }
-    }
-    // Nothing reaches it: go as far as the range allows, which is what a real
-    // scheme does rather than declining to act.
-    let chosen = best.or_else(|| {
+    let start = current_tap(result, branch, network.lines.len(), tap_to_angle)?;
+    let angle_of = |tap: i32| {
         tap_to_angle
             .iter()
-            .filter(|(_, a)| if needed >= 0.0 { *a >= current } else { *a <= current })
-            .max_by(|a, b| (a.1 - current).abs().total_cmp(&(b.1 - current).abs()))
-            .copied()
-    })?;
-    if (chosen.1 - current).abs() < 1e-9 {
+            .find(|(t, _)| *t == tap)
+            .map(|(_, a)| *a)
+    };
+    let start_angle = angle_of(start)?;
+
+    let mut transformers = result.transformers.clone();
+    let (mut tap, mut angle) = (start, start_angle);
+    let mut direction = 0.0f64;
+    // CNECs this shifter provably cannot help — the sensitivity is negligible,
+    // so no set-point secures them. Excluded rather than given up on, so the
+    // loop moves to the next violated CNEC instead of stopping at the worst.
+    let mut hopeless: Vec<usize> = Vec::new();
+    let mut previous: Option<usize> = None;
+    let mut underestimator = 1.0f64;
+
+    for _ in 0..MAX_SHIFTS {
+        let view = Network {
+            generation: network.generation,
+            buses: network.buses,
+            lines: network.lines,
+            transformers: &transformers,
+            branch_ids: network.branch_ids,
+            bus_ids: network.bus_ids,
+            initially_open: network.initially_open,
+            bus_countries: network.bus_countries,
+            shunts: network.shunts,
+            tap_changers: network.tap_changers,
+            base_mva: network.base_mva,
+        };
+        let assessment = measure(crac, &view, resolution, &result.open_branches, model);
+        let perimeter = assessment.perimeters.iter().find(|p| p.state == *state)?;
+
+        // The worst violated CNEC this automaton watches, ranked in the unit
+        // the flow model implies — megawatts under DC, amperes under AC. Not
+        // cosmetic: two CNECs at different voltages order differently in the
+        // two units, so the unit decides which one the shift is sized against.
+        let Some(worst) = perimeter
+            .cnecs
+            .iter()
+            .filter(|c| watched.iter().any(|v| *v == crac.flow_cnecs[c.cnec].id))
+            .filter(|c| !hopeless.contains(&c.cnec))
+            .filter(|c| c.is_violated())
+            .min_by(|a, b| overload(a, model).total_cmp(&overload(b, model)))
+        else {
+            break;
+        };
+
+        underestimator = if previous == Some(worst.cnec) {
+            (underestimator - SENSI_UNDERESTIMATOR_STEP).max(SENSI_UNDERESTIMATOR_MIN)
+        } else {
+            1.0
+        };
+        previous = Some(worst.cnec);
+
+        let options = DcOptions::default();
+        let branches = dc_branches(network.lines, &transformers, options);
+        let Some(sensitivity) = DcSensitivity::new(
+            network.buses,
+            &branches,
+            network.lines.len() + transformers.len(),
+        ) else {
+            break;
+        };
+        let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else {
+            break;
+        };
+        // MW per degree of the CRAC's angle — the same sign convention the
+        // linear optimizer uses, and for the same reason.
+        let sigma = -column.get(worst.branch).copied().unwrap_or(0.0)
+            * network.base_mva
+            * std::f64::consts::PI
+            / 180.0
+            * underestimator;
+        if sigma.abs() < 1e-6 {
+            hopeless.push(worst.cnec);
+            previous = None;
+            continue;
+        }
+
+        // Just far enough to bring the flow back to the limit. Margin and
+        // sensitivity are both in megawatts, so the ratio is the same number in
+        // either unit — only the choice of CNEC above depended on that.
+        let needed = worst.flow_mw.signum() * worst.margin_mw.min(0.0) / sigma;
+        let target = angle + needed;
+        let Some(next) = round_away(tap_to_angle, angle, target) else {
+            break;
+        };
+
+        let step = (next.1 - angle).signum() * f64::from(u8::from((next.1 - angle).abs() > 1e-9));
+        // At a bound, or asked to turn round. Either way the position it is
+        // already on is the answer.
+        if step == 0.0 || (direction != 0.0 && step != direction) {
+            break;
+        }
+        direction = step;
+
+        if let Some(i) = branch.checked_sub(network.lines.len()) {
+            apply_tap(network, &mut transformers, i, next.0, next.1);
+        }
+        (tap, angle) = next;
+    }
+
+    if tap == start {
         return None;
     }
-    Some(chosen)
+    // The estimate got it into the neighbourhood; this settles which tap.
+    Some(smallest_securing(
+        crac,
+        network,
+        resolution,
+        state,
+        result,
+        branch,
+        tap_to_angle,
+        watched,
+        &hopeless,
+        model,
+        start,
+        tap,
+    ))
+}
+
+/// The tap nearest `start` that secures every watched CNEC, searching outward
+/// towards `reached`.
+///
+/// # Why the shift is not simply believed
+///
+/// The reference computes the set-point that puts the worst margin at exactly
+/// zero, rounds to the first tap beyond it, and stops. That is the *smallest*
+/// set-point which secures the CNEC — and it is only the smallest because the
+/// sensitivity it divides by is the true one, taken from the same analysis that
+/// measures the flow.
+///
+/// gridoxide's gradient is the DC phase-shift sensitivity, and under an AC flow
+/// model it is not that number: on scenario 1.2.2.2 it reports 5.44 MW per
+/// degree where the network delivers 8.8. The direction is right — a DC
+/// sensitivity gets a phase shifter's sign and rough size right — but the
+/// distance is 60% too far, and rounding *away* then turns that into tap −11
+/// where −8 secures the circuit. Believing an approximate gradient to the tap
+/// is the one thing this algorithm cannot afford, because there is no
+/// keep-it-only-if-it-improved filter behind it: whatever it lands on is the
+/// answer.
+///
+/// So the specification is reproduced rather than the arithmetic. "Shift until
+/// the CNECs are secure, and no further" is a statement about measured flows,
+/// and measuring is what makes it independent of how good the gradient was.
+/// The scan runs from `start` outward, so the first tap that secures everything
+/// wins; when none does, the furthest reached stands, which is the honest
+/// answer to "this scheme cannot save the circuit".
+#[allow(clippy::too_many_arguments)]
+fn smallest_securing(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    state: &State,
+    result: &AutomatonResult,
+    branch: usize,
+    tap_to_angle: &[(i32, f64)],
+    watched: &[String],
+    hopeless: &[usize],
+    model: FlowModel,
+    start: i32,
+    reached: i32,
+) -> (i32, f64) {
+    let angle_of = |tap: i32| {
+        tap_to_angle
+            .iter()
+            .find(|(t, _)| *t == tap)
+            .map(|(_, a)| *a)
+    };
+    let reached_angle = angle_of(reached).unwrap_or_default();
+    let Some(i) = branch.checked_sub(network.lines.len()) else {
+        return (reached, reached_angle);
+    };
+
+    // Every tap strictly between the two, ordered from `start` outward, then
+    // the one actually reached. Ordered by tap number rather than by angle
+    // because a tap changer's map need not be monotone.
+    let mut between: Vec<i32> = tap_to_angle
+        .iter()
+        .map(|(t, _)| *t)
+        .filter(|t| {
+            if reached > start {
+                *t > start && *t < reached
+            } else {
+                *t < start && *t > reached
+            }
+        })
+        .collect();
+    between.sort_by_key(|t| (t - start).abs());
+
+    for tap in between {
+        let Some(angle) = angle_of(tap) else { continue };
+        let mut transformers = result.transformers.clone();
+        apply_tap(network, &mut transformers, i, tap, angle);
+        let view = Network {
+            generation: network.generation,
+            buses: network.buses,
+            lines: network.lines,
+            transformers: &transformers,
+            branch_ids: network.branch_ids,
+            bus_ids: network.bus_ids,
+            initially_open: network.initially_open,
+            bus_countries: network.bus_countries,
+            shunts: network.shunts,
+            tap_changers: network.tap_changers,
+            base_mva: network.base_mva,
+        };
+        let secure = measure(crac, &view, resolution, &result.open_branches, model)
+            .perimeters
+            .iter()
+            .find(|p| p.state == *state)
+            .is_some_and(|p| {
+                p.cnecs
+                    .iter()
+                    .filter(|c| watched.iter().any(|v| *v == crac.flow_cnecs[c.cnec].id))
+                    // The same exclusions the shift itself made. A CNEC this
+                    // shifter has no influence over cannot decide how far it
+                    // travels, or one overload nothing can fix would drive the
+                    // machine to the end of its range for nothing.
+                    .filter(|c| !hopeless.contains(&c.cnec))
+                    .all(|c| !c.is_violated())
+            });
+        if secure {
+            return (tap, angle);
+        }
+    }
+    (reached, reached_angle)
+}
+
+/// How far past its limit a CNEC is, in the unit the flow model implies.
+///
+/// `RaoUtil.getFlowUnit`: megawatts for a DC load flow, amperes for an AC one.
+fn overload(cnec: &CnecResult, model: FlowModel) -> f64 {
+    match model {
+        FlowModel::Ac => cnec.margin_a,
+        FlowModel::Dc => cnec.margin_mw,
+    }
+}
+
+/// The first tap at or beyond `target`, travelling away from `from`.
+///
+/// **Away**, not nearest. A shift sized to put the margin at exactly zero lands
+/// between two taps, and the nearer one is on the wrong side of it about half
+/// the time — which for protection equipment means leaving the circuit
+/// overloaded. The reference's `roundUpAngleToTapWrtInitialSetpoint` rounds the
+/// same way and for the same reason. `tap_to_angle` is already restricted to
+/// what the action's range permits, so running out of table is running out of
+/// range: the furthest permitted tap in that direction is the answer, which is
+/// what a real scheme does rather than declining to act.
+fn round_away(tap_to_angle: &[(i32, f64)], from: f64, target: f64) -> Option<(i32, f64)> {
+    let forward = target >= from;
+    let onward = tap_to_angle
+        .iter()
+        .filter(|(_, a)| if forward { *a >= from } else { *a <= from });
+    onward
+        .clone()
+        .filter(|(_, a)| if forward { *a >= target } else { *a <= target })
+        .min_by(|a, b| (a.1 - from).abs().total_cmp(&(b.1 - from).abs()))
+        .or_else(|| onward.max_by(|a, b| (a.1 - from).abs().total_cmp(&(b.1 - from).abs())))
+        .copied()
+}
+
+/// Put one transformer on a tap, preferring the network's own step.
+///
+/// See the note in [`linear::apply`](super::linear): a tap changer is
+/// equipment, a CRAC's table describes it, and the equipment wins when they
+/// disagree.
+fn apply_tap(
+    network: &Network<'_>,
+    transformers: &mut [Transformer],
+    index: usize,
+    tap: i32,
+    angle: f64,
+) {
+    let from_network = network
+        .tap_changers
+        .get(index)
+        .and_then(|c| c.as_ref())
+        .and_then(|c| c.at(tap));
+    if let Some(t) = transformers.get_mut(index) {
+        let ratio = t.tap.norm();
+        t.tap = match from_network {
+            Some(step) => num_complex::Complex::from_polar(ratio, step.arg()),
+            None => num_complex::Complex::from_polar(ratio, (-angle).to_radians()),
+        };
+    }
+}
+
+/// Evaluate with the flow model the run is using, as
+/// [`search`](super::search) does.
+fn measure(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+    model: FlowModel,
+) -> super::evaluate::SecurityResult {
+    let ac = super::evaluate::ac_options(network);
+    evaluate_model(crac, network, resolution, open, model, &ac)
 }
 
 /// The tap the transformer is actually at, read from its live angle.
@@ -449,8 +844,10 @@ fn violated(
     state: &State,
     open: &[usize],
     transformers: &[Transformer],
-) -> Vec<String> {
+    model: FlowModel,
+) -> Vec<Violated> {
     let view = Network {
+        generation: network.generation,
         buses: network.buses,
         lines: network.lines,
         transformers,
@@ -462,13 +859,40 @@ fn violated(
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
-    evaluate_with(crac, &view, resolution, open)
+    // The countries each violated branch touches, so a rule scoped to one can
+    // be honoured rather than ignored. Derived from the network, because a CRAC
+    // does not say where its elements are — the same source
+    // `usage::branch_countries` reads for the search.
+    let branches = crate::linear::btheta::dc_branches(
+        view.lines,
+        view.transformers,
+        crate::linear::DcOptions::default(),
+    );
+    let countries = super::usage::branch_countries(crac, &view, resolution, &branches);
+    measure(crac, &view, resolution, open, model)
         .perimeters
         .iter()
         .filter(|p| p.state == *state)
         .flat_map(|p| p.violations())
-        .map(|c| crac.flow_cnecs[c.cnec].id.clone())
+        .map(|c| Violated {
+            cnec: crac.flow_cnecs[c.cnec].id.clone(),
+            countries: countries.get(&c.branch).cloned().unwrap_or_default(),
+        })
         .collect()
+}
+
+/// A CNEC over its threshold, and the countries its branch touches.
+///
+/// The second half exists because `OnFlowConstraintInCountry` is a rule about
+/// *where* the overload is. Carrying only the id made that rule unanswerable
+/// here, and it was answered "yes" unconditionally: an automaton scoped to
+/// Belgium fired because something in France was overloaded. `usage.rs` has
+/// always done the test properly for the search, and the reference runs both
+/// paths through one `RaoUtil.canRemedialActionBeUsed`.
+#[derive(Clone, Debug)]
+struct Violated {
+    cnec: String,
+    countries: Vec<String>,
 }
 
 fn margin(
@@ -478,8 +902,10 @@ fn margin(
     state: &State,
     open: &[usize],
     transformers: &[Transformer],
+    model: FlowModel,
 ) -> f64 {
     let view = Network {
+        generation: network.generation,
         buses: network.buses,
         lines: network.lines,
         transformers,
@@ -491,10 +917,85 @@ fn margin(
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
-    evaluate_with(crac, &view, resolution, open)
+    measure(crac, &view, resolution, open, model)
         .perimeters
         .iter()
         .find(|p| p.state == *state)
         .and_then(|p| p.min_margin())
         .unwrap_or(f64::INFINITY)
+}
+
+#[cfg(test)]
+mod country_tests {
+    use super::*;
+    use crate::rao::crac::UsageRule;
+
+    fn violated(cnec: &str, countries: &[&str]) -> Violated {
+        Violated {
+            cnec: cnec.into(),
+            countries: countries.iter().map(|c| (*c).to_string()).collect(),
+        }
+    }
+
+    fn in_country(country: &str) -> UsageRule {
+        UsageRule::OnFlowConstraintInCountry {
+            instant: 0,
+            country: country.into(),
+            contingency: None,
+        }
+    }
+
+    const AUTO: State = State {
+        instant: 0,
+        contingency: Some(0),
+    };
+
+    /// A rule scoped to a country is a rule **about where the overload is**.
+    ///
+    /// This path used to fire on any violation anywhere, so an automaton scoped
+    /// to Belgium operated because something in France was over its threshold.
+    /// `usage.rs` has always done the test properly for the search — the two
+    /// were one rule with two implementations, one of them ignoring half the
+    /// condition — and the reference runs both paths through a single
+    /// `RaoUtil.canRemedialActionBeUsed`.
+    ///
+    /// No vendored CRAC has a country-scoped rule on an automaton, so the gate
+    /// cannot see this. It is asserted here instead rather than left to be
+    /// discovered by whoever first writes one.
+    #[test]
+    fn a_country_scoped_automaton_ignores_an_overload_elsewhere() {
+        let rules = [in_country("BE")];
+        let elsewhere = [violated("fr-cnec", &["FR"])];
+        assert!(
+            !triggered(&rules, &AUTO, &elsewhere),
+            "an overload in France must not operate equipment scoped to Belgium"
+        );
+        let here = [violated("be-cnec", &["BE"])];
+        assert!(
+            triggered(&rules, &AUTO, &here),
+            "an overload in Belgium must"
+        );
+    }
+
+    /// A cross-border branch counts for both ends, which is why the country is
+    /// a list rather than a value.
+    #[test]
+    fn a_tie_line_counts_for_both_countries() {
+        let tie = [violated("be-fr", &["BE", "FR"])];
+        assert!(triggered(&[in_country("BE")], &AUTO, &tie));
+        assert!(triggered(&[in_country("FR")], &AUTO, &tie));
+        assert!(!triggered(&[in_country("DE")], &AUTO, &tie));
+    }
+
+    /// And what it watches is scoped too: an action authorized by an overload in
+    /// Belgium watches Belgium's CNECs, not everything over its threshold.
+    #[test]
+    fn what_a_country_scoped_rule_watches_is_scoped_too() {
+        let rules = [in_country("BE")];
+        let violations = [violated("be-cnec", &["BE"]), violated("fr-cnec", &["FR"])];
+        assert_eq!(
+            watched_cnecs(&rules, &AUTO, &violations),
+            vec!["be-cnec".to_string()]
+        );
+    }
 }

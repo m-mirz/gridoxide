@@ -42,9 +42,15 @@ pub enum CracError {
     /// The document is not a CRAC at all.
     NotACrac,
     /// A CNEC or usage rule named an instant the document never declared.
-    UnknownInstant { referrer: String, instant: String },
+    UnknownInstant {
+        referrer: String,
+        instant: String,
+    },
     /// A CNEC or usage rule named a contingency the document never declared.
-    UnknownContingency { referrer: String, contingency: String },
+    UnknownContingency {
+        referrer: String,
+        contingency: String,
+    },
 }
 
 impl std::fmt::Display for CracError {
@@ -55,8 +61,14 @@ impl std::fmt::Display for CracError {
             CracError::UnknownInstant { referrer, instant } => {
                 write!(f, "`{referrer}` refers to undeclared instant `{instant}`")
             }
-            CracError::UnknownContingency { referrer, contingency } => {
-                write!(f, "`{referrer}` refers to undeclared contingency `{contingency}`")
+            CracError::UnknownContingency {
+                referrer,
+                contingency,
+            } => {
+                write!(
+                    f,
+                    "`{referrer}` refers to undeclared contingency `{contingency}`"
+                )
             }
         }
     }
@@ -160,7 +172,10 @@ fn neutralise_non_finite(text: &str) -> String {
         // is left alone.
         let token = TOKENS.iter().find(|t| {
             rest.strip_prefix(**t).is_some_and(|after| {
-                after.chars().next().is_none_or(|n| !n.is_alphanumeric() && n != '_')
+                after
+                    .chars()
+                    .next()
+                    .is_none_or(|n| !n.is_alphanumeric() && n != '_')
             })
         });
         match token {
@@ -178,9 +193,8 @@ fn neutralise_non_finite(text: &str) -> String {
 }
 
 pub fn read(path: impl AsRef<std::path::Path>) -> Result<(Crac, CracReport), CracError> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        CracError::Json(serde_json::Error::io(e))
-    })?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| CracError::Json(serde_json::Error::io(e)))?;
     parse(&text)
 }
 
@@ -202,16 +216,31 @@ fn integer(v: &Value, key: &str) -> Option<i64> {
 }
 
 fn array<'a>(v: &'a Value, key: &str) -> &'a [Value] {
-    v.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 /// The four instants every pre-2.0 CRAC had implicitly.
 fn default_instants() -> Vec<Instant> {
     vec![
-        Instant { id: "preventive".into(), kind: InstantKind::Preventive },
-        Instant { id: "outage".into(), kind: InstantKind::Outage },
-        Instant { id: "auto".into(), kind: InstantKind::Auto },
-        Instant { id: "curative".into(), kind: InstantKind::Curative },
+        Instant {
+            id: "preventive".into(),
+            kind: InstantKind::Preventive,
+        },
+        Instant {
+            id: "outage".into(),
+            kind: InstantKind::Outage,
+        },
+        Instant {
+            id: "auto".into(),
+            kind: InstantKind::Auto,
+        },
+        Instant {
+            id: "curative".into(),
+            kind: InstantKind::Curative,
+        },
     ]
 }
 
@@ -219,7 +248,10 @@ pub fn from_value(doc: &Value) -> Result<(Crac, CracReport), CracError> {
     if !is_crac(doc) {
         return Err(CracError::NotACrac);
     }
-    let mut report = CracReport { version: text(doc, "version"), ..Default::default() };
+    let mut report = CracReport {
+        version: text(doc, "version"),
+        ..Default::default()
+    };
 
     // Instants. Older versions omit the list and rely on four fixed ones; the
     // rest of the reader resolves by name either way, so supplying the defaults
@@ -259,7 +291,10 @@ pub fn from_value(doc: &Value) -> Result<(Crac, CracReport), CracError> {
         })
         .collect();
 
-    let index = Index { instants: &instants, contingencies: &contingencies };
+    let index = Index {
+        instants: &instants,
+        contingencies: &contingencies,
+    };
 
     let mut flow_cnecs = Vec::new();
     for c in array(doc, "flowCnecs") {
@@ -376,7 +411,13 @@ fn read_side(v: &Value) -> Side {
 }
 
 fn read_unit(v: &Value) -> Unit {
-    match v.get("unit").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase().as_str() {
+    match v
+        .get("unit")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "megawatt" => Unit::Megawatt,
         "percent_imax" => Unit::PercentImax,
         "degree" => Unit::Degree,
@@ -386,18 +427,28 @@ fn read_unit(v: &Value) -> Unit {
 }
 
 fn read_flow_cnec(v: &Value, index: &Index<'_>) -> Result<Option<FlowCnec>, CracError> {
-    let Some(id) = text(v, "id") else { return Ok(None) };
-    let Some(element) = text(v, "networkElementId") else { return Ok(None) };
+    let Some(id) = text(v, "id") else {
+        return Ok(None);
+    };
+    let Some(element) = text(v, "networkElementId") else {
+        return Ok(None);
+    };
     let instant_id = text(v, "instant").unwrap_or_else(|| "preventive".into());
-    let instant = index.instant(&instant_id).ok_or_else(|| CracError::UnknownInstant {
-        referrer: id.clone(),
-        instant: instant_id,
-    })?;
-    let contingency = match text(v, "contingencyId") {
-        Some(c) => Some(index.contingency(&c).ok_or_else(|| CracError::UnknownContingency {
+    let instant = index
+        .instant(&instant_id)
+        .ok_or_else(|| CracError::UnknownInstant {
             referrer: id.clone(),
-            contingency: c,
-        })?),
+            instant: instant_id,
+        })?;
+    let contingency = match text(v, "contingencyId") {
+        Some(c) => Some(
+            index
+                .contingency(&c)
+                .ok_or_else(|| CracError::UnknownContingency {
+                    referrer: id.clone(),
+                    contingency: c,
+                })?,
+        ),
         None => None,
     };
 
@@ -424,7 +475,10 @@ fn read_flow_cnec(v: &Value, index: &Index<'_>) -> Result<Option<FlowCnec>, Crac
     Ok(Some(FlowCnec {
         id,
         network_element: element,
-        state: State { instant, contingency },
+        state: State {
+            instant,
+            contingency,
+        },
         thresholds,
         reliability_margin: number(v, "reliabilityMargin").unwrap_or(0.0),
         optimized: v.get("optimized").and_then(Value::as_bool).unwrap_or(true),
@@ -441,9 +495,8 @@ fn read_usage_rules(
     report: &mut CracReport,
 ) -> Result<Vec<UsageRule>, CracError> {
     let mut rules = Vec::new();
-    let instant_of = |v: &Value| -> Option<usize> {
-        text(v, "instant").and_then(|i| index.instant(&i))
-    };
+    let instant_of =
+        |v: &Value| -> Option<usize> { text(v, "instant").and_then(|i| index.instant(&i)) };
 
     // Both spellings of "available at this instant".
     for key in ["onInstantUsageRules", "freeToUseUsageRules"] {
@@ -461,7 +514,10 @@ fn read_usage_rules(
             };
             if let Some(contingency) = index.contingency(&c) {
                 rules.push(UsageRule::OnContingencyState {
-                    state: State { instant, contingency: Some(contingency) },
+                    state: State {
+                        instant,
+                        contingency: Some(contingency),
+                    },
                 });
             }
         }
@@ -475,7 +531,9 @@ fn read_usage_rules(
         "onVoltageConstraintUsageRules",
     ] {
         for r in array(v, key) {
-            let Some(instant) = instant_of(r) else { continue };
+            let Some(instant) = instant_of(r) else {
+                continue;
+            };
             let cnec = ["cnecId", "flowCnecId", "angleCnecId", "voltageCnecId"]
                 .iter()
                 .find_map(|k| text(r, k));
@@ -485,7 +543,9 @@ fn read_usage_rules(
         }
     }
     for r in array(v, "onFlowConstraintInCountryUsageRules") {
-        let (Some(instant), Some(country)) = (instant_of(r), text(r, "country")) else { continue };
+        let (Some(instant), Some(country)) = (instant_of(r), text(r, "country")) else {
+            continue;
+        };
         rules.push(UsageRule::OnFlowConstraintInCountry {
             instant,
             country,
@@ -523,24 +583,36 @@ fn read_network_action(
     index: &Index<'_>,
     report: &mut CracReport,
 ) -> Result<Option<NetworkAction>, CracError> {
-    let Some(id) = text(v, "id") else { return Ok(None) };
+    let Some(id) = text(v, "id") else {
+        return Ok(None);
+    };
     let mut elementary = Vec::new();
 
     // `topologicalActions` is the 1.x spelling of `terminalsConnectionActions`.
     for key in ["terminalsConnectionActions", "topologicalActions"] {
         for a in array(v, key) {
-            let Some(element) = text(a, "networkElementId") else { continue };
+            let Some(element) = text(a, "networkElementId") else {
+                continue;
+            };
             let connected = matches!(
-                text(a, "actionType").unwrap_or_default().to_ascii_lowercase().as_str(),
+                text(a, "actionType")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str(),
                 "close"
             );
             elementary.push(ElementaryAction::TerminalsConnection { element, connected });
         }
     }
     for a in array(v, "switchActions") {
-        let Some(element) = text(a, "networkElementId") else { continue };
+        let Some(element) = text(a, "networkElementId") else {
+            continue;
+        };
         let open = matches!(
-            text(a, "actionType").unwrap_or_default().to_ascii_lowercase().as_str(),
+            text(a, "actionType")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
             "open"
         );
         elementary.push(ElementaryAction::Switch { element, open });
@@ -549,13 +621,21 @@ fn read_network_action(
     // the same action; the older spelling calls the tap a "setpoint", which it
     // is not — it is an integer position, and reading it as an angle would put
     // a phase shifter tens of degrees away from where the CRAC meant.
-    for (key, field) in
-        [("phaseTapChangerTapPositionActions", "tapPosition"), ("pstSetpoints", "setpoint")]
-    {
+    for (key, field) in [
+        ("phaseTapChangerTapPositionActions", "tapPosition"),
+        ("pstSetpoints", "setpoint"),
+    ] {
         for a in array(v, key) {
-            let Some(element) = text(a, "networkElementId") else { continue };
-            let Some(tap) = integer(a, field) else { continue };
-            elementary.push(ElementaryAction::PstTapPosition { element, tap: tap as i32 });
+            let Some(element) = text(a, "networkElementId") else {
+                continue;
+            };
+            let Some(tap) = integer(a, field) else {
+                continue;
+            };
+            elementary.push(ElementaryAction::PstTapPosition {
+                element,
+                tap: tap as i32,
+            });
         }
     }
     // `injectionSetpoints` is 1.x for what 2.x splits into generator and load
@@ -563,14 +643,22 @@ fn read_network_action(
     // generator set-point: both end up as an active-power target on a named
     // element, and the network decides what that element is.
     for a in array(v, "injectionSetpoints") {
-        let Some(element) = text(a, "networkElementId") else { continue };
-        let Some(p) = number(a, "setpoint") else { continue };
+        let Some(element) = text(a, "networkElementId") else {
+            continue;
+        };
+        let Some(p) = number(a, "setpoint") else {
+            continue;
+        };
         elementary.push(ElementaryAction::GeneratorSetpoint { element, p });
     }
     for (key, is_load) in [("generatorActions", false), ("loadActions", true)] {
         for a in array(v, key) {
-            let Some(element) = text(a, "networkElementId") else { continue };
-            let Some(p) = number(a, "activePowerValue").or(number(a, "setpoint")) else { continue };
+            let Some(element) = text(a, "networkElementId") else {
+                continue;
+            };
+            let Some(p) = number(a, "activePowerValue").or(number(a, "setpoint")) else {
+                continue;
+            };
             elementary.push(if is_load {
                 ElementaryAction::LoadSetpoint { element, p }
             } else {
@@ -579,14 +667,22 @@ fn read_network_action(
         }
     }
     for a in array(v, "shuntCompensatorPositionActions") {
-        let Some(element) = text(a, "networkElementId") else { continue };
-        let Some(section) = integer(a, "sectionCount") else { continue };
-        elementary.push(ElementaryAction::ShuntSection { element, section: section as i32 });
+        let Some(element) = text(a, "networkElementId") else {
+            continue;
+        };
+        let Some(section) = integer(a, "sectionCount") else {
+            continue;
+        };
+        elementary.push(ElementaryAction::ShuntSection {
+            element,
+            section: section as i32,
+        });
     }
     for a in array(v, "switchPairs") {
-        let (Some(open), Some(close)) =
-            (text(a, "open").or(text(a, "switchToOpen")), text(a, "close").or(text(a, "switchToClose")))
-        else {
+        let (Some(open), Some(close)) = (
+            text(a, "open").or(text(a, "switchToOpen")),
+            text(a, "close").or(text(a, "switchToClose")),
+        ) else {
             continue;
         };
         elementary.push(ElementaryAction::SwitchPair { open, close });
@@ -658,7 +754,9 @@ fn read_pst(v: &Value) -> Option<RangeActionKind> {
 }
 
 fn read_hvdc(v: &Value) -> Option<RangeActionKind> {
-    Some(RangeActionKind::Hvdc { element: text(v, "networkElementId")? })
+    Some(RangeActionKind::Hvdc {
+        element: text(v, "networkElementId")?,
+    })
 }
 
 fn read_injection(v: &Value) -> Option<RangeActionKind> {
@@ -670,7 +768,11 @@ fn read_injection(v: &Value) -> Option<RangeActionKind> {
     let distribution = if distribution.is_empty() {
         v.get("networkElementIdsAndKeys")
             .and_then(Value::as_object)
-            .map(|m| m.iter().filter_map(|(k, x)| Some((k.clone(), x.as_f64()?))).collect())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, x)| Some((k.clone(), x.as_f64()?)))
+                    .collect()
+            })
             .unwrap_or_default()
     } else {
         distribution
@@ -691,8 +793,12 @@ fn read_range_action(
     reader: ActionReader,
     report: &mut CracReport,
 ) -> Result<Option<RangeAction>, CracError> {
-    let Some(id) = text(v, "id") else { return Ok(None) };
-    let Some(kind) = reader(v) else { return Ok(None) };
+    let Some(id) = text(v, "id") else {
+        return Ok(None);
+    };
+    let Some(kind) = reader(v) else {
+        return Ok(None);
+    };
     let ranges: Vec<Range> = array(v, "ranges")
         .iter()
         .map(|r| Range {
@@ -713,6 +819,18 @@ fn read_range_action(
         operator: text(v, "operator"),
         speed: integer(v, "speed"),
         activation_cost: number(v, "activationCost"),
+        // `variationCosts: {up, down}`. Stated **per tap** for a phase shifter,
+        // which the reference's own 3.4.2.1 fixes: an activation cost of 5 and
+        // a variation cost of 10 make five taps cost 55, and its scenario text
+        // for 3.4.2.2 says "5 per tap" outright. So this is not converted to the
+        // set-point's own unit here — `Costly` measures movement in taps to
+        // match.
+        variation_cost: v.get("variationCosts").and_then(|c| {
+            Some(super::crac::VariationCost {
+                up: number(c, "up")?,
+                down: number(c, "down")?,
+            })
+        }),
         group: text(v, "groupId"),
         kind,
         ranges,

@@ -70,11 +70,12 @@ use std::path::{Path, PathBuf};
 
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
-use gridoxide::rao::evaluate::{evaluate_model, AcOptions, FlowModel};
+use gridoxide::rao::evaluate::{FlowModel, evaluate_model};
 use gridoxide::rao::linear::ObjectiveUnit;
-use gridoxide::rao::{crac_json, run, Network, Resolution, SearchOptions};
+use gridoxide::rao::{
+    Network, Resolution, SearchOptions, SecondPreventiveCondition, crac_json, run,
+};
 use gridoxide::ucte;
-use serde_json::Value;
 
 mod openrao;
 
@@ -89,7 +90,11 @@ fn all_scenarios() -> HashMap<String, Scenario> {
                 let text = std::fs::read_to_string(&path).expect("feature file");
                 for scenario in parse(&text) {
                     let previous = out.insert(scenario.name.clone(), scenario);
-                    assert!(previous.is_none(), "a scenario id repeats in {}", path.display());
+                    assert!(
+                        previous.is_none(),
+                        "a scenario id repeats in {}",
+                        path.display()
+                    );
                 }
             }
         }
@@ -101,11 +106,17 @@ fn all_scenarios() -> HashMap<String, Scenario> {
 
 /// The scenarios a gate selects, in the order its list names them.
 fn selected(list: &str, all: &HashMap<String, Scenario>) -> Vec<Scenario> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/rao").join(list);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/rao")
+        .join(list);
     let text = std::fs::read_to_string(&path).expect("scenario list");
     text.lines()
         .filter_map(|l| l.split('#').next().unwrap().split_whitespace().next())
-        .map(|id| all.get(id).unwrap_or_else(|| panic!("{list}: no scenario {id}")).clone())
+        .map(|id| {
+            all.get(id)
+                .unwrap_or_else(|| panic!("{list}: no scenario {id}"))
+                .clone()
+        })
         .collect()
 }
 
@@ -132,41 +143,157 @@ enum MarginUnit {
     Ampere,
 }
 
-/// A margin in both units, as the evaluator reported it.
+/// One CNEC's reading in one network: its margin in both units, and the flow
+/// that produced it at both terminals.
+///
+/// The flows travel with the margin rather than in a map of their own because
+/// they are read at the same three stages and out of the same
+/// [`CnecResult`](gridoxide::rao::CnecResult) — a second set of maps would be a
+/// second chance to look a stage up in the wrong one.
 #[derive(Debug, Clone, Copy)]
 struct Margin {
     mw: f64,
     a: f64,
+    /// `(MW, A)` at side one and side two. Under AC these differ by the
+    /// branch's losses and by the two buses' voltages; under DC side two is the
+    /// negation of side one.
+    flow: [(f64, f64); 2],
 }
 
 impl Margin {
+    fn of(c: &gridoxide::rao::CnecResult) -> Self {
+        Self {
+            mw: c.margin_mw,
+            a: c.margin_a,
+            flow: [(c.flow_mw, c.current_a), c.side_two],
+        }
+    }
+
     fn in_unit(&self, unit: MarginUnit) -> f64 {
         match unit {
             MarginUnit::Megawatt => self.mw,
             MarginUnit::Ampere => self.a,
         }
     }
+
+    /// The flow at one side, in the unit the step is written in. `side` is the
+    /// reference's own 1-based numbering.
+    ///
+    /// The ampere figure is **signed by the active power** at that terminal.
+    /// `CnecResult::current_a` is a magnitude, correctly — a current is one, and
+    /// it is what a threshold is compared against. But the reference's
+    /// `getFlow(cnec, side, AMPERE)` divides the *signed* megawatts by
+    /// `√3·U`, so a step reading `-1444.0 A on side 2` is naming a direction
+    /// and not just a size. Comparing a magnitude against it fails on every
+    /// reverse flow while agreeing to five significant figures, which is a
+    /// confusing way to be right.
+    fn flow_in_unit(&self, unit: MarginUnit, side: usize) -> Option<f64> {
+        let (mw, a) = *self.flow.get(side.checked_sub(1)?)?;
+        Some(match unit {
+            MarginUnit::Megawatt => mw,
+            MarginUnit::Ampere => a.copysign(mw),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
 enum Expect {
     Secured(bool),
-    WorstMargin { value: f64, cnec: Option<String>, stage: Stage, unit: MarginUnit },
-    CnecMargin { cnec: String, value: f64, stage: Stage, unit: MarginUnit },
+    WorstMargin {
+        value: f64,
+        cnec: Option<String>,
+        stage: Stage,
+        unit: MarginUnit,
+    },
+    CnecMargin {
+        cnec: String,
+        value: f64,
+        stage: Stage,
+        unit: MarginUnit,
+    },
     /// `the initial margin on cnec "X" should be N MW` — the *untouched*
     /// network, before any remedial action. Distinct from the after-PRA one,
     /// and a scenario routinely asserts both for the same CNEC: reading them
     /// as the same step compares the optimized answer against the starting
     /// point and fails on every scenario that improves anything.
-    InitialCnecMargin { cnec: String, value: f64, unit: MarginUnit },
+    InitialCnecMargin {
+        cnec: String,
+        value: f64,
+        unit: MarginUnit,
+    },
     /// `the value of the objective function after CRA should be N` — the
     /// reference's **cost**, which is the negated worst margin plus whatever
     /// the monitored CNECs are violating. `None` means "initially", before any
     /// remedial action.
-    ObjectiveValue { value: f64, stage: Option<Stage> },
-    PstTap { action: String, tap: i32, at: Where },
-    ActionUsed { action: String, at: Where },
-    ActionCount { count: usize, at: Where },
+    ObjectiveValue {
+        value: f64,
+        stage: Option<Stage>,
+    },
+    PstTap {
+        action: String,
+        tap: i32,
+        at: Where,
+    },
+    /// A redispatch's set-point, in MW. Absolute, not a shift — see
+    /// `linear::injection_origin`.
+    Setpoint {
+        action: String,
+        value: f64,
+        at: Where,
+    },
+    ActionUsed {
+        action: String,
+        at: Where,
+    },
+    /// `the remedial action "X" is not used ...` — the negative, and worth
+    /// having for exactly the reason it is easy to skip: nothing else in this
+    /// harness penalizes taking an action the reference declines, which is the
+    /// shape two recorded defects already had.
+    ActionNotUsed {
+        action: String,
+        at: Where,
+    },
+    ActionCount {
+        count: usize,
+        at: Where,
+    },
+    /// `the flow on cnec "X" after PRA should be N A on side N`, and the
+    /// `initial flow` form with `stage: None`. Sides are the reference's own
+    /// 1-based numbering.
+    CnecFlow {
+        cnec: String,
+        value: f64,
+        unit: MarginUnit,
+        side: usize,
+        stage: Option<Stage>,
+    },
+    /// `the "upper"/"lower" threshold on cnec "X" should be N A` — the bound
+    /// itself, not the distance to it.
+    CnecThreshold {
+        cnec: String,
+        upper: bool,
+        value: f64,
+        unit: MarginUnit,
+    },
+    /// `PST "X" in network file with PRA is on tap N` — where the *network*
+    /// left the shifter, addressed by network element rather than by range
+    /// action. Distinct from [`PstTap`](Self::PstTap): a scenario asserts this
+    /// for a shifter no range action names.
+    NetworkTap {
+        element: String,
+        tap: i32,
+    },
+    /// `line "X" in network file with PRA has connection status to "X"`.
+    Connected {
+        element: String,
+        connected: bool,
+    },
+    /// `the execution details should be "X"` — which optimization steps ran and
+    /// how each turned out. The most-asserted step in the whole suite, and the
+    /// one thing no margin can tell you: whether the answer in front of you is
+    /// the plan the optimizer wanted, the plan it fell back to, or the network
+    /// untouched.
+    Steps(String),
     /// A step this harness does not implement, kept so it is counted rather
     /// than quietly dropped.
     Unsupported(String),
@@ -205,7 +332,10 @@ fn stage_of(line: &str) -> Stage {
 #[derive(Debug, Clone, PartialEq)]
 enum Where {
     Preventive,
-    After { contingency: String, instant: String },
+    After {
+        contingency: String,
+        instant: String,
+    },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -217,6 +347,13 @@ struct Scenario {
     core_cc: bool,
     crac: String,
     config: String,
+    /// `I launch rao with a time limit of N seconds`, where the reference has
+    /// one. A **negative** limit is the suite's way of saying the run had no
+    /// time for a second preventive pass — 1.4.4.5 and 1.4.4.6 are the same
+    /// scenario at −1 and 600 seconds, and they assert different answers.
+    /// gridoxide has no wall clock in the optimizer, so the limit is honoured
+    /// where it is a statement about *what runs* rather than about how long.
+    time_limit: Option<f64>,
     expectations: Vec<Expect>,
 }
 
@@ -244,6 +381,28 @@ fn number_after_quotes(line: &str) -> Option<f64> {
     token.parse::<f64>().ok()
 }
 
+/// The `n`th double-quoted span, zero-based.
+///
+/// Needed because the reference does not put the subject first in every step:
+/// `the "upper" threshold on cnec "X"` names the bound before the CNEC.
+fn quoted_nth(line: &str, n: usize) -> Option<String> {
+    line.split('"')
+        .skip(1)
+        .step_by(2)
+        .nth(n)
+        .map(str::to_string)
+}
+
+/// The terminal a flow step names, in the reference's 1-based numbering.
+fn side_of(line: &str) -> Option<usize> {
+    line.split_once(" on side ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn parse(text: &str) -> Vec<Scenario> {
     let mut scenarios = Vec::new();
     let mut current: Option<Scenario> = None;
@@ -257,12 +416,19 @@ fn parse(text: &str) -> Vec<Scenario> {
                 scenarios.push(s);
             }
             current = Some(Scenario {
-                name: rest.split_whitespace().next().unwrap_or("?").trim_end_matches(':').to_string(),
+                name: rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("?")
+                    .trim_end_matches(':')
+                    .to_string(),
                 ..Default::default()
             });
             continue;
         }
-        let Some(scenario) = current.as_mut() else { continue };
+        let Some(scenario) = current.as_mut() else {
+            continue;
+        };
 
         if line.starts_with("Given network file is") {
             scenario.network = quoted(line).unwrap_or_default();
@@ -276,6 +442,16 @@ fn parse(text: &str) -> Vec<Scenario> {
             scenario.crac = quoted(line).unwrap_or_default();
         } else if line.starts_with("Given configuration file is") {
             scenario.config = quoted(line).unwrap_or_default();
+        } else if line.contains("launch rao with a time limit of") {
+            scenario.time_limit = number_after_quotes(line);
+        } else if line.contains("I launch rao") {
+            // Recognised and handled by doing nothing: `check` launches
+            // unconditionally, so the step needs no state. Recognising it
+            // matters because **Gherkin's keywords are prose** — a step is
+            // identified by its text, and `Then I launch rao` is the same step
+            // as `When I launch rao`. 0.2.1.2.1 writes `Then` where every other
+            // scenario writes `When`, and matching on the keyword filed it as
+            // an expectation nobody could check.
         } else if line.starts_with("Then") {
             scenario.expectations.push(expectation(line));
         }
@@ -351,23 +527,33 @@ fn expectation(line: &str) -> Expect {
         };
     }
     if line.contains("the worst margin is") {
-        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
         let cnec = line.contains("on cnec").then(|| quoted(line)).flatten();
         return match number_after_quotes(line) {
-            Some(value) => Expect::WorstMargin { value, cnec, stage: stage_of(line), unit },
+            Some(value) => Expect::WorstMargin {
+                value,
+                cnec,
+                stage: stage_of(line),
+                unit,
+            },
             None => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("margin on cnec") {
-        let Some(unit) = margin_unit(line) else { return Expect::Unsupported(line.to_string()) };
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
         let initial = line.contains("initial margin on cnec");
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(cnec), Some(value)) if initial => {
-                Expect::InitialCnecMargin { cnec, value, unit }
-            }
-            (Some(cnec), Some(value)) => {
-                Expect::CnecMargin { cnec, value, stage: stage_of(line), unit }
-            }
+            (Some(cnec), Some(value)) if initial => Expect::InitialCnecMargin { cnec, value, unit },
+            (Some(cnec), Some(value)) => Expect::CnecMargin {
+                cnec,
+                value,
+                stage: stage_of(line),
+                unit,
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
@@ -384,23 +570,122 @@ fn expectation(line: &str) -> Expect {
             None => Expect::Unsupported(line.to_string()),
         };
     }
+    if line.contains("flow on cnec") {
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
+        let Some(side) = side_of(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
+        // `initial` is the untouched network; every other form names a stage.
+        let stage = (!line.contains("initial flow")).then(|| stage_of(line));
+        return match (quoted(line), number_after_quotes(line)) {
+            (Some(cnec), Some(value)) => Expect::CnecFlow {
+                cnec,
+                value,
+                unit,
+                side,
+                stage,
+            },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("threshold on cnec") {
+        let Some(unit) = margin_unit(line) else {
+            return Expect::Unsupported(line.to_string());
+        };
+        let upper = match quoted(line).as_deref() {
+            Some("upper") => true,
+            Some("lower") => false,
+            _ => return Expect::Unsupported(line.to_string()),
+        };
+        return match (quoted_nth(line, 1), number_after_quotes(line)) {
+            (Some(cnec), Some(value)) => Expect::CnecThreshold {
+                cnec,
+                upper,
+                value,
+                unit,
+            },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("the setpoint of RangeAction") {
+        // Comparable since `linear::injection_origin` landed. Both sides now
+        // name the same quantity: a redispatch's set-point is absolute, and
+        // each element's target is `setpoint × key` — which is the model the
+        // reference's own 2.3.1.1.a spells out, and what the CRAC's declared
+        // range is stated in.
+        return match (quoted(line), number_after_quotes(line)) {
+            (Some(action), Some(value)) => Expect::Setpoint {
+                action,
+                value,
+                at: where_of(line),
+            },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("in network file with PRA is on tap") {
+        return match (quoted(line), number_after_quotes(line)) {
+            (Some(element), Some(tap)) => Expect::NetworkTap {
+                element,
+                tap: tap as i32,
+            },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("in network file with PRA has connection status to") {
+        return match (quoted(line), quoted_nth(line, 1).as_deref()) {
+            (Some(element), Some("true")) => Expect::Connected {
+                element,
+                connected: true,
+            },
+            (Some(element), Some("false")) => Expect::Connected {
+                element,
+                connected: false,
+            },
+            _ => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("the execution details should be") {
+        return match quoted(line) {
+            Some(text) => Expect::Steps(text),
+            None => Expect::Unsupported(line.to_string()),
+        };
+    }
+    if line.contains("remedial action") && line.contains(" is not used") {
+        return match quoted(line) {
+            Some(action) => Expect::ActionNotUsed {
+                action,
+                at: where_of(line),
+            },
+            None => Expect::Unsupported(line.to_string()),
+        };
+    }
     if line.contains("the tap of PstRangeAction") {
         return match (quoted(line), number_after_quotes(line)) {
-            (Some(action), Some(tap)) => {
-                Expect::PstTap { action, tap: tap as i32, at: where_of(line) }
-            }
+            (Some(action), Some(tap)) => Expect::PstTap {
+                action,
+                tap: tap as i32,
+                at: where_of(line),
+            },
             _ => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("remedial action") && line.contains(" is used") && !line.contains("not used") {
         return match quoted(line) {
-            Some(action) => Expect::ActionUsed { action, at: where_of(line) },
+            Some(action) => Expect::ActionUsed {
+                action,
+                at: where_of(line),
+            },
             None => Expect::Unsupported(line.to_string()),
         };
     }
     if line.contains("remedial actions are used") {
         return match number_after_quotes(line) {
-            Some(n) => Expect::ActionCount { count: n as usize, at: where_of(line) },
+            Some(n) => Expect::ActionCount {
+                count: n as usize,
+                at: where_of(line),
+            },
             None => Expect::Unsupported(line.to_string()),
         };
     }
@@ -422,12 +707,27 @@ fn resolve(kind: &str, reference: &str) -> PathBuf {
     openrao::root().join("files").join(kind).join(reference)
 }
 
-/// Map the reference's `RaoParameters` onto [`SearchOptions`].
+/// The scenario's configuration, read by the **library** and then clamped for
+/// this harness's own reasons.
 ///
-/// Only the knobs that change an answer are read. A parameter this does not
-/// understand is ignored *silently on purpose*: the alternative is to fail on
-/// the dozens of AC, loop-flow and solver settings these files carry, none of
-/// which apply to a DC run.
+/// `gridoxide::rao::parameters` is the reading; it used to live here, which is
+/// how the gate came to validate behaviour `gridoxide rao` could not ask for.
+/// Calling it from here is what keeps it validated: if that reading changes,
+/// these 1862 assertions say so.
+///
+/// The depth clamp stays **here**, because it is not a reading of the document.
+/// `max-preventive-search-tree-depth` is 5 in some configurations and a search
+/// bounded in name only would have this corpus evaluate every combination of
+/// actions it declares, which is a time budget rather than a setting. The
+/// library honours what the file says; the harness declines to run it.
+fn options_from(config: &Path) -> SearchOptions {
+    let text = std::fs::read_to_string(config).unwrap_or_default();
+    let mut options = gridoxide::rao::parameters::from_json(&text);
+    options.max_depth = options.max_depth.min(3);
+    options.curative_max_depth = options.curative_max_depth.map(|d| d.min(3));
+    options
+}
+
 /// Which flow model the scenario's configuration asks for.
 ///
 /// The reference states it outright — `load-flow-parameters.dc` — so this reads
@@ -435,134 +735,11 @@ fn resolve(kind: &str, reference: &str) -> PathBuf {
 /// the field is the setting the run actually used, and when a scenario is
 /// retagged the field is the one that stays true.
 fn flow_model_from(config: &Path) -> FlowModel {
-    let Ok(text) = std::fs::read_to_string(config) else { return FlowModel::Dc };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return FlowModel::Dc };
-    let dc = doc
-        .pointer(
-            "/extensions/open-rao-search-tree-parameters/load-flow-and-sensitivity-computation\
-             /sensitivity-parameters/load-flow-parameters/dc",
-        )
-        .and_then(|v| v.as_bool());
-    match dc {
-        Some(false) => FlowModel::Ac,
-        // Absent means the reference's own default, which is DC for these
-        // files — and a config this cannot read is treated as DC rather than
-        // silently upgraded to a slower model that changes every number.
-        _ => FlowModel::Dc,
+    let text = std::fs::read_to_string(config).unwrap_or_default();
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(doc) => gridoxide::rao::parameters::flow_model(&doc),
+        Err(_) => FlowModel::Dc,
     }
-}
-
-fn options_from(config: &Path) -> SearchOptions {
-    let mut options = SearchOptions::default();
-    // `RaoUtil.getFlowUnit`: megawatts for a DC load flow, amperes for an AC
-    // one. Not a setting of its own — the objective follows the flow model, and
-    // the minimum-impact thresholds below are stated in whichever unit results.
-    options.linear.flow_model = flow_model_from(config);
-    options.linear.objective_unit = match options.linear.flow_model {
-        FlowModel::Ac => ObjectiveUnit::Ampere,
-        FlowModel::Dc => ObjectiveUnit::Megawatt,
-    };
-    let Ok(text) = std::fs::read_to_string(config) else { return options };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return options };
-
-    // A curative perimeter always stops at a target, and the target is stated
-    // relative to the preventive perimeter's own objective:
-    // `TreeParameters.buildForCurativePerimeter`. Both halves of that live in
-    // different places in the file — the improvement under the search-tree
-    // extension, the security flag beside the objective's type.
-    if let Some(v) = doc
-        .pointer("/extensions/open-rao-search-tree-parameters/objective-function\
-                  /curative-min-obj-improvement")
-        .and_then(Value::as_f64)
-    {
-        options.curative_min_obj_improvement = v;
-    }
-    if let Some(v) =
-        doc.pointer("/objective-function/enforce-curative-security").and_then(Value::as_bool)
-    {
-        options.enforce_curative_security = v;
-    }
-
-    // `SECURE_FLOW` means "stop once secure" rather than "maximize" —
-    // `TreeParameters.buildForPreventivePerimeter` turns it into
-    // `AT_TARGET_OBJECTIVE_VALUE` with a target of zero.
-    if doc.pointer("/objective-function/type").and_then(|v| v.as_str()) == Some("SECURE_FLOW") {
-        options.stop_at_target = Some(0.0);
-    }
-
-    // The two knobs live under the search-tree extension, not beside the
-    // thresholds above.
-    if let Some(topology) = doc.pointer(
-        "/extensions/open-rao-search-tree-parameters/topological-actions-optimization",
-    ) {
-        let skip = topology
-            .get("skip-actions-far-from-most-limiting-element")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if skip {
-            options.skip_far_actions = Some(
-                topology
-                    .get("max-number-of-boundaries-for-skipping-actions")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize,
-            );
-        }
-    }
-    if let Some(topology) = doc.get("topological-actions-optimization") {
-        if let Some(v) = topology.get("absolute-minimum-impact-threshold").and_then(|v| v.as_f64()) {
-            options.absolute_min_impact = v;
-        }
-        if let Some(v) = topology.get("relative-minimum-impact-threshold").and_then(|v| v.as_f64()) {
-            options.relative_min_impact = v;
-        }
-    }
-    if let Some(range) = doc.get("range-actions-optimization") {
-        if let Some(v) = range.get("pst-ra-min-impact-threshold").and_then(|v| v.as_f64()) {
-            options.linear.pst_penalty = v;
-        }
-        if let Some(v) = range.get("injection-ra-min-impact-threshold").and_then(|v| v.as_f64()) {
-            options.linear.injection_penalty = v;
-        }
-    }
-    let extension = doc
-        .get("extensions")
-        .and_then(|e| e.get("open-rao-search-tree-parameters"));
-    if let Some(range) = extension.and_then(|e| e.get("range-actions-optimization")) {
-        if let Some(v) = range.get("max-mip-iterations").and_then(|v| v.as_u64()) {
-            options.linear.max_iterations = v as usize;
-        }
-        if let Some(v) = range.get("pst-sensitivity-threshold").and_then(|v| v.as_f64()) {
-            options.linear.sensitivity_threshold = v;
-        }
-    }
-    // MNEC handling is gated on the configuration mentioning it at all, exactly
-    // as `ObjectiveFunctionCreator` gates its virtual cost evaluator on both
-    // `mnec-parameters` blocks being present. A file that never mentions MNECs
-    // leaves them unconstrained however the CRAC labels them.
-    let base_mnec = doc.get("mnec-parameters");
-    let extension_mnec = extension.and_then(|e| e.get("mnec-parameters"));
-    options.linear.mnec.options.enabled = base_mnec.is_some() && extension_mnec.is_some();
-    if let Some(v) = base_mnec.and_then(|m| m.get("acceptable-margin-decrease")).and_then(Value::as_f64)
-    {
-        options.linear.mnec.options.acceptable_margin_decrease = v;
-    }
-    if let Some(m) = extension_mnec {
-        if let Some(v) = m.get("violation-cost").and_then(Value::as_f64) {
-            options.linear.mnec.options.violation_cost = v;
-        }
-        if let Some(v) = m.get("constraint-adjustment-coefficient").and_then(Value::as_f64) {
-            options.linear.mnec.options.constraint_adjustment_coefficient = v;
-        }
-    }
-    if let Some(topology) = extension.and_then(|e| e.get("topological-actions-optimization")) {
-        if let Some(v) = topology.get("max-preventive-search-tree-depth").and_then(|v| v.as_u64()) {
-            // The reference's default is i32::MAX; anything that large is a
-            // depth bound in name only, and running it would evaluate every
-            // combination of a corpus this harness has no time budget for.
-            options.max_depth = (v as usize).min(3);
-        }
-    }
-    options
 }
 
 /// The margin of `cnec` at `stage`, falling back to the after-PRA map when the
@@ -591,20 +768,142 @@ fn pick(
 /// changer for the element, which is the same precedence `linear::tap_table`
 /// uses and for the same reason: the equipment is the authority, the CRAC is a
 /// description of it.
+/// A redispatch's set-point in one perimeter, MW.
+///
+/// The plan's own figure where this perimeter moved it; otherwise where the
+/// action sits untouched, which is what the reference reports for a state that
+/// did not act. The sibling of [`resting_tap`], and needed for the same reason.
+fn setpoint_of(
+    crac: &Crac,
+    plan: &gridoxide::rao::Plan,
+    net: &ucte::UcteImport,
+    action: &str,
+    at: &Where,
+) -> Option<f64> {
+    let index = crac.range_actions.iter().position(|a| a.id == action)?;
+    let from_plan = |setpoints: &[gridoxide::rao::Setpoint]| {
+        setpoints
+            .iter()
+            .find(|s| s.action == index)
+            .map(|s| s.value)
+    };
+    let moved = match at {
+        Where::Preventive => from_plan(&plan.preventive.setpoints),
+        Where::After { contingency, .. } => plan
+            .scenarios
+            .iter()
+            .filter(|s| crac.contingencies[s.contingency].id == *contingency)
+            .flat_map(|s| s.perimeters.iter())
+            .find_map(|p| from_plan(&p.setpoints)),
+    };
+    if let Some(value) = moved {
+        return Some(value);
+    }
+    let resolution = Resolution::with_buses(crac, &net.branch_ids, &net.node_codes);
+    let view = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    gridoxide::rao::injection_setpoint(crac, &view, &resolution, index)
+}
+
 fn resting_tap(
     crac: &Crac,
     resolution: &Resolution,
     net: &ucte::UcteImport,
+    transformers: &[gridoxide::types::Transformer],
     action: &str,
 ) -> Option<i32> {
     let range = crac.range_actions.iter().find(|r| r.id == action)?;
-    let RangeActionKind::Pst { element, initial_tap, .. } = &range.kind else { return None };
+    let RangeActionKind::Pst {
+        element,
+        initial_tap,
+        ..
+    } = &range.kind
+    else {
+        return None;
+    };
+    // Read out of the network **this state** is in, not out of the file. A
+    // shifter the preventive stage moved to −16 and that no curative action may
+    // touch is at −16 in the curative state, and the reference's
+    // `getOptimizedTapOnState` says so: it answers for every state, from the
+    // set-points in force there. Falling back to the file's position instead
+    // reports the plan undoing a decision it never revisited.
+    Some(tap_in_network(crac, resolution, net, &[], transformers, element).unwrap_or(*initial_tap))
+}
+
+/// Where a phase shifter *in the network* ended up, addressed by network
+/// element rather than by range action.
+///
+/// Distinct from [`resting_tap`], which answers for a range action. A scenario
+/// asks this of a shifter no range action need name, so the position is
+/// recovered from the transformer the plan left behind: the tap changer's own
+/// steps are the only authority on which position an angle corresponds to, and
+/// the search reports angles.
+fn tap_in_network(
+    crac: &Crac,
+    resolution: &Resolution,
+    net: &ucte::UcteImport,
+    setpoints: &[gridoxide::rao::Setpoint],
+    transformers: &[gridoxide::types::Transformer],
+    element: &str,
+) -> Option<i32> {
+    // A range action on this element already knows the answer, and knows it
+    // exactly. Under the continuous tap model the optimizer leaves the
+    // transformer on an angle *between* two steps and the set-point carries the
+    // position it was rounded to, so recovering the position from the angle
+    // afterwards can land on the other neighbour — the same off-by-one
+    // `BestTapFinder` exists to settle.
+    let by_action = setpoints
+        .iter()
+        .find_map(|s| match &crac.range_actions[s.action].kind {
+            RangeActionKind::Pst { element: e, .. } if e == element => s.tap,
+            _ => None,
+        });
+    if by_action.is_some() {
+        return by_action;
+    }
     let branch = resolution.branch(element)?;
-    let changer = branch
-        .checked_sub(net.lines.len())
-        .and_then(|i| net.tap_changers.get(i))
-        .and_then(|c| c.as_ref());
-    Some(changer.map_or(*initial_tap, |c| c.position))
+    let i = branch.checked_sub(net.lines.len())?;
+    let changer = net.tap_changers.get(i)?.as_ref()?;
+    let angle = transformers.get(i)?.tap.arg();
+    (changer.low..=changer.high())
+        .filter(|p| changer.at(*p).is_some())
+        .min_by(|a, b| {
+            let d = |p: &i32| (changer.at(*p).unwrap().arg() - angle).abs();
+            d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+/// A CNEC's declared threshold in one direction, in the unit the step names.
+///
+/// Read from the **CRAC**, not from the evaluator. The step asserts what the
+/// file says — `frm` is zero on every CNEC that carries one of these steps —
+/// while the evaluator's bound has already been tightened by the reliability
+/// margin and, under AC, charged for reactive flow. Those are the right numbers
+/// for a margin and the wrong ones for this question.
+fn declared_threshold(crac: &Crac, cnec: &str, upper: bool, unit: MarginUnit) -> Option<f64> {
+    let cnec = crac.flow_cnecs.iter().find(|c| c.id == cnec)?;
+    let want = match unit {
+        MarginUnit::Ampere => Unit::Ampere,
+        MarginUnit::Megawatt => Unit::Megawatt,
+    };
+    cnec.thresholds
+        .iter()
+        .filter(|t| t.unit == want)
+        .filter_map(|t| if upper { t.max } else { t.min })
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map_or(v, |a| if upper { a.min(v) } else { a.max(v) }))
+        })
 }
 
 /// The worst margin across every **optimized** CNEC, each measured at its own
@@ -635,7 +934,9 @@ fn worst_at_own_stage(
             };
             pick(stage, &c.id, pra, ara, cra).map(|m| m.in_unit(unit))
         })
-        .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))
+        .fold(None, |acc: Option<f64>, m| {
+            Some(acc.map_or(m, |a| a.min(m)))
+        })
 }
 
 struct Outcome {
@@ -645,8 +946,11 @@ struct Outcome {
 }
 
 fn check(scenario: &Scenario) -> Outcome {
-    let mut outcome =
-        Outcome { matched: Vec::new(), mismatched: Vec::new(), unsupported: Vec::new() };
+    let mut outcome = Outcome {
+        matched: Vec::new(),
+        mismatched: Vec::new(),
+        unsupported: Vec::new(),
+    };
 
     let options = if scenario.core_cc {
         ucte::UcteOptions::core_capacity_calculation()
@@ -655,15 +959,25 @@ fn check(scenario: &Scenario) -> Outcome {
     };
     let net = ucte::read_with(resolve("cases", &scenario.network), &options).expect("network");
     let (crac, _) = crac_json::read(resolve("crac", &scenario.crac)).expect("crac");
-    let search_options = options_from(&resolve("configurations", &scenario.config));
+    let mut search_options = options_from(&resolve("configurations", &scenario.config));
+    // A run given no time does not get a second preventive pass. That is the
+    // whole of what the time limit means here: gridoxide's optimizer has no
+    // wall clock, and inventing one to reproduce a wall-clock decision would be
+    // reproducing the symptom rather than the rule. 1.4.4.5 and 1.4.4.6 are the
+    // same scenario at −1 and 600 seconds and assert different answers, which
+    // is exactly the distinction being made.
+    if scenario.time_limit.is_some_and(|t| t <= 0.0) {
+        search_options.second_preventive.condition = SecondPreventiveCondition::Disabled;
+    }
+    let search_options = search_options;
     // The search stays on DC whatever the model: it is what makes the tree
     // finish, and phase 11's whole argument is that AC is where the answer gets
     // *checked*. What the model changes here is every margin the scenario
     // asserts on.
     let model = flow_model_from(&resolve("configurations", &scenario.config));
-    let ac_options = AcOptions { shunts: &net.shunts, ..Default::default() };
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let view = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -675,8 +989,41 @@ fn check(scenario: &Scenario) -> Outcome {
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
-    let mut solver = IpmSolver::new();
-    let plan = run(&crac, &view, &resolution, &mut solver, &search_options);
+    // The same settings the optimizer measures with, from the same builder: a
+    // harness that scored the answer under a different slack from the one that
+    // produced it would be marking its own homework wrong.
+    let ac_options = gridoxide::rao::ac_options(&view);
+    // A cost objective's LP is a different problem class — one violation column
+    // per CNEC, priced against movement, where a margin objective has a single
+    // column to maximize — and gridoxide's barrier method is **not robust on
+    // it**. It reports `Unbounded` for problems whose objective is bounded
+    // below by zero with every column bounded below, the caller reads that as
+    // "the LP failed" and moves nothing, and a shifter sits on tap 0 beside a
+    // two-hundred-thousand overload. HiGHS solves them: `min_cost.txt`
+    // scores 221 against the barrier method's 177.
+    //
+    // Faithful as well as expedient — the reference's own costly configurations
+    // name a simplex-family solver for exactly these problems
+    // (`"linear-optimization-solver": {"solver": "CBC"}`).
+    //
+    // Only for `MIN_COST`. Switching every scenario to HiGHS costs 6 on
+    // `ac_scenarios_16nodes.txt`, which is a question about tap rounding and
+    // not one to settle by changing solver underneath it.
+    let mut ipm = IpmSolver::new();
+    #[cfg(feature = "opf-highs")]
+    let mut highs = search_options
+        .linear
+        .objective_kind
+        .costly()
+        .and_then(|_| gridoxide::opf::highs::HighsSolver::new().ok());
+    #[cfg(feature = "opf-highs")]
+    let solver: &mut dyn gridoxide::opf::Solver = match highs.as_mut() {
+        Some(h) => h,
+        None => &mut ipm,
+    };
+    #[cfg(not(feature = "opf-highs"))]
+    let solver: &mut dyn gridoxide::opf::Solver = &mut ipm;
+    let plan = run(&crac, &view, &resolution, solver, &search_options);
 
     // Per-CNEC margins with the preventive decisions in force — what the
     // reference calls "after PRA".
@@ -686,15 +1033,32 @@ fn check(scenario: &Scenario) -> Outcome {
         let mut out = HashMap::new();
         for scenario in &plan.scenarios {
             let contingency = Some(scenario.contingency);
+            // The automatons, as the stage a curative perimeter inherits.
+            let after_automatons = || {
+                scenario
+                    .automatons
+                    .as_ref()
+                    .map(|a| (&a.open_branches, &a.transformers, &plan.preventive.buses))
+            };
             let (open, transformers, buses) = match stage {
+                // Last curative perimeter, else the automatons, **else**
+                // preventive — and the middle step is the one that matters.
+                //
+                // A contingency can have a forced automaton and no curative
+                // action at all, and then `scenarios_after` builds it no curative
+                // perimeter: there is nothing to decide. Falling straight back to
+                // preventive measures its curative CNECs in a network where its
+                // automaton never fired, which is not a stage that exists. On the
+                // reference's 3.4.1.12 that is `coBeFr3` — "forced ARA and no
+                // CRA" in its own description — read at 100 MW of overload
+                // instead of the 66.67 `closeBeFr7` leaves, and 100 is then the
+                // worst perimeter and the whole after-CRA cost.
                 Stage::Cra => scenario
                     .perimeters
                     .last()
-                    .map(|p| (&p.open_branches, &p.transformers, &p.buses)),
-                Stage::Ara => scenario
-                    .automatons
-                    .as_ref()
-                    .map(|a| (&a.open_branches, &a.transformers, &plan.preventive.buses)),
+                    .map(|p| (&p.open_branches, &p.transformers, &p.buses))
+                    .or_else(after_automatons),
+                Stage::Ara => after_automatons(),
                 Stage::Pra => None,
             }
             .unwrap_or((
@@ -703,6 +1067,7 @@ fn check(scenario: &Scenario) -> Outcome {
                 &plan.preventive.buses,
             ));
             let view = Network {
+                generation: &net.generation,
                 buses,
                 lines: &net.lines,
                 transformers,
@@ -721,10 +1086,7 @@ fn check(scenario: &Scenario) -> Outcome {
                     continue;
                 }
                 for c in &perimeter.cnecs {
-                    out.insert(
-                        crac.flow_cnecs[c.cnec].id.clone(),
-                        Margin { mw: c.margin_mw, a: c.margin_a },
-                    );
+                    out.insert(crac.flow_cnecs[c.cnec].id.clone(), Margin::of(c));
                 }
             }
         }
@@ -734,6 +1096,7 @@ fn check(scenario: &Scenario) -> Outcome {
     let cra_margins = margins_at(Stage::Cra);
 
     let after_pra = Network {
+        generation: &net.generation,
         // The plan's own buses, not the file's: a redispatch lives only there,
         // and re-evaluating against the original buses reports a network in
         // which no injection ever moved.
@@ -748,22 +1111,19 @@ fn check(scenario: &Scenario) -> Outcome {
         tap_changers: &net.tap_changers,
         base_mva: net.base_mva,
     };
-    let evaluated =
-        evaluate_model(
-            &crac,
-            &after_pra,
-            &resolution,
-            &plan.preventive.open_branches,
-            model,
-            &ac_options,
-        );
+    let evaluated = evaluate_model(
+        &crac,
+        &after_pra,
+        &resolution,
+        &plan.preventive.open_branches,
+        model,
+        &ac_options,
+    );
     let margins: HashMap<&str, Margin> = evaluated
         .perimeters
         .iter()
         .flat_map(|p| p.cnecs.iter())
-        .map(|c| {
-            (crac.flow_cnecs[c.cnec].id.as_str(), Margin { mw: c.margin_mw, a: c.margin_a })
-        })
+        .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c)))
         .collect();
 
     // The network's *own* open set, not an empty one. "Untouched" means before
@@ -772,15 +1132,19 @@ fn check(scenario: &Scenario) -> Outcome {
     // `&[]` here measures a network that does not exist, and does it silently:
     // every margin stays self-consistent and the whole initial situation is
     // simply a different one.
-    let untouched =
-        evaluate_model(&crac, &view, &resolution, view.initially_open, model, &ac_options);
+    let untouched = evaluate_model(
+        &crac,
+        &view,
+        &resolution,
+        view.initially_open,
+        model,
+        &ac_options,
+    );
     let initial_margins: HashMap<&str, Margin> = untouched
         .perimeters
         .iter()
         .flat_map(|p| p.cnecs.iter())
-        .map(|c| {
-            (crac.flow_cnecs[c.cnec].id.as_str(), Margin { mw: c.margin_mw, a: c.margin_a })
-        })
+        .map(|c| (crac.flow_cnecs[c.cnec].id.as_str(), Margin::of(c)))
         .collect();
 
     // The reference's "value of the objective function" is its **cost**: the
@@ -797,6 +1161,127 @@ fn check(scenario: &Scenario) -> Outcome {
         ObjectiveUnit::Ampere => MarginUnit::Ampere,
         ObjectiveUnit::Megawatt => MarginUnit::Megawatt,
     };
+    // What the plan has spent by a given stage, as `(network actions, range
+    // actions moved)`. Only a cost objective reads it.
+    //
+    // Cumulative, because activation is: an action taken preventively is still
+    // in force after the contingency, and the reference's `getCost(instant)`
+    // prices everything activated up to that instant.
+    // Distance is in **taps** for a shifter, which is the unit its variation
+    // cost is stated in — see `Costly::activation`. A `Setpoint` carries the
+    // angle it started from rather than the tap, so the tap is recovered from
+    // the action's own table.
+    let tap_of = |action: usize, angle: f64| -> Option<i32> {
+        let gridoxide::rao::RangeActionKind::Pst { tap_to_angle, .. } =
+            &crac.range_actions.get(action)?.kind
+        else {
+            return None;
+        };
+        tap_to_angle
+            .iter()
+            .min_by(|a, b| (a.1 - angle).abs().total_cmp(&(b.1 - angle).abs()))
+            .map(|(t, _)| *t)
+    };
+    let spent_by = |stage: Option<Stage>| -> (Vec<usize>, Vec<(usize, f64)>) {
+        let (mut actions, mut moved): (Vec<usize>, Vec<(usize, f64)>) = (Vec::new(), Vec::new());
+        let take = |p: &gridoxide::rao::PerimeterPlan,
+                    actions: &mut Vec<usize>,
+                    moved: &mut Vec<(usize, f64)>| {
+            actions.extend(&p.network_actions);
+            for setpoint in p.setpoints.iter().filter(|s| s.moved()) {
+                let distance = match (setpoint.tap, tap_of(setpoint.action, setpoint.initial)) {
+                    (Some(now), Some(was)) => f64::from(now - was),
+                    _ => setpoint.value - setpoint.initial,
+                };
+                moved.push((setpoint.action, distance));
+            }
+        };
+        if stage.is_none() {
+            return (actions, moved);
+        }
+        take(&plan.preventive, &mut actions, &mut moved);
+        for scenario in &plan.scenarios {
+            // An `AutomatonResult` is not a `PerimeterPlan` — it reports the
+            // range actions that moved as `(index, set-point, tap)` rather than
+            // as `Setpoint`s — so it is read directly rather than through
+            // `take`.
+            if matches!(stage, Some(Stage::Ara) | Some(Stage::Cra))
+                && let Some(a) = &scenario.automatons
+            {
+                actions.extend(&a.network_actions);
+                // An `AutomatonResult` reports where a range action ended, not
+                // where it began, so the distance is measured from the CRAC's
+                // own `initialTap` — the only starting point it states.
+                for &(action, value, tap) in &a.range_actions {
+                    let distance = match (tap, crac.range_actions.get(action).map(|r| &r.kind)) {
+                        (
+                            Some(now),
+                            Some(gridoxide::rao::RangeActionKind::Pst { initial_tap, .. }),
+                        ) => f64::from(now - initial_tap),
+                        _ => value,
+                    };
+                    moved.push((action, distance));
+                }
+            }
+            if stage == Some(Stage::Cra) {
+                for perimeter in &scenario.perimeters {
+                    take(perimeter, &mut actions, &mut moved);
+                }
+            }
+        }
+        // Sorted for a stable answer and **not** deduped: the reference bills an
+        // activation per state, so `closeBeFr4` taken after `coBeFr2` and again
+        // after `coBeFr3` costs 850 twice (3.4.1.7's own comment says so), and a
+        // PST moved preventively and again curatively owes two activations plus
+        // both distances (3.4.2.3).
+        actions.sort_unstable();
+        moved.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        (actions, moved)
+    };
+
+    // Two implementations of "what did this plan spend", asserted equal.
+    //
+    // `spent_by` above is this file's own reading of the plan; `Plan::spent` is
+    // the library's, and `castor`'s whole-plan judgement prices with it. If they
+    // drift, every cost figure below is measured against one of them and decided
+    // by the other — and they *were* changed together once, when a fix removed a
+    // `dedup()` from each.
+    //
+    // Checked only under a cost objective, which is the only place either is
+    // read, and at the stage that covers the whole plan.
+    if search_options.linear.objective_kind.costly().is_some() {
+        let (mine_actions, mine_moved) = spent_by(Some(Stage::Cra));
+        let (theirs_actions, mut theirs_moved) = plan.spent(&crac);
+        assert_eq!(
+            mine_actions, theirs_actions,
+            "{}: the gate and the library disagree about which network actions the plan spent",
+            scenario.name
+        );
+        theirs_moved.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        assert_eq!(
+            mine_moved.len(),
+            theirs_moved.len(),
+            "{}: the gate and the library disagree about how many range-action movements the \
+             plan spent — {mine_moved:?} against {theirs_moved:?}",
+            scenario.name
+        );
+        for (mine, theirs) in mine_moved.iter().zip(&theirs_moved) {
+            assert_eq!(
+                mine.0, theirs.0,
+                "{}: different range action",
+                scenario.name
+            );
+            assert!(
+                (mine.1 - theirs.1).abs() < 1e-9,
+                "{}: `{}` moved {} by one reading and {} by the other",
+                scenario.name,
+                crac.range_actions[mine.0].id,
+                mine.1,
+                theirs.1
+            );
+        }
+    }
+
     let cost_at = |stage: Option<Stage>| -> Option<f64> {
         let read = |cnec: &FlowCnec| -> Option<f64> {
             let margin = match stage {
@@ -813,20 +1298,13 @@ fn check(scenario: &Scenario) -> Outcome {
             };
             margin.map(|m| m.in_unit(objective_unit))
         };
-        let worst = crac
-            .flow_cnecs
-            .iter()
-            .filter(|c| c.optimized)
-            .filter_map(read)
-            .fold(None, |acc: Option<f64>, m| Some(acc.map_or(m, |a| a.min(m))))?;
         let mnec = search_options.linear.mnec.options;
         let violated: f64 = if mnec.enabled {
             crac.flow_cnecs
                 .iter()
                 .filter(|c| c.monitored)
                 .filter_map(|c| {
-                    let initial =
-                        initial_margins.get(c.id.as_str())?.in_unit(objective_unit);
+                    let initial = initial_margins.get(c.id.as_str())?.in_unit(objective_unit);
                     let floor = f64::min(0.0, initial - mnec.acceptable_margin_decrease);
                     Some(mnec.violation_cost * (floor - read(c)?).max(0.0))
                 })
@@ -834,6 +1312,45 @@ fn check(scenario: &Scenario) -> Outcome {
         } else {
             0.0
         };
+        // Under `MIN_COST` the functional half is a **sum** of penalized
+        // overloads plus what the plan spent, not the negated worst margin —
+        // and the two are not a rescaling of each other, which is why this
+        // branches rather than adjusting a coefficient.
+        if let Some(costly) = search_options.linear.objective_kind.costly() {
+            // Summed **within** an optimization perimeter and maxed across
+            // them: the base case and its outage states are one perimeter, and
+            // every other state is its own. 3.4.1.11 is what pins it — nine
+            // states carrying 500 units of overload between them, and the cost
+            // the reference states is 100000, the worst single perimeter.
+            //
+            // Grouped from the CRAC here rather than read off `Costly`, so the
+            // aggregation stays a second opinion and not an echo.
+            let mut buckets: HashMap<Option<State>, f64> = HashMap::new();
+            for cnec in crac.flow_cnecs.iter().filter(|c| c.optimized) {
+                let Some(margin) = read(cnec) else { continue };
+                let bucket = match crac.instants[cnec.state.instant].kind {
+                    InstantKind::Preventive | InstantKind::Outage => None,
+                    InstantKind::Auto | InstantKind::Curative => Some(cnec.state.clone()),
+                };
+                *buckets.entry(bucket).or_default() +=
+                    (costly.options.violation_threshold - margin).max(0.0);
+            }
+            let overload = buckets.values().copied().fold(0.0, f64::max);
+            // Priced by the library rather than a fourth reimplementation of it.
+            // What this file still computes for itself is the *overload*, which
+            // is the part worth an independent opinion.
+            let (actions, moved) = spent_by(stage);
+            let spent = costly.activation(&crac, &actions, &moved);
+            return Some(violated + costly.options.violation_penalty * overload + spent);
+        }
+        let worst = crac
+            .flow_cnecs
+            .iter()
+            .filter(|c| c.optimized)
+            .filter_map(read)
+            .fold(None, |acc: Option<f64>, m| {
+                Some(acc.map_or(m, |a| a.min(m)))
+            })?;
         Some(violated - worst)
     };
 
@@ -869,15 +1386,21 @@ fn check(scenario: &Scenario) -> Outcome {
                 );
                 take_setpoints(&crac, &plan.preventive.setpoints, &mut used, &mut taps);
             }
-            Where::After { contingency, instant } => {
+            Where::After {
+                contingency,
+                instant,
+            } => {
                 for scenario in &plan.scenarios {
                     if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
                         continue;
                     }
-                    if crac.instants.iter().any(|i| {
-                        i.id == *instant && i.kind == InstantKind::Auto
-                    }) {
-                        if let Some(a) = &scenario.automatons {
+                    if crac
+                        .instants
+                        .iter()
+                        .any(|i| i.id == *instant && i.kind == InstantKind::Auto)
+                        && let Some(a) = &scenario.automatons
+                    {
+                        {
                             used.extend(
                                 a.network_actions
                                     .iter()
@@ -913,6 +1436,45 @@ fn check(scenario: &Scenario) -> Outcome {
         (used, taps)
     };
 
+    // The transformers as that point in the plan left them. A shifter with no
+    // set-point in this perimeter still has a tap — the one an earlier
+    // perimeter put it on — and only this network knows which.
+    let transformers_at = |at: &Where| -> &[gridoxide::types::Transformer] {
+        let Where::After {
+            contingency,
+            instant,
+        } = at
+        else {
+            return &plan.preventive.transformers;
+        };
+        for scenario in &plan.scenarios {
+            if crac.contingencies[scenario.contingency].id.trim() != contingency.trim() {
+                continue;
+            }
+            if crac
+                .instants
+                .iter()
+                .any(|i| i.id == *instant && i.kind == InstantKind::Auto)
+                && let Some(a) = &scenario.automatons
+            {
+                return &a.transformers;
+            }
+            if let Some(perimeter) = scenario.perimeters.iter().find(|p| {
+                p.states
+                    .iter()
+                    .any(|s| crac.instants[s.instant].id == *instant)
+            }) {
+                return &perimeter.transformers;
+            }
+            // A contingency with no perimeter at this instant is still after
+            // the automatons, where there are any.
+            if let Some(a) = &scenario.automatons {
+                return &a.transformers;
+            }
+        }
+        &plan.preventive.transformers
+    };
+
     let mut record = |ok: bool, detail: String| {
         if ok {
             outcome.matched.push(detail);
@@ -927,7 +1489,12 @@ fn check(scenario: &Scenario) -> Outcome {
                 let got = plan.is_secure();
                 record(got == *want, format!("security {got} (expected {want})"));
             }
-            Expect::WorstMargin { value, cnec: None, unit, .. } => {
+            Expect::WorstMargin {
+                value,
+                cnec: None,
+                unit,
+                ..
+            } => {
                 // In MW the plan's own objective is the answer. In amperes it
                 // is not the same quantity: the worst margin in amperes can
                 // fall on a different CNEC, because the conversion voltage
@@ -936,20 +1503,21 @@ fn check(scenario: &Scenario) -> Outcome {
                 // named form already uses.
                 let got = match unit {
                     MarginUnit::Megawatt => Some(plan.final_margin_mw),
-                    MarginUnit::Ampere => worst_at_own_stage(
-                        &crac,
-                        *unit,
-                        &margins,
-                        &ara_margins,
-                        &cra_margins,
-                    ),
+                    MarginUnit::Ampere => {
+                        worst_at_own_stage(&crac, *unit, &margins, &ara_margins, &cra_margins)
+                    }
                 };
                 record(
                     got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
                     format!("worst margin {got:?} {unit:?} (expected {value})"),
                 );
             }
-            Expect::WorstMargin { value, cnec: Some(id), unit, .. } => {
+            Expect::WorstMargin {
+                value,
+                cnec: Some(id),
+                unit,
+                ..
+            } => {
                 // A worst-margin step names the CNEC that *ends up* carrying the
                 // worst margin, so it is measured at that CNEC's own stage —
                 // an `auto` CNEC after the automatons, a `curative` one after
@@ -966,8 +1534,8 @@ fn check(scenario: &Scenario) -> Outcome {
                         _ => Stage::Pra,
                     })
                     .unwrap_or(Stage::Pra);
-                let got = pick(stage, id, &margins, &ara_margins, &cra_margins)
-                    .map(|m| m.in_unit(*unit));
+                let got =
+                    pick(stage, id, &margins, &ara_margins, &cra_margins).map(|m| m.in_unit(*unit));
                 record(
                     got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
                     format!("worst margin on `{id}` {got:?} (expected {value})"),
@@ -980,7 +1548,12 @@ fn check(scenario: &Scenario) -> Outcome {
                     format!("initial margin on `{cnec}` {got:?} (expected {value})"),
                 );
             }
-            Expect::CnecMargin { cnec, value, stage, unit } => {
+            Expect::CnecMargin {
+                cnec,
+                value,
+                stage,
+                unit,
+            } => {
                 let got = pick(*stage, cnec, &margins, &ara_margins, &cra_margins)
                     .map(|m| m.in_unit(*unit));
                 record(
@@ -1003,14 +1576,24 @@ fn check(scenario: &Scenario) -> Outcome {
                 // `auto` while a scenario asks where it stood in preventive.
                 // Reporting `None` there fails an assertion that is simply
                 // asking "unchanged?".
-                let got = decisions(at)
-                    .1
-                    .get(action)
-                    .copied()
-                    .or_else(|| resting_tap(&crac, &resolution, &net, action));
+                let got =
+                    decisions(at).1.get(action).copied().or_else(|| {
+                        resting_tap(&crac, &resolution, &net, transformers_at(at), action)
+                    });
                 record(
                     got == Some(*tap),
                     format!("tap of `{action}` {got:?} (expected {tap}) {at:?}"),
+                );
+            }
+            Expect::Setpoint { action, value, at } => {
+                // Like a tap, a set-point exists whether or not this perimeter
+                // moved it: an action left alone is still sitting somewhere,
+                // and the reference answers for every state. Unmoved means the
+                // origin, which is what the LP anchored the control at.
+                let got = setpoint_of(&crac, &plan, &net, action, at);
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!("setpoint of `{action}` {got:?} (expected {value}) {at:?}"),
                 );
             }
             Expect::ActionUsed { action, at } => {
@@ -1018,9 +1601,82 @@ fn check(scenario: &Scenario) -> Outcome {
                 let got = used.iter().any(|u| u == action);
                 record(got, format!("`{action}` used: {got} {at:?}"));
             }
+            Expect::Steps(want) => {
+                let got = plan.steps.as_str();
+                record(
+                    got == want,
+                    format!("execution details {got:?} (expected {want:?})"),
+                );
+            }
+            Expect::ActionNotUsed { action, at } => {
+                let (used, _) = decisions(at);
+                let got = used.iter().any(|u| u == action);
+                record(
+                    !got,
+                    format!("`{action}` used: {got} (expected false) {at:?}"),
+                );
+            }
+            Expect::CnecFlow {
+                cnec,
+                value,
+                unit,
+                side,
+                stage,
+            } => {
+                let reading = match stage {
+                    None => initial_margins.get(cnec.as_str()).copied(),
+                    Some(s) => pick(*s, cnec, &margins, &ara_margins, &cra_margins),
+                };
+                let got = reading.and_then(|m| m.flow_in_unit(*unit, *side));
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!("flow on `{cnec}` side {side} {got:?} (expected {value})"),
+                );
+            }
+            Expect::CnecThreshold {
+                cnec,
+                upper,
+                value,
+                unit,
+            } => {
+                let got = declared_threshold(&crac, cnec, *upper, *unit);
+                record(
+                    got.is_some_and(|g| (g - value).abs() <= flow_tolerance(*value)),
+                    format!(
+                        "{} threshold on `{cnec}` {got:?} (expected {value})",
+                        if *upper { "upper" } else { "lower" }
+                    ),
+                );
+            }
+            Expect::NetworkTap { element, tap } => {
+                let got = tap_in_network(
+                    &crac,
+                    &resolution,
+                    &net,
+                    &plan.preventive.setpoints,
+                    &plan.preventive.transformers,
+                    element,
+                );
+                record(
+                    got == Some(*tap),
+                    format!("network tap of `{element}` {got:?} (expected {tap})"),
+                );
+            }
+            Expect::Connected { element, connected } => {
+                let got = resolution
+                    .branch(element)
+                    .map(|b| !plan.preventive.open_branches.contains(&b));
+                record(
+                    got == Some(*connected),
+                    format!("`{element}` connected: {got:?} (expected {connected})"),
+                );
+            }
             Expect::ActionCount { count, at } => {
                 let got = decisions(at).0.len();
-                record(got == *count, format!("{got} action(s) used (expected {count}) {at:?}"));
+                record(
+                    got == *count,
+                    format!("{got} action(s) used (expected {count}) {at:?}"),
+                );
             }
             Expect::Unsupported(line) => outcome.unsupported.push(line.clone()),
         }
@@ -1040,30 +1696,124 @@ fn check(scenario: &Scenario) -> Outcome {
 #[test]
 fn the_reference_implementations_own_expectations() {
     let all = all_scenarios();
-    for (file, expected, baseline) in [
-        ("dc_scenarios.txt", 25, BASELINE_MATCHED_DC),
-        ("ac_scenarios.txt", 38, BASELINE_MATCHED_AC),
-        ("ac_scenarios_16nodes.txt", 93, BASELINE_MATCHED_AC16),
-    ] {
-        run_gate(file, &selected(file, &all), expected, baseline);
+    for (file, expected, baseline, pending) in FILES {
+        run_gate(file, &selected(file, &all), expected, baseline, pending);
     }
+
+    // Every recorded reason has to name a scenario that is actually run.
+    // `run_gate` can only notice an entry that has stopped disagreeing in a
+    // file it appears in; one naming nothing at all would sit there forever,
+    // looking like diligence.
+    let known: Vec<String> = FILES
+        .iter()
+        .flat_map(|(file, ..)| selected(file, &all))
+        .map(|s| s.name)
+        .collect();
+    let orphans: Vec<&str> = RECORDED_DISAGREEMENTS
+        .iter()
+        .map(|(s, _)| *s)
+        .filter(|s| !known.iter().any(|k| k == s))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "RECORDED_DISAGREEMENTS names scenarios nothing runs: {orphans:?}"
+    );
 }
+
+/// The gate's scenario lists, with their scenario counts and recorded
+/// baselines. Scored separately on purpose — a gain in one must not hide a
+/// regression in another.
+const FILES: [(&str, usize, usize, Option<&str>); 5] = [
+    ("dc_scenarios.txt", 25, BASELINE_MATCHED_DC, None),
+    ("ac_scenarios.txt", 38, BASELINE_MATCHED_AC, None),
+    ("ac_scenarios_16nodes.txt", 93, BASELINE_MATCHED_AC16, None),
+    (
+        "second_preventive.txt",
+        15,
+        BASELINE_MATCHED_2P,
+        // The fourth field says a whole corpus is allowed to disagree, and why.
+        // It exists so "the capability is partly built" cannot be confused with
+        // "nobody has looked", which is the distinction the per-scenario check
+        // beside it enforces everywhere else. Delete it when the two scenarios
+        // below are settled — leaving it is how a corpus stops being measured.
+        //
+        // The reason it used to give — that the second pass held curative range
+        // actions rather than re-optimizing them — stopped being true when
+        // `A(r, s)` gave them columns of their own. What is left is narrower and
+        // worth naming precisely, because a stale exemption is how a corpus
+        // stops being measured just as surely as a missing one.
+        // No exemption. This corpus scored 45 of 108 when it was vendored with
+        // nothing implemented, and it is now **123 of 123** — every scenario,
+        // every assertion. The field is `None` rather than a stale reason, and
+        // the per-scenario guard beside it is live again for all 15.
+        None,
+    ),
+    (
+        "min_cost.txt",
+        26,
+        BASELINE_MATCHED_MIN_COST,
+        MIN_COST_PENDING,
+    ),
+];
+
+/// Whether this corpus is still allowed to disagree wholesale, and why.
+///
+/// **With a MIP backend: it is not.** The blanket exemption was honest for as
+/// long as the capability was missing, and it stopped being honest when 3.4.1.12
+/// closed. A stale exemption is how a corpus stops being measured just as surely
+/// as a missing one, so it is gone, and the per-scenario rule now applies here
+/// like everywhere else: the two scenarios that still disagree are in
+/// [`RECORDED_DISAGREEMENTS`] with their measurements, and their assertions
+/// still count as mismatched.
+#[cfg(feature = "opf-highs")]
+const MIN_COST_PENDING: Option<&str> = None;
+
+/// **Without one: it is**, and this is not the same kind of statement.
+///
+/// A build with no MIP backend cannot pose the activation binary at all, so it
+/// cannot reach the plans these seven scenarios are scored against. That is a
+/// capability this build does not have, not an answer it disagrees about, and
+/// asking it for a per-scenario measurement would be asking it to stand behind
+/// an answer it never computed.
+#[cfg(not(feature = "opf-highs"))]
+const MIN_COST_PENDING: Option<&str> = Some(
+    "a range action's activation cost is a binary per action, so the cost LP is only reachable \
+     with a MIP backend; without one this build answers `MIN_COST` by margin",
+);
 
 /// Run one gate's scenarios and assert on their aggregate.
 ///
 /// The two files are scored separately on purpose. They exercise different flow
 /// models, and a single total would let a gain in one hide a regression in the
 /// other.
-fn run_gate(file: &str, scenarios: &[Scenario], expected_scenarios: usize, baseline: usize) {
+fn run_gate(
+    file: &str,
+    scenarios: &[Scenario],
+    expected_scenarios: usize,
+    baseline: usize,
+    pending: Option<&str>,
+) {
     assert_eq!(scenarios.len(), expected_scenarios, "in {file}");
 
     let (mut matched, mut mismatched, mut unsupported) = (0usize, 0usize, 0usize);
     let mut report = String::new();
+    // Scenarios that disagree without a recorded reason, and recorded reasons
+    // that have stopped applying. Both are failures and neither touches the
+    // ratio: see [`RECORDED_DISAGREEMENTS`].
+    let (mut unexplained, mut stale) = (Vec::new(), Vec::new());
     for scenario in scenarios {
         let outcome = check(scenario);
         matched += outcome.matched.len();
         mismatched += outcome.mismatched.len();
         unsupported += outcome.unsupported.len();
+        match (
+            recorded_reason(&scenario.name),
+            outcome.mismatched.is_empty(),
+        ) {
+            (None, false) => unexplained.push(scenario.name.clone()),
+            (Some(_), true) => stale.push(scenario.name.clone()),
+            _ => {}
+        }
         report.push_str(&format!(
             "\n{}  ({} matched, {} mismatched, {} unsupported)\n",
             scenario.name,
@@ -1080,35 +1830,159 @@ fn run_gate(file: &str, scenarios: &[Scenario], expected_scenarios: usize, basel
         for line in &outcome.unsupported {
             report.push_str(&format!("    skip  {line}\n"));
         }
+        if let Some(reason) = recorded_reason(&scenario.name) {
+            report.push_str(&format!("    why   {reason}\n"));
+        }
     }
     let total = matched + mismatched;
+    let note = pending.map_or(String::new(), |why| format!(" — {why}"));
     println!(
         "{report}\n{file}: {matched}/{total} checkable assertions match the reference \
-         ({unsupported} steps unsupported)"
+         ({unsupported} steps unsupported){note}"
     );
 
     assert!(
         matched >= baseline,
         "{file}: {matched}/{total} matched, baseline is {baseline} — a drop is a regression:\n{report}"
     );
+    assert!(
+        unexplained.is_empty() || pending.is_some(),
+        "{file}: {unexplained:?} disagree with the reference and nothing says why. Either that is a \
+         defect, or it is a disagreement worth standing behind — and standing behind one means \
+         measuring both answers on the reference's own objective and adding it to \
+         RECORDED_DISAGREEMENTS with that measurement. Do not add an entry you have not \
+         measured.\n{report}"
+    );
+    assert!(
+        stale.is_empty() || pending.is_some(),
+        "{file}: {stale:?} are listed in RECORDED_DISAGREEMENTS and no longer disagree. Delete \
+         those entries — a standing excuse for something already fixed will one day excuse a \
+         regression instead."
+    );
 }
 
-/// How many of the reference's assertions currently hold: **138 of 142**,
+/// Where the two implementations disagree **and gridoxide is staying put**.
+///
+/// Every entry has been measured: both answers evaluated on the reference's own
+/// objective, in the unit its own configuration selects, with its own MNEC
+/// violation cost applied. None of them is gridoxide being worse.
+///
+/// The list buys the gate a property a count cannot have — that **no scenario
+/// disagrees for a reason nobody has looked at**. That is sharper than the
+/// baselines beside it, and it is the one that catches a new defect hiding
+/// inside an old total.
+///
+/// These are **not** excused. Their assertions still count as mismatched in the
+/// ratio, exactly as before. Moving them out of the denominator is the one
+/// thing this must never do: a gate that stops counting what it has decided not
+/// to fix stops being a measurement.
+///
+/// Adding an entry means doing the measurement first. An entry without one is a
+/// claim to be better, dressed up as a record of being better.
+const RECORDED_DISAGREEMENTS: &[(&str, &str)] = &[
+    (
+        "1.3.2.6",
+        "same worst margin, reached with one curative action instead of two — the alternative \
+         optimum risk 1 names, and this CRAC has no MNEC to break the tie",
+    ),
+    (
+        "1.3.2.8",
+        "gridoxide 461.3 A against the reference's 433 on the binding CNEC, one tap apart",
+    ),
+    (
+        "1.3.6.6",
+        "gridoxide 630.0 A against 612, spending one curative action the reference declines; the \
+         MNEC it moves lands at 21.8 A against a floor of 0, so nothing is violated to get there",
+    ),
+    (
+        "1.3.8.2",
+        "same worst margin, one tap apart on a non-binding CNEC",
+    ),
+    (
+        "5.2.1.3",
+        "BestTapFinder: gridoxide's tap -6 scores 188.42 with no MNEC violation; the reference's \
+         -7 scores 192.05 and pays 0.76 of violation, for 184.41",
+    ),
+    (
+        "5.2.1.4",
+        "BestTapFinder: as 5.2.1.3 — 188.42 against 184.41",
+    ),
+    (
+        "5.2.3.2",
+        "BestTapFinder: gridoxide's -11 scores -156.28 clean; the reference's -12 scores -146.33 \
+         and pays 1.42 of violation at cost 15, for -167.60",
+    ),
+    (
+        "5.2.3.3",
+        "BestTapFinder: gridoxide's -8 scores -186.15 clean; the reference's -9 scores -176.19 \
+         and pays 1.70 of violation, for -201.62",
+    ),
+    (
+        "3.4.2.4",
+        "same final answer — secure, worst margin 11.73, cost 0 after CRA, all matching — reached \
+         through a cheaper preventive step: this PST is free, so under MIN_COST the only term its \
+         tap moves is the violation, and gridoxide's -16 leaves 214762 where the reference's -3 \
+         leaves 282717",
+    ),
+    (
+        "3.4.3.5",
+        "gridoxide secures the network for 135 where the reference spends 145, declining \
+         `closeBeFr4` after `coBeFr2` on a state already secure at 5.74 MW; the after-PRA cost \
+         agrees to 1e-7 (4386.911874 against 4386.91), so the flow models agree and the whole \
+         difference is one curative activation the objective does not ask for",
+    ),
+];
+
+/// The reason recorded for a scenario, if any.
+///
+/// Matched on the leading identifier, so the feature file's own punctuation —
+/// some scenario names carry a trailing colon and some do not — cannot decide
+/// whether a disagreement counts as explained.
+fn recorded_reason(name: &str) -> Option<&'static str> {
+    let id = name.split_whitespace().next()?.trim_end_matches(':');
+    RECORDED_DISAGREEMENTS
+        .iter()
+        .find(|(s, _)| *s == id)
+        .map(|(_, why)| *why)
+}
+
+/// How many of the reference's assertions currently hold: **175 of 181**,
 /// across all 25 scenarios.
+///
+/// It was 150 of 156 before `the execution details should be` left the skip
+/// bucket. That step was skipped 171 times across the four files — more than
+/// every other unsupported step put together — on the grounds that it named
+/// second-preventive bookkeeping. It does not: it names which optimization
+/// steps ran and how each turned out, and it is the one thing no margin can
+/// tell you, because a plan and the plan it fell back to have different
+/// margins but the same *shape*. All 25 of this file's hold.
 ///
 /// It was 124 of 124 before the three MNEC scenarios (5.2.1.2 to 5.2.1.4)
 /// joined it. Eight of their twelve assertions hold; the four that do not are
 /// two taps and the two margins that follow from them, and they are the
 /// `BestTapFinder` divergence described on [`BASELINE_MATCHED_AC`].
 ///
+/// It was 138 of 142 before the per-side flow, threshold, resting-tap and
+/// connection-status steps were taken out of the skip bucket. Twelve of the
+/// fourteen new assertions hold; the two that do not are the third and fourth
+/// sighting of that same `BestTapFinder` divergence, now visible as a tap
+/// position in the network as well as a margin.
+///
 /// It is a recorded number rather than an assertion of perfection. These are
 /// two heuristic search trees, and a different set of actions reaching the
 /// same margin is not a defect; a scenario added later may
 /// legitimately disagree. Raising this is progress, a drop is a regression, and
 /// the printed report says which assertion moved.
-const BASELINE_MATCHED_DC: usize = 138;
+///
+/// **This file now skips nothing.** The last five were `setpoint of
+/// RangeAction`, recorded as not comparable because gridoxide reported a
+/// redispatch's *shift* where the reference reports the machine's absolute
+/// target. Wiring them up turned out to need two redispatch defects fixed first,
+/// which is what a skipped assertion is for: it kept the ratio honest until the
+/// thing behind it was.
+const BASELINE_MATCHED_DC: usize = 180;
 
-/// The same, for the 38 AC scenarios in `ac_scenarios.feature`: **192 of 203**.
+/// The same, for the 38 AC scenarios in `ac_scenarios.txt`: **276 of 282**.
 ///
 /// Lower than the DC file's score, and expected to be. These scenarios are
 /// judged on margins the reference measured with an AC load flow that also
@@ -1119,7 +1993,7 @@ const BASELINE_MATCHED_DC: usize = 138;
 ///
 /// # The one divergence that is not a coin toss
 ///
-/// Three of the MNEC scenarios — 5.2.1.3, 5.2.1.4 here and 5.2.3.3 above —
+/// Four of the MNEC scenarios — 5.2.1.3, 5.2.1.4, 5.2.3.2 here and 5.2.3.3 above —
 /// disagree by exactly **one tap**, always in the direction of the reference
 /// paying an MNEC violation gridoxide declines to pay. On 5.2.1.3 the
 /// reference's tap −7 scores 192.05 MW of margin against a 7.67 MW violation
@@ -1139,11 +2013,49 @@ const BASELINE_MATCHED_DC: usize = 138;
 /// `PstControl::bracketing_taps` always looks, and scores with the penalty
 /// included.
 ///
-/// Matching these four assertions would mean reproducing that rounding, at the
-/// cost of a worse answer. They are left as recorded disagreements.
-const BASELINE_MATCHED_AC: usize = 192;
+/// Matching these assertions would mean reproducing that rounding, at the cost
+/// of a worse answer. They are left as recorded disagreements, and with family
+/// 3.2 complete they are now the whole of what this file still misses.
+///
+/// 5.2.3.2 joined them when the **ampere margin** was corrected — an ampere
+/// margin is now the limit in amperes less the current, rather than the
+/// megawatt margin converted, which is exactly the reference's own number
+/// (−146.33 A against its −146.3) at the reference's own tap. That moved the
+/// objective enough to expose the same rounding question one scenario further
+/// on: at tap −12 the worst margin is −146.33 with an MNEC violated by 1.4 A,
+/// at −11 it is −156.28 with none, and scoring the virtual cost makes −11 the
+/// better answer by 4.2. The reference does not score it and takes −12. Three
+/// assertions here, against three gained in 3.2 on the same change.
+///
+/// # The slack, which family 3.2 turned on
+///
+/// It was 232 before the slack was **distributed** and weighted by
+/// **generation**, which took 3.2 from 24 of 33 to 33 of 33 and moved nothing
+/// else. Both halves matter and the second is the one that hides: netting
+/// generation against load puts 70% of an islanded node's make-up back inside
+/// or next to the country that lost it, so distributing barely changes the
+/// answer and the whole idea looks refuted. See
+/// [`the_slack_is_shared_out_in_proportion_to_generation`] in
+/// `tests/rao_evaluate_test.rs`.
+///
+/// # What the per-side flow steps bought
+///
+/// It was 192 of 203 before the `flow on cnec … on side N` steps left the skip
+/// bucket — 41 new assertions, 40 of which hold. Getting there needed two
+/// conventions stated that the evaluator had never had to commit to, and
+/// neither was guessable from the margins:
+///
+/// - An ampere flow is **signed by the active power**. `CnecResult::current_a`
+///   is a magnitude, correctly, but `getFlow(cnec, side, AMPERE)` divides the
+///   signed megawatts by `√3·U`, so a step reading `-1444.0 A` is naming a
+///   direction. The magnitudes had agreed to five figures all along.
+/// - **Side two is measured in the same direction as side one** — power
+///   entering at one end, leaving at the other — so the two differ by the
+///   branch's losses. Reporting the power *entering* side two negates it, and
+///   the pair then differ by twice the flow.
+const BASELINE_MATCHED_AC: usize = 276;
 
-/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **727 of 883**.
+/// The same, for the 93 AC scenarios on `TestCase16Nodes`: **963 of 977**.
 ///
 /// The largest of the three files and the newest, so the furthest from
 /// settled. It is here to find defects, and it does.
@@ -1154,7 +2066,7 @@ const BASELINE_MATCHED_AC: usize = 192;
 /// file's remaining disagreements sit, MNECs or no MNECs.
 ///
 /// The `value of the objective function` steps are checked here too — 39 of
-/// them, of which 27 hold. Every one of the twelve that does not sits in a
+/// them, of which 31 hold. Every one of the eight that does not sits in a
 /// scenario whose margins already disagree, so they add no new *kind* of
 /// failure; they make the existing ones visible in one more place, which is
 /// what a gate is for.
@@ -1168,27 +2080,283 @@ const BASELINE_MATCHED_AC: usize = 192;
 /// it beats the preventive one and no further — took 1.2 from 69 of 119 to 94
 /// and 1.3 from 335 of 420 to 346.
 ///
-/// What is still open, by size: 1.3 curative (86 of 459 wrong), 2.6 usage
-/// limits (31 of 134), 1.2 automatons (25 of 119), 2.2 range actions (9 of 63).
-/// The 2.6 remainder has changed character completely — it was "gridoxide
-/// spends actions the CRAC forbids" and is now "gridoxide stops before the
-/// reference does", the greedy chain that shows up wherever three actions are
-/// needed and each is worth little on its own.
-const BASELINE_MATCHED_AC16: usize = 727;
+/// Then making a curative **close** possible at all — the perimeter's
+/// already-open branches are now a stated set rather than an impedance, so an
+/// action that removes one from it actually reconnects the branch — took 1.3
+/// from 372 to 404, 2.6 from 103 to 130, and 2.2 to 63 of 63. It was worth 68
+/// assertions on this file and none on the other two, which have no curative
+/// close between them. Nothing regressed: every other family is unchanged to
+/// the assertion.
+///
+/// Then the curative **range** actions, which is where that left the residue.
+/// Two causes, and the smaller one was in this harness:
+///
+/// - A `relativeToPreviousInstant` range was read as absolute, so a shifter the
+///   CRAC allowed ten taps either side of the preventive answer got ten taps
+///   either side of *zero*. On 1.3.4.3 that is tap 10 where the reference
+///   reaches 15, with five taps of permitted travel the optimizer never knew it
+///   had — and nothing about it visible in a margin, because the answer stays
+///   feasible, self-consistent and worse. Worth 39.
+/// - A shifter with no set-point in a perimeter was reported at the **file's**
+///   tap rather than at the one an earlier perimeter put it on, so a plan that
+///   moved a PST in preventive and never revisited it read as having undone the
+///   move. The reference's `getOptimizedTapOnState` answers for every state
+///   from the set-points in force there, and now so does this. Worth 6.
+///
+/// Then the **automaton simulator**, which that left as the largest cause.
+/// Three things, of which only the first was suspected:
+///
+/// - It sized its shift against **DC** margins while the run measured in AC. On
+///   `co2_be1_be3` the DC overload is −120.5 MW where AC says −70.8, so the
+///   formula asked for roughly twice the travel it needed.
+/// - It ignored the range action's **own range**, stopping only when it ran out
+///   of tap changer — 16 where the CRAC allowed 10.
+/// - It shifted **once**. The set-point is sized from a linear estimate and
+///   applied to a network that is not linear, so one shot lands short: tap −7
+///   on 1.2.2.2 with the watched CNEC still overloaded, where −8 clears it.
+///
+/// Took 1.2 from 98 of 121 to 111.
+///
+/// The last of that family was not the automaton at all: a **range action whose
+/// starting set-point is outside its own range** was optimized rather than
+/// dropped. `SL_ep15us11-3case2_withPstCra` declares four range actions on one
+/// shifter and names one of them `useless_pst`, permitting tap 0 and nothing
+/// else — and by the curative perimeter an automaton has put that shifter on
+/// −8. Kept, it is a second control on a device that already has one, pinned to
+/// a position the machine is not at, and the curative perimeter moves nothing.
+/// Dropping it, as `doesPrePerimeterSetpointRespectRange` does, takes 1.2 to
+/// 118 of 121 and 1.2.2.5 to 22 of 22.
+///
+/// The last three were an ordering rule, not a sizing one: an automaton that
+/// states **no speed fires first**, since the reference's `DEFAULT_SPEED` is
+/// zero. The tempting reading is the opposite — "no speed stated" looks like
+/// "no claim to be fast" — and it costs answers rather than order. On 1.2.2.4
+/// the untimed `open_be1_be4` opens a Belgian circuit and the two shifters that
+/// follow are sized against what that leaves behind, so `pst_be` needs one tap;
+/// fired last they are sized against an overload the opening was about to
+/// remove, and spend four. **Family 1.2 is now 121 of 121.**
+///
+/// Then the rule that the perimeters cannot see between them: **a plan that
+/// ends worse than doing nothing is thrown away**. Each perimeter accepts only
+/// candidates that improve its own objective, but they do not partition the
+/// harm — a preventive action is judged on the base case and the outage states,
+/// and what it costs a *curative* state is invisible there. On 1.4.4.2 closing
+/// two circuits takes the preventive perimeter from 590.6 to 681.7 MW and the
+/// curative state to −342; the curative perimeter recovers half and the plan
+/// still ends below where it began. The reference compares the finished plan
+/// against the untouched network and discards it — `postCheckResults` — and its
+/// own report calls the outcome "First preventive fell back to initial
+/// situation". **Family 1.4 is now 9 of 9.**
+///
+/// What is still open, by size: 3.2 (9 of 33), 5.2 MNEC (9 of 68), 1.3 (14 of
+/// 458). Families 1.2, 1.4, 2.2 and 2.6 are complete. Of the remaining tap
+/// disagreements six are the `BestTapFinder` divergence recorded on
+/// [`BASELINE_MATCHED_AC`], and the rest are one tap apart.
+const BASELINE_MATCHED_AC16: usize = 963;
+
+/// The 15 second-preventive scenarios: **118 of 123**, from 45 of 108 before the
+/// capability existed.
+///
+/// 14 of the 15 `execution details` assertions hold. The one that does not is
+/// 1.4.1.5, and it is honest: gridoxide's second pass ran and was **declined**,
+/// so it says so, where the reference's improved. That scenario is already one
+/// of the four recorded as a genuine gap — the step is reporting the gap
+/// rather than adding one.
+///
+/// The corpus was vendored first and scored at 45 with nothing implemented,
+/// which is the order everything else in this file was built in and the only
+/// order that works: the gate found all twenty-nine defects before it, and
+/// building a capability with nothing to check it against is how the
+/// twenty-ninth survived three refuted hypotheses.
+///
+/// # What the 33 that remain are
+///
+/// Four scenarios need one range action at **two set-points** — a PST at +5 in
+/// preventive and −5 in curative, say. The reference re-optimizes curative range
+/// actions inside the second preventive problem, which needs a set-point per
+/// action *per state*: `A(r, s)`, not built, because this LP carries one
+/// set-point per action. Until it does, a shifter the CRAC allows in both
+/// instants is held where the curative stage put it rather than re-tuned, and
+/// 1.4.1.1.3, 1.4.1.2, 1.4.1.5 and 1.4.1.6 turn on exactly that.
+///
+/// Four scenarios' worth used to be counted with the `A(r, s)` gap and were not
+/// it. All three defects were found by dropping the architecture question and
+/// diagnosing **one scenario to a mechanism**, which is how every earlier defect
+/// was found, and all three were in what the second pass holds from the curative
+/// stage:
+///
+/// - It **inherited a curative set-point** (defect 30). On 1.4.4.4
+///   `pst_be` at −16 — chosen against preventive decisions the second pass was
+///   in the act of discarding — capped its whole landscape at 553 A. Released,
+///   the pass finds the reference's answer with no network action at all, and
+///   1.4.5.1, the scenario named for fixing CRA set-points, closed completely.
+/// - It **dropped a curative close** (defect 31). The held set was built
+///   by adding every branch a curative perimeter leaves open, and a close is
+///   invisible to an add-only rule. 1.4.1.5 and 1.4.1.6 both turn on
+///   `close_fr1_fr5`, and without it the second pass maximizes a curve peaking
+///   at −3 where the true one peaks at the shifter's bound of −7. Worth 12.
+///
+/// - It held that switching in **one network**, so the preventive and outage
+///   CNECs were read where a curative branch is open and they are not (defect
+///   32). The two landscapes are 77 A apart on 1.4.1.2 and peak at
+///   different taps. `Held` now carries the switching as a *delta* and every
+///   measurement — the objective, the base flows, and the sensitivities, which
+///   stop sharing a linearization between an outage and a curative CNEC under
+///   one contingency — reads a CNEC in its own state's network. Worth 6, and it
+///   closed 1.4.4.4 completely.
+///
+/// All three are pinned in `tests/rao_castor_test.rs` and all three fail on the
+/// old code.
+///
+/// With those three landed the second preventive problem was finally rich enough
+/// to earn **`A(r, s)`**, which had been ranked last for exactly that
+/// reason and which had cost on all three previous attempts. It carries a column
+/// per range action per state — including a **second** column for an action a
+/// CRAC allows in both instants, which is what 1.4.1.1.3 turns on — so the pass
+/// can see a curative shifter paying for a preventive push. Worth 9 across two
+/// steps, and it closed 1.4.1.2 and 1.4.1.1.3.
+///
+/// It also settled a question defect 30's fix had answered the other way. A second
+/// preventive result reported `final_margin_mw` over **every** state with only
+/// the preventive decisions in force, and narrowing it to the states the
+/// perimeter governs cost 4 when it was tried. It now **gains** 1: the wide
+/// reading was carrying `security status` while the pass's own answer was wrong,
+/// and once the answer is right the wide reading is the thing that is wrong —
+/// it judges a plan on a curative CNEC read in a network whose curative
+/// perimeter has not run, when that perimeter's own figure is already in the
+/// minimum beside it.
+///
+/// # Closed, at 123 of 123
+///
+/// The file scored **45 of 108** when it was vendored with nothing implemented,
+/// which is the order this was built in and the only one that works: vendor the
+/// corpus first, then let it find the defects one scenario at a time.
+///
+/// The last two, 1.4.1.5 and 1.4.1.6, spent three curative actions where the
+/// reference spends one. **Seven** mechanisms were implemented, measured and
+/// refuted for them — the stop criterion, a capped curative objective, the
+/// composition rule, `A(r, s)`, carrying the second pass's own curative
+/// set-point, the cap applied only after a second pass, and a ceiling on the
+/// LP's own margin column. Every one cost elsewhere.
+///
+/// The eighth was **read** rather than guessed, out of
+/// `references/powsybl-open-rao`: after a kept second preventive pass
+/// the reference composes its plan from the first curative pass's *network*
+/// actions plus the second pass's own *range* set-points, and runs no curative
+/// range-action search afterwards. The two differ in objective — a curative
+/// perimeter maximizes its own worst margin, the second pass the whole plan's —
+/// and on 1.4.1.5 that is 285 A of curative margin the plan's 43 A preventive
+/// bottleneck cannot use.
+///
+/// The rest closed with one more fix: the rounding step could offer a column its other
+/// adjacent tap but never *not moving at all*, and for a chained column "not
+/// moving" is where its anchor ended up rather than where it started.
+///
+/// The claim that preceded all this — that reading the reference "is not a
+/// measurement this repository can make" — was false, and had been repeated
+/// three times without being checked.
+const BASELINE_MATCHED_2P: usize = 123;
+
+/// The 26 costly-optimization scenarios: **288 of 294**, from 165 with the
+/// objective unbuilt, 178 once the search tree could rank by cost, 221
+/// once the LP could minimize it, 252 once the cost was *aggregated* the
+/// way the reference aggregates it, and 272 once a range action's
+/// *activation* was priced — a binary, a MIP, and the row that makes a curative
+/// set-point mean "further than preventive went" — and 277 once two
+/// defects in that same machinery were found: a `start` that did not survive
+/// relinearization, and a rounding step that pulled a coupled column apart
+/// — and 286 once the curative stop target was dropped under a cost,
+/// where it compares a whole preventive perimeter's violation against a single
+/// curative state's and is therefore met before that state has done anything
+/// — and 288 once the last defect went: a curative state of a
+/// contingency with a forced automaton and nothing to decide curatively, read
+/// in a network where its automaton never fired, in the optimizer *and* here.
+///
+/// That last step was two corrections and no new capability, which is why it was
+/// worth 31:
+///
+/// - **Activation is billed per state, not per action.** One action taken after
+///   two contingencies is two activations. Both `castor::activated_by` and this
+///   file's own `spent_by` used to end in `dedup()`, reporting 3.4.1.7's plan at
+///   850 where its own comment prices it at 850 + 850.
+/// - **The violation term maxes across perimeters.** Summed *within* a
+///   perimeter — that is the objective's whole point and what the LP minimizes —
+///   and maxed across them, base case and outage states counting as one.
+///   3.4.1.11 pins it: nine states carrying 500 units of overload between them,
+///   and the cost it states is 100000.
+///
+/// # What the 6 that remain are
+///
+/// Two scenarios, and **both are gridoxide answering more cheaply** than the
+/// reference asks. Both are measured and in `RECORDED_DISAGREEMENTS`, and both
+/// still count as mismatched here — which is why this is 288 and not 294:
+///
+/// - **3.4.3.5** (4) secures for **135** where the reference spends 145,
+///   declining `closeBeFr4` after `coBeFr2` on a state already secure at 5.74
+///   MW. Its after-PRA cost agrees to 1e-7, so the flow models agree and the
+///   whole difference is one curative activation the objective does not ask for.
+/// - **3.4.2.4** (2) reaches the *same* final answer — secure, worst margin
+///   11.73, cost 0 after CRA, all matching — through a cheaper preventive step.
+///   That PST is free, so under `MIN_COST` the only term its tap moves is the
+///   violation: −16 leaves 214762 where the reference's −3 leaves 282717.
+///
+/// The corpus's blanket exemption went with the last defect and is now cfg-gated
+/// — see [`MIN_COST_PENDING`].
+///
+/// The rest of this note is the original *before* comment, kept because the
+/// order it describes is the point:
+///
+/// Vendored first on purpose. That is the only order
+/// that works — the second-preventive corpus was vendored before anything
+/// implemented it, scored 45 of 108, and the gate then found every defect in it
+/// one scenario at a time. A corpus vendored after the fact only ever confirms
+/// what its author already believed.
+///
+/// So this is a *before* figure, and it is low for a stated reason:
+/// `objective-function.type: MIN_COST` has no representation anywhere in
+/// `src/rao/`, `options_from` reads it as max-min-margin, and the
+/// `activation_cost` these CRACs carry on every action is parsed by
+/// `crac_json.rs` and read by nothing. What passes here passes because a
+/// margin-maximizing answer happens to coincide with a cost-minimizing one.
+#[cfg(feature = "opf-highs")]
+const BASELINE_MATCHED_MIN_COST: usize = 288;
+
+/// Without HiGHS, the same corpus scores **222**.
+///
+/// Not a build flag changing a number by rounding — it changes which answers are
+/// reachable. A cost objective's LP is one violation column per CNEC priced
+/// against movement, and the barrier method reports `Unbounded` on problems
+/// whose objective is bounded below by zero with every column bounded below.
+/// The caller reads that as "the LP failed" and moves nothing, so a shifter sits
+/// on tap 0 beside the overload it was meant to clear.
+///
+/// Recorded as its own baseline rather than hidden behind a feature gate,
+/// because a build that cannot solve these should say so rather than quietly
+/// score lower.
+#[cfg(not(feature = "opf-highs"))]
+const BASELINE_MATCHED_MIN_COST: usize = 222;
 
 #[test]
 fn every_scenario_names_inputs_that_exist() {
     // A scenario whose fixture is missing would otherwise be silently skipped,
     // and the gate would pass by testing nothing.
     let all = all_scenarios();
-    for list in ["dc_scenarios.txt", "ac_scenarios.txt", "ac_scenarios_16nodes.txt"] {
+    for list in [
+        "dc_scenarios.txt",
+        "ac_scenarios.txt",
+        "ac_scenarios_16nodes.txt",
+    ] {
         for scenario in selected(list, &all) {
             for (kind, reference) in [
                 ("cases", &scenario.network),
                 ("crac", &scenario.crac),
                 ("configurations", &scenario.config),
             ] {
-                assert!(!reference.is_empty(), "{}: a Given step is missing", scenario.name);
+                assert!(
+                    !reference.is_empty(),
+                    "{}: a Given step is missing",
+                    scenario.name
+                );
                 assert!(
                     resolve(kind, reference).exists(),
                     "{}: `{reference}` resolves to {} which does not exist",
@@ -1196,7 +2364,11 @@ fn every_scenario_names_inputs_that_exist() {
                     resolve(kind, reference).display()
                 );
             }
-            assert!(!scenario.expectations.is_empty(), "{}: nothing to check", scenario.name);
+            assert!(
+                !scenario.expectations.is_empty(),
+                "{}: nothing to check",
+                scenario.name
+            );
         }
     }
 }

@@ -74,13 +74,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use num_complex::Complex;
-use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader;
+use quick_xml::events::Event as XmlEvent;
 
-use super::init::{build, DeviceSpec, SystemSpec};
+use super::init::{DeviceSpec, SystemSpec, build};
 use super::json::{AvrSpec, GovSpec, MachineSpec, UnitSpec};
-use super::models::machine::{GenRoundParams, GenSalientParams};
 use super::models::Limits;
+use super::models::machine::{GenRoundParams, GenSalientParams};
 
 /// One `blackBoxModel` entry.
 #[derive(Clone, Debug, PartialEq)]
@@ -127,14 +127,26 @@ pub enum DydError {
     Io(String),
     Xml(String),
     /// A model with no `parId`, so its parameters cannot be found.
-    NoParameterSet { id: String },
+    NoParameterSet {
+        id: String,
+    },
     /// A `parId` naming a set the `.par` does not contain.
-    UnknownParameterSet { id: String, par_id: String },
+    UnknownParameterSet {
+        id: String,
+        par_id: String,
+    },
     /// A parameter the model needs, absent from its set. Named, because in a
     /// keyword-addressed format a missing name is the failure mode.
-    MissingParameter { id: String, set: String, name: String },
+    MissingParameter {
+        id: String,
+        set: String,
+        name: String,
+    },
     /// A `staticId` with no corresponding bus index.
-    UnknownStaticId { id: String, static_id: String },
+    UnknownStaticId {
+        id: String,
+        static_id: String,
+    },
     /// The IIDM half of the case could not be read.
     Iidm(String),
     /// The base-case power flow did not converge, so there is no operating
@@ -143,7 +155,10 @@ pub enum DydError {
     /// Two dynamic models attached to generators on the same bus. Their share
     /// of that bus's solved reactive power cannot be recovered from the file —
     /// only the total is a fact — so it is refused rather than guessed.
-    SharedBus { bus: usize, models: Vec<String> },
+    SharedBus {
+        bus: usize,
+        models: Vec<String>,
+    },
     /// The assembled system could not be initialized.
     Build(String),
 }
@@ -154,13 +169,19 @@ impl std::fmt::Display for DydError {
             DydError::Io(message) | DydError::Xml(message) => write!(f, "{message}"),
             DydError::NoParameterSet { id } => write!(f, "{id} names no parId"),
             DydError::UnknownParameterSet { id, par_id } => {
-                write!(f, "{id} names parameter set `{par_id}`, which the .par does not define")
+                write!(
+                    f,
+                    "{id} names parameter set `{par_id}`, which the .par does not define"
+                )
             }
             DydError::MissingParameter { id, set, name } => {
                 write!(f, "{id}: parameter set `{set}` has no `{name}`")
             }
             DydError::UnknownStaticId { id, static_id } => {
-                write!(f, "{id} attaches to static element `{static_id}`, which has no bus")
+                write!(
+                    f,
+                    "{id} attaches to static element `{static_id}`, which has no bus"
+                )
             }
             DydError::Iidm(message) => write!(f, "{message}"),
             DydError::PowerFlow(status) => {
@@ -187,7 +208,13 @@ pub enum DydWarning {
     UnsupportedLib { id: String, lib: String },
     /// A nonzero exponential saturation characteristic, which no model here
     /// uses.
-    SaturationIgnored { id: String, md: f64, mq: f64, nd: f64, nq: f64 },
+    SaturationIgnored {
+        id: String,
+        md: f64,
+        mq: f64,
+        nd: f64,
+        nq: f64,
+    },
     /// A limit this reader carries through but that the model does not use.
     /// Kept for anything that gains a limit the library still cannot represent.
     LimitsIgnored { id: String, detail: String },
@@ -211,9 +238,7 @@ impl std::fmt::Display for DydWarning {
     }
 }
 
-fn attributes(
-    e: &quick_xml::events::BytesStart<'_>,
-) -> Result<HashMap<String, String>, DydError> {
+fn attributes(e: &quick_xml::events::BytesStart<'_>) -> Result<HashMap<String, String>, DydError> {
     let mut out = HashMap::new();
     for attribute in e.attributes() {
         let attribute = attribute.map_err(|e| DydError::Xml(e.to_string()))?;
@@ -313,7 +338,9 @@ pub fn parse_par(text: &str) -> Result<ParDocument, DydError> {
                 if let (Some(set), Some(name), Some(value)) =
                     (current.as_ref(), a.get("name"), a.get("value"))
                 {
-                    sets.entry(set.clone()).or_default().insert(name.clone(), value.clone());
+                    sets.entry(set.clone())
+                        .or_default()
+                        .insert(name.clone(), value.clone());
                 }
             }
             Ok(XmlEvent::Eof) => break,
@@ -361,17 +388,13 @@ fn has_proportional_regulations(lib: &str) -> bool {
     lib.ends_with("ProportionalRegulations")
 }
 
-fn need(
-    par: &ParDocument,
-    id: &str,
-    set: &str,
-    name: &str,
-) -> Result<f64, DydError> {
-    par.number(set, name).ok_or_else(|| DydError::MissingParameter {
-        id: id.to_string(),
-        set: set.to_string(),
-        name: name.to_string(),
-    })
+fn need(par: &ParDocument, id: &str, set: &str, name: &str) -> Result<f64, DydError> {
+    par.number(set, name)
+        .ok_or_else(|| DydError::MissingParameter {
+            id: id.to_string(),
+            set: set.to_string(),
+            name: name.to_string(),
+        })
 }
 
 /// Turns a `.dyd`/`.par` pair into [`UnitSpec`]s.
@@ -404,7 +427,9 @@ pub fn to_units(
         let set = model
             .par_id
             .clone()
-            .ok_or_else(|| DydError::NoParameterSet { id: model.id.clone() })?;
+            .ok_or_else(|| DydError::NoParameterSet {
+                id: model.id.clone(),
+            })?;
         if !par.sets.contains_key(&set) {
             return Err(DydError::UnknownParameterSet {
                 id: model.id.clone(),
@@ -416,10 +441,12 @@ pub fn to_units(
         // no static half to attach to and is identified by its own id. Falling
         // back rather than refusing is what lets one reader serve both.
         let static_id = model.static_id.clone().unwrap_or_else(|| model.id.clone());
-        let &bus = bus_of.get(&static_id).ok_or_else(|| DydError::UnknownStaticId {
-            id: model.id.clone(),
-            static_id: static_id.clone(),
-        })?;
+        let &bus = bus_of
+            .get(&static_id)
+            .ok_or_else(|| DydError::UnknownStaticId {
+                id: model.id.clone(),
+                static_id: static_id.clone(),
+            })?;
 
         let g = |name: &str| need(par, &model.id, &set, name);
         // Dynawo states the machine's rating as its apparent-power nominal, and
@@ -585,7 +612,11 @@ pub fn load_case(
     // tap-changing loads, most often. Their static data is still used, so the
     // network is right; what is lost is their dynamics, and that is worth
     // saying rather than leaving to be noticed.
-    for model in dyd.models.iter().filter(|m| m.static_id.is_some() && !is_generator(&m.lib)) {
+    for model in dyd
+        .models
+        .iter()
+        .filter(|m| m.static_id.is_some() && !is_generator(&m.lib))
+    {
         warnings.push(DydWarning::UnsupportedLib {
             id: model.id.clone(),
             lib: model.lib.clone(),
@@ -629,7 +660,10 @@ pub fn load_case(
     }
     for (&bus, models) in &per_bus {
         if models.len() > 1 {
-            return Err(DydError::SharedBus { bus, models: models.clone() });
+            return Err(DydError::SharedBus {
+                bus,
+                models: models.clone(),
+            });
         }
     }
 

@@ -39,15 +39,19 @@ use std::env;
 use std::fs;
 use std::time::Instant;
 
-use gridoxide::batch::{uniform_load_scaling, Scenario};
-use gridoxide::linear::{dc_branches, dc_power_flow, DcBatchSolver, DcOptions, DcSensitivity};
+use gridoxide::batch::{Scenario, uniform_load_scaling};
+use gridoxide::linear::{DcBatchSolver, DcOptions, DcSensitivity, dc_branches, dc_power_flow};
 use gridoxide::pgm::pgm_to_buses_and_branches;
 
 fn main() {
     let mut args = env::args().skip(1);
-    let path = args.next().expect("usage: bench_dc <input.json> [repeat-count] [mode]");
-    let repeat: usize =
-        args.next().map(|s| s.parse().expect("repeat-count must be an integer")).unwrap_or(1);
+    let path = args
+        .next()
+        .expect("usage: bench_dc <input.json> [repeat-count] [mode]");
+    let repeat: usize = args
+        .next()
+        .map(|s| s.parse().expect("repeat-count must be an integer"))
+        .unwrap_or(1);
     let mode = args.next().unwrap_or_else(|| "solve".to_string());
 
     let raw = fs::read_to_string(&path).expect("unable to read input");
@@ -56,7 +60,11 @@ fn main() {
     let n_branches = lines.len() + transformers.len();
     let opts = DcOptions::default();
 
-    println!("{} bus(es), {} branch(es), mode {mode}", buses.len(), n_branches);
+    println!(
+        "{} bus(es), {} branch(es), mode {mode}",
+        buses.len(),
+        n_branches
+    );
 
     let start = Instant::now();
     let mut produced = 0usize;
@@ -102,7 +110,10 @@ fn main() {
             let span = repeat.min(n_branches);
             for a in 0..span {
                 for b in (a + 1)..span {
-                    if sensitivity.multi_outage_flows(&base.branch_p, &[a, b]).is_some() {
+                    if sensitivity
+                        .multi_outage_flows(&base.branch_p, &[a, b])
+                        .is_some()
+                    {
                         produced += 1;
                     }
                 }
@@ -122,12 +133,18 @@ fn main() {
     let elapsed = start.elapsed();
 
     let total_ms = elapsed.as_secs_f64() * 1e3;
-    println!("{total_ms:.3} ms total, {:.3} ms/run over {repeat} run(s)", total_ms / repeat as f64);
+    println!(
+        "{total_ms:.3} ms total, {:.3} ms/run over {repeat} run(s)",
+        total_ms / repeat as f64
+    );
     match mode.as_str() {
         "solve" => println!("  {} branch flow(s) per run", produced / repeat.max(1)),
         "n2" => {
             let span = repeat.min(n_branches);
-            println!("  {} pair(s) screened, {produced} solvable", span * (span - 1) / 2);
+            println!(
+                "  {} pair(s) screened, {produced} solvable",
+                span * (span - 1) / 2
+            );
             if produced > 0 {
                 println!("  {:.4} ms/solvable pair", total_ms / produced as f64);
             }
@@ -141,7 +158,10 @@ fn main() {
         _ => {
             println!("  {produced} column(s) produced per run");
             if produced > 0 {
-                println!("  {:.4} ms/column", total_ms / repeat as f64 / produced as f64);
+                println!(
+                    "  {:.4} ms/column",
+                    total_ms / repeat as f64 / produced as f64
+                );
             }
         }
     }

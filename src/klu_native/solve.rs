@@ -105,7 +105,7 @@ pub fn solve(sym: &Symbolic, num: &Numeric, rs: Option<&[f64]>, b: &[f64]) -> Ve
 mod tests {
     use super::super::analyze::analyze;
     use super::super::factor::factor;
-    use super::super::refactor::{refactor, RefactorScratch};
+    use super::super::refactor::{RefactorScratch, refactor};
     use super::*;
 
     fn dense_solve(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
@@ -113,7 +113,9 @@ mod tests {
         let mut a: Vec<Vec<f64>> = a.to_vec();
         let mut rhs = b.to_vec();
         for col in 0..n {
-            let pivot_row = (col..n).max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs())).unwrap();
+            let pivot_row = (col..n)
+                .max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs()))
+                .unwrap();
             a.swap(col, pivot_row);
             rhs.swap(col, pivot_row);
             for row in (col + 1)..n {
@@ -190,7 +192,12 @@ mod tests {
         let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &entries), &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -213,36 +220,69 @@ mod tests {
         ];
         let (col_ptr, row_idx, values) = to_csc(n, &entries);
         let sym = analyze(n, &col_ptr, &row_idx);
-        assert!(sym.nblocks() >= 2, "fixture should produce multiple BTF blocks, got {}", sym.nblocks());
+        assert!(
+            sym.nblocks() >= 2,
+            "fixture should produce multiple BTF blocks, got {}",
+            sym.nblocks()
+        );
 
         let num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
         let b = vec![1.0, -2.0, 0.5, 3.0, -1.0];
         let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &entries), &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
     #[test]
     fn solve_after_refactor_matches_dense() {
         let n = 4;
-        let base =
-            vec![(0, 0, 6.0), (1, 1, 7.0), (2, 2, 8.0), (3, 3, 5.0), (0, 1, -0.9), (1, 0, -0.5), (2, 3, 0.4), (3, 2, -0.2)];
+        let base = vec![
+            (0, 0, 6.0),
+            (1, 1, 7.0),
+            (2, 2, 8.0),
+            (3, 3, 5.0),
+            (0, 1, -0.9),
+            (1, 0, -0.5),
+            (2, 3, 0.4),
+            (3, 2, -0.2),
+        ];
         let (col_ptr, row_idx, values) = to_csc(n, &base);
         let sym = analyze(n, &col_ptr, &row_idx);
         let mut num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
         let mut scratch = RefactorScratch::new(n);
 
-        let updated: Vec<(usize, usize, f64)> = base.iter().map(|&(r, c, v)| (r, c, v * 1.7 + 0.1)).collect();
+        let updated: Vec<(usize, usize, f64)> = base
+            .iter()
+            .map(|&(r, c, v)| (r, c, v * 1.7 + 0.1))
+            .collect();
         let (col_ptr2, row_idx2, values2) = to_csc(n, &updated);
-        assert!(refactor(n, &col_ptr2, &row_idx2, &values2, &sym, &mut num, &mut scratch));
+        assert!(refactor(
+            n,
+            &col_ptr2,
+            &row_idx2,
+            &values2,
+            &sym,
+            &mut num,
+            &mut scratch
+        ));
 
         let b = vec![1.0, 2.0, -1.0, 0.5];
         let x = solve(&sym, &num, None, &b);
         let expected = dense_solve(&dense_from_entries(n, &updated), &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -259,7 +299,13 @@ mod tests {
         // scale), confirming it's wired correctly and ready for a real
         // (factorization-consistent) Rs once scaling is wired in.
         let n = 3;
-        let entries = vec![(0, 0, 4.0), (1, 1, 5.0), (2, 2, 6.0), (0, 1, 0.3), (1, 2, -0.2)];
+        let entries = vec![
+            (0, 0, 4.0),
+            (1, 1, 5.0),
+            (2, 2, 6.0),
+            (0, 1, 0.3),
+            (1, 2, -0.2),
+        ];
         let (col_ptr, row_idx, values) = to_csc(n, &entries);
         let sym = analyze(n, &col_ptr, &row_idx);
         let num = factor(n, &col_ptr, &row_idx, &values, &sym, 1e-3).unwrap();
@@ -269,7 +315,10 @@ mod tests {
         let ones = vec![1.0; n];
         let x_scaled = solve(&sym, &num, Some(&ones), &b);
         for i in 0..n {
-            assert_eq!(x_unscaled[i], x_scaled[i], "index {i}: Rs=1 must be a no-op");
+            assert_eq!(
+                x_unscaled[i], x_scaled[i],
+                "index {i}: Rs=1 must be a no-op"
+            );
         }
     }
 

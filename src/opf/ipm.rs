@@ -140,11 +140,17 @@ pub struct IpmSolver {
 
 impl IpmSolver {
     pub fn new() -> Self {
-        Self { options: IpmOptions::default(), iterations: 0 }
+        Self {
+            options: IpmOptions::default(),
+            iterations: 0,
+        }
     }
 
     pub fn with_options(options: IpmOptions) -> Self {
-        Self { options, iterations: 0 }
+        Self {
+            options,
+            iterations: 0,
+        }
     }
 
     /// Iterations taken by the last [`solve`](Solver::solve). Reported because
@@ -301,8 +307,14 @@ impl Solver for IpmSolver {
             };
         }
         let mut y = vec![0.0; m_eq];
-        let mut z_l: Vec<f64> = has_lower.iter().map(|&h| if h { 1.0 } else { 0.0 }).collect();
-        let mut z_u: Vec<f64> = has_upper.iter().map(|&h| if h { 1.0 } else { 0.0 }).collect();
+        let mut z_l: Vec<f64> = has_lower
+            .iter()
+            .map(|&h| if h { 1.0 } else { 0.0 })
+            .collect();
+        let mut z_u: Vec<f64> = has_upper
+            .iter()
+            .map(|&h| if h { 1.0 } else { 0.0 })
+            .collect();
 
         let b_scale = 1.0 + norm_inf(&p.b);
         let c_scale = 1.0 + norm_inf(&p.c);
@@ -319,8 +331,9 @@ impl Solver for IpmSolver {
 
             let qu = p.q_mul(&u);
             let aty = p.at_mul(&y);
-            let r_d: Vec<f64> =
-                (0..n_total).map(|k| qu[k] + p.c[k] - aty[k] - z_l[k] + z_u[k]).collect();
+            let r_d: Vec<f64> = (0..n_total)
+                .map(|k| qu[k] + p.c[k] - aty[k] - z_l[k] + z_u[k])
+                .collect();
             let au = p.a_mul(&u);
             let r_p: Vec<f64> = (0..m_eq).map(|r| au[r] - p.b[r]).collect();
 
@@ -330,11 +343,14 @@ impl Solver for IpmSolver {
                         + (if has_upper[k] { t[k] * z_u[k] } else { 0.0 })
                 })
                 .sum();
-            let mu = if n_bounds > 0 { complementarity / n_bounds as f64 } else { 0.0 };
+            let mu = if n_bounds > 0 {
+                complementarity / n_bounds as f64
+            } else {
+                0.0
+            };
 
-            let objective =
-                0.5 * (0..n_total).map(|k| u[k] * qu[k]).sum::<f64>()
-                    + (0..n_total).map(|k| p.c[k] * u[k]).sum::<f64>();
+            let objective = 0.5 * (0..n_total).map(|k| u[k] * qu[k]).sum::<f64>()
+                + (0..n_total).map(|k| p.c[k] * u[k]).sum::<f64>();
 
             // The gap test uses *total* complementarity, not `mu`. `mu` is the
             // per-bound average, so testing it would make the criterion weaker
@@ -377,9 +393,8 @@ impl Solver for IpmSolver {
             }
 
             // The KKT matrix: symmetric, regularized to quasi-definite.
-            let mut kkt: Vec<(usize, usize, f64)> = Vec::with_capacity(
-                p.q.len() * 2 + p.a.len() * 2 + n_total + m_eq,
-            );
+            let mut kkt: Vec<(usize, usize, f64)> =
+                Vec::with_capacity(p.q.len() * 2 + p.a.len() * 2 + n_total + m_eq);
             for &(i, j, v) in &p.q {
                 kkt.push((i, j, v));
                 if i != j {
@@ -423,7 +438,8 @@ impl Solver for IpmSolver {
 
                 let mut d = factorization.solve(&rhs)?;
                 for _ in 0..self.options.refinement_rounds {
-                    let residual = kkt_residual(&p, &has_lower, &has_upper, &g, &t, &z_l, &z_u, &d, &rhs);
+                    let residual =
+                        kkt_residual(&p, &has_lower, &has_upper, &g, &t, &z_l, &z_u, &d, &rhs);
                     let correction = factorization.solve(&residual)?;
                     for i in 0..dim {
                         d[i] += correction[i];
@@ -436,28 +452,38 @@ impl Solver for IpmSolver {
                 Some((du, dy))
             };
 
-            let rc_l_aff: Vec<f64> =
-                (0..n_total).map(|k| if has_lower[k] { g[k] * z_l[k] } else { 0.0 }).collect();
-            let rc_u_aff: Vec<f64> =
-                (0..n_total).map(|k| if has_upper[k] { t[k] * z_u[k] } else { 0.0 }).collect();
+            let rc_l_aff: Vec<f64> = (0..n_total)
+                .map(|k| if has_lower[k] { g[k] * z_l[k] } else { 0.0 })
+                .collect();
+            let rc_u_aff: Vec<f64> = (0..n_total)
+                .map(|k| if has_upper[k] { t[k] * z_u[k] } else { 0.0 })
+                .collect();
 
             let Some((du_aff, _)) = solve_step(&rc_l_aff, &rc_u_aff) else {
                 return Ok(Solution::failed(diagnose(&u, &y, primal_ok, dual_ok)));
             };
             let dz_l_aff: Vec<f64> = (0..n_total)
                 .map(|k| {
-                    if has_lower[k] { (-rc_l_aff[k] - z_l[k] * du_aff[k]) / g[k] } else { 0.0 }
+                    if has_lower[k] {
+                        (-rc_l_aff[k] - z_l[k] * du_aff[k]) / g[k]
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
             let dz_u_aff: Vec<f64> = (0..n_total)
                 .map(|k| {
-                    if has_upper[k] { (-rc_u_aff[k] + z_u[k] * du_aff[k]) / t[k] } else { 0.0 }
+                    if has_upper[k] {
+                        (-rc_u_aff[k] + z_u[k] * du_aff[k]) / t[k]
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
 
             let (ap_aff, ad_aff) = step_lengths(
-                n_total, &has_lower, &has_upper, &g, &t, &z_l, &z_u, &du_aff, &dz_l_aff,
-                &dz_u_aff, 1.0,
+                n_total, &has_lower, &has_upper, &g, &t, &z_l, &z_u, &du_aff, &dz_l_aff, &dz_u_aff,
+                1.0,
             );
 
             // How much would the affine step have reduced complementarity?
@@ -506,10 +532,22 @@ impl Solver for IpmSolver {
                 return Ok(Solution::failed(diagnose(&u, &y, primal_ok, dual_ok)));
             };
             let dz_l: Vec<f64> = (0..n_total)
-                .map(|k| if has_lower[k] { (-rc_l[k] - z_l[k] * du[k]) / g[k] } else { 0.0 })
+                .map(|k| {
+                    if has_lower[k] {
+                        (-rc_l[k] - z_l[k] * du[k]) / g[k]
+                    } else {
+                        0.0
+                    }
+                })
                 .collect();
             let dz_u: Vec<f64> = (0..n_total)
-                .map(|k| if has_upper[k] { (-rc_u[k] + z_u[k] * du[k]) / t[k] } else { 0.0 })
+                .map(|k| {
+                    if has_upper[k] {
+                        (-rc_u[k] + z_u[k] * du[k]) / t[k]
+                    } else {
+                        0.0
+                    }
+                })
                 .collect();
 
             // Stop just short of the boundary, so the next iteration still has
@@ -662,13 +700,7 @@ fn step_lengths(
 /// columns for free: their pinning rows are internal-only, so their multiplier
 /// lands in `col_dual` as a reduced cost, exactly where a caller expects a
 /// fixed variable's price to appear.
-fn finish(
-    lp: &LinearProgram,
-    p: &Internal,
-    u: &[f64],
-    y: &[f64],
-    objective: f64,
-) -> Solution {
+fn finish(lp: &LinearProgram, p: &Internal, u: &[f64], y: &[f64], objective: f64) -> Solution {
     let n = p.n_vars;
     let primal = u[..n].to_vec();
 

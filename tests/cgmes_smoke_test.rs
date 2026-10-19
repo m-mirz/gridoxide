@@ -31,7 +31,11 @@ fn decodes_inline_fragment_and_reports_type_counts() {
         .as_any()
         .downcast_ref::<cimstructs::TopologicalNode>()
         .expect("TopologicalNode downcast");
-    let base_voltage_mrid = &tn.base_voltage.as_ref().expect("missing BaseVoltage ref").mrid;
+    let base_voltage_mrid = &tn
+        .base_voltage
+        .as_ref()
+        .expect("missing BaseVoltage ref")
+        .mrid;
 
     let bv = ds.entries[base_voltage_mrid]
         .element

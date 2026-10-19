@@ -13,8 +13,8 @@
 //! `new_common()`, which never overrides `klu_defaults.c`'s `ordering = 0`
 //! default.
 
-use super::btf::btf_order;
 use super::amd::amd_order;
+use super::btf::btf_order;
 use super::types::unflip;
 
 /// The result of symbolic analysis: everything `factor`/`refactor` need to
@@ -65,7 +65,12 @@ impl Symbolic {
 /// construction always guarantees this).
 pub fn analyze(n: usize, col_ptr: &[i64], row_idx: &[i64]) -> Symbolic {
     if n == 0 {
-        return Symbolic { p: Vec::new(), q: Vec::new(), r: vec![0], lnz: Vec::new() };
+        return Symbolic {
+            p: Vec::new(),
+            q: Vec::new(),
+            r: vec![0],
+            lnz: Vec::new(),
+        };
     }
 
     let (p_btf, mut q_btf, r, nmatch) = btf_order(n, col_ptr, row_idx);
@@ -137,7 +142,11 @@ pub fn analyze(n: usize, col_ptr: &[i64], row_idx: &[i64]) -> Symbolic {
         // doesn't expose AMD_Info's lnz statistic -- see amd/core.rs's doc
         // comment on what's dropped as diagnostic-only. This is purely a
         // capacity-hint approximation, not load-bearing.).
-        lnz[block] = if nk <= 3 { (nk * (nk + 1) / 2) as f64 } else { (nk * 4) as f64 };
+        lnz[block] = if nk <= 3 {
+            (nk * (nk + 1) / 2) as f64
+        } else {
+            (nk * 4) as f64
+        };
     }
 
     Symbolic {

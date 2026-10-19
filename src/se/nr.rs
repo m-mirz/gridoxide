@@ -27,10 +27,8 @@ use crate::sparse::RealSparseSystem;
 use crate::types::Bus;
 
 use super::constraints::Constraints;
-use super::jacobian::{
-    gain_and_rhs, mask_untouched, measurement_jacobian_with, StateLayout,
-};
-use super::{measurement_functions, measurement_functions_with, MeasurementModel, SeNetwork};
+use super::jacobian::{StateLayout, gain_and_rhs, mask_untouched, measurement_jacobian_with};
+use super::{MeasurementModel, SeNetwork, measurement_functions, measurement_functions_with};
 
 /// How the estimate finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,8 +204,10 @@ pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurem
 /// better starting value than either produces on its own, and costs nothing.
 fn apply_measured_magnitudes(buses: &mut [Bus], measurements: &[Measurement]) {
     for m in measurements {
-        if let (crate::measurement::MeasurementKind::VoltageMagnitude,
-                crate::measurement::Target::Bus(bus)) = (m.kind, m.target)
+        if let (
+            crate::measurement::MeasurementKind::VoltageMagnitude,
+            crate::measurement::Target::Bus(bus),
+        ) = (m.kind, m.target)
         {
             if m.value.is_finite() && m.value > 0.0 {
                 buses[bus].voltage_mag = m.value;
@@ -252,8 +252,7 @@ fn estimate_with<S: LinearSolver>(
 
         let unconstrained = mask_untouched(&mut triplets, &mut rhs, &[&rows, &c_rows], n);
 
-        let (triplets, rhs) =
-            super::constraints::augment(triplets, rhs, n, &c_values, &c_rows);
+        let (triplets, rhs) = super::constraints::augment(triplets, rhs, n, &c_values, &c_rows);
         let n_aug = n + constraints.len();
 
         // The gain matrix's sparsity pattern is fixed for a topology and a
@@ -453,18 +452,46 @@ impl PersistentEstimator {
 
         match self.options.backend {
             JacobianBackend::KluNative => estimate_with(
-                measurements, buses, net, layout, constraints, model, &self.options, &mut self.klu_native,
+                measurements,
+                buses,
+                net,
+                layout,
+                constraints,
+                model,
+                &self.options,
+                &mut self.klu_native,
             ),
             #[cfg(feature = "klu")]
             JacobianBackend::Klu => estimate_with(
-                measurements, buses, net, layout, constraints, model, &self.options, &mut self.klu,
+                measurements,
+                buses,
+                net,
+                layout,
+                constraints,
+                model,
+                &self.options,
+                &mut self.klu,
             ),
             #[cfg(feature = "pardiso")]
             JacobianBackend::Pardiso => estimate_with(
-                measurements, buses, net, layout, constraints, model, &self.options, &mut self.pardiso,
+                measurements,
+                buses,
+                net,
+                layout,
+                constraints,
+                model,
+                &self.options,
+                &mut self.pardiso,
             ),
             JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
-                measurements, buses, net, layout, constraints, model, &self.options, &mut self.scalar,
+                measurements,
+                buses,
+                net,
+                layout,
+                constraints,
+                model,
+                &self.options,
+                &mut self.scalar,
             ),
         }
     }
@@ -490,17 +517,35 @@ pub fn estimate(
     let model = MeasurementModel::new(measurements, net);
     match options.backend {
         JacobianBackend::KluNative => estimate_with(
-            measurements, buses, net, &layout, &constraints, &model, options,
+            measurements,
+            buses,
+            net,
+            &layout,
+            &constraints,
+            &model,
+            options,
             &mut None::<crate::klu_native::KluNativeSystem>,
         ),
         #[cfg(feature = "klu")]
         JacobianBackend::Klu => estimate_with(
-            measurements, buses, net, &layout, &constraints, &model, options,
+            measurements,
+            buses,
+            net,
+            &layout,
+            &constraints,
+            &model,
+            options,
             &mut None::<crate::sparse_klu::KluRealSystem>,
         ),
         #[cfg(feature = "pardiso")]
         JacobianBackend::Pardiso => estimate_with(
-            measurements, buses, net, &layout, &constraints, &model, options,
+            measurements,
+            buses,
+            net,
+            &layout,
+            &constraints,
+            &model,
+            options,
             &mut None::<crate::sparse_pardiso::PardisoRealSystem>,
         ),
         // `Block` assumes power flow's two-unknowns-per-bus structure, which the
@@ -509,7 +554,13 @@ pub fn estimate(
         // than silently mis-assembling. Every other backend is a general sparse
         // LU and carries the gain matrix unchanged.
         JacobianBackend::Block | JacobianBackend::Scalar => estimate_with(
-            measurements, buses, net, &layout, &constraints, &model, options,
+            measurements,
+            buses,
+            net,
+            &layout,
+            &constraints,
+            &model,
+            options,
             &mut None::<RealSparseSystem>,
         ),
     }
@@ -521,7 +572,12 @@ mod tests {
     use crate::measurement::{MeasurementKind, Target};
 
     fn m(kind: MeasurementKind, target: Target, value: f64, sigma: f64) -> Measurement {
-        Measurement { kind, target, value, sigma }
+        Measurement {
+            kind,
+            target,
+            value,
+            sigma,
+        }
     }
 
     /// With enough consistent measurements, the estimate should reproduce the
@@ -544,11 +600,17 @@ mod tests {
             (MeasurementKind::ReactivePower, Target::Bus(1)),
             (
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: crate::branch_flow::Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: crate::branch_flow::Terminal::From,
+                },
             ),
             (
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: crate::branch_flow::Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: crate::branch_flow::Terminal::From,
+                },
             ),
         ];
         let probe: Vec<Measurement> = h_targets
@@ -576,7 +638,9 @@ mod tests {
                 want.voltage_mag
             );
             // Angles are only determined up to the reference, which is pinned.
-            let reference = layout.angle_ref.expect("no angle measurements here, so one is pinned");
+            let reference = layout
+                .angle_ref
+                .expect("no angle measurements here, so one is pinned");
             let d_ang = (got.voltage_ang - want.voltage_ang)
                 - (buses[reference].voltage_ang - truth[reference].voltage_ang);
             assert!(d_ang.abs() < 1e-8, "bus {i} angle off by {d_ang}");
@@ -597,7 +661,12 @@ mod tests {
     #[test]
     fn unobservable_unknowns_are_pinned_and_reported() {
         let (net, truth) = crate::se::tests::two_bus_net();
-        let measurements = vec![m(MeasurementKind::VoltageMagnitude, Target::Bus(0), 1.03, 0.01)];
+        let measurements = vec![m(
+            MeasurementKind::VoltageMagnitude,
+            Target::Bus(0),
+            1.03,
+            0.01,
+        )];
         let mut buses = truth.clone();
         flat_start(&mut buses, &measurements);
         let report = estimate(&measurements, &mut buses, &net, &SeOptions::default());
@@ -610,10 +679,18 @@ mod tests {
             "a single measurement cannot constrain the whole state: {report:?}"
         );
         // The measured quantity is still recovered exactly.
-        assert!((buses[0].voltage_mag - 1.03).abs() < 1e-9, "got {}", buses[0].voltage_mag);
+        assert!(
+            (buses[0].voltage_mag - 1.03).abs() < 1e-9,
+            "got {}",
+            buses[0].voltage_mag
+        );
         // And the unconstrained ones kept their starting value rather than
         // drifting somewhere arbitrary.
-        assert!((buses[1].voltage_mag - 1.0).abs() < 1e-12, "got {}", buses[1].voltage_mag);
+        assert!(
+            (buses[1].voltage_mag - 1.0).abs() < 1e-12,
+            "got {}",
+            buses[1].voltage_mag
+        );
     }
 
     /// A reused estimator must produce exactly what a fresh one does.
@@ -652,13 +729,19 @@ mod tests {
 
         for (i, (report, buses)) in reused.iter().enumerate() {
             assert_eq!(report.status, one_shot.status, "solve {i} status");
-            assert_eq!(report.iterations, one_shot.iterations, "solve {i} iterations");
+            assert_eq!(
+                report.iterations, one_shot.iterations,
+                "solve {i} iterations"
+            );
             for (bus, (got, want)) in buses.iter().zip(&fresh).enumerate() {
                 assert_eq!(
                     got.voltage_mag, want.voltage_mag,
                     "solve {i} bus {bus}: reuse changed the answer"
                 );
-                assert_eq!(got.voltage_ang, want.voltage_ang, "solve {i} bus {bus} angle");
+                assert_eq!(
+                    got.voltage_ang, want.voltage_ang,
+                    "solve {i} bus {bus} angle"
+                );
             }
         }
     }
@@ -683,7 +766,10 @@ mod tests {
         // A different operating point, same sensors.
         let second: Vec<Measurement> = first
             .iter()
-            .map(|m| Measurement { value: m.value * 0.98, ..*m })
+            .map(|m| Measurement {
+                value: m.value * 0.98,
+                ..*m
+            })
             .collect();
 
         let mut persistent = PersistentEstimator::new(SeOptions::default());
@@ -728,7 +814,10 @@ mod tests {
             m(MeasurementKind::ReactivePower, Target::Bus(1), 0.0, 0.01),
             m(
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: crate::branch_flow::Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: crate::branch_flow::Terminal::From,
+                },
                 0.0,
                 0.01,
             ),
@@ -739,7 +828,10 @@ mod tests {
             .iter()
             .zip(&exact)
             .enumerate()
-            .map(|(i, (p, &v))| Measurement { value: v + 0.002 * (i as f64 - 2.0), ..*p })
+            .map(|(i, (p, &v))| Measurement {
+                value: v + 0.002 * (i as f64 - 2.0),
+                ..*p
+            })
             .collect();
 
         let mut buses = truth.clone();
@@ -747,7 +839,10 @@ mod tests {
         let report = estimate(&measurements, &mut buses, &net, &SeOptions::default());
 
         assert_eq!(report.status, SeStatus::Converged, "report={report:?}");
-        assert!(report.objective > 0.0, "inconsistent data should leave residual disagreement");
+        assert!(
+            report.objective > 0.0,
+            "inconsistent data should leave residual disagreement"
+        );
         assert!(report.last_step < SeOptions::default().tol);
     }
 }

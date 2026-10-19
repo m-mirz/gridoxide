@@ -141,7 +141,10 @@ impl DcOpfNetwork {
         let branches: Vec<DcBranch> = crate::linear::btheta::dc_branches(
             &net.lines,
             &net.transformers,
-            crate::linear::DcOptions { approximation, ..crate::linear::DcOptions::default() },
+            crate::linear::DcOptions {
+                approximation,
+                ..crate::linear::DcOptions::default()
+            },
         )
         .into_iter()
         // A branch touching a virtual bus is a synthesized source connection.
@@ -161,7 +164,9 @@ impl DcOpfNetwork {
 
         let mut limits = HashMap::new();
         for limit in &opf.branch_limit {
-            let Some(&flat) = net.branch_idx.get(&limit.id) else { continue };
+            let Some(&flat) = net.branch_idx.get(&limit.id) else {
+                continue;
+            };
             limits.insert(flat, limit.rate_pu(base_mva));
         }
 
@@ -185,8 +190,13 @@ impl DcOpfNetwork {
 
         let mut loads = Vec::new();
         for (node, p_specified) in loads_raw {
-            let Some(&bus) = net.node_idx.get(&node) else { continue };
-            loads.push(DcLoad { bus, p: p_specified / s_base_va });
+            let Some(&bus) = net.node_idx.get(&node) else {
+                continue;
+            };
+            loads.push(DcLoad {
+                bus,
+                p: p_specified / s_base_va,
+            });
         }
 
         Ok(Self {
@@ -251,7 +261,10 @@ pub struct DcOpfOptions {
 
 impl Default for DcOpfOptions {
     fn default() -> Self {
-        Self { shed_price: 10_000.0, allow_shedding: true }
+        Self {
+            shed_price: 10_000.0,
+            allow_shedding: true,
+        }
     }
 }
 
@@ -343,7 +356,11 @@ impl DcOpf {
 
         let n_buses = network.n_buses;
         let n_gen = network.generators.len();
-        let n_shed = if options.allow_shedding { network.loads.len() } else { 0 };
+        let n_shed = if options.allow_shedding {
+            network.loads.len()
+        } else {
+            0
+        };
 
         // **Piecewise-linear costs enter through an epigraph.** A convex
         // piecewise-linear function is the upper envelope of its segments, so
@@ -499,7 +516,10 @@ impl DcOpf {
             // right-hand side.
             let offset = branch.b * branch.shift;
             let row = lp.add_row(
-                &[(layout.theta + branch.from, branch.b), (layout.theta + branch.to, -branch.b)],
+                &[
+                    (layout.theta + branch.from, branch.b),
+                    (layout.theta + branch.to, -branch.b),
+                ],
                 -rate + offset,
                 rate + offset,
             );
@@ -547,9 +567,17 @@ impl DcOpf {
             }
         }
 
-        let layout = Layout { limit_rows, ..layout };
+        let layout = Layout {
+            limit_rows,
+            ..layout
+        };
         lp.validate()?;
-        Ok(Self { network, options, layout, problem: lp })
+        Ok(Self {
+            network,
+            options,
+            layout,
+            problem: lp,
+        })
     }
 
     /// The assembled program, for handing to a [`Solver`](crate::opf::Solver).
@@ -591,8 +619,13 @@ impl DcOpf {
             .map(|d| solution.primal[self.layout.shed + d] * base)
             .collect();
 
-        let n_branches =
-            self.network.branches.iter().map(|b| b.index + 1).max().unwrap_or(0);
+        let n_branches = self
+            .network
+            .branches
+            .iter()
+            .map(|b| b.index + 1)
+            .max()
+            .unwrap_or(0);
         let mut flows = vec![0.0; n_branches];
         for branch in &self.network.branches {
             let flow = branch.b * (angles[branch.from] - angles[branch.to] - branch.shift);
@@ -669,7 +702,13 @@ mod tests {
         DcOpfNetwork {
             n_buses: 2,
             reference: 0,
-            branches: vec![DcBranch { index: 0, from: 0, to: 1, b: 10.0, shift: 0.0 }],
+            branches: vec![DcBranch {
+                index: 0,
+                from: 0,
+                to: 1,
+                b: 10.0,
+                shift: 0.0,
+            }],
             limits: HashMap::from([(0, rate)]),
             generators: vec![
                 DcGenerator {
@@ -678,7 +717,9 @@ mod tests {
                     p_min: 0.0,
                     p_max: 2.0,
                     // $10/MWh, linear, already per-unit on a 100 MVA base.
-                    cost: Some(CostCurve::Polynomial { coefficients: vec![0.0, 1000.0] }),
+                    cost: Some(CostCurve::Polynomial {
+                        coefficients: vec![0.0, 1000.0],
+                    }),
                 },
                 DcGenerator {
                     index: 1,
@@ -686,7 +727,9 @@ mod tests {
                     p_min: 0.0,
                     p_max: 2.0,
                     // $30/MWh.
-                    cost: Some(CostCurve::Polynomial { coefficients: vec![0.0, 3000.0] }),
+                    cost: Some(CostCurve::Polynomial {
+                        coefficients: vec![0.0, 3000.0],
+                    }),
                 },
             ],
             loads: vec![DcLoad { bus: 1, p: 1.0 }],
@@ -717,7 +760,10 @@ mod tests {
 
     #[test]
     fn shedding_can_be_switched_off() {
-        let options = DcOpfOptions { allow_shedding: false, ..Default::default() };
+        let options = DcOpfOptions {
+            allow_shedding: false,
+            ..Default::default()
+        };
         let opf = DcOpf::build(two_bus(Some(2.0)), options).unwrap();
         assert_eq!(opf.problem().n_vars, 4, "no shedding column");
     }
@@ -727,8 +773,9 @@ mod tests {
     #[test]
     fn a_quadratic_cost_is_doubled_into_the_hessian() {
         let mut network = two_bus(None);
-        network.generators[0].cost =
-            Some(CostCurve::Polynomial { coefficients: vec![5.0, 1000.0, 7.0] });
+        network.generators[0].cost = Some(CostCurve::Polynomial {
+            coefficients: vec![5.0, 1000.0, 7.0],
+        });
         let opf = DcOpf::build(network, DcOpfOptions::default()).unwrap();
 
         let hessian = opf.problem().hessian.as_ref().expect("a quadratic term");
@@ -744,8 +791,9 @@ mod tests {
     #[test]
     fn a_non_convex_cost_is_refused_rather_than_solved() {
         let mut network = two_bus(None);
-        network.generators[0].cost =
-            Some(CostCurve::Polynomial { coefficients: vec![0.0, 1000.0, -1.0] });
+        network.generators[0].cost = Some(CostCurve::Polynomial {
+            coefficients: vec![0.0, 1000.0, -1.0],
+        });
         assert!(DcOpf::build(network, DcOpfOptions::default()).is_err());
     }
 
@@ -759,7 +807,11 @@ mod tests {
         let lp = opf.problem();
 
         // Bus 0's balance row: rhs = load(0) - shift_injection(0) = 0 - 10*0.1.
-        assert!((lp.row_lower[0] - (-1.0)).abs() < 1e-12, "{:?}", lp.row_lower);
+        assert!(
+            (lp.row_lower[0] - (-1.0)).abs() < 1e-12,
+            "{:?}",
+            lp.row_lower
+        );
         // Bus 1's: rhs = 1.0 - (-10*0.1).
         assert!((lp.row_lower[1] - 2.0).abs() < 1e-12, "{:?}", lp.row_lower);
         // And the limit row's bounds pick up `b·α` on both sides.

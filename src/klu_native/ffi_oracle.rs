@@ -71,7 +71,11 @@ unsafe extern "C" {
 /// the diagonal of the permuted matrix (a separate output parameter, not the
 /// same as `nblocks`).
 #[allow(dead_code)]
-pub fn btf_order_oracle(n: usize, col_ptr: &[i32], row_idx: &[i32]) -> (Vec<i32>, Vec<i32>, Vec<i32>, i32) {
+pub fn btf_order_oracle(
+    n: usize,
+    col_ptr: &[i32],
+    row_idx: &[i32],
+) -> (Vec<i32>, Vec<i32>, Vec<i32>, i32) {
     assert_eq!(col_ptr.len(), n + 1, "col_ptr must have n+1 entries");
     let mut p = vec![0i32; n];
     let mut q = vec![0i32; n];
@@ -107,7 +111,14 @@ pub fn amd_order_oracle(n: usize, col_ptr: &[i32], row_idx: &[i32]) -> Option<Ve
     assert_eq!(col_ptr.len(), n + 1, "col_ptr must have n+1 entries");
     let mut p = vec![0i32; n];
     let status = unsafe {
-        amd_order(n as i32, col_ptr.as_ptr(), row_idx.as_ptr(), p.as_mut_ptr(), std::ptr::null(), std::ptr::null_mut())
+        amd_order(
+            n as i32,
+            col_ptr.as_ptr(),
+            row_idx.as_ptr(),
+            p.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
     };
     (status >= 0).then_some(p)
 }
@@ -125,7 +136,13 @@ pub fn amd_order_oracle(n: usize, col_ptr: &[i32], row_idx: &[i32]) -> Option<Ve
 /// `scale <= 0`, which `scale.rs`'s pure-Rust unit tests already cover
 /// without any FFI needed).
 #[allow(dead_code)]
-pub fn klu_scale_oracle(scale: i32, n: usize, col_ptr: &[i32], row_idx: &[i32], values: &[f64]) -> Option<Vec<f64>> {
+pub fn klu_scale_oracle(
+    scale: i32,
+    n: usize,
+    col_ptr: &[i32],
+    row_idx: &[i32],
+    values: &[f64],
+) -> Option<Vec<f64>> {
     use crate::sparse_klu::{klu_common_for_oracle, klu_defaults_for_oracle, klu_scale_for_oracle};
 
     assert_eq!(col_ptr.len(), n + 1, "col_ptr must have n+1 entries");
@@ -166,7 +183,10 @@ mod tests {
         let mut sorted_p = p.clone();
         sorted_p.sort_unstable();
         assert_eq!(sorted_p, vec![0, 1, 2], "P must be a bijection");
-        let mut sorted_q: Vec<i32> = q.iter().map(|&x| super::super::types::unflip(x as i64) as i32).collect();
+        let mut sorted_q: Vec<i32> = q
+            .iter()
+            .map(|&x| super::super::types::unflip(x as i64) as i32)
+            .collect();
         sorted_q.sort_unstable();
         assert_eq!(sorted_q, vec![0, 1, 2], "Q (unflipped) must be a bijection");
     }

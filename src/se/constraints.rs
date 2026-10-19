@@ -35,8 +35,8 @@
 
 use crate::types::Bus;
 
-use super::jacobian::{Row, StateLayout};
 use super::SeNetwork;
+use super::jacobian::{Row, StateLayout};
 
 /// The zero-injection constraints of a network, in a fixed order.
 ///
@@ -102,7 +102,12 @@ impl Constraints {
             for active in [true, false] {
                 values.push(if active { p_inj[bus] } else { q_inj[bus] });
                 rows.push(super::jacobian::injection_row(
-                    layout, net, &v, bus, active, &mut scratch,
+                    layout,
+                    net,
+                    &v,
+                    bus,
+                    active,
+                    &mut scratch,
                 ));
             }
         }
@@ -182,6 +187,9 @@ mod tests {
             }
         }
         assert_eq!(dense[n][n], 0.0, "the multiplier block must stay zero");
-        assert_eq!(rhs[n], -0.25, "the constraint row drives the violation to zero");
+        assert_eq!(
+            rhs[n], -0.25,
+            "the constraint row drives the violation to zero"
+        );
     }
 }

@@ -17,7 +17,7 @@ use std::fs;
 use std::time::Instant;
 
 use gridoxide::batch::{BatchSolver, BusOverride, Scenario};
-use gridoxide::bde::{solve_batch_block_diagonal, BlockDiagonal};
+use gridoxide::bde::{BlockDiagonal, solve_batch_block_diagonal};
 use gridoxide::klu_native::KluNativeSystem;
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
@@ -25,8 +25,13 @@ use gridoxide::solver::{JacobianBackend, SolveStatus};
 
 fn main() {
     let mut args = env::args().skip(1);
-    let path = args.next().expect("usage: bde_check <input.json> [n_scenarios]");
-    let nb: usize = args.next().map(|s| s.parse().expect("n_scenarios must be an integer")).unwrap_or(8);
+    let path = args
+        .next()
+        .expect("usage: bde_check <input.json> [n_scenarios]");
+    let nb: usize = args
+        .next()
+        .map(|s| s.parse().expect("n_scenarios must be an integer"))
+        .unwrap_or(8);
 
     let raw = fs::read_to_string(&path).expect("read input file");
     let input = serde_json::from_str(&raw).expect("parse PGM input JSON");
@@ -63,11 +68,14 @@ fn main() {
 
     let t0 = Instant::now();
     let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 1).expect("pool");
-    let independent = batch.solve(&template, &ybus, &scenarios, 1e-8, 40).expect("independent");
+    let independent = batch
+        .solve(&template, &ybus, &scenarios, 1e-8, 40)
+        .expect("independent");
     let t_indep = t0.elapsed();
 
     let t1 = Instant::now();
-    let embedded = solve_batch_block_diagonal::<KluNativeSystem>(&template, &ybus, &scenarios, 1e-8, 40);
+    let embedded =
+        solve_batch_block_diagonal::<KluNativeSystem>(&template, &ybus, &scenarios, 1e-8, 40);
     let t_bde = t1.elapsed();
 
     let mut worst_vm = 0.0f64;
@@ -75,7 +83,9 @@ fn main() {
     let mut iter_mismatch = 0usize;
     let mut not_converged = 0usize;
     for (emb, indep) in embedded.iter().zip(&independent) {
-        if emb.stats.status != SolveStatus::Converged || indep.stats.status != SolveStatus::Converged {
+        if emb.stats.status != SolveStatus::Converged
+            || indep.stats.status != SolveStatus::Converged
+        {
             not_converged += 1;
             continue;
         }
@@ -89,8 +99,14 @@ fn main() {
     }
 
     println!();
-    println!("independent (1 thread): {:.1} ms", t_indep.as_secs_f64() * 1e3);
-    println!("block-diagonal:         {:.1} ms", t_bde.as_secs_f64() * 1e3);
+    println!(
+        "independent (1 thread): {:.1} ms",
+        t_indep.as_secs_f64() * 1e3
+    );
+    println!(
+        "block-diagonal:         {:.1} ms",
+        t_bde.as_secs_f64() * 1e3
+    );
     println!();
     println!("max |dVm| = {worst_vm:.3e}");
     println!("max |dVa| = {worst_va:.3e} rad");

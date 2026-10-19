@@ -15,11 +15,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use gridoxide::batch::{BatchSolver, BusOverride, Scenario};
-use gridoxide::bde::{solve_batch_block_diagonal, BlockDiagonal};
+use gridoxide::bde::{BlockDiagonal, solve_batch_block_diagonal};
 use gridoxide::jacobian::JacobianPattern;
 use gridoxide::json::NetworkData;
 use gridoxide::klu_native::KluNativeSystem;
-use gridoxide::network::{build_ybus, YBusSparse};
+use gridoxide::network::{YBusSparse, build_ybus};
 use gridoxide::solver::{JacobianBackend, SolveStatus};
 use gridoxide::sparse::RealSparseSystem;
 use gridoxide::types::Bus;
@@ -38,7 +38,9 @@ fn scenarios(template: &[Bus], n: usize) -> Vec<Scenario> {
         .map(|k| {
             let f = 0.5 + 1.5 * (k as f64) / (n as f64);
             Scenario::new(vec![
-                BusOverride::new(2).p(template[2].p_spec * f).q(template[2].q_spec * f),
+                BusOverride::new(2)
+                    .p(template[2].p_spec * f)
+                    .q(template[2].q_spec * f),
             ])
         })
         .collect()
@@ -82,7 +84,11 @@ fn masked_block_is_identity_in_the_same_pattern() {
 
     let mut ident = Vec::new();
     base.fill_identity_into(&mut ident);
-    assert_eq!(ident.len(), base.len(), "identity fill must not change the pattern length");
+    assert_eq!(
+        ident.len(),
+        base.len(),
+        "identity fill must not change the pattern length"
+    );
 
     let n = base.n_unknowns;
     let mut seen_diag = vec![false; n];
@@ -112,13 +118,19 @@ fn assert_bde_matches_independent<S: gridoxide::solver::LinearSolver>(
     let scs = scenarios(&template, 12);
 
     let batch = BatchSolver::with_threads(backend, 1).expect("build pool");
-    let independent = batch.solve(&template, &ybus, &scs, 1e-8, 40).expect("independent solves");
+    let independent = batch
+        .solve(&template, &ybus, &scs, 1e-8, 40)
+        .expect("independent solves");
 
     let embedded = solve_batch_block_diagonal::<S>(&template, &ybus, &scs, 1e-8, 40);
 
     assert_eq!(embedded.len(), scs.len());
     for (k, (emb, indep)) in embedded.iter().zip(&independent).enumerate() {
-        assert_eq!(emb.stats.status, SolveStatus::Converged, "{label}: scenario {k} status");
+        assert_eq!(
+            emb.stats.status,
+            SolveStatus::Converged,
+            "{label}: scenario {k} status"
+        );
         assert_eq!(
             indep.stats.status,
             SolveStatus::Converged,
@@ -172,13 +184,21 @@ fn masked_scenarios_stop_moving() {
     let mut scs = scenarios(&template, 6);
     // A near-trivial scenario converges in very few iterations and then sits
     // masked while the heavier ones keep going.
-    scs[0] = Scenario::new(vec![BusOverride::new(2).p(template[2].p_spec * 0.01).q(0.0)]);
-    scs[5] = Scenario::new(vec![BusOverride::new(2).p(template[2].p_spec * 2.5).q(template[2].q_spec * 2.5)]);
+    scs[0] = Scenario::new(vec![
+        BusOverride::new(2).p(template[2].p_spec * 0.01).q(0.0),
+    ]);
+    scs[5] = Scenario::new(vec![
+        BusOverride::new(2)
+            .p(template[2].p_spec * 2.5)
+            .q(template[2].q_spec * 2.5),
+    ]);
 
     let embedded = solve_batch_block_diagonal::<KluNativeSystem>(&template, &ybus, &scs, 1e-8, 40);
 
     let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 1).expect("pool");
-    let independent = batch.solve(&template, &ybus, &scs, 1e-8, 40).expect("independent");
+    let independent = batch
+        .solve(&template, &ybus, &scs, 1e-8, 40)
+        .expect("independent");
 
     let iters: Vec<usize> = embedded.iter().map(|r| r.stats.iterations()).collect();
     assert!(

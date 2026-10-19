@@ -31,7 +31,11 @@ fn estimate(extra: &[&str]) -> Output {
 }
 
 fn stdout_of(out: &Output) -> String {
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -63,7 +67,10 @@ fn the_asymmetric_flag_estimates_in_the_phase_domain() {
     // reader should not have to know that a node's phases are `3n`, `3n+1`,
     // `3n+2` to read the answer.
     for phase in ["a", "b", "c"] {
-        assert!(text.contains(&format!("node 1 phase {phase}: |V| =")), "{text}");
+        assert!(
+            text.contains(&format!("node 1 phase {phase}: |V| =")),
+            "{text}"
+        );
     }
 
     // Three times the buses and roughly three times the measurements.
@@ -95,7 +102,10 @@ fn the_two_domains_agree_about_a_balanced_network() {
         after.split_whitespace().next().unwrap().parse().unwrap()
     };
     let angle = |text: &str, prefix: &str| -> f64 {
-        let line = text.lines().find(|l| l.trim_start().starts_with(prefix)).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with(prefix))
+            .unwrap();
         let after = line.split("angle = ").nth(1).unwrap();
         after.split_whitespace().next().unwrap().parse().unwrap()
     };

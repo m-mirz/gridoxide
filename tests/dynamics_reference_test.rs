@@ -32,11 +32,11 @@
 use std::collections::HashMap;
 
 use gridoxide::dynamics::dyd;
-use num_complex::Complex;
 use gridoxide::dynamics::json::{DynamicsData, DynamicsDocument, EventSpec, MachineSpec};
-use gridoxide::dynamics::{run_dynamics, DynamicsOptions, DynamicsStatus, Trajectory};
+use gridoxide::dynamics::{DynamicsOptions, DynamicsStatus, Trajectory, run_dynamics};
 use gridoxide::json::NetworkData;
 use gridoxide::types::{Bus, BusType, Line};
+use num_complex::Complex;
 
 const DIR: &str = "tests/data/benchmark-grids/dynawo/kundur13";
 
@@ -70,8 +70,10 @@ impl Reference {
             .expect("the reference is committed beside the test");
         let mut lines = text.lines();
         let header: Vec<&str> = lines.next().expect("a header").split(';').collect();
-        let mut columns: HashMap<String, Vec<f64>> =
-            header.iter().map(|h| (h.trim().to_string(), Vec::new())).collect();
+        let mut columns: HashMap<String, Vec<f64>> = header
+            .iter()
+            .map(|h| (h.trim().to_string(), Vec::new()))
+            .collect();
         let mut time = Vec::new();
         for line in lines {
             if line.trim().is_empty() {
@@ -89,7 +91,9 @@ impl Reference {
     }
 
     fn column(&self, name: &str) -> &[f64] {
-        self.columns.get(name).unwrap_or_else(|| panic!("no column `{name}`"))
+        self.columns
+            .get(name)
+            .unwrap_or_else(|| panic!("no column `{name}`"))
     }
 }
 
@@ -154,7 +158,10 @@ fn case_with(speed_voltages: bool) -> DynamicsDocument {
         "`GeneratorSynchronousFourWindings` carries no regulators — that is why this case \
          was chosen"
     );
-    assert!(warnings.is_empty(), "nothing should need excusing here: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "nothing should need excusing here: {warnings:?}"
+    );
     units[0].id = "SM".to_string();
 
     // The bus voltages the network solves to are checked against the file's own
@@ -166,11 +173,32 @@ fn case_with(speed_voltages: bool) -> DynamicsDocument {
             bus(2, BusType::PV, 1.0, -P0_PU, 0.0),
         ],
         lines: vec![
-            Line { from: 0, to: 1, r: 0.0, x: X_LINE_1, b_shunt: 0.0, g_shunt: 0.0 },
-            Line { from: 0, to: 1, r: 0.0, x: X_LINE_2, b_shunt: 0.0, g_shunt: 0.0 },
+            Line {
+                from: 0,
+                to: 1,
+                r: 0.0,
+                x: X_LINE_1,
+                b_shunt: 0.0,
+                g_shunt: 0.0,
+            },
+            Line {
+                from: 0,
+                to: 1,
+                r: 0.0,
+                x: X_LINE_2,
+                b_shunt: 0.0,
+                g_shunt: 0.0,
+            },
             // A fixed-ratio transformer at ratio 1 with no resistance is a
             // series reactance and nothing more, so it needs no separate type.
-            Line { from: 1, to: 2, r: 0.0, x: X_TRANSFORMER, b_shunt: 0.0, g_shunt: 0.0 },
+            Line {
+                from: 1,
+                to: 2,
+                r: 0.0,
+                x: X_TRANSFORMER,
+                b_shunt: 0.0,
+                g_shunt: 0.0,
+            },
         ],
     };
 
@@ -184,10 +212,20 @@ fn case_with(speed_voltages: bool) -> DynamicsDocument {
             loads: Vec::new(),
             fixed_buses: vec![0],
             events: vec![
-                EventSpec::BusFault { t: FAULT_AT, bus: 1, y: None },
-                EventSpec::ClearFault { t: CLEAR_AT, bus: 1 },
+                EventSpec::BusFault {
+                    t: FAULT_AT,
+                    bus: 1,
+                    y: None,
+                },
+                EventSpec::ClearFault {
+                    t: CLEAR_AT,
+                    bus: 1,
+                },
                 // Line 2 is branch index 1, in the order the network lists them.
-                EventSpec::BranchTrip { t: CLEAR_AT, branch: 1 },
+                EventSpec::BranchTrip {
+                    t: CLEAR_AT,
+                    branch: 1,
+                },
             ],
             relays: Vec::new(),
         },
@@ -254,7 +292,11 @@ fn the_operating_point_and_the_initial_rotor_angle_agree() {
 
     // And the equilibrium invariant still holds on a case built from someone
     // else's data, which is not something the earlier gates could show.
-    assert!(system.max_derivative() < 1e-10, "drift {:e}", system.max_derivative());
+    assert!(
+        system.max_derivative() < 1e-10,
+        "drift {:e}",
+        system.max_derivative()
+    );
     assert!(system.network_residual_norm() < 1e-10);
 }
 
@@ -313,7 +355,12 @@ fn the_trajectory_matches_dynawo_through_the_fault() {
 
     let report = run_dynamics(
         &mut system,
-        &DynamicsOptions { end_time: 5.0, step: 0.00025, events, ..Default::default() },
+        &DynamicsOptions {
+            end_time: 5.0,
+            step: 0.00025,
+            events,
+            ..Default::default()
+        },
     );
     assert_eq!(report.status, DynamicsStatus::Completed);
     assert_eq!(report.events_applied, 3);
@@ -341,8 +388,14 @@ fn the_trajectory_matches_dynawo_through_the_fault() {
     // Through the fault, and for the first 40 ms after clearing.
     let delta_fault = worst("SM.delta", "SM_generator_theta", CLEAR_AT + 0.04);
     let omega_fault = worst("SM.omega", "SM_generator_omegaPu", CLEAR_AT + 0.04);
-    assert!(delta_fault < 1e-3, "rotor angle through the fault: {delta_fault:e} rad");
-    assert!(omega_fault < 1e-4, "rotor speed through the fault: {omega_fault:e} pu");
+    assert!(
+        delta_fault < 1e-3,
+        "rotor angle through the fault: {delta_fault:e} rad"
+    );
+    assert!(
+        omega_fault < 1e-4,
+        "rotor speed through the fault: {omega_fault:e} pu"
+    );
 
     // The terminal voltage is split at the clearing instant, because that is
     // where it tells two different stories. *During* the fault it tracks
@@ -352,7 +405,10 @@ fn the_trajectory_matches_dynawo_through_the_fault() {
     // algebraic solution before any of it has had time to integrate.
     let voltage_during = worst("bus2.vmag", "SM_generator_UPu", CLEAR_AT);
     let voltage_after = worst("bus2.vmag", "SM_generator_UPu", CLEAR_AT + 0.04);
-    assert!(voltage_during < 2e-3, "terminal voltage during the fault: {voltage_during:e} pu");
+    assert!(
+        voltage_during < 2e-3,
+        "terminal voltage during the fault: {voltage_during:e} pu"
+    );
     assert!(
         voltage_after < 8e-3,
         "terminal voltage just after clearing: {voltage_after:e} pu"
@@ -397,7 +453,12 @@ fn the_speed_voltage_approximation_costs_six_tenths_of_a_percent() {
     let (mut system, events) = case().build().unwrap();
     let report = run_dynamics(
         &mut system,
-        &DynamicsOptions { end_time: 2.0, step: 0.00025, events, ..Default::default() },
+        &DynamicsOptions {
+            end_time: 2.0,
+            step: 0.00025,
+            events,
+            ..Default::default()
+        },
     );
     assert_eq!(report.status, DynamicsStatus::Completed);
 
@@ -422,15 +483,28 @@ fn the_speed_voltage_approximation_costs_six_tenths_of_a_percent() {
         if (delta - expected_delta[k]).abs() > 1e-3 {
             continue;
         }
-        let (v1, ang1) = (sample(&report.trajectory, m1, t), sample(&report.trajectory, da, t));
-        let (v2, ang2) = (sample(&report.trajectory, m2, t), sample(&report.trajectory, a2, t));
+        let (v1, ang1) = (
+            sample(&report.trajectory, m1, t),
+            sample(&report.trajectory, da, t),
+        );
+        let (v2, ang2) = (
+            sample(&report.trajectory, m2, t),
+            sample(&report.trajectory, a2, t),
+        );
         let ours = v1 * v2 * (ang2 - ang1).sin() / X_TRANSFORMER;
         offsets.push((ours - expected_power[k]) / expected_power[k]);
     }
 
-    assert!(offsets.len() >= 5, "not enough matched samples: {}", offsets.len());
+    assert!(
+        offsets.len() >= 5,
+        "not enough matched samples: {}",
+        offsets.len()
+    );
     let mean = offsets.iter().sum::<f64>() / offsets.len() as f64;
-    println!("post-fault power offset at matched angle: {:.4}%", mean * 100.0);
+    println!(
+        "post-fault power offset at matched angle: {:.4}%",
+        mean * 100.0
+    );
     assert!(
         (-0.008..-0.004).contains(&mean),
         "the ω ≈ 1 approximation is expected to cost about −0.6% here; it cost \
@@ -453,24 +527,44 @@ fn the_published_clearing_time_is_survivable_and_a_longer_one_is_not() {
     let stays_in_step = |clear_at: f64| {
         let mut document = case();
         document.dynamics.events = vec![
-            EventSpec::BusFault { t: FAULT_AT, bus: 1, y: None },
-            EventSpec::ClearFault { t: clear_at, bus: 1 },
-            EventSpec::BranchTrip { t: clear_at, branch: 1 },
+            EventSpec::BusFault {
+                t: FAULT_AT,
+                bus: 1,
+                y: None,
+            },
+            EventSpec::ClearFault {
+                t: clear_at,
+                bus: 1,
+            },
+            EventSpec::BranchTrip {
+                t: clear_at,
+                branch: 1,
+            },
         ];
         let (mut system, events) = document.build().unwrap();
         let report = run_dynamics(
             &mut system,
-            &DynamicsOptions { end_time: 5.0, step: 0.001, events, ..Default::default() },
+            &DynamicsOptions {
+                end_time: 5.0,
+                step: 0.001,
+                events,
+                ..Default::default()
+            },
         );
         assert_eq!(report.status, DynamicsStatus::Completed);
         let delta = report.trajectory.series("SM.delta").unwrap();
         delta.iter().fold(0.0f64, |m, d| m.max(*d)) < std::f64::consts::TAU
     };
 
-    assert!(stays_in_step(CLEAR_AT), "the published 70 ms clearing must be survivable");
-    assert!(!stays_in_step(1.0 + 0.5), "half a second of fault must not be");
+    assert!(
+        stays_in_step(CLEAR_AT),
+        "the published 70 ms clearing must be survivable"
+    );
+    assert!(
+        !stays_in_step(1.0 + 0.5),
+        "half a second of fault must not be"
+    );
 }
-
 
 /// **Adopting Dynawo's own form drives the 0.6% offset to nothing.**
 ///
@@ -491,7 +585,12 @@ fn the_full_form_removes_the_offset_against_dynawo() {
         let (mut system, events) = case_with(speed_voltages).build().unwrap();
         let report = run_dynamics(
             &mut system,
-            &DynamicsOptions { end_time: 2.0, step: 0.00025, events, ..Default::default() },
+            &DynamicsOptions {
+                end_time: 2.0,
+                step: 0.00025,
+                events,
+                ..Default::default()
+            },
         );
         assert_eq!(report.status, DynamicsStatus::Completed);
 
@@ -513,14 +612,22 @@ fn the_full_form_removes_the_offset_against_dynawo() {
             if (delta - expected_delta[k]).abs() > 1e-3 {
                 continue;
             }
-            let (v1, ang1) =
-                (sample(&report.trajectory, m1, t), sample(&report.trajectory, da, t));
-            let (v2, ang2) =
-                (sample(&report.trajectory, m2, t), sample(&report.trajectory, a2, t));
+            let (v1, ang1) = (
+                sample(&report.trajectory, m1, t),
+                sample(&report.trajectory, da, t),
+            );
+            let (v2, ang2) = (
+                sample(&report.trajectory, m2, t),
+                sample(&report.trajectory, a2, t),
+            );
             let ours = v1 * v2 * (ang2 - ang1).sin() / X_TRANSFORMER;
             offsets.push((ours - expected_power[k]) / expected_power[k]);
         }
-        assert!(offsets.len() >= 5, "not enough matched samples: {}", offsets.len());
+        assert!(
+            offsets.len() >= 5,
+            "not enough matched samples: {}",
+            offsets.len()
+        );
         offsets.iter().sum::<f64>() / offsets.len() as f64
     };
 
@@ -554,7 +661,12 @@ fn the_full_form_tracks_dynawo_through_the_whole_first_swing() {
         let (mut system, events) = case_with(speed_voltages).build().unwrap();
         let report = run_dynamics(
             &mut system,
-            &DynamicsOptions { end_time: 5.0, step: 0.00025, events, ..Default::default() },
+            &DynamicsOptions {
+                end_time: 5.0,
+                step: 0.00025,
+                events,
+                ..Default::default()
+            },
         );
         assert_eq!(report.status, DynamicsStatus::Completed);
         let column = report.trajectory.column("SM.delta").unwrap();
@@ -611,7 +723,10 @@ fn the_field_voltage_base_agrees_with_dynawos() {
     };
     let mut machine = GenRound::new(params, S_BASE, F_NOM).unwrap();
     let init = machine
-        .initialize(Complex::from_polar(1.0, 0.49445), Complex::new(-P0_PU, 9.68))
+        .initialize(
+            Complex::from_polar(1.0, 0.49445),
+            Complex::new(-P0_PU, 9.68),
+        )
         .expect("initializes");
 
     let expected = Reference::read().column("SM_generator_efdPu")[0];

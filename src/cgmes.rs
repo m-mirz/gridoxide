@@ -16,17 +16,16 @@ use num_complex::Complex;
 pub use cimdecoder::CimDataset;
 use cimstructs::{
     ACDCConverterDCTerminal, ACLineSegment, BaseVoltage, CsConverter, CurrentLimit, DCBreaker,
-    DCDisconnector,
-    DCGround, DCLineSegment, DCSeriesDevice, DCShunt, DCSwitch, DCTerminal, EnergyConsumer,
-    EquivalentInjection, LinearShuntCompensator, NonlinearShuntCompensator,
+    DCDisconnector, DCGround, DCLineSegment, DCSeriesDevice, DCShunt, DCSwitch, DCTerminal,
+    EnergyConsumer, EquivalentInjection, LinearShuntCompensator, NonlinearShuntCompensator,
     NonlinearShuntCompensatorPoint, OperationalLimitSet, OperationalLimitType,
-    PhaseTapChangerAsymmetrical, PhaseTapChangerNonLinear,
-    PhaseTapChangerSymmetrical, PowerElectronicsConnection, PowerTransformerEnd, RatioTapChanger,
-    RegulatingControl, StaticVarCompensator, SynchronousMachine, Terminal, TopologicalIsland,
-    TopologicalNode, VsConverter,
+    PhaseTapChangerAsymmetrical, PhaseTapChangerNonLinear, PhaseTapChangerSymmetrical,
+    PowerElectronicsConnection, PowerTransformerEnd, RatioTapChanger, RegulatingControl,
+    StaticVarCompensator, SynchronousMachine, Terminal, TopologicalIsland, TopologicalNode,
+    VsConverter,
 };
 
-use crate::dc::{injected_currents, solve_dc_network, DcBus, DcBusRole, DcLine, DcSolveStatus};
+use crate::dc::{DcBus, DcBusRole, DcLine, DcSolveStatus, injected_currents, solve_dc_network};
 use crate::network::ShuntAdm;
 use crate::types::{Bus, BusType, Line, RegulatingMachine, Transformer};
 
@@ -41,10 +40,18 @@ pub enum CgmesError {
     /// A reference (e.g. `Terminal.TopologicalNode`) didn't resolve to any
     /// decoded element of the expected type — either a genuinely dangling
     /// reference, or (more likely) a required profile file wasn't loaded.
-    UnresolvedReference { from_type: &'static str, from_mrid: String, field: &'static str },
+    UnresolvedReference {
+        from_type: &'static str,
+        from_mrid: String,
+        field: &'static str,
+    },
     /// A field that's required for conversion (though CGMES's own schema
     /// always makes it `Option`) was absent.
-    MissingField { type_name: &'static str, mrid: String, field: &'static str },
+    MissingField {
+        type_name: &'static str,
+        mrid: String,
+        field: &'static str,
+    },
     /// No `TopologicalNode` entries at all — the TP profile wasn't loaded.
     NoTopologicalNodes,
     /// No `TopologicalIsland.AngleRefTopologicalNode` found — the SV profile
@@ -69,23 +76,43 @@ pub enum CgmesError {
 impl std::fmt::Display for CgmesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CgmesError::UnresolvedReference { from_type, from_mrid, field } => {
-                write!(f, "{from_type} {from_mrid}: {field} does not resolve to a decoded element")
+            CgmesError::UnresolvedReference {
+                from_type,
+                from_mrid,
+                field,
+            } => {
+                write!(
+                    f,
+                    "{from_type} {from_mrid}: {field} does not resolve to a decoded element"
+                )
             }
-            CgmesError::MissingField { type_name, mrid, field } => {
+            CgmesError::MissingField {
+                type_name,
+                mrid,
+                field,
+            } => {
                 write!(f, "{type_name} {mrid}: required field {field} is missing")
             }
             CgmesError::NoTopologicalNodes => {
-                write!(f, "dataset has no TopologicalNode entries (is the TP profile loaded?)")
+                write!(
+                    f,
+                    "dataset has no TopologicalNode entries (is the TP profile loaded?)"
+                )
             }
             CgmesError::NoAngleReference => {
-                write!(f, "no TopologicalIsland.AngleRefTopologicalNode found (is the SV profile loaded?)")
+                write!(
+                    f,
+                    "no TopologicalIsland.AngleRefTopologicalNode found (is the SV profile loaded?)"
+                )
             }
             CgmesError::UnsupportedTransformer { mrid, reason } => {
                 write!(f, "PowerTransformer {mrid}: {reason}")
             }
             CgmesError::UnsupportedConverterControl { mrid, mode } => {
-                write!(f, "ACDCConverter {mrid}: unsupported pPccControl mode {mode:?}")
+                write!(
+                    f,
+                    "ACDCConverter {mrid}: unsupported pPccControl mode {mode:?}"
+                )
             }
             CgmesError::DcNetworkDidNotConverge => {
                 write!(f, "DC network solve did not converge")
@@ -101,28 +128,66 @@ fn get<'a, T: 'static>(ds: &'a CimDataset, mrid: &str) -> Option<&'a T> {
 }
 
 fn require<'a, T: 'static>(
-    ds: &'a CimDataset, mrid: &str, from_type: &'static str, from_mrid: &str, field: &'static str,
+    ds: &'a CimDataset,
+    mrid: &str,
+    from_type: &'static str,
+    from_mrid: &str,
+    field: &'static str,
 ) -> Result<&'a T, CgmesError> {
     get(ds, mrid).ok_or_else(|| CgmesError::UnresolvedReference {
-        from_type, from_mrid: from_mrid.to_string(), field,
+        from_type,
+        from_mrid: from_mrid.to_string(),
+        field,
     })
 }
 
 fn missing(type_name: &'static str, mrid: &str, field: &'static str) -> CgmesError {
-    CgmesError::MissingField { type_name, mrid: mrid.to_string(), field }
+    CgmesError::MissingField {
+        type_name,
+        mrid: mrid.to_string(),
+        field,
+    }
 }
 
 fn by_type<'a>(ds: &'a CimDataset, type_name: &str) -> &'a [String] {
-    ds.by_type.get(type_name).map(|v| v.as_slice()).unwrap_or(&[])
+    ds.by_type
+        .get(type_name)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
+/// [`by_type`], in an order that is the same on every run.
+///
+/// `CimDataset::merge` iterates a `HashMap` of entries, so `by_type` lists
+/// elements first seen in a merged profile in a randomized order — and a CGMES
+/// import is almost always several profiles merged. Any loop whose *position*
+/// in the output matters therefore has to impose one, or the flat branch index
+/// it produces differs between two runs against the same files.
+fn sorted_mrids(ds: &CimDataset, type_name: &str) -> Vec<String> {
+    let mut v = by_type(ds, type_name).to_vec();
+    v.sort();
+    v
 }
 
 /// `target_value_unit_multiplier`'s URI suffix -> multiplier factor.
 fn unit_multiplier(uri: Option<&str>) -> f64 {
     match uri.and_then(|u| u.rsplit('.').next()) {
-        Some("Y") => 1e24, Some("Z") => 1e21, Some("E") => 1e18, Some("P") => 1e15,
-        Some("T") => 1e12, Some("G") => 1e9, Some("M") => 1e6, Some("k") => 1e3,
-        Some("h") => 1e2, Some("da") => 1e1, Some("d") => 1e-1, Some("c") => 1e-2,
-        Some("m") => 1e-3, Some("micro") => 1e-6, Some("n") => 1e-9, Some("p") => 1e-12,
+        Some("Y") => 1e24,
+        Some("Z") => 1e21,
+        Some("E") => 1e18,
+        Some("P") => 1e15,
+        Some("T") => 1e12,
+        Some("G") => 1e9,
+        Some("M") => 1e6,
+        Some("k") => 1e3,
+        Some("h") => 1e2,
+        Some("da") => 1e1,
+        Some("d") => 1e-1,
+        Some("c") => 1e-2,
+        Some("m") => 1e-3,
+        Some("micro") => 1e-6,
+        Some("n") => 1e-9,
+        Some("p") => 1e-12,
         _ => 1.0,
     }
 }
@@ -151,7 +216,11 @@ impl TerminalIndex {
     /// area's or the merged model's own TP data, which a standalone-area
     /// "Model As Supplied" file doesn't carry) gets a synthesized bus here,
     /// the same spirit as the 3-winding star-bus synthesis.
-    fn build(ds: &CimDataset, idx_of: &HashMap<String, usize>, buses: &mut Vec<Bus>) -> Result<Self, CgmesError> {
+    fn build(
+        ds: &CimDataset,
+        idx_of: &HashMap<String, usize>,
+        buses: &mut Vec<Bus>,
+    ) -> Result<Self, CgmesError> {
         // Terminal.TopologicalNode is documented as "an alternative to the
         // ConnectivityNode path to TopologicalNode" — i.e. a Terminal may
         // carry only a ConnectivityNode reference and no direct
@@ -161,7 +230,8 @@ impl TerminalIndex {
         // optional nicety.
         let mut cn_to_tn: HashMap<String, String> = HashMap::new();
         for cn_mrid in by_type(ds, "ConnectivityNode") {
-            let cn: &cimstructs::ConnectivityNode = require(ds, cn_mrid, "ConnectivityNode", cn_mrid, "(self)")?;
+            let cn: &cimstructs::ConnectivityNode =
+                require(ds, cn_mrid, "ConnectivityNode", cn_mrid, "(self)")?;
             if let Some(tn) = &cn.topological_node {
                 cn_to_tn.insert(cn_mrid.clone(), tn.mrid.clone());
             }
@@ -176,11 +246,19 @@ impl TerminalIndex {
             connected_of.insert(t_mrid.clone(), t.base.connected.unwrap_or(true));
             if let Some(ce) = &t.conducting_equipment {
                 let seq = t.base.sequence_number.unwrap_or(1);
-                raw.entry(ce.mrid.clone()).or_default().push((seq, t_mrid.clone()));
+                raw.entry(ce.mrid.clone())
+                    .or_default()
+                    .push((seq, t_mrid.clone()));
             }
-            let tn_mrid = t.topological_node.as_ref().map(|tn| tn.mrid.clone()).or_else(|| {
-                t.connectivity_node.as_ref().and_then(|cn| cn_to_tn.get(&cn.mrid).cloned())
-            });
+            let tn_mrid = t
+                .topological_node
+                .as_ref()
+                .map(|tn| tn.mrid.clone())
+                .or_else(|| {
+                    t.connectivity_node
+                        .as_ref()
+                        .and_then(|cn| cn_to_tn.get(&cn.mrid).cloned())
+                });
             match (tn_mrid, &t.connectivity_node) {
                 (Some(tn_mrid), _) => {
                     if let Some(&idx) = idx_of.get(&tn_mrid) {
@@ -188,7 +266,11 @@ impl TerminalIndex {
                     }
                 }
                 (None, Some(cn)) => {
-                    orphans.push((t_mrid.clone(), cn.mrid.clone(), t.conducting_equipment.as_ref().map(|ce| ce.mrid.clone())));
+                    orphans.push((
+                        t_mrid.clone(),
+                        cn.mrid.clone(),
+                        t.conducting_equipment.as_ref().map(|ce| ce.mrid.clone()),
+                    ));
                 }
                 (None, None) => {}
             }
@@ -202,7 +284,10 @@ impl TerminalIndex {
         // through to a nonsense placeholder).
         let mut orphans_by_cn: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
         for (t_mrid, cn_mrid, ce_mrid) in orphans {
-            orphans_by_cn.entry(cn_mrid).or_default().push((t_mrid, ce_mrid));
+            orphans_by_cn
+                .entry(cn_mrid)
+                .or_default()
+                .push((t_mrid, ce_mrid));
         }
         for (cn_mrid, terms_here) in &orphans_by_cn {
             let u_rated = terms_here
@@ -212,13 +297,26 @@ impl TerminalIndex {
                     let bv_ref = ei.base.base.base_voltage.as_ref()?;
                     get::<BaseVoltage>(ds, &bv_ref.mrid)?.nominal_voltage
                 })
-                .ok_or_else(|| missing("ConnectivityNode", cn_mrid, "(no EquivalentInjection with a resolvable BaseVoltage found)"))?
+                .ok_or_else(|| {
+                    missing(
+                        "ConnectivityNode",
+                        cn_mrid,
+                        "(no EquivalentInjection with a resolvable BaseVoltage found)",
+                    )
+                })?
                 * 1e3;
             let idx = buses.len();
             buses.push(Bus {
-                idx, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-                p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY,
-                u_rated, zip_terms: Vec::new(),
+                idx,
+                bus_type: BusType::PQ,
+                voltage_mag: 1.0,
+                voltage_ang: 0.0,
+                p_spec: 0.0,
+                q_spec: 0.0,
+                q_min: -f64::INFINITY,
+                q_max: f64::INFINITY,
+                u_rated,
+                zip_terms: Vec::new(),
             });
             for (t_mrid, _) in terms_here {
                 bus_of.insert(t_mrid.clone(), idx);
@@ -232,14 +330,22 @@ impl TerminalIndex {
                 (eq, v.into_iter().map(|(_, m)| m).collect())
             })
             .collect();
-        Ok(TerminalIndex { by_equipment, bus_of, connected_of })
+        Ok(TerminalIndex {
+            by_equipment,
+            bus_of,
+            connected_of,
+        })
     }
 
     /// `which` is 0-indexed after sorting by sequence number (0 = seq 1, the
     /// branch's "starting point" per CGMES's own `ACDCTerminal.sequenceNumber`
     /// doc comment).
     fn bus(&self, equipment_mrid: &str, which: usize) -> Option<usize> {
-        self.by_equipment.get(equipment_mrid)?.get(which).and_then(|t| self.bus_of.get(t)).copied()
+        self.by_equipment
+            .get(equipment_mrid)?
+            .get(which)
+            .and_then(|t| self.bus_of.get(t))
+            .copied()
     }
 
     fn bus_via_terminal_mrid(&self, terminal_mrid: &str) -> Option<usize> {
@@ -260,7 +366,10 @@ impl TerminalIndex {
     }
 
     fn connected_via_terminal_mrid(&self, terminal_mrid: &str) -> bool {
-        self.connected_of.get(terminal_mrid).copied().unwrap_or(true)
+        self.connected_of
+            .get(terminal_mrid)
+            .copied()
+            .unwrap_or(true)
     }
 }
 
@@ -361,7 +470,11 @@ fn zero_injection_flags(ds: &CimDataset, terms: &TerminalIndex, n_buses: usize) 
 /// Returns the merged buses plus the pre-merge -> post-merge index remap
 /// (so callers can fix up any *other* pre-merge-indexed mapping they hold —
 /// `cgmes_to_buses_and_branches`'s own `idx_of` in particular).
-fn merge_closed_switches(ds: &CimDataset, buses: Vec<Bus>, terms: &mut TerminalIndex) -> Result<(Vec<Bus>, Vec<usize>), CgmesError> {
+fn merge_closed_switches(
+    ds: &CimDataset,
+    buses: Vec<Bus>,
+    terms: &mut TerminalIndex,
+) -> Result<(Vec<Bus>, Vec<usize>), CgmesError> {
     let topo = switch_topology(ds, buses.len(), terms)?;
     let view = crate::topology::bus_view(&topo, &crate::topology::RetentionPolicy::MergeAll);
 
@@ -417,10 +530,10 @@ fn switch_topology(
     let mut topo = crate::topology::NodeBreakerTopology::new(n_nodes);
 
     let add = |topo: &mut crate::topology::NodeBreakerTopology,
-                   mrid: &str,
-                   kind: SwitchKind,
-                   in_service: bool,
-                   open: bool| {
+               mrid: &str,
+               kind: SwitchKind,
+               in_service: bool,
+               open: bool| {
         if let (Some(a), Some(b)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) {
             topo.add_switch(TopoSwitch {
                 kind,
@@ -433,39 +546,120 @@ fn switch_topology(
 
     for mrid in by_type(ds, "Switch") {
         let sw: &cimstructs::Switch = require(ds, mrid, "Switch", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::Generic, equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service), sw.open.unwrap_or(false));
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::Generic,
+            equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service),
+            sw.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Breaker") {
         let br: &cimstructs::Breaker = require(ds, mrid, "Breaker", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::Breaker, equipment_in_service(br.base.base.base.base.in_service, br.base.base.base.base.normally_in_service), br.base.base.open.unwrap_or(false));
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::Breaker,
+            equipment_in_service(
+                br.base.base.base.base.in_service,
+                br.base.base.base.base.normally_in_service,
+            ),
+            br.base.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "LoadBreakSwitch") {
-        let lbs: &cimstructs::LoadBreakSwitch = require(ds, mrid, "LoadBreakSwitch", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::LoadBreakSwitch, equipment_in_service(lbs.base.base.base.base.in_service, lbs.base.base.base.base.normally_in_service), lbs.base.base.open.unwrap_or(false));
+        let lbs: &cimstructs::LoadBreakSwitch =
+            require(ds, mrid, "LoadBreakSwitch", mrid, "(self)")?;
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::LoadBreakSwitch,
+            equipment_in_service(
+                lbs.base.base.base.base.in_service,
+                lbs.base.base.base.base.normally_in_service,
+            ),
+            lbs.base.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "DisconnectingCircuitBreaker") {
-        let dcb: &cimstructs::DisconnectingCircuitBreaker = require(ds, mrid, "DisconnectingCircuitBreaker", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::DisconnectingCircuitBreaker, equipment_in_service(dcb.base.base.base.base.base.in_service, dcb.base.base.base.base.base.normally_in_service), dcb.base.base.base.open.unwrap_or(false));
+        let dcb: &cimstructs::DisconnectingCircuitBreaker =
+            require(ds, mrid, "DisconnectingCircuitBreaker", mrid, "(self)")?;
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::DisconnectingCircuitBreaker,
+            equipment_in_service(
+                dcb.base.base.base.base.base.in_service,
+                dcb.base.base.base.base.base.normally_in_service,
+            ),
+            dcb.base.base.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Disconnector") {
         let d: &cimstructs::Disconnector = require(ds, mrid, "Disconnector", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::Disconnector, equipment_in_service(d.base.base.base.in_service, d.base.base.base.normally_in_service), d.base.open.unwrap_or(false));
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::Disconnector,
+            equipment_in_service(
+                d.base.base.base.in_service,
+                d.base.base.base.normally_in_service,
+            ),
+            d.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "GroundDisconnector") {
-        let g: &cimstructs::GroundDisconnector = require(ds, mrid, "GroundDisconnector", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::GroundDisconnector, equipment_in_service(g.base.base.base.in_service, g.base.base.base.normally_in_service), g.base.open.unwrap_or(false));
+        let g: &cimstructs::GroundDisconnector =
+            require(ds, mrid, "GroundDisconnector", mrid, "(self)")?;
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::GroundDisconnector,
+            equipment_in_service(
+                g.base.base.base.in_service,
+                g.base.base.base.normally_in_service,
+            ),
+            g.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Jumper") {
         let j: &cimstructs::Jumper = require(ds, mrid, "Jumper", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::Jumper, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), j.base.open.unwrap_or(false));
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::Jumper,
+            equipment_in_service(
+                j.base.base.base.in_service,
+                j.base.base.base.normally_in_service,
+            ),
+            j.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Cut") {
         let c: &cimstructs::Cut = require(ds, mrid, "Cut", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::Cut, equipment_in_service(c.base.base.base.in_service, c.base.base.base.normally_in_service), c.base.open.unwrap_or(false));
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::Cut,
+            equipment_in_service(
+                c.base.base.base.in_service,
+                c.base.base.base.normally_in_service,
+            ),
+            c.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Fuse") {
         let f: &cimstructs::Fuse = require(ds, mrid, "Fuse", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::Fuse, equipment_in_service(f.base.base.base.in_service, f.base.base.base.normally_in_service), f.base.open.unwrap_or(false));
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::Fuse,
+            equipment_in_service(
+                f.base.base.base.in_service,
+                f.base.base.base.normally_in_service,
+            ),
+            f.base.open.unwrap_or(false),
+        );
     }
     // Junction: CIM's own doc text calls it "a point where one or more
     // conducting equipment are connected with zero impedance" — always a
@@ -475,12 +669,20 @@ fn switch_topology(
     // that: `is_operable` is false for it, so no retention policy can keep it.
     for mrid in by_type(ds, "Junction") {
         let j: &cimstructs::Junction = require(ds, mrid, "Junction", mrid, "(self)")?;
-        add(&mut topo, mrid, SwitchKind::Junction, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), false);
+        add(
+            &mut topo,
+            mrid,
+            SwitchKind::Junction,
+            equipment_in_service(
+                j.base.base.base.in_service,
+                j.base.base.base.normally_in_service,
+            ),
+            false,
+        );
     }
 
     Ok(topo)
 }
-
 
 /// The result of resolving whichever tap changer (if any) is attached to a
 /// `PowerTransformerEnd`: the complex ratio it contributes at its own end,
@@ -582,50 +784,90 @@ impl TapChangerIndex {
         let mut phase_tabular = HashMap::new();
         for mrid in by_type(ds, "PhaseTapChangerTabular") {
             if let Some(ptc) = get::<cimstructs::PhaseTapChangerTabular>(ds, mrid) {
-                if let (Some(end), Some(table)) = (&ptc.base.transformer_end, &ptc.phase_tap_changer_table) {
+                if let (Some(end), Some(table)) =
+                    (&ptc.base.transformer_end, &ptc.phase_tap_changer_table)
+                {
                     phase_tabular.insert(end.mrid.clone(), (mrid.clone(), table.mrid.clone()));
                 }
             }
         }
-        TapChangerIndex { ratio, phase_asym, phase_sym, phase_linear, phase_tabular }
+        TapChangerIndex {
+            ratio,
+            phase_asym,
+            phase_sym,
+            phase_linear,
+            phase_tabular,
+        }
     }
 
     /// `xtx` is the owning `PowerTransformerEnd`'s own static `x` — needed as
     /// the fallback base reactance when `xMin` is absent/non-positive,
     /// mirroring `CgmesPhaseTapChangerBuilder.getXMin()`.
-    fn effect_for_end(&self, ds: &CimDataset, end_mrid: &str, xtx: f64) -> Result<Option<TapEffect>, CgmesError> {
+    fn effect_for_end(
+        &self,
+        ds: &CimDataset,
+        end_mrid: &str,
+        xtx: f64,
+    ) -> Result<Option<TapEffect>, CgmesError> {
         if let Some(mrid) = self.ratio.get(end_mrid) {
             let rtc: &RatioTapChanger = require(ds, mrid, "RatioTapChanger", mrid, "(self)")?;
-            let step = rtc.base.step.ok_or_else(|| missing("RatioTapChanger", mrid, "step"))?;
+            let step = rtc
+                .base
+                .step
+                .ok_or_else(|| missing("RatioTapChanger", mrid, "step"))?;
             if let Some(table_ref) = &rtc.ratio_tap_changer_table {
-                if let Some(effect) = ratio_tap_table(ds, &table_ref.mrid, step.round() as i64, xtx) {
+                if let Some(effect) = ratio_tap_table(ds, &table_ref.mrid, step.round() as i64, xtx)
+                {
                     return Ok(Some(effect));
                 }
             }
             let neutral = rtc.base.neutral_step.unwrap_or(0) as f64;
             let inc = rtc.step_voltage_increment.unwrap_or(0.0);
             let ratio = 1.0 + (step - neutral) * inc / 100.0;
-            return Ok(Some(TapEffect { tap: Complex::new(ratio, 0.0), x_override: None }));
+            return Ok(Some(TapEffect {
+                tap: Complex::new(ratio, 0.0),
+                x_override: None,
+            }));
         }
         if let Some(mrid) = self.phase_asym.get(end_mrid) {
-            let ptc: &PhaseTapChangerAsymmetrical = require(ds, mrid, "PhaseTapChangerAsymmetrical", mrid, "(self)")?;
+            let ptc: &PhaseTapChangerAsymmetrical =
+                require(ds, mrid, "PhaseTapChangerAsymmetrical", mrid, "(self)")?;
             let theta_deg = ptc.winding_connection_angle.ok_or_else(|| {
-                missing("PhaseTapChangerAsymmetrical", mrid, "windingConnectionAngle")
+                missing(
+                    "PhaseTapChangerAsymmetrical",
+                    mrid,
+                    "windingConnectionAngle",
+                )
             })?;
-            return Ok(Some(phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx, None)?));
+            return Ok(Some(phase_tap_asymmetrical(
+                &ptc.base, mrid, theta_deg, xtx, None,
+            )?));
         }
         if let Some(mrid) = self.phase_sym.get(end_mrid) {
-            let ptc: &PhaseTapChangerSymmetrical = require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
+            let ptc: &PhaseTapChangerSymmetrical =
+                require(ds, mrid, "PhaseTapChangerSymmetrical", mrid, "(self)")?;
             return Ok(Some(phase_tap_symmetrical(&ptc.base, mrid, xtx, None)?));
         }
         if let Some(mrid) = self.phase_linear.get(end_mrid) {
-            let ptc: &cimstructs::PhaseTapChangerLinear = require(ds, mrid, "PhaseTapChangerLinear", mrid, "(self)")?;
+            let ptc: &cimstructs::PhaseTapChangerLinear =
+                require(ds, mrid, "PhaseTapChangerLinear", mrid, "(self)")?;
             return Ok(Some(phase_tap_linear(ptc, mrid, xtx, None)?));
         }
         if let Some((ptc_mrid, table_mrid)) = self.phase_tabular.get(end_mrid) {
-            let ptc: &cimstructs::PhaseTapChangerTabular = require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
-            let step = ptc.base.base.step.ok_or_else(|| missing("PhaseTapChangerTabular", ptc_mrid, "step"))?;
-            return Ok(Some(phase_tap_tabular(ds, ptc_mrid, table_mrid, step.round() as i64, xtx)?));
+            let ptc: &cimstructs::PhaseTapChangerTabular =
+                require(ds, ptc_mrid, "PhaseTapChangerTabular", ptc_mrid, "(self)")?;
+            let step = ptc
+                .base
+                .base
+                .step
+                .ok_or_else(|| missing("PhaseTapChangerTabular", ptc_mrid, "step"))?;
+            return Ok(Some(phase_tap_tabular(
+                ds,
+                ptc_mrid,
+                table_mrid,
+                step.round() as i64,
+                xtx,
+            )?));
         }
         Ok(None)
     }
@@ -643,7 +885,10 @@ impl TapChangerIndex {
     /// `TapChangerControl` and `controlEnabled` live, regardless of subtype.
     fn control_of(&self, ds: &CimDataset, end_mrid: &str) -> Option<(Option<String>, bool)> {
         let read = |tc: &cimstructs::TapChanger| {
-            (tc.tap_changer_control.as_ref().map(|r| r.mrid.clone()), tc.control_enabled == Some(true))
+            (
+                tc.tap_changer_control.as_ref().map(|r| r.mrid.clone()),
+                tc.control_enabled == Some(true),
+            )
         };
         if let Some(m) = self.ratio.get(end_mrid) {
             return get::<RatioTapChanger>(ds, m).map(|t| read(&t.base));
@@ -706,7 +951,12 @@ impl TapChangerIndex {
             for s in low..=high {
                 effects.push(eval(s as f64)?);
             }
-            Some(RawTapTable { low, position, neutral, effects })
+            Some(RawTapTable {
+                low,
+                position,
+                neutral,
+                effects,
+            })
         };
 
         if let Some(mrid) = self.ratio.get(end_mrid) {
@@ -731,7 +981,9 @@ impl TapChangerIndex {
         if let Some(mrid) = self.phase_asym.get(end_mrid) {
             let ptc: &PhaseTapChangerAsymmetrical =
                 require(ds, mrid, "PhaseTapChangerAsymmetrical", mrid, "(self)")?;
-            let Some(theta_deg) = ptc.winding_connection_angle else { return Ok(None) };
+            let Some(theta_deg) = ptc.winding_connection_angle else {
+                return Ok(None);
+            };
             let eval =
                 |s: f64| phase_tap_asymmetrical(&ptc.base, mrid, theta_deg, xtx, Some(s)).ok();
             return Ok(build(&ptc.base.base.base, &eval));
@@ -769,12 +1021,18 @@ impl TapChangerIndex {
 /// x(from this class)/100)") — matches `references/powsybl-core`'s own
 /// `x *= 1 + step.getX() / 100` treatment for tabular tap changers.
 fn phase_tap_tabular(
-    ds: &CimDataset, ptc_mrid: &str, table_mrid: &str, step: i64, xtx: f64,
+    ds: &CimDataset,
+    ptc_mrid: &str,
+    table_mrid: &str,
+    step: i64,
+    xtx: f64,
 ) -> Result<TapEffect, CgmesError> {
     for pt_mrid in by_type(ds, "PhaseTapChangerTablePoint") {
         let pt: &cimstructs::PhaseTapChangerTablePoint =
             require(ds, pt_mrid, "PhaseTapChangerTablePoint", pt_mrid, "(self)")?;
-        let Some(owner) = &pt.phase_tap_changer_table else { continue };
+        let Some(owner) = &pt.phase_tap_changer_table else {
+            continue;
+        };
         if owner.mrid != *table_mrid || pt.base.step != Some(step) {
             continue;
         }
@@ -782,7 +1040,10 @@ fn phase_tap_tabular(
         let angle_rad = pt.angle.unwrap_or(0.0).to_radians();
         let tap = Complex::from_polar(ratio, angle_rad);
         let x_pct = pt.base.x.unwrap_or(0.0);
-        return Ok(TapEffect { tap, x_override: Some(xtx * (1.0 + x_pct / 100.0)) });
+        return Ok(TapEffect {
+            tap,
+            x_override: Some(xtx * (1.0 + x_pct / 100.0)),
+        });
     }
     Err(CgmesError::UnresolvedReference {
         from_type: "PhaseTapChangerTabular",
@@ -807,13 +1068,18 @@ fn phase_tap_tabular(
 fn ratio_tap_table(ds: &CimDataset, table_mrid: &str, step: i64, xtx: f64) -> Option<TapEffect> {
     for pt_mrid in by_type(ds, "RatioTapChangerTablePoint") {
         let pt: &cimstructs::RatioTapChangerTablePoint = get(ds, pt_mrid)?;
-        let Some(owner) = &pt.ratio_tap_changer_table else { continue };
+        let Some(owner) = &pt.ratio_tap_changer_table else {
+            continue;
+        };
         if owner.mrid != *table_mrid || pt.base.step != Some(step) {
             continue;
         }
         let ratio = pt.base.ratio.unwrap_or(1.0);
         let x_pct = pt.base.x.unwrap_or(0.0);
-        return Some(TapEffect { tap: Complex::new(ratio, 0.0), x_override: Some(xtx * (1.0 + x_pct / 100.0)) });
+        return Some(TapEffect {
+            tap: Complex::new(ratio, 0.0),
+            x_override: Some(xtx * (1.0 + x_pct / 100.0)),
+        });
     }
     None
 }
@@ -854,13 +1120,18 @@ fn x_min_max(x_min: Option<f64>, x_max: Option<f64>, xtx: f64) -> Option<(f64, f
 /// value at either endpoint, since angle isn't necessarily monotonic in step
 /// once `windingConnectionAngle` is taken into account).
 fn phase_tap_asymmetrical(
-    base: &PhaseTapChangerNonLinear, mrid: &str, winding_connection_angle_deg: f64, xtx: f64,
+    base: &PhaseTapChangerNonLinear,
+    mrid: &str,
+    winding_connection_angle_deg: f64,
+    xtx: f64,
     at: Option<f64>,
 ) -> Result<TapEffect, CgmesError> {
     let tc = &base.base.base;
     let step = match at {
         Some(s) => s,
-        None => tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
+        None => tc
+            .step
+            .ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
     };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
@@ -884,7 +1155,9 @@ fn phase_tap_asymmetrical(
     let alpha = angle_rad_at(step);
     let tap = Complex::from_polar(ratio_at(step), alpha);
 
-    let alpha_max = (low..=high).map(|s| angle_rad_at(s as f64)).fold(f64::MIN, f64::max);
+    let alpha_max = (low..=high)
+        .map(|s| angle_rad_at(s as f64))
+        .fold(f64::MIN, f64::max);
     let x_override = match (x_min_max(base.x_min, base.x_max, xtx), alpha_max != 0.0) {
         (Some((x_min, x_max)), true) => {
             let numer = theta.sin() - alpha_max.tan() * theta.cos();
@@ -910,12 +1183,17 @@ fn phase_tap_asymmetrical(
 /// absent from `PhaseTapChangerNonLinear`/`Symmetrical`'s own generated
 /// fields, so it's not handled here).
 fn phase_tap_symmetrical(
-    base: &PhaseTapChangerNonLinear, mrid: &str, xtx: f64, at: Option<f64>,
+    base: &PhaseTapChangerNonLinear,
+    mrid: &str,
+    xtx: f64,
+    at: Option<f64>,
 ) -> Result<TapEffect, CgmesError> {
     let tc = &base.base.base;
     let step = match at {
         Some(s) => s,
-        None => tc.step.ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
+        None => tc
+            .step
+            .ok_or_else(|| missing("PhaseTapChanger", mrid, "step"))?,
     };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
@@ -930,7 +1208,9 @@ fn phase_tap_symmetrical(
     let alpha = angle_rad_at(step);
     let tap = Complex::from_polar(1.0, alpha);
 
-    let alpha_max = (low..=high).map(|s| angle_rad_at(s as f64)).fold(f64::MIN, f64::max);
+    let alpha_max = (low..=high)
+        .map(|s| angle_rad_at(s as f64))
+        .fold(f64::MIN, f64::max);
     let x_override = match (x_min_max(base.x_min, base.x_max, xtx), alpha_max != 0.0) {
         (Some((x_min, x_max)), true) => {
             let ratio = (alpha / 2.0).sin() / (alpha_max / 2.0).sin();
@@ -955,12 +1235,17 @@ fn phase_tap_symmetrical(
 /// `sin(alpha/2)²` interpolation Symmetrical uses — the Java reference
 /// shares one `getStepXforLinearAndSymmetrical` helper between both types.
 fn phase_tap_linear(
-    ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f64, at: Option<f64>,
+    ptc: &cimstructs::PhaseTapChangerLinear,
+    mrid: &str,
+    xtx: f64,
+    at: Option<f64>,
 ) -> Result<TapEffect, CgmesError> {
     let tc = &ptc.base.base;
     let step = match at {
         Some(s) => s,
-        None => tc.step.ok_or_else(|| missing("PhaseTapChangerLinear", mrid, "step"))?,
+        None => tc
+            .step
+            .ok_or_else(|| missing("PhaseTapChangerLinear", mrid, "step"))?,
     };
     let neutral = tc.neutral_step.unwrap_or(0) as f64;
     let low = tc.low_step.unwrap_or(0);
@@ -972,7 +1257,9 @@ fn phase_tap_linear(
     let alpha = angle_rad_at(step);
     let tap = Complex::from_polar(1.0, alpha);
 
-    let alpha_max = (low..=high).map(|s| angle_rad_at(s as f64)).fold(f64::MIN, f64::max);
+    let alpha_max = (low..=high)
+        .map(|s| angle_rad_at(s as f64))
+        .fold(f64::MIN, f64::max);
     let x_override = match (x_min_max(ptc.x_min, ptc.x_max, xtx), alpha_max != 0.0) {
         (Some((x_min, x_max)), true) => {
             let ratio = (alpha / 2.0).sin() / (alpha_max / 2.0).sin();
@@ -1007,9 +1294,11 @@ fn phase_tap_linear(
 /// Returns the post-merge `buses` plus `idx_of`, already remapped from
 /// pre-merge to post-merge indices (unlike `merge_closed_switches`'s own
 /// return value, which is a raw remap table, not a finished mrid map).
-fn build_ac_bus_skeleton(ds: &CimDataset) -> Result<(Vec<Bus>, HashMap<String, usize>, TerminalIndex), CgmesError> {
+fn build_ac_bus_skeleton(
+    ds: &CimDataset,
+) -> Result<(Vec<Bus>, HashMap<String, usize>, TerminalIndex), CgmesError> {
     // --- Step 1: buses from TopologicalNode ---
-    let tn_mrids = by_type(ds, "TopologicalNode");
+    let tn_mrids = sorted_mrids(ds, "TopologicalNode");
     if tn_mrids.is_empty() {
         return Err(CgmesError::NoTopologicalNodes);
     }
@@ -1020,9 +1309,12 @@ fn build_ac_bus_skeleton(ds: &CimDataset) -> Result<(Vec<Bus>, HashMap<String, u
         let tn: &TopologicalNode = require(ds, mrid, "TopologicalNode", mrid, "(self)")?;
         let u_rated = match &tn.base_voltage {
             Some(bv_ref) => {
-                let bv: &BaseVoltage = require(ds, &bv_ref.mrid, "TopologicalNode", mrid, "BaseVoltage")?;
+                let bv: &BaseVoltage =
+                    require(ds, &bv_ref.mrid, "TopologicalNode", mrid, "BaseVoltage")?;
                 // CGMES gives nominalVoltage in kV; `Bus::u_rated` is documented in V.
-                bv.nominal_voltage.ok_or_else(|| missing("BaseVoltage", &bv_ref.mrid, "nominalVoltage"))? * 1e3
+                bv.nominal_voltage
+                    .ok_or_else(|| missing("BaseVoltage", &bv_ref.mrid, "nominalVoltage"))?
+                    * 1e3
             }
             None => return Err(missing("TopologicalNode", mrid, "BaseVoltage")),
         };
@@ -1060,13 +1352,16 @@ fn build_ac_bus_skeleton(ds: &CimDataset) -> Result<(Vec<Bus>, HashMap<String, u
 /// `buses` — see `build_ac_bus_skeleton`'s doc comment for why naively using
 /// `by_type(ds, "TopologicalNode")`'s own list position is unsafe once any
 /// closed-switch merging happens.
-pub fn cgmes_topological_node_bus_index(ds: &CimDataset) -> Result<HashMap<String, usize>, CgmesError> {
+pub fn cgmes_topological_node_bus_index(
+    ds: &CimDataset,
+) -> Result<HashMap<String, usize>, CgmesError> {
     let (_, idx_of, _) = build_ac_bus_skeleton(ds)?;
     Ok(idx_of)
 }
 
 pub fn cgmes_to_buses_and_branches(
-    ds: &CimDataset, s_base_va: f64,
+    ds: &CimDataset,
+    s_base_va: f64,
 ) -> Result<(Vec<Bus>, Vec<Line>, Vec<Transformer>, Vec<ShuntAdm>), CgmesError> {
     let net = cgmes_to_network(ds, s_base_va)?;
     Ok((net.buses, net.lines, net.transformers, net.shunts))
@@ -1085,6 +1380,17 @@ pub struct CgmesNetwork {
     pub lines: Vec<Line>,
     pub transformers: Vec<Transformer>,
     pub shunts: Vec<ShuntAdm>,
+    /// Per-bus active generation, per-unit and **positive** — the participation
+    /// weights a distributed slack shares an imbalance out by.
+    ///
+    /// Summed over the connected `SynchronousMachine`s at each bus, then
+    /// clamped at zero, exactly as `ucte.rs` does it. It matters more than it
+    /// looks: it has been measured what happens when a slack is
+    /// weighted by *net injection* instead — on one fixture it pushes an entire
+    /// 1000 MW make-up back through the country that just lost it and over the
+    /// line being measured, 1165 A against a true 1000. An importer that leaves
+    /// this empty gets that weighting.
+    pub generation: Vec<f64>,
     /// Parallel to [`transformers`](Self::transformers): every position of the
     /// tap changer on that transformer, or `None` where it has none.
     ///
@@ -1095,6 +1401,47 @@ pub struct CgmesNetwork {
     /// that makes the table trustworthy as a *replacement* for the single-step
     /// path rather than a second opinion about it.
     pub tap_changers: Vec<Option<crate::types::TapChanger>>,
+    /// Parallel to [`buses`](Self::buses): the `TopologicalNode` mRID each bus
+    /// came from.
+    ///
+    /// A three-winding transformer's **star point** is not a node any document
+    /// names, so it gets `{PowerTransformer mRID}_star` — synthesized, and the
+    /// only entry here that is not read straight off the model.
+    pub bus_ids: Vec<String>,
+    /// Every `TopologicalNode` mRID and the bus it belongs to, sorted by mRID.
+    ///
+    /// [`bus_ids`](Self::bus_ids) has to pick **one** name per bus, because a
+    /// network has one node where the documents may have several: the skeleton
+    /// merges galvanically-joined nodes, so the mRID → bus map is not injective
+    /// and inverting it has to choose. This is the map uninverted, and it is
+    /// what lets a CRAC naming one of the *other* merged nodes resolve anyway —
+    /// which document named the node is the CRAC author's business, not the
+    /// importer's.
+    ///
+    /// Includes the mRID that won, so this is the whole relation rather than a
+    /// correction to it; [`Resolution`](crate::rao::Resolution) lets a canonical
+    /// name win over an alias, so the overlap is harmless and the invariant is
+    /// easier to state.
+    ///
+    /// A three-winding transformer's synthesized star point is **not** here: no
+    /// document names it, so nothing can name it in a CRAC.
+    pub bus_aliases: Vec<(String, usize)>,
+    /// The identifier of each branch, in the crate-wide flat order: every line
+    /// first, then every transformer.
+    ///
+    /// The mRID of the `ConductingEquipment` the branch came from —
+    /// `ACLineSegment`, `SeriesCompensator`, `EquivalentBranch` or
+    /// `PowerTransformer` — which is what powsybl gives an IIDM element
+    /// converted from CGMES, and therefore what a CRAC written against such a
+    /// network names.
+    ///
+    /// **A three-winding transformer is the exception**, because it becomes
+    /// three branches and one mRID cannot name three things. Each leg carries
+    /// its own `PowerTransformerEnd` mRID instead, so a CRAC naming the
+    /// *transformer* resolves to nothing and says so through
+    /// [`Resolution::unresolved`](crate::rao::Resolution) — which beats
+    /// silently resolving to whichever leg happened to be built first.
+    pub branch_ids: Vec<String>,
     /// The regulating controls acting on those changers, resolved onto
     /// gridoxide's own bus and branch indices. Only enabled, modelled controls
     /// appear; [`tap_report`](Self::tap_report) accounts for the rest.
@@ -1259,7 +1606,9 @@ fn harmonize_voltage_bases(
     // tie is still one wire, and its two ends are still one voltage level.
     for kind in ["ACLineSegment", "SeriesCompensator"] {
         for mrid in by_type(ds, kind) {
-            let (Some(a), Some(b)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
+            let (Some(a), Some(b)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else {
+                continue;
+            };
             if a >= n || b >= n {
                 continue;
             }
@@ -1284,7 +1633,9 @@ fn harmonize_voltage_bases(
         let mut tally: HashMap<u64, usize> = HashMap::new();
         for &i in group {
             if buses[i].u_rated > 0.0 {
-                *tally.entry((buses[i].u_rated * 1e3).round() as u64).or_default() += 1;
+                *tally
+                    .entry((buses[i].u_rated * 1e3).round() as u64)
+                    .or_default() += 1;
             }
         }
         if tally.len() < 2 {
@@ -1301,7 +1652,10 @@ fn harmonize_voltage_bases(
         for &i in group {
             if buses[i].u_rated > 0.0 && (buses[i].u_rated - keep).abs() > 1e-9 {
                 *merged
-                    .entry(((keep / 1e3).round() as u64, (buses[i].u_rated / 1e3).round() as u64))
+                    .entry((
+                        (keep / 1e3).round() as u64,
+                        (buses[i].u_rated / 1e3).round() as u64,
+                    ))
                     .or_default() += 1;
                 buses[i].u_rated = keep;
                 report.buses += 1;
@@ -1312,7 +1666,9 @@ fn harmonize_voltage_bases(
         .into_iter()
         .map(|((k, r), c)| (k as f64, r as f64, c))
         .collect();
-    report.merged.sort_by(|a, b| b.2.cmp(&a.2).then(b.0.total_cmp(&a.0)));
+    report
+        .merged
+        .sort_by(|a, b| b.2.cmp(&a.2).then(b.0.total_cmp(&a.0)));
     report
 }
 
@@ -1350,8 +1706,12 @@ fn convert_equipment(
     // uniform CGMES quirk.
     for mrid in by_type(ds, "EnergyConsumer") {
         let ec: &EnergyConsumer = require(ds, mrid, "EnergyConsumer", mrid, "(self)")?;
-        let Some(bus) = terms.bus(mrid, 0) else { continue };
-        if !terms.connected(mrid, 0) { continue }
+        let Some(bus) = terms.bus(mrid, 0) else {
+            continue;
+        };
+        if !terms.connected(mrid, 0) {
+            continue;
+        }
         buses[bus].p_spec += -ec.p.unwrap_or(0.0) * 1e6 / s_base_va;
         buses[bus].q_spec += -ec.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
@@ -1362,15 +1722,23 @@ fn convert_equipment(
     // type, not its inheritance chain, so these need their own loop.
     for mrid in by_type(ds, "ConformLoad") {
         let cl: &cimstructs::ConformLoad = require(ds, mrid, "ConformLoad", mrid, "(self)")?;
-        let Some(bus) = terms.bus(mrid, 0) else { continue };
-        if !terms.connected(mrid, 0) { continue }
+        let Some(bus) = terms.bus(mrid, 0) else {
+            continue;
+        };
+        if !terms.connected(mrid, 0) {
+            continue;
+        }
         buses[bus].p_spec += -cl.base.p.unwrap_or(0.0) * 1e6 / s_base_va;
         buses[bus].q_spec += -cl.base.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
     for mrid in by_type(ds, "NonConformLoad") {
         let ncl: &cimstructs::NonConformLoad = require(ds, mrid, "NonConformLoad", mrid, "(self)")?;
-        let Some(bus) = terms.bus(mrid, 0) else { continue };
-        if !terms.connected(mrid, 0) { continue }
+        let Some(bus) = terms.bus(mrid, 0) else {
+            continue;
+        };
+        if !terms.connected(mrid, 0) {
+            continue;
+        }
         buses[bus].p_spec += -ncl.base.p.unwrap_or(0.0) * 1e6 / s_base_va;
         buses[bus].q_spec += -ncl.base.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
@@ -1385,16 +1753,25 @@ fn convert_equipment(
     // Q exception (which exists only because a machine is normally a source,
     // not a sink).
     for mrid in by_type(ds, "AsynchronousMachine") {
-        let am: &cimstructs::AsynchronousMachine = require(ds, mrid, "AsynchronousMachine", mrid, "(self)")?;
-        let Some(bus) = terms.bus(mrid, 0) else { continue };
-        if !terms.connected(mrid, 0) { continue }
+        let am: &cimstructs::AsynchronousMachine =
+            require(ds, mrid, "AsynchronousMachine", mrid, "(self)")?;
+        let Some(bus) = terms.bus(mrid, 0) else {
+            continue;
+        };
+        if !terms.connected(mrid, 0) {
+            continue;
+        }
         buses[bus].p_spec += -am.base.p.unwrap_or(0.0) * 1e6 / s_base_va;
         buses[bus].q_spec += -am.base.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
     for mrid in by_type(ds, "EquivalentInjection") {
         let ei: &EquivalentInjection = require(ds, mrid, "EquivalentInjection", mrid, "(self)")?;
-        let Some(bus) = terms.bus(mrid, 0) else { continue };
-        if !terms.connected(mrid, 0) { continue }
+        let Some(bus) = terms.bus(mrid, 0) else {
+            continue;
+        };
+        if !terms.connected(mrid, 0) {
+            continue;
+        }
         buses[bus].p_spec += -ei.p.unwrap_or(0.0) * 1e6 / s_base_va;
         buses[bus].q_spec += -ei.q.unwrap_or(0.0) * 1e6 / s_base_va;
     }
@@ -1405,7 +1782,8 @@ fn convert_equipment(
     // flow out from a node"), not SynchronousMachine's — so both get
     // negated, EquivalentInjection-style, not the machine's Q exception.
     for mrid in by_type(ds, "PowerElectronicsConnection") {
-        let pec: &PowerElectronicsConnection = require(ds, mrid, "PowerElectronicsConnection", mrid, "(self)")?;
+        let pec: &PowerElectronicsConnection =
+            require(ds, mrid, "PowerElectronicsConnection", mrid, "(self)")?;
         let pec_connected = terms.connected(mrid, 0);
         if let Some(bus) = terms.bus(mrid, 0) {
             if pec_connected {
@@ -1414,36 +1792,68 @@ fn convert_equipment(
             }
         }
 
-        let Some(rc_ref) = &pec.base.regulating_control else { continue };
+        let Some(rc_ref) = &pec.base.regulating_control else {
+            continue;
+        };
         if !pec_connected || pec.base.control_enabled != Some(true) {
             continue;
         }
-        let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "PowerElectronicsConnection", mrid, "RegulatingControl")?;
+        let rc: &RegulatingControl = require(
+            ds,
+            &rc_ref.mrid,
+            "PowerElectronicsConnection",
+            mrid,
+            "RegulatingControl",
+        )?;
         if rc.enabled != Some(true) {
             continue;
         }
-        let is_voltage_mode = rc.mode.as_ref().is_some_and(|m| m.uri.ends_with(".voltage"));
+        let is_voltage_mode = rc
+            .mode
+            .as_ref()
+            .is_some_and(|m| m.uri.ends_with(".voltage"));
         if !is_voltage_mode {
             continue;
         }
-        let Some(term_ref) = &rc.terminal else { continue };
-        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else { continue };
-        let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
-        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+        let Some(term_ref) = &rc.terminal else {
+            continue;
+        };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else {
+            continue;
+        };
+        let target = rc
+            .target_value
+            .ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
+        let mult = unit_multiplier(
+            rc.target_value_unit_multiplier
+                .as_ref()
+                .map(|u| u.uri.as_str()),
+        );
 
         let q_min = pec.min_q.unwrap_or(-f64::INFINITY);
         let q_max = pec.max_q.unwrap_or(f64::INFINITY);
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(&mut buses, Regulation {
-            controlled_bus,
-            target_pu,
-            q_min: if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
-            q_max: if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
-            id: mrid,
-            at_bus: terms.bus(mrid, 0),
-            // Negated, matching the injection written above.
-            q_scheduled: -pec.q.unwrap_or(0.0) * 1e6 / s_base_va,
-        });
+        voltage_control.regulate(
+            &mut buses,
+            Regulation {
+                controlled_bus,
+                target_pu,
+                q_min: if q_min.is_finite() {
+                    q_min * 1e6 / s_base_va
+                } else {
+                    q_min
+                },
+                q_max: if q_max.is_finite() {
+                    q_max * 1e6 / s_base_va
+                } else {
+                    q_max
+                },
+                id: mrid,
+                at_bus: terms.bus(mrid, 0),
+                // Negated, matching the injection written above.
+                q_scheduled: -pec.q.unwrap_or(0.0) * 1e6 / s_base_va,
+            },
+        );
     }
 
     // --- Step 4: lines from ACLineSegment ---
@@ -1466,10 +1876,26 @@ fn convert_equipment(
     // — mirroring pgm.rs's own from_status/to_status handling for `Line`,
     // needed here because RealGrid genuinely has `Terminal.connected=false`
     // entries (a real de-energized/switched-out snapshot, not a decode gap).
-    /// Returns the index of the pushed line, or `None` when both ends are
-    /// disconnected and nothing was pushed. The index is what lets a caller
-    /// map a `Terminal` onto a branch — see `terminal_branch` below.
-    fn push_status_aware_line(lines: &mut Vec<Line>, from: usize, to: usize, from_conn: bool, to_conn: bool, r: f64, x: f64, b_shunt: f64, g_shunt: f64) -> Option<usize> {
+    /// `(index, carries through flow)` for the line pushed, or `None` when both
+    /// ends are disconnected and nothing was pushed.
+    ///
+    /// The two halves are separate because a half-open line **is** pushed — as
+    /// a shunt-only self-loop — and so needs an identifier like any other
+    /// branch, but carries no through flow and can therefore never be an area
+    /// boundary, so it is deliberately not mapped from a `Terminal`. Returning
+    /// one `Option` for both conflated "nothing was pushed" with "nothing to
+    /// map", and left every half-open line nameless.
+    fn push_status_aware_line(
+        lines: &mut Vec<Line>,
+        from: usize,
+        to: usize,
+        from_conn: bool,
+        to_conn: bool,
+        r: f64,
+        x: f64,
+        b_shunt: f64,
+        g_shunt: f64,
+    ) -> Option<(usize, bool)> {
         match (from_conn, to_conn) {
             (true, true) => {
                 // A jumper exported as a very short `ACLineSegment` would put an
@@ -1479,88 +1905,166 @@ fn convert_equipment(
                 // above the threshold, so this changes nothing modelled today
                 // and exists for exports that are less well behaved.
                 let (r, x) = crate::topology::clamp_branch_impedance(r, x);
-                lines.push(Line { from, to, r, x, b_shunt, g_shunt });
-                Some(lines.len() - 1)
+                lines.push(Line {
+                    from,
+                    to,
+                    r,
+                    x,
+                    b_shunt,
+                    g_shunt,
+                });
+                Some((lines.len() - 1, true))
             }
             // A half-open line becomes a shunt-only self-loop at the connected
             // end. It carries no through flow, so it can never be an area
-            // boundary and is deliberately not mapped.
+            // boundary and is deliberately not mapped — but it is a branch, and
+            // it is named.
             (true, false) => {
-                lines.push(Line { from, to: from, r: 0.0, x: 0.0, b_shunt, g_shunt });
-                None
+                lines.push(Line {
+                    from,
+                    to: from,
+                    r: 0.0,
+                    x: 0.0,
+                    b_shunt,
+                    g_shunt,
+                });
+                Some((lines.len() - 1, false))
             }
             (false, true) => {
-                lines.push(Line { from: to, to, r: 0.0, x: 0.0, b_shunt, g_shunt });
-                None
+                lines.push(Line {
+                    from: to,
+                    to,
+                    r: 0.0,
+                    x: 0.0,
+                    b_shunt,
+                    g_shunt,
+                });
+                Some((lines.len() - 1, false))
             }
             (false, false) => None,
         }
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    // Parallel to `lines`: the equipment mRID each came from. Recorded beside
+    // the push rather than re-derived, because `push_status_aware_line` decides
+    // whether a branch survives at all.
+    let mut line_ids: Vec<String> = Vec::new();
     // Terminal mRID -> (branch index within `lines`, which side it became).
     // Built here because only the conversion knows which branches survived and
     // in what order; `cgmes_control_areas` needs it to turn a `TieFlow`'s
     // terminal into a boundary branch.
     let mut line_terminal: HashMap<String, (usize, crate::branch_flow::Terminal)> = HashMap::new();
-    let record_line = |terms: &TerminalIndex,
-                           line_terminal: &mut HashMap<String, (usize, crate::branch_flow::Terminal)>,
-                           mrid: &str,
-                           pushed: Option<usize>| {
-        let Some(idx) = pushed else { return };
-        let Some(ts) = terms.by_equipment.get(mrid) else { return };
-        for (which, side) in
-            [(0, crate::branch_flow::Terminal::From), (1, crate::branch_flow::Terminal::To)]
-        {
-            if let Some(t) = ts.get(which) {
-                line_terminal.insert(t.clone(), (idx, side));
+    let record_line =
+        |terms: &TerminalIndex,
+         line_terminal: &mut HashMap<String, (usize, crate::branch_flow::Terminal)>,
+         line_ids: &mut Vec<String>,
+         mrid: &str,
+         pushed: Option<(usize, bool)>| {
+            let Some((idx, through)) = pushed else { return };
+            if line_ids.len() <= idx {
+                line_ids.resize(idx + 1, String::new());
             }
-        }
-    };
+            line_ids[idx] = mrid.to_string();
+            if !through {
+                return;
+            }
+            let Some(ts) = terms.by_equipment.get(mrid) else {
+                return;
+            };
+            for (which, side) in [
+                (0, crate::branch_flow::Terminal::From),
+                (1, crate::branch_flow::Terminal::To),
+            ] {
+                if let Some(t) = ts.get(which) {
+                    line_terminal.insert(t.clone(), (idx, side));
+                }
+            }
+        };
 
-    for mrid in by_type(ds, "ACLineSegment") {
+    // Sorted by mRID before conversion, for the reason the transformer loop
+    // below states and by the same remedy: `CimDataset::merge` iterates a
+    // `HashMap` of entries, so `by_type` accumulates in a randomized order for
+    // every element first seen in a merged profile — and a CGMES import is
+    // almost always several files merged. Left alone, the line list, every flat
+    // branch index derived from it, and every identifier those indices are
+    // looked up by came out in a different order on each run of the same
+    // program against the same files. Nothing asserted on a line index, so it
+    // never surfaced; it surfaces the moment a branch has a name.
+    for mrid in sorted_mrids(ds, "ACLineSegment") {
+        let mrid = mrid.as_str();
         let ln: &ACLineSegment = require(ds, mrid, "ACLineSegment", mrid, "(self)")?;
-        let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
+        let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else {
+            continue;
+        };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
         let y_base = 1.0 / z_base;
         let pushed = push_status_aware_line(
-            &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
-            ln.r.unwrap_or(0.0) / z_base, ln.x.unwrap_or(0.0) / z_base,
-            ln.bch.unwrap_or(0.0) / y_base, ln.gch.unwrap_or(0.0) / y_base,
+            &mut lines,
+            from,
+            to,
+            terms.connected(mrid, 0),
+            terms.connected(mrid, 1),
+            ln.r.unwrap_or(0.0) / z_base,
+            ln.x.unwrap_or(0.0) / z_base,
+            ln.bch.unwrap_or(0.0) / y_base,
+            ln.gch.unwrap_or(0.0) / y_base,
         );
-        record_line(&terms, &mut line_terminal, mrid, pushed);
+        record_line(&terms, &mut line_terminal, &mut line_ids, mrid, pushed);
     }
     // SeriesCompensator: a distinct 2-terminal CIM class from ACLineSegment
     // ("a series capacitor or reactor... without charging susceptance" per
     // its own doc comment) — same conversion, minus the shunt terms (it has
     // no bch/gch fields at all, unlike ACLineSegment).
-    for mrid in by_type(ds, "SeriesCompensator") {
-        let sc: &cimstructs::SeriesCompensator = require(ds, mrid, "SeriesCompensator", mrid, "(self)")?;
-        let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
+    for mrid in sorted_mrids(ds, "SeriesCompensator") {
+        let mrid = mrid.as_str();
+        let sc: &cimstructs::SeriesCompensator =
+            require(ds, mrid, "SeriesCompensator", mrid, "(self)")?;
+        let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else {
+            continue;
+        };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
         let pushed = push_status_aware_line(
-            &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
-            sc.r.unwrap_or(0.0) / z_base, sc.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
+            &mut lines,
+            from,
+            to,
+            terms.connected(mrid, 0),
+            terms.connected(mrid, 1),
+            sc.r.unwrap_or(0.0) / z_base,
+            sc.x.unwrap_or(0.0) / z_base,
+            0.0,
+            0.0,
         );
-        record_line(&terms, &mut line_terminal, mrid, pushed);
+        record_line(&terms, &mut line_terminal, &mut line_ids, mrid, pushed);
     }
     // EquivalentBranch: a simplified series-impedance stand-in for a
     // reduced/boundary part of the network (an `EquivalentNetwork`
     // container) — same shape as ACLineSegment, using the primary `r`/`x`
     // (not the `r21`/`x21`/`negative*`/`zero*` directional variants, which
     // FullGrid's own instance leaves equal to `r`/`x` anyway).
-    for mrid in by_type(ds, "EquivalentBranch") {
-        let eb: &cimstructs::EquivalentBranch = require(ds, mrid, "EquivalentBranch", mrid, "(self)")?;
-        let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else { continue };
+    for mrid in sorted_mrids(ds, "EquivalentBranch") {
+        let mrid = mrid.as_str();
+        let eb: &cimstructs::EquivalentBranch =
+            require(ds, mrid, "EquivalentBranch", mrid, "(self)")?;
+        let (Some(from), Some(to)) = (terms.bus(mrid, 0), terms.bus(mrid, 1)) else {
+            continue;
+        };
         let u_rated = buses[from].u_rated;
         let z_base = u_rated * u_rated / s_base_va;
         let pushed = push_status_aware_line(
-            &mut lines, from, to, terms.connected(mrid, 0), terms.connected(mrid, 1),
-            eb.r.unwrap_or(0.0) / z_base, eb.x.unwrap_or(0.0) / z_base, 0.0, 0.0,
+            &mut lines,
+            from,
+            to,
+            terms.connected(mrid, 0),
+            terms.connected(mrid, 1),
+            eb.r.unwrap_or(0.0) / z_base,
+            eb.x.unwrap_or(0.0) / z_base,
+            0.0,
+            0.0,
         );
-        record_line(&terms, &mut line_terminal, mrid, pushed);
+        record_line(&terms, &mut line_terminal, &mut line_ids, mrid, pushed);
     }
 
     // --- Steps 5+6: transformers (2- and 3-winding) ---
@@ -1574,7 +2078,14 @@ fn convert_equipment(
         ends_by_pt.entry(pt.mrid.clone()).or_default().push(end);
     }
 
+    // Star points, which are synthesized rather than read: `(bus index, id)`.
+    let mut star_bus_ids: Vec<(usize, String)> = Vec::new();
     let mut transformers: Vec<Transformer> = Vec::new();
+    // Parallel to `transformers`: the mRID each is named by. The
+    // `PowerTransformer` for a two-winding one; the `PowerTransformerEnd` for
+    // each leg of a three-winding one, since one mRID cannot name three
+    // branches. See [`CgmesNetwork::branch_ids`].
+    let mut transformer_ids: Vec<String> = Vec::new();
     let mut tap_changers: Vec<Option<crate::types::TapChanger>> = Vec::new();
     // Parallel to `transformers`: the `PowerTransformerEnd` whose tap changer
     // produced the table, and each end's terminal with the side it became.
@@ -1596,8 +2107,11 @@ fn convert_equipment(
         ends.sort_by_key(|e| e.base.end_number.unwrap_or(0));
         match ends.len() {
             2 => {
-                let (t, c) = build_two_winding(ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va)?;
+                let (t, c) = build_two_winding(
+                    ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va,
+                )?;
                 transformers.push(t);
+                transformer_ids.push(pt_mrid.clone());
                 tap_changers.push(c);
                 changer_end.push(
                     [ends[0], ends[1]]
@@ -1608,12 +2122,15 @@ fn convert_equipment(
                 // `build_two_winding` fixes `to` to end 1's bus and `from` to
                 // end 2's, whichever end the changer is physically on.
                 terminal_sides.push(
-                    [(ends[0], crate::branch_flow::Terminal::To), (ends[1], crate::branch_flow::Terminal::From)]
-                        .iter()
-                        .filter_map(|(e, side)| {
-                            e.base.terminal.as_ref().map(|t| (t.mrid.clone(), *side))
-                        })
-                        .collect(),
+                    [
+                        (ends[0], crate::branch_flow::Terminal::To),
+                        (ends[1], crate::branch_flow::Terminal::From),
+                    ]
+                    .iter()
+                    .filter_map(|(e, side)| {
+                        e.base.terminal.as_ref().map(|t| (t.mrid.clone(), *side))
+                    })
+                    .collect(),
                 );
             }
             3 => {
@@ -1628,17 +2145,29 @@ fn convert_equipment(
                 // first real multi-3-winding-transformer case this
                 // converter was tried against).
                 let star_idx = buses.len();
+                star_bus_ids.push((star_idx, format!("{pt_mrid}_star")));
                 buses.push(Bus {
-                    idx: star_idx, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-                    p_spec: 0.0, q_spec: 0.0, q_min: -f64::INFINITY, q_max: f64::INFINITY,
-                    u_rated: ends[0].rated_u.unwrap_or(1e-3) * 1e3, zip_terms: Vec::new(),
+                    idx: star_idx,
+                    bus_type: BusType::PQ,
+                    voltage_mag: 1.0,
+                    voltage_ang: 0.0,
+                    p_spec: 0.0,
+                    q_spec: 0.0,
+                    q_min: -f64::INFINITY,
+                    q_max: f64::INFINITY,
+                    u_rated: ends[0].rated_u.unwrap_or(1e-3) * 1e3,
+                    zip_terms: Vec::new(),
                 });
                 for end in &ends {
-                    let (t, c) = build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?;
+                    let (t, c) =
+                        build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?;
                     transformers.push(t);
+                    transformer_ids.push(end.mrid_str().to_string());
                     tap_changers.push(c);
                     changer_end.push(
-                        tap_index.has_changer(end.mrid_str()).then(|| end.mrid_str().to_string()),
+                        tap_index
+                            .has_changer(end.mrid_str())
+                            .then(|| end.mrid_str().to_string()),
                     );
                     // A star leg's `to` is this end's own bus; `from` is the
                     // synthesized star point, which no terminal names.
@@ -1651,34 +2180,57 @@ fn convert_equipment(
                     );
                 }
             }
-            n => return Err(CgmesError::UnsupportedTransformer {
-                mrid: pt_mrid, reason: format!("{n} PowerTransformerEnds (only 2 or 3 supported)"),
-            }),
+            n => {
+                return Err(CgmesError::UnsupportedTransformer {
+                    mrid: pt_mrid,
+                    reason: format!("{n} PowerTransformerEnds (only 2 or 3 supported)"),
+                });
+            }
         }
     }
 
     // --- Step 7: shunts (LinearShuntCompensator + NonlinearShuntCompensator) ---
     let mut shunts: Vec<ShuntAdm> = Vec::new();
     for mrid in by_type(ds, "LinearShuntCompensator") {
-        let sc: &LinearShuntCompensator = require(ds, mrid, "LinearShuntCompensator", mrid, "(self)")?;
-        let Some(at) = terms.bus(mrid, 0) else { continue };
-        if !terms.connected(mrid, 0) { continue }
+        let sc: &LinearShuntCompensator =
+            require(ds, mrid, "LinearShuntCompensator", mrid, "(self)")?;
+        let Some(at) = terms.bus(mrid, 0) else {
+            continue;
+        };
+        if !terms.connected(mrid, 0) {
+            continue;
+        }
         let sections = sc.base.sections.unwrap_or(0.0);
         let g = sc.g_per_section.unwrap_or(0.0) * sections;
         let b = sc.b_per_section.unwrap_or(0.0) * sections;
         let z_base = buses[at].u_rated * buses[at].u_rated / s_base_va;
-        shunts.push(ShuntAdm { at, y: Complex::new(g, b) * z_base });
+        shunts.push(ShuntAdm {
+            at,
+            y: Complex::new(g, b) * z_base,
+        });
     }
     for mrid in by_type(ds, "NonlinearShuntCompensator") {
-        let sc: &NonlinearShuntCompensator = require(ds, mrid, "NonlinearShuntCompensator", mrid, "(self)")?;
-        let Some(at) = terms.bus(mrid, 0) else { continue };
-        if !terms.connected(mrid, 0) { continue }
+        let sc: &NonlinearShuntCompensator =
+            require(ds, mrid, "NonlinearShuntCompensator", mrid, "(self)")?;
+        let Some(at) = terms.bus(mrid, 0) else {
+            continue;
+        };
+        if !terms.connected(mrid, 0) {
+            continue;
+        }
         let target_section = sc.base.sections.unwrap_or(0.0).round() as i64;
         let mut y = Complex::new(0.0, 0.0);
         for pt_mrid in by_type(ds, "NonlinearShuntCompensatorPoint") {
-            let pt: &NonlinearShuntCompensatorPoint =
-                require(ds, pt_mrid, "NonlinearShuntCompensatorPoint", pt_mrid, "(self)")?;
-            let Some(owner) = &pt.nonlinear_shunt_compensator else { continue };
+            let pt: &NonlinearShuntCompensatorPoint = require(
+                ds,
+                pt_mrid,
+                "NonlinearShuntCompensatorPoint",
+                pt_mrid,
+                "(self)",
+            )?;
+            let Some(owner) = &pt.nonlinear_shunt_compensator else {
+                continue;
+            };
             if owner.mrid != *mrid {
                 continue;
             }
@@ -1745,6 +2297,12 @@ fn convert_equipment(
     // differ from the machine's own terminal for remote voltage control) —
     // mirrors pgm.rs's `voltage_regulator` handling, reading CGMES's own
     // fields instead.
+    // Per-bus machine production, accumulated beside the injection it comes
+    // from. Signed here and clamped at the end, which is the same order
+    // `src/ucte.rs:862` does it in: a bus whose machines net out to consumption
+    // has no share of an upward imbalance, but one machine pumping does not
+    // cancel another's participation before the totals are in.
+    let mut generation: Vec<f64> = vec![0.0; buses.len()];
     for mrid in by_type(ds, "SynchronousMachine") {
         let sm: &SynchronousMachine = require(ds, mrid, "SynchronousMachine", mrid, "(self)")?;
         // `Equipment.inService` is independent of terminal connectivity, and a
@@ -1757,7 +2315,9 @@ fn convert_equipment(
         // the fixture's own published 20.134 kV — Svedala's single worst bus.
         // The same applies to its P/Q injection, hence gating both.
         let machine_in_service = equipment_in_service(
-            sm.base.base.base.base.base.in_service, sm.base.base.base.base.base.normally_in_service);
+            sm.base.base.base.base.base.in_service,
+            sm.base.base.base.base.base.normally_in_service,
+        );
         let machine_connected = terms.connected(mrid, 0) && machine_in_service;
         if let Some(bus) = terms.bus(mrid, 0) {
             if machine_connected {
@@ -1765,39 +2325,74 @@ fn convert_equipment(
                 let q = sm.base.q.unwrap_or(0.0);
                 buses[bus].p_spec += -p * 1e6 / s_base_va;
                 buses[bus].q_spec += q * 1e6 / s_base_va; // no negation — see the Step 3 loads comment
+                if let Some(g) = generation.get_mut(bus) {
+                    *g += -p * 1e6 / s_base_va;
+                }
             }
         }
 
-        let Some(rc_ref) = &sm.base.base.regulating_control else { continue };
+        let Some(rc_ref) = &sm.base.base.regulating_control else {
+            continue;
+        };
         if !machine_connected || sm.base.base.control_enabled != Some(true) {
             continue;
         }
-        let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "SynchronousMachine", mrid, "RegulatingControl")?;
+        let rc: &RegulatingControl = require(
+            ds,
+            &rc_ref.mrid,
+            "SynchronousMachine",
+            mrid,
+            "RegulatingControl",
+        )?;
         if rc.enabled != Some(true) {
             continue;
         }
-        let is_voltage_mode = rc.mode.as_ref().is_some_and(|m| m.uri.ends_with(".voltage"));
+        let is_voltage_mode = rc
+            .mode
+            .as_ref()
+            .is_some_and(|m| m.uri.ends_with(".voltage"));
         if !is_voltage_mode {
             continue;
         }
-        let Some(term_ref) = &rc.terminal else { continue };
-        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else { continue };
-        let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
-        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+        let Some(term_ref) = &rc.terminal else {
+            continue;
+        };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else {
+            continue;
+        };
+        let target = rc
+            .target_value
+            .ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
+        let mult = unit_multiplier(
+            rc.target_value_unit_multiplier
+                .as_ref()
+                .map(|u| u.uri.as_str()),
+        );
 
         let q_min = sm.min_q.unwrap_or(-f64::INFINITY);
         let q_max = sm.max_q.unwrap_or(f64::INFINITY);
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(&mut buses, Regulation {
-            controlled_bus,
-            target_pu,
-            q_min: if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
-            q_max: if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
-            id: mrid,
-            at_bus: terms.bus(mrid, 0),
-            // No negation — the same exception the injection above makes.
-            q_scheduled: sm.base.q.unwrap_or(0.0) * 1e6 / s_base_va,
-        });
+        voltage_control.regulate(
+            &mut buses,
+            Regulation {
+                controlled_bus,
+                target_pu,
+                q_min: if q_min.is_finite() {
+                    q_min * 1e6 / s_base_va
+                } else {
+                    q_min
+                },
+                q_max: if q_max.is_finite() {
+                    q_max * 1e6 / s_base_va
+                } else {
+                    q_max
+                },
+                id: mrid,
+                at_bus: terms.bus(mrid, 0),
+                // No negation — the same exception the injection above makes.
+                q_scheduled: sm.base.q.unwrap_or(0.0) * 1e6 / s_base_va,
+            },
+        );
     }
 
     // StaticVarCompensator: same RegulatingCondEq/RegulatingControl pattern as
@@ -1820,22 +2415,43 @@ fn convert_equipment(
             }
         }
 
-        let Some(rc_ref) = &sc.base.regulating_control else { continue };
+        let Some(rc_ref) = &sc.base.regulating_control else {
+            continue;
+        };
         if !svc_connected || sc.base.control_enabled != Some(true) {
             continue;
         }
-        let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "StaticVarCompensator", mrid, "RegulatingControl")?;
+        let rc: &RegulatingControl = require(
+            ds,
+            &rc_ref.mrid,
+            "StaticVarCompensator",
+            mrid,
+            "RegulatingControl",
+        )?;
         if rc.enabled != Some(true) {
             continue;
         }
-        let is_voltage_mode = rc.mode.as_ref().is_some_and(|m| m.uri.ends_with(".voltage"));
+        let is_voltage_mode = rc
+            .mode
+            .as_ref()
+            .is_some_and(|m| m.uri.ends_with(".voltage"));
         if !is_voltage_mode {
             continue;
         }
-        let Some(term_ref) = &rc.terminal else { continue };
-        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else { continue };
-        let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
-        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+        let Some(term_ref) = &rc.terminal else {
+            continue;
+        };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else {
+            continue;
+        };
+        let target = rc
+            .target_value
+            .ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
+        let mult = unit_multiplier(
+            rc.target_value_unit_multiplier
+                .as_ref()
+                .map(|u| u.uri.as_str()),
+        );
 
         // capacitiveRating/inductiveRating are REACTANCE ratings in ohms,
         // not MVAr — despite the doc text reading "at maximum ... reactive
@@ -1864,16 +2480,19 @@ fn convert_equipment(
             _ => f64::INFINITY,
         };
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(&mut buses, Regulation {
-            controlled_bus,
-            target_pu,
-            // Already per-unit — see the rating conversion above.
-            q_min,
-            q_max,
-            id: mrid,
-            at_bus: own_bus,
-            q_scheduled: sc.q.unwrap_or(0.0) * 1e6 / s_base_va,
-        });
+        voltage_control.regulate(
+            &mut buses,
+            Regulation {
+                controlled_bus,
+                target_pu,
+                // Already per-unit — see the rating conversion above.
+                q_min,
+                q_max,
+                id: mrid,
+                at_bus: own_bus,
+                q_scheduled: sc.q.unwrap_or(0.0) * 1e6 / s_base_va,
+            },
+        );
     }
 
     // ExternalNetworkInjection: CIM describes it as "used for IEC 60909
@@ -1886,7 +2505,8 @@ fn convert_equipment(
     // in for "the rest of the interconnected system", the same conceptual
     // role EquivalentInjection plays, not a physical rotating machine.
     for mrid in by_type(ds, "ExternalNetworkInjection") {
-        let eni: &cimstructs::ExternalNetworkInjection = require(ds, mrid, "ExternalNetworkInjection", mrid, "(self)")?;
+        let eni: &cimstructs::ExternalNetworkInjection =
+            require(ds, mrid, "ExternalNetworkInjection", mrid, "(self)")?;
         let eni_connected = terms.connected(mrid, 0);
         if let Some(bus) = terms.bus(mrid, 0) {
             if eni_connected {
@@ -1895,36 +2515,68 @@ fn convert_equipment(
             }
         }
 
-        let Some(rc_ref) = &eni.base.regulating_control else { continue };
+        let Some(rc_ref) = &eni.base.regulating_control else {
+            continue;
+        };
         if !eni_connected || eni.base.control_enabled != Some(true) {
             continue;
         }
-        let rc: &RegulatingControl = require(ds, &rc_ref.mrid, "ExternalNetworkInjection", mrid, "RegulatingControl")?;
+        let rc: &RegulatingControl = require(
+            ds,
+            &rc_ref.mrid,
+            "ExternalNetworkInjection",
+            mrid,
+            "RegulatingControl",
+        )?;
         if rc.enabled != Some(true) {
             continue;
         }
-        let is_voltage_mode = rc.mode.as_ref().is_some_and(|m| m.uri.ends_with(".voltage"));
+        let is_voltage_mode = rc
+            .mode
+            .as_ref()
+            .is_some_and(|m| m.uri.ends_with(".voltage"));
         if !is_voltage_mode {
             continue;
         }
-        let Some(term_ref) = &rc.terminal else { continue };
-        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else { continue };
-        let target = rc.target_value.ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
-        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+        let Some(term_ref) = &rc.terminal else {
+            continue;
+        };
+        let Some(controlled_bus) = terms.bus_via_terminal_mrid(&term_ref.mrid) else {
+            continue;
+        };
+        let target = rc
+            .target_value
+            .ok_or_else(|| missing("RegulatingControl", &rc_ref.mrid, "targetValue"))?;
+        let mult = unit_multiplier(
+            rc.target_value_unit_multiplier
+                .as_ref()
+                .map(|u| u.uri.as_str()),
+        );
 
         let q_min = eni.min_q.unwrap_or(-f64::INFINITY);
         let q_max = eni.max_q.unwrap_or(f64::INFINITY);
         let target_pu = target * mult / buses[controlled_bus].u_rated;
-        voltage_control.regulate(&mut buses, Regulation {
-            controlled_bus,
-            target_pu,
-            q_min: if q_min.is_finite() { q_min * 1e6 / s_base_va } else { q_min },
-            q_max: if q_max.is_finite() { q_max * 1e6 / s_base_va } else { q_max },
-            id: mrid,
-            at_bus: terms.bus(mrid, 0),
-            // Negated, matching the injection written above.
-            q_scheduled: -eni.q.unwrap_or(0.0) * 1e6 / s_base_va,
-        });
+        voltage_control.regulate(
+            &mut buses,
+            Regulation {
+                controlled_bus,
+                target_pu,
+                q_min: if q_min.is_finite() {
+                    q_min * 1e6 / s_base_va
+                } else {
+                    q_min
+                },
+                q_max: if q_max.is_finite() {
+                    q_max * 1e6 / s_base_va
+                } else {
+                    q_max
+                },
+                id: mrid,
+                at_bus: terms.bus(mrid, 0),
+                // Negated, matching the injection written above.
+                q_scheduled: -eni.q.unwrap_or(0.0) * 1e6 / s_base_va,
+            },
+        );
     }
 
     // Slack: each TopologicalIsland's own angle reference, applied last so it
@@ -1977,7 +2629,11 @@ fn convert_equipment(
     for (&slack_idx, slack_mrid) in slack_indices.iter().zip(slack_angle_ref_mrid.iter()) {
         for mrid in by_type(ds, "SvVoltage") {
             let sv: &cimstructs::SvVoltage = require(ds, mrid, "SvVoltage", mrid, "(self)")?;
-            if sv.topological_node.as_ref().is_some_and(|tn| &tn.mrid == slack_mrid) {
+            if sv
+                .topological_node
+                .as_ref()
+                .is_some_and(|tn| &tn.mrid == slack_mrid)
+            {
                 if let Some(angle_deg) = sv.angle {
                     buses[slack_idx].voltage_ang = angle_deg.to_radians();
                 }
@@ -2015,8 +2671,50 @@ fn convert_equipment(
         s_base_va,
     );
 
+    // A bus whose machines net out to consumption participates in no upward
+    // imbalance, and a negative weight is not a weight.
+    generation.resize(buses.len(), 0.0);
+    for g in &mut generation {
+        *g = g.max(0.0);
+    }
+
     let voltage_control = voltage_control.finish(&buses);
+    // `idx_of` maps a `TopologicalNode` mRID to a bus index, and it is **not**
+    // injective: the skeleton merges galvanically-joined nodes, so several
+    // mRIDs can name one bus. Inverting it therefore has to choose, and the
+    // choice has to be the same on every import — taking whichever the hash
+    // map happened to yield last made two imports of one model disagree about
+    // the name of a merged bus while agreeing about everything else.
+    //
+    // The lowest-sorting of the merged mRIDs wins, and the rest are kept in
+    // [`bus_aliases`](CgmesNetwork::bus_aliases) so a CRAC naming any of them
+    // still resolves — one name per bus is what the *network* needs, not what
+    // the documents are entitled to say.
+    let mut named: Vec<(&String, usize)> = idx_of.iter().map(|(m, i)| (m, *i)).collect();
+    named.sort();
+    let bus_aliases: Vec<(String, usize)> = named.iter().map(|(m, i)| ((*m).clone(), *i)).collect();
+    let mut bus_ids: Vec<String> = vec![String::new(); buses.len()];
+    for (mrid, i) in named {
+        if let Some(slot) = bus_ids.get_mut(i)
+            && slot.is_empty()
+        {
+            *slot = mrid.clone();
+        }
+    }
+    for (i, id) in star_bus_ids {
+        if let Some(slot) = bus_ids.get_mut(i) {
+            *slot = id;
+        }
+    }
+    // Lines first, then transformers — the flat order `branch_flow::branch_params`
+    // defines and every index in this crate follows.
+    line_ids.resize(lines.len(), String::new());
+    let branch_ids: Vec<String> = line_ids.into_iter().chain(transformer_ids).collect();
     Ok(CgmesNetwork {
+        bus_ids,
+        bus_aliases,
+        branch_ids,
+        generation,
         base_harmonization,
         buses,
         lines,
@@ -2209,7 +2907,13 @@ pub fn cgmes_control_areas(
     let of_bus: Vec<Option<usize>> = (0..n).map(|b| area_of_component[component[b]]).collect();
     report.unassigned_buses = of_bus.iter().filter(|a| a.is_none()).count();
 
-    Ok(ControlAreaImport { of_bus, targets, tolerances, ids, report })
+    Ok(ControlAreaImport {
+        of_bus,
+        targets,
+        tolerances,
+        ids,
+        report,
+    })
 }
 
 /// Two regulating machines asked one bus to hold different voltages.
@@ -2331,8 +3035,15 @@ impl VoltageControl {
     /// means reactive dispatch inside the Newton system, which is a different
     /// job.
     fn regulate(&mut self, buses: &mut [Bus], reg: Regulation<'_>) {
-        let Regulation { controlled_bus: bus, target_pu, q_min, q_max, id, at_bus, q_scheduled } =
-            reg;
+        let Regulation {
+            controlled_bus: bus,
+            target_pu,
+            q_min,
+            q_max,
+            id,
+            at_bus,
+            q_scheduled,
+        } = reg;
         if buses[bus].bus_type == BusType::PQ {
             buses[bus].bus_type = BusType::PV;
         }
@@ -2484,14 +3195,18 @@ fn read_tap_regulation(
         if changer.is_none() {
             continue;
         }
-        let Some(end_mrid) = changer_end[i].as_deref() else { continue };
+        let Some(end_mrid) = changer_end[i].as_deref() else {
+            continue;
+        };
         let Some((control_mrid, control_enabled)) = tap_index.control_of(ds, end_mrid) else {
             continue;
         };
         // A changer with no `TapChangerControl` at all has a fixed position by
         // construction. FullGrid's `BE_TR2_HVDC2` is one, and it is why the
         // published SV moves a tap this importer must not.
-        let Some(control_mrid) = control_mrid else { continue };
+        let Some(control_mrid) = control_mrid else {
+            continue;
+        };
         let Some(rc) = get::<cimstructs::TapChangerControl>(ds, &control_mrid) else {
             report.unattached += 1;
             continue;
@@ -2518,13 +3233,21 @@ fn read_tap_regulation(
             report.without_target += 1;
             continue;
         };
-        let mult = unit_multiplier(rc.target_value_unit_multiplier.as_ref().map(|u| u.uri.as_str()));
+        let mult = unit_multiplier(
+            rc.target_value_unit_multiplier
+                .as_ref()
+                .map(|u| u.uri.as_str()),
+        );
         let deadband = rc.target_deadband.unwrap_or(0.0);
 
         let uri = rc.mode.as_ref().map(|m| m.uri.as_str()).unwrap_or("");
         let (mode, target, deadband) = if uri.ends_with(".voltage") {
             let base = buses[controlled_bus].u_rated;
-            (RegulationMode::Voltage, target * mult / base, deadband * mult / base)
+            (
+                RegulationMode::Voltage,
+                target * mult / base,
+                deadband * mult / base,
+            )
         } else if uri.ends_with(".activePower") {
             let Some(&(branch, terminal)) = flow_of.get(term_ref.mrid.as_str()) else {
                 report.unresolved_flow += 1;
@@ -2572,15 +3295,39 @@ fn read_tap_regulation(
 /// `tap_side`-dependent reciprocal treatment, needed because
 /// `network::branch_calc_param` always scales the `from` side by `1/tap²`.
 fn build_two_winding(
-    ds: &CimDataset, tap_index: &TapChangerIndex, terms: &TerminalIndex, buses: &[Bus],
-    pt_mrid: &str, end1: &PowerTransformerEnd, end2: &PowerTransformerEnd, s_base_va: f64,
+    ds: &CimDataset,
+    tap_index: &TapChangerIndex,
+    terms: &TerminalIndex,
+    buses: &[Bus],
+    pt_mrid: &str,
+    end1: &PowerTransformerEnd,
+    end2: &PowerTransformerEnd,
+    s_base_va: f64,
 ) -> Result<(Transformer, Option<crate::types::TapChanger>), CgmesError> {
-    let term1 = end1.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end1.mrid_str(), "Terminal"))?;
-    let term2 = end2.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end2.mrid_str(), "Terminal"))?;
-    let bus1 = terms.bus_via_terminal_mrid(&term1.mrid)
-        .ok_or_else(|| CgmesError::UnresolvedReference { from_type: "PowerTransformerEnd", from_mrid: end1.mrid_str().to_string(), field: "Terminal.TopologicalNode" })?;
-    let bus2 = terms.bus_via_terminal_mrid(&term2.mrid)
-        .ok_or_else(|| CgmesError::UnresolvedReference { from_type: "PowerTransformerEnd", from_mrid: end2.mrid_str().to_string(), field: "Terminal.TopologicalNode" })?;
+    let term1 = end1
+        .base
+        .terminal
+        .as_ref()
+        .ok_or_else(|| missing("PowerTransformerEnd", end1.mrid_str(), "Terminal"))?;
+    let term2 = end2
+        .base
+        .terminal
+        .as_ref()
+        .ok_or_else(|| missing("PowerTransformerEnd", end2.mrid_str(), "Terminal"))?;
+    let bus1 = terms.bus_via_terminal_mrid(&term1.mrid).ok_or_else(|| {
+        CgmesError::UnresolvedReference {
+            from_type: "PowerTransformerEnd",
+            from_mrid: end1.mrid_str().to_string(),
+            field: "Terminal.TopologicalNode",
+        }
+    })?;
+    let bus2 = terms.bus_via_terminal_mrid(&term2.mrid).ok_or_else(|| {
+        CgmesError::UnresolvedReference {
+            from_type: "PowerTransformerEnd",
+            from_mrid: end2.mrid_str().to_string(),
+            field: "Terminal.TopologicalNode",
+        }
+    })?;
 
     let tap1 = tap_index.effect_for_end(ds, end1.mrid_str(), end1.x.unwrap_or(0.0))?;
     let tap2 = tap_index.effect_for_end(ds, end2.mrid_str(), end2.x.unwrap_or(0.0))?;
@@ -2592,8 +3339,9 @@ fn build_two_winding(
         (Some(_), Some(_)) => {
             return Err(CgmesError::UnsupportedTransformer {
                 mrid: pt_mrid.to_string(),
-                reason: "tap changers on both ends of a 2-winding transformer aren't supported".into(),
-            })
+                reason: "tap changers on both ends of a 2-winding transformer aren't supported"
+                    .into(),
+            });
         }
         (Some(t1), None) => (Complex::new(1.0, 0.0) / t1.tap, t1.x_override),
         (None, Some(t2)) => (t2.tap, None),
@@ -2615,12 +3363,16 @@ fn build_two_winding(
     if r1 == 0.0 && x1 == 0.0 {
         return Err(CgmesError::UnsupportedTransformer {
             mrid: pt_mrid.to_string(),
-            reason: "end 1 has zero series impedance (expected all series impedance on end 1)".into(),
+            reason: "end 1 has zero series impedance (expected all series impedance on end 1)"
+                .into(),
         });
     }
     let g1 = end1.g.unwrap_or(0.0);
     let b1 = end1.b.unwrap_or(0.0);
-    let u1 = end1.rated_u.ok_or_else(|| missing("PowerTransformerEnd", end1.mrid_str(), "ratedU"))? * 1e3;
+    let u1 = end1
+        .rated_u
+        .ok_or_else(|| missing("PowerTransformerEnd", end1.mrid_str(), "ratedU"))?
+        * 1e3;
     let z_base = u1 * u1 / s_base_va;
     // Structural ratio: each end's own nameplate `ratedU` against the system
     // base voltage of the bus it actually sits on. Both ends contribute, and
@@ -2645,22 +3397,42 @@ fn build_two_winding(
     let structural_1 = u1 / buses[bus1].u_rated;
     // A missing end2 `ratedU` means "no nameplate of its own to disagree with",
     // i.e. a unity contribution — not an error, since end2 carries no impedance.
-    let structural_2 = end2.rated_u.map_or(1.0, |u2| (u2 * 1e3) / buses[bus2].u_rated);
+    let structural_2 = end2
+        .rated_u
+        .map_or(1.0, |u2| (u2 * 1e3) / buses[bus2].u_rated);
     let structural = structural_1 / structural_2;
     let tap = tap / structural;
 
     // The whole table, composed exactly as the current step above was, so that
     // reading position `step` back out of it reproduces `tap` bit for bit.
-    let end_mrid = if on_end1 { end1.mrid_str() } else { end2.mrid_str() };
-    let xtx = if on_end1 { end1.x.unwrap_or(0.0) } else { end2.x.unwrap_or(0.0) };
+    let end_mrid = if on_end1 {
+        end1.mrid_str()
+    } else {
+        end2.mrid_str()
+    };
+    let xtx = if on_end1 {
+        end1.x.unwrap_or(0.0)
+    } else {
+        end2.x.unwrap_or(0.0)
+    };
     let changer = tap_index.steps_for_end(ds, end_mrid, xtx)?.map(|raw| {
         raw.compose(
-            |t| if on_end1 { Complex::new(1.0, 0.0) / t / structural } else { t / structural },
+            |t| {
+                if on_end1 {
+                    Complex::new(1.0, 0.0) / t / structural
+                } else {
+                    t / structural
+                }
+            },
             |x| {
                 // An override on end 2 is dropped by the match above, which is
                 // this branch's own convention: only end 1 carries series
                 // impedance, so only a changer there can move it.
-                let x = if on_end1 { x.unwrap_or_else(|| end1.x.unwrap_or(0.0)) } else { x1 };
+                let x = if on_end1 {
+                    x.unwrap_or_else(|| end1.x.unwrap_or(0.0))
+                } else {
+                    x1
+                };
                 Complex::new(z_base, 0.0) / Complex::new(r1, x)
             },
         )
@@ -2688,12 +3460,27 @@ fn build_two_winding(
 /// nameplate style which needs `three_winding_star_params`'s common-base
 /// conversion), `from` = the synthesized star bus.
 fn build_star_leg(
-    ds: &CimDataset, tap_index: &TapChangerIndex, terms: &TerminalIndex, buses: &[Bus],
-    end: &PowerTransformerEnd, star_idx: usize, s_base_va: f64,
+    ds: &CimDataset,
+    tap_index: &TapChangerIndex,
+    terms: &TerminalIndex,
+    buses: &[Bus],
+    end: &PowerTransformerEnd,
+    star_idx: usize,
+    s_base_va: f64,
 ) -> Result<(Transformer, Option<crate::types::TapChanger>), CgmesError> {
-    let term = end.base.terminal.as_ref().ok_or_else(|| missing("PowerTransformerEnd", end.mrid_str(), "Terminal"))?;
-    let bus = terms.bus_via_terminal_mrid(&term.mrid)
-        .ok_or_else(|| CgmesError::UnresolvedReference { from_type: "PowerTransformerEnd", from_mrid: end.mrid_str().to_string(), field: "Terminal.TopologicalNode" })?;
+    let term = end
+        .base
+        .terminal
+        .as_ref()
+        .ok_or_else(|| missing("PowerTransformerEnd", end.mrid_str(), "Terminal"))?;
+    let bus =
+        terms
+            .bus_via_terminal_mrid(&term.mrid)
+            .ok_or_else(|| CgmesError::UnresolvedReference {
+                from_type: "PowerTransformerEnd",
+                from_mrid: end.mrid_str().to_string(),
+                field: "Terminal.TopologicalNode",
+            })?;
 
     let effect = tap_index.effect_for_end(ds, end.mrid_str(), end.x.unwrap_or(0.0))?;
     let (tap, x_override) = match effect {
@@ -2708,20 +3495,25 @@ fn build_star_leg(
     let x = x_override.unwrap_or_else(|| end.x.unwrap_or(0.0));
     let g = end.g.unwrap_or(0.0);
     let b = end.b.unwrap_or(0.0);
-    let u = end.rated_u.ok_or_else(|| missing("PowerTransformerEnd", end.mrid_str(), "ratedU"))? * 1e3;
+    let u = end
+        .rated_u
+        .ok_or_else(|| missing("PowerTransformerEnd", end.mrid_str(), "ratedU"))?
+        * 1e3;
     let z_base = u * u / s_base_va;
     let structural = u / buses[bus].u_rated;
     let tap = tap / structural;
 
-    let changer = tap_index.steps_for_end(ds, end.mrid_str(), end.x.unwrap_or(0.0))?.map(|raw| {
-        raw.compose(
-            |t| Complex::new(1.0, 0.0) / t / structural,
-            |xo| {
-                let x = xo.unwrap_or_else(|| end.x.unwrap_or(0.0));
-                Complex::new(z_base, 0.0) / Complex::new(r, x)
-            },
-        )
-    });
+    let changer = tap_index
+        .steps_for_end(ds, end.mrid_str(), end.x.unwrap_or(0.0))?
+        .map(|raw| {
+            raw.compose(
+                |t| Complex::new(1.0, 0.0) / t / structural,
+                |xo| {
+                    let x = xo.unwrap_or_else(|| end.x.unwrap_or(0.0));
+                    Complex::new(z_base, 0.0) / Complex::new(r, x)
+                },
+            )
+        });
 
     Ok((
         Transformer {
@@ -2817,7 +3609,14 @@ fn equipment_in_service(in_service: Option<bool>, normally_in_service: Option<bo
 /// gives an absurd ~50,000 MW "loss" at FullGrid's real Idc values (hundreds
 /// of amps) — confirming the coefficients are meant to be applied to a
 /// per-unit, not raw-Amp, current.
-fn converter_loss_mw(idle: f64, switching: f64, resistive: f64, base_s: f64, rated_udc: f64, idc_amps: f64) -> f64 {
+fn converter_loss_mw(
+    idle: f64,
+    switching: f64,
+    resistive: f64,
+    base_s: f64,
+    rated_udc: f64,
+    idc_amps: f64,
+) -> f64 {
     let i_base = base_s * 1000.0 / rated_udc;
     let idc_pu = if i_base > 0.0 { idc_amps / i_base } else { 0.0 };
     idle + switching * idc_pu.abs() + resistive * idc_pu * idc_pu
@@ -2840,25 +3639,62 @@ enum ConverterRole {
 }
 
 fn classify_vs_converter(vc: &VsConverter, mrid: &str) -> Result<ConverterRole, CgmesError> {
-    let suffix = vc.p_pcc_control.as_ref().and_then(|u| u.uri.rsplit('.').next());
+    let suffix = vc
+        .p_pcc_control
+        .as_ref()
+        .and_then(|u| u.uri.rsplit('.').next());
     match suffix {
-        Some("udc") => Ok(ConverterRole::UdcSlack(vc.base.target_udc.ok_or_else(|| missing("VsConverter", mrid, "targetUdc"))?)),
-        Some("pPcc") => Ok(ConverterRole::FixedAc(vc.base.target_ppcc.ok_or_else(|| missing("VsConverter", mrid, "targetPpcc"))?)),
-        other => Err(CgmesError::UnsupportedConverterControl { mrid: mrid.to_string(), mode: other.unwrap_or("(none)").to_string() }),
+        Some("udc") => {
+            Ok(ConverterRole::UdcSlack(vc.base.target_udc.ok_or_else(
+                || missing("VsConverter", mrid, "targetUdc"),
+            )?))
+        }
+        Some("pPcc") => {
+            Ok(ConverterRole::FixedAc(vc.base.target_ppcc.ok_or_else(
+                || missing("VsConverter", mrid, "targetPpcc"),
+            )?))
+        }
+        other => Err(CgmesError::UnsupportedConverterControl {
+            mrid: mrid.to_string(),
+            mode: other.unwrap_or("(none)").to_string(),
+        }),
     }
 }
 
 fn classify_cs_converter(cc: &CsConverter, mrid: &str) -> Result<ConverterRole, CgmesError> {
-    let suffix = cc.p_pcc_control.as_ref().and_then(|u| u.uri.rsplit('.').next());
+    let suffix = cc
+        .p_pcc_control
+        .as_ref()
+        .and_then(|u| u.uri.rsplit('.').next());
     match suffix {
-        Some("dcVoltage") => Ok(ConverterRole::UdcSlack(cc.base.target_udc.ok_or_else(|| missing("CsConverter", mrid, "targetUdc"))?)),
-        Some("dcCurrent") => {
-            let idc = cc.target_idc.ok_or_else(|| missing("CsConverter", mrid, "targetIdc"))?;
-            let is_rectifier = cc.operating_mode.as_ref().is_some_and(|m| m.uri.ends_with(".rectifier"));
-            Ok(ConverterRole::FixedIdc(if is_rectifier { idc } else { -idc }))
+        Some("dcVoltage") => {
+            Ok(ConverterRole::UdcSlack(cc.base.target_udc.ok_or_else(
+                || missing("CsConverter", mrid, "targetUdc"),
+            )?))
         }
-        Some("activePower") => Ok(ConverterRole::FixedAc(cc.base.target_ppcc.ok_or_else(|| missing("CsConverter", mrid, "targetPpcc"))?)),
-        other => Err(CgmesError::UnsupportedConverterControl { mrid: mrid.to_string(), mode: other.unwrap_or("(none)").to_string() }),
+        Some("dcCurrent") => {
+            let idc = cc
+                .target_idc
+                .ok_or_else(|| missing("CsConverter", mrid, "targetIdc"))?;
+            let is_rectifier = cc
+                .operating_mode
+                .as_ref()
+                .is_some_and(|m| m.uri.ends_with(".rectifier"));
+            Ok(ConverterRole::FixedIdc(if is_rectifier {
+                idc
+            } else {
+                -idc
+            }))
+        }
+        Some("activePower") => {
+            Ok(ConverterRole::FixedAc(cc.base.target_ppcc.ok_or_else(
+                || missing("CsConverter", mrid, "targetPpcc"),
+            )?))
+        }
+        other => Err(CgmesError::UnsupportedConverterControl {
+            mrid: mrid.to_string(),
+            mode: other.unwrap_or("(none)").to_string(),
+        }),
     }
 }
 
@@ -2889,10 +3725,14 @@ impl DcTerminalIndex {
         let mut raw: HashMap<String, Vec<(i64, String)>> = HashMap::new();
         let mut bus_of = HashMap::new();
         for t_mrid in by_type(ds, "DCTerminal") {
-            let Some(t) = get::<DCTerminal>(ds, t_mrid) else { continue };
+            let Some(t) = get::<DCTerminal>(ds, t_mrid) else {
+                continue;
+            };
             if let Some(ce) = &t.dc_conducting_equipment {
                 let seq = t.base.base.sequence_number.unwrap_or(1);
-                raw.entry(ce.mrid.clone()).or_default().push((seq, t_mrid.clone()));
+                raw.entry(ce.mrid.clone())
+                    .or_default()
+                    .push((seq, t_mrid.clone()));
             }
             // Direct `DCTopologicalNode` reference, merged in from the TP
             // profile onto the same terminal mrid — confirmed present on
@@ -2906,11 +3746,17 @@ impl DcTerminalIndex {
                 }
             }
         }
-        let by_equipment = raw.into_iter().map(|(eq, mut v)| {
-            v.sort_by_key(|(seq, _)| *seq);
-            (eq, v.into_iter().map(|(_, m)| m).collect())
-        }).collect();
-        DcTerminalIndex { by_equipment, bus_of }
+        let by_equipment = raw
+            .into_iter()
+            .map(|(eq, mut v)| {
+                v.sort_by_key(|(seq, _)| *seq);
+                (eq, v.into_iter().map(|(_, m)| m).collect())
+            })
+            .collect();
+        DcTerminalIndex {
+            by_equipment,
+            bus_of,
+        }
     }
 
     /// The two DC buses a two-terminal piece of DC equipment connects, in
@@ -2963,7 +3809,9 @@ pub struct DcResolution {
 /// own converters have static, non-dynamic Q targets, so this doesn't cost
 /// accuracy in the fixture used to validate this function.
 pub fn cgmes_resolve_dc_converters(
-    ds: &CimDataset, buses: &mut [Bus], s_base_va: f64,
+    ds: &CimDataset,
+    buses: &mut [Bus],
+    s_base_va: f64,
 ) -> Result<Option<DcResolution>, CgmesError> {
     let dctn_mrids = by_type(ds, "DCTopologicalNode");
     if dctn_mrids.is_empty() {
@@ -2983,11 +3831,20 @@ pub fn cgmes_resolve_dc_converters(
     // caller's own already-merged `buses`.
     let (_, _, ac_terms) = build_ac_bus_skeleton(ds)?;
 
-    let dc_idx_of: HashMap<String, usize> = dctn_mrids.iter().enumerate()
-        .map(|(i, mrid)| (mrid.clone(), i)).collect();
-    let mut dc_buses: Vec<DcBus> = (0..dctn_mrids.len()).map(|idx| DcBus {
-        idx, role: DcBusRole::Passive, udc_fixed: 0.0, voltage: 0.0, shunt_g: 0.0,
-    }).collect();
+    let dc_idx_of: HashMap<String, usize> = dctn_mrids
+        .iter()
+        .enumerate()
+        .map(|(i, mrid)| (mrid.clone(), i))
+        .collect();
+    let mut dc_buses: Vec<DcBus> = (0..dctn_mrids.len())
+        .map(|idx| DcBus {
+            idx,
+            role: DcBusRole::Passive,
+            udc_fixed: 0.0,
+            voltage: 0.0,
+            shunt_g: 0.0,
+        })
+        .collect();
 
     let terms = DcTerminalIndex::build(ds, &dc_idx_of);
 
@@ -2995,35 +3852,77 @@ pub fn cgmes_resolve_dc_converters(
     let mut dc_lines: Vec<DcLine> = Vec::new();
     for mrid in by_type(ds, "DCLineSegment") {
         let seg: &DCLineSegment = require(ds, mrid, "DCLineSegment", mrid, "(self)")?;
-        if !equipment_in_service(seg.base.base.in_service, seg.base.base.normally_in_service) { continue }
-        let Some((a, b)) = terms.line(mrid) else { continue };
-        let r = seg.resistance.ok_or_else(|| missing("DCLineSegment", mrid, "resistance"))?;
+        if !equipment_in_service(seg.base.base.in_service, seg.base.base.normally_in_service) {
+            continue;
+        }
+        let Some((a, b)) = terms.line(mrid) else {
+            continue;
+        };
+        let r = seg
+            .resistance
+            .ok_or_else(|| missing("DCLineSegment", mrid, "resistance"))?;
         dc_lines.push(DcLine { from: a, to: b, r });
     }
     for mrid in by_type(ds, "DCSeriesDevice") {
         let dev: &DCSeriesDevice = require(ds, mrid, "DCSeriesDevice", mrid, "(self)")?;
-        if !equipment_in_service(dev.base.base.in_service, dev.base.base.normally_in_service) { continue }
-        let Some((a, b)) = terms.line(mrid) else { continue };
-        let r = dev.resistance.ok_or_else(|| missing("DCSeriesDevice", mrid, "resistance"))?;
+        if !equipment_in_service(dev.base.base.in_service, dev.base.base.normally_in_service) {
+            continue;
+        }
+        let Some((a, b)) = terms.line(mrid) else {
+            continue;
+        };
+        let r = dev
+            .resistance
+            .ok_or_else(|| missing("DCSeriesDevice", mrid, "resistance"))?;
         dc_lines.push(DcLine { from: a, to: b, r });
     }
     for mrid in by_type(ds, "DCBreaker") {
         let br: &DCBreaker = require(ds, mrid, "DCBreaker", mrid, "(self)")?;
-        if !equipment_in_service(br.base.base.base.in_service, br.base.base.base.normally_in_service) { continue }
-        let Some((a, b)) = terms.line(mrid) else { continue };
-        dc_lines.push(DcLine { from: a, to: b, r: DC_SWITCH_R });
+        if !equipment_in_service(
+            br.base.base.base.in_service,
+            br.base.base.base.normally_in_service,
+        ) {
+            continue;
+        }
+        let Some((a, b)) = terms.line(mrid) else {
+            continue;
+        };
+        dc_lines.push(DcLine {
+            from: a,
+            to: b,
+            r: DC_SWITCH_R,
+        });
     }
     for mrid in by_type(ds, "DCDisconnector") {
         let dc: &DCDisconnector = require(ds, mrid, "DCDisconnector", mrid, "(self)")?;
-        if !equipment_in_service(dc.base.base.base.in_service, dc.base.base.base.normally_in_service) { continue }
-        let Some((a, b)) = terms.line(mrid) else { continue };
-        dc_lines.push(DcLine { from: a, to: b, r: DC_SWITCH_R });
+        if !equipment_in_service(
+            dc.base.base.base.in_service,
+            dc.base.base.base.normally_in_service,
+        ) {
+            continue;
+        }
+        let Some((a, b)) = terms.line(mrid) else {
+            continue;
+        };
+        dc_lines.push(DcLine {
+            from: a,
+            to: b,
+            r: DC_SWITCH_R,
+        });
     }
     for mrid in by_type(ds, "DCSwitch") {
         let sw: &DCSwitch = require(ds, mrid, "DCSwitch", mrid, "(self)")?;
-        if !equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service) { continue }
-        let Some((a, b)) = terms.line(mrid) else { continue };
-        dc_lines.push(DcLine { from: a, to: b, r: DC_SWITCH_R });
+        if !equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service) {
+            continue;
+        }
+        let Some((a, b)) = terms.line(mrid) else {
+            continue;
+        };
+        dc_lines.push(DcLine {
+            from: a,
+            to: b,
+            r: DC_SWITCH_R,
+        });
     }
 
     // --- DCGround (fixes its bus at 0 kV) / DCShunt (adds shunt conductance) ---
@@ -3035,8 +3934,12 @@ pub fn cgmes_resolve_dc_converters(
     // already out of service and gets isolated by dead-subgraph detection.
     for mrid in by_type(ds, "DCGround") {
         let g: &DCGround = require(ds, mrid, "DCGround", mrid, "(self)")?;
-        if !equipment_in_service(g.base.base.in_service, g.base.base.normally_in_service) { continue }
-        let Some(bus) = terms.single_bus(mrid) else { continue };
+        if !equipment_in_service(g.base.base.in_service, g.base.base.normally_in_service) {
+            continue;
+        }
+        let Some(bus) = terms.single_bus(mrid) else {
+            continue;
+        };
         // `DCGround.r` (a real grounding resistance) is 0 in every FullGrid
         // instance; a nonzero value isn't modeled as a resistor-to-earth
         // here (there's no separate "earth" bus in this graph) — a known
@@ -3046,8 +3949,12 @@ pub fn cgmes_resolve_dc_converters(
     }
     for mrid in by_type(ds, "DCShunt") {
         let sh: &DCShunt = require(ds, mrid, "DCShunt", mrid, "(self)")?;
-        if !equipment_in_service(sh.base.base.in_service, sh.base.base.normally_in_service) { continue }
-        let Some(bus) = terms.single_bus(mrid) else { continue };
+        if !equipment_in_service(sh.base.base.in_service, sh.base.base.normally_in_service) {
+            continue;
+        }
+        let Some(bus) = terms.single_bus(mrid) else {
+            continue;
+        };
         if let Some(r) = sh.resistance {
             if r != 0.0 {
                 dc_buses[bus].shunt_g += 1.0 / r;
@@ -3058,10 +3965,19 @@ pub fn cgmes_resolve_dc_converters(
     // --- Converters: resolve each to its own positive-pole DC bus ---
     let mut positive_pole_of: HashMap<String, usize> = HashMap::new();
     for t_mrid in by_type(ds, "ACDCConverterDCTerminal") {
-        let Some(t) = get::<ACDCConverterDCTerminal>(ds, t_mrid) else { continue };
-        let is_positive = t.polarity.as_ref().is_some_and(|p| p.uri.ends_with(".positive"));
-        if !is_positive { continue }
-        let (Some(ce), Some(tn)) = (&t.dc_conducting_equipment, &t.base.dc_topological_node) else { continue };
+        let Some(t) = get::<ACDCConverterDCTerminal>(ds, t_mrid) else {
+            continue;
+        };
+        let is_positive = t
+            .polarity
+            .as_ref()
+            .is_some_and(|p| p.uri.ends_with(".positive"));
+        if !is_positive {
+            continue;
+        }
+        let (Some(ce), Some(tn)) = (&t.dc_conducting_equipment, &t.base.dc_topological_node) else {
+            continue;
+        };
         if let Some(&bus) = dc_idx_of.get(&tn.mrid) {
             positive_pole_of.insert(ce.mrid.clone(), bus);
         }
@@ -3075,35 +3991,65 @@ pub fn cgmes_resolve_dc_converters(
     let mut converters: Vec<ConverterInfo> = Vec::new();
     for mrid in by_type(ds, "VsConverter") {
         let vc: &VsConverter = require(ds, mrid, "VsConverter", mrid, "(self)")?;
-        let Some(&dc_bus) = positive_pole_of.get(mrid) else { continue };
-        let Some(ac_bus) = vc.base.pcc_terminal.as_ref()
+        let Some(&dc_bus) = positive_pole_of.get(mrid) else {
+            continue;
+        };
+        let Some(ac_bus) = vc
+            .base
+            .pcc_terminal
+            .as_ref()
             .and_then(|r| ac_terms.bus_via_terminal_mrid(&r.mrid))
-            .or_else(|| ac_terms.bus(mrid, 0)) else { continue };
+            .or_else(|| ac_terms.bus(mrid, 0))
+        else {
+            continue;
+        };
         converters.push(ConverterInfo {
-            ac_bus, dc_bus,
+            ac_bus,
+            dc_bus,
             role: classify_vs_converter(vc, mrid)?,
             idle_loss: vc.base.idle_loss.unwrap_or(0.0),
             switching_loss: vc.base.switching_loss.unwrap_or(0.0),
             resistive_loss: vc.base.resistive_loss.unwrap_or(0.0),
-            base_s: vc.base.base_s.ok_or_else(|| missing("VsConverter", mrid, "baseS"))?,
-            rated_udc: vc.base.rated_udc.ok_or_else(|| missing("VsConverter", mrid, "ratedUdc"))?,
+            base_s: vc
+                .base
+                .base_s
+                .ok_or_else(|| missing("VsConverter", mrid, "baseS"))?,
+            rated_udc: vc
+                .base
+                .rated_udc
+                .ok_or_else(|| missing("VsConverter", mrid, "ratedUdc"))?,
             q_mw: vc.base.q.unwrap_or(0.0),
         });
     }
     for mrid in by_type(ds, "CsConverter") {
         let cc: &CsConverter = require(ds, mrid, "CsConverter", mrid, "(self)")?;
-        let Some(&dc_bus) = positive_pole_of.get(mrid) else { continue };
-        let Some(ac_bus) = cc.base.pcc_terminal.as_ref()
+        let Some(&dc_bus) = positive_pole_of.get(mrid) else {
+            continue;
+        };
+        let Some(ac_bus) = cc
+            .base
+            .pcc_terminal
+            .as_ref()
             .and_then(|r| ac_terms.bus_via_terminal_mrid(&r.mrid))
-            .or_else(|| ac_terms.bus(mrid, 0)) else { continue };
+            .or_else(|| ac_terms.bus(mrid, 0))
+        else {
+            continue;
+        };
         converters.push(ConverterInfo {
-            ac_bus, dc_bus,
+            ac_bus,
+            dc_bus,
             role: classify_cs_converter(cc, mrid)?,
             idle_loss: cc.base.idle_loss.unwrap_or(0.0),
             switching_loss: cc.base.switching_loss.unwrap_or(0.0),
             resistive_loss: cc.base.resistive_loss.unwrap_or(0.0),
-            base_s: cc.base.base_s.ok_or_else(|| missing("CsConverter", mrid, "baseS"))?,
-            rated_udc: cc.base.rated_udc.ok_or_else(|| missing("CsConverter", mrid, "ratedUdc"))?,
+            base_s: cc
+                .base
+                .base_s
+                .ok_or_else(|| missing("CsConverter", mrid, "baseS"))?,
+            rated_udc: cc
+                .base
+                .rated_udc
+                .ok_or_else(|| missing("CsConverter", mrid, "ratedUdc"))?,
             q_mw: cc.base.q.unwrap_or(0.0),
         });
     }
@@ -3119,7 +4065,9 @@ pub fn cgmes_resolve_dc_converters(
             // A/1000 -> kA, matching dc::solve_dc_network's implied units
             // (kV buses, Ω lines => kA currents, MW powers).
             ConverterRole::FixedIdc(idc_amps) => {
-                dc_buses[c.dc_bus].role = DcBusRole::FixedIdc { idc_spec: idc_amps / 1000.0 };
+                dc_buses[c.dc_bus].role = DcBusRole::FixedIdc {
+                    idc_spec: idc_amps / 1000.0,
+                };
             }
             ConverterRole::FixedAc(_) => {} // resolved below
         }
@@ -3133,11 +4081,22 @@ pub fn cgmes_resolve_dc_converters(
     // only unknown is the converter's own Idc, needed for the loss term,
     // which the DC solve itself produces. ---
     for c in &converters {
-        let ConverterRole::FixedAc(pac_absorbed_target) = c.role else { continue };
+        let ConverterRole::FixedAc(pac_absorbed_target) = c.role else {
+            continue;
+        };
         let mut idc_amps = 0.0;
         for _ in 0..20 {
-            let loss = converter_loss_mw(c.idle_loss, c.switching_loss, c.resistive_loss, c.base_s, c.rated_udc, idc_amps);
-            dc_buses[c.dc_bus].role = DcBusRole::FixedP { p_spec: pac_absorbed_target - loss };
+            let loss = converter_loss_mw(
+                c.idle_loss,
+                c.switching_loss,
+                c.resistive_loss,
+                c.base_s,
+                c.rated_udc,
+                idc_amps,
+            );
+            dc_buses[c.dc_bus].role = DcBusRole::FixedP {
+                p_spec: pac_absorbed_target - loss,
+            };
             let status = solve_dc_network(&mut dc_buses, &dc_lines, DC_SOLVE_TOL, 100);
             if !status.converged {
                 return Err(CgmesError::DcNetworkDidNotConverge);
@@ -3159,7 +4118,14 @@ pub fn cgmes_resolve_dc_converters(
     for c in &converters {
         let p_dc_injected = dc_buses[c.dc_bus].voltage * currents[c.dc_bus];
         let idc_amps = currents[c.dc_bus].abs() * 1000.0;
-        let loss = converter_loss_mw(c.idle_loss, c.switching_loss, c.resistive_loss, c.base_s, c.rated_udc, idc_amps);
+        let loss = converter_loss_mw(
+            c.idle_loss,
+            c.switching_loss,
+            c.resistive_loss,
+            c.base_s,
+            c.rated_udc,
+            idc_amps,
+        );
         let pac_absorbed = p_dc_injected + loss;
         buses[c.ac_bus].p_spec += -pac_absorbed * 1e6 / s_base_va;
         buses[c.ac_bus].q_spec += -c.q_mw * 1e6 / s_base_va;
@@ -3278,12 +4244,14 @@ pub fn cgmes_node_breaker_topology(ds: &CimDataset) -> Result<CgmesNodeBreaker, 
     let mut switch_mrids: Vec<String> = Vec::new();
 
     let add = |topology: &mut crate::topology::NodeBreakerTopology,
-                   switch_mrids: &mut Vec<String>,
-                   mrid: &String,
-                   kind: SwitchKind,
-                   in_service: bool,
-                   open: bool| {
-        let Some(terms) = terminals_of_equipment.get(mrid.as_str()) else { return };
+               switch_mrids: &mut Vec<String>,
+               mrid: &String,
+               kind: SwitchKind,
+               in_service: bool,
+               open: bool| {
+        let Some(terms) = terminals_of_equipment.get(mrid.as_str()) else {
+            return;
+        };
         if terms.len() < 2 {
             return;
         }
@@ -3304,50 +4272,152 @@ pub fn cgmes_node_breaker_topology(ds: &CimDataset) -> Result<CgmesNodeBreaker, 
 
     for mrid in by_type(ds, "Switch") {
         let sw: &cimstructs::Switch = require(ds, mrid, "Switch", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Generic, equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service), sw.open.unwrap_or(false));
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::Generic,
+            equipment_in_service(sw.base.base.in_service, sw.base.base.normally_in_service),
+            sw.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Breaker") {
         let br: &cimstructs::Breaker = require(ds, mrid, "Breaker", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Breaker, equipment_in_service(br.base.base.base.base.in_service, br.base.base.base.base.normally_in_service), br.base.base.open.unwrap_or(false));
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::Breaker,
+            equipment_in_service(
+                br.base.base.base.base.in_service,
+                br.base.base.base.base.normally_in_service,
+            ),
+            br.base.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "LoadBreakSwitch") {
-        let lbs: &cimstructs::LoadBreakSwitch = require(ds, mrid, "LoadBreakSwitch", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::LoadBreakSwitch, equipment_in_service(lbs.base.base.base.base.in_service, lbs.base.base.base.base.normally_in_service), lbs.base.base.open.unwrap_or(false));
+        let lbs: &cimstructs::LoadBreakSwitch =
+            require(ds, mrid, "LoadBreakSwitch", mrid, "(self)")?;
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::LoadBreakSwitch,
+            equipment_in_service(
+                lbs.base.base.base.base.in_service,
+                lbs.base.base.base.base.normally_in_service,
+            ),
+            lbs.base.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "DisconnectingCircuitBreaker") {
-        let dcb: &cimstructs::DisconnectingCircuitBreaker = require(ds, mrid, "DisconnectingCircuitBreaker", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::DisconnectingCircuitBreaker, equipment_in_service(dcb.base.base.base.base.base.in_service, dcb.base.base.base.base.base.normally_in_service), dcb.base.base.base.open.unwrap_or(false));
+        let dcb: &cimstructs::DisconnectingCircuitBreaker =
+            require(ds, mrid, "DisconnectingCircuitBreaker", mrid, "(self)")?;
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::DisconnectingCircuitBreaker,
+            equipment_in_service(
+                dcb.base.base.base.base.base.in_service,
+                dcb.base.base.base.base.base.normally_in_service,
+            ),
+            dcb.base.base.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Disconnector") {
         let d: &cimstructs::Disconnector = require(ds, mrid, "Disconnector", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Disconnector, equipment_in_service(d.base.base.base.in_service, d.base.base.base.normally_in_service), d.base.open.unwrap_or(false));
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::Disconnector,
+            equipment_in_service(
+                d.base.base.base.in_service,
+                d.base.base.base.normally_in_service,
+            ),
+            d.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "GroundDisconnector") {
-        let g: &cimstructs::GroundDisconnector = require(ds, mrid, "GroundDisconnector", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::GroundDisconnector, equipment_in_service(g.base.base.base.in_service, g.base.base.base.normally_in_service), g.base.open.unwrap_or(false));
+        let g: &cimstructs::GroundDisconnector =
+            require(ds, mrid, "GroundDisconnector", mrid, "(self)")?;
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::GroundDisconnector,
+            equipment_in_service(
+                g.base.base.base.in_service,
+                g.base.base.base.normally_in_service,
+            ),
+            g.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Jumper") {
         let j: &cimstructs::Jumper = require(ds, mrid, "Jumper", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Jumper, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), j.base.open.unwrap_or(false));
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::Jumper,
+            equipment_in_service(
+                j.base.base.base.in_service,
+                j.base.base.base.normally_in_service,
+            ),
+            j.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Cut") {
         let c: &cimstructs::Cut = require(ds, mrid, "Cut", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Cut, equipment_in_service(c.base.base.base.in_service, c.base.base.base.normally_in_service), c.base.open.unwrap_or(false));
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::Cut,
+            equipment_in_service(
+                c.base.base.base.in_service,
+                c.base.base.base.normally_in_service,
+            ),
+            c.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Fuse") {
         let f: &cimstructs::Fuse = require(ds, mrid, "Fuse", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Fuse, equipment_in_service(f.base.base.base.in_service, f.base.base.base.normally_in_service), f.base.open.unwrap_or(false));
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::Fuse,
+            equipment_in_service(
+                f.base.base.base.in_service,
+                f.base.base.base.normally_in_service,
+            ),
+            f.base.open.unwrap_or(false),
+        );
     }
     for mrid in by_type(ds, "Junction") {
         let j: &cimstructs::Junction = require(ds, mrid, "Junction", mrid, "(self)")?;
-        add(&mut topology, &mut switch_mrids, mrid, SwitchKind::Junction, equipment_in_service(j.base.base.base.in_service, j.base.base.base.normally_in_service), false);
+        add(
+            &mut topology,
+            &mut switch_mrids,
+            mrid,
+            SwitchKind::Junction,
+            equipment_in_service(
+                j.base.base.base.in_service,
+                j.base.base.base.normally_in_service,
+            ),
+            false,
+        );
     }
 
     // Busbars, for `RetentionPolicy::RetainAdjacentToBusbar`. A busbar section
     // is single-terminal equipment, so it contributes the node its one terminal
     // sits on.
     for mrid in by_type(ds, "BusbarSection") {
-        let Some(terms) = terminals_of_equipment.get(mrid.as_str()) else { continue };
+        let Some(terms) = terminals_of_equipment.get(mrid.as_str()) else {
+            continue;
+        };
         for &(_, t) in terms {
             if let Some(&node) = node_of_terminal.get(t) {
                 topology.busbars.push(NodeIdx(node));
@@ -3357,7 +4427,12 @@ pub fn cgmes_node_breaker_topology(ds: &CimDataset) -> Result<CgmesNodeBreaker, 
     topology.busbars.sort_unstable();
     topology.busbars.dedup();
 
-    Ok(CgmesNodeBreaker { topology, node_mrids, switch_mrids, tn_of_node })
+    Ok(CgmesNodeBreaker {
+        topology,
+        node_mrids,
+        switch_mrids,
+        tn_of_node,
+    })
 }
 
 /// A `ConnectivityNode`'s nominal voltage in volts, resolved through its
@@ -3406,7 +4481,13 @@ fn build_node_breaker_skeleton(
     ds: &CimDataset,
     policy: &crate::topology::RetentionPolicy,
 ) -> Result<
-    (Vec<Bus>, HashMap<String, usize>, TerminalIndex, CgmesNodeBreaker, crate::topology::BusView),
+    (
+        Vec<Bus>,
+        HashMap<String, usize>,
+        TerminalIndex,
+        CgmesNodeBreaker,
+        crate::topology::BusView,
+    ),
     CgmesError,
 > {
     use crate::topology::model::{BusIdx, NodeIdx};
@@ -3460,9 +4541,15 @@ fn build_node_breaker_skeleton(
         connected_of.insert(t_mrid.clone(), t.base.connected.unwrap_or(true));
         if let Some(ce) = &t.conducting_equipment {
             let seq = t.base.sequence_number.unwrap_or(1);
-            raw.entry(ce.mrid.clone()).or_default().push((seq, t_mrid.clone()));
+            raw.entry(ce.mrid.clone())
+                .or_default()
+                .push((seq, t_mrid.clone()));
         }
-        match t.connectivity_node.as_ref().and_then(|cn| node_of_cn.get(cn.mrid.as_str())) {
+        match t
+            .connectivity_node
+            .as_ref()
+            .and_then(|cn| node_of_cn.get(cn.mrid.as_str()))
+        {
             Some(&node) => {
                 bus_of.insert(t_mrid.clone(), view.bus_of(NodeIdx(node)).0);
             }
@@ -3506,7 +4593,17 @@ fn build_node_breaker_skeleton(
         }
     }
 
-    Ok((buses, idx_of, TerminalIndex { by_equipment, bus_of, connected_of }, nb, view))
+    Ok((
+        buses,
+        idx_of,
+        TerminalIndex {
+            by_equipment,
+            bus_of,
+            connected_of,
+        },
+        nb,
+        view,
+    ))
 }
 
 /// Converts a CGMES dataset into a **node-breaker** network: buses from
@@ -3536,7 +4633,13 @@ pub fn cgmes_node_breaker_to_buses_and_branches(
     // model's own transformers, so the tap tables — which are parallel to the
     // model's transformers only — are dropped here rather than handed on
     // misaligned. Tap control over a node-breaker view is not wired up.
-    let CgmesNetwork { buses, lines, transformers, shunts, .. } = converted;
+    let CgmesNetwork {
+        buses,
+        lines,
+        transformers,
+        shunts,
+        ..
+    } = converted;
     // Conversion appends buses of its own — a three-winding transformer's star
     // point, chiefly. Nothing terminates on those by construction, which is
     // what `true` says: they are the textbook zero-injection bus.
@@ -3592,12 +4695,15 @@ impl EquipmentLimits {
     /// The tightest permanent rating over every terminal — the single number to
     /// use when a caller has one branch and no side in mind.
     pub fn tightest_patl(&self) -> Option<f64> {
-        self.terminals.iter().filter_map(|t| t.patl_a).fold(None, |acc, v| {
-            Some(match acc {
-                Some(a) => f64::min(a, v),
-                None => v,
+        self.terminals
+            .iter()
+            .filter_map(|t| t.patl_a)
+            .fold(None, |acc, v| {
+                Some(match acc {
+                    Some(a) => f64::min(a, v),
+                    None => v,
+                })
             })
-        })
     }
 }
 
@@ -3639,8 +4745,12 @@ pub fn cgmes_operational_limits(
     let mut position_of: HashMap<String, (String, usize)> = HashMap::new();
     let mut by_equipment: HashMap<String, Vec<(i64, String)>> = HashMap::new();
     for mrid in by_type(ds, "Terminal") {
-        let Some(t) = get::<Terminal>(ds, mrid) else { continue };
-        let Some(ce) = t.conducting_equipment.as_ref() else { continue };
+        let Some(t) = get::<Terminal>(ds, mrid) else {
+            continue;
+        };
+        let Some(ce) = t.conducting_equipment.as_ref() else {
+            continue;
+        };
         by_equipment
             .entry(ce.mrid.clone())
             .or_default()
@@ -3659,7 +4769,9 @@ pub fn cgmes_operational_limits(
     // equipment rather than a terminal covers all of them.
     let mut set_targets: HashMap<String, (String, Vec<usize>)> = HashMap::new();
     for mrid in by_type(ds, "OperationalLimitSet") {
-        let Some(set) = get::<OperationalLimitSet>(ds, mrid) else { continue };
+        let Some(set) = get::<OperationalLimitSet>(ds, mrid) else {
+            continue;
+        };
         if let Some(t) = set.terminal.as_ref() {
             if let Some((equipment, which)) = position_of.get(&t.mrid) {
                 set_targets.insert(mrid.clone(), (equipment.clone(), vec![*which]));
@@ -3678,7 +4790,9 @@ pub fn cgmes_operational_limits(
     let mut report = LimitImportReport::default();
 
     for mrid in by_type(ds, "CurrentLimit") {
-        let Some(limit) = get::<CurrentLimit>(ds, mrid) else { continue };
+        let Some(limit) = get::<CurrentLimit>(ds, mrid) else {
+            continue;
+        };
         let Some(value) = limit.value.or(limit.normal_value) else {
             report.without_value += 1;
             continue;
@@ -3700,7 +4814,10 @@ pub fn cgmes_operational_limits(
                             .kind
                             .as_ref()
                             .is_some_and(|k| k.mrid.rsplit('.').next() == Some("patl"));
-                    (kind.acceptable_duration, patl || kind.acceptable_duration.is_none())
+                    (
+                        kind.acceptable_duration,
+                        patl || kind.acceptable_duration.is_none(),
+                    )
                 }
                 None => (None, true),
             },
@@ -3803,10 +4920,18 @@ mod voltage_control_tests {
         let mut vc = VoltageControl::new(2);
         vc.regulate(&mut buses, reg(1, 1.02, -2.0, 3.0, "a"));
         assert_eq!(buses[1].bus_type, BusType::PV);
-        assert_eq!((buses[1].q_min, buses[1].q_max), (-2.0, 3.0), "the first assigns");
+        assert_eq!(
+            (buses[1].q_min, buses[1].q_max),
+            (-2.0, 3.0),
+            "the first assigns"
+        );
 
         vc.regulate(&mut buses, reg(1, 1.02, -1.5, 4.0, "b"));
-        assert_eq!((buses[1].q_min, buses[1].q_max), (-3.5, 7.0), "the second adds");
+        assert_eq!(
+            (buses[1].q_min, buses[1].q_max),
+            (-3.5, 7.0),
+            "the second adds"
+        );
 
         let report = vc.finish(&buses);
         assert_eq!(report.regulated_buses, 1);
@@ -3858,7 +4983,10 @@ mod voltage_control_tests {
         let report = vc.finish(&buses);
         assert_eq!(report.target_conflicts.len(), 1);
         let c = &report.target_conflicts[0];
-        assert_eq!((c.bus, c.existing, c.proposed, c.id.as_str()), (0, 1.02, 1.06, "second"));
+        assert_eq!(
+            (c.bus, c.existing, c.proposed, c.id.as_str()),
+            (0, 1.02, 1.06, "second")
+        );
         // And the limits summed regardless — a disagreement about the target
         // says nothing about the machines' capability.
         assert_eq!((buses[0].q_min, buses[0].q_max), (-2.0, 2.0));

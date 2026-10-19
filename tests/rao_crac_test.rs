@@ -29,7 +29,10 @@ fn read(name: &str) -> (Crac, crac_json::CracReport) {
 }
 
 fn all_fixtures() -> Vec<String> {
-    openrao::names_with_extension("json").into_iter().map(str::to_string).collect()
+    openrao::names_with_extension("json")
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -39,7 +42,10 @@ fn all_fixtures() -> Vec<String> {
 #[test]
 fn every_vendored_format_version_reads() {
     let names = all_fixtures();
-    assert!(names.len() >= 4, "expected several fixtures, found {names:?}");
+    assert!(
+        names.len() >= 4,
+        "expected several fixtures, found {names:?}"
+    );
     let mut versions: Vec<String> = Vec::new();
     for name in &names {
         let (crac, report) = read(name);
@@ -51,7 +57,10 @@ fn every_vendored_format_version_reads() {
     }
     versions.sort();
     versions.dedup();
-    assert!(versions.len() >= 4, "expected several format versions, saw {versions:?}");
+    assert!(
+        versions.len() >= 4,
+        "expected several format versions, saw {versions:?}"
+    );
 }
 
 /// OpenRAO writes bare `NaN` for an absent rated current, which is not valid
@@ -64,7 +73,10 @@ fn every_vendored_format_version_reads() {
 #[test]
 fn bare_nan_literals_do_not_stop_the_parse() {
     let raw = std::fs::read_to_string(fixture("crac-v2.6.json")).expect("fixture");
-    assert!(raw.contains("NaN"), "this fixture is supposed to contain NaN");
+    assert!(
+        raw.contains("NaN"),
+        "this fixture is supposed to contain NaN"
+    );
     assert!(
         serde_json::from_str::<serde_json::Value>(&raw).is_err(),
         "if this became valid JSON the test no longer proves anything"
@@ -85,7 +97,11 @@ fn neutralising_nan_leaves_strings_alone() {
     let (crac, _) = crac_json::parse(doc).expect("parse");
     assert_eq!(crac.flow_cnecs[0].id, "NaN cnec");
     assert_eq!(crac.flow_cnecs[0].network_element, "NaN Substation");
-    assert_eq!(crac.flow_cnecs[0].i_max, Some([None, None]), "NaN should read as absent");
+    assert_eq!(
+        crac.flow_cnecs[0].i_max,
+        Some([None, None]),
+        "NaN should read as absent"
+    );
 }
 
 #[test]
@@ -117,16 +133,26 @@ fn both_generations_of_usage_rule_spelling_are_read() {
 fn the_one_x_setpoint_spellings_are_read() {
     let (crac, report) = read("crac-for-rao-result-v1.8.json");
     let has_pst = crac.network_actions.iter().any(|a| {
-        a.elementary.iter().any(|e| matches!(e, ElementaryAction::PstTapPosition { .. }))
+        a.elementary
+            .iter()
+            .any(|e| matches!(e, ElementaryAction::PstTapPosition { .. }))
     });
     let has_injection = crac.network_actions.iter().any(|a| {
-        a.elementary.iter().any(|e| matches!(e, ElementaryAction::GeneratorSetpoint { .. }))
+        a.elementary
+            .iter()
+            .any(|e| matches!(e, ElementaryAction::GeneratorSetpoint { .. }))
     });
     assert!(has_pst, "no `pstSetpoints` action read");
     assert!(has_injection, "no `injectionSetpoints` action read");
     // And the detector must not report them as unknown any more.
-    assert!(!report.unknown_actions.contains_key("pstSetpoints"), "{report:?}");
-    assert!(!report.unknown_actions.contains_key("injectionSetpoints"), "{report:?}");
+    assert!(
+        !report.unknown_actions.contains_key("pstSetpoints"),
+        "{report:?}"
+    );
+    assert!(
+        !report.unknown_actions.contains_key("injectionSetpoints"),
+        "{report:?}"
+    );
 }
 
 /// A PST set-point in 1.x is a **tap position**, not an angle.
@@ -144,7 +170,10 @@ fn a_pst_setpoint_is_read_as_a_tap_not_an_angle() {
         .expect("a PST action");
     // The fixture says 15 — a tap. Reading it as degrees would put the shifter
     // somewhere no tap changer reaches.
-    assert!(tap.abs() <= 100, "tap {tap} looks like an angle, not a position");
+    assert!(
+        tap.abs() <= 100,
+        "tap {tap} looks like an angle, not a position"
+    );
 }
 
 #[test]
@@ -161,7 +190,10 @@ fn an_unrecognised_action_is_counted_rather_than_ignored() {
             assert!(!dropped.is_empty(), "{name}: a dropped action had no id");
         }
     }
-    assert!(seen, "the fixture set should include at least one unmodelled action kind");
+    assert!(
+        seen,
+        "the fixture set should include at least one unmodelled action kind"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -174,18 +206,28 @@ fn several_curative_instants_are_representable() {
     // declares two curative instants; an enum could hold only one.
     let (crac, _) = read("crac-v2.6.json");
     let curative = crac.curative_instants();
-    assert!(curative.len() >= 2, "expected multi-curative, got {curative:?}");
+    assert!(
+        curative.len() >= 2,
+        "expected multi-curative, got {curative:?}"
+    );
     // And they stay in the order the file gave, since order is what sequences
     // the optimization.
     assert!(curative.windows(2).all(|w| w[0] < w[1]));
-    assert_eq!(crac.instants[crac.preventive_instant().unwrap()].kind, InstantKind::Preventive);
+    assert_eq!(
+        crac.instants[crac.preventive_instant().unwrap()].kind,
+        InstantKind::Preventive
+    );
 }
 
 #[test]
 fn cnecs_resolve_their_instant_and_contingency_to_indices() {
     let (crac, _) = read("crac-v2.6.json");
     for cnec in &crac.flow_cnecs {
-        assert!(cnec.state.instant < crac.instants.len(), "{}: bad instant", cnec.id);
+        assert!(
+            cnec.state.instant < crac.instants.len(),
+            "{}: bad instant",
+            cnec.id
+        );
         if let Some(c) = cnec.state.contingency {
             assert!(c < crac.contingencies.len(), "{}: bad contingency", cnec.id);
         }
@@ -193,9 +235,17 @@ fn cnecs_resolve_their_instant_and_contingency_to_indices() {
         // not. Getting this wrong silently optimizes the wrong perimeter.
         let kind = crac.instants[cnec.state.instant].kind;
         if kind == InstantKind::Preventive {
-            assert!(cnec.state.is_preventive(), "{}: preventive CNEC has a contingency", cnec.id);
+            assert!(
+                cnec.state.is_preventive(),
+                "{}: preventive CNEC has a contingency",
+                cnec.id
+            );
         } else {
-            assert!(cnec.state.contingency.is_some(), "{}: post-contingency CNEC has none", cnec.id);
+            assert!(
+                cnec.state.contingency.is_some(),
+                "{}: post-contingency CNEC has none",
+                cnec.id
+            );
         }
     }
 }
@@ -207,7 +257,10 @@ fn a_dangling_reference_is_an_error_rather_than_a_silent_drop() {
       "flowCnecs":[{"id":"x","networkElementId":"ne","instant":"nonexistent",
                     "thresholds":[{"unit":"ampere","min":-1.0,"side":1}]}]}"#;
     let err = crac_json::parse(doc).unwrap_err();
-    assert!(matches!(err, crac_json::CracError::UnknownInstant { .. }), "got {err}");
+    assert!(
+        matches!(err, crac_json::CracError::UnknownInstant { .. }),
+        "got {err}"
+    );
 }
 
 #[test]
@@ -219,14 +272,21 @@ fn thresholds_keep_one_sided_limits() {
         let (crac, _) = read(&name);
         for cnec in &crac.flow_cnecs {
             for t in &cnec.thresholds {
-                assert!(t.min.is_some() || t.max.is_some(), "{}: empty threshold", cnec.id);
+                assert!(
+                    t.min.is_some() || t.max.is_some(),
+                    "{}: empty threshold",
+                    cnec.id
+                );
                 if t.min.is_none() || t.max.is_none() {
                     one_sided += 1;
                 }
             }
         }
     }
-    assert!(one_sided > 0, "the corpus contains one-sided thresholds; none survived");
+    assert!(
+        one_sided > 0,
+        "the corpus contains one-sided thresholds; none survived"
+    );
 }
 
 #[test]
@@ -247,7 +307,10 @@ fn all_three_side_spellings_are_understood() {
         ("", Side::Both),
     ] {
         let (crac, _) = crac_json::parse(&doc(spelling)).expect("parse");
-        assert_eq!(crac.flow_cnecs[0].thresholds[0].side, expected, "spelling `{spelling}`");
+        assert_eq!(
+            crac.flow_cnecs[0].thresholds[0].side, expected,
+            "spelling `{spelling}`"
+        );
     }
 }
 
@@ -268,15 +331,24 @@ fn a_pst_range_action_keeps_its_tap_to_angle_map() {
         })
         .expect("a PST range action with a conversion map");
     assert!(map.len() > 2, "a two-entry map is not a tap changer");
-    assert!(map.windows(2).all(|w| w[0].0 < w[1].0), "taps are not ascending: {map:?}");
+    assert!(
+        map.windows(2).all(|w| w[0].0 < w[1].0),
+        "taps are not ascending: {map:?}"
+    );
     let angles: Vec<f64> = map.iter().map(|(_, a)| *a).collect();
-    assert!(angles.iter().any(|a| *a != angles[0]), "every tap maps to the same angle");
+    assert!(
+        angles.iter().any(|a| *a != angles[0]),
+        "every tap maps to the same angle"
+    );
 
     // The two operations an optimizer actually performs on this table.
     let kind = crac
         .range_actions
         .iter()
-        .find_map(|a| matches!(&a.kind, RangeActionKind::Pst { tap_to_angle, .. } if !tap_to_angle.is_empty()).then_some(&a.kind))
+        .find_map(|a| {
+            matches!(&a.kind, RangeActionKind::Pst { tap_to_angle, .. } if !tap_to_angle.is_empty())
+                .then_some(&a.kind)
+        })
         .expect("a PST range action");
     let (tap, angle) = map[map.len() / 2];
     assert_eq!(kind.angle_at(tap), Some(angle));
@@ -294,8 +366,11 @@ fn range_kinds_survive_and_default_to_absolute() {
     assert_eq!(crac.range_actions[0].ranges[0].kind, RangeKind::Absolute);
 
     let (rich, _) = read("crac-v2.6.json");
-    let kinds: Vec<RangeKind> =
-        rich.range_actions.iter().flat_map(|a| a.ranges.iter().map(|r| r.kind)).collect();
+    let kinds: Vec<RangeKind> = rich
+        .range_actions
+        .iter()
+        .flat_map(|a| a.ranges.iter().map(|r| r.kind))
+        .collect();
     assert!(kinds.contains(&RangeKind::Absolute));
     assert!(
         kinds.contains(&RangeKind::RelativeToInitialNetwork),
@@ -308,12 +383,19 @@ fn usage_rules_answer_which_state_they_cover() {
     let (crac, _) = read("crac-v2.6.json");
     let preventive = State::preventive(crac.preventive_instant().expect("preventive"));
     let available = crac.network_actions_for(&preventive);
-    assert!(!available.is_empty(), "no network action is available preventively");
+    assert!(
+        !available.is_empty(),
+        "no network action is available preventively"
+    );
     // An OnContingencyState rule must not leak into the preventive state.
     for action in &crac.network_actions {
         for rule in &action.usage_rules {
             if let UsageRule::OnContingencyState { state } = rule {
-                assert!(!state.is_preventive(), "{}: contingency-state rule on preventive", action.id);
+                assert!(
+                    !state.is_preventive(),
+                    "{}: contingency-state rule on preventive",
+                    action.id
+                );
                 assert!(!rule.covers(&preventive));
             }
         }
@@ -328,11 +410,19 @@ fn network_elements_are_collected_once_each() {
     let mut sorted = ids.clone();
     sorted.sort_unstable();
     sorted.dedup();
-    assert_eq!(sorted.len(), ids.len(), "network_elements returned duplicates");
+    assert_eq!(
+        sorted.len(),
+        ids.len(),
+        "network_elements returned duplicates"
+    );
     // Every CNEC's element must appear — that set is the input to resolution
     // against a real network.
     for cnec in &crac.flow_cnecs {
-        assert!(ids.contains(&cnec.network_element.as_str()), "{} missing", cnec.network_element);
+        assert!(
+            ids.contains(&cnec.network_element.as_str()),
+            "{} missing",
+            cnec.network_element
+        );
     }
 }
 
@@ -345,7 +435,11 @@ fn states_are_derived_in_chronological_order() {
     // Every CNEC's state must be among them, or an optimization would skip a
     // perimeter that has constraints in it.
     for cnec in &crac.flow_cnecs {
-        assert!(states.contains(&cnec.state), "{}: state not enumerated", cnec.id);
+        assert!(
+            states.contains(&cnec.state),
+            "{}: state not enumerated",
+            cnec.id
+        );
     }
 }
 
@@ -367,7 +461,10 @@ fn a_crac_round_trips_through_the_native_format_without_loss() {
 
 #[test]
 fn the_native_document_declares_its_type_and_is_checked_on_the_way_in() {
-    let crac = Crac { id: "c".into(), ..Default::default() };
+    let crac = Crac {
+        id: "c".into(),
+        ..Default::default()
+    };
     let text = crac.to_json().expect("serialize");
     let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(doc["type"], DOCUMENT_TYPE);
@@ -378,5 +475,8 @@ fn the_native_document_declares_its_type_and_is_checked_on_the_way_in() {
     // that finds nothing wrong because it was asked nothing.
     let opf = r#"{"version":"1.0","type":"opf_input","id":"","instants":[],
                   "contingencies":[],"flow_cnecs":[],"network_actions":[],"range_actions":[]}"#;
-    assert!(Crac::from_json(opf).is_err(), "an opf_input document was accepted as a CRAC");
+    assert!(
+        Crac::from_json(opf).is_err(),
+        "an opf_input document was accepted as a CRAC"
+    );
 }

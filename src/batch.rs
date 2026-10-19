@@ -33,16 +33,16 @@
 //! single-threaded CPU solver is not a result.
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::PowerFlowReport;
 use crate::network::{
-    build_ybus, build_ybus_with_outages, linear_initial_guess, stamp_shunts,
-    structural_component_count, ShuntAdm, YBusSparse,
+    ShuntAdm, YBusSparse, build_ybus, build_ybus_with_outages, linear_initial_guess, stamp_shunts,
+    structural_component_count,
 };
 use crate::solver::{JacobianBackend, PersistentSolver};
 use crate::types::{Bus, Line, Transformer};
-use crate::PowerFlowReport;
 
 /// A per-bus change applied on top of the batch's shared bus template.
 /// `None` fields leave the template's value alone.
@@ -63,7 +63,10 @@ pub struct BusOverride {
 
 impl BusOverride {
     pub fn new(bus: usize) -> Self {
-        Self { bus, ..Default::default() }
+        Self {
+            bus,
+            ..Default::default()
+        }
     }
 
     pub fn p(mut self, p_spec: f64) -> Self {
@@ -100,7 +103,10 @@ pub struct Scenario {
 
 impl Scenario {
     pub fn new(bus_overrides: Vec<BusOverride>) -> Self {
-        Self { bus_overrides, branch_outages: Vec::new() }
+        Self {
+            bus_overrides,
+            branch_outages: Vec::new(),
+        }
     }
 }
 
@@ -114,7 +120,11 @@ pub fn uniform_load_scaling(buses_template: &[Bus], factor: f64) -> Scenario {
     let overrides = buses_template
         .iter()
         .filter(|b| b.p_spec != 0.0 || b.q_spec != 0.0)
-        .map(|b| BusOverride::new(b.idx).p(b.p_spec * factor).q(b.q_spec * factor))
+        .map(|b| {
+            BusOverride::new(b.idx)
+                .p(b.p_spec * factor)
+                .q(b.q_spec * factor)
+        })
         .collect();
     Scenario::new(overrides)
 }
@@ -126,9 +136,17 @@ pub enum BatchError {
     /// comment, and use [`BatchSolver::solve_contingencies`] instead.
     OutagesUnsupported { scenario: usize },
     /// A `BusOverride::bus` was not a valid index into the bus template.
-    BusOutOfRange { scenario: usize, bus: usize, n_buses: usize },
+    BusOutOfRange {
+        scenario: usize,
+        bus: usize,
+        n_buses: usize,
+    },
     /// A `Scenario::branch_outages` entry was not a valid flat branch index.
-    BranchOutOfRange { scenario: usize, branch: usize, n_branches: usize },
+    BranchOutOfRange {
+        scenario: usize,
+        branch: usize,
+        n_branches: usize,
+    },
     /// `rayon` refused to build the requested thread pool.
     ThreadPool(String),
     /// The reduced susceptance matrix was singular, so no scenario in a
@@ -151,11 +169,19 @@ impl fmt::Display for BatchError {
                  finished Y-bus — use `BatchSolver::solve_contingencies`, which takes the branch \
                  lists"
             ),
-            BatchError::BusOutOfRange { scenario, bus, n_buses } => write!(
+            BatchError::BusOutOfRange {
+                scenario,
+                bus,
+                n_buses,
+            } => write!(
                 f,
                 "scenario {scenario} overrides bus {bus}, but the template has only {n_buses} bus(es)"
             ),
-            BatchError::BranchOutOfRange { scenario, branch, n_branches } => write!(
+            BatchError::BranchOutOfRange {
+                scenario,
+                branch,
+                n_branches,
+            } => write!(
                 f,
                 "scenario {scenario} outages branch {branch}, but the network has only \
                  {n_branches} branch(es)"
@@ -198,7 +224,10 @@ pub struct BatchSolver {
 impl BatchSolver {
     /// Uses rayon's global thread pool (honors `RAYON_NUM_THREADS`).
     pub fn new(backend: JacobianBackend) -> Self {
-        Self { backend, pool: None }
+        Self {
+            backend,
+            pool: None,
+        }
     }
 
     /// Uses a dedicated pool of exactly `threads` workers. Built once here
@@ -209,7 +238,10 @@ impl BatchSolver {
             .num_threads(threads)
             .build()
             .map_err(|e| BatchError::ThreadPool(e.to_string()))?;
-        Ok(Self { backend, pool: Some(pool) })
+        Ok(Self {
+            backend,
+            pool: Some(pool),
+        })
     }
 
     /// Workers this solver will use for a batch.
@@ -309,14 +341,17 @@ impl BatchSolver {
                             collected
                                 .lock()
                                 .expect("batch result mutex poisoned by a panicking worker")
-                                .push((i, PowerFlowReport {
-                                buses,
-                                islands,
-                                stats,
-                                dc: None,
-                                linear: None,
-                                outer: None,
-                            }));
+                                .push((
+                                    i,
+                                    PowerFlowReport {
+                                        buses,
+                                        islands,
+                                        stats,
+                                        dc: None,
+                                        linear: None,
+                                        outer: None,
+                                    },
+                                ));
                         }
                     });
                 }
@@ -500,14 +535,17 @@ impl BatchSolver {
                             collected
                                 .lock()
                                 .expect("batch result mutex poisoned by a panicking worker")
-                                .push((i, PowerFlowReport {
-                                    buses,
-                                    islands,
-                                    stats,
-                                    dc: None,
-                                    linear: None,
-                                    outer: None,
-                                }));
+                                .push((
+                                    i,
+                                    PowerFlowReport {
+                                        buses,
+                                        islands,
+                                        stats,
+                                        dc: None,
+                                        linear: None,
+                                        outer: None,
+                                    },
+                                ));
                         }
                     });
                 }

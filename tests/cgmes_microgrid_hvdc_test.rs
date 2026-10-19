@@ -2,7 +2,10 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_resolve_dc_converters, cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_resolve_dc_converters, cgmes_to_buses_and_branches, cgmes_topological_node_bus_index,
+    load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -60,10 +63,15 @@ fn test_cgmes_microgrid_type2_hvdc() {
     let ssh = dir.join("20210401T1730Z_1D_HVDC_SSH_1.xml");
     let tp = dir.join("20210401T1730Z_1D_HVDC_TP_1.xml");
     let sv = dir.join("20210401T1730Z_1D_HVDC_SV_1.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
-    assert_eq!(tn_mrids.len(), 4, "expected 4 physical AC TopologicalNode buses");
+    assert_eq!(
+        tn_mrids.len(),
+        4,
+        "expected 4 physical AC TopologicalNode buses"
+    );
     let expected = cgmes_common::expected_voltages(&ds);
 
     let s_base_va = 100e6;
@@ -75,14 +83,30 @@ fn test_cgmes_microgrid_type2_hvdc() {
     let dc = cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va)
         .expect("DC resolution failed")
         .expect("expected HVDC equipment in this fixture");
-    assert!(dc.status.converged, "DC network solve did not converge: {:?}", dc.status);
-    assert!(dc.status.isolated_buses.is_empty(), "expected no isolated DC buses, got {:?}", dc.status.isolated_buses);
-    assert_eq!(dc.dc_bus_mrids.len(), 4, "expected 4 DCTopologicalNode buses (2 positive poles + 2 grounded middle poles)");
+    assert!(
+        dc.status.converged,
+        "DC network solve did not converge: {:?}",
+        dc.status
+    );
+    assert!(
+        dc.status.isolated_buses.is_empty(),
+        "expected no isolated DC buses, got {:?}",
+        dc.status.isolated_buses
+    );
+    assert_eq!(
+        dc.dc_bus_mrids.len(),
+        4,
+        "expected 4 DCTopologicalNode buses (2 positive poles + 2 grounded middle poles)"
+    );
     // The UdcSlack side should have solved to (very close to) its own fixed
     // 150 kV target; the FixedP follower side, one line resistance away,
     // solves to something close by but not identical.
     let slack_v = dc.voltages_kv.iter().find(|&&v| (v - 150.0).abs() < 1e-6);
-    assert!(slack_v.is_some(), "expected one DC bus solved at exactly the 150 kV UdcSlack target, got {:?}", dc.voltages_kv);
+    assert!(
+        slack_v.is_some(),
+        "expected one DC bus solved at exactly the 150 kV UdcSlack target, got {:?}",
+        dc.voltages_kv
+    );
 
     let mut ybus = build_ybus(buses.len(), &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
@@ -90,9 +114,19 @@ fn test_cgmes_microgrid_type2_hvdc() {
 
     // Only VSC1's own area has a local angle reference in this fixture (see
     // the module doc comment) — filter to just its two physical buses.
-    let vsc1_area: [&str; 2] = ["_246d0822-a3f4-4894-9c22-22c9cfd1104c", "_da2d770e-6ace-47a7-8274-2fbb4cc0d52c"];
-    let expected_vsc1_area: Vec<_> = expected.into_iter().filter(|e| vsc1_area.contains(&e.tn_mrid.as_str())).collect();
-    assert_eq!(expected_vsc1_area.len(), 2, "expected published SvVoltage for both of VSC1's own area buses");
+    let vsc1_area: [&str; 2] = [
+        "_246d0822-a3f4-4894-9c22-22c9cfd1104c",
+        "_da2d770e-6ace-47a7-8274-2fbb4cc0d52c",
+    ];
+    let expected_vsc1_area: Vec<_> = expected
+        .into_iter()
+        .filter(|e| vsc1_area.contains(&e.tn_mrid.as_str()))
+        .collect();
+    assert_eq!(
+        expected_vsc1_area.len(),
+        2,
+        "expected published SvVoltage for both of VSC1's own area buses"
+    );
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
     cgmes_common::assert_matches_sv(&result, &bus_index, &expected_vsc1_area, 4e-2);
 }

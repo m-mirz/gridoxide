@@ -68,12 +68,16 @@ pub fn assert_sym_node(
     assert!(
         (bus.voltage_mag - node_out.u_pu).abs() < tol,
         "node {}: voltage_mag = {:.6}, expected u_pu = {:.6}",
-        node_out.id, bus.voltage_mag, node_out.u_pu
+        node_out.id,
+        bus.voltage_mag,
+        node_out.u_pu
     );
     assert!(
         (bus.voltage_ang - node_out.u_angle).abs() < tol,
         "node {}: voltage_ang = {:.6}, expected u_angle = {:.6}",
-        node_out.id, bus.voltage_ang, node_out.u_angle
+        node_out.id,
+        bus.voltage_ang,
+        node_out.u_angle
     );
 }
 
@@ -90,12 +94,18 @@ pub fn assert_asym_node(
         assert!(
             (bus.voltage_mag - node_out.u_pu[ph]).abs() < tol,
             "node {} phase {}: voltage_mag = {:.8}, expected u_pu = {:.8}",
-            node_out.id, ph, bus.voltage_mag, node_out.u_pu[ph]
+            node_out.id,
+            ph,
+            bus.voltage_mag,
+            node_out.u_pu[ph]
         );
         assert!(
             (bus.voltage_ang - node_out.u_angle[ph]).abs() < tol,
             "node {} phase {}: voltage_ang = {:.8}, expected u_angle = {:.8}",
-            node_out.id, ph, bus.voltage_ang, node_out.u_angle[ph]
+            node_out.id,
+            ph,
+            bus.voltage_ang,
+            node_out.u_angle[ph]
         );
     }
 }

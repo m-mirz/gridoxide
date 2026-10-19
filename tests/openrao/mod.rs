@@ -36,15 +36,23 @@ pub fn fixture(name: &str) -> PathBuf {
 
 /// The names of every listed file with this extension, e.g. `"xiidm"`, sorted.
 pub fn names_with_extension(extension: &str) -> Vec<&'static str> {
-    let mut names: Vec<&str> =
-        entries().map(|(n, _)| n).filter(|n| n.rsplit('.').next() == Some(extension)).collect();
+    let mut names: Vec<&str> = entries()
+        .map(|(n, _)| n)
+        .filter(|n| n.rsplit('.').next() == Some(extension))
+        .collect();
     names.sort();
     names
 }
 
 fn entries() -> impl Iterator<Item = (&'static str, &'static str)> {
-    MANIFEST.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).map(|l| {
-        let mut fields = l.split_whitespace();
-        (fields.next().unwrap(), fields.next().expect("a name and a path"))
-    })
+    MANIFEST
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut fields = l.split_whitespace();
+            (
+                fields.next().unwrap(),
+                fields.next().expect("a name and a path"),
+            )
+        })
 }

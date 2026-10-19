@@ -12,11 +12,11 @@
 //! cheapest guard against the augmented form quietly disagreeing with the
 //! solver it is supposed to extend.
 
-use crate::network::{effective_injection, power_injections, YBusSparse};
+use crate::network::{YBusSparse, effective_injection, power_injections};
 use crate::solver::LinearSolver;
 use crate::types::{Bus, BusType};
 
-use super::augmented::{border_columns, AugmentedPattern, Layout, Parametrization};
+use super::augmented::{AugmentedPattern, Layout, Parametrization, border_columns};
 use super::direction::{BaseSpec, LoadingDirection};
 
 /// The closing equation, fully evaluated: what `p(x, λ)` is and what border row
@@ -29,7 +29,11 @@ pub(crate) enum Constraint {
     /// `z_k − target = 0`.
     Local { k: usize, target: f64 },
     /// `tᵀ(z − z₀) − σ = 0`.
-    Arc { tangent: Vec<f64>, z0: Vec<f64>, step: f64 },
+    Arc {
+        tangent: Vec<f64>,
+        z0: Vec<f64>,
+        step: f64,
+    },
 }
 
 impl Constraint {
@@ -54,7 +58,9 @@ impl Constraint {
     fn border(&self, layout: &Layout) -> (Vec<usize>, Vec<f64>) {
         let n = layout.n_unknowns;
         match self {
-            Constraint::Natural { .. } => (border_columns(Parametrization::Natural, n, n), vec![1.0]),
+            Constraint::Natural { .. } => {
+                (border_columns(Parametrization::Natural, n, n), vec![1.0])
+            }
             Constraint::Local { k, .. } => {
                 (border_columns(Parametrization::Local, *k, n), vec![1.0])
             }
@@ -111,7 +117,15 @@ impl<S: LinearSolver> Segment<S> {
         let pattern = AugmentedPattern::analyze(buses, ybus, border_cols);
         let ds = layout.direction_rows(&dir.d_p, &dir.d_q);
         let values = Vec::with_capacity(pattern.len());
-        Self { layout, pattern, ds, solver: None, values, solves: 0, reanalyses: 0 }
+        Self {
+            layout,
+            pattern,
+            ds,
+            solver: None,
+            values,
+            solves: 0,
+            reanalyses: 0,
+        }
     }
 
     /// Re-analyzes if the border row now needs different columns.
@@ -197,7 +211,8 @@ impl<S: LinearSolver> Segment<S> {
         let (p_calc, q_calc) = power_injections(buses, ybus);
         let mut rhs = vec![0.0; self.layout.n_unknowns + 1];
         rhs[self.layout.n_unknowns] = sign;
-        let mut t = self.solve_bordered(buses, ybus, &p_calc, &q_calc, border_cols, border, &rhs)?;
+        let mut t =
+            self.solve_bordered(buses, ybus, &p_calc, &q_calc, border_cols, border, &rhs)?;
         let norm = t.iter().map(|v| v * v).sum::<f64>().sqrt();
         if !(norm > 0.0) || !norm.is_finite() {
             return None;
@@ -231,7 +246,10 @@ impl<S: LinearSolver> Segment<S> {
             let (mismatch, p_calc, q_calc) = self.mismatch(buses, ybus);
             let p_res = constraint.residual(&self.layout, buses, lambda);
 
-            let worst = mismatch.iter().fold(0.0f64, |a, &b| a.max(b.abs())).max(p_res.abs());
+            let worst = mismatch
+                .iter()
+                .fold(0.0f64, |a, &b| a.max(b.abs()))
+                .max(p_res.abs());
             if worst < tol {
                 return CorrectorOutcome {
                     status: CorrectorStatus::Converged,
@@ -262,7 +280,11 @@ impl<S: LinearSolver> Segment<S> {
         // One last consistency write, so `buses` always describes the λ being
         // reported even on a failed correction.
         dir.apply(base, lambda, buses);
-        CorrectorOutcome { status: CorrectorStatus::MaxIterations, iterations: max_iter, lambda }
+        CorrectorOutcome {
+            status: CorrectorStatus::MaxIterations,
+            iterations: max_iter,
+            lambda,
+        }
     }
 
     /// The reactive injection at every bus, for the event functions.

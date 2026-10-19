@@ -2,7 +2,9 @@ mod cgmes_common;
 
 use std::path::Path;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -29,15 +31,24 @@ fn test_cgmes_microgrid_type2_be_mas() {
     let ssh = dir.join("20210401T1730Z_1D_BE_SSH_1.xml");
     let tp = dir.join("20210401T1730Z_1D_BE_TP_1.xml");
     let sv = dir.join("20210401T1730Z_1D_BE_SV_1.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let expected = cgmes_common::expected_voltages(&ds);
-    assert_eq!(expected.len(), 11, "fixture should have 11 SvVoltage entries");
+    assert_eq!(
+        expected.len(),
+        11,
+        "fixture should have 11 SvVoltage entries"
+    );
 
     let s_base_va = 100e6;
     let (buses, lines, transformers, shunts) =
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
-    assert!(buses.len() > 11, "expected at least the 11 physical TopologicalNode buses, got {}", buses.len());
+    assert!(
+        buses.len() > 11,
+        "expected at least the 11 physical TopologicalNode buses, got {}",
+        buses.len()
+    );
     assert_eq!(lines.len(), 10, "expected 10 ACLineSegment lines");
     assert_eq!(transformers.len(), 8, "expected 8 two-winding transformers");
     assert_eq!(shunts.len(), 4, "expected 4 LinearShuntCompensator shunts");
@@ -71,7 +82,8 @@ fn test_cgmes_microgrid_type2_nl_mas() {
     let ssh = dir.join("20210401T1730Z_1D_NL_SSH_1.xml");
     let tp = dir.join("20210401T1730Z_1D_NL_TP_1.xml");
     let sv = dir.join("20210401T1730Z_1D_NL_SV_1.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let expected = cgmes_common::expected_voltages(&ds);
     assert_eq!(expected.len(), 5, "fixture should have 5 SvVoltage entries");
@@ -79,7 +91,11 @@ fn test_cgmes_microgrid_type2_nl_mas() {
     let s_base_va = 100e6;
     let (buses, lines, transformers, shunts) =
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
-    assert!(buses.len() > 5, "expected at least the 5 physical TopologicalNode buses, got {}", buses.len());
+    assert!(
+        buses.len() > 5,
+        "expected at least the 5 physical TopologicalNode buses, got {}",
+        buses.len()
+    );
     assert_eq!(lines.len(), 5, "expected 5 ACLineSegment lines");
     assert_eq!(transformers.len(), 3, "expected 3 two-winding transformers");
     assert_eq!(shunts.len(), 1, "expected 1 LinearShuntCompensator shunt");
@@ -128,11 +144,17 @@ fn test_cgmes_microgrid_type2_merged() {
     let hvdc_ssh = hvdc_dir.join("20210401T1730Z_1D_HVDC_SSH_1.xml");
     let tp = dir.join("20210401T1730Z_1D_ASSEMBLED_TP_1.xml");
     let sv = dir.join("20210401T1730Z_1D_ASSEMBLED_SV_1.xml");
-    let ds = load_profiles(&[&eq_bd, &be_eq, &be_ssh, &nl_eq, &nl_ssh, &hvdc_eq, &hvdc_ssh, &tp, &sv])
-        .expect("failed to decode CGMES profiles");
+    let ds = load_profiles(&[
+        &eq_bd, &be_eq, &be_ssh, &nl_eq, &nl_ssh, &hvdc_eq, &hvdc_ssh, &tp, &sv,
+    ])
+    .expect("failed to decode CGMES profiles");
 
     let tn_mrids = ds.by_type["TopologicalNode"].clone();
-    assert_eq!(tn_mrids.len(), 26, "expected 26 physical TopologicalNode buses across all three areas");
+    assert_eq!(
+        tn_mrids.len(),
+        26,
+        "expected 26 physical TopologicalNode buses across all three areas"
+    );
     let expected = cgmes_common::expected_voltages(&ds);
 
     let s_base_va = 100e6;
@@ -140,7 +162,11 @@ fn test_cgmes_microgrid_type2_merged() {
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
     assert_eq!(buses.len(), 26);
     assert_eq!(lines.len(), 17, "expected 17 ACLineSegment lines");
-    assert_eq!(transformers.len(), 13, "expected 13 two-winding transformers");
+    assert_eq!(
+        transformers.len(),
+        13,
+        "expected 13 two-winding transformers"
+    );
     assert_eq!(shunts.len(), 5, "expected 5 LinearShuntCompensator shunts");
 
     let n = buses.len();

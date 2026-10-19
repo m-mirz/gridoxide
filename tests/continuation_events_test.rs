@@ -16,14 +16,20 @@ mod common;
 mod pglib;
 
 use gridoxide::continuation::{
-    run_continuation, ContinuationOptions, CriticalPointKind, LoadingDirection,
+    ContinuationOptions, CriticalPointKind, LoadingDirection, run_continuation,
 };
 use gridoxide::network::{build_ybus, power_injections};
-use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
+use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType, Line};
 
-fn fixture(name: &str) -> (Vec<Bus>, Vec<gridoxide::types::Line>, Vec<gridoxide::types::Transformer>) {
+fn fixture(
+    name: &str,
+) -> (
+    Vec<Bus>,
+    Vec<gridoxide::types::Line>,
+    Vec<gridoxide::types::Transformer>,
+) {
     let raw = pglib::read(name, ".json");
     let input: PgmInput = serde_json::from_str(&raw).expect("parse");
     pgm_to_buses_and_branches(input, 100e6, 50.0)
@@ -42,7 +48,10 @@ fn scaled(start: &[Bus], dir: &LoadingDirection, lambda: f64) -> Vec<Bus> {
 
 fn q_limits_opts() -> ContinuationOptions {
     ContinuationOptions {
-        power_flow: PowerFlowOptions { enforce_q_limits: true, ..Default::default() },
+        power_flow: PowerFlowOptions {
+            enforce_q_limits: true,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -56,7 +65,11 @@ fn q_limits_opts() -> ContinuationOptions {
 /// happened to be small.
 #[test]
 fn located_events_match_a_brute_force_bisection() {
-    for name in ["pglib_opf_case5_pjm", "pglib_opf_case14_ieee", "pglib_opf_case30_ieee"] {
+    for name in [
+        "pglib_opf_case5_pjm",
+        "pglib_opf_case14_ieee",
+        "pglib_opf_case30_ieee",
+    ] {
         let (start, lines, transformers) = fixture(name);
         let direction = LoadingDirection::scale_loads(&start);
 
@@ -143,7 +156,11 @@ fn located_events_match_a_brute_force_bisection() {
 /// limit is simply not enforced any more.
 #[test]
 fn no_point_on_the_curve_violates_a_reactive_limit() {
-    for name in ["pglib_opf_case5_pjm", "pglib_opf_case14_ieee", "pglib_opf_case30_ieee"] {
+    for name in [
+        "pglib_opf_case5_pjm",
+        "pglib_opf_case14_ieee",
+        "pglib_opf_case30_ieee",
+    ] {
         let (start, lines, transformers) = fixture(name);
         let direction = LoadingDirection::scale_loads(&start);
         let ybus = build_ybus(start.len(), &lines, &transformers).finish();
@@ -153,7 +170,10 @@ fn no_point_on_the_curve_violates_a_reactive_limit() {
             &lines,
             &transformers,
             &[],
-            ContinuationOptions { direction, ..q_limits_opts() },
+            ContinuationOptions {
+                direction,
+                ..q_limits_opts()
+            },
         );
 
         for (n, point) in curve.points.iter().enumerate() {
@@ -206,7 +226,11 @@ fn no_point_on_the_curve_violates_a_reactive_limit() {
 /// holding its voltage cannot make the system carry *more* load.
 #[test]
 fn enforcing_reactive_limits_lowers_the_nose() {
-    for name in ["pglib_opf_case5_pjm", "pglib_opf_case14_ieee", "pglib_opf_case30_ieee"] {
+    for name in [
+        "pglib_opf_case5_pjm",
+        "pglib_opf_case14_ieee",
+        "pglib_opf_case30_ieee",
+    ] {
         let (start, lines, transformers) = fixture(name);
         let direction = LoadingDirection::scale_loads(&start);
 
@@ -255,7 +279,10 @@ fn case118_maximum_is_limit_induced_and_sits_on_its_event() {
         &lines,
         &transformers,
         &[],
-        ContinuationOptions { direction: direction.clone(), ..q_limits_opts() },
+        ContinuationOptions {
+            direction: direction.clone(),
+            ..q_limits_opts()
+        },
     );
 
     let critical = curve.critical.as_ref().expect("a maximum was reported");
@@ -264,9 +291,13 @@ fn case118_maximum_is_limit_induced_and_sits_on_its_event() {
     };
 
     let events = curve.q_limit_events();
-    let &(event_bus, _, event_lambda) =
-        events.last().expect("a limit-induced maximum implies at least one event");
-    assert_eq!(event_bus, bus, "the maximum must be the machine that just saturated");
+    let &(event_bus, _, event_lambda) = events
+        .last()
+        .expect("a limit-induced maximum implies at least one event");
+    assert_eq!(
+        event_bus, bus,
+        "the maximum must be the machine that just saturated"
+    );
     assert!(
         (event_lambda - critical.lambda_max).abs() < 1e-9,
         "lambda_max {} should be the event lambda {event_lambda}",
@@ -336,9 +367,30 @@ fn unreachable_limits_leave_the_curve_alone() {
         },
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.03, x: 0.09, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 0, to: 2, r: 0.04, x: 0.12, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.03,
+            x: 0.09,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.04,
+            x: 0.12,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let direction = LoadingDirection::scale_loads(&buses);
 
@@ -347,14 +399,20 @@ fn unreachable_limits_leave_the_curve_alone() {
         &lines,
         &[],
         &[],
-        ContinuationOptions { direction: direction.clone(), ..q_limits_opts() },
+        ContinuationOptions {
+            direction: direction.clone(),
+            ..q_limits_opts()
+        },
     );
     let without = run_continuation(
         buses,
         &lines,
         &[],
         &[],
-        ContinuationOptions { direction, ..Default::default() },
+        ContinuationOptions {
+            direction,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -362,7 +420,13 @@ fn unreachable_limits_leave_the_curve_alone() {
         "nothing should saturate: {:?}",
         with.q_limit_events()
     );
-    assert_eq!(with.segments, 1, "no bus type changed, so there is one segment");
+    assert_eq!(
+        with.segments, 1,
+        "no bus type changed, so there is one segment"
+    );
     let (a, b) = (with.lambda_max().unwrap(), without.lambda_max().unwrap());
-    assert!((a - b).abs() < 1e-9, "limits that never bind changed the nose: {a} vs {b}");
+    assert!(
+        (a - b).abs() < 1e-9,
+        "limits that never bind changed the nose: {a} vs {b}"
+    );
 }

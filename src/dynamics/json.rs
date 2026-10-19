@@ -57,8 +57,9 @@ use crate::network::{build_ybus, power_injections};
 use crate::solver::SolveStatus;
 use crate::types::Bus;
 
+use super::DynamicSystem;
 use super::events::{Event, EventKind, Relay};
-use super::init::{build, BuildError, DeviceSpec, SystemSpec};
+use super::init::{BuildError, DeviceSpec, SystemSpec, build};
 use super::models::avr::{Sexs, SexsParams, VrProportional};
 use super::models::gov::{GoverProportional, Tgov1, Tgov1Params};
 use super::models::load::ZipLoad;
@@ -68,7 +69,6 @@ use super::models::machine::{
 };
 use super::models::pss::{Stab1, Stab1Params};
 use super::models::{Control, DynamicModel, GeneratingUnit, InitError, Limits};
-use super::DynamicSystem;
 
 /// A network document that also carries dynamic data.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -269,7 +269,10 @@ impl From<EventSpec> for Event {
         let t = spec.time();
         let kind = match spec {
             EventSpec::BusFault { bus, y, .. } => match y {
-                Some([g, b]) => EventKind::BusFault { bus, y: Complex::new(g, b) },
+                Some([g, b]) => EventKind::BusFault {
+                    bus,
+                    y: Complex::new(g, b),
+                },
                 None => return Event::bolted_fault(t, bus),
             },
             EventSpec::ClearFault { bus, .. } => EventKind::ClearFault { bus },
@@ -277,9 +280,10 @@ impl From<EventSpec> for Event {
             EventSpec::BranchClose { branch, .. } => EventKind::BranchClose { branch },
             EventSpec::UnitTrip { unit, .. } => EventKind::UnitTrip { unit },
             EventSpec::UnitClose { unit, .. } => EventKind::UnitClose { unit },
-            EventSpec::LoadStep { bus, dp, dq, .. } => {
-                EventKind::LoadStep { bus, ds: Complex::new(dp, dq) }
-            }
+            EventSpec::LoadStep { bus, dp, dq, .. } => EventKind::LoadStep {
+                bus,
+                ds: Complex::new(dp, dq),
+            },
         };
         Event::new(t, kind)
     }
@@ -295,12 +299,22 @@ pub enum DynamicsError {
     /// device's state is derived from the solved voltages, so an unconverged
     /// solve produces a plausible-looking equilibrium of the wrong network.
     PowerFlow(SolveStatus),
-    BusOutOfRange { id: String, bus: usize, n_bus: usize },
+    BusOutOfRange {
+        id: String,
+        bus: usize,
+        n_bus: usize,
+    },
     /// Two or more devices at one bus each left their terminal power unstated,
     /// so the bus's injection could be split between them in any proportion.
     /// Refused by name rather than guessed — see the module doc.
-    AmbiguousSplit { bus: usize, devices: Vec<String> },
-    Model { id: String, source: InitError },
+    AmbiguousSplit {
+        bus: usize,
+        devices: Vec<String>,
+    },
+    Model {
+        id: String,
+        source: InitError,
+    },
     Build(BuildError),
 }
 
@@ -414,11 +428,7 @@ impl UnitSpec {
     /// Builds this unit's model. Exposed so a reader that assembles a case its
     /// own way — the Dynawo one, which gets its network from IIDM — does not
     /// have to reimplement the composition.
-    pub fn into_model(
-        self,
-        s_base: f64,
-        f_nom: f64,
-    ) -> Result<Box<dyn DynamicModel>, InitError> {
+    pub fn into_model(self, s_base: f64, f_nom: f64) -> Result<Box<dyn DynamicModel>, InitError> {
         Ok(Box::new(GeneratingUnit::new(
             self.machine.build(s_base, f_nom, false)?,
             self.avr.map(|a| a.build()).transpose()?,
@@ -434,7 +444,8 @@ impl DynamicsDocument {
     /// Returns the system together with the event schedule the file states, so
     /// a caller has everything a run needs from one call.
     pub fn build(&self) -> Result<(DynamicSystem, Vec<Event>), DynamicsError> {
-        self.build_with_relays().map(|(system, events, _)| (system, events))
+        self.build_with_relays()
+            .map(|(system, events, _)| (system, events))
     }
 
     /// As [`build`](Self::build), additionally returning the relays the
@@ -481,12 +492,12 @@ impl DynamicsDocument {
         let mut devices = Vec::with_capacity(placed.len());
         for (i, spec) in self.dynamics.units.iter().enumerate() {
             let model = GeneratingUnit::new(
-                spec.machine.build(s_base, f_nom, self.dynamics.speed_voltages).map_err(
-                    |source| DynamicsError::Model {
+                spec.machine
+                    .build(s_base, f_nom, self.dynamics.speed_voltages)
+                    .map_err(|source| DynamicsError::Model {
                         id: spec.id.clone(),
                         source,
-                    },
-                )?,
+                    })?,
                 option_build(spec.avr, |a| a.build(), &spec.id)?,
                 option_build(spec.gov, |g| g.build(), &spec.id)?,
                 option_build(spec.pss, |p| p.build(), &spec.id)?,
@@ -499,8 +510,12 @@ impl DynamicsDocument {
             });
         }
         for (j, spec) in self.dynamics.loads.iter().enumerate() {
-            let load = ZipLoad::new(spec.zip[0], spec.zip[1], spec.zip[2], spec.cutoff)
-                .map_err(|source| DynamicsError::Model { id: spec.id.clone(), source })?;
+            let load = ZipLoad::new(spec.zip[0], spec.zip[1], spec.zip[2], spec.cutoff).map_err(
+                |source| DynamicsError::Model {
+                    id: spec.id.clone(),
+                    source,
+                },
+            )?;
             devices.push(DeviceSpec {
                 id: spec.id.clone(),
                 bus: spec.bus,
@@ -518,7 +533,13 @@ impl DynamicsDocument {
             fixed_buses: self.dynamics.fixed_buses.clone(),
         })?;
 
-        let events = self.dynamics.events.iter().copied().map(Event::from).collect();
+        let events = self
+            .dynamics
+            .events
+            .iter()
+            .copied()
+            .map(Event::from)
+            .collect();
         Ok((system, events, self.dynamics.relays.clone()))
     }
 }
@@ -540,9 +561,10 @@ where
 {
     match spec {
         None => Ok(None),
-        Some(s) => make(s)
-            .map(Some)
-            .map_err(|source| DynamicsError::Model { id: id.to_string(), source }),
+        Some(s) => make(s).map(Some).map_err(|source| DynamicsError::Model {
+            id: id.to_string(),
+            source,
+        }),
     }
 }
 

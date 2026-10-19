@@ -25,10 +25,10 @@
 use gridoxide::dynamics::json::{
     AvrSpec, DynamicsData, DynamicsDocument, EventSpec, GovSpec, MachineSpec, UnitSpec,
 };
+use gridoxide::dynamics::models::Limits;
 use gridoxide::dynamics::models::avr::SexsParams;
 use gridoxide::dynamics::models::gov::Tgov1Params;
 use gridoxide::dynamics::models::machine::GenRoundParams;
-use gridoxide::dynamics::models::Limits;
 use gridoxide::json::NetworkData;
 use gridoxide::types::{Bus, BusType, Line};
 
@@ -150,7 +150,11 @@ pub fn ring(n_bus: usize, spread: f64) -> DynamicsDocument {
 pub fn ring_with_fault(n_bus: usize, spread: f64) -> DynamicsDocument {
     let mut document = ring(n_bus, spread);
     document.dynamics.events = vec![
-        EventSpec::BusFault { t: 1.0, bus: 1, y: None },
+        EventSpec::BusFault {
+            t: 1.0,
+            bus: 1,
+            y: None,
+        },
         EventSpec::ClearFault { t: 1.08, bus: 1 },
     ];
     document

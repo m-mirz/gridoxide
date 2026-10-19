@@ -40,9 +40,9 @@ use std::sync::Mutex;
 use crate::batch::{BatchError, Scenario};
 use crate::types::{Bus, Line, Transformer};
 
-use super::btheta::{dc_branches, dc_power_flow, DcIslandReport, DcSolution};
-use super::sensitivity::DcSensitivity;
 use super::DcOptions;
+use super::btheta::{DcIslandReport, DcSolution, dc_branches, dc_power_flow};
+use super::sensitivity::DcSensitivity;
 
 /// One scenario's DC answer.
 #[derive(Clone, Debug, PartialEq)]
@@ -159,13 +159,13 @@ impl DcBatchSolver {
             Mutex::new(Vec::with_capacity(scenarios.len()));
         let run = || {
             use rayon::prelude::*;
-            scenarios
-                .par_iter()
-                .enumerate()
-                .for_each(|(i, sc)| {
-                    let result = prepared.solve_one(sc);
-                    collected.lock().expect("batch collector poisoned").push((i, result));
-                });
+            scenarios.par_iter().enumerate().for_each(|(i, sc)| {
+                let result = prepared.solve_one(sc);
+                collected
+                    .lock()
+                    .expect("batch collector poisoned")
+                    .push((i, result));
+            });
         };
         match &self.pool {
             Some(pool) => pool.install(run),
@@ -230,8 +230,11 @@ impl Prepared {
         let sensitivity = DcSensitivity::new(&scratch, &branches, n_branches)?;
 
         let zip_sum: Vec<f64> = buses_template.iter().map(zip_total).collect();
-        let base_injection: Vec<f64> =
-            buses_template.iter().zip(&zip_sum).map(|(b, z)| b.p_spec + z).collect();
+        let base_injection: Vec<f64> = buses_template
+            .iter()
+            .zip(&zip_sum)
+            .map(|(b, z)| b.p_spec + z)
+            .collect();
         let island_members = base
             .islands
             .iter()
@@ -245,7 +248,14 @@ impl Prepared {
             })
             .collect();
 
-        Some(Self { base_ang, base, sensitivity, base_injection, zip_sum, island_members })
+        Some(Self {
+            base_ang,
+            base,
+            sensitivity,
+            base_injection,
+            zip_sum,
+            island_members,
+        })
     }
 
     fn solve_one(&self, scenario: &Scenario) -> DcBatchResult {
@@ -268,10 +278,19 @@ impl Prepared {
             .response(&delta)
             .expect("delta is one entry per bus and the factorization is non-singular");
 
-        let voltage_ang: Vec<f64> =
-            self.base_ang.iter().zip(&d_ang).map(|(a, d)| a + d).collect();
-        let branch_p: Vec<f64> =
-            self.base.branch_p.iter().zip(&d_flow).map(|(p, d)| p + d).collect();
+        let voltage_ang: Vec<f64> = self
+            .base_ang
+            .iter()
+            .zip(&d_ang)
+            .map(|(a, d)| a + d)
+            .collect();
+        let branch_p: Vec<f64> = self
+            .base
+            .branch_p
+            .iter()
+            .zip(&d_flow)
+            .map(|(p, d)| p + d)
+            .collect();
         // Lossless, so each island's reference supplies exactly the negation
         // of everything else in it.
         let slack_pickup = self
@@ -280,7 +299,11 @@ impl Prepared {
             .map(|members| -members.iter().map(|&i| scenario_injection[i]).sum::<f64>())
             .collect();
 
-        DcBatchResult { voltage_ang, branch_p, slack_pickup }
+        DcBatchResult {
+            voltage_ang,
+            branch_p,
+            slack_pickup,
+        }
     }
 }
 

@@ -10,9 +10,7 @@
 use std::path::PathBuf;
 
 use gridoxide::batch::{BatchError, BusOverride, Scenario};
-use gridoxide::linear::{
-    dc_branches, dc_power_flow, DcBatchSolver, DcOptions, DcSensitivity,
-};
+use gridoxide::linear::{DcBatchSolver, DcOptions, DcSensitivity, dc_branches, dc_power_flow};
 use gridoxide::pgm::pgm_to_buses_and_branches;
 use gridoxide::types::{Bus, BusType, Line, Transformer};
 
@@ -65,8 +63,7 @@ fn batch_matches_a_sequential_loop_exactly() {
                     expected_buses[ov.bus].p_spec = p;
                 }
             }
-            let expected =
-                dc_power_flow(&mut expected_buses, &lines, &transformers, opts);
+            let expected = dc_power_flow(&mut expected_buses, &lines, &transformers, opts);
 
             for (i, bus) in expected_buses.iter().enumerate() {
                 assert!(
@@ -76,8 +73,12 @@ fn batch_matches_a_sequential_loop_exactly() {
                     bus.voltage_ang
                 );
             }
-            for (b, (want, have)) in
-                expected.branch_p.iter().zip(&got.branch_p).enumerate().map(|(b, p)| (b, p))
+            for (b, (want, have)) in expected
+                .branch_p
+                .iter()
+                .zip(&got.branch_p)
+                .enumerate()
+                .map(|(b, p)| (b, p))
             {
                 assert!(
                     (want - have).abs() < 1e-12,
@@ -114,7 +115,10 @@ fn results_are_ordered_and_thread_count_independent() {
         .unwrap();
 
     assert_eq!(single.len(), scenarios.len());
-    assert_eq!(single, many, "thread count changed the batch's answer or its order");
+    assert_eq!(
+        single, many,
+        "thread count changed the batch's answer or its order"
+    );
 
     // And the scenarios really are distinct, so ordering is observable.
     assert!(
@@ -128,8 +132,8 @@ fn results_are_ordered_and_thread_count_independent() {
 /// silently, since DC folds them into the same scalar injection.
 #[test]
 fn zip_terms_survive_a_p_spec_override() {
-    use num_complex::Complex;
     use gridoxide::types::{ZipKind, ZipTerm};
+    use num_complex::Complex;
 
     let mut buses = vec![
         Bus {
@@ -160,7 +164,14 @@ fn zip_terms_survive_a_p_spec_override() {
             }],
         },
     ];
-    let lines = vec![Line { from: 0, to: 1, r: 0.0, x: 0.1, b_shunt: 0.0, g_shunt: 0.0 }];
+    let lines = vec![Line {
+        from: 0,
+        to: 1,
+        r: 0.0,
+        x: 0.1,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }];
     let opts = DcOptions::default();
 
     let scenario = Scenario::new(vec![BusOverride::new(1).p(-0.5)]);
@@ -172,7 +183,11 @@ fn zip_terms_survive_a_p_spec_override() {
     let expected = dc_power_flow(&mut buses, &lines, &[], opts);
 
     // -0.5 override plus the -0.3 constant-impedance term = -0.8 total.
-    assert!((batched[0].branch_p[0] - 0.8).abs() < 1e-12, "{}", batched[0].branch_p[0]);
+    assert!(
+        (batched[0].branch_p[0] - 0.8).abs() < 1e-12,
+        "{}",
+        batched[0].branch_p[0]
+    );
     assert!(
         (batched[0].branch_p[0] - expected.branch_p[0]).abs() < 1e-12,
         "batch dropped or double-counted the ZIP term"
@@ -199,7 +214,13 @@ fn malformed_input_is_rejected() {
         Err(BatchError::OutagesUnsupported { scenario: 0 })
     ));
 
-    assert_eq!(batch.solve(&buses, &lines, &transformers, opts, &[]).unwrap().len(), 0);
+    assert_eq!(
+        batch
+            .solve(&buses, &lines, &transformers, opts, &[])
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 /// `outage_flows` is the N-1 primitive: it must agree with actually removing
@@ -239,10 +260,16 @@ fn outage_flows_match_an_actual_outage_resolve() {
                 actual[k]
             );
         }
-        assert_eq!(predicted[outaged], 0.0, "the tripped branch must carry nothing");
+        assert_eq!(
+            predicted[outaged], 0.0,
+            "the tripped branch must carry nothing"
+        );
         checked += 1;
     }
-    assert!(checked > 0, "no load-carrying, non-radial branch was checked");
+    assert!(
+        checked > 0,
+        "no load-carrying, non-radial branch was checked"
+    );
 }
 
 /// A radial branch has no post-outage flows, because removing it islands the
@@ -265,7 +292,10 @@ fn outage_flows_refuse_a_radial_branch() {
             radial += 1;
         }
     }
-    assert!(radial > 0, "fixture has no radial branch, so this proves nothing");
+    assert!(
+        radial > 0,
+        "fixture has no radial branch, so this proves nothing"
+    );
 
     // A mismatched base-flow vector is rejected rather than read out of bounds.
     assert!(sensitivity.outage_flows(&[0.0], 0).is_none());
@@ -298,8 +328,7 @@ fn multi_outage_flows_match_an_actual_n_minus_2_resolve() {
             opened[a].to = opened[a].from;
             opened[b].to = opened[b].from;
             let mut scratch = buses.clone();
-            let actual =
-                dc_power_flow(&mut scratch, &opened, &transformers, opts).branch_p;
+            let actual = dc_power_flow(&mut scratch, &opened, &transformers, opts).branch_p;
 
             for k in 0..n_branches {
                 assert!(
@@ -351,18 +380,33 @@ fn a_breaking_pair_is_reported_even_when_neither_branch_is_radial() {
         bus_type,
         voltage_mag: 1.0,
         voltage_ang: 0.0,
-        p_spec: if bus_type == BusType::Slack { 0.0 } else { -0.3 },
+        p_spec: if bus_type == BusType::Slack {
+            0.0
+        } else {
+            -0.3
+        },
         q_spec: 0.0,
         q_min: 0.0,
         q_max: 0.0,
         u_rated: 0.0,
         zip_terms: Vec::new(),
     };
-    let line = |from, to, x| Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 };
+    let line = |from, to, x| Line {
+        from,
+        to,
+        r: 0.0,
+        x,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
 
     // Buses 0-1 joined by two parallel lines, then a tail to bus 2. Neither
     // parallel line is radial on its own; together they are the only path.
-    let buses = vec![mk(0, BusType::Slack), mk(1, BusType::PQ), mk(2, BusType::PQ)];
+    let buses = vec![
+        mk(0, BusType::Slack),
+        mk(1, BusType::PQ),
+        mk(2, BusType::PQ),
+    ];
     let lines = vec![line(0, 1, 0.1), line(0, 1, 0.2), line(1, 2, 0.3)];
     let opts = DcOptions::default();
 
@@ -378,7 +422,11 @@ fn a_breaking_pair_is_reported_even_when_neither_branch_is_radial() {
 
     // Together they are the only path to buses 1 and 2.
     assert!(sensitivity.is_breaking_set(&[0, 1]));
-    assert!(sensitivity.multi_outage_flows(&base.branch_p, &[0, 1]).is_none());
+    assert!(
+        sensitivity
+            .multi_outage_flows(&base.branch_p, &[0, 1])
+            .is_none()
+    );
 
     // Branch 2 is radial on its own, so any set containing it breaks too.
     assert!(sensitivity.is_breaking_set(&[2]));
@@ -404,9 +452,17 @@ fn empty_and_malformed_outage_sets() {
         base.branch_p
     );
     // A repeated index is malformed input, not a breaking set.
-    assert!(sensitivity.multi_outage_flows(&base.branch_p, &[0, 0]).is_none());
+    assert!(
+        sensitivity
+            .multi_outage_flows(&base.branch_p, &[0, 0])
+            .is_none()
+    );
     // Out of range, and a mismatched base-flow vector.
-    assert!(sensitivity.multi_outage_flows(&base.branch_p, &[n_branches]).is_none());
+    assert!(
+        sensitivity
+            .multi_outage_flows(&base.branch_p, &[n_branches])
+            .is_none()
+    );
     assert!(sensitivity.multi_outage_flows(&[0.0], &[0]).is_none());
 }
 
@@ -426,7 +482,14 @@ fn three_simultaneous_outages_match_a_resolve() {
         u_rated: 0.0,
         zip_terms: Vec::new(),
     };
-    let line = |from, to, x| Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 };
+    let line = |from, to, x| Line {
+        from,
+        to,
+        r: 0.0,
+        x,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
 
     // Five buses, fully meshed enough that removing three still leaves a
     // connected network.
@@ -499,7 +562,14 @@ fn chaining_single_outages_is_not_a_substitute() {
         u_rated: 0.0,
         zip_terms: Vec::new(),
     };
-    let line = |from, to, x| Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 };
+    let line = |from, to, x| Line {
+        from,
+        to,
+        r: 0.0,
+        x,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
 
     let buses = vec![
         mk(0, BusType::Slack, 0.0),
@@ -534,14 +604,23 @@ fn chaining_single_outages_is_not_a_substitute() {
     let mut scratch = buses.clone();
     let actual = dc_power_flow(&mut scratch, &opened, &[], opts).branch_p;
 
-    let simultaneous = sensitivity.multi_outage_flows(&base.branch_p, &[a, b]).unwrap();
+    let simultaneous = sensitivity
+        .multi_outage_flows(&base.branch_p, &[a, b])
+        .unwrap();
     let first = sensitivity.outage_flows(&base.branch_p, a).unwrap();
     let chained = sensitivity.outage_flows(&first, b).unwrap();
 
     let worst = |v: &[f64]| {
-        v.iter().zip(&actual).map(|(x, t)| (x - t).abs()).fold(0.0f64, f64::max)
+        v.iter()
+            .zip(&actual)
+            .map(|(x, t)| (x - t).abs())
+            .fold(0.0f64, f64::max)
     };
-    assert!(worst(&simultaneous) < 1e-9, "simultaneous is off by {}", worst(&simultaneous));
+    assert!(
+        worst(&simultaneous) < 1e-9,
+        "simultaneous is off by {}",
+        worst(&simultaneous)
+    );
     assert!(
         worst(&chained) > 1e-3,
         "chaining happened to agree here, so this fixture cannot show the \

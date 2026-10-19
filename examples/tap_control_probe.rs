@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/CGMES-Test-Configurations/v3.0");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/CGMES-Test-Configurations/v3.0");
     for name in std::env::args().skip(1) {
         let dir = root.join(&name);
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -18,15 +18,21 @@ fn main() {
         let ds = gridoxide::cgmes::load_profiles(&refs).expect("load");
         let net = gridoxide::cgmes::cgmes_to_network(&ds, 100e6).expect("convert");
 
-        let before: Vec<Option<i32>> =
-            net.tap_changers.iter().map(|c| c.as_ref().map(|c| c.position)).collect();
+        let before: Vec<Option<i32>> = net
+            .tap_changers
+            .iter()
+            .map(|c| c.as_ref().map(|c| c.position))
+            .collect();
 
         let report = gridoxide::run_power_flow(
             net.buses.clone(),
             &net.lines,
             &net.transformers,
             &net.shunts,
-            gridoxide::TapData { changers: &net.tap_changers, regulation: &net.regulation },
+            gridoxide::TapData {
+                changers: &net.tap_changers,
+                regulation: &net.regulation,
+            },
             gridoxide::solver::PowerFlowOptions {
                 control_taps: true,
                 enforce_q_limits: true,
@@ -42,8 +48,12 @@ fn main() {
         for c in &outer.taps {
             println!(
                 "    tf {:>3}  {} -> {}  steps {}  reversals {}  {:?}",
-                c.transformer, c.initial_position, c.final_position, c.steps_moved,
-                c.direction_changes, c.outcome
+                c.transformer,
+                c.initial_position,
+                c.final_position,
+                c.steps_moved,
+                c.direction_changes,
+                c.outcome
             );
         }
         let moved: Vec<usize> = outer

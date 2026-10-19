@@ -35,8 +35,8 @@ use crate::opf::Solver;
 
 use super::crac::{Crac, ElementaryAction, NetworkAction, State};
 use super::evaluate::{Network, Resolution};
-use super::linear::{optimize, LinearOptions, NetworkMut, Setpoint};
 use super::limits::Limits;
+use super::linear::{LinearOptions, NetworkMut, Setpoint, optimize};
 use super::usage::Constrained;
 
 #[derive(Clone, Debug)]
@@ -44,6 +44,46 @@ pub struct SearchOptions {
     /// How many network actions may be stacked. `0` optimizes range actions
     /// only.
     pub max_depth: usize,
+    /// The same, for a **curative** perimeter. `None` uses
+    /// [`max_depth`](Self::max_depth).
+    ///
+    /// The reference states the two separately —
+    /// `max-preventive-search-tree-depth` and
+    /// `max-curative-search-tree-depth` — and read by
+    /// [`castor::run`](super::castor::run) rather than here, since only that
+    /// layer knows which kind of perimeter it is answering. Both are
+    /// `i32::MAX` in every vendored configuration, so this changes no answer on
+    /// that corpus; it is here so a configuration that sets them differently is
+    /// not silently scored against the preventive one.
+    pub curative_max_depth: Option<usize>,
+    /// Whether, and when, to optimize the preventive perimeter a second time.
+    pub second_preventive: SecondPreventive,
+    /// The states whose usage rules decide what is *available*, when that is
+    /// not the same as the states being optimized.
+    ///
+    /// `None` — the ordinary case — means the perimeter answers both questions:
+    /// a perimeter optimizes its own CNECs using its own actions. Second
+    /// preventive is the exception and the reason this exists. It optimizes
+    /// **every** CNEC in the CRAC, curative ones included, while the actions it
+    /// may take are still only the preventive ones; handing it a perimeter of
+    /// every state would offer it every contingency's curative actions as
+    /// though they were preventive.
+    pub available_at: Option<Vec<State>>,
+    /// Sets of network actions offered as **one** candidate each, by id.
+    ///
+    /// The reference's `predefined-combinations`, and its entire mechanism for
+    /// searching anything but a greedy chain: `SearchTreeBloomer.bloom` returns
+    /// these plus one candidate per individual action, and never enumerates
+    /// subsets. So the breadth of both searches is configuration rather than
+    /// algorithm — and every vendored configuration carries `[]`, which is why
+    /// this changes no answer on that corpus either.
+    ///
+    /// A combination costs **one depth** and spends one usage allowance per
+    /// member. An entry naming an unknown action, naming fewer than two, whose
+    /// members conflict with each other, or any of whose members is unavailable
+    /// or inexpressible in this perimeter is dropped whole: a combination is
+    /// one decision, and half of one is a network nobody described.
+    pub predefined_combinations: Vec<Vec<String>>,
     /// A candidate must improve the objective by at least this much, in MW, to
     /// be taken.
     pub absolute_min_impact: f64,
@@ -99,10 +139,84 @@ pub struct SearchOptions {
     pub stop_at_target: Option<f64>,
 }
 
+/// When the preventive perimeter is optimized a second time.
+///
+/// The reference's `second-preventive-rao` parameters, and its default is
+/// **off** — a second pass costs another full search and another round of
+/// curative ones, and it only pays where the sequential decomposition left
+/// something on the table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SecondPreventive {
+    pub condition: SecondPreventiveCondition,
+    /// `hint-from-first-preventive-rao`: offer the first pass's winning set of
+    /// network actions as one candidate at the first depth. It cannot change
+    /// the answer, only how quickly the second pass reaches it — a combination
+    /// that was optimal once is worth trying before rediscovering it action by
+    /// action.
+    pub hint: bool,
+}
+
+/// What makes a second preventive pass worth running.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SecondPreventiveCondition {
+    #[default]
+    Disabled,
+    /// Run if the finished plan costs more than doing nothing — the same
+    /// comparison [`castor`](super::castor) makes before discarding a plan
+    /// outright, asked earlier so there is a chance to fix it rather than throw
+    /// it away.
+    CostIncrease,
+    /// Run if any curative perimeter failed to reach its stop criterion, which
+    /// is the case where the sequential decomposition demonstrably left
+    /// something for the preventive perimeter to do. The reference's default
+    /// when the feature is switched on at all.
+    PossibleCurativeImprovement,
+}
+
+impl SecondPreventive {
+    /// Whether to run, given how the first pass turned out.
+    pub fn runs(
+        &self,
+        options: &SearchOptions,
+        preventive: &SearchResult,
+        scenarios: &[super::castor::ScenarioPlan],
+        cost_increased: bool,
+    ) -> bool {
+        match self.condition {
+            SecondPreventiveCondition::Disabled => false,
+            // "A curative perimeter reached an objective worse than the
+            // preventive perimeter's" is the reference's own wording, and it is
+            // the negation of the criterion those perimeters stop on: if one
+            // stopped without reaching the target, something is left.
+            SecondPreventiveCondition::PossibleCurativeImprovement => {
+                let target = options
+                    .stop_at_target
+                    .unwrap_or(preventive.final_objective + options.curative_min_obj_improvement);
+                scenarios
+                    .iter()
+                    .flat_map(|s| s.perimeters.iter())
+                    .any(|p| p.final_margin_mw < target - 1e-6)
+            }
+            // The comparison the caller has already made: the finished plan
+            // against doing nothing, over every state at once. Per-perimeter
+            // margins cannot answer it — each perimeter improves *itself* by
+            // construction, and a plan costs more than doing nothing exactly
+            // when a preventive decision hurts a state its own perimeter could
+            // not see. That is the case this condition exists for, so it is the
+            // one it has to measure.
+            SecondPreventiveCondition::CostIncrease => cost_increased,
+        }
+    }
+}
+
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
             max_depth: 2,
+            curative_max_depth: None,
+            second_preventive: SecondPreventive::default(),
+            available_at: None,
+            predefined_combinations: Vec::new(),
             absolute_min_impact: 0.0,
             relative_min_impact: 0.0,
             linear: LinearOptions::default(),
@@ -121,6 +235,9 @@ pub struct SearchResult {
     pub network_actions: Vec<usize>,
     /// Range-action set-points at the winning leaf.
     pub setpoints: Vec<Setpoint>,
+    /// The winning leaf's `A(r, s)` answers for states this perimeter carries
+    /// but does not report — empty outside the second preventive problem.
+    pub held_setpoints: Vec<Setpoint>,
     pub initial_margin_mw: f64,
     pub final_margin_mw: f64,
     /// The winning leaf's objective — the minimum margin in
@@ -203,7 +320,11 @@ fn effect_of(
     tap_changers: &[Option<crate::types::TapChanger>],
     lines: usize,
 ) -> Option<Effect> {
-    let mut effect = Effect { open: Vec::new(), close: Vec::new(), taps: Vec::new() };
+    let mut effect = Effect {
+        open: Vec::new(),
+        close: Vec::new(),
+        taps: Vec::new(),
+    };
     for elementary in &action.elementary {
         match elementary {
             ElementaryAction::TerminalsConnection { element, connected } => {
@@ -245,16 +366,15 @@ fn effect_of(
                     .range_actions
                     .iter()
                     .find_map(|r| match &r.kind {
-                        super::crac::RangeActionKind::Pst { element: e, tap_to_angle, .. }
-                            if e == element =>
-                        {
-                            Some(tap_to_angle.clone())
-                        }
+                        super::crac::RangeActionKind::Pst {
+                            element: e,
+                            tap_to_angle,
+                            ..
+                        } if e == element => Some(tap_to_angle.clone()),
                         _ => None,
                     })
                     .unwrap_or_default();
-                let table =
-                    super::linear::tap_table(&declared, tap_changers, branch, lines);
+                let table = super::linear::tap_table(&declared, tap_changers, branch, lines);
                 let angle = table.iter().find(|(t, _)| t == tap).map(|(_, a)| *a)?;
                 effect.taps.push((branch, *tap, angle));
             }
@@ -270,13 +390,39 @@ fn effect_of(
         .then_some(effect)
 }
 
+/// One thing the search may try at a depth: a set of network actions applied
+/// together, and the network state they produce.
+///
+/// Usually a set of one. The reference's `SearchTreeBloomer.bloom` offers each
+/// individual network action **plus** each *predefined combination* named in
+/// the RAO parameters, and a combination is one decision rather than a chain of
+/// them — it is taken whole or not at all, and it costs one depth. So the
+/// search's unit is a candidate, not an action.
+///
+/// Its breadth is therefore configuration, not algorithm: with no predefined
+/// combinations — which is every vendored configuration — this is exactly the
+/// greedy chain it has always been.
+struct Candidate {
+    /// Indices into [`Crac::network_actions`], in the CRAC's own order.
+    actions: Vec<usize>,
+    effect: Effect,
+    /// The tie-break key: the members' ids joined, so a combination orders
+    /// deterministically among single actions rather than by whatever position
+    /// it was built at.
+    key: String,
+}
+
 /// Whether two actions can be taken together.
 ///
 /// Two actions touching the same network element conflict: one may open a line
 /// the other moves, and the result depends on the order, which a set has none
 /// of.
 fn compatible(a: &NetworkAction, b: &NetworkAction) -> bool {
-    let mine: Vec<&str> = a.elementary.iter().flat_map(ElementaryAction::elements).collect();
+    let mine: Vec<&str> = a
+        .elementary
+        .iter()
+        .flat_map(ElementaryAction::elements)
+        .collect();
     !b.elementary
         .iter()
         .flat_map(ElementaryAction::elements)
@@ -287,6 +433,10 @@ fn compatible(a: &NetworkAction, b: &NetworkAction) -> bool {
 ///
 /// `transformers` is mutated to the winning leaf's state, matching
 /// [`optimize`]'s contract: the caller's network ends up where the result says.
+///
+/// Starts from the network's own out-of-service circuits. A perimeter that
+/// begins somewhere else — a curative one, carrying the preventive stage's and
+/// the automatons' decisions — wants [`search_with_open`] instead.
 pub fn search(
     crac: &Crac,
     network: &Network<'_>,
@@ -295,15 +445,66 @@ pub fn search(
     solver: &mut dyn Solver,
     options: &SearchOptions,
 ) -> SearchResult {
+    search_with_open(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        solver,
+        options,
+        network.initially_open,
+    )
+}
+
+/// [`search`], starting from a stated open set rather than the network's own.
+///
+/// # Why this is a parameter and not a pre-modified network
+///
+/// The obvious way to say "these branches are already open" is to write
+/// [`OPEN_BRANCH_Z`](crate::topology::reduction::OPEN_BRANCH_Z) into a copy of
+/// the lines before searching. That is what this used to do, and it made a
+/// **closing** remedial action structurally impossible: a close is expressed by
+/// removing a branch from the open set, so with the set emptied into the
+/// impedances there is nothing left to remove and the branch stays at 1e9 Ω
+/// whatever the action says.
+///
+/// The failure is silent in the worst way. The action is not refused — it
+/// evaluates as a change that does nothing, loses to every other candidate, and
+/// the perimeter reports that no remedial action was worth taking. Against the
+/// reference's own suite that was 21 curative closes declined out of 21 offered,
+/// while the same actions matched 8 of 8 in preventive and 3 of 3 in auto,
+/// which is where the asymmetry gave it away: [`automaton`](super::automaton)
+/// carries the set as a list and retains against it, exactly as this now does.
+///
+/// So the set stays a list all the way down to
+/// [`optimize_with_open`], which knows how to apply it — including stating it
+/// as outages so the AC path removes those branches from the Y-bus rather than
+/// leaving them coupled through a ~1e-9 admittance.
+pub fn search_with_open(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    perimeter: &[State],
+    solver: &mut dyn Solver,
+    options: &SearchOptions,
+    already_open: &[usize],
+) -> SearchResult {
     // The root: no network action, range actions untouched.
-    let base_open: Vec<usize> = network.initially_open.to_vec();
+    let base_open: Vec<usize> = already_open.to_vec();
 
     // Which CNECs are constrained *here*, before this perimeter acts. A usage
     // rule conditional on a CNEC is answered against this and never
     // re-answered, so an action authorized by an overload keeps its authority
     // even once another action has relieved it — the reference's own scenario
     // 2.4.1.2 is named for that ("no reevaluation"). See `super::usage`.
-    let starting = measure_with(crac, network, resolution, &base_open, options.linear.flow_model);
+    let starting = measure_with(
+        crac,
+        network,
+        resolution,
+        &base_open,
+        options.linear.flow_model,
+        options.linear.held.as_ref(),
+    );
     let branches = crate::linear::btheta::dc_branches(
         network.lines,
         network.transformers,
@@ -318,32 +519,113 @@ pub fn search(
     // travels with the options rather than being re-derived per leaf.
     let mut linear = options.linear.clone();
     linear.available = constrained.clone();
-    let options = &SearchOptions { linear, ..options.clone() };
+    linear.available_at = options.available_at.clone();
+    // Where each phase shifter sits *before this perimeter acts*, which is what
+    // a `relativeToPreviousInstant` range is written against. Measured here,
+    // once, on the network the perimeter was handed — a curative one carries
+    // the preventive stage's and the automatons' decisions, and that is exactly
+    // the "previous instant" the CRAC means. Every leaf then optimizes against
+    // the same box, rather than one that moves with whatever the leaf did.
+    linear.previous_taps = super::linear::taps_now(crac, network, resolution);
+    // Cleared, not inherited. `budgeted` fills it per leaf; leaving the
+    // caller's value here would bill the preventive stage's actions to every
+    // curative leaf, which under a cost objective makes every curative
+    // candidate look equally and wrongly expensive.
+    linear.activated = Vec::new();
+    let options = &SearchOptions {
+        linear,
+        ..options.clone()
+    };
 
-    let available: Vec<(usize, Effect)> = crac
-        .network_actions
-        .iter()
-        .filter(|action| constrained.allows(&action.usage_rules, perimeter, crac))
-        .filter_map(|action| {
-            let index = crac.network_actions.iter().position(|a| a.id == action.id)?;
-            let effect =
-                effect_of(action, crac, resolution, network.tap_changers, network.lines.len())?;
-            Some((index, effect))
+    let available_at = options.available_at.as_deref().unwrap_or(perimeter);
+    let offered = |index: usize| -> Option<Effect> {
+        let action = crac.network_actions.get(index)?;
+        constrained
+            .allows(&action.usage_rules, available_at, crac)
+            .then(|| {
+                effect_of(
+                    action,
+                    crac,
+                    resolution,
+                    network.tap_changers,
+                    network.lines.len(),
+                )
+            })
+            .flatten()
+    };
+    let mut available: Vec<Candidate> = (0..crac.network_actions.len())
+        .filter_map(|index| {
+            Some(Candidate {
+                actions: vec![index],
+                effect: offered(index)?,
+                key: crac.network_actions[index].id.clone(),
+            })
         })
         .collect();
-    let available = match options.skip_far_actions {
-        Some(max) => {
-            near_most_limiting(
-                crac,
-                network,
-                resolution,
-                perimeter,
-                &base_open,
-                available,
-                max,
-                options.linear.flow_model,
-            )
+    // Then the predefined combinations, each as **one** candidate. A member
+    // that is unavailable here, inexpressible, or incompatible with another
+    // member takes the whole combination with it: the reference offers a
+    // combination as a single decision, and half of one is a network nobody
+    // described.
+    for combination in &options.predefined_combinations {
+        let members: Option<Vec<usize>> = combination
+            .iter()
+            .map(|id| crac.network_actions.iter().position(|a| a.id == *id))
+            .collect();
+        let Some(members) = members else { continue };
+        if members.len() < 2 {
+            continue;
         }
+        let pairwise_ok = members.iter().enumerate().all(|(i, &a)| {
+            members[i + 1..]
+                .iter()
+                .all(|&b| compatible(&crac.network_actions[a], &crac.network_actions[b]))
+        });
+        if !pairwise_ok {
+            continue;
+        }
+        let mut effect = Effect {
+            open: Vec::new(),
+            close: Vec::new(),
+            taps: Vec::new(),
+        };
+        let mut expressible = true;
+        for &index in &members {
+            match offered(index) {
+                Some(part) => {
+                    effect.open.extend(part.open);
+                    effect.close.extend(part.close);
+                    effect.taps.extend(part.taps);
+                }
+                None => expressible = false,
+            }
+        }
+        if !expressible {
+            continue;
+        }
+        let key = members
+            .iter()
+            .map(|&i| crac.network_actions[i].id.as_str())
+            .collect::<Vec<_>>()
+            .join("+");
+        available.push(Candidate {
+            actions: members,
+            effect,
+            key,
+        });
+    }
+    let available = match options.skip_far_actions {
+        Some(max) => near_most_limiting(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            &base_open,
+            available,
+            max,
+            options.linear.flow_model,
+            options.linear.held.as_ref(),
+        ),
         None => available,
     };
     // What the CRAC allows in this perimeter's own instant. A perimeter spans
@@ -351,7 +633,7 @@ pub fn search(
     // preventive state and every curative perimeter a single curative one — so
     // the earliest instant present is that instant, and an outage or
     // pulled-forward state riding along does not bring its own allowance.
-    let limits = perimeter
+    let limits = available_at
         .iter()
         .map(|s| s.instant)
         .min()
@@ -360,6 +642,9 @@ pub fn search(
     // so the budget is rebuilt per candidate rather than shared.
     let budgeted = |chosen: &[usize]| LinearOptions {
         limits: limits.remaining(crac, chosen),
+        // The same set, so a leaf cannot be budgeted against one answer and
+        // scored against another. Only a cost objective reads it.
+        activated: chosen.to_vec(),
         ..options.linear.clone()
     };
 
@@ -367,7 +652,8 @@ pub fn search(
     // from a second one of a network it has already measured — under an AC flow
     // model that is a Newton-Raphson solve per state.
     let initial = worst_of(crac, &starting, perimeter);
-    let untouched = objective_of(crac, &starting, perimeter, &options.linear);
+    // Nothing has been done yet, so nothing has been paid for.
+    let untouched = objective_of(crac, &starting, perimeter, &[], &[], &options.linear);
 
     let reached = |objective: f64| options.stop_at_target.is_some_and(|t| objective >= t);
 
@@ -383,6 +669,7 @@ pub fn search(
         return SearchResult {
             network_actions: Vec::new(),
             setpoints: Vec::new(),
+            held_setpoints: Vec::new(),
             initial_margin_mw: initial,
             final_margin_mw: initial,
             final_objective: untouched,
@@ -401,7 +688,10 @@ pub fn search(
         perimeter,
         solver,
         &budgeted(&[]),
-        Applied { open: &base_open, taps: &[] },
+        Applied {
+            open: &base_open,
+            taps: &[],
+        },
     );
 
     let mut chosen: Vec<usize> = Vec::new();
@@ -419,37 +709,41 @@ pub fn search(
         let mut open_here: Vec<usize> = base_open.clone();
         let mut taps_here: Vec<(usize, i32, f64)> = Vec::new();
         for &index in &chosen {
-            if let Some((_, effect)) = available.iter().find(|(i, _)| *i == index) {
+            if let Some(effect) = effect_of_chosen(&available, index) {
                 open_here.extend(&effect.open);
                 open_here.retain(|b| !effect.close.contains(b));
                 taps_here.extend(&effect.taps);
             }
         }
 
-        let mut winner: Option<(usize, Evaluated)> = None;
+        let mut winner: Option<(&Candidate, Evaluated)> = None;
         // A fixed order, so the search reproduces itself.
-        for (index, effect) in &available {
-            if chosen.contains(index) {
+        for offer in &available {
+            if offer.actions.iter().any(|i| chosen.contains(i)) {
                 continue;
             }
-            if chosen.iter().any(|&c| {
-                !compatible(&crac.network_actions[c], &crac.network_actions[*index])
+            if offer.actions.iter().any(|&index| {
+                chosen
+                    .iter()
+                    .any(|&c| !compatible(&crac.network_actions[c], &crac.network_actions[index]))
             }) {
                 continue;
             }
             // More than the plan's allowance permits. Checked before the leaf
             // is evaluated rather than after: a candidate the CRAC forbids is
-            // not a worse answer, it is not an answer.
+            // not a worse answer, it is not an answer. A combination spends one
+            // allowance **per member**: the limits count remedial actions, and
+            // taking three at once is still taking three.
             let mut with_candidate = chosen.clone();
-            with_candidate.push(*index);
+            with_candidate.extend(&offer.actions);
             if !limits.admits(crac, &with_candidate) {
                 continue;
             }
             let mut open = open_here.clone();
-            open.extend(&effect.open);
-            open.retain(|b| !effect.close.contains(b));
+            open.extend(&offer.effect.open);
+            open.retain(|b| !offer.effect.close.contains(b));
             let mut taps = taps_here.clone();
-            taps.extend(&effect.taps);
+            taps.extend(&offer.effect.taps);
 
             let candidate = leaf(
                 crac,
@@ -458,7 +752,10 @@ pub fn search(
                 perimeter,
                 solver,
                 &budgeted(&with_candidate),
-                Applied { open: &open, taps: &taps },
+                Applied {
+                    open: &open,
+                    taps: &taps,
+                },
             );
             leaves += 1;
 
@@ -466,19 +763,20 @@ pub fn search(
             // ampere objective those can order two candidates differently.
             let better = match &winner {
                 None => true,
-                Some((previous_index, previous)) => {
-                    candidate.objective > previous.objective + 1e-12
-                        || ((candidate.objective - previous.objective).abs() <= 1e-12
-                            && crac.network_actions[*index].id
-                                < crac.network_actions[*previous_index].id)
+                Some((previous, evaluated)) => {
+                    candidate.objective > evaluated.objective + 1e-12
+                        || ((candidate.objective - evaluated.objective).abs() <= 1e-12
+                            && offer.key < previous.key)
                 }
             };
             if better {
-                winner = Some((*index, candidate));
+                winner = Some((offer, candidate));
             }
         }
 
-        let Some((index, candidate)) = winner else { break };
+        let Some((offer, candidate)) = winner else {
+            break;
+        };
         // A candidate that reaches the target is taken even if it falls short
         // of the minimum-impact thresholds: those exist to stop the search
         // spending an action for nothing, and securing the network is not
@@ -488,14 +786,14 @@ pub fn search(
         if !enough {
             break;
         }
-        chosen.push(index);
+        chosen.extend(&offer.actions);
         best = candidate;
         depth += 1;
     }
 
     let mut open_branches: Vec<usize> = base_open.clone();
     for &index in &chosen {
-        if let Some((_, effect)) = available.iter().find(|(i, _)| *i == index) {
+        if let Some(effect) = effect_of_chosen(&available, index) {
             open_branches.extend(&effect.open);
             open_branches.retain(|b| !effect.close.contains(b));
         }
@@ -506,6 +804,7 @@ pub fn search(
     SearchResult {
         network_actions: chosen,
         setpoints: best.setpoints,
+        held_setpoints: best.held_setpoints,
         initial_margin_mw: initial,
         // Megawatts, whatever the objective was maximized in — the search
         // reports a margin, it does not report its own scoring function.
@@ -519,6 +818,19 @@ pub fn search(
     }
 }
 
+/// The effect of one chosen action, found among the candidates that offered it.
+///
+/// Prefers the single-action candidate, so a chain that took an action on its
+/// own is rebuilt from that action alone rather than from a combination that
+/// merely happened to contain it.
+fn effect_of_chosen(available: &[Candidate], index: usize) -> Option<&Effect> {
+    available
+        .iter()
+        .find(|c| c.actions == [index])
+        .or_else(|| available.iter().find(|c| c.actions.contains(&index)))
+        .map(|c| &c.effect)
+}
+
 /// Whether a candidate beats the incumbent by enough to be worth taking.
 ///
 /// Both thresholds apply and the stricter binds. Without them a search happily
@@ -527,6 +839,15 @@ pub fn search(
 fn improved_enough(current: f64, candidate: f64, options: &SearchOptions) -> bool {
     if candidate <= current + options.absolute_min_impact {
         return false;
+    }
+    // A *relative* threshold is a rule about margins and does not survive the
+    // change of scale. It is stated as a fraction of the current objective; a
+    // margin is tens or hundreds, a cost is hundreds of thousands, so 1% asks
+    // for a 2500-unit gain where it meant 2. Refuse it rather than apply it at
+    // that scale — the absolute threshold above still bites, and under
+    // `MIN_COST` it is the one the configurations actually set.
+    if options.linear.objective_kind.costly().is_some() {
+        return true;
     }
     if options.relative_min_impact > 0.0 {
         let scale = current.abs().max(1.0);
@@ -554,26 +875,54 @@ fn leaf(
     // out does not make the action fail loudly — it makes it evaluate as a
     // change that does nothing, so the search can never prefer it and would
     // misreport the network if it ever did.
-    apply_taps(&mut transformers, network.tap_changers, network.lines.len(), applied.taps);
+    apply_taps(
+        &mut transformers,
+        network.tap_changers,
+        network.lines.len(),
+        applied.taps,
+    );
     // The leaf gets its own copy of the buses as well as the transformers: a
     // redispatch moves injections, and a candidate that is evaluated and
     // discarded must not leave them moved.
     let mut buses = network.buses.to_vec();
     let mut mutable = NetworkMut {
+        generation: network.generation,
         buses: &mut buses,
         lines: network.lines,
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
         bus_ids: network.bus_ids,
-        initially_open: network.initially_open,
+        // The candidate's own open set, not the file's. `optimize_with_open`
+        // overrides this whenever the set is non-empty, so the only path this
+        // field decides is the empty one — and an empty set is a *result* here,
+        // not an absence: a closing remedial action that shuts the network's
+        // last out-of-service circuit produces exactly it. Handing the file's
+        // list over at that point would re-open the branch the action just
+        // closed, and every margin downstream would stay self-consistent while
+        // describing a network in which nothing was closed.
+        initially_open: applied.open,
         bus_countries: network.bus_countries,
         shunts: network.shunts,
         tap_changers: network.tap_changers,
         base_mva: network.base_mva,
     };
-    let (objective, margin_mw, setpoints) =
-        optimize_with_open(crac, &mut mutable, resolution, perimeter, solver, options, applied.open);
-    Evaluated { objective, margin_mw, setpoints, transformers, buses }
+    let (objective, margin_mw, setpoints, held_setpoints) = optimize_with_open(
+        crac,
+        &mut mutable,
+        resolution,
+        perimeter,
+        solver,
+        options,
+        applied.open,
+    );
+    Evaluated {
+        objective,
+        margin_mw,
+        setpoints,
+        held_setpoints,
+        transformers,
+        buses,
+    }
 }
 
 /// One leaf's outcome.
@@ -585,6 +934,7 @@ struct Evaluated {
     objective: f64,
     margin_mw: f64,
     setpoints: Vec<Setpoint>,
+    held_setpoints: Vec<Setpoint>,
     transformers: Vec<crate::types::Transformer>,
     buses: Vec<crate::types::Bus>,
 }
@@ -607,15 +957,20 @@ struct Applied<'a> {
 /// `linear::apply`'s rule, and powsybl's: a `PstRangeAction` converts a
 /// set-point to a position and lets the equipment decide the angle. The CRAC's
 /// angle is the fallback for a shifter the network does not describe.
-fn apply_taps(
+pub(super) fn apply_taps(
     transformers: &mut [crate::types::Transformer],
     tap_changers: &[Option<crate::types::TapChanger>],
     lines: usize,
     taps: &[(usize, i32, f64)],
 ) {
     for &(branch, tap, angle_deg) in taps {
-        let Some(i) = branch.checked_sub(lines) else { continue };
-        let from_network = tap_changers.get(i).and_then(|c| c.as_ref()).and_then(|c| c.at(tap));
+        let Some(i) = branch.checked_sub(lines) else {
+            continue;
+        };
+        let from_network = tap_changers
+            .get(i)
+            .and_then(|c| c.as_ref())
+            .and_then(|c| c.at(tap));
         if let Some(transformer) = transformers.get_mut(i) {
             // The magnitude is the transformer's own ratio and is not the
             // shifter's to change; only the angle moves.
@@ -640,18 +995,31 @@ fn optimize_with_open(
     solver: &mut dyn Solver,
     options: &LinearOptions,
     open: &[usize],
-) -> (f64, f64, Vec<Setpoint>) {
+) -> (f64, f64, Vec<Setpoint>, Vec<Setpoint>) {
     if open.is_empty() {
         let result = optimize(crac, network, resolution, perimeter, solver, options);
-        return (result.final_objective, result.final_margin_mw, result.setpoints);
+        return (
+            result.final_objective,
+            result.final_margin_mw,
+            result.setpoints,
+            result.held_setpoints,
+        );
     }
     // Opening a branch is expressed by removing it from the working copy's
     // line list — a line with no admittance carries no flow and contributes
     // nothing, which is exactly what "open" means. Indices are preserved by
     // zeroing rather than deleting.
+    //
+    // Not when the perimeter is **split**, though. There the open set is not
+    // one set: `LinearOptions::held` names states that see a different one, and
+    // baking either into the shared line list would make the other wrong.
+    // `SensitivityPoints::build` opens each point's own branches instead, and
+    // the evaluator has always taken its open set as data rather than from the
+    // lines.
+    let split = options.held.as_ref().is_some_and(|h| !h.states.is_empty());
     let mut lines = network.lines.to_vec();
     let mut transformers = network.transformers.clone();
-    for &branch in open {
+    for &branch in if split { &[][..] } else { open } {
         if branch < lines.len() {
             lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
             lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
@@ -664,6 +1032,7 @@ fn optimize_with_open(
     }
     let mut inner = NetworkMut {
         buses: network.buses,
+        generation: network.generation,
         lines: &lines,
         transformers: &mut transformers,
         branch_ids: network.branch_ids,
@@ -695,7 +1064,12 @@ fn optimize_with_open(
     for (a, b) in network.transformers.iter_mut().zip(transformers.iter()) {
         a.tap = b.tap;
     }
-    (result.final_objective, result.final_margin_mw, result.setpoints)
+    (
+        result.final_objective,
+        result.final_margin_mw,
+        result.setpoints,
+        result.held_setpoints,
+    )
 }
 
 /// Evaluate with the given flow model, taking the AC options from the network.
@@ -705,44 +1079,61 @@ fn measure_with(
     resolution: &Resolution,
     open: &[usize],
     model: super::evaluate::FlowModel,
+    held: Option<&super::evaluate::Held>,
 ) -> super::evaluate::SecurityResult {
-    let ac = super::evaluate::AcOptions { shunts: network.shunts, ..Default::default() };
-    super::evaluate::evaluate_model(crac, network, resolution, open, model, &ac)
+    let ac = super::evaluate::ac_options(network);
+    super::evaluate::evaluate_split(crac, network, resolution, open, held, model, &ac)
 }
 
 /// What the search maximizes, read off an assessment already made: the worst
 /// optimized margin in the objective's unit, less what the monitored CNECs
 /// cost. Mirrors `linear::objective`, which computes the same thing from a
 /// network rather than from a result.
-fn objective_of(
+pub(super) fn objective_of(
     crac: &Crac,
     result: &super::evaluate::SecurityResult,
     perimeter: &[State],
+    activated: &[usize],
+    moved: &[(usize, f64)],
     options: &LinearOptions,
 ) -> f64 {
     let unit = options.objective_unit;
-    let margin = result
-        .perimeters
-        .iter()
-        .filter(|p| perimeter.contains(&p.state))
-        .flat_map(|p| p.cnecs.iter())
-        .filter(|c| crac.flow_cnecs[c.cnec].optimized)
-        .map(|c| match unit {
-            super::linear::ObjectiveUnit::Megawatt => c.margin_mw,
-            super::linear::ObjectiveUnit::Ampere => c.margin_a,
-        })
-        .fold(f64::INFINITY, f64::min);
-    let margin = if margin.is_finite() { margin } else { super::mnec::NO_CNEC_MARGIN };
-    margin - options.mnec.cost(crac, result, perimeter, unit)
+    let score = match options.objective_kind.costly() {
+        // See [`linear::objective`] for why `NO_CNEC_MARGIN` is not reached
+        // here: a sum over no CNECs is zero, not an enormous margin.
+        //
+        // Both what was activated and what moved, because this reads an
+        // assessment rather than an optimization and a network does not
+        // remember how it got that way. Explicit parameters rather than
+        // defaults, so the compiler makes every call site say which plan it
+        // means — passing `&[]` for `moved` prices every shifter at zero, and
+        // 3.4.3.3 is decided by exactly one activation plus one tap.
+        Some(costly) => -costly.cost(crac, result, perimeter, unit, activated, moved),
+        None => {
+            let margin = result
+                .perimeters
+                .iter()
+                .filter(|p| perimeter.contains(&p.state))
+                .flat_map(|p| p.cnecs.iter())
+                .filter(|c| crac.flow_cnecs[c.cnec].optimized)
+                .map(|c| match unit {
+                    super::linear::ObjectiveUnit::Megawatt => c.margin_mw,
+                    super::linear::ObjectiveUnit::Ampere => c.margin_a,
+                })
+                .fold(f64::INFINITY, f64::min);
+            if margin.is_finite() {
+                margin
+            } else {
+                super::mnec::NO_CNEC_MARGIN
+            }
+        }
+    };
+    score - options.mnec.cost(crac, result, perimeter, unit)
 }
 
 /// The worst optimized margin over `perimeter` in an assessment already made —
 /// the "do nothing" baseline the search improves on.
-fn worst_of(
-    crac: &Crac,
-    result: &super::evaluate::SecurityResult,
-    perimeter: &[State],
-) -> f64 {
+fn worst_of(crac: &Crac, result: &super::evaluate::SecurityResult, perimeter: &[State]) -> f64 {
     result
         .perimeters
         .iter()
@@ -761,7 +1152,9 @@ fn branch_countries(
     branch: usize,
     dc: &[crate::linear::btheta::DcBranch],
 ) -> Vec<String> {
-    let Some(b) = dc.iter().find(|b| b.index == branch) else { return Vec::new() };
+    let Some(b) = dc.iter().find(|b| b.index == branch) else {
+        return Vec::new();
+    };
     [b.from, b.to]
         .iter()
         .filter_map(|&bus| network.bus_countries.get(bus)?.clone())
@@ -779,15 +1172,20 @@ fn country_boundaries(
 ) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for b in dc {
-        let (Some(Some(x)), Some(Some(y))) =
-            (network.bus_countries.get(b.from), network.bus_countries.get(b.to))
-        else {
+        let (Some(Some(x)), Some(Some(y))) = (
+            network.bus_countries.get(b.from),
+            network.bus_countries.get(b.to),
+        ) else {
             continue;
         };
         if x == y {
             continue;
         }
-        let pair = if x < y { (x.clone(), y.clone()) } else { (y.clone(), x.clone()) };
+        let pair = if x < y {
+            (x.clone(), y.clone())
+        } else {
+            (y.clone(), x.clone())
+        };
         if !out.contains(&pair) {
             out.push(pair);
         }
@@ -852,10 +1250,11 @@ fn near_most_limiting(
     resolution: &Resolution,
     perimeter: &[State],
     open: &[usize],
-    available: Vec<(usize, Effect)>,
+    available: Vec<Candidate>,
     max_boundaries: usize,
     model: super::evaluate::FlowModel,
-) -> Vec<(usize, Effect)> {
+    held: Option<&super::evaluate::Held>,
+) -> Vec<Candidate> {
     if network.bus_countries.is_empty() {
         return available;
     }
@@ -868,7 +1267,7 @@ fn near_most_limiting(
     // The most limiting element, measured on the network as it stands and with
     // the same flow model the optimizer scores by — the reference locates it
     // from its own optimization result, not from a second opinion.
-    let evaluated = measure_with(crac, network, resolution, open, model);
+    let evaluated = measure_with(crac, network, resolution, open, model, held);
     let worst = evaluated
         .perimeters
         .iter()
@@ -884,7 +1283,8 @@ fn near_most_limiting(
     let boundaries = country_boundaries(network, &dc);
     available
         .into_iter()
-        .filter(|(_, effect)| {
+        .filter(|candidate| {
+            let effect = &candidate.effect;
             let mut touched: Vec<String> = Vec::new();
             for &branch in effect.open.iter().chain(&effect.close) {
                 touched.extend(branch_countries(network, branch, &dc));
@@ -896,7 +1296,8 @@ fn near_most_limiting(
                 return true;
             }
             touched.iter().any(|t| {
-                here.iter().any(|h| within_boundaries(h, t, &boundaries, max_boundaries))
+                here.iter()
+                    .any(|h| within_boundaries(h, t, &boundaries, max_boundaries))
             })
         })
         .collect()

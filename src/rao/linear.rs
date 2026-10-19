@@ -73,14 +73,14 @@
 //! counter trade has no network sensitivity at all, which is why the reference
 //! leaves it out of its LP too.
 
-use crate::linear::btheta::{dc_branches, dc_power_flow, DcBranch};
-use crate::linear::sensitivity::DcSensitivity;
 use crate::linear::DcOptions;
-use crate::opf::{LinearProgram, OptStatus, Solver};
+use crate::linear::btheta::{DcBranch, dc_branches, dc_power_flow};
+use crate::linear::sensitivity::DcSensitivity;
+use crate::opf::{LinearProgram, OpfError, OptStatus, Solver};
 use crate::types::Transformer;
 
 use super::crac::{Crac, RangeActionKind, State};
-use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution};
+use super::evaluate::{FlowModel, Network, Resolution};
 use super::limits::Budget;
 use super::mnec::{Mnec, NO_CNEC_MARGIN};
 use super::usage::Constrained;
@@ -105,15 +105,72 @@ pub enum ObjectiveUnit {
     Ampere,
 }
 
+/// What the objective **is**, as opposed to what it is measured in.
+///
+/// The reference's `objective-function.type`. [`MaxMargin`](Self::MaxMargin) is
+/// the minimum margin over the optimized CNECs — a quantity to *maximize*, and
+/// a **min**. [`MinCost`](Self::MinCost) is `MIN_COST` — a penalized sum of
+/// every overload plus what the chosen actions cost, a quantity to *minimize*
+/// and a **sum**.
+///
+/// The two are different questions rather than one question in two units, which
+/// is why this is a branch rather than another penalty term: scenario 3.4.1.2
+/// picks a network action that yields a *smaller* margin than its rival because
+/// it costs less, and no scaling of a min-margin objective produces that answer.
+///
+/// gridoxide keeps one internal convention — higher is better — so the cost is
+/// returned negated by [`objective`] and
+/// [`objective_of`](super::search::objective_of). Everything downstream (the
+/// winner ranking, `improved_enough`, `stop_at_target`) is then unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ObjectiveKind {
+    #[default]
+    MaxMargin,
+    MinCost(super::costly::Costly),
+}
+
+impl ObjectiveKind {
+    /// The cost rule, when this is a cost objective.
+    pub fn costly(&self) -> Option<&super::costly::Costly> {
+        match self {
+            ObjectiveKind::MaxMargin => None,
+            ObjectiveKind::MinCost(c) => Some(c),
+        }
+    }
+}
+
 /// How the optimizer should treat a phase shifter's taps.
+///
+/// **Only [`Continuous`](Self::Continuous) is implemented**, and nothing reads
+/// this field: `options_from` does not set it and [`build_program`] does not
+/// branch on it. It is kept because the reference's `pst-model` names both, and
+/// because naming the gap is better than leaving the reader to find it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TapModel {
     /// Optimize the angle continuously, then round to the nearest tap and
-    /// re-evaluate. Needs only an LP, so it runs on the in-house solver.
+    /// re-evaluate — with the bracketing tap on the other side tried too, so the
+    /// iteration cannot settle on the wrong side of a kink. Needs only an LP, so
+    /// it runs on the in-house solver.
     #[default]
     Continuous,
-    /// Optimize the tap itself as an integer variable. Needs a MIP backend —
-    /// [`IpmSolver`](crate::opf::ipm) refuses, by design.
+    /// Optimize the tap itself as an integer variable. **Declared, not built**:
+    /// selecting it today behaves exactly as [`Continuous`](Self::Continuous).
+    ///
+    /// Not an oversight, and this is the measurement rather than the excuse. Of
+    /// 37 vendored configurations 5 ask for `APPROXIMATED_INTEGERS`, governing 24
+    /// scenarios — and the reference built eight of them as a **controlled
+    /// pair**, 2.2.1.5.1 through 2.2.1.5.6 each labelled "copy of 2.6.2.x with
+    /// MIP for PSTs": the same scenario on the same network with the tap model as
+    /// the only difference. All 24 match in full bar the two where gridoxide
+    /// answers more cheaply, so both halves of every pair agree with one
+    /// implementation of taps between them.
+    ///
+    /// Continuous-plus-rounding therefore reaches the reference's discrete answer
+    /// everywhere the reference asked for a discrete answer. Building the integer
+    /// tap could win nothing against this corpus and could only lose, which makes
+    /// it a change the gate cannot validate — and the rule for those is that
+    /// the measurement comes first. It wants a case the corpus does not have: a
+    /// tap table nonuniform enough that the rounding lands wrong.
     Discrete,
 }
 
@@ -133,6 +190,8 @@ pub struct LinearOptions {
     pub tap_model: TapModel,
     /// What the minimum margin being maximized is measured in.
     pub objective_unit: ObjectiveUnit,
+    /// Whether the objective is a margin to maximize or a cost to minimize.
+    pub objective_kind: ObjectiveKind,
     /// Which flow model the optimizer *measures* with.
     ///
     /// Sensitivities stay DC either way — they are cheap, exact for the linear
@@ -164,6 +223,68 @@ pub struct LinearOptions {
     /// [`search`](super::search::search) fills all three in; a caller
     /// optimizing a lone perimeter gets the unconstrained default for each.
     pub limits: Budget,
+    /// The states whose usage rules decide which range actions are available,
+    /// when that is not the same as the states being optimized. See
+    /// [`SearchOptions::available_at`](super::search::SearchOptions::available_at)
+    /// — second preventive optimizes every CNEC while remaining a preventive
+    /// perimeter, and without this it would help itself to every contingency's
+    /// curative shifters.
+    pub available_at: Option<Vec<State>>,
+    /// The states of this perimeter that see a **different** network, and what
+    /// is open in them.
+    ///
+    /// Only the second preventive perimeter sets this, and only because it is
+    /// the one perimeter that spans every state at once. See
+    /// [`Held`](super::evaluate::Held). `None`
+    /// everywhere else, which is one network, one open set, and one evaluation.
+    pub held: Option<super::evaluate::Held>,
+    /// Range actions an upstream stage has already decided, which this perimeter
+    /// must leave alone. Indices into [`Crac::range_actions`].
+    ///
+    /// The one caller is the curative stage after a kept second preventive pass:
+    /// that pass decided these on the whole plan's objective, and searching them
+    /// again here would overrule it with this perimeter's own — which values a
+    /// curative margin the plan's worst case cannot use. The set-points
+    /// are applied to the network separately; this only stops the action being
+    /// offered again.
+    pub decided: Vec<usize>,
+    /// The network actions in force at this leaf, indexing
+    /// [`Crac::network_actions`].
+    ///
+    /// Only a cost objective reads it, and only because a cost depends on what
+    /// was *done* where a margin depends only on what the network *is*. It is
+    /// the second per-leaf field, beside [`limits`](Self::limits), and is filled
+    /// by the same `budgeted` closure in [`search`](super::search) that fills
+    /// that one — so a leaf cannot be scored against one action set and
+    /// budgeted against another.
+    ///
+    /// Empty is the honest default: a caller invoking [`optimize`] directly has
+    /// taken no network action.
+    pub activated: Vec<usize>,
+    /// Give the held states' own range actions a column of their own —
+    /// `A(r, s)`, a set-point per range action **per state**.
+    ///
+    /// Only meaningful alongside [`held`](Self::held), and only the second
+    /// preventive perimeter sets it. Without it that perimeter chooses its
+    /// preventive set-points as though every curative shifter were frozen where
+    /// it stands, which understates what a preventive move costs: on the
+    /// reference's 1.4.1.2 it stops the preventive shifter at tap 3 because
+    /// pushing to 4 hurts a curative CNEC the curative stage is perfectly able
+    /// to recover — and does recover, the moment the pass is over.
+    pub a_r_s: bool,
+    /// The tap each phase-shifter range action sat on when this **perimeter**
+    /// began, as `(range action index, tap)`.
+    ///
+    /// The anchor for a `relativeToPreviousInstant` range, and the only place
+    /// that information exists: by the time the LP runs, the live tap has moved
+    /// — a leaf may have applied a set-point action, and the outer iteration
+    /// moves it again every round. Anchoring the box on the live tap would let
+    /// it walk, one box-width per iteration, out of the range the CRAC wrote.
+    ///
+    /// Empty means "the network as imported", which is what a preventive
+    /// perimeter starts from and therefore the right answer for a caller
+    /// optimizing one on its own.
+    pub previous_taps: Vec<(usize, i32)>,
 }
 
 impl Default for LinearOptions {
@@ -175,10 +296,17 @@ impl Default for LinearOptions {
             sensitivity_threshold: 1e-6,
             tap_model: TapModel::Continuous,
             objective_unit: ObjectiveUnit::Megawatt,
+            objective_kind: ObjectiveKind::MaxMargin,
             flow_model: FlowModel::Dc,
             mnec: Mnec::default(),
             available: Constrained::unmeasured(),
             limits: Budget::default(),
+            available_at: None,
+            held: None,
+            decided: Vec::new(),
+            activated: Vec::new(),
+            a_r_s: false,
+            previous_taps: Vec::new(),
         }
     }
 }
@@ -217,6 +345,16 @@ pub enum LinearStatus {
 pub struct LinearResult {
     pub status: LinearStatus,
     pub setpoints: Vec<Setpoint>,
+    /// The `A(r, s)` columns' own answers — set-points this perimeter carried
+    /// for states it does **not** report.
+    ///
+    /// Empty everywhere but the second preventive problem. There they are the
+    /// answer to "where should the curative shifter go, judged on the whole
+    /// plan", which is the judgement the reference keeps: `CastorSecondPreventive`
+    /// composes its final plan from the first curative pass's *network* actions
+    /// and the second pass's *range* set-points, and runs no curative
+    /// range-action search afterwards.
+    pub held_setpoints: Vec<Setpoint>,
     /// Minimum margin over the perimeter's optimized CNECs, **MW**, before and
     /// after — whatever unit the objective was maximized in.
     pub initial_margin_mw: f64,
@@ -252,9 +390,18 @@ fn evaluate_in(
     view: &Network<'_>,
     resolution: &Resolution,
     model: FlowModel,
+    held: Option<&super::evaluate::Held>,
 ) -> super::evaluate::SecurityResult {
-    let ac = AcOptions { shunts: view.shunts, ..Default::default() };
-    evaluate_model(crac, view, resolution, view.initially_open, model, &ac)
+    let ac = super::evaluate::ac_options(view);
+    super::evaluate::evaluate_split(
+        crac,
+        view,
+        resolution,
+        view.initially_open,
+        held,
+        model,
+        &ac,
+    )
 }
 
 /// A phase shifter's tap-to-angle table, in the **CRAC's** sign convention.
@@ -283,7 +430,10 @@ pub fn tap_table(
     branch: usize,
     lines: usize,
 ) -> Vec<(i32, f64)> {
-    if let Some(changer) = branch.checked_sub(lines).and_then(|i| tap_changers.get(i)?.as_ref()) {
+    if let Some(changer) = branch
+        .checked_sub(lines)
+        .and_then(|i| tap_changers.get(i)?.as_ref())
+    {
         let table: Vec<(i32, f64)> = (changer.low..=changer.high())
             .filter_map(|tap| changer.angle_deg(tap).map(|a| (tap, CRAC_ANGLE_SIGN * a)))
             .collect();
@@ -327,11 +477,67 @@ pub fn phase_shift_sensitivity(
 struct Control {
     /// Index into [`Crac::range_actions`].
     action: usize,
+    /// Whether this column is one the perimeter *reports*.
+    ///
+    /// A perimeter that spans several instants can carry a column for an action
+    /// it is not itself deciding — the second preventive problem needs the
+    /// curative shifters in front of it to choose the preventive ones properly,
+    /// which is `A(r, s)`: a set-point per range action **per state**. Such a
+    /// column is real, it constrains and is constrained, and its value is *not*
+    /// this perimeter's answer: the curative perimeter that follows decides it
+    /// properly, in a network where it is the only thing being decided.
+    /// Reporting both would put two set-points on one action with nothing to
+    /// tell them apart.
+    reported: bool,
     /// Sensitivity of each perimeter CNEC's flow to one unit of this control,
     /// MW per degree (PST) or MW per MW (injection).
     sensitivity: Vec<f64>,
     /// Current set-point, in the control's own unit.
     current: f64,
+    /// Where this control was when the perimeter was handed to the optimizer.
+    ///
+    /// `current` moves as the iteration proposes and applies; this does not. A
+    /// cost objective needs it to tell a control that *moved* from one that was
+    /// merely offered — and for a redispatch the distinction is not "is it
+    /// non-zero", because its set-point is absolute and starts wherever its
+    /// machines already are (see `injection_origin`).
+    start: f64,
+    /// The tap it started on, for a phase shifter. A variation cost is stated
+    /// per **tap**, so the distance a cost objective bills for is counted in
+    /// taps rather than in the set-point's own degrees.
+    start_tap: Option<i32>,
+    /// What moving this control one unit of its **set-point** costs, up and
+    /// down.
+    ///
+    /// Not the CRAC's number as written: a shifter's variation cost is stated
+    /// per *tap* and the LP's movement columns are in degrees, so the price is
+    /// divided by the degrees a tap is worth. That ratio is a linearization —
+    /// a tap table is not exactly uniform — and it does not have to be exact,
+    /// because the iterate-and-relinearize loop scores every proposal with
+    /// [`objective`], which prices the real taps.
+    ///
+    /// `(0.0, 0.0)` where the CRAC states no variation cost, which is every
+    /// action outside the costly corpus.
+    variation: (f64, f64),
+    /// A `relativeToPreviousInstant` window this column states as a **row**
+    /// rather than as its own bounds, in **taps**, about the previous instant's
+    /// position.
+    ///
+    /// `None` on every column whose previous instant is a number — which is
+    /// every column but one: an `A(r, s)` column in the second preventive
+    /// problem, whose previous instant is another column of that same problem.
+    /// See [`tap_bounds_split`] and [`previous_instant_of`].
+    chained: Option<ChainedWindow>,
+    /// What using this action at all costs, whatever distance it then travels.
+    ///
+    /// Unlike [`variation`](Self::variation) this cannot be a column price: it
+    /// is paid once for any non-zero movement and not at all for none, which is
+    /// a step, not a slope. It becomes a binary and a big-M row in
+    /// [`build_program`], and only when a MIP backend is in hand.
+    ///
+    /// `None` where the CRAC prices no activation — and the field is optional in
+    /// the format, so absent means **free**, not unknown.
+    activation: Option<f64>,
     lower: f64,
     upper: f64,
     /// Objective penalty per unit moved.
@@ -422,7 +628,10 @@ impl PstControl {
     }
 
     fn angle_at(&self, tap: i32) -> Option<f64> {
-        self.tap_to_angle.binary_search_by_key(&tap, |(t, _)| *t).ok().map(|i| self.tap_to_angle[i].1)
+        self.tap_to_angle
+            .binary_search_by_key(&tap, |(t, _)| *t)
+            .ok()
+            .map(|i| self.tap_to_angle[i].1)
     }
 }
 
@@ -444,7 +653,8 @@ pub fn optimize(
     // network wherever its answer says — and the whole point of the retry below
     // is to start each subset from the same place.
     let before = (network.buses.clone(), network.transformers.clone());
-    let unconstrained = optimize_within(crac, network, resolution, perimeter, solver, options, None);
+    let unconstrained =
+        optimize_within(crac, network, resolution, perimeter, solver, options, None);
     let moved = moved_actions(&unconstrained);
     if options.limits.is_unlimited() || options.limits.admits(crac, &moved) {
         return unconstrained;
@@ -465,11 +675,21 @@ pub fn optimize(
     for subset in admissible_subsets(crac, &usable, &options.limits) {
         network.buses.clone_from(&before.0);
         network.transformers.clone_from(&before.1);
-        let result =
-            optimize_within(crac, network, resolution, perimeter, solver, options, Some(&subset));
+        let result = optimize_within(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            solver,
+            options,
+            Some(&subset),
+        );
         // The network each attempt leaves behind travels with its result, so
         // the winner can be restored without optimizing it a second time.
-        if best.as_ref().is_none_or(|(b, ..)| result.final_objective > b.final_objective) {
+        if best
+            .as_ref()
+            .is_none_or(|(b, ..)| result.final_objective > b.final_objective)
+        {
             best = Some((result, network.buses.clone(), network.transformers.clone()));
         }
     }
@@ -484,7 +704,12 @@ pub fn optimize(
 /// Which range actions a result actually moved, by index into
 /// [`Crac::range_actions`].
 fn moved_actions(result: &LinearResult) -> Vec<usize> {
-    result.setpoints.iter().filter(|s| s.moved()).map(|s| s.action).collect()
+    result
+        .setpoints
+        .iter()
+        .filter(|s| s.moved())
+        .map(|s| s.action)
+        .collect()
 }
 
 /// The **maximal** subsets of `usable` the budget admits.
@@ -543,7 +768,10 @@ fn usable_range_actions(crac: &Crac, perimeter: &[State], options: &LinearOption
     crac.range_actions
         .iter()
         .enumerate()
-        .filter(|(_, a)| options.available.allows(&a.usage_rules, perimeter, crac))
+        .filter(|(_, a)| {
+            let at = options.available_at.as_deref().unwrap_or(perimeter);
+            options.available.allows(&a.usage_rules, at, crac)
+        })
         .map(|(i, _)| i)
         .collect()
 }
@@ -576,13 +804,27 @@ fn optimize_within(
     // One list for everything that needs a flow and a sensitivity row. The
     // optimized ones come first, so a position below `cnec_indices.len()` is an
     // optimized CNEC and anything after it is a monitored one.
-    let lp_indices: Vec<usize> =
-        cnec_indices.iter().chain(mnec_indices.iter()).copied().collect();
+    let lp_indices: Vec<usize> = cnec_indices
+        .iter()
+        .chain(mnec_indices.iter())
+        .copied()
+        .collect();
 
-    let mut best = objective(crac, network, resolution, perimeter, options);
+    // Before any control exists, so there is nothing state-dependent to see.
+    let mut best = objective(crac, network, resolution, perimeter, &[], options);
     let initial_objective = best;
-    let initial_margin = margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model);
+    // Before any control exists, like `best` above.
+    let initial_margin = margin(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        ObjectiveUnit::Megawatt,
+        &[],
+        options,
+    );
     let mut setpoints: Vec<Setpoint> = Vec::new();
+    let mut held_setpoints: Vec<Setpoint> = Vec::new();
     let mut iterations = 0;
 
     // Nothing to constrain in either direction. A perimeter with *only*
@@ -593,6 +835,7 @@ fn optimize_within(
         return LinearResult {
             status: LinearStatus::NoImprovement,
             setpoints,
+            held_setpoints,
             initial_margin_mw: initial_margin,
             final_margin_mw: initial_margin,
             initial_objective,
@@ -603,37 +846,79 @@ fn optimize_within(
 
     // Where every control started, so `Setpoint::initial` is the pre-optimization
     // value rather than the previous iteration's.
-    let mut controls = match build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options, allowed) {
+    let mut controls = match build_controls(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        &lp_indices,
+        dc_options,
+        options,
+        allowed,
+    ) {
         Some(c) if !c.is_empty() => c,
         _ => {
             return LinearResult {
                 status: LinearStatus::NoImprovement,
                 setpoints,
+                held_setpoints,
                 initial_margin_mw: initial_margin,
                 final_margin_mw: initial_margin,
                 initial_objective,
                 final_objective: best,
                 iterations,
-            }
+            };
         }
     };
     let starting: Vec<f64> = controls.iter().map(|c| c.current).collect();
-    let starting_taps: Vec<Option<i32>> =
-        controls.iter().map(|c| c.pst.as_ref().map(|p| p.tap)).collect();
+    let starting_taps: Vec<Option<i32>> = controls
+        .iter()
+        .map(|c| c.pst.as_ref().map(|p| p.tap))
+        .collect();
+
+    // Whether to price activation with a binary, which needs a backend that can
+    // honour integrality. Asked of the solver rather than configured, because
+    // the answer is a property of the build: `IpmSolver` refuses a program with
+    // integral columns rather than returning the relaxation, precisely so a
+    // caller can discover at this boundary that it needs the MIP. The first
+    // refusal turns this off for the rest of the loop, and the iteration
+    // continues on the LP — a cost objective without activation pricing, which
+    // is what a build with no MIP backend can honestly answer.
+    let mut binaries = options.objective_kind.costly().is_some()
+        && controls
+            .iter()
+            .any(|c| c.activation.is_some_and(|k| k > 0.0));
 
     for _ in 0..options.max_iterations {
         iterations += 1;
-        let (flows, limits) =
-            perimeter_flows(crac, network, resolution, perimeter, &lp_indices, options.flow_model);
-        let program = build_program(
-            cnec_indices.len(),
-            &mnec_indices,
-            &flows,
-            &limits,
+        let (flows, limits) = perimeter_flows(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            &lp_indices,
             &controls,
             options,
         );
-        let Ok(solution) = solver.solve(&program) else {
+        let build = |binaries| {
+            build_program(
+                cnec_indices.len(),
+                &mnec_indices,
+                &flows,
+                &limits,
+                &controls,
+                options,
+                binaries,
+            )
+        };
+        let solved = match solver.solve(&build(binaries)) {
+            Err(OpfError::IntegralityUnsupported { .. }) if binaries => {
+                binaries = false;
+                solver.solve(&build(false))
+            }
+            other => other,
+        };
+        let Ok(solution) = solved else {
             break;
         };
         if solution.status != OptStatus::Optimal {
@@ -643,8 +928,10 @@ fn optimize_within(
         // Read the new set-points, round a phase shifter to a real tap, and
         // apply. Rounding *before* measuring is the point: the margin that
         // matters is the one at a tap the operator can actually select.
-        let previous: Vec<(f64, Option<i32>)> =
-            controls.iter().map(|c| (c.current, c.pst.as_ref().map(|p| p.tap))).collect();
+        let previous: Vec<(f64, Option<i32>)> = controls
+            .iter()
+            .map(|c| (c.current, c.pst.as_ref().map(|p| p.tap)))
+            .collect();
 
         // The LP's answer, rounded to the nearer bracketing tap as a starting
         // point.
@@ -668,9 +955,14 @@ fn optimize_within(
         // iteration settling on the wrong side of a kink — see
         // `PstControl::bracketing_taps`.
         apply(crac, network, &mut controls, &proposed);
-        let mut best_here = objective(crac, network, resolution, perimeter, options);
+        let mut best_here = objective(crac, network, resolution, perimeter, &controls, options);
+        // Only a cost objective couples the columns; under a margin the held
+        // column is anchored on the network and moves on its own.
+        let coupled = options.objective_kind.costly().is_some();
         for k in 0..controls.len() {
-            let Some(pst) = controls[k].pst.as_ref() else { continue };
+            let Some(pst) = controls[k].pst.as_ref() else {
+                continue;
+            };
             let target = solution.primal[setpoint_column(k)];
             let candidates: Vec<i32> = pst
                 .bracketing_taps(target)
@@ -683,14 +975,106 @@ fn optimize_within(
                 };
                 let mut trial = proposed.clone();
                 trial[k] = (angle, Some(tap));
+                // A column anchored on this one travels **with** it, when the
+                // two are where the LP left them together.
+                //
+                // `A(r, s)` is coupled to its preventive column under a cost
+                // objective (`A(r, s) − A(r) = Δ`), so a curative shifter that
+                // matched preventive is not making a decision — it is inheriting
+                // one, and moving preventive alone silently turns that into a
+                // curative move back, which costs a whole second activation.
+                // The reference's 3.4.3.5 is decided here: the LP's own answer
+                // puts both columns at −2.38, and the only rounding that reaches
+                // the plan it asks for moves both to tap −7 at once. Trying one
+                // control at a time can reach [−7, −6] and [−6, −7], each of
+                // which is worse than doing nothing, and never [−7, −7].
+                if coupled {
+                    for j in 0..trial.len() {
+                        if anchor_of(&controls, j) == Some(k) && proposed[j].1 == proposed[k].1 {
+                            trial[j] = (angle, Some(tap));
+                        }
+                    }
+                }
+                // A trial that breaks a chained window is not a worse answer,
+                // it is not an answer: the CRAC does not permit it.
+                if !chained_taps_hold(&controls, &trial) {
+                    continue;
+                }
                 apply(crac, network, &mut controls, &trial);
-                let score = objective(crac, network, resolution, perimeter, options);
+                let score = objective(crac, network, resolution, perimeter, &controls, options);
                 if score > best_here + 1e-9 {
                     best_here = score;
                     proposed = trial;
                 } else {
                     apply(crac, network, &mut controls, &proposed);
                 }
+            }
+        }
+
+        // Then the candidate the trial above never offers: **not moving at all**.
+        //
+        // The bracketing trial asks which of two adjacent taps is better. It
+        // cannot ask whether the column should have moved, and the LP does not
+        // either: a column that rides along with another whose movement *does*
+        // improve the objective costs only `pst_penalty`, which at 0.01 a degree
+        // is a tie-break rather than a brake. So a shifter can end far from where
+        // it started having bought nothing — on the reference's 1.4.1.6 a curative
+        // column pushed to the edge of its window while the plan's worst margin
+        // sits on a preventive CNEC it cannot touch.
+        //
+        // Reverted only when the objective is **no worse**, which is exactly what
+        // the movement penalty is supposed to express: among answers that are
+        // equally good, prefer the one that moves least. A revert that costs
+        // margin is not taken.
+        for k in 0..controls.len() {
+            if controls[k].pst.is_none() {
+                continue;
+            }
+            // Where "not moving" actually *is*.
+            //
+            // For most columns it is where the perimeter found the shifter. For
+            // a **chained** one it is wherever its anchor ended up: its window is
+            // stated about the previous instant, so once preventive has moved,
+            // the starting tap may be outside what the CRAC allows — on 1.4.1.6
+            // preventive goes to −7 and the ±8 window is [−15, 1], which the
+            // starting tap of 5 is not in. Offering that as the do-nothing
+            // candidate offers an illegal plan, `chained_taps_hold` rejects it,
+            // and the column stays where the LP put it for want of anywhere to
+            // go back to. Tracking the anchor is what "this state decides
+            // nothing" means for a chained column.
+            let (rest_angle, rest_tap) = match previous_instant_of(&controls, k) {
+                Some(p) => (
+                    controls[k]
+                        .pst
+                        .as_ref()
+                        .and_then(|c| proposed[p].1.and_then(|t| c.angle_at(t)))
+                        .unwrap_or(proposed[p].0),
+                    proposed[p].1,
+                ),
+                None => (starting[k], starting_taps[k]),
+            };
+            if proposed[k].1 == rest_tap {
+                continue;
+            }
+            let mut trial = proposed.clone();
+            trial[k] = (rest_angle, rest_tap);
+            if coupled {
+                for j in 0..trial.len() {
+                    if anchor_of(&controls, j) == Some(k) && proposed[j].1 == proposed[k].1 {
+                        trial[j] = (rest_angle, rest_tap);
+                    }
+                }
+            }
+            if !chained_taps_hold(&controls, &trial) {
+                continue;
+            }
+            apply(crac, network, &mut controls, &trial);
+            let score = objective(crac, network, resolution, perimeter, &controls, options);
+            if score >= best_here - 1e-9 {
+                best_here = best_here.max(score);
+                proposed = trial;
+            } else {
+                apply(crac, network, &mut controls, &proposed);
             }
         }
 
@@ -704,12 +1088,26 @@ fn optimize_within(
         }
         apply(crac, network, &mut controls, &proposed);
 
-        let score = objective(crac, network, resolution, perimeter, options);
+        let score = objective(crac, network, resolution, perimeter, &controls, options);
         if score > best + 1e-9 {
             best = score;
             setpoints = controls
                 .iter()
                 .enumerate()
+                .filter(|(_, c)| c.reported)
+                .map(|(k, c)| Setpoint {
+                    action: c.action,
+                    value: c.current,
+                    initial: starting[k],
+                    tap: c.pst.as_ref().map(|p| p.tap),
+                })
+                .collect();
+            // The other half: what this perimeter decided for states it carries
+            // but does not report. See [`LinearResult::held_setpoints`].
+            held_setpoints = controls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.reported)
                 .map(|(k, c)| Setpoint {
                     action: c.action,
                     value: c.current,
@@ -718,10 +1116,31 @@ fn optimize_within(
                 })
                 .collect();
             // Relinearize around the new point.
-            if let Some(rebuilt) =
-                build_controls(crac, network, resolution, perimeter, &lp_indices, dc_options, options, allowed)
-            {
+            //
+            // Sensitivities and `current` are what the new point changes. Where
+            // the perimeter *began* is not: `build_controls` reads `start` off
+            // the live network, so a rebuilt control believes it started
+            // wherever the last round left it. Carrying `start` and `start_tap`
+            // across is what keeps "has this action been used in this perimeter"
+            // answerable at all — without it the cost of a plan is the cost of
+            // its last round, a shifter that reached tap −7 in one move is
+            // indistinguishable from one that took three, and each round is free
+            // to buy a fraction of a degree with a fresh activation.
+            if let Some(mut rebuilt) = build_controls(
+                crac,
+                network,
+                resolution,
+                perimeter,
+                &lp_indices,
+                dc_options,
+                options,
+                allowed,
+            ) {
                 if rebuilt.len() == controls.len() {
+                    for (new, old) in rebuilt.iter_mut().zip(&controls) {
+                        new.start = old.start;
+                        new.start_tap = old.start_tap;
+                    }
                     controls = rebuilt;
                 }
             }
@@ -738,8 +1157,11 @@ fn optimize_within(
     // rejection path above restores it, and this asserts the invariant rather
     // than assuming it.
     if setpoints.is_empty() {
-        let restore: Vec<(f64, Option<i32>)> =
-            starting.iter().copied().zip(starting_taps.iter().copied()).collect();
+        let restore: Vec<(f64, Option<i32>)> = starting
+            .iter()
+            .copied()
+            .zip(starting_taps.iter().copied())
+            .collect();
         apply(crac, network, &mut controls, &restore);
     }
 
@@ -752,11 +1174,20 @@ fn optimize_within(
             LinearStatus::NoImprovement
         },
         setpoints,
+        held_setpoints,
         initial_margin_mw: initial_margin,
         // Re-measured in megawatts rather than converted from `best`: the two
         // are minima over the *same* CNECs but not necessarily over the same
         // one, so converting the ampere answer would name a margin no CNEC has.
-        final_margin_mw: margin(crac, network, resolution, perimeter, ObjectiveUnit::Megawatt, options.flow_model),
+        final_margin_mw: margin(
+            crac,
+            network,
+            resolution,
+            perimeter,
+            ObjectiveUnit::Megawatt,
+            &controls,
+            options,
+        ),
         initial_objective,
         final_objective: best,
         iterations,
@@ -779,6 +1210,8 @@ pub struct NetworkMut<'a> {
     pub bus_countries: &'a [Option<String>],
     /// Shunt admittances; see [`Network::shunts`].
     pub shunts: &'a [crate::network::ShuntAdm],
+    /// Per-bus generation; see [`Network::generation`].
+    pub generation: &'a [f64],
     pub tap_changers: &'a [Option<crate::types::TapChanger>],
     pub base_mva: f64,
 }
@@ -786,6 +1219,7 @@ pub struct NetworkMut<'a> {
 impl NetworkMut<'_> {
     fn view(&self) -> Network<'_> {
         Network {
+            generation: self.generation,
             buses: self.buses,
             lines: self.lines,
             transformers: self.transformers,
@@ -811,13 +1245,9 @@ fn down_column(k: usize) -> usize {
     3 * k + 2
 }
 
+/// The minimum-margin column. Present only when the objective **is** a margin.
 fn margin_column(n_controls: usize) -> usize {
     3 * n_controls
-}
-
-/// The violation column of the `slot`-th monitored CNEC.
-fn violation_column(n_controls: usize, slot: usize) -> usize {
-    3 * n_controls + 1 + slot
 }
 
 /// The LP.
@@ -834,25 +1264,211 @@ fn build_program(
     limits: &[(f64, f64, f64)],
     controls: &[Control],
     options: &LinearOptions,
+    binaries: bool,
 ) -> LinearProgram {
     let n = controls.len();
     let mm = margin_column(n);
-    let mut lp = LinearProgram::new(3 * n + 1 + mnecs.len());
+    let costly = options.objective_kind.costly();
+    // Which controls get an activation binary: the ones a cost objective prices
+    // for being used at all. `None` for the rest, so the layout stays dense —
+    // an action the CRAC prices at nothing needs no column and no big-M row.
+    let activation: Vec<Option<f64>> = controls
+        .iter()
+        .map(|c| {
+            binaries
+                .then_some(c.activation)
+                .flatten()
+                .filter(|k| *k > 0.0)
+        })
+        .collect();
+    let n_binary = activation.iter().filter(|a| a.is_some()).count();
+    // The layout: `3n` control columns, then the minimum-margin column **only
+    // when the objective is a margin**, then one violation column per monitored
+    // CNEC, then — under a cost objective only — one overload column per
+    // optimized CNEC.
+    //
+    // A cost needs one column per CNEC where a margin needs one for the whole
+    // perimeter, because a cost sums them and a margin minimizes over them. The
+    // same min-versus-sum difference that makes `MIN_COST` a branch rather than
+    // a coefficient, in the LP's own shape.
+    //
+    // And the margin column is **omitted** under a cost objective rather than
+    // kept at zero cost. Kept, it is a variable in no row that nothing prices:
+    // a pure degenerate direction, which this interior-point solver reports as
+    // `Unbounded` and the caller reads as "the LP failed" — moving nothing at
+    // all. That is exactly how it failed, leaving every costly range-action
+    // scenario's shifter on tap 0 with an overload costing two hundred thousand
+    // sitting next to it. Bounding it did not help; there is no interior in a
+    // direction the problem does not constrain.
+    let base = 3 * n + usize::from(costly.is_none());
+    let violation_of = |slot: usize| base + slot;
+    let overload_of = |slot: usize| base + mnecs.len() + slot;
+    let extra = if costly.is_some() { optimized } else { 0 };
+    // The activation binaries come last, one per priced control, in control
+    // order. `slot` counts only the controls that have one.
+    let binary_base = base + mnecs.len() + extra;
+    let mut binary_of: Vec<Option<usize>> = Vec::with_capacity(n);
+    let mut next = binary_base;
+    for a in &activation {
+        binary_of.push(a.is_some().then(|| {
+            let column = next;
+            next += 1;
+            column
+        }));
+    }
+    let mut lp = LinearProgram::new(binary_base + n_binary);
 
     for (k, control) in controls.iter().enumerate() {
         lp.col_lower[setpoint_column(k)] = control.lower;
         lp.col_upper[setpoint_column(k)] = control.upper;
-        for column in [up_column(k), down_column(k)] {
+        for (column, price) in [
+            (up_column(k), control.variation.0),
+            (down_column(k), control.variation.1),
+        ] {
             lp.col_lower[column] = 0.0;
             lp.col_upper[column] = f64::INFINITY;
-            lp.col_cost[column] = control.penalty;
+            // Under a cost objective this is a **real price**, in the same
+            // currency as the overload penalty. Otherwise it stays the
+            // movement penalty, which exists only to break ties toward the
+            // answer that moves least.
+            lp.col_cost[column] = if costly.is_some() {
+                price
+            } else {
+                control.penalty
+            };
         }
-        // A(r) − Δ⁺(r) + Δ⁻(r) = current
-        lp.add_row(
-            &[(setpoint_column(k), 1.0), (up_column(k), -1.0), (down_column(k), 1.0)],
-            control.current,
-            control.current,
-        );
+        // What this control's movement is measured **from**.
+        //
+        // For a control the perimeter decides, that is where the shifter
+        // actually stands: `A(r) − Δ⁺(r) + Δ⁻(r) = current`.
+        //
+        // For an `A(r, s)` column — a held state's copy of an action this
+        // problem is also deciding preventively — it is the **preventive
+        // column**, not the network:
+        //
+        //     A(r, s) − A(r) − Δ⁺(r, s) + Δ⁻(r, s) = 0
+        //
+        // because the curative shifter inherits whatever preventive chose and
+        // only pays for moving further. Measured from the network instead, a
+        // curative column is billed the whole distance from the starting tap
+        // however much preventive already travelled — and that inverts the
+        // comparison the second preventive pass exists to make. On the
+        // reference's 3.4.3.3, doing all six taps preventively is billed 220
+        // (six taps twice, two activations) against 205 for splitting them five
+        // and one, so the pass "improves" its way to the more expensive answer;
+        // read relative, it is 110 against 130 and the right plan wins.
+        //
+        // This is the coupling row an earlier version said the LP could not state. That was
+        // true of a *bound* — a window relative to another column, which needs
+        // per-column bounds this program does not have — and not of a row, which
+        // takes whatever coefficients it is given.
+        //
+        // Under a **margin** objective the anchor stays the network, and that is
+        // not an oversight. There the up/down columns carry `control.penalty`, a
+        // tie-break that exists to stop the optimizer moving a shifter by a
+        // rounding error's worth for no gain — it is not a price and does not
+        // claim to be one. Re-anchoring it costs three assertions on
+        // `second_preventive.txt`, which `A(r, s)` was tuned against on 1.4.1.6. Under
+        // a cost objective the same columns carry the CRAC's real money, and
+        // then the relative reading is the only defensible one.
+        let previous = costly.is_some().then(|| anchor_of(controls, k)).flatten();
+        let mut row = vec![
+            (setpoint_column(k), 1.0),
+            (up_column(k), -1.0),
+            (down_column(k), 1.0),
+        ];
+        let anchor = match previous {
+            Some(p) => {
+                row.push((setpoint_column(p), -1.0));
+                0.0
+            }
+            // `start`, not `current`, under a cost objective — and the
+            // difference is the whole of what the outer iteration does to this
+            // problem.
+            //
+            // `current` is where the shifter stands *now*, which after the first
+            // relinearization is wherever the last round left it. Anchored
+            // there, Δ is the movement this round proposes and the activation
+            // binary asks "does it move **again**" — so a shifter already at tap
+            // −7 is charged another 20 to reach −7.1 and nothing at all to stay,
+            // and a plan that got there in one move is indistinguishable from one
+            // that got there in three. On the reference's 3.4.3.5 that is a
+            // second round paying a 20-unit activation to buy four hundredths of
+            // a degree, and preferring it to spending the same distance
+            // preventively where the activation was already paid for.
+            //
+            // Anchored on `start`, Δ is the total movement over the perimeter and
+            // `y` asks "was this action used here at all", which is what the CRAC
+            // prices and what [`moved_range_actions`] bills. The flow rows are
+            // untouched either way: they use the set-point column directly, with
+            // their constant built from `current`, so the linearization still
+            // happens where the network actually is.
+            None if costly.is_some() => control.start,
+            None => control.current,
+        };
+        lp.add_row(&row, anchor, anchor);
+
+        // The `relativeToPreviousInstant` window, as a **row**:
+        //
+        //     min ≤ A(r, s) − A(r) ≤ max
+        //
+        // An earlier version declined this column because its window is relative to another
+        // column rather than to a number, and "this LP carries one bound pair
+        // per column and no row coupling two of them". That was true of a
+        // *bound*; the movement row had already shown a row can name two
+        // columns, and this is the same observation applied to the constraint
+        // the decline was actually about.
+        //
+        // **Not** gated on the objective kind, unlike the movement row above.
+        // That gate is about pricing, where two readings of a penalty are each
+        // defensible. This is a permission the CRAC states, and the alternatives
+        // are declining the column or ignoring a limit the file wrote down. It
+        // would also be dead code: no `min_cost.txt` CRAC carries a chained
+        // range, and the corpus that does has no second preventive pass.
+        if let (Some(window), Some(p)) = (control.chained, previous_instant_of(controls, k))
+            && let Some(pst) = controls[p].pst.as_ref()
+        {
+            let (lo, hi) = chained_window(pst, window);
+            lp.add_row(
+                &[(setpoint_column(k), 1.0), (setpoint_column(p), -1.0)],
+                lo,
+                hi,
+            );
+        }
+
+        // What it costs to use this action **at all**, as against how far it
+        // then travels. The two are different sizes and the reference states
+        // them separately: 3.4.3.2 pays 20 to pick `pstBeFr4` up and 15 a tap
+        // to move it, so five taps in one state cost 95 and splitting the same
+        // five taps across two states costs 20 more.
+        //
+        // A cost paid once for any non-zero movement is not linear in the
+        // movement, so it needs a variable that is 0 or 1 and nothing between:
+        //
+        //     Δ⁺(r) + Δ⁻(r) ≤ M · y(r),    y(r) ∈ {0, 1}
+        //
+        // with `M` the widest the set-point can travel inside its own box. The
+        // binary is priced and the movement columns are not re-priced, so an
+        // action that moves pays `activation + variation · distance` and one
+        // that stays put pays nothing: at optimum `y` is 0 whenever it can be,
+        // because it costs something and buys only the right to move.
+        //
+        // `M` is `upper − lower` rather than anything tighter. A tighter bound
+        // would have to know which direction the solver will choose, and a big-M
+        // that is too small silently forbids a legal move — the one failure mode
+        // here that produces a plausible wrong answer rather than an obvious
+        // one. These boxes are a shifter's tap range, so the slack costs
+        // nothing that matters.
+        if let (Some(column), Some(cost)) = (binary_of[k], activation[k]) {
+            lp.set_binary(column);
+            lp.col_cost[column] = cost;
+            let big_m = control.upper - control.lower;
+            lp.add_row(
+                &[(up_column(k), 1.0), (down_column(k), 1.0), (column, -big_m)],
+                f64::NEG_INFINITY,
+                0.0,
+            );
+        }
     }
 
     // The network must still balance after any redispatch:
@@ -884,10 +1500,30 @@ fn build_program(
         lp.add_row(&row, 0.0, 0.0);
     }
 
-    // Maximize the minimum margin.
-    lp.col_lower[mm] = f64::NEG_INFINITY;
-    lp.col_upper[mm] = f64::INFINITY;
-    lp.col_cost[mm] = -1.0;
+    // Maximize the minimum margin — or, under a cost objective, minimize the
+    // penalized overload instead. The margin column stays in the layout either
+    // way so that every index helper keeps its arithmetic; under a cost it is
+    // simply worth nothing and constrained by nothing.
+    // Under a cost objective the margin column is **pinned**, not merely
+    // unrewarded. Left free with no cost and no row referring to it, it is a
+    // variable the solver has nothing to place it by — an interior-point method
+    // has no interior to find, reports something other than `Optimal`, and the
+    // caller breaks out of the iteration having moved nothing at all. That is
+    // exactly how it failed: every costly range-action scenario left its shifter
+    // on tap 0 while an overload sat there costing two hundred thousand.
+    if costly.is_none() {
+        lp.col_lower[mm] = f64::NEG_INFINITY;
+        lp.col_upper[mm] = f64::INFINITY;
+        lp.col_cost[mm] = -1.0;
+    }
+    if let Some(costly) = costly {
+        for slot in 0..optimized {
+            let column = overload_of(slot);
+            lp.col_lower[column] = 0.0;
+            lp.col_upper[column] = f64::INFINITY;
+            lp.col_cost[column] = costly.options.violation_penalty;
+        }
+    }
 
     for position in 0..optimized {
         let reference = flows[position];
@@ -943,14 +1579,42 @@ fn build_program(
             if !limit.is_finite() {
                 continue;
             }
-            let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
-            coefficients.push((mm, 1.0));
             let sign = if is_upper { 1.0 } else { -1.0 };
-            for &(column, s) in &terms {
-                coefficients.push((column, sign * s * scale));
+            let bound = scale
+                * if is_upper {
+                    limit - constant
+                } else {
+                    constant - limit
+                };
+            match costly {
+                // `v ≥ τ − margin`, one column per CNEC, floored at zero by its
+                // own bound. Minimizing a positive penalty drives it to exactly
+                // the violation, so no second row is needed to pin it down.
+                //
+                // The same terms as the margin row with the sign flipped and
+                // the bound on the other side: a margin row says
+                // `MM ≤ margin`, this says `v ≥ τ − margin`.
+                Some(c) => {
+                    let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
+                    coefficients.push((overload_of(position), 1.0));
+                    for &(column, s) in &terms {
+                        coefficients.push((column, -sign * s * scale));
+                    }
+                    lp.add_row(
+                        &coefficients,
+                        c.options.violation_threshold - bound,
+                        f64::INFINITY,
+                    );
+                }
+                None => {
+                    let mut coefficients: Vec<(usize, f64)> = Vec::with_capacity(terms.len() + 1);
+                    coefficients.push((mm, 1.0));
+                    for &(column, s) in &terms {
+                        coefficients.push((column, sign * s * scale));
+                    }
+                    lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
+                }
             }
-            let bound = scale * if is_upper { limit - constant } else { constant - limit };
-            lp.add_row(&coefficients, f64::NEG_INFINITY, bound);
         }
     }
 
@@ -974,14 +1638,16 @@ fn build_program(
     // row. A column left at the default free bounds would be one the solver may
     // move for no reason.
     for slot in 0..mnecs.len() {
-        lp.col_lower[violation_column(n, slot)] = 0.0;
-        lp.col_upper[violation_column(n, slot)] = f64::INFINITY;
+        lp.col_lower[violation_of(slot)] = 0.0;
+        lp.col_upper[violation_of(slot)] = f64::INFINITY;
     }
     for (slot, &cnec) in mnecs.iter().enumerate() {
         let position = optimized + slot;
-        let violation = violation_column(n, slot);
+        let violation = violation_of(slot);
         let (lower, upper, amperes_per_mw) = limits[position];
-        let Some(initial) = options.mnec.baseline.get(cnec) else { continue };
+        let Some(initial) = options.mnec.baseline.get(cnec) else {
+            continue;
+        };
         let to_mw = match options.objective_unit {
             ObjectiveUnit::Megawatt => 1.0,
             // No voltage means no conversion, and a bound converted at a made-up
@@ -1005,8 +1671,11 @@ fn build_program(
                 (s.abs() >= options.sensitivity_threshold).then_some((k, s))
             })
             .collect();
-        let constant: f64 =
-            flows[position] - terms.iter().map(|&(k, s)| s * controls[k].current).sum::<f64>();
+        let constant: f64 = flows[position]
+            - terms
+                .iter()
+                .map(|&(k, s)| s * controls[k].current)
+                .sum::<f64>();
 
         if upper.is_finite() {
             let bound = f64::max(upper, initial.flow_mw + decrease) - adjustment;
@@ -1043,6 +1712,61 @@ fn perimeter_cnecs(
         .collect()
 }
 
+/// The set-point a redispatch action currently sits on, in MW, or `None` when
+/// the network cannot say.
+///
+/// Each element's target is `setpoint × key`, so `setpoint = target / key` and
+/// every element must agree. The target is read as the bus's net injection,
+/// which is the machine's own only when nothing else sits on that bus — so the
+/// agreement is checked rather than assumed, and a disagreement returns `None`.
+/// A key of zero contributes nothing and is skipped: it names an element the
+/// action does not move.
+fn injection_origin(
+    buses: &[crate::types::Bus],
+    base_mva: f64,
+    keys: &[(usize, f64)],
+) -> Option<f64> {
+    let mut agreed: Option<f64> = None;
+    for &(bus, key) in keys {
+        if key.abs() < 1e-9 {
+            continue;
+        }
+        let target = buses.get(bus)?.p_spec * base_mva;
+        let setpoint = target / key;
+        match agreed {
+            None => agreed = Some(setpoint),
+            // Relative, because these are megawatts and a thousand-megawatt
+            // machine does not agree to the same absolute tolerance a
+            // ten-megawatt one does.
+            Some(first) if (setpoint - first).abs() <= 1e-6 * first.abs().max(1.0) => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// The set-point a redispatch range action currently sits on in `network`, MW.
+///
+/// The quantity the reference reports and the one a CRAC's range is stated in:
+/// each element's target is `setpoint × key`, so an action nobody has moved is
+/// already at a non-zero set-point. `None` when `action` is not a redispatch, or
+/// when the network cannot say — see [`injection_origin`].
+pub fn injection_setpoint(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    action: usize,
+) -> Option<f64> {
+    let RangeActionKind::Injection { distribution } = &crac.range_actions.get(action)?.kind else {
+        return None;
+    };
+    let keys: Vec<(usize, f64)> = distribution
+        .iter()
+        .filter_map(|(element, key)| Some((resolution.bus(element)?, *key)))
+        .collect();
+    injection_origin(network.buses, network.base_mva, &keys)
+}
+
 /// Build one control per usable range action, with its sensitivity to each of
 /// `cnecs` — which is the LP's row set, optimized and monitored alike, in the
 /// order the rows will be written.
@@ -1057,28 +1781,116 @@ fn build_controls(
     options: &LinearOptions,
     allowed: Option<&[usize]>,
 ) -> Option<Vec<Control>> {
-    let cnec_branches: Vec<usize> = cnecs
-        .iter()
-        .map(|&i| resolution.branch(&crac.flow_cnecs[i].network_element).unwrap())
-        .collect();
+    // One linearization point **per contingency**, not one for the whole
+    // perimeter.
+    //
+    // A CNEC's sensitivity to a shifter is a property of the network that CNEC
+    // lives in, and a post-contingency network is not the intact one. While a
+    // perimeter was always a single contingency's — which every ordinary
+    // perimeter is — reading them all off the intact network was a small and
+    // uniform error. A perimeter spanning every state has no single network,
+    // and there the error stops being uniform: preventive columns are traded
+    // against curative CNECs whose response to them is the wrong number.
+    let points = SensitivityPoints::build(
+        network,
+        crac,
+        resolution,
+        cnecs,
+        dc_options,
+        options.held.as_ref(),
+    )?;
 
-    let branches = dc_branches(network.lines, network.transformers, dc_options);
-    let sensitivity =
-        DcSensitivity::new(network.buses, &branches, network.lines.len() + network.transformers.len())?;
+    // Which CNEC rows a column governs, given the states it is available in.
+    // `None` is every row, which is what a single-instant perimeter always
+    // gets. A column scoped to a subset writes zeros elsewhere, so a curative
+    // shifter cannot pretend to move a preventive flow.
+    let scoped = |sensitivity: Vec<f64>, governs: Option<&[State]>| -> Vec<f64> {
+        let Some(governs) = governs else {
+            return sensitivity;
+        };
+        sensitivity
+            .into_iter()
+            .enumerate()
+            .map(|(position, value)| {
+                let state = cnecs.get(position).map(|&i| &crac.flow_cnecs[i].state);
+                if state.is_some_and(|s| governs.contains(s)) {
+                    value
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
+    // The states this perimeter sees a *different* network in, which is the
+    // only place a column can be scoped to.
+    let split = options.held.as_ref().filter(|h| !h.states.is_empty());
 
-    let mut controls = Vec::new();
+    // Which columns to build, as `(range action, the states it governs)`.
+    //
+    // An action gets an unscoped column wherever this perimeter may itself use
+    // it — the ordinary case, and the only one when the perimeter is not split.
+    // When it *is* split, an action available in the held states gets a second
+    // column scoped to them. **A second, not an alternative**: an action a CRAC
+    // allows in both instants is two decisions taken at different times against
+    // different information, which is what `A(r, s)` means, and collapsing them
+    // to one column forces the preventive answer to be the one that is best on
+    // average across every state. The reference's 1.4.1.1.3 is exactly that —
+    // it leaves `pst_fr` at 5 preventively *because* it can put it at −5
+    // curatively, and spends the preventive move on `pst_be` instead.
+    let at = options.available_at.as_deref().unwrap_or(perimeter);
+    let mut wanted: Vec<(usize, Option<&[State]>)> = Vec::new();
     for (index, action) in crac.range_actions.iter().enumerate() {
-        if !options.available.allows(&action.usage_rules, perimeter, crac) {
-            continue;
-        }
         // A usage limit already spent on network actions leaves room for only
         // some of these; `allowed` is the subset being tried.
         if allowed.is_some_and(|a| !a.contains(&index)) {
             continue;
         }
+        if options.decided.contains(&index) {
+            continue;
+        }
+        if options.available.allows(&action.usage_rules, at, crac) {
+            wanted.push((index, None));
+        }
+        if let Some(held) = split
+            && options.a_r_s
+            && options
+                .available
+                .allows(&action.usage_rules, &held.states, crac)
+        // A range written `relativeToPreviousInstant` used to be declined
+        // here. Its window is relative to another *column* — the preventive
+        // set-point this same problem is deciding — and an earlier version read that as
+        // beyond the LP, "one bound pair per column and no row coupling two
+        // of them". True of a bound, and the window is now stated as a row
+        // instead: see `tap_bounds_split` and the chained row in
+        // `build_program`.
+        {
+            wanted.push((index, Some(&held.states)));
+        }
+    }
+
+    // The machines this problem decides preventively. A curative column on one of
+    // them has its previous instant *in this LP* rather than in the network.
+    let preventive_branches: Vec<usize> = wanted
+        .iter()
+        .filter(|(_, governs)| governs.is_none())
+        .filter_map(|(index, _)| match &crac.range_actions[*index].kind {
+            RangeActionKind::Pst { element, .. } => resolution.branch(element),
+            _ => None,
+        })
+        .collect();
+
+    let mut controls = Vec::new();
+    for (index, governs) in wanted {
+        let action = &crac.range_actions[index];
         match &action.kind {
-            RangeActionKind::Pst { element, initial_tap, tap_to_angle } => {
-                let Some(branch) = resolution.branch(element) else { continue };
+            RangeActionKind::Pst {
+                element,
+                initial_tap,
+                tap_to_angle,
+            } => {
+                let Some(branch) = resolution.branch(element) else {
+                    continue;
+                };
                 let table = tap_table(
                     tap_to_angle,
                     network.tap_changers,
@@ -1088,15 +1900,13 @@ fn build_controls(
                 if table.is_empty() {
                     continue;
                 }
-                let Some(column) = phase_shift_sensitivity(&sensitivity, &branches, branch) else {
+                let Some(column) = points.phase_shift(branch) else {
                     continue;
                 };
                 // MW per degree *of the CRAC's angle*: the column is per-unit
                 // per radian of gridoxide's, so the sign flips with it.
-                let scale =
-                    CRAC_ANGLE_SIGN * network.base_mva * std::f64::consts::PI / 180.0;
-                let sensitivity_mw: Vec<f64> =
-                    cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0) * scale).collect();
+                let scale = CRAC_ANGLE_SIGN * network.base_mva * std::f64::consts::PI / 180.0;
+                let sensitivity_mw: Vec<f64> = column.iter().map(|s| s * scale).collect();
 
                 // The live tap is whatever the transformer's angle is closest
                 // to, not the CRAC's `initialTap` — a search tree may have
@@ -1108,26 +1918,70 @@ fn build_controls(
                         .map(|(_, a)| *a)
                         .unwrap_or(0.0)
                 });
-                let tap = table
-                    .iter()
-                    .min_by(|a, b| (a.1 - live_angle).abs().total_cmp(&(b.1 - live_angle).abs()))
-                    .map(|(t, _)| *t)
-                    .unwrap_or(*initial_tap);
+                let tap = tap_nearest(&table, live_angle).unwrap_or(*initial_tap);
                 let current = table
                     .iter()
                     .find(|(t, _)| *t == tap)
                     .map(|(_, a)| *a)
                     .unwrap_or(live_angle);
 
-                let (lower, upper) = tap_bounds(action, &table, *initial_tap);
+                // Where this perimeter began, which is the anchor a
+                // `relativeToPreviousInstant` range is written against. The
+                // caller states it because only the caller knows where the
+                // perimeter began; falling back to `initial_tap` is the right
+                // answer for a preventive perimeter, whose previous instant
+                // *is* the network as imported.
+                let previous_tap = options
+                    .previous_taps
+                    .iter()
+                    .find(|(i, _)| *i == index)
+                    .map_or(*initial_tap, |(_, t)| *t);
+                // Chain the window onto the preventive column only when this
+                // problem actually contains one for the same **machine**. It is
+                // a property of the shifter, not of the range action: 1.4.1.6
+                // states the two permissions as `pst_fr_pra` and `pst_fr_cra`,
+                // two CRAC actions with no index in common, and the supersession
+                // block below already treats them as one.
+                let chain = governs.is_some() && preventive_branches.contains(&branch);
+                let ((lower, upper), chained) =
+                    tap_bounds_split(action, &table, *initial_tap, previous_tap, chain);
+                if !starts_inside_its_range(current, lower, upper) {
+                    continue;
+                }
+                // Per degree, from the per-tap price the CRAC states. The
+                // table's own span gives the ratio; a table with one position
+                // has no span and no movement to price.
+                let per_tap = |cost: f64| -> f64 {
+                    let (lo, hi) = (table.first(), table.last());
+                    match (lo, hi) {
+                        (Some((t0, a0)), Some((t1, a1))) if t1 > t0 => {
+                            let degrees = (a1 - a0).abs() / f64::from(t1 - t0);
+                            if degrees > 1e-12 { cost / degrees } else { 0.0 }
+                        }
+                        _ => 0.0,
+                    }
+                };
+                let variation = action
+                    .variation_cost
+                    .map_or((0.0, 0.0), |c| (per_tap(c.up), per_tap(c.down)));
                 controls.push(Control {
                     action: index,
-                    sensitivity: sensitivity_mw,
+                    reported: governs.is_none(),
+                    sensitivity: scoped(sensitivity_mw, governs),
                     current,
+                    start: current,
+                    start_tap: Some(tap),
+                    variation,
+                    chained,
+                    activation: action.activation_cost,
                     lower,
                     upper,
                     penalty: options.pst_penalty,
-                    pst: Some(PstControl { branch, tap_to_angle: table, tap }),
+                    pst: Some(PstControl {
+                        branch,
+                        tap_to_angle: table,
+                        tap,
+                    }),
                     injection: None,
                 });
             }
@@ -1135,14 +1989,16 @@ fn build_controls(
                 // A redispatch shifts power between buses by its distribution
                 // keys. Its sensitivity is the PTDF combination those keys
                 // produce, which is exact in DC.
-                let mut injections = vec![0.0; sensitivity.n_buses()];
+                let mut injections = vec![0.0; network.buses.len()];
                 let mut keys: Vec<(usize, f64)> = Vec::new();
                 let mut usable = false;
                 for (element, key) in distribution {
                     // A redispatch names generators and loads, which are buses.
                     // Resolving them as branches finds nothing and silently
                     // drops the action.
-                    let Some(bus) = resolution.bus(element) else { continue };
+                    let Some(bus) = resolution.bus(element) else {
+                        continue;
+                    };
                     if bus >= injections.len() {
                         continue;
                     }
@@ -1153,14 +2009,67 @@ fn build_controls(
                 if !usable {
                     continue;
                 }
-                let Some((_, column)) = sensitivity.response(&injections) else { continue };
+                // Per unit **of the set-point**, which is megawatts.
+                //
+                // The pattern above is `key / base_mva` — a per-unit injection
+                // of `key` megawatts — so the response comes back in per-unit
+                // flow, and a row that reads it as MW-per-MW is short by a
+                // factor of `base_mva`: 0.01 where the truth is 1.
+                //
+                // It was invisible for as long as the control was anchored at
+                // zero. An LP told a control is a hundred times weaker than it
+                // is still moves it the right *way*, saturates at its bound,
+                // and hands that to `apply`, which does the arithmetic in MW
+                // and gets the move right; the iterate-and-relinearize loop
+                // then measures the true objective and keeps it. On every
+                // vendored redispatch fixture the answer happens to sit exactly
+                // on the bound, so saturating *was* optimal and the scale never
+                // showed. Anchoring the control where it really starts removes
+                // that accident, which is how this surfaced.
+                let Some(column) = points.injection(&injections) else {
+                    continue;
+                };
                 let sensitivity_mw: Vec<f64> =
-                    cnec_branches.iter().map(|&b| column.get(b).copied().unwrap_or(0.0)).collect();
+                    column.iter().map(|s| s * network.base_mva).collect();
                 let (lower, upper) = standard_bounds(action);
+                // Where this action's set-point *starts*, which is not zero.
+                //
+                // A redispatch's set-point is an absolute quantity, not a
+                // shift: the reference's own scenario 2.3.1.1.a spells the
+                // model out — "on FFR1AA1 -> setpoint * 1 = 0, on FFR2 ->
+                // setpoint * -1 = 0" — so each element's target **is**
+                // `setpoint × key`, and the range the CRAC declares is stated
+                // in that quantity. Anchoring the control at zero instead
+                // therefore shifts the whole feasible set by the starting
+                // value: on that scenario the CRAC's [−1000, 1000] became
+                // [0, 2000] in the reference's terms, overlapping the truth
+                // only on half its length.
+                //
+                // `setpoint₀ = target₀(e) / key(e)`, and the model says every
+                // element must give the same answer — which is what makes this
+                // recoverable at all, and what makes it **self-checking**. A
+                // bus carrying load as well as the machine gives a target that
+                // is not the machine's, and then the elements disagree; that
+                // disagreement is the signal, and the action falls back to the
+                // shift-from-zero reading rather than quietly using a wrong
+                // origin.
+                let origin = injection_origin(network.buses, network.base_mva, &keys);
+                let start = origin.unwrap_or(0.0);
+                if !starts_inside_its_range(start, lower, upper) {
+                    continue;
+                }
                 controls.push(Control {
                     action: index,
-                    sensitivity: sensitivity_mw,
-                    current: 0.0,
+                    reported: governs.is_none(),
+                    sensitivity: scoped(sensitivity_mw, governs),
+                    current: start,
+                    start,
+                    start_tap: None,
+                    // A redispatch's set-point is megawatts and its variation
+                    // cost is per megawatt, so no conversion.
+                    variation: action.variation_cost.map_or((0.0, 0.0), |c| (c.up, c.down)),
+                    chained: None,
+                    activation: action.activation_cost,
                     lower,
                     upper,
                     penalty: options.injection_penalty,
@@ -1168,7 +2077,7 @@ fn build_controls(
                     injection: Some(InjectionControl {
                         key_sum: keys.iter().map(|(_, k)| *k).sum(),
                         distribution: keys,
-                        applied: 0.0,
+                        applied: start,
                     }),
                 });
             }
@@ -1176,6 +2085,42 @@ fn build_controls(
             // connects it to a range action, and a counter trade has no network
             // sensitivity at all.
             RangeActionKind::Hvdc { .. } | RangeActionKind::CounterTrade { .. } => {}
+        }
+    }
+    // A curative column **supersedes** the preventive one on the same machine;
+    // it does not add to it.
+    //
+    // A shifter a CRAC allows in both instants is one machine with one angle,
+    // and the curative decision is the later one: after the contingency the
+    // shifter is wherever the curative stage put it, whatever preventive chose.
+    // Left additive, the LP sees twice the authority it has and splits the
+    // movement between the two columns — and on the reference's 1.4.1.6, where
+    // `pst_fr_pra` and `pst_fr_cra` are two range actions on one shifter, that
+    // is the difference between the reference's answer and a second preventive
+    // pass that gives up and falls back to the initial situation.
+    let superseded: Vec<usize> = controls
+        .iter()
+        .filter(|c| !c.reported)
+        .filter_map(|c| c.pst.as_ref().map(|p| p.branch))
+        .collect();
+    if let Some(held) = split
+        && !superseded.is_empty()
+    {
+        for control in controls.iter_mut().filter(|c| c.reported) {
+            let Some(branch) = control.pst.as_ref().map(|p| p.branch) else {
+                continue;
+            };
+            if !superseded.contains(&branch) {
+                continue;
+            }
+            for (position, value) in control.sensitivity.iter_mut().enumerate() {
+                let governed = cnecs
+                    .get(position)
+                    .is_some_and(|&i| held.states.contains(&crac.flow_cnecs[i].state));
+                if governed {
+                    *value = 0.0;
+                }
+            }
         }
     }
     Some(controls)
@@ -1188,21 +2133,148 @@ fn live_crac_angle(network: &NetworkMut<'_>, branch: usize) -> Option<f64> {
     Some(CRAC_ANGLE_SIGN * network.transformers.get(i)?.tap.arg().to_degrees())
 }
 
+/// The position in `table` whose angle is nearest `angle`.
+///
+/// A search over the table rather than arithmetic on the step size, because a
+/// tap-to-angle map is not necessarily linear and is not necessarily monotone.
+fn tap_nearest(table: &[(i32, f64)], angle: f64) -> Option<i32> {
+    table
+        .iter()
+        .min_by(|a, b| (a.1 - angle).abs().total_cmp(&(b.1 - angle).abs()))
+        .map(|(t, _)| *t)
+}
+
+/// The tap each phase-shifter range action sits on in `network`, as
+/// [`LinearOptions::previous_taps`] wants it.
+///
+/// Call this on the network a perimeter is **handed**, before anything in that
+/// perimeter has acted: for a preventive perimeter that is the network as
+/// imported, and for a curative one it is what the preventive stage and the
+/// automatons left, which is precisely the instant a
+/// `relativeToPreviousInstant` range is written against.
+pub fn taps_now(crac: &Crac, network: &Network<'_>, resolution: &Resolution) -> Vec<(usize, i32)> {
+    crac.range_actions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, action)| {
+            let RangeActionKind::Pst {
+                element,
+                initial_tap,
+                tap_to_angle,
+            } = &action.kind
+            else {
+                return None;
+            };
+            let branch = resolution.branch(element)?;
+            let table = tap_table(
+                tap_to_angle,
+                network.tap_changers,
+                branch,
+                network.lines.len(),
+            );
+            if table.is_empty() {
+                return None;
+            }
+            let i = branch.checked_sub(network.lines.len())?;
+            let angle = CRAC_ANGLE_SIGN * network.transformers.get(i)?.tap.arg().to_degrees();
+            Some((index, tap_nearest(&table, angle).unwrap_or(*initial_tap)))
+        })
+        .collect()
+}
+
 /// Angle bounds from a PST range action's tap ranges.
-fn tap_bounds(
+///
+/// The three kinds are three different anchors and the ranges are
+/// **intersected**, so a CRAC declaring all three — and the reference's own
+/// `SL_ep13us5case3` does — is constrained by whichever binds:
+///
+/// | kind | anchored on |
+/// |---|---|
+/// | `absolute` | nothing; the bounds are tap positions |
+/// | `relativeToInitialNetwork` | `initial_tap`, the network as imported |
+/// | `relativeToPreviousInstant` | `previous_tap`, where this perimeter began |
+///
+/// The last two coincide for a preventive perimeter and part company for a
+/// curative one, which is the whole point of having both: "no more than ten
+/// taps from where the file had it" and "no more than ten taps from whatever
+/// the preventive plan left" are different permissions, and a TSO writes both.
+///
+/// `previous_tap` is **not** the live tap. By the time this is called the
+/// shifter may have been moved by this leaf's own set-point action and will be
+/// moved again by every outer iteration; anchoring on that lets the box walk a
+/// width per round until the answer bears no relation to what the CRAC allowed.
+pub(super) fn tap_bounds(
     action: &super::crac::RangeAction,
     table: &[(i32, f64)],
     initial_tap: i32,
+    previous_tap: i32,
 ) -> (f64, f64) {
+    tap_bounds_split(action, table, initial_tap, previous_tap, false).0
+}
+
+/// The same, with the option of holding a `relativeToPreviousInstant` window
+/// **back** from the bound so a caller can state it as a row instead.
+///
+/// `chain = false` is [`tap_bounds`] exactly: every range folds into one tap
+/// interval, a chained one anchored on `previous_tap`, and the second element is
+/// `None`. That is the right reading everywhere the previous instant is a
+/// *number* — a curative perimeter solved after the preventive one, which is
+/// every perimeter but one.
+///
+/// `chain = true` is for the second preventive problem, where the previous
+/// instant is **being decided in the same LP**. There the window is relative to
+/// another column, and an earlier version declined the whole column rather than mis-state it,
+/// on the grounds that "this LP carries one bound pair per column and no row
+/// coupling two of them". That was true of a *bound*. So the chained ranges come
+/// back separately, in taps, for [`build_program`] to emit as a row; the
+/// absolute and `relativeToInitialNetwork` ranges still become the bound.
+///
+/// One flag rather than two functions, so "nothing changes unless chaining" is
+/// checkable by reading the call sites: `chain` is only ever `true` on the new
+/// path.
+/// A `relativeToPreviousInstant` window in **taps**, `(min, max)`, either side
+/// open where the CRAC states only one.
+pub(super) type ChainedWindow = (Option<i32>, Option<i32>);
+
+pub(super) fn tap_bounds_split(
+    action: &super::crac::RangeAction,
+    table: &[(i32, f64)],
+    initial_tap: i32,
+    previous_tap: i32,
+    chain: bool,
+) -> ((f64, f64), Option<ChainedWindow>) {
     let (mut low, mut high) = (i32::MIN, i32::MAX);
+    // The chained window, intersected across however many chained ranges the
+    // action declares — tightest wins, exactly as the tap interval does.
+    let (mut chained_min, mut chained_max) = (None::<i32>, None::<i32>);
+    let mut chained_any = false;
     for range in &action.ranges {
-        let (min, max) = match range.kind {
-            super::crac::RangeKind::RelativeToInitialNetwork => (
-                range.min.map(|m| initial_tap + m as i32),
-                range.max.map(|m| initial_tap + m as i32),
-            ),
-            _ => (range.min.map(|m| m as i32), range.max.map(|m| m as i32)),
+        if chain && range.kind == super::crac::RangeKind::RelativeToPreviousInstant {
+            chained_any = true;
+            if let Some(m) = range.min {
+                let m = m as i32;
+                chained_min = Some(chained_min.map_or(m, |c: i32| c.max(m)));
+            }
+            if let Some(m) = range.max {
+                let m = m as i32;
+                chained_max = Some(chained_max.map_or(m, |c: i32| c.min(m)));
+            }
+            continue;
+        }
+        let anchor = match range.kind {
+            super::crac::RangeKind::RelativeToInitialNetwork => initial_tap,
+            super::crac::RangeKind::RelativeToPreviousInstant => previous_tap,
+            // Absolute bounds anchor on nothing. `relativeToPreviousTimeStep`
+            // belongs to the multi-timestamp RAO this does not model, and is
+            // read as absolute rather than silently anchored on the wrong
+            // instant — there is no previous time step to be relative to.
+            super::crac::RangeKind::Absolute
+            | super::crac::RangeKind::RelativeToPreviousTimeStep => 0,
         };
+        let (min, max) = (
+            range.min.map(|m| anchor + m as i32),
+            range.max.map(|m| anchor + m as i32),
+        );
         if let Some(m) = min {
             low = low.max(m);
         }
@@ -1218,16 +2290,236 @@ fn tap_bounds(
     if angles.is_empty() {
         let all: Vec<f64> = table.iter().map(|(_, a)| *a).collect();
         return (
-            all.iter().copied().fold(f64::INFINITY, f64::min),
-            all.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            (
+                all.iter().copied().fold(f64::INFINITY, f64::min),
+                all.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ),
+            chained_any.then_some((chained_min, chained_max)),
         );
     }
     (
-        angles.iter().copied().fold(f64::INFINITY, f64::min),
-        angles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        (
+            angles.iter().copied().fold(f64::INFINITY, f64::min),
+            angles.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ),
+        chained_any.then_some((chained_min, chained_max)),
     )
 }
 
+/// One DC linearization per contingency, so every CNEC's sensitivity is read in
+/// the network that CNEC actually lives in.
+///
+/// Built once per `build_controls` call and shared by every control: the
+/// expensive part is the factorization, and it does not depend on which range
+/// action is being differentiated.
+struct SensitivityPoints {
+    /// `((contingency, held), branches, sensitivity)`; `None` is the intact
+    /// network.
+    ///
+    /// The second element of the key is what makes an **outage** CNEC and a
+    /// **curative** one under the same contingency stop sharing a
+    /// linearization. They do not share a network: the curative stage's
+    /// switching is in force in one and not the other, and a perimeter that
+    /// spans both — which is only ever the second preventive one — was
+    /// differentiating the preventive CNECs against a network with a curative
+    /// branch open in it.
+    points: Vec<SensitivityPoint>,
+    /// Which point each CNEC position reads from.
+    per_cnec: Vec<usize>,
+    /// The branch each CNEC position monitors.
+    branches: Vec<usize>,
+}
+
+/// One linearization: the states it serves, the network they see, and the
+/// factorization of it.
+type SensitivityPoint = ((Option<usize>, bool), Vec<DcBranch>, DcSensitivity);
+
+impl SensitivityPoints {
+    fn build(
+        network: &NetworkMut<'_>,
+        crac: &Crac,
+        resolution: &Resolution,
+        cnecs: &[usize],
+        dc_options: DcOptions,
+        held: Option<&super::evaluate::Held>,
+    ) -> Option<Self> {
+        let n_branches = network.lines.len() + network.transformers.len();
+        let held = held.filter(|h| !h.states.is_empty());
+        let is_held = |cnec: usize| -> bool {
+            held.is_some_and(|h| h.states.contains(&crac.flow_cnecs[cnec].state))
+        };
+        // The contingencies this perimeter's CNECs actually live under, so a
+        // perimeter spanning one state pays for one factorization exactly as it
+        // did before. Split by whether the curative switching is in force,
+        // which costs a second factorization *only* when a perimeter genuinely
+        // spans both — the second preventive one, and nothing else.
+        let mut wanted: Vec<(Option<usize>, bool)> = cnecs
+            .iter()
+            .map(|&i| (crac.flow_cnecs[i].state.contingency, is_held(i)))
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let mut points = Vec::with_capacity(wanted.len());
+        for (contingency, held_here) in wanted {
+            let mut lines = network.lines.to_vec();
+            let mut transformers = network.transformers.clone();
+            let cut = |branch: usize,
+                       lines: &mut Vec<crate::types::Line>,
+                       transformers: &mut Vec<Transformer>| {
+                if branch < lines.len() {
+                    lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
+                    lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
+                    lines[branch].b_shunt = 0.0;
+                    lines[branch].g_shunt = 0.0;
+                } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
+                    t.from_status = 0;
+                    t.to_status = 0;
+                }
+            };
+            // The open set this point's states actually see. Only stated when
+            // the perimeter is split: everywhere else the caller has already
+            // zeroed the branches it opened, and re-deriving them here would
+            // change a path that is not what `Held` is about.
+            if let Some(held) = held {
+                let open = if held_here {
+                    held.applied_to(network.initially_open)
+                } else {
+                    network.initially_open.to_vec()
+                };
+                for &branch in &open {
+                    cut(branch, &mut lines, &mut transformers);
+                }
+            }
+            if let Some(c) = contingency {
+                for element in &crac.contingencies[c].elements {
+                    let Some(branch) = resolution.branch(element) else {
+                        continue;
+                    };
+                    cut(branch, &mut lines, &mut transformers);
+                }
+            }
+            let branches = dc_branches(&lines, &transformers, dc_options);
+            // A contingency that severs the network has no linearization of its
+            // own; those CNECs fall back to the intact point below, which is a
+            // better answer than none — and the evaluator reports the state as
+            // severed regardless.
+            let Some(sensitivity) = DcSensitivity::new(network.buses, &branches, n_branches) else {
+                continue;
+            };
+            points.push(((contingency, held_here), branches, sensitivity));
+        }
+        if points.is_empty() {
+            return None;
+        }
+        let per_cnec = cnecs
+            .iter()
+            .map(|&i| {
+                let want = (crac.flow_cnecs[i].state.contingency, is_held(i));
+                points
+                    .iter()
+                    .position(|(key, _, _)| *key == want)
+                    // A severed contingency has no point of its own; falling
+                    // back to one that shares its switching beats one that does
+                    // not.
+                    .or_else(|| points.iter().position(|((_, h), _, _)| *h == want.1))
+                    .unwrap_or(0)
+            })
+            .collect();
+        let branches = cnecs
+            .iter()
+            .map(|&i| {
+                resolution
+                    .branch(&crac.flow_cnecs[i].network_element)
+                    .unwrap()
+            })
+            .collect();
+        Some(Self {
+            points,
+            per_cnec,
+            branches,
+        })
+    }
+
+    /// MW per radian of `branch`'s phase shift at each CNEC, each read in its
+    /// own network.
+    fn phase_shift(&self, branch: usize) -> Option<Vec<f64>> {
+        let columns: Vec<Option<Vec<f64>>> = self
+            .points
+            .iter()
+            .map(|(_, branches, s)| phase_shift_sensitivity(s, branches, branch))
+            .collect();
+        columns
+            .iter()
+            .any(Option::is_some)
+            .then(|| self.gather(&columns))
+    }
+
+    /// The same for an injection pattern.
+    fn injection(&self, injections: &[f64]) -> Option<Vec<f64>> {
+        let columns: Vec<Option<Vec<f64>>> = self
+            .points
+            .iter()
+            .map(|(_, _, s)| s.response(injections).map(|(_, column)| column))
+            .collect();
+        columns
+            .iter()
+            .any(Option::is_some)
+            .then(|| self.gather(&columns))
+    }
+
+    fn gather(&self, columns: &[Option<Vec<f64>>]) -> Vec<f64> {
+        self.per_cnec
+            .iter()
+            .zip(&self.branches)
+            .map(|(&point, &branch)| {
+                columns
+                    .get(point)
+                    .and_then(|c| c.as_ref())
+                    .and_then(|c| c.get(branch))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+            .collect()
+    }
+}
+
+/// Whether a range action can be optimized at all from where the perimeter
+/// found it.
+///
+/// A range action whose **starting** set-point is already outside its own range
+/// is not a tightly-constrained lever, it is not a lever: the CRAC is saying
+/// this device may only be at positions it is not at, and no movement the
+/// optimizer chooses can make that true. The reference drops such an action
+/// from the perimeter outright — `doesPrePerimeterSetpointRespectRange` — and
+/// so does this.
+///
+/// It bites when an earlier perimeter has moved the device. The reference's own
+/// `SL_ep15us11-3case2_withPstCra` declares four range actions on **one**
+/// phase shifter, of which the one named `useless_pst` permits tap 0 and
+/// nothing else; by the time the curative perimeter runs, an automaton has put
+/// that shifter on tap −8. Kept, it becomes a second control on a device that
+/// already has one, pinned to a position the machine is not at and pulling
+/// against the action the scenario is about — so the curative perimeter moves
+/// nothing and reports that nothing helped.
+fn starts_inside_its_range(current: f64, lower: f64, upper: f64) -> bool {
+    current >= lower - 1e-6 && current <= upper + 1e-6
+}
+
+/// The window a **standard** range action may move in, MW.
+///
+/// Unlike [`tap_bounds`] this ignores [`RangeKind`](super::crac::RangeKind)
+/// entirely: every range is read as absolute, so a `relativeToInitialNetwork` or
+/// `relativeToPreviousInstant` window on a redispatch is anchored on nothing
+/// rather than on the set-point it names.
+///
+/// That is a **known inconsistency between two readings of one field**, recorded
+/// rather than fixed. Every `injectionRangeActions` range in the vendored corpus
+/// states no `rangeType` at all, so nothing pins what the anchors should be —
+/// a redispatch's "previous instant" is a megawatt set-point read off the
+/// machines (`injection_origin`), not a tap, and building that blind is the
+/// thing that was declined for `TapModel::Discrete`. Naming it here is the
+/// alternative to leaving the next reader to find it.
 fn standard_bounds(action: &super::crac::RangeAction) -> (f64, f64) {
     let mut low = f64::NEG_INFINITY;
     let mut high = f64::INFINITY;
@@ -1255,6 +2547,7 @@ fn apply(
     let base_mva = network.base_mva;
     for (control, &(value, tap)) in controls.iter_mut().zip(proposed) {
         control.current = value;
+        let reported = control.reported;
         if let Some(injection) = control.injection.as_mut() {
             // Move the *difference*, so trying a proposal and reverting it
             // returns the buses to exactly where they were rather than
@@ -1272,6 +2565,13 @@ fn apply(
         if let Some(pst) = control.pst.as_mut() {
             if let Some(tap) = tap {
                 pst.tap = tap;
+            }
+            // A column this perimeter does not report is not in force in the
+            // network it shares with the preventive states: it belongs to the
+            // held ones, and `held_now` puts it there. Writing it here would
+            // move a preventive flow with a decision nobody has taken.
+            if !reported {
+                continue;
             }
             if let Some(i) = pst.branch.checked_sub(network.lines.len()) {
                 // The **network's** own step is what gets applied, at the tap
@@ -1325,11 +2625,191 @@ fn margin(
     resolution: &Resolution,
     perimeter: &[State],
     unit: ObjectiveUnit,
-    model: FlowModel,
+    controls: &[Control],
+    options: &LinearOptions,
 ) -> f64 {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, model);
+    // The same assessment `objective` scores by, held columns and all. Measuring
+    // the reported margin without them and the objective with them would let a
+    // plan report a negative margin for a network its own optimizer called
+    // secure — which is what `is_secure` then reads.
+    let held = held_now(options, controls);
+    let result = evaluate_in(crac, &view, resolution, options.flow_model, held.as_ref());
     margin_of(crac, &result, perimeter, unit)
+}
+
+/// What control `k`'s movement is measured **from**, when that is another
+/// column rather than the network.
+///
+/// An `A(r, s)` column — a held state's copy of an action the same problem is
+/// deciding preventively — inherits whatever preventive chose and pays only for
+/// moving further. Everything else is measured from where it actually stands.
+///
+/// One function because two places need the answer and they must not drift: the
+/// LP's movement row ([`build_program`]) and the pricing that scores what the LP
+/// proposed ([`moved_range_actions`]). Anchored differently, the optimizer would
+/// choose against one rule and be billed against another — which is how a plan
+/// that saves an activation gets scored as though it did not.
+fn anchor_of(controls: &[Control], k: usize) -> Option<usize> {
+    let control = &controls[k];
+    if control.reported {
+        return None;
+    }
+    controls[..k]
+        .iter()
+        .position(|c| c.action == control.action && c.reported)
+}
+
+/// Whether a proposal keeps every chained column inside the window its CRAC
+/// states, counted in **taps**.
+///
+/// Exact where the LP's row is a linearization: the row is what the optimizer
+/// chooses against, and this is what its answer is checked against, in the unit
+/// the CRAC wrote the window in.
+///
+/// It is needed because rounding is per column. The LP may leave the anchor
+/// between taps 1 and 2 and the chained column between −3 and −2, and rounding
+/// each to its own nearest tap can separate them by more than the window allows
+/// — handing `objective` a pair the CRAC forbids, and letting the pass judge a
+/// preventive tap against a curative capability that does not exist.
+///
+/// Deliberately separate from the `coupled` rule in the rounding loop, which is
+/// cost-gated and encodes *inheritance* — a curative column matching preventive
+/// is not making a decision. This encodes *permission*. They answer different
+/// questions and should not be merged.
+fn chained_taps_hold(controls: &[Control], proposed: &[(f64, Option<i32>)]) -> bool {
+    for (k, control) in controls.iter().enumerate() {
+        let Some(window) = control.chained else {
+            continue;
+        };
+        let Some(p) = previous_instant_of(controls, k) else {
+            continue;
+        };
+        let (Some(here), Some(there)) = (proposed[k].1, proposed[p].1) else {
+            continue;
+        };
+        let delta = here - there;
+        if window.0.is_some_and(|m| delta < m) || window.1.is_some_and(|m| delta > m) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The column this one's `relativeToPreviousInstant` window is measured from:
+/// the preventive decision on the **same machine**, whatever range action
+/// happens to declare it.
+///
+/// Deliberately not [`anchor_of`], and the difference is not cosmetic. That one
+/// answers *what does this column's movement cost measure from*, and keys on the
+/// range action because a cost is billed per action. This answers *what is this
+/// column's previous instant*, and an instant is a property of the machine: the
+/// reference's 1.4.1.6 states the preventive and curative permissions on one
+/// shifter as `pst_fr_pra` and `pst_fr_cra`, two actions with no index in
+/// common. Keyed on the action, this would find nothing on exactly the scenario
+/// it exists for, and the column would then be offered with no window at all —
+/// which is a regression already measured once, arrived at silently.
+///
+/// Searches **all** of `controls`, not `controls[..k]`. `build_controls` walks
+/// `crac.range_actions` in declaration order, and 1.4.1.6 declares the curative
+/// action before the preventive one.
+fn previous_instant_of(controls: &[Control], k: usize) -> Option<usize> {
+    let control = &controls[k];
+    if control.reported || control.chained.is_none() {
+        return None;
+    }
+    let branch = control.pst.as_ref()?.branch;
+    controls
+        .iter()
+        .position(|c| c.reported && c.pst.as_ref().is_some_and(|p| p.branch == branch))
+}
+
+/// A chained tap window as an angle window **relative to where the anchor
+/// currently sits**, read off that machine's own table.
+///
+/// Min and max over the admissible taps rather than `steps × step_size`, for the
+/// same reason [`tap_bounds`] does it: a tap table is neither uniform nor
+/// necessarily monotone in angle, and `CRAC_ANGLE_SIGN` means these tables run
+/// *downward* on the vendored fixtures. Multiplying a step size would get the
+/// sign right by luck and the width wrong by construction.
+///
+/// It is a linearization, exact only while the anchor sits on `anchor.tap`, and
+/// the outer loop re-derives it every iteration because `build_program` runs
+/// every iteration. What it cannot do is produce an illegal *reported* plan: an
+/// `A(r, s)` column is never reported, and the curative perimeter that follows
+/// re-decides it against the exact integer bound.
+fn chained_window(anchor: &PstControl, window: ChainedWindow) -> (f64, f64) {
+    let base = anchor.angle_at(anchor.tap).unwrap_or(0.0);
+    let low = window.0.map_or(i32::MIN, |m| anchor.tap.saturating_add(m));
+    let high = window.1.map_or(i32::MAX, |m| anchor.tap.saturating_add(m));
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(t, a) in &anchor.tap_to_angle {
+        if t >= low && t <= high {
+            lo = lo.min(a - base);
+            hi = hi.max(a - base);
+        }
+    }
+    // No admissible tap: the window and the table do not overlap, which a CRAC
+    // can state. Pinning the column to the anchor is the honest reading — it may
+    // not move relative to the previous instant at all.
+    if lo > hi { (0.0, 0.0) } else { (lo, hi) }
+}
+
+/// The range actions a set of controls has actually moved, indexing
+/// [`Crac::range_actions`].
+///
+/// What a cost objective bills for. A control that sits where it started cost
+/// nothing to *not* activate, so the comparison is against
+/// [`Control::start`](Control) rather than against zero — a redispatch's
+/// set-point is absolute and starts wherever its machines already are, which is
+/// the whole point of `injection_origin`.
+///
+/// Except for an `A(r, s)` column, which is measured against its preventive
+/// companion instead: see [`anchor_of`]. A curative shifter that ends where
+/// preventive already put it has not moved and owes nothing, and billing it the
+/// whole distance from the starting tap is what made the second preventive pass
+/// prefer splitting a movement across two states to doing it once.
+fn moved_range_actions(controls: &[Control]) -> Vec<(usize, f64)> {
+    controls
+        .iter()
+        .enumerate()
+        .filter_map(|(k, c)| {
+            let (from, from_tap) = match anchor_of(controls, k) {
+                Some(p) => (controls[p].current, controls[p].pst.as_ref().map(|x| x.tap)),
+                None => (c.start, c.start_tap),
+            };
+            if (c.current - from).abs() <= 1e-9 {
+                return None;
+            }
+            // Taps for a shifter, set-point units for anything else — the unit
+            // the CRAC states the price in. See [`Costly::activation`].
+            let distance = match (&c.pst, from_tap) {
+                (Some(pst), Some(start)) => f64::from(pst.tap - start),
+                _ => c.current - from,
+            };
+            Some((c.action, distance))
+        })
+        .collect()
+}
+
+/// [`LinearOptions::held`], with every column the perimeter does not report
+/// folded in at the value it currently sits on.
+///
+/// This is what closes the loop on `A(r, s)`: the LP proposes a curative
+/// set-point, and the measurement that scores the proposal has to see it — in
+/// the curative states, and only there.
+fn held_now(options: &LinearOptions, controls: &[Control]) -> Option<super::evaluate::Held> {
+    let held = options.held.as_ref()?;
+    if controls.iter().all(|c| c.reported) {
+        return Some(held.clone());
+    }
+    let mut out = held.clone();
+    for control in controls.iter().filter(|c| !c.reported) {
+        if let Some(pst) = &control.pst {
+            out.taps.push((pst.branch, pst.tap, control.current));
+        }
+    }
+    Some(out)
 }
 
 /// The minimum margin over the perimeter's optimized CNECs of an assessment
@@ -1368,14 +2848,37 @@ fn objective(
     network: &NetworkMut<'_>,
     resolution: &Resolution,
     perimeter: &[State],
+    controls: &[Control],
     options: &LinearOptions,
 ) -> f64 {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, options.flow_model);
+    let held = held_now(options, controls);
+    let result = evaluate_in(crac, &view, resolution, options.flow_model, held.as_ref());
     let unit = options.objective_unit;
-    let margin = margin_of(crac, &result, perimeter, unit);
-    let margin = if margin.is_finite() { margin } else { NO_CNEC_MARGIN };
-    margin - options.mnec.cost(crac, &result, perimeter, unit)
+    let score = match options.objective_kind.costly() {
+        // A cost, negated so that higher stays better. `NO_CNEC_MARGIN` is
+        // deliberately **not** reached on this path: it is a stand-in for a
+        // *minimum* that does not exist, and a sum over no CNECs is honestly
+        // zero. Substituting 1e9 here would score a perimeter with nothing to
+        // optimize at +1e9 and let it beat every real answer.
+        Some(costly) => -costly.cost(
+            crac,
+            &result,
+            perimeter,
+            unit,
+            &options.activated,
+            &moved_range_actions(controls),
+        ),
+        None => {
+            let margin = margin_of(crac, &result, perimeter, unit);
+            if margin.is_finite() {
+                margin
+            } else {
+                NO_CNEC_MARGIN
+            }
+        }
+    };
+    score - options.mnec.cost(crac, &result, perimeter, unit)
 }
 
 /// Flows on the perimeter's CNEC branches, MW, at the current operating point.
@@ -1385,10 +2888,12 @@ fn perimeter_flows(
     resolution: &Resolution,
     perimeter: &[State],
     cnecs: &[usize],
-    model: FlowModel,
+    controls: &[Control],
+    options: &LinearOptions,
 ) -> (Vec<f64>, Vec<(f64, f64, f64)>) {
     let view = network.view();
-    let result = evaluate_in(crac, &view, resolution, model);
+    let held = held_now(options, controls);
+    let result = evaluate_in(crac, &view, resolution, options.flow_model, held.as_ref());
     cnecs
         .iter()
         .map(|&i| {
@@ -1407,5 +2912,121 @@ fn perimeter_flows(
 /// without going through a full evaluation.
 pub fn base_flows(network: &Network<'_>) -> Vec<f64> {
     let mut buses = network.buses.to_vec();
-    dc_power_flow(&mut buses, network.lines, network.transformers, DcOptions::default()).branch_p
+    dc_power_flow(
+        &mut buses,
+        network.lines,
+        network.transformers,
+        DcOptions::default(),
+    )
+    .branch_p
+}
+
+#[cfg(test)]
+mod chained_tests {
+    use super::*;
+
+    /// A shifter whose steps are **not** uniform, which is the case that decides
+    /// how this must be computed.
+    fn pst(tap: i32) -> PstControl {
+        PstControl {
+            branch: 0,
+            // Widening steps, and *descending* in angle as the tap rises — the
+            // sign `CRAC_ANGLE_SIGN` produces on the vendored fixtures.
+            tap_to_angle: (-8..=8)
+                .map(|t| (t, -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01)))
+                .collect(),
+            tap,
+        }
+    }
+
+    /// The window comes from the table, not from a step size.
+    ///
+    /// A ±2-tap window about tap 3 spans taps 1 to 5, whose angles are not
+    /// symmetric about tap 3's — so `±2 × step` would get the width wrong in
+    /// both directions and the sign right only by luck.
+    #[test]
+    fn a_chained_window_is_read_off_the_tap_table() {
+        let anchor = pst(3);
+        let (lo, hi) = chained_window(&anchor, (Some(-2), Some(2)));
+        let at = |t: i32| -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01);
+        assert!((lo - (at(5) - at(3))).abs() < 1e-12, "lo was {lo}");
+        assert!((hi - (at(1) - at(3))).abs() < 1e-12, "hi was {hi}");
+        assert!(
+            (lo.abs() - hi.abs()).abs() > 1e-6,
+            "this table is nonuniform, so the window must not come out symmetric: {lo} .. {hi}"
+        );
+    }
+
+    /// A one-sided window is one-sided, and the open side reaches the table's end
+    /// rather than wrapping or vanishing.
+    ///
+    /// Note which end is which. The window is stated in **taps** and the row is
+    /// in **degrees**, and these tables descend in angle as the tap rises — so
+    /// the lowest admissible tap supplies the row's *upper* bound. Getting that
+    /// backwards is the failure mode that would silently let a curative shifter
+    /// move the wrong way, and asserting it here is cheaper than finding it in a
+    /// margin.
+    #[test]
+    fn a_one_sided_chained_window_stays_one_sided() {
+        let anchor = pst(0);
+        // Bounded one tap above, unbounded below: taps −8 through 1.
+        let (lo, hi) = chained_window(&anchor, (None, Some(1)));
+        let at = |t: i32| -(f64::from(t) * 0.4 + f64::from(t * t) * 0.01);
+        assert!((lo - (at(1) - at(0))).abs() < 1e-12, "lo was {lo}");
+        assert!(
+            (hi - (at(-8) - at(0))).abs() < 1e-12,
+            "the open side should reach the table's end, was {hi}"
+        );
+    }
+
+    /// A window the table cannot satisfy pins the column to its anchor rather
+    /// than inverting. A CRAC can state one; an inverted row cannot be solved.
+    #[test]
+    fn an_unsatisfiable_chained_window_pins_rather_than_inverts() {
+        let anchor = pst(8);
+        let (lo, hi) = chained_window(&anchor, (Some(4), Some(6)));
+        assert_eq!((lo, hi), (0.0, 0.0));
+    }
+
+    /// The rounding filter counts taps, which is the unit the CRAC states.
+    #[test]
+    fn the_rounding_filter_rejects_a_pair_outside_the_window() {
+        let mut anchor = control();
+        anchor.reported = true;
+        anchor.pst = Some(pst(0));
+        let mut chained = control();
+        chained.reported = false;
+        chained.chained = Some((Some(-2), Some(2)));
+        chained.pst = Some(pst(0));
+        let controls = vec![anchor, chained];
+        // Anchor at tap 1, chained at tap -1: two apart, allowed.
+        assert!(chained_taps_hold(
+            &controls,
+            &[(0.0, Some(1)), (0.0, Some(-1))]
+        ));
+        // Three apart: not.
+        assert!(!chained_taps_hold(
+            &controls,
+            &[(0.0, Some(1)), (0.0, Some(-2))]
+        ));
+    }
+
+    fn control() -> Control {
+        Control {
+            action: 0,
+            reported: true,
+            sensitivity: Vec::new(),
+            current: 0.0,
+            start: 0.0,
+            start_tap: Some(0),
+            variation: (0.0, 0.0),
+            chained: None,
+            activation: None,
+            lower: -10.0,
+            upper: 10.0,
+            penalty: 0.0,
+            pst: None,
+            injection: None,
+        }
+    }
 }

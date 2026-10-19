@@ -26,127 +26,69 @@ jobs:
         python-version: "3.12"
     - name: Install numpy
       run: pip install numpy
-    - name: Build
-      run: cargo build --verbose
-    # No `--features klu`: this doesn't build/run the FFI-backed `Klu`
-    # backend (needs a C compiler + libclang) or the differential tests in
-    # `src/klu_native/` that compare its pure-Rust port against real
-    # vendored KLU (`#[cfg(feature = "klu")]`-gated). klu_native's own
-    # structural/dense-oracle tests and tests/klu_native_jacobian_test.rs
-    # still run here, since that backend needs no C toolchain. Adding
-    # `--features klu` here (a C-compiler + libclang runner dependency)
-    # is a known follow-up, not done as part of the klu_native port itself.
-    # No `--features pardiso` either, for the same reason plus one more:
-    # the `Pardiso` backend (`src/sparse_pardiso.rs`) needs a locally
-    # installed, separately-licensed Intel oneMKL (`MKLROOT` set) — not
-    # available on GitHub-hosted runners at all, so this backend is
-    # local/manual-verification-only (see
-    # docs/src/solvers/backends.md).
-    - name: Run tests
-      run: cargo test --verbose
-    # `opf` *is* built and tested here, unlike the backends above, because it
-    # needs nothing installed: the interior-point QP solver in `src/opf/ipm.rs`
-    # is pure Rust on this crate's own sparse factorization. That was the point
-    # of writing it — before it existed the only backend was `opf-highs`, which
-    # links a system HiGHS no runner has, so the entire OPF surface (DC-OPF,
-    # the CLI subcommand, the Python binding) was invisible to CI.
+    # Dependencies and the previous run's build, keyed on Cargo.lock. Without
+    # it every run compiles every crate from scratch, once per profile.
+    - uses: Swatinem/rust-cache@v2
+
+    # **Each feature set CI covers is compiled on its own, and tested once,
+    # together.** Testing them one at a time ran the default suite eight times
+    # over and relinked every test binary for each feature set; what the
+    # separate builds actually guard is a missing or wrong `#[cfg]`, which a
+    # compile check — `--all-targets`, so tests and examples included — finds
+    # just as well, with no codegen and no link.
     #
-    # Still not built here: `opf-highs` itself, and with it
-    # `tests/opf_cross_test.rs`, which holds the two backends against each
-    # other. That gate runs where HiGHS is installed. Losing it in CI is the
-    # accepted cost of not making a system library a CI dependency — what CI
-    # does cover is the analytic battery in `tests/opf_ipm_test.rs` and the
-    # published pglib objectives in `tests/opf_dc_test.rs`, neither of which
-    # needs a second solver.
-    # `opf` covers the mixed-integer path too, since `opf::bnb` branches and
-    # bounds over the in-house interior-point solver and needs no system
-    # library. Before it existed every discrete question had to go to HiGHS, so
-    # that whole half was verified only where libhighs-dev happened to be
-    # installed — which is not here.
-    - name: Build and test the optimization layer
-      run: |
-        cargo build --verbose --features opf
-        cargo test --verbose --features opf
-    # `ucte` is in CI for the same reason `opf` and `capi` are, and with less
-    # excuse than either: UCTE-DEF is fixed-column text, so the importer pulls
-    # in no dependency at all — not even a parser crate.
+    # Not here at all: `klu` (a C compiler and libclang), `pardiso` (a
+    # separately-licensed Intel oneMKL, `MKLROOT` set — not on hosted runners;
+    # see docs/src/solvers/backends.md), `opf-highs` and `opf-ipopt` (system
+    # libraries no runner has, so `tests/opf_cross_test.rs`, which holds HiGHS
+    # against the in-house solver, runs where HiGHS is installed), and
+    # `smallsignal-arpack`. Everything below is pure Rust or fetched by cargo:
     #
-    # What the suite checks is not that files parse. It is that the imported
-    # network *solves to the same answer as pypowsybl*, against reference
-    # solutions committed as JSON under `tests/data/ucte/`, for networks read
-    # from the benchmark-grids submodule (fetched above). Those were generated
-    # once by `scripts/bench/ucte_reference.py`; the runner needs neither Python
-    # nor pypowsybl to check them, which is the whole point of committing them.
-    - name: Build and test the UCTE importer
+    # - `opf`: the interior-point QP solver in `src/opf/ipm.rs`, and `opf::bnb`
+    #   branching over it for the mixed-integer path.
+    # - `ucte`: fixed-column text, no dependency. Its suite checks that each
+    #   network solves to pypowsybl's answer, committed as JSON under
+    #   `tests/data/ucte/`, so the runner needs no pypowsybl.
+    # - `iidm`: one crate (quick-xml). Checked with `ucte` too, because its
+    #   strongest test reads the same network through both parsers.
+    # - `dynamics`: pure Rust on this crate's sparse backends; small-signal
+    #   analysis rides along on it.
+    # - `rao`: serde, which the crate already has. Its external gate,
+    #   `tests/rao_cucumber_test.rs`, reads powsybl-open-rao's own Cucumber
+    #   suite from benchmark-grids and needs no Java.
+    # - `capi`: pure Rust plus cbindgen.
+    - name: Check each feature set on its own
       run: |
-        cargo build --verbose --features ucte
-        cargo test --verbose --features ucte
-    # `iidm` costs one crate (quick-xml) and no system library, so it is in CI
-    # alongside `ucte`. It is built together with `ucte` because its strongest
-    # test needs both: three fixtures are pypowsybl exports of `.uct` files the
-    # UCTE suite has already checked, so gridoxide reads the same network
-    # through two parsers that share no code and the answers must agree.
-    - name: Build and test the IIDM importer
-      run: |
-        cargo build --verbose --features iidm
-        cargo test --verbose --features iidm,ucte
-    # Small-signal analysis rides along on the same feature: it reuses the
-    # time-domain solve's own Jacobian blocks rather than deriving its own, so
-    # there is nothing extra to build or install.
+        for features in "" opf ucte iidm iidm,ucte dynamics dynamics,iidm \
+                        rao rao,ucte,iidm capi; do
+          echo "::group::cargo check --features '$features'"
+          cargo check --all-targets --features "$features"
+          echo "::endgroup::"
+        done
+    # Feature *unification* is its own failure mode, which the checks above
+    # cannot see: `iidm` and `cgmes` share quick-xml, and cimdecoder enables its
+    # `encoding` feature — which changes the shape of a public type. That
+    # combination compiled in no single-feature step and broke in the one
+    # nobody ran. This is that step.
+    - name: Check every CI-covered feature together
+      run: cargo check --all-targets --features cgmes,ucte,iidm,opf,rao,dynamics,capi
+    # Tested on the union, *less `cgmes`*: its tests read
+    # CGMES-Test-Configurations (158 MB), which CI does not fetch, and nine of
+    # them fail rather than skip without it. CI has never run them; fetching
+    # the submodule and adding `cgmes` here is what would change that.
     #
-    # `dynamics` is in CI for the same reason `opf` is: pure Rust on this
-    # crate's own sparse backends, no system library and nothing to install.
-    #
-    # Its strongest gates need no reference implementation at all. A run with no
-    # disturbance must be flat to machine precision, which catches essentially
-    # every initialization and per-unit mistake; the small-signal oscillation
-    # period must match the linearized swing equation's closed form; and halving
-    # the step must quarter the error, because the trapezoidal rule is
-    # second-order. External validation against ANDES and Dynawo is a later
-    # phase and will be committed as JSON, the way `ucte` and `iidm` already
-    # are, so this step will keep needing neither.
-    - name: Build and test the RMS dynamics layer
+    # The integration tests are one binary (`tests/all.rs`), so this links once.
+    - name: Test every CI-covered feature together
+      run: cargo test --features ucte,iidm,opf,rao,dynamics,capi
+    - name: Build the dynamics scaling examples
       run: |
-        cargo build --verbose --features dynamics
-        cargo test --verbose --features dynamics
-        cargo test --verbose --features dynamics,iidm --test dynamics_dyd_test
-        cargo test --verbose --features dynamics,iidm --test dynamics_reference_test
-        cargo build --verbose --release --features dynamics --example dynamics_scale
-        cargo build --verbose --release --features dynamics --example smallsignal_scale
-    # Feature *unification* is its own failure mode, and the steps above cannot
-    # see it: each builds one feature at a time, while cargo builds whatever
-    # combination a consumer asks for. `iidm` and `cgmes` share quick-xml, and
-    # cimdecoder enables its `encoding` feature — which changes the shape of a
-    # public type. That combination compiled in neither step above and broke in
-    # the one nobody ran. This is that step.
-    # `rao` is pure Rust on serde, which the crate already depends on.
-    - name: Build and test the remedial-action layer
-      run: |
-        cargo build --verbose --features rao
-        cargo test --verbose --features rao
-        cargo test --verbose --features rao,ucte,iidm
-    # The external gate: `tests/rao_cucumber_test.rs` runs scenarios copied
-    # verbatim from powsybl-open-rao's own Cucumber suite and compares against
-    # expectations its authors wrote. It needs no network access and no Java —
-    # the scenarios, their CRACs and their parameter files are vendored — so it
-    # is an ordinary test, and it is the only check here that gridoxide did not
-    # write for itself.
-    - name: Build the CI-covered features together
-      run: cargo build --verbose --features cgmes,ucte,iidm,opf,rao,dynamics
-    # `capi` is built here for the same reason `opf` is: no system dependency.
-    # It is pure Rust plus cbindgen, which cargo fetches like any other crate —
-    # unlike klu/pardiso/opf-highs/opf-ipopt, which each need a library the
-    # runner does not have.
-    #
+        cargo build --release --features dynamics --example dynamics_scale
+        cargo build --release --features dynamics --example smallsignal_scale
     # The two example programs are the part `cargo test` cannot cover. They are
     # what proves the generated header actually parses as C11 and C++17, that
     # the `#[repr(C)]` layouts agree with what a real compiler computes, and
     # that the exported symbols link — none of which a Rust test can check,
     # since it never sees the header at all.
-    - name: Build and test the C ABI
-      run: |
-        cargo build --verbose --features capi
-        cargo test --verbose --features capi
     - name: Compile and run the C and C++ examples
       run: |
         cargo build --release --features capi
@@ -161,7 +103,7 @@ jobs:
         /tmp/powerflow_cpp /tmp/pglib-opf/pglib_opf_case14_ieee.json
     # The header is committed so a prebuilt-artifact consumer needs no Rust
     # toolchain. Nothing keeps it in step with the code unless something checks,
-    # and `cargo build --features capi` regenerates it — so a diff here means a
+    # and building with `capi` regenerates it — so a diff here means a
     # contributor changed the ABI without committing the regenerated header.
     - name: Check the committed header is not stale
       run: git diff --exit-code -- include/gridoxide.h

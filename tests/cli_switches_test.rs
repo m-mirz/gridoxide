@@ -38,10 +38,9 @@ fn run(args: &[&str]) -> Output {
 
 fn run_switches(extra: &[&str]) -> Option<Output> {
     let files = minigrid()?;
-    let mut args: Vec<String> =
-        std::iter::once("switches".to_string())
-            .chain(files.iter().map(|p| p.display().to_string()))
-            .collect();
+    let mut args: Vec<String> = std::iter::once("switches".to_string())
+        .chain(files.iter().map(|p| p.display().to_string()))
+        .collect();
     args.extend(extra.iter().map(|s| s.to_string()));
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     Some(run(&refs))
@@ -50,15 +49,25 @@ fn run_switches(extra: &[&str]) -> Option<Output> {
 #[test]
 fn switches_lists_devices_with_their_mrids_and_state() {
     let Some(out) = run_switches(&[]) else { return };
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(stdout.contains("103 connectivity node(s)"), "{stdout}");
-    assert!(stdout.contains("90 switch(es) in the model, 30 retained"), "{stdout}");
+    assert!(
+        stdout.contains("90 switch(es) in the model, 30 retained"),
+        "{stdout}"
+    );
     // Every listed switch is named by its CGMES mRID, which is what an operator
     // has to hand — not by an index only gridoxide knows.
     assert!(stdout.contains("_"), "{stdout}");
-    assert!(stdout.contains("Disconnector") || stdout.contains("Breaker"), "{stdout}");
+    assert!(
+        stdout.contains("Disconnector") || stdout.contains("Breaker"),
+        "{stdout}"
+    );
     assert!(stdout.contains("closed"), "{stdout}");
     // Without --solve there are no flows to report.
     assert!(!stdout.contains("P (MW)"), "{stdout}");
@@ -66,8 +75,14 @@ fn switches_lists_devices_with_their_mrids_and_state() {
 
 #[test]
 fn solve_reports_a_flow_through_each_switch() {
-    let Some(out) = run_switches(&["--solve"]) else { return };
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let Some(out) = run_switches(&["--solve"]) else {
+        return;
+    };
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("power flow: Converged"), "{stdout}");
     assert!(stdout.contains("P (MW)"), "{stdout}");
@@ -77,7 +92,9 @@ fn solve_reports_a_flow_through_each_switch() {
 /// has to actually reach the solver.
 #[test]
 fn the_retention_policy_changes_how_much_survives() {
-    let Some(none) = run_switches(&["--retain", "none"]) else { return };
+    let Some(none) = run_switches(&["--retain", "none"]) else {
+        return;
+    };
     let all = run_switches(&["--retain", "all"]).unwrap();
     let none = String::from_utf8_lossy(&none.stdout).to_string();
     let all = String::from_utf8_lossy(&all.stdout).to_string();
@@ -85,7 +102,10 @@ fn the_retention_policy_changes_how_much_survives() {
     assert!(none.contains("0 retained"), "{none}");
     assert!(all.contains("90 retained"), "{all}");
     // `none` merges everything, so it must produce the fewest buses.
-    assert!(none.contains("13 bus(es)") || none.contains("15 bus(es)"), "{none}");
+    assert!(
+        none.contains("13 bus(es)") || none.contains("15 bus(es)"),
+        "{none}"
+    );
     assert!(all.contains("105 bus(es)"), "{all}");
 }
 
@@ -95,8 +115,14 @@ fn the_retention_policy_changes_how_much_survives() {
 fn opening_a_switch_is_reflected_in_the_listing_and_the_solve() {
     // A disconnector MiniGrid carries real power through.
     const MRID: &str = "_b7e79b65-8d3e-4ee9-bf05-12bf2250b12d";
-    let Some(out) = run_switches(&["--open", MRID, "--solve"]) else { return };
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let Some(out) = run_switches(&["--open", MRID, "--solve"]) else {
+        return;
+    };
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(stdout.contains(&format!("opened {MRID}")), "{stdout}");
@@ -105,7 +131,10 @@ fn opening_a_switch_is_reflected_in_the_listing_and_the_solve() {
         .lines()
         .find(|l| l.contains(MRID))
         .unwrap_or_else(|| panic!("the opened switch is not listed:\n{stdout}"));
-    assert!(line.contains("open"), "listing still shows it closed: {line}");
+    assert!(
+        line.contains("open"),
+        "listing still shows it closed: {line}"
+    );
 }
 
 /// Bad input is rejected with a message that says what to do, and a non-zero
@@ -120,10 +149,15 @@ fn malformed_invocations_are_rejected() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let Some(out) = run_switches(&["--retain", "nonsense"]) else { return };
+    let Some(out) = run_switches(&["--retain", "nonsense"]) else {
+        return;
+    };
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("expected none, busbar_adjacent or all"), "{err}");
+    assert!(
+        err.contains("expected none, busbar_adjacent or all"),
+        "{err}"
+    );
 
     let out = run_switches(&["--retain"]).unwrap();
     assert!(!out.status.success());

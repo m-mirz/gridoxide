@@ -11,7 +11,13 @@ use super::super::types::EMPTY;
 /// pushed in list order (reversed via the stack, so the *last* child in
 /// `child`'s linked list — which `AMD_postorder` arranges to be the
 /// largest — gets ordered last).
-fn post_tree(root: usize, mut k: i64, child: &mut [i64], sibling: &[i64], order: &mut [i64]) -> i64 {
+fn post_tree(
+    root: usize,
+    mut k: i64,
+    child: &mut [i64],
+    sibling: &[i64],
+    order: &mut [i64],
+) -> i64 {
     let mut stack = vec![root as i64];
 
     while let Some(&i) = stack.last() {
@@ -139,6 +145,9 @@ mod tests {
         let fsize = [0, 1, 5];
         let order = postorder(3, &parent, &nv, &fsize);
         assert_eq!(order[0], 2, "root visited last, after both children");
-        assert!(order[2] > order[1], "bigger child (2) should be ordered after smaller (1)");
+        assert!(
+            order[2] > order[1],
+            "bigger child (2) should be ordered after smaller (1)"
+        );
     }
 }

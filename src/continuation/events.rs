@@ -36,7 +36,12 @@ pub enum ContinuationEvent {
     /// A `PV` bus reached a reactive limit and was switched to `PQ`, pinned at
     /// that limit. `lambda` is the located crossing, not the step that
     /// straddled it.
-    QLimit { bus: usize, limit: QLimitKind, lambda: f64, iterations: usize },
+    QLimit {
+        bus: usize,
+        limit: QLimitKind,
+        lambda: f64,
+        iterations: usize,
+    },
     /// The safety net fired: an accepted point violated a limit the locator did
     /// not bracket. The switch is applied anyway, so the curve stays
     /// outer-loop-consistent, but the λ is the step's, not the true crossing.
@@ -68,7 +73,10 @@ pub(crate) fn q_violations(buses: &[Bus], q_calc: &[f64]) -> Vec<(usize, f64)> {
 /// The largest event value over every still-`PV` bus: the scalar the locator
 /// brackets, so the *earliest* crossing along the step is the one found.
 pub(crate) fn worst_violation(buses: &[Bus], q_calc: &[f64]) -> f64 {
-    q_violations(buses, q_calc).into_iter().map(|(_, e)| e).fold(f64::NEG_INFINITY, f64::max)
+    q_violations(buses, q_calc)
+        .into_iter()
+        .map(|(_, e)| e)
+        .fold(f64::NEG_INFINITY, f64::max)
 }
 
 /// Regula falsi with Illinois damping over `[lo, hi]`, given the bracketing

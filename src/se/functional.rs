@@ -123,8 +123,17 @@ pub fn power_partials_of(
             return;
         }
         let v_at = v[at];
-        let s = v_at * coefficients.iter().map(|&(k, c)| c * v[k]).sum::<Complex<f64>>().conj();
-        let inv_mag = if v_at.norm() > 0.0 { v_at.norm().recip() } else { 0.0 };
+        let s = v_at
+            * coefficients
+                .iter()
+                .map(|&(k, c)| c * v[k])
+                .sum::<Complex<f64>>()
+                .conj();
+        let inv_mag = if v_at.norm() > 0.0 {
+            v_at.norm().recip()
+        } else {
+            0.0
+        };
         let mut saw_at = false;
 
         for &(k, c) in coefficients {
@@ -136,7 +145,11 @@ pub fn power_partials_of(
                 d_dtheta += J * s;
                 d_dvmag += s * inv_mag;
             }
-            out.push(Partial { bus: k, d_dtheta, d_dvmag });
+            out.push(Partial {
+                bus: k,
+                d_dtheta,
+                d_dvmag,
+            });
         }
 
         // `at` is one of the coefficients for every target gridoxide builds, so
@@ -144,7 +157,11 @@ pub fn power_partials_of(
         // conj(I)` does not require it, and a functional that ever separates the
         // two would otherwise silently lose the leading factor's derivative.
         if !saw_at {
-            out.push(Partial { bus: at, d_dtheta: J * s, d_dvmag: s * inv_mag });
+            out.push(Partial {
+                bus: at,
+                d_dtheta: J * s,
+                d_dvmag: s * inv_mag,
+            });
         }
     }
 }
@@ -165,7 +182,11 @@ pub fn current_partials_of(
 ) {
     for &(k, c) in coefficients {
         let unit_k = unit(v[k]);
-        out.push(Partial { bus: k, d_dtheta: J * c * v[k], d_dvmag: c * unit_k });
+        out.push(Partial {
+            bus: k,
+            d_dtheta: J * c * v[k],
+            d_dvmag: c * unit_k,
+        });
     }
 }
 
@@ -227,7 +248,11 @@ pub fn local_current_of(
 
 /// A unit phasor in `z`'s direction, or `1` where `z` has no direction.
 fn unit(z: Complex<f64>) -> Complex<f64> {
-    if z.norm() > 0.0 { z / z.norm() } else { Complex::new(1.0, 0.0) }
+    if z.norm() > 0.0 {
+        z / z.norm()
+    } else {
+        Complex::new(1.0, 0.0)
+    }
 }
 
 impl SeNetwork {
@@ -240,17 +265,18 @@ impl SeNetwork {
     pub fn functional(&self, target: Target) -> Option<CurrentFunctional> {
         Some(match target {
             // A bus injection is its own Y-bus row: `I_i = Σ_k Y_ik·V_k`.
-            Target::Bus(bus) => {
-                CurrentFunctional { at: bus, coefficients: self.ybus.row(bus).to_vec() }
-            }
+            Target::Bus(bus) => CurrentFunctional {
+                at: bus,
+                coefficients: self.ybus.row(bus).to_vec(),
+            },
             // A current sensor names the same terminal as a power sensor and so
             // resolves to the same functional. What differs is which quantity of
             // it the estimator reads — `current` or `local_current` rather than
             // `power` — not the coefficients.
             Target::BranchTerminal { branch, terminal }
-            | Target::BranchTerminalCurrent { branch, terminal, .. } => {
-                self.terminals.get(branch)?[terminal as usize].clone()
-            }
+            | Target::BranchTerminalCurrent {
+                branch, terminal, ..
+            } => self.terminals.get(branch)?[terminal as usize].clone(),
             // A source's injection into its node is the negation of the current
             // flowing from that node into the synthesized branch, and negating
             // the coefficients negates the power with it.
@@ -276,11 +302,17 @@ impl SeNetwork {
                 let mut coefficients = self.ybus.row(bus).to_vec();
                 for &branch in &self.source_branches[bus] {
                     let f = &self.terminals[branch][Terminal::To as usize];
-                    debug_assert_eq!(f.at, bus, "a source branch must feed the bus it is listed on");
+                    debug_assert_eq!(
+                        f.at, bus,
+                        "a source branch must feed the bus it is listed on"
+                    );
                     coefficients.extend(f.coefficients.iter().map(|&(k, c)| (k, -c)));
                 }
                 coefficients.push((bus, -self.shunt_y[bus]));
-                CurrentFunctional { at: bus, coefficients }
+                CurrentFunctional {
+                    at: bus,
+                    coefficients,
+                }
             }
         })
     }
@@ -292,7 +324,10 @@ mod tests {
     use crate::branch_flow::{terminal_flow, terminal_flow_derivs};
 
     fn state(buses: &[crate::types::Bus]) -> Vec<Complex<f64>> {
-        buses.iter().map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang)).collect()
+        buses
+            .iter()
+            .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
+            .collect()
     }
 
     /// The functional form reproduces `branch_flow::terminal_flow` exactly.
@@ -311,7 +346,10 @@ mod tests {
 
         for terminal in [Terminal::From, Terminal::To] {
             let f = net
-                .functional(Target::BranchTerminal { branch: 0, terminal })
+                .functional(Target::BranchTerminal {
+                    branch: 0,
+                    terminal,
+                })
                 .expect("branch 0 exists");
             let s = f.power(&v);
             let (p, q) = terminal_flow(&super::super::tests::two_bus_params(), terminal, &v);
@@ -337,7 +375,10 @@ mod tests {
 
         for terminal in [Terminal::From, Terminal::To] {
             let f = net
-                .functional(Target::BranchTerminal { branch: 0, terminal })
+                .functional(Target::BranchTerminal {
+                    branch: 0,
+                    terminal,
+                })
                 .expect("branch 0 exists");
             let mut partials = Vec::new();
             f.power_partials(&v, &mut partials);
@@ -347,7 +388,12 @@ mod tests {
             let (near, _far) = params.buses(terminal);
             let want = |bus: usize| -> (f64, f64, f64, f64) {
                 if bus == near {
-                    (d.dp_dtheta_near, d.dq_dtheta_near, d.dp_dv_near, d.dq_dv_near)
+                    (
+                        d.dp_dtheta_near,
+                        d.dq_dtheta_near,
+                        d.dp_dv_near,
+                        d.dq_dv_near,
+                    )
                 } else {
                     (d.dp_dtheta_far, d.dq_dtheta_far, d.dp_dv_far, d.dq_dv_far)
                 }
@@ -379,8 +425,14 @@ mod tests {
             Target::Bus(1),
             Target::NodeInjection(1),
             Target::ShuntInjection { bus: 1 },
-            Target::BranchTerminal { branch: 0, terminal: Terminal::From },
-            Target::BranchTerminal { branch: 0, terminal: Terminal::To },
+            Target::BranchTerminal {
+                branch: 0,
+                terminal: Terminal::From,
+            },
+            Target::BranchTerminal {
+                branch: 0,
+                terminal: Terminal::To,
+            },
             Target::SourceInjection { branch: 0 },
         ];
 
@@ -406,7 +458,10 @@ mod tests {
                 }
             }
             if matches!(target, Target::NodeInjection(_)) {
-                assert!(raw.len() > partials.len(), "the duplicate-summing path should be exercised");
+                assert!(
+                    raw.len() > partials.len(),
+                    "the duplicate-summing path should be exercised"
+                );
             }
 
             for p in &partials {
@@ -454,7 +509,10 @@ mod tests {
         let v = state(&buses);
 
         let f = net
-            .functional(Target::BranchTerminal { branch: 0, terminal: Terminal::From })
+            .functional(Target::BranchTerminal {
+                branch: 0,
+                terminal: Terminal::From,
+            })
             .expect("branch 0");
         let local = f.local_current(&v);
         let s = f.power(&v);
@@ -468,7 +526,10 @@ mod tests {
         );
         // And it is genuinely a different quantity from the global current, so
         // a test confusing the two would not pass by coincidence.
-        assert!((local - i).norm() > 1e-3, "the two frames should differ here");
+        assert!(
+            (local - i).norm() > 1e-3,
+            "the two frames should differ here"
+        );
     }
 
     /// Both current forms' partials against central differences of their own
@@ -482,14 +543,18 @@ mod tests {
         buses[1].voltage_ang = -0.074;
 
         let f = net
-            .functional(Target::BranchTerminal { branch: 0, terminal: Terminal::To })
+            .functional(Target::BranchTerminal {
+                branch: 0,
+                terminal: Terminal::To,
+            })
             .expect("branch 0");
 
         const H: f64 = 1e-6;
         for (name, value, partials) in [
             (
                 "global",
-                Box::new(|v: &[Complex<f64>]| f.current(v)) as Box<dyn Fn(&[Complex<f64>]) -> Complex<f64>>,
+                Box::new(|v: &[Complex<f64>]| f.current(v))
+                    as Box<dyn Fn(&[Complex<f64>]) -> Complex<f64>>,
                 {
                     let mut o = Vec::new();
                     f.current_partials(&state(&buses), &mut o);
@@ -540,7 +605,10 @@ mod tests {
     /// isolated bus's column stays untouched and `mask_untouched` can pin it.
     #[test]
     fn an_empty_functional_produces_no_partials() {
-        let f = CurrentFunctional { at: 0, coefficients: Vec::new() };
+        let f = CurrentFunctional {
+            at: 0,
+            coefficients: Vec::new(),
+        };
         let v = vec![Complex::new(1.0, 0.0)];
         assert_eq!(f.power(&v), Complex::new(0.0, 0.0));
         let mut partials = Vec::new();

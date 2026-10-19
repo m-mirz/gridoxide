@@ -53,8 +53,8 @@ pub mod powerflow;
 pub mod types;
 
 use std::cell::RefCell;
-use std::ffi::{c_char, CString};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ffi::{CString, c_char};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// The ABI this build speaks.
 ///

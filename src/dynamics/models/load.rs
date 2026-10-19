@@ -73,10 +73,16 @@ impl ZipLoad {
     pub fn new(z: f64, i: f64, p: f64, cutoff: f64) -> Result<Self, InitError> {
         let sum = z + i + p;
         if (sum - 1.0).abs() > 1e-9 {
-            return Err(InitError::OutsideLimits { name: "zip fractions sum", value: sum });
+            return Err(InitError::OutsideLimits {
+                name: "zip fractions sum",
+                value: sum,
+            });
         }
         if cutoff <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "zip cutoff", value: cutoff });
+            return Err(InitError::NonPositiveParameter {
+                name: "zip cutoff",
+                value: cutoff,
+            });
         }
         Ok(Self {
             fractions: [z, i, p],
@@ -97,7 +103,11 @@ impl ZipLoad {
     fn weights(&self, v_mag: f64) -> ([f64; 3], [f64; 3]) {
         let m = v_mag.max(self.cutoff);
         let clamped = v_mag <= self.cutoff;
-        let w = [1.0 / (self.v0 * self.v0), 1.0 / (self.v0 * m), 1.0 / (m * m)];
+        let w = [
+            1.0 / (self.v0 * self.v0),
+            1.0 / (self.v0 * m),
+            1.0 / (m * m),
+        ];
         let dw = if clamped {
             [0.0, 0.0, 0.0]
         } else {
@@ -137,8 +147,11 @@ impl DynamicModel for ZipLoad {
         let (w, dw) = self.weights(v_mag);
         // ∂|V|/∂V, undefined at the origin; the cutoff means the weights are
         // constant there anyway, so zero is both finite and correct.
-        let (dm_re, dm_im) =
-            if v_mag > 0.0 { (v.re / v_mag, v.im / v_mag) } else { (0.0, 0.0) };
+        let (dm_re, dm_im) = if v_mag > 0.0 {
+            (v.re / v_mag, v.im / v_mag)
+        } else {
+            (0.0, 0.0)
+        };
 
         let mut d_re = Complex::new(0.0, 0.0);
         let mut d_im = Complex::new(0.0, 0.0);

@@ -15,8 +15,10 @@ use gridoxide::linear::btheta::{dc_branches, dc_power_flow};
 use gridoxide::linear::sensitivity::DcSensitivity;
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
-use gridoxide::rao::linear::{phase_shift_sensitivity, LinearOptions, LinearStatus};
-use gridoxide::rao::{crac_json, evaluate, optimize, Network, NetworkMut, Resolution};
+use gridoxide::rao::linear::{LinearOptions, LinearStatus, phase_shift_sensitivity};
+use gridoxide::rao::{
+    Network, NetworkMut, Resolution, SearchOptions, crac_json, evaluate, optimize, run,
+};
 use gridoxide::ucte;
 
 mod openrao;
@@ -46,8 +48,7 @@ fn phase_shift_sensitivity_matches_a_finite_difference() {
     let options = Default::default();
     let branches = dc_branches(&net.lines, &net.transformers, options);
     let n_branches = net.n_branches();
-    let sensitivity =
-        DcSensitivity::new(&net.buses, &branches, n_branches).expect("sensitivity");
+    let sensitivity = DcSensitivity::new(&net.buses, &branches, n_branches).expect("sensitivity");
 
     // The one transformer in this network is a phase shifter.
     assert_eq!(net.transformers.len(), 1);
@@ -76,7 +77,10 @@ fn phase_shift_sensitivity_matches_a_finite_difference() {
             compared += 1;
         }
     }
-    assert!(compared >= 5, "only {compared} branches respond to the shifter");
+    assert!(
+        compared >= 5,
+        "only {compared} branches respond to the shifter"
+    );
     assert!(worst < 1e-6, "worst sensitivity error {worst} pu/rad");
 
     // And the shifting branch's own sensitivity must be the largest in
@@ -87,7 +91,10 @@ fn phase_shift_sensitivity_matches_a_finite_difference() {
         analytic.iter().all(|s| s.abs() <= own + 1e-9),
         "the shifter's own branch should respond most strongly"
     );
-    assert!(own > 1.0, "own sensitivity {own} looks like the direct term is missing");
+    assert!(
+        own > 1.0,
+        "own sensitivity {own} looks like the direct term is missing"
+    );
 }
 
 #[test]
@@ -141,6 +148,7 @@ fn optimizing_a_perimeter_improves_its_worst_margin() {
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -162,7 +170,10 @@ fn optimizing_a_perimeter_improves_its_worst_margin() {
         &LinearOptions::default(),
     );
 
-    assert!(result.initial_margin_mw < 0.0, "the fixture should start overloaded");
+    assert!(
+        result.initial_margin_mw < 0.0,
+        "the fixture should start overloaded"
+    );
     assert_eq!(result.status, LinearStatus::Improved, "{result:?}");
     assert!(
         result.improvement() > 0.0,
@@ -170,7 +181,10 @@ fn optimizing_a_perimeter_improves_its_worst_margin() {
         result.initial_margin_mw,
         result.final_margin_mw
     );
-    assert!(result.setpoints.iter().any(|s| s.moved()), "nothing was moved");
+    assert!(
+        result.setpoints.iter().any(|s| s.moved()),
+        "nothing was moved"
+    );
     assert!(result.iterations >= 1);
 }
 
@@ -183,6 +197,7 @@ fn a_phase_shifter_lands_on_a_tap_the_operator_can_select() {
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -195,8 +210,14 @@ fn a_phase_shifter_lands_on_a_tap_the_operator_can_select() {
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let result =
-        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &LinearOptions::default());
+    let result = optimize(
+        &c.crac,
+        &mut network,
+        &resolution,
+        std::slice::from_ref(&preventive),
+        &mut solver,
+        &LinearOptions::default(),
+    );
 
     for setpoint in &result.setpoints {
         let Some(tap) = setpoint.tap else { continue };
@@ -231,6 +252,7 @@ fn the_network_is_left_where_the_result_says_it_is() {
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -243,11 +265,18 @@ fn the_network_is_left_where_the_result_says_it_is() {
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let result =
-        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &LinearOptions::default());
+    let result = optimize(
+        &c.crac,
+        &mut network,
+        &resolution,
+        std::slice::from_ref(&preventive),
+        &mut solver,
+        &LinearOptions::default(),
+    );
 
     // Re-evaluate from scratch against the network as it now stands.
     let view = Network {
+        generation: &c.net.generation,
         buses: &c.net.buses,
         lines: &c.net.lines,
         transformers: &transformers,
@@ -285,6 +314,7 @@ fn a_perimeter_with_no_range_actions_reports_no_improvement() {
     let before = transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -297,8 +327,14 @@ fn a_perimeter_with_no_range_actions_reports_no_improvement() {
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let result =
-        optimize(&crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &LinearOptions::default());
+    let result = optimize(
+        &crac,
+        &mut network,
+        &resolution,
+        std::slice::from_ref(&preventive),
+        &mut solver,
+        &LinearOptions::default(),
+    );
 
     assert_eq!(result.status, LinearStatus::NoImprovement);
     assert!(result.setpoints.is_empty());
@@ -320,6 +356,7 @@ fn the_movement_penalty_prefers_the_smaller_move() {
         let mut transformers = c.net.transformers.clone();
         let mut buses = c.net.buses.clone();
         let mut network = NetworkMut {
+            generation: &c.net.generation,
             buses: &mut buses,
             lines: &c.net.lines,
             transformers: &mut transformers,
@@ -332,8 +369,18 @@ fn the_movement_penalty_prefers_the_smaller_move() {
             base_mva: c.net.base_mva,
         };
         let mut solver = IpmSolver::new();
-        let options = LinearOptions { pst_penalty: penalty, ..Default::default() };
-        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&preventive), &mut solver, &options)
+        let options = LinearOptions {
+            pst_penalty: penalty,
+            ..Default::default()
+        };
+        optimize(
+            &c.crac,
+            &mut network,
+            &resolution,
+            std::slice::from_ref(&preventive),
+            &mut solver,
+            &options,
+        )
     };
 
     let cheap = run(0.0);
@@ -342,7 +389,10 @@ fn the_movement_penalty_prefers_the_smaller_move() {
     assert!(dear.final_margin_mw >= dear.initial_margin_mw - 1e-9);
     // And it should not move further than the unpenalized run.
     let movement = |r: &gridoxide::rao::LinearResult| -> f64 {
-        r.setpoints.iter().map(|s| (s.value - s.initial).abs()).sum()
+        r.setpoints
+            .iter()
+            .map(|s| (s.value - s.initial).abs())
+            .sum()
     };
     assert!(
         movement(&dear) <= movement(&cheap) + 1e-9,
@@ -362,14 +412,14 @@ fn a_curative_perimeter_optimizes_its_own_state() {
         .states()
         .into_iter()
         .find(|s| {
-            s.contingency.is_some()
-                && c.crac.instants[s.instant].kind == InstantKind::Curative
+            s.contingency.is_some() && c.crac.instants[s.instant].kind == InstantKind::Curative
         })
         .expect("a curative state");
 
     let mut transformers = c.net.transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -382,13 +432,20 @@ fn a_curative_perimeter_optimizes_its_own_state() {
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let result =
-        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&curative), &mut solver, &LinearOptions::default());
+    let result = optimize(
+        &c.crac,
+        &mut network,
+        &resolution,
+        std::slice::from_ref(&curative),
+        &mut solver,
+        &LinearOptions::default(),
+    );
 
     // The starting margin here must be the *post-contingency* one, which
     // differs from the preventive margin — optimizing the wrong perimeter is
     // the mistake this catches.
     let view = Network {
+        generation: &c.net.generation,
         buses: &c.net.buses,
         lines: &c.net.lines,
         transformers: &c.net.transformers,
@@ -429,8 +486,12 @@ fn a_perimeter_of_monitored_only_cnecs_optimizes_nothing() {
         .into_iter()
         .find(|s| c.crac.instants[s.instant].kind == InstantKind::Auto)
         .expect("an auto state");
-    let here: Vec<&FlowCnec> =
-        c.crac.flow_cnecs.iter().filter(|x| x.state == auto).collect();
+    let here: Vec<&FlowCnec> = c
+        .crac
+        .flow_cnecs
+        .iter()
+        .filter(|x| x.state == auto)
+        .collect();
     assert!(!here.is_empty(), "the auto perimeter should have CNECs");
     assert!(
         here.iter().all(|x| !x.optimized && x.monitored),
@@ -442,6 +503,7 @@ fn a_perimeter_of_monitored_only_cnecs_optimizes_nothing() {
     let before = transformers.clone();
     let mut buses = c.net.buses.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -454,12 +516,24 @@ fn a_perimeter_of_monitored_only_cnecs_optimizes_nothing() {
         base_mva: c.net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let result =
-        optimize(&c.crac, &mut network, &resolution, std::slice::from_ref(&auto), &mut solver, &LinearOptions::default());
+    let result = optimize(
+        &c.crac,
+        &mut network,
+        &resolution,
+        std::slice::from_ref(&auto),
+        &mut solver,
+        &LinearOptions::default(),
+    );
     assert_eq!(result.status, LinearStatus::NoImprovement);
-    assert_eq!(result.iterations, 0, "nothing to optimize means no LP is built");
+    assert_eq!(
+        result.iterations, 0,
+        "nothing to optimize means no LP is built"
+    );
     for (a, b) in transformers.iter().zip(&before) {
-        assert_eq!(a.tap, b.tap, "an MNEC-only perimeter must not move anything");
+        assert_eq!(
+            a.tap, b.tap,
+            "an MNEC-only perimeter must not move anything"
+        );
     }
 }
 
@@ -476,6 +550,7 @@ fn usage_rules_decide_which_perimeter_an_action_reaches() {
         let mut transformers = c.net.transformers.clone();
         let mut buses = c.net.buses.clone();
         let mut network = NetworkMut {
+            generation: &c.net.generation,
             buses: &mut buses,
             lines: &c.net.lines,
             transformers: &mut transformers,
@@ -518,8 +593,8 @@ fn the_objective_unit_changes_what_the_optimizer_maximizes() {
     // network with two voltage levels the same set of margins does not have the
     // same minimum in the two units — and the optimizer trades one CNEC against
     // another differently as a result.
-    let net = ucte::read(ucte_fixture("TestCase12Nodes_with_2_voltage_levels_1.uct"))
-        .expect("network");
+    let net =
+        ucte::read(ucte_fixture("TestCase12Nodes_with_2_voltage_levels_1.uct")).expect("network");
     // This CRAC states 225 kV on some CNECs and 400 kV on others, which is what
     // makes the two units disagree; a CRAC that says 400 everywhere would make
     // the ampere objective a constant rescaling of the megawatt one.
@@ -528,6 +603,7 @@ fn the_objective_unit_changes_what_the_optimizer_maximizes() {
     let resolution = Resolution::new(&crac, &net.branch_ids);
 
     let view = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -540,12 +616,22 @@ fn the_objective_unit_changes_what_the_optimizer_maximizes() {
         base_mva: net.base_mva,
     };
     let result = evaluate(&crac, &view, &resolution);
-    let cnecs: Vec<_> = result.perimeters.iter().flat_map(|p| p.cnecs.iter()).collect();
-    assert!(cnecs.len() > 1, "need several CNECs to have an ordering at all");
+    let cnecs: Vec<_> = result
+        .perimeters
+        .iter()
+        .flat_map(|p| p.cnecs.iter())
+        .collect();
+    assert!(
+        cnecs.len() > 1,
+        "need several CNECs to have an ordering at all"
+    );
 
     let voltages: std::collections::BTreeSet<i64> =
         cnecs.iter().map(|c| c.conversion_v as i64).collect();
-    assert!(voltages.len() > 1, "fixture should span two voltage levels: {voltages:?}");
+    assert!(
+        voltages.len() > 1,
+        "fixture should span two voltage levels: {voltages:?}"
+    );
 
     // The property that matters is not that the *minimum* differs — the same
     // CNEC can be worst in both units, and here it is — but that the ordering
@@ -574,6 +660,7 @@ fn an_ampere_objective_is_reported_in_megawatts_all_the_same() {
     let mut buses = c.net.buses.clone();
     let mut transformers = c.net.transformers.clone();
     let mut network = NetworkMut {
+        generation: &c.net.generation,
         buses: &mut buses,
         lines: &c.net.lines,
         transformers: &mut transformers,
@@ -592,8 +679,14 @@ fn an_ampere_objective_is_reported_in_megawatts_all_the_same() {
         objective_unit: gridoxide::rao::linear::ObjectiveUnit::Ampere,
         ..Default::default()
     };
-    let result =
-        optimize(&c.crac, &mut network, &resolution, &perimeter, &mut solver, &options);
+    let result = optimize(
+        &c.crac,
+        &mut network,
+        &resolution,
+        &perimeter,
+        &mut solver,
+        &options,
+    );
 
     // Amperes are the larger number at these voltages, so the two must not be
     // equal and the MW one must be the smaller.
@@ -602,5 +695,190 @@ fn an_ampere_objective_is_reported_in_megawatts_all_the_same() {
         "objective {} should be an ampere figure, margin {} a megawatt one",
         result.final_objective,
         result.final_margin_mw
+    );
+}
+
+/// A redispatch's set-point is **absolute**, and its sensitivity is per
+/// megawatt of it.
+///
+/// Both halves were wrong together, and each hid the other. The control was
+/// anchored at zero, so the CRAC's declared range was read as a range on the
+/// *shift* — on the reference's 2.3.1.1.a that turned `[−1000, 1000]` into
+/// `[0, 2000]` in the reference's own terms. And the sensitivity was the
+/// per-unit response to a per-unit pattern, a hundred times too small at a
+/// 100 MVA base.
+///
+/// An LP told a control is a hundred times weaker than it is still moves it the
+/// right way and saturates at its bound; `apply` then does the arithmetic in MW
+/// and gets the move right, and the iterate-and-relinearize loop keeps it
+/// because the true objective improved. On every vendored fixture the answer
+/// sits exactly on the bound, so saturating *was* optimal — which is why four
+/// scenarios passed for years with a factor of a hundred in the model.
+///
+/// This asserts the model rather than the answer: two nodes, one line, a
+/// generator at each end, and a redispatch whose keys are +1 and −1. The
+/// set-point starts at 1000 because that is what the machines are at, and
+/// moving it to 0 shuts both down — the reference's own words for this case.
+#[test]
+fn a_redispatch_starts_at_the_set_point_its_machines_are_already_on() {
+    let net = ucte::read(ucte_fixture("2Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic93/crac-93-1-1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+
+    let action = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "redispatchingAction")
+        .expect("the redispatch action");
+    let origin = gridoxide::rao::injection_setpoint(&crac, &network, &resolution, action)
+        .expect("both machines agree on where the action sits");
+    assert!(
+        (origin - 1000.0).abs() < 1e-6,
+        "FFR1AA1 generates 1000 MW on a key of 1, so the set-point starts at 1000, not {origin}"
+    );
+
+    // And the optimizer takes it to zero, which is the whole scenario: the line
+    // carries 1000 MW against a 300 MW threshold, and shutting both machines
+    // down is the only thing that helps.
+    let mut solver = IpmSolver::new();
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
+    let setpoint = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == action)
+        .expect("the action should be used");
+    assert!(
+        setpoint.value.abs() < 1e-3,
+        "the optimizer should shut both machines down, not move to {}",
+        setpoint.value
+    );
+    assert!(
+        (setpoint.initial - 1000.0).abs() < 1e-6,
+        "and it should report where it started, not zero ({})",
+        setpoint.initial
+    );
+}
+
+/// The cost objective, against the arithmetic the reference's own scenario
+/// spells out.
+///
+/// 3.4.1.1 is two nodes joined by four parallel lines, three of them open, and
+/// three network actions that each close one — priced at 100, 500 and 10. Its
+/// comments state the sums: *"Overload penalty (250 * 1000)"* for the untouched
+/// network, and *"Activation of closeBeFr4 (10)"* for the answer.
+///
+/// So this asserts the two numbers the scenario asserts, and one thing it
+/// cannot: that the **cheapest** action is chosen. All three close a line and
+/// all three relieve the overload, so a margin objective would rank them by the
+/// margin each buys and a cost objective ranks them by price — which is the
+/// distinction the whole feature exists to draw.
+#[test]
+fn a_cost_objective_buys_the_cheapest_answer_not_the_roomiest() {
+    use gridoxide::rao::linear::ObjectiveKind;
+    use gridoxide::rao::{Costly, CostlyOptions};
+
+    let net =
+        ucte::read(openrao::path("files/cases/epic92/2Nodes4ParallelLines.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic92/crac-92-1-1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+
+    // The three actions and their stated prices, so the assertion below is
+    // about *which* is cheapest rather than about a name.
+    let priced: Vec<(&str, f64)> = crac
+        .network_actions
+        .iter()
+        .map(|a| {
+            (
+                a.id.as_str(),
+                a.activation_cost.expect("every action is priced"),
+            )
+        })
+        .collect();
+    assert_eq!(priced.len(), 3, "the fixture declares three actions");
+    let cheapest = priced
+        .iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id.to_string())
+        .expect("a cheapest");
+    assert_eq!(
+        cheapest, "closeBeFr4",
+        "10 is the lowest of 100, 500 and 10"
+    );
+
+    let mut options = SearchOptions::default();
+    options.linear.objective_kind = ObjectiveKind::MinCost(Costly {
+        options: CostlyOptions::default(),
+    });
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let used: Vec<&str> = plan
+        .preventive
+        .network_actions
+        .iter()
+        .map(|&i| crac.network_actions[i].id.as_str())
+        .collect();
+    assert_eq!(
+        used,
+        vec![cheapest.as_str()],
+        "the cheapest action, and only it"
+    );
+
+    // And the two figures the scenario states. `CostlyOptions::default()` is
+    // the vendored configurations' own 1000.0 per unit of overload.
+    let costly = Costly {
+        options: CostlyOptions::default(),
+    };
+    let untouched = evaluate(&crac, &network, &resolution);
+    let states = crac.states();
+    assert!(
+        (costly.violation(
+            &crac,
+            &untouched,
+            &states,
+            gridoxide::rao::ObjectiveUnit::Megawatt
+        ) - 250_000.0)
+            .abs()
+            < 500.0,
+        "the untouched network is 250 MW overloaded, which at 1000 a unit is 250000"
+    );
+    assert!(
+        (costly.activation(&crac, &plan.preventive.network_actions, &[]) - 10.0).abs() < 1e-9,
+        "and the answer costs exactly what closeBeFr4 costs"
     );
 }

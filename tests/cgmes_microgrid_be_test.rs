@@ -1,6 +1,8 @@
 mod cgmes_common;
 
-use gridoxide::cgmes::{cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles};
+use gridoxide::cgmes::{
+    cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
+};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::run_power_flow_analysis_from_ybus;
 
@@ -44,7 +46,8 @@ fn test_cgmes_microgrid_be_mas() {
     let ssh = dir.join("20210325T1530Z_1D_BE_SSH_001.xml");
     let tp = dir.join("20210325T1530Z_1D_BE_TP_001.xml");
     let sv = dir.join("20210325T1530Z_1D_BE_SV_001.xml");
-    let ds = load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
+    let ds =
+        load_profiles(&[&eq_bd, &eq, &ssh, &tp, &sv]).expect("failed to decode CGMES profiles");
 
     let expected = cgmes_common::expected_voltages(&ds);
     assert_eq!(expected.len(), 7, "fixture should have 7 SvVoltage entries");
@@ -54,7 +57,11 @@ fn test_cgmes_microgrid_be_mas() {
         cgmes_to_buses_and_branches(&ds, s_base_va).expect("conversion failed");
     // 7 physical TopologicalNode buses, plus one synthesized bus per
     // 3-winding star point and per boundary ConnectivityNode.
-    assert!(buses.len() > 7, "expected at least the 7 physical TopologicalNode buses, got {}", buses.len());
+    assert!(
+        buses.len() > 7,
+        "expected at least the 7 physical TopologicalNode buses, got {}",
+        buses.len()
+    );
 
     let n = buses.len();
     let mut ybus = build_ybus(n, &lines, &transformers);

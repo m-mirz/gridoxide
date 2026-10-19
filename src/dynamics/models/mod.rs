@@ -137,13 +137,19 @@ impl std::fmt::Display for InitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InitError::ZeroTerminalVoltage => {
-                write!(f, "terminal voltage is zero, so no terminal current is defined")
+                write!(
+                    f,
+                    "terminal voltage is zero, so no terminal current is defined"
+                )
             }
             InitError::NonPositiveParameter { name, value } => {
                 write!(f, "parameter {name} must be positive, got {value}")
             }
             InitError::OutsideLimits { name, value } => {
-                write!(f, "equilibrium value of {name} ({value}) lies outside its limits")
+                write!(
+                    f,
+                    "equilibrium value of {name} ({value}) lies outside its limits"
+                )
             }
         }
     }
@@ -302,10 +308,16 @@ pub enum LimitState {
 }
 
 impl Limits {
-    pub const NONE: Limits = Limits { min: None, max: None };
+    pub const NONE: Limits = Limits {
+        min: None,
+        max: None,
+    };
 
     pub fn new(min: f64, max: f64) -> Self {
-        Self { min: Some(min), max: Some(max) }
+        Self {
+            min: Some(min),
+            max: Some(max),
+        }
     }
 
     pub fn lower(&self) -> f64 {
@@ -466,7 +478,12 @@ pub trait Control: std::fmt::Debug {
 /// Returns the same four blocks computed numerically. This exists for the same
 /// reason `klu_native::ffi_oracle` does: the analytic version is what runs, and
 /// the numerical version is what proves it. Not used in production paths.
-pub fn finite_difference(model: &dyn DynamicModel, x: &[f64], v: Complex<f64>, h: f64) -> ModelJacobian {
+pub fn finite_difference(
+    model: &dyn DynamicModel,
+    x: &[f64],
+    v: Complex<f64>,
+    h: f64,
+) -> ModelJacobian {
     let n = model.n_states();
     let mut out = ModelJacobian::zeros(n);
 
@@ -493,7 +510,10 @@ pub fn finite_difference(model: &dyn DynamicModel, x: &[f64], v: Complex<f64>, h
     }
 
     // df/dV and dI/dV: perturb each voltage component.
-    for (col, unit) in [Complex::new(1.0, 0.0), Complex::new(0.0, 1.0)].iter().enumerate() {
+    for (col, unit) in [Complex::new(1.0, 0.0), Complex::new(0.0, 1.0)]
+        .iter()
+        .enumerate()
+    {
         let step = h * v.norm().max(1.0);
         let v_plus = v + unit * step;
         let v_minus = v - unit * step;

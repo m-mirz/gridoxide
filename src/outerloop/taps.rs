@@ -144,7 +144,9 @@ impl TapControlReport {
     /// The report for the controller on `transformer`, if that transformer had
     /// one.
     pub fn controller(&self, transformer: usize) -> Option<&ControllerReport> {
-        self.controllers.iter().find(|c| c.transformer == transformer)
+        self.controllers
+            .iter()
+            .find(|c| c.transformer == transformer)
     }
 }
 
@@ -174,7 +176,11 @@ struct TapLoop {
 
 impl TapLoop {
     fn new(max_tap_shift: i32) -> Self {
-        Self { max_tap_shift: max_tap_shift.max(1), states: Vec::new(), initialized: false }
+        Self {
+            max_tap_shift: max_tap_shift.max(1),
+            states: Vec::new(),
+            initialized: false,
+        }
     }
 
     /// Records the starting positions of every controller this loop owns.
@@ -202,7 +208,11 @@ impl TapLoop {
         }
     }
 
-    fn report(&self, regulation: &[TapRegulation], tap_changers: &[Option<crate::types::TapChanger>]) -> TapControlReport {
+    fn report(
+        &self,
+        regulation: &[TapRegulation],
+        tap_changers: &[Option<crate::types::TapChanger>],
+    ) -> TapControlReport {
         TapControlReport {
             controllers: self
                 .states
@@ -280,7 +290,9 @@ impl TapLoop {
             }
         }
 
-        let tc = ctx.net.tap_changers[transformer].as_mut().expect("checked above");
+        let tc = ctx.net.tap_changers[transformer]
+            .as_mut()
+            .expect("checked above");
         if !tc.set_position(&mut ctx.net.transformers[transformer], target) {
             return false;
         }
@@ -308,7 +320,9 @@ pub struct TransformerVoltageControl {
 
 impl Default for TransformerVoltageControl {
     fn default() -> Self {
-        Self { inner: TapLoop::new(3) }
+        Self {
+            inner: TapLoop::new(3),
+        }
     }
 }
 
@@ -325,7 +339,11 @@ impl TransformerVoltageControl {
         self
     }
 
-    pub fn report(&self, ctx_regulation: &[TapRegulation], tap_changers: &[Option<crate::types::TapChanger>]) -> TapControlReport {
+    pub fn report(
+        &self,
+        ctx_regulation: &[TapRegulation],
+        tap_changers: &[Option<crate::types::TapChanger>],
+    ) -> TapControlReport {
         self.inner.report(ctx_regulation, tap_changers)
     }
 }
@@ -423,22 +441,31 @@ impl OuterLoop for TransformerVoltageControl {
                     continue;
                 }
                 let t = ctx.net.regulation[self.inner.states[s].regulation_index].transformer;
-                let Some(Some(tc)) = ctx.net.tap_changers.get(t) else { continue };
-                let Some(current_ratio) = tc.ratio(tc.position) else { continue };
+                let Some(Some(tc)) = ctx.net.tap_changers.get(t) else {
+                    continue;
+                };
+                let Some(current_ratio) = tc.ratio(tc.position) else {
+                    continue;
+                };
                 let wanted_ratio = current_ratio + remaining / sens;
-                let Some(wanted) = tc.nearest_to_ratio(wanted_ratio) else { continue };
+                let Some(wanted) = tc.nearest_to_ratio(wanted_ratio) else {
+                    continue;
+                };
                 let (lo, hi) = tc
                     .steps
                     .iter()
                     .map(|t| t.norm())
-                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), r| (a.min(r), b.max(r)));
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), r| {
+                        (a.min(r), b.max(r))
+                    });
                 let saturated = wanted_ratio < lo || wanted_ratio > hi;
 
                 let before = tc.position;
                 if self.inner.move_to(s, wanted, saturated, ctx) {
                     moved = true;
                     let tc = ctx.net.tap_changers[t].as_ref().expect("moved it");
-                    let achieved = (tc.ratio(tc.position).unwrap_or(current_ratio) - current_ratio) * sens;
+                    let achieved =
+                        (tc.ratio(tc.position).unwrap_or(current_ratio) - current_ratio) * sens;
                     remaining -= achieved;
                     let _ = before;
                 }
@@ -476,7 +503,9 @@ pub struct PhaseControl {
 
 impl Default for PhaseControl {
     fn default() -> Self {
-        Self { inner: TapLoop::new(3) }
+        Self {
+            inner: TapLoop::new(3),
+        }
     }
 }
 
@@ -490,7 +519,11 @@ impl PhaseControl {
         self
     }
 
-    pub fn report(&self, regulation: &[TapRegulation], tap_changers: &[Option<crate::types::TapChanger>]) -> TapControlReport {
+    pub fn report(
+        &self,
+        regulation: &[TapRegulation],
+        tap_changers: &[Option<crate::types::TapChanger>],
+    ) -> TapControlReport {
         self.inner.report(regulation, tap_changers)
     }
 }
@@ -529,7 +562,9 @@ impl OuterLoop for PhaseControl {
                 continue;
             }
             let reg = &ctx.net.regulation[self.inner.states[s].regulation_index];
-            let RegulationMode::ActivePower { branch, terminal } = reg.mode else { continue };
+            let RegulationMode::ActivePower { branch, terminal } = reg.mode else {
+                continue;
+            };
             match groups.iter_mut().find(|(k, _)| *k == (branch, terminal)) {
                 Some((_, v)) => v.push(s),
                 None => groups.push(((branch, terminal), vec![s])),
@@ -555,7 +590,9 @@ impl OuterLoop for PhaseControl {
 
         let mut moved = false;
         for ((branch, terminal), controllers) in groups {
-            let Some(bp) = params.get(branch) else { continue };
+            let Some(bp) = params.get(branch) else {
+                continue;
+            };
             let (p, _) = crate::branch_flow::terminal_flow(bp, terminal, &v);
 
             let reg0 = &ctx.net.regulation[self.inner.states[controllers[0]].regulation_index];
@@ -594,25 +631,33 @@ impl OuterLoop for PhaseControl {
                     continue;
                 }
                 let t = ctx.net.regulation[self.inner.states[s].regulation_index].transformer;
-                let Some(Some(tc)) = ctx.net.tap_changers.get(t) else { continue };
-                let Some(current_angle) = tc.angle_deg(tc.position) else { continue };
+                let Some(Some(tc)) = ctx.net.tap_changers.get(t) else {
+                    continue;
+                };
+                let Some(current_angle) = tc.angle_deg(tc.position) else {
+                    continue;
+                };
                 // The sensitivity is per radian; the tap table is in degrees.
                 let wanted_angle = current_angle + (remaining / sens).to_degrees();
-                let Some(wanted) = tc.nearest_to_angle(wanted_angle) else { continue };
+                let Some(wanted) = tc.nearest_to_angle(wanted_angle) else {
+                    continue;
+                };
                 let (lo, hi) = tc
                     .steps
                     .iter()
                     .map(|t| t.arg().to_degrees())
-                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), r| (a.min(r), b.max(r)));
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), r| {
+                        (a.min(r), b.max(r))
+                    });
                 let saturated = wanted_angle < lo || wanted_angle > hi;
 
                 if self.inner.move_to(s, wanted, saturated, ctx) {
                     moved = true;
                     let tc = ctx.net.tap_changers[t].as_ref().expect("moved it");
-                    let achieved =
-                        (tc.angle_deg(tc.position).unwrap_or(current_angle) - current_angle)
-                            .to_radians()
-                            * sens;
+                    let achieved = (tc.angle_deg(tc.position).unwrap_or(current_angle)
+                        - current_angle)
+                        .to_radians()
+                        * sens;
                     remaining -= achieved;
                 }
             }

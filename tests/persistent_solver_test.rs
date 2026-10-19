@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use gridoxide::json::NetworkData;
-use gridoxide::network::{build_ybus, linear_initial_guess, YBusSparse};
-use gridoxide::solver::{newton_raphson_with_backend, JacobianBackend, PersistentSolver};
+use gridoxide::network::{YBusSparse, build_ybus, linear_initial_guess};
+use gridoxide::solver::{JacobianBackend, PersistentSolver, newton_raphson_with_backend};
 use gridoxide::types::Bus;
 
 fn load_network() -> (Vec<Bus>, YBusSparse) {
@@ -32,8 +32,14 @@ fn assert_persistent_solver_matches_fresh(backend: JacobianBackend) {
     solver.solve(&mut buses1, &ybus, 1e-6, 20);
     let expected_first = [(1.06, 0.0), (1.04, 0.014349), (1.003358, -0.043141)];
     for (i, &(vm, va)) in expected_first.iter().enumerate() {
-        assert!((buses1[i].voltage_mag - vm).abs() < 1e-5, "bus {i} vm cold solve");
-        assert!((buses1[i].voltage_ang - va).abs() < 1e-5, "bus {i} va cold solve");
+        assert!(
+            (buses1[i].voltage_mag - vm).abs() < 1e-5,
+            "bus {i} vm cold solve"
+        );
+        assert!(
+            (buses1[i].voltage_ang - va).abs() < 1e-5,
+            "bus {i} va cold solve"
+        );
     }
 
     // Second solve on the same PersistentSolver, but with different load —
@@ -55,11 +61,15 @@ fn assert_persistent_solver_matches_fresh(backend: JacobianBackend) {
     for i in 0..buses2.len() {
         assert!(
             (buses2[i].voltage_mag - buses3[i].voltage_mag).abs() < 1e-9,
-            "bus {i} vm: warm={} fresh={}", buses2[i].voltage_mag, buses3[i].voltage_mag
+            "bus {i} vm: warm={} fresh={}",
+            buses2[i].voltage_mag,
+            buses3[i].voltage_mag
         );
         assert!(
             (buses2[i].voltage_ang - buses3[i].voltage_ang).abs() < 1e-9,
-            "bus {i} va: warm={} fresh={}", buses2[i].voltage_ang, buses3[i].voltage_ang
+            "bus {i} va: warm={} fresh={}",
+            buses2[i].voltage_ang,
+            buses3[i].voltage_ang
         );
     }
 }
@@ -96,7 +106,13 @@ fn persistent_solver_reset_then_solve_matches_fresh() {
     solver.solve(&mut buses2, &ybus, 1e-6, 20);
 
     for i in 0..buses1.len() {
-        assert!((buses1[i].voltage_mag - buses2[i].voltage_mag).abs() < 1e-9, "bus {i} vm after reset");
-        assert!((buses1[i].voltage_ang - buses2[i].voltage_ang).abs() < 1e-9, "bus {i} va after reset");
+        assert!(
+            (buses1[i].voltage_mag - buses2[i].voltage_mag).abs() < 1e-9,
+            "bus {i} vm after reset"
+        );
+        assert!(
+            (buses1[i].voltage_ang - buses2[i].voltage_ang).abs() < 1e-9,
+            "bus {i} va after reset"
+        );
     }
 }

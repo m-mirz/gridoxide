@@ -30,12 +30,11 @@
 
 #![cfg(feature = "opf-ipopt")]
 
-
+use gridoxide::opf::OptStatus;
 use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
 use gridoxide::opf::ipopt::{self, IpoptOptions};
 use gridoxide::opf::model::OpfData;
 use gridoxide::opf::nlp::{self, NlpOptions, NonlinearProblem};
-use gridoxide::opf::OptStatus;
 use gridoxide::pgm::PgmInput;
 
 mod pglib;
@@ -67,7 +66,11 @@ fn ac_opf(name: &str) -> AcOpf {
 fn the_linked_library_reports_a_version() {
     let version = ipopt::version();
     let parts: Vec<&str> = version.split('.').collect();
-    assert_eq!(parts.len(), 3, "version {version:?} is not major.minor.release");
+    assert_eq!(
+        parts.len(),
+        3,
+        "version {version:?} is not major.minor.release"
+    );
     assert!(
         parts[0].parse::<u32>().unwrap() >= 3,
         "IPOPT {version} is older than the 3.x C interface this binding targets"
@@ -125,10 +128,26 @@ fn ipopt_solves_a_problem_whose_answer_is_known_on_paper() {
     assert_eq!(solution.status, OptStatus::Optimal);
 
     let root5 = 5.0f64.sqrt();
-    assert!((solution.objective + root5).abs() < 1e-7, "objective {}", solution.objective);
-    assert!((solution.x[0] + 1.0 / root5).abs() < 1e-7, "x0 {}", solution.x[0]);
-    assert!((solution.x[1] + 2.0 / root5).abs() < 1e-7, "x1 {}", solution.x[1]);
-    assert!(solution.violation < 1e-8, "violation {}", solution.violation);
+    assert!(
+        (solution.objective + root5).abs() < 1e-7,
+        "objective {}",
+        solution.objective
+    );
+    assert!(
+        (solution.x[0] + 1.0 / root5).abs() < 1e-7,
+        "x0 {}",
+        solution.x[0]
+    );
+    assert!(
+        (solution.x[1] + 2.0 / root5).abs() < 1e-7,
+        "x1 {}",
+        solution.x[1]
+    );
+    assert!(
+        solution.violation < 1e-8,
+        "violation {}",
+        solution.violation
+    );
 }
 
 /// **A curved constraint is what makes the Hessian conversion observable.**
@@ -170,8 +189,16 @@ fn ipopt_and_the_in_house_solver_agree_on_every_ac_case() {
 
         // Both feasible. An objective at an infeasible point is not comparable
         // to anything, so this is checked before the objectives are.
-        assert!(ours.violation < 1e-6, "{name}: ours left violation {:.2e}", ours.violation);
-        assert!(theirs.violation < 1e-6, "{name}: IPOPT left violation {:.2e}", theirs.violation);
+        assert!(
+            ours.violation < 1e-6,
+            "{name}: ours left violation {:.2e}",
+            ours.violation
+        );
+        assert!(
+            theirs.violation < 1e-6,
+            "{name}: IPOPT left violation {:.2e}",
+            theirs.violation
+        );
 
         let between = (ours.objective - theirs.objective).abs() / published;
         assert!(
@@ -182,7 +209,10 @@ fn ipopt_and_the_in_house_solver_agree_on_every_ac_case() {
         );
         for (label, objective) in [("ours", ours.objective), ("IPOPT", theirs.objective)] {
             let gap = (objective - published).abs() / published;
-            assert!(gap < 1e-4, "{name}: {label} {objective} vs published {published}");
+            assert!(
+                gap < 1e-4,
+                "{name}: {label} {objective} vs published {published}"
+            );
         }
     }
 }
@@ -194,7 +224,8 @@ fn ipopt_and_the_in_house_solver_agree_on_every_ac_case() {
 /// that block would be corroborated by nothing.
 #[test]
 fn ipopt_agrees_on_a_piecewise_linear_case() {
-    let polynomial = ipopt::solve(&ac_opf("pglib_opf_case5_pjm"), &IpoptOptions::default()).unwrap();
+    let polynomial =
+        ipopt::solve(&ac_opf("pglib_opf_case5_pjm"), &IpoptOptions::default()).unwrap();
     let piecewise = ipopt::solve(&ac_opf("case5_pjm_pwl"), &IpoptOptions::default()).unwrap();
 
     assert_eq!(polynomial.status, OptStatus::Optimal);

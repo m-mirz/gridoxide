@@ -270,11 +270,7 @@ fn mat_vec(triplets: &[(usize, usize, f64)], x: &[f64], rows: usize) -> Vec<f64>
     out
 }
 
-fn mat_transpose_vec(
-    triplets: &[(usize, usize, f64)],
-    y: &[f64],
-    cols: usize,
-) -> Vec<f64> {
+fn mat_transpose_vec(triplets: &[(usize, usize, f64)], y: &[f64], cols: usize) -> Vec<f64> {
     let mut out = vec![0.0; cols];
     for &(r, c, v) in triplets {
         out[c] += v * y[r];
@@ -339,8 +335,14 @@ pub fn solve(
     }
 
     let mut y = vec![0.0; m_eq];
-    let mut z_l: Vec<f64> = has_lower.iter().map(|&h| if h { 1.0 } else { 0.0 }).collect();
-    let mut z_u: Vec<f64> = has_upper.iter().map(|&h| if h { 1.0 } else { 0.0 }).collect();
+    let mut z_l: Vec<f64> = has_lower
+        .iter()
+        .map(|&h| if h { 1.0 } else { 0.0 })
+        .collect();
+    let mut z_u: Vec<f64> = has_upper
+        .iter()
+        .map(|&h| if h { 1.0 } else { 0.0 })
+        .collect();
     let mut mu = options.initial_barrier;
     let mut penalty = 1.0f64;
 
@@ -360,14 +362,17 @@ pub fn solve(
         let mut grad = vec![0.0; n_total];
         grad[..n_x].copy_from_slice(&grad_x);
 
-        let g: Vec<f64> =
-            (0..n_total).map(|k| if has_lower[k] { u[k] - p.lower[k] } else { 1.0 }).collect();
-        let t: Vec<f64> =
-            (0..n_total).map(|k| if has_upper[k] { p.upper[k] - u[k] } else { 1.0 }).collect();
+        let g: Vec<f64> = (0..n_total)
+            .map(|k| if has_lower[k] { u[k] - p.lower[k] } else { 1.0 })
+            .collect();
+        let t: Vec<f64> = (0..n_total)
+            .map(|k| if has_upper[k] { p.upper[k] - u[k] } else { 1.0 })
+            .collect();
 
         let aty = mat_transpose_vec(&a, &y, n_total);
-        let r_d: Vec<f64> =
-            (0..n_total).map(|k| grad[k] - aty[k] - z_l[k] + z_u[k]).collect();
+        let r_d: Vec<f64> = (0..n_total)
+            .map(|k| grad[k] - aty[k] - z_l[k] + z_u[k])
+            .collect();
 
         let complementarity: f64 = (0..n_total)
             .map(|k| {
@@ -386,7 +391,16 @@ pub fn solve(
 
         if error <= options.tolerance && mu <= options.tolerance {
             return Ok(finish(
-                problem, &p, &u, &y, &z_l, &z_u, f, &c, iterations, OptStatus::Optimal,
+                problem,
+                &p,
+                &u,
+                &y,
+                &z_l,
+                &z_u,
+                f,
+                &c,
+                iterations,
+                OptStatus::Optimal,
             ));
         }
 
@@ -470,7 +484,9 @@ pub fn solve(
                 for r in 0..m_eq {
                     residual[n_total + r] -= adu[r];
                 }
-                let Some(correction) = factorization.solve(&residual) else { break };
+                let Some(correction) = factorization.solve(&residual) else {
+                    break;
+                };
                 for i in 0..dim {
                     d[i] += correction[i];
                 }
@@ -485,12 +501,20 @@ pub fn solve(
 
             let dz_l: Vec<f64> = (0..n_total)
                 .map(|k| {
-                    if has_lower[k] { (mu - g[k] * z_l[k] - z_l[k] * du[k]) / g[k] } else { 0.0 }
+                    if has_lower[k] {
+                        (mu - g[k] * z_l[k] - z_l[k] * du[k]) / g[k]
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
             let dz_u: Vec<f64> = (0..n_total)
                 .map(|k| {
-                    if has_upper[k] { (mu - t[k] * z_u[k] + z_u[k] * du[k]) / t[k] } else { 0.0 }
+                    if has_upper[k] {
+                        (mu - t[k] * z_u[k] + z_u[k] * du[k]) / t[k]
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
 
@@ -521,17 +545,14 @@ pub fn solve(
                 continue;
             }
 
-            let alpha_max = fraction_to_boundary(
-                n_total, &has_lower, &has_upper, &g, &t, &du, options.tau,
-            );
-            let merit_here =
-                merit(problem, &p, &u, mu, penalty, &has_lower, &has_upper, n_x);
+            let alpha_max =
+                fraction_to_boundary(n_total, &has_lower, &has_upper, &g, &t, &du, options.tau);
+            let merit_here = merit(problem, &p, &u, mu, penalty, &has_lower, &has_upper, n_x);
 
             let mut alpha = alpha_max;
             let mut ok = false;
             while alpha > options.min_step {
-                let trial: Vec<f64> =
-                    (0..n_total).map(|k| u[k] + alpha * du[k]).collect();
+                let trial: Vec<f64> = (0..n_total).map(|k| u[k] + alpha * du[k]).collect();
                 let inside = (0..n_total).all(|k| {
                     (!has_lower[k] || trial[k] > p.lower[k])
                         && (!has_upper[k] || trial[k] < p.upper[k])
@@ -616,11 +637,7 @@ pub fn solve(
 }
 
 /// `H x` for a full symmetric triplet list.
-fn mat_vec_symmetric(
-    triplets: &[(usize, usize, f64)],
-    x: &[f64],
-    n: usize,
-) -> Vec<f64> {
+fn mat_vec_symmetric(triplets: &[(usize, usize, f64)], x: &[f64], n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n];
     for &(r, c, v) in triplets {
         out[r] += v * x[c];
@@ -725,7 +742,13 @@ fn finish(
         objective,
         x: u[..n_x].to_vec(),
         y: (0..m)
-            .map(|r| p.source_row.iter().position(|s| *s == Some(r)).map(|i| y[i]).unwrap_or(0.0))
+            .map(|r| {
+                p.source_row
+                    .iter()
+                    .position(|s| *s == Some(r))
+                    .map(|i| y[i])
+                    .unwrap_or(0.0)
+            })
             .collect(),
         z: (0..n_x).map(|k| z_l[k] - z_u[k]).collect(),
         iterations,

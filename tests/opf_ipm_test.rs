@@ -89,7 +89,11 @@ fn lp_with_a_unique_vertex_optimum() {
 
     // Requiring one more unit costs 2, the price of the marginal variable.
     close(solution.row_dual[0], 2.0, "the binding row's price");
-    close(solution.col_dual[0], -1.0, "reduced cost at x0's active ceiling");
+    close(
+        solution.col_dual[0],
+        -1.0,
+        "reduced cost at x0's active ceiling",
+    );
     assert_stationarity(&lp, &solution);
 }
 
@@ -173,7 +177,11 @@ fn qp_with_an_active_bound() {
     close(solution.primal[0], 0.5, "x0 at its cap");
     close(solution.primal[1], 1.25, "x1");
     close(solution.objective, -2.8125, "objective");
-    close(solution.col_dual[0], -0.75, "reduced cost at the active cap");
+    close(
+        solution.col_dual[0],
+        -0.75,
+        "reduced cost at the active cap",
+    );
     assert_stationarity(&lp, &solution);
 }
 
@@ -233,7 +241,11 @@ fn a_fixed_column_is_pinned_without_a_barrier() {
     // And the fixed column's reduced cost is what stationarity leaves over —
     // the multiplier of its internal pinning row, surfaced where a caller
     // expects a fixed variable's price.
-    close(solution.col_dual[0], 1.0, "reduced cost of the fixed column");
+    close(
+        solution.col_dual[0],
+        1.0,
+        "reduced cost of the fixed column",
+    );
     assert_stationarity(&lp, &solution);
 }
 
@@ -283,7 +295,10 @@ fn a_fully_determined_equality_system_solves_in_one_step() {
     // anything above two means the step is being scaled when it should not be,
     // which is a bug that stays invisible elsewhere: on a bounded problem the
     // same fault merely costs iterations rather than changing any answer.
-    assert_eq!(iterations, 2, "an unblocked Newton step should be taken in full");
+    assert_eq!(
+        iterations, 2,
+        "an unblocked Newton step should be taken in full"
+    );
 }
 
 /// An infeasible problem must be *diagnosed*, not merely failed.
@@ -303,9 +318,15 @@ fn an_infeasible_problem_is_reported_as_such() {
 
     let (solution, iterations) = solve(&lp);
     assert_eq!(solution.status, OptStatus::Infeasible);
-    assert!(solution.primal.is_empty(), "a failed solve must return no primal values");
+    assert!(
+        solution.primal.is_empty(),
+        "a failed solve must return no primal values"
+    );
     assert!(solution.objective.is_nan());
-    assert!(iterations < 30, "divergence should be recognised quickly, took {iterations}");
+    assert!(
+        iterations < 30,
+        "divergence should be recognised quickly, took {iterations}"
+    );
 }
 
 /// The mirror image: the primal runs off along a ray while the *dual* residual
@@ -322,7 +343,10 @@ fn an_unbounded_problem_is_reported_as_such() {
     let (solution, iterations) = solve(&lp);
     assert_eq!(solution.status, OptStatus::Unbounded);
     assert!(solution.primal.is_empty());
-    assert!(iterations < 30, "divergence should be recognised quickly, took {iterations}");
+    assert!(
+        iterations < 30,
+        "divergence should be recognised quickly, took {iterations}"
+    );
 }
 
 /// A bounded problem that *looks* like it has a ray. The objective is
@@ -425,7 +449,9 @@ fn iterative_refinement_earns_its_keep() {
         for &(row, c, v) in &lp.rows {
             r[c] -= v * s.row_dual[row];
         }
-        (0..2).map(|k| (r[k] - s.col_dual[k]).abs()).fold(0.0f64, f64::max)
+        (0..2)
+            .map(|k| (r[k] - s.col_dual[k]).abs())
+            .fold(0.0f64, f64::max)
     };
     assert!(
         residual(&refined) <= residual(&unrefined),

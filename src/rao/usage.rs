@@ -103,12 +103,17 @@ impl Constrained {
                     ObjectiveUnit::Ampere => cnec.margin_a,
                 };
                 if margin <= 0.0 {
-                    at_or_below_zero
-                        .insert(cnec.cnec, countries.get(&cnec.branch).cloned().unwrap_or_default());
+                    at_or_below_zero.insert(
+                        cnec.cnec,
+                        countries.get(&cnec.branch).cloned().unwrap_or_default(),
+                    );
                 }
             }
         }
-        Self { at_or_below_zero, measured: true }
+        Self {
+            at_or_below_zero,
+            measured: true,
+        }
     }
 
     /// Whether one usage rule is activated in `state`.
@@ -133,13 +138,18 @@ impl Constrained {
                 // states. A preventive one reaches all of them, which is what
                 // makes "open this line before the outage, because that outage
                 // overloads something" expressible at all.
-                let preventive = crac.instants[*instant].kind == super::crac::InstantKind::Preventive;
+                let preventive =
+                    crac.instants[*instant].kind == super::crac::InstantKind::Preventive;
                 if !preventive && named.state.contingency != state.contingency {
                     return false;
                 }
                 state.instant == *instant && self.at_or_below_zero.contains_key(&index)
             }
-            UsageRule::OnFlowConstraintInCountry { instant, country, contingency } => {
+            UsageRule::OnFlowConstraintInCountry {
+                instant,
+                country,
+                contingency,
+            } => {
                 if contingency.is_some_and(|c| state.contingency != Some(c)) {
                     return false;
                 }
@@ -161,7 +171,9 @@ impl Constrained {
 
     /// Whether `rules` make an action available anywhere in `perimeter`.
     pub fn allows(&self, rules: &[UsageRule], perimeter: &[State], crac: &Crac) -> bool {
-        perimeter.iter().any(|s| rules.iter().any(|r| self.activates(r, s, crac)))
+        perimeter
+            .iter()
+            .any(|s| rules.iter().any(|r| self.activates(r, s, crac)))
     }
 }
 
@@ -179,9 +191,13 @@ pub fn branch_countries(
 ) -> HashMap<usize, Vec<String>> {
     let mut out: HashMap<usize, Vec<String>> = HashMap::new();
     for cnec in &crac.flow_cnecs {
-        let Some(branch) = resolution.branch(&cnec.network_element) else { continue };
+        let Some(branch) = resolution.branch(&cnec.network_element) else {
+            continue;
+        };
         out.entry(branch).or_insert_with(|| {
-            let Some(b) = dc.iter().find(|b| b.index == branch) else { return Vec::new() };
+            let Some(b) = dc.iter().find(|b| b.index == branch) else {
+                return Vec::new();
+            };
             [b.from, b.to]
                 .iter()
                 .filter_map(|&bus| network.bus_countries.get(bus)?.clone())
@@ -200,7 +216,10 @@ mod tests {
         let cnec = |id: &str, contingency: Option<usize>, instant: usize| FlowCnec {
             id: id.into(),
             network_element: id.into(),
-            state: State { instant, contingency },
+            state: State {
+                instant,
+                contingency,
+            },
             thresholds: vec![Threshold {
                 unit: Unit::Megawatt,
                 min: None,
@@ -216,10 +235,20 @@ mod tests {
         };
         Crac {
             instants: vec![
-                Instant { id: "preventive".into(), kind: InstantKind::Preventive },
-                Instant { id: "curative".into(), kind: InstantKind::Curative },
+                Instant {
+                    id: "preventive".into(),
+                    kind: InstantKind::Preventive,
+                },
+                Instant {
+                    id: "curative".into(),
+                    kind: InstantKind::Curative,
+                },
             ],
-            flow_cnecs: vec![cnec("tight", None, 0), cnec("slack", None, 0), cnec("cur", Some(0), 1)],
+            flow_cnecs: vec![
+                cnec("tight", None, 0),
+                cnec("slack", None, 0),
+                cnec("cur", Some(0), 1),
+            ],
             ..Default::default()
         }
     }
@@ -227,18 +256,26 @@ mod tests {
     /// Only `tight` and `cur` are at or below zero.
     fn constrained() -> Constrained {
         Constrained {
-            at_or_below_zero: [(0, vec!["fr".into()]), (2, vec!["be".into()])].into_iter().collect(),
+            at_or_below_zero: [(0, vec!["fr".into()]), (2, vec!["be".into()])]
+                .into_iter()
+                .collect(),
             measured: true,
         }
     }
 
-    const PREVENTIVE: State = State { instant: 0, contingency: None };
+    const PREVENTIVE: State = State {
+        instant: 0,
+        contingency: None,
+    };
 
     #[test]
     fn a_conditional_rule_needs_its_cnec_to_be_constrained() {
         let crac = crac();
         let c = constrained();
-        let on = |cnec: &str| UsageRule::OnConstraint { instant: 0, cnec: cnec.into() };
+        let on = |cnec: &str| UsageRule::OnConstraint {
+            instant: 0,
+            cnec: cnec.into(),
+        };
 
         assert!(c.activates(&on("tight"), &PREVENTIVE, &crac));
         assert!(!c.activates(&on("slack"), &PREVENTIVE, &crac));
@@ -253,7 +290,10 @@ mod tests {
     fn a_preventive_rule_reaches_across_contingencies() {
         let crac = crac();
         let c = constrained();
-        let rule = UsageRule::OnConstraint { instant: 0, cnec: "cur".into() };
+        let rule = UsageRule::OnConstraint {
+            instant: 0,
+            cnec: "cur".into(),
+        };
         assert!(c.activates(&rule, &PREVENTIVE, &crac));
     }
 
@@ -264,7 +304,10 @@ mod tests {
         let c = constrained();
         let rules = vec![
             UsageRule::OnInstant { instant: 0 },
-            UsageRule::OnConstraint { instant: 0, cnec: "slack".into() },
+            UsageRule::OnConstraint {
+                instant: 0,
+                cnec: "slack".into(),
+            },
         ];
         assert!(
             c.allows(&rules, &[PREVENTIVE], &crac),
@@ -298,7 +341,10 @@ mod tests {
         // Note the asymmetry with `OnConstraint` above, which a preventive
         // instant lets reach across contingencies. Both are the reference's.
         assert!(!c.activates(&rule(0, "be", Some(0)), &PREVENTIVE, &crac));
-        let curative = State { instant: 1, contingency: Some(0) };
+        let curative = State {
+            instant: 1,
+            contingency: Some(0),
+        };
         assert!(c.activates(&rule(1, "be", Some(0)), &curative, &crac));
         // FR's overload is in the base case, which a curative rule cannot see:
         // a preventive CNEC comes *before* the curative instant.
@@ -320,6 +366,7 @@ mod tests {
             margin_a: margin,
             conversion_v: 0.0,
             current_a: 0.0,
+            side_two: (0.0, 0.0),
         };
         let result = SecurityResult {
             perimeters: vec![PerimeterResult {
@@ -330,8 +377,14 @@ mod tests {
             skipped: Vec::new(),
         };
         let c = Constrained::from_result(&result, ObjectiveUnit::Megawatt, &HashMap::new());
-        assert!(c.at_or_below_zero.contains_key(&0), "exactly zero is constrained");
-        assert!(!c.at_or_below_zero.contains_key(&1), "a hair above zero is not");
+        assert!(
+            c.at_or_below_zero.contains_key(&0),
+            "exactly zero is constrained"
+        );
+        assert!(
+            !c.at_or_below_zero.contains_key(&1),
+            "a hair above zero is not"
+        );
     }
 
     /// Without flows, a conditional rule falls back to its topological half —
@@ -340,7 +393,10 @@ mod tests {
     fn an_unmeasured_perimeter_keeps_the_old_permissive_reading() {
         let crac = crac();
         let c = Constrained::unmeasured();
-        let rule = UsageRule::OnConstraint { instant: 0, cnec: "slack".into() };
+        let rule = UsageRule::OnConstraint {
+            instant: 0,
+            cnec: "slack".into(),
+        };
         assert!(c.activates(&rule, &PREVENTIVE, &crac));
         assert!(!c.is_measured());
     }

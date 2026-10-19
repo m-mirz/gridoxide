@@ -15,8 +15,8 @@
 
 use gridoxide::continuation::augmented::Parametrization;
 use gridoxide::continuation::{
-    run_continuation, ContinuationError, ContinuationOptions, ContinuationStatus, CriticalPointKind,
-    CurveBranch, LoadingDirection, StopCriterion,
+    ContinuationError, ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch,
+    LoadingDirection, StopCriterion, run_continuation,
 };
 use gridoxide::network::{build_ybus, effective_injection, power_injections};
 use gridoxide::solver::{JacobianBackend, PowerFlowOptions};
@@ -40,13 +40,23 @@ fn bus(idx: usize, bus_type: BusType, vm: f64, p: f64, q: f64) -> Bus {
 }
 
 fn line(from: usize, to: usize, r: f64, x: f64) -> Line {
-    Line { from, to, r, x, b_shunt: 0.0, g_shunt: 0.0 }
+    Line {
+        from,
+        to,
+        r,
+        x,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    }
 }
 
 /// Slack at `1∠0`, one line, one constant-power PQ load.
 fn two_bus(r: f64, x: f64, p0: f64, q0: f64) -> (Vec<Bus>, Vec<Line>) {
     (
-        vec![bus(0, BusType::Slack, 1.0, 0.0, 0.0), bus(1, BusType::PQ, 1.0, p0, q0)],
+        vec![
+            bus(0, BusType::Slack, 1.0, 0.0, 0.0),
+            bus(1, BusType::PQ, 1.0, p0, q0),
+        ],
         vec![line(0, 1, r, x)],
     )
 }
@@ -68,7 +78,10 @@ fn analytic_nose(e: f64, r: f64, x: f64, p0: f64, q0: f64) -> (f64, f64) {
 }
 
 fn options(direction: LoadingDirection) -> ContinuationOptions {
-    ContinuationOptions { direction, ..Default::default() }
+    ContinuationOptions {
+        direction,
+        ..Default::default()
+    }
 }
 
 /// **The gate.** λ_max and the nose voltage against arithmetic, over a grid that
@@ -92,7 +105,11 @@ fn two_bus_nose_matches_the_closed_form() {
         let direction = LoadingDirection::scale_loads(&buses);
         let curve = run_continuation(buses, &lines, &[], &[], options(direction));
 
-        assert_eq!(curve.status, ContinuationStatus::NoseReached, "r={r} x={x} q0={q0}");
+        assert_eq!(
+            curve.status,
+            ContinuationStatus::NoseReached,
+            "r={r} x={x} q0={q0}"
+        );
         let critical = curve.critical.as_ref().expect("a nose was reported");
         assert_eq!(critical.kind, CriticalPointKind::SaddleNode);
 
@@ -134,7 +151,11 @@ fn every_point_solves_the_power_flow_at_its_own_lambda() {
     let ybus = build_ybus(buses.len(), &lines, &[]).finish();
 
     let curve = run_continuation(buses, &lines, &[], &[], options(direction.clone()));
-    assert!(curve.points.len() > 3, "expected a curve, got {} points", curve.points.len());
+    assert!(
+        curve.points.len() > 3,
+        "expected a curve, got {} points",
+        curve.points.len()
+    );
 
     for (n, point) in curve.points.iter().enumerate() {
         let rebuilt: Vec<Bus> = (0..point.voltage_mag.len())
@@ -164,7 +185,11 @@ fn every_point_solves_the_power_flow_at_its_own_lambda() {
                 worst = worst.max((q_eff - q_calc[b.idx]).abs());
             }
         }
-        assert!(worst < 1e-6, "point {n} (lambda {}) has mismatch {worst}", point.lambda);
+        assert!(
+            worst < 1e-6,
+            "point {n} (lambda {}) has mismatch {worst}",
+            point.lambda
+        );
         assert!(
             point.voltage_mag.iter().all(|v| *v > 0.0),
             "point {n} has a non-positive voltage magnitude: {:?}",
@@ -198,7 +223,10 @@ fn newton_converges_below_the_nose_and_fails_above() {
             &[],
             &[],
             gridoxide::TapData::none(),
-            PowerFlowOptions { max_iter: 60, ..Default::default() },
+            PowerFlowOptions {
+                max_iter: 60,
+                ..Default::default()
+            },
         )
         .stats
         .status
@@ -237,9 +265,9 @@ fn parametrizations_and_step_sizes_agree_on_the_nose() {
                     ..Default::default()
                 },
             );
-            let lambda = curve
-                .lambda_max()
-                .unwrap_or_else(|| panic!("{param:?} at step {step} found no nose: {:?}", curve.status));
+            let lambda = curve.lambda_max().unwrap_or_else(|| {
+                panic!("{param:?} at step {step} found no nose: {:?}", curve.status)
+            });
             found.push((format!("{param:?}/{step}"), lambda));
         }
     }
@@ -270,11 +298,16 @@ fn backends_agree_and_block_is_refused() {
             &[],
             ContinuationOptions {
                 direction: direction.clone(),
-                power_flow: PowerFlowOptions { backend, ..Default::default() },
+                power_flow: PowerFlowOptions {
+                    backend,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         );
-        let lambda = curve.lambda_max().unwrap_or_else(|| panic!("backend {backend:?}: no nose"));
+        let lambda = curve
+            .lambda_max()
+            .unwrap_or_else(|| panic!("backend {backend:?}: no nose"));
         match reference {
             None => reference = Some(lambda),
             Some(r) => assert!(
@@ -300,7 +333,9 @@ fn backends_agree_and_block_is_refused() {
     );
     assert_eq!(
         refused.status,
-        ContinuationStatus::Rejected(ContinuationError::BackendUnsupported(JacobianBackend::Block))
+        ContinuationStatus::Rejected(ContinuationError::BackendUnsupported(
+            JacobianBackend::Block
+        ))
     );
 }
 
@@ -316,13 +351,20 @@ fn a_target_lambda_is_landed_on_exactly() {
         &[],
         ContinuationOptions {
             direction,
-            stop: StopCriterion { target_lambda: Some(0.4), trace_lower_branch: false },
+            stop: StopCriterion {
+                target_lambda: Some(0.4),
+                trace_lower_branch: false,
+            },
             ..Default::default()
         },
     );
     assert_eq!(curve.status, ContinuationStatus::TargetReached);
     let last = curve.points.last().expect("points were recorded");
-    assert!((last.lambda - 0.4).abs() < 1e-9, "landed at {} instead of 0.4", last.lambda);
+    assert!(
+        (last.lambda - 0.4).abs() < 1e-9,
+        "landed at {} instead of 0.4",
+        last.lambda
+    );
 }
 
 /// A direction that moves nothing has no curve to trace, and a mis-sized one is
@@ -338,7 +380,10 @@ fn a_degenerate_direction_is_refused() {
         &[],
         options(LoadingDirection::zero(buses.len())),
     );
-    assert_eq!(empty.status, ContinuationStatus::Rejected(ContinuationError::EmptyDirection));
+    assert_eq!(
+        empty.status,
+        ContinuationStatus::Rejected(ContinuationError::EmptyDirection)
+    );
 
     let wrong = run_continuation(
         buses,
@@ -383,7 +428,11 @@ fn zip_loads_are_refused_unless_explicitly_allowed() {
         &lines,
         &[],
         &[],
-        ContinuationOptions { direction, allow_zip: true, ..Default::default() },
+        ContinuationOptions {
+            direction,
+            allow_zip: true,
+            ..Default::default()
+        },
     );
     assert!(
         !allowed.warnings.is_empty(),
@@ -430,10 +479,16 @@ fn the_tangent_at_the_nose_is_the_jacobians_null_vector() {
 
     // The Newton unknown layout: non-slack angles in bus order, then PQ
     // magnitudes in bus order.
-    let non_slack: Vec<usize> =
-        state.iter().filter(|b| b.bus_type != BusType::Slack).map(|b| b.idx).collect();
-    let pq: Vec<usize> =
-        state.iter().filter(|b| b.bus_type == BusType::PQ).map(|b| b.idx).collect();
+    let non_slack: Vec<usize> = state
+        .iter()
+        .filter(|b| b.bus_type != BusType::Slack)
+        .map(|b| b.idx)
+        .collect();
+    let pq: Vec<usize> = state
+        .iter()
+        .filter(|b| b.bus_type == BusType::PQ)
+        .map(|b| b.idx)
+        .collect();
     let n_angle = non_slack.len();
 
     let mut t = vec![0.0; n_angle + pq.len()];
@@ -458,7 +513,10 @@ fn the_tangent_at_the_nose_is_the_jacobians_null_vector() {
 
     let residual = jt.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
     let norm = t.iter().map(|v| v * v).sum::<f64>().sqrt();
-    assert!(norm > 0.5, "the reported tangent should be a unit vector, got norm {norm}");
+    assert!(
+        norm > 0.5,
+        "the reported tangent should be a unit vector, got norm {norm}"
+    );
     assert!(
         residual < 1e-3 * scale,
         "J·t = {residual} against a largest Jacobian entry of {scale}: the reported \
@@ -483,7 +541,10 @@ fn the_lower_branch_is_the_low_voltage_solution() {
         &[],
         ContinuationOptions {
             direction,
-            stop: StopCriterion { target_lambda: None, trace_lower_branch: true },
+            stop: StopCriterion {
+                target_lambda: None,
+                trace_lower_branch: true,
+            },
             max_steps: 400,
             ..Default::default()
         },
@@ -492,9 +553,20 @@ fn the_lower_branch_is_the_low_voltage_solution() {
     assert_eq!(curve.status, ContinuationStatus::TracedToZero);
     let lambda_max = curve.lambda_max().expect("a nose was reported");
 
-    let upper: Vec<_> = curve.points.iter().filter(|p| p.branch == CurveBranch::Upper).collect();
-    let lower: Vec<_> = curve.points.iter().filter(|p| p.branch == CurveBranch::Lower).collect();
-    assert!(!upper.is_empty() && !lower.is_empty(), "both branches should be walked");
+    let upper: Vec<_> = curve
+        .points
+        .iter()
+        .filter(|p| p.branch == CurveBranch::Upper)
+        .collect();
+    let lower: Vec<_> = curve
+        .points
+        .iter()
+        .filter(|p| p.branch == CurveBranch::Lower)
+        .collect();
+    assert!(
+        !upper.is_empty() && !lower.is_empty(),
+        "both branches should be walked"
+    );
 
     // No point may exceed the nose, on either branch.
     for p in &curve.points {
@@ -515,7 +587,9 @@ fn the_lower_branch_is_the_low_voltage_solution() {
             .iter()
             .filter(|p| p.branch == branch)
             .min_by(|a, b| {
-                (a.lambda - shared).abs().total_cmp(&(b.lambda - shared).abs())
+                (a.lambda - shared)
+                    .abs()
+                    .total_cmp(&(b.lambda - shared).abs())
             })
             .expect("both branches have points")
     };
@@ -527,7 +601,10 @@ fn the_lower_branch_is_the_low_voltage_solution() {
         hi.voltage_mag[1]
     );
     assert!(
-        curve.points.iter().all(|p| p.voltage_mag.iter().all(|v| *v > 0.0)),
+        curve
+            .points
+            .iter()
+            .all(|p| p.voltage_mag.iter().all(|v| *v > 0.0)),
         "the lower branch is a low-voltage solution, not a negative-voltage one"
     );
 }
@@ -570,8 +647,14 @@ fn generation_pickup_composes_into_the_direction() {
     // different scenario than the one asked for.
     let shared = LoadingDirection::scale_loads_with_pickup(&buses, &[0.0, 1.0, 0.0, 0.0]);
     let net: f64 = shared.d_p.iter().sum();
-    assert!(net.abs() < 1e-12, "pickup should balance the load increase exactly, net is {net}");
-    assert!(shared.d_p[1] > 0.0, "the generator should pick up, not shed");
+    assert!(
+        net.abs() < 1e-12,
+        "pickup should balance the load increase exactly, net is {net}"
+    );
+    assert!(
+        shared.d_p[1] > 0.0,
+        "the generator should pick up, not shed"
+    );
     assert_eq!(
         shared.total_active_load_increase(),
         plain.total_active_load_increase(),
@@ -610,7 +693,7 @@ fn generation_pickup_composes_into_the_direction() {
 /// update them — but read the diff first.
 #[test]
 fn ieee_fixtures_have_a_recorded_nose() {
-    use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
+    use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 
     for (name, expected_free, expected_limited) in [
         ("pglib_opf_case14_ieee", 2.5361, 0.6018),
@@ -659,7 +742,7 @@ fn ieee_fixtures_have_a_recorded_nose() {
 /// of deferring to this one.
 #[test]
 fn the_default_parametrization_has_a_sparse_border_row() {
-    use gridoxide::continuation::augmented::{border_columns, Parametrization};
+    use gridoxide::continuation::augmented::{Parametrization, border_columns};
 
     let n = 500;
     let cols = border_columns(Parametrization::default(), 17, n);
@@ -673,7 +756,10 @@ fn the_default_parametrization_has_a_sparse_border_row() {
 
     // And the expensive one really is the dense one, so this test is measuring
     // the thing it claims to.
-    assert_eq!(border_columns(Parametrization::PseudoArcLength, 17, n).len(), n + 1);
+    assert_eq!(
+        border_columns(Parametrization::PseudoArcLength, 17, n).len(),
+        n + 1
+    );
     assert_eq!(border_columns(Parametrization::Natural, 17, n), vec![n]);
 }
 
@@ -687,7 +773,7 @@ fn the_default_parametrization_has_a_sparse_border_row() {
 /// change threw away the factorization.
 #[test]
 fn a_whole_trace_needs_few_reanalyses() {
-    use gridoxide::pgm::{pgm_to_buses_and_branches, PgmInput};
+    use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 
     let raw = pglib::read("pglib_opf_case118_ieee", ".json");
     let input: PgmInput = serde_json::from_str(&raw).expect("parse");
@@ -701,12 +787,19 @@ fn a_whole_trace_needs_few_reanalyses() {
         &[],
         ContinuationOptions {
             direction,
-            power_flow: PowerFlowOptions { enforce_q_limits: true, ..Default::default() },
+            power_flow: PowerFlowOptions {
+                enforce_q_limits: true,
+                ..Default::default()
+            },
             ..Default::default()
         },
     );
 
-    assert!(curve.solves > 50, "expected a real trace, got {} solves", curve.solves);
+    assert!(
+        curve.solves > 50,
+        "expected a real trace, got {} solves",
+        curve.solves
+    );
     assert!(
         curve.reanalyses * 4 < curve.solves,
         "{} re-analyses against {} solves: the continuation index is churning, so the \

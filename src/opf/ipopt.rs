@@ -101,8 +101,11 @@ struct Context<'a> {
 }
 
 fn lower_triangle(triplets: &[(usize, usize, f64)]) -> Vec<(usize, usize)> {
-    let mut seen: Vec<(usize, usize)> =
-        triplets.iter().filter(|(r, c, _)| r >= c).map(|(r, c, _)| (*r, *c)).collect();
+    let mut seen: Vec<(usize, usize)> = triplets
+        .iter()
+        .filter(|(r, c, _)| r >= c)
+        .map(|(r, c, _)| (*r, *c))
+        .collect();
     seen.sort_unstable();
     seen.dedup();
     seen
@@ -139,7 +142,10 @@ fn scaled_hessian(
             }
         }
     }
-    pattern.iter().map(|key| dense.get(key).copied().unwrap_or(0.0)).collect()
+    pattern
+        .iter()
+        .map(|key| dense.get(key).copied().unwrap_or(0.0))
+        .collect()
 }
 
 unsafe extern "C" fn eval_f(
@@ -273,8 +279,13 @@ unsafe extern "C" fn eval_h(
     } else {
         Vec::new()
     };
-    let folded =
-        scaled_hessian(context.problem, x, &lambda, obj_factor, &context.hessian_pattern);
+    let folded = scaled_hessian(
+        context.problem,
+        x,
+        &lambda,
+        obj_factor,
+        &context.hessian_pattern,
+    );
     let out = unsafe { std::slice::from_raw_parts_mut(values, count) };
     out.copy_from_slice(&folded);
     true
@@ -301,7 +312,11 @@ fn map_status(status: bindings::ApplicationReturnStatus) -> OptStatus {
     }
 }
 
-fn set_string_option(problem: bindings::IpoptProblem, name: &str, value: &str) -> Result<(), OpfError> {
+fn set_string_option(
+    problem: bindings::IpoptProblem,
+    name: &str,
+    value: &str,
+) -> Result<(), OpfError> {
     let name = CString::new(name).map_err(|e| OpfError::Backend(e.to_string()))?;
     let value = CString::new(value).map_err(|e| OpfError::Backend(e.to_string()))?;
     // SAFETY: both strings outlive the call; IPOPT copies what it keeps.
@@ -315,7 +330,9 @@ fn set_string_option(problem: bindings::IpoptProblem, name: &str, value: &str) -
     if ok {
         Ok(())
     } else {
-        Err(OpfError::Backend(format!("IPOPT rejected option {name:?} = {value:?}")))
+        Err(OpfError::Backend(format!(
+            "IPOPT rejected option {name:?} = {value:?}"
+        )))
     }
 }
 
@@ -358,8 +375,11 @@ pub fn solve(
     }
 
     let jacobian_pattern = {
-        let mut keys: Vec<(usize, usize)> =
-            problem.jacobian(&start).into_iter().map(|(r, c, _)| (r, c)).collect();
+        let mut keys: Vec<(usize, usize)> = problem
+            .jacobian(&start)
+            .into_iter()
+            .map(|(r, c, _)| (r, c))
+            .collect();
         keys.sort_unstable();
         keys.dedup();
         keys
@@ -496,5 +516,10 @@ pub fn solve(
 
 /// The linked IPOPT's version, for a test or a bug report to quote.
 pub fn version() -> String {
-    format!("{}.{}.{}", bindings::IPOPT_VERSION_MAJOR, bindings::IPOPT_VERSION_MINOR, bindings::IPOPT_VERSION_RELEASE)
+    format!(
+        "{}.{}.{}",
+        bindings::IPOPT_VERSION_MAJOR,
+        bindings::IPOPT_VERSION_MINOR,
+        bindings::IPOPT_VERSION_RELEASE
+    )
 }

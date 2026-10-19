@@ -57,15 +57,18 @@ use num_complex::Complex;
 
 pub use fortescue::SequenceValue;
 pub use solver::{
-    short_circuit, BranchResult, FaultResult, NodeResult, ShortCircuitError,
-    ShortCircuitReport, ShuntResult, SourceResult,
+    BranchResult, FaultResult, NodeResult, ShortCircuitError, ShortCircuitReport, ShuntResult,
+    SourceResult, short_circuit,
 };
 
 /// The nominal phase angles, in the order power-grid-model's own
 /// `ComplexValue<asymmetric_t>` scalar constructor produces: `[x, x·a², x·a]`
 /// with `a = exp(j2π/3)`. Phase b lags by 120°, phase c leads by 120°.
-pub(crate) const PHASE_ANG: [f64; 3] =
-    [0.0, -2.0 * std::f64::consts::PI / 3.0, 2.0 * std::f64::consts::PI / 3.0];
+pub(crate) const PHASE_ANG: [f64; 3] = [
+    0.0,
+    -2.0 * std::f64::consts::PI / 3.0,
+    2.0 * std::f64::consts::PI / 3.0,
+];
 
 /// Which of the four fault situations IEC 60909 distinguishes.
 ///
@@ -265,7 +268,13 @@ pub fn faults_from_pgm(
             FaultAdmittance::Finite(z_base / Complex::new(f.r_f, f.x_f))
         };
 
-        out.push(Fault { id: f.id, bus, fault_type, fault_phase, y_fault });
+        out.push(Fault {
+            id: f.id,
+            bus,
+            fault_type,
+            fault_phase,
+            y_fault,
+        });
     }
     Ok(out)
 }
@@ -312,7 +321,10 @@ mod tests {
         assert_eq!(FaultType::TwoPhase.default_phase(), FaultPhase::Bc);
         assert_eq!(FaultType::TwoPhaseToGround.default_phase(), FaultPhase::Bc);
         assert_eq!(FaultType::ThreePhase.default_phase(), FaultPhase::Abc);
-        assert_eq!(FaultType::SinglePhaseToGround.default_phase(), FaultPhase::A);
+        assert_eq!(
+            FaultType::SinglePhaseToGround.default_phase(),
+            FaultPhase::A
+        );
     }
 
     #[test]

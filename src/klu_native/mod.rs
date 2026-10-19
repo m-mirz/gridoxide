@@ -65,13 +65,13 @@
 
 pub mod types;
 
-mod btf;
 mod amd;
 mod analyze;
-mod kernel;
+mod btf;
 mod factor;
-mod scale;
+mod kernel;
 mod refactor;
+mod scale;
 mod solve;
 
 #[cfg(all(test, feature = "klu"))]
@@ -85,7 +85,10 @@ mod ffi_oracle;
 /// "always built" licensing posture — see the module doc comment above).
 /// Returns `(col_ptr, row_idx, groups)`, where `groups[k]` lists the
 /// original `entries` indices contributing to the `k`-th CSC position.
-fn build_csc_structure(n: usize, pairs: &[(usize, usize)]) -> (Vec<i64>, Vec<i64>, Vec<Vec<usize>>) {
+fn build_csc_structure(
+    n: usize,
+    pairs: &[(usize, usize)],
+) -> (Vec<i64>, Vec<i64>, Vec<Vec<usize>>) {
     let mut order: Vec<usize> = (0..pairs.len()).collect();
     order.sort_by_key(|&i| (pairs[i].1, pairs[i].0));
 
@@ -114,14 +117,20 @@ fn build_csc_structure(n: usize, pairs: &[(usize, usize)]) -> (Vec<i64>, Vec<i64
 }
 
 fn pack_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups.iter().map(|g| g.iter().map(|&i| entries[i].2).sum()).collect()
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&i| entries[i].2).sum())
+        .collect()
 }
 
 /// `pack_values` for callers that already hold just the values, positionally
 /// matching the triplets `new` was given — see
 /// `solver::LinearSolver::factor_and_solve_values`.
 fn pack_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups.iter().map(|g| g.iter().map(|&i| values[i]).sum()).collect()
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&i| values[i]).sum())
+        .collect()
 }
 
 /// A real sparse system whose sparsity *pattern* is fixed across repeated
@@ -162,10 +171,25 @@ impl KluNativeSystem {
         let values = pack_values(entries, &groups);
 
         let sym = analyze::analyze(n, &col_ptr, &row_idx);
-        let num = factor::factor(n, &col_ptr, &row_idx, &values, &sym, types::Options::default().tol)?;
+        let num = factor::factor(
+            n,
+            &col_ptr,
+            &row_idx,
+            &values,
+            &sym,
+            types::Options::default().tol,
+        )?;
         let scratch = refactor::RefactorScratch::new(n);
 
-        Some(Self { n, col_ptr, row_idx, groups, sym, num, scratch })
+        Some(Self {
+            n,
+            col_ptr,
+            row_idx,
+            groups,
+            sym,
+            num,
+            scratch,
+        })
     }
 
     /// Numeric-only refactorization against the cached symbolic pattern,
@@ -175,7 +199,11 @@ impl KluNativeSystem {
     /// `common.status`/`KLU_SINGULAR` to check directly, so a non-finite
     /// entry is this port's only symptom of an ill-conditioned refactor
     /// that a fixed pattern still let through).
-    pub fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    pub fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         let values = pack_values(entries, &self.groups);
         self.solve_packed(values, rhs)
     }
@@ -183,7 +211,15 @@ impl KluNativeSystem {
     /// Shared tail of both `factor_and_solve` paths, taking already-packed
     /// CSC values.
     fn solve_packed(&mut self, values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
-        let ok = refactor::refactor(self.n, &self.col_ptr, &self.row_idx, &values, &self.sym, &mut self.num, &mut self.scratch);
+        let ok = refactor::refactor(
+            self.n,
+            &self.col_ptr,
+            &self.row_idx,
+            &values,
+            &self.sym,
+            &mut self.num,
+            &mut self.scratch,
+        );
         if !ok {
             return None;
         }
@@ -201,7 +237,11 @@ impl crate::solver::LinearSolver for KluNativeSystem {
         KluNativeSystem::new(n, entries)
     }
 
-    fn factor_and_solve(&mut self, entries: &[(usize, usize, f64)], rhs: &[f64]) -> Option<Vec<f64>> {
+    fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
         KluNativeSystem::factor_and_solve(self, entries, rhs)
     }
 

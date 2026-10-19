@@ -92,16 +92,28 @@ const SEXS_STATES: [&str; 2] = ["avr_lead", "efd"];
 impl Sexs {
     pub fn new(params: SexsParams) -> Result<Self, InitError> {
         if params.k <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "avr k", value: params.k });
+            return Err(InitError::NonPositiveParameter {
+                name: "avr k",
+                value: params.k,
+            });
         }
         if params.tb <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "avr tb", value: params.tb });
+            return Err(InitError::NonPositiveParameter {
+                name: "avr tb",
+                value: params.tb,
+            });
         }
         if params.te <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "avr te", value: params.te });
+            return Err(InitError::NonPositiveParameter {
+                name: "avr te",
+                value: params.te,
+            });
         }
         if params.ta < 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "avr ta", value: params.ta });
+            return Err(InitError::NonPositiveParameter {
+                name: "avr ta",
+                value: params.ta,
+            });
         }
         Ok(Self {
             k: params.k,
@@ -145,7 +157,9 @@ impl Control for Sexs {
     fn derivatives(&self, x: &[f64], u: f64, out: &mut [f64]) {
         let w = self.v_ref + u;
         out[0] = (w * (1.0 - self.ta_over_tb) - x[0]) / self.tb;
-        out[1] = self.limits.held(self.limit.get(), self.raw_field_derivative(x, u));
+        out[1] = self
+            .limits
+            .held(self.limit.get(), self.raw_field_derivative(x, u));
     }
 
     fn jacobian(&self, _x: &[f64], _u: f64, dfdx: &mut [f64], dfdu: &mut [f64]) {
@@ -229,9 +243,17 @@ impl VrProportional {
     /// it.
     pub fn limited(k: f64, limits: Limits) -> Result<Self, InitError> {
         if k <= 0.0 {
-            return Err(InitError::NonPositiveParameter { name: "avr gain", value: k });
+            return Err(InitError::NonPositiveParameter {
+                name: "avr gain",
+                value: k,
+            });
         }
-        Ok(Self { k, limits, limit: Cell::new(LimitState::Free), v_ref: 0.0 })
+        Ok(Self {
+            k,
+            limits,
+            limit: Cell::new(LimitState::Free),
+            v_ref: 0.0,
+        })
     }
 
     pub fn v_ref(&self) -> f64 {
@@ -266,11 +288,17 @@ impl Control for VrProportional {
     }
 
     fn output(&self, _x: &[f64], u: f64) -> f64 {
-        self.limits.under(self.limit.get(), self.k * (self.v_ref + u)).0
+        self.limits
+            .under(self.limit.get(), self.k * (self.v_ref + u))
+            .0
     }
 
     fn output_jacobian(&self, _x: &[f64], u: f64, _dydx: &mut [f64]) -> f64 {
-        self.k * self.limits.under(self.limit.get(), self.k * (self.v_ref + u)).1
+        self.k
+            * self
+                .limits
+                .under(self.limit.get(), self.k * (self.v_ref + u))
+                .1
     }
 
     fn initialize(&mut self, y: f64, u: f64) -> Result<Vec<f64>, InitError> {

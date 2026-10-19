@@ -8,7 +8,7 @@
 //! refused by name.
 
 use gridoxide::dynamics::json::{self, DynamicsError};
-use gridoxide::dynamics::{run_dynamics, DynamicsOptions, DynamicsStatus};
+use gridoxide::dynamics::{DynamicsOptions, DynamicsStatus, run_dynamics};
 
 const FIXTURE: &str = "tests/data/dynamics/smib.json";
 
@@ -37,16 +37,28 @@ fn a_document_builds_and_runs() {
 
     let report = run_dynamics(
         &mut system,
-        &DynamicsOptions { end_time: 8.0, step: 0.005, events, ..Default::default() },
+        &DynamicsOptions {
+            end_time: 8.0,
+            step: 0.005,
+            events,
+            ..Default::default()
+        },
     );
     assert_eq!(report.status, DynamicsStatus::Completed);
     assert_eq!(report.events_applied, 3);
-    assert!(report.warnings.is_empty(), "unexpected warnings: {:?}", report.warnings);
+    assert!(
+        report.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        report.warnings
+    );
 
     // The fault is visible, and the machine survives it.
     let v = report.trajectory.series("bus1.vmag").unwrap();
     let min = v.iter().cloned().fold(f64::INFINITY, f64::min);
-    assert!(min < 1e-3, "a bolted fault should collapse the bus, lowest was {min}");
+    assert!(
+        min < 1e-3,
+        "a bolted fault should collapse the bus, lowest was {min}"
+    );
     let omega = report.trajectory.series("G1.omega").unwrap();
     assert!(
         omega.iter().all(|w| (w - 1.0).abs() < 0.1),
@@ -79,7 +91,10 @@ fn an_unstated_terminal_power_is_derived_from_the_bus() {
     );
     // Only proceed if the substitution actually landed; otherwise the test is
     // silently checking nothing.
-    assert!(stated_text.contains("\"p\": 0.8"), "the fixture's shape changed");
+    assert!(
+        stated_text.contains("\"p\": 0.8"),
+        "the fixture's shape changed"
+    );
     let stated = json::parse(&stated_text).unwrap().build().unwrap().0;
 
     // Bus 0's solved injection is 0.8 real and *some* reactive; stating the
@@ -111,7 +126,10 @@ fn an_ambiguous_split_is_refused() {
     ],"#,
     );
     assert!(text.contains("L2"), "the fixture's shape changed");
-    let err = json::parse(&text).unwrap().build().expect_err("must refuse");
+    let err = json::parse(&text)
+        .unwrap()
+        .build()
+        .expect_err("must refuse");
     match err {
         DynamicsError::AmbiguousSplit { bus, ref devices } => {
             assert_eq!(bus, 1);
@@ -129,7 +147,10 @@ fn an_ambiguous_split_is_refused() {
 #[test]
 fn a_bus_out_of_range_is_named() {
     let text = fixture().replace(r#""bus": 0,"#, r#""bus": 9,"#);
-    let err = json::parse(&text).unwrap().build().expect_err("must refuse");
+    let err = json::parse(&text)
+        .unwrap()
+        .build()
+        .expect_err("must refuse");
     assert!(
         matches!(err, DynamicsError::BusOutOfRange { ref id, bus: 9, n_bus: 3 } if id == "G1"),
         "got {err}"
@@ -146,10 +167,16 @@ fn a_bus_out_of_range_is_named() {
 #[test]
 fn an_unknown_field_or_model_is_a_parse_error() {
     let typo = fixture().replace(r#""h": 5.0,"#, r#""hh": 5.0,"#);
-    assert!(matches!(json::parse(&typo), Err(DynamicsError::Parse(_))), "a typo must not parse");
+    assert!(
+        matches!(json::parse(&typo), Err(DynamicsError::Parse(_))),
+        "a typo must not parse"
+    );
 
     let unknown = fixture().replace(r#""model": "gen_round","#, r#""model": "gen_octonion","#);
-    assert!(matches!(json::parse(&unknown), Err(DynamicsError::Parse(_))));
+    assert!(matches!(
+        json::parse(&unknown),
+        Err(DynamicsError::Parse(_))
+    ));
 }
 
 /// The document serializes back to something that parses to the same system.
@@ -163,7 +190,11 @@ fn a_document_round_trips() {
     let (b, _) = again.build().unwrap();
     assert_eq!(a.n_states(), b.n_states());
     for (x, y) in a.state().iter().zip(b.state().iter()) {
-        assert_eq!(x.to_bits(), y.to_bits(), "a round trip must not move a single state");
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "a round trip must not move a single state"
+        );
     }
 }
 
@@ -188,8 +219,14 @@ fn an_unbounded_reactive_limit_round_trips() {
     }
 
     let text = serde_json::to_string(&doc).expect("serializes");
-    assert!(!text.contains("q_min"), "an unbounded limit is absent, not null: {text}");
-    assert!(!text.contains("q_max"), "an unbounded limit is absent, not null: {text}");
+    assert!(
+        !text.contains("q_min"),
+        "an unbounded limit is absent, not null: {text}"
+    );
+    assert!(
+        !text.contains("q_max"),
+        "an unbounded limit is absent, not null: {text}"
+    );
 
     let again = json::parse(&text).expect("re-parses");
     for bus in &again.network.buses {

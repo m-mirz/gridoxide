@@ -10,19 +10,19 @@
 //! another is idempotent rather than cumulative, and a failed solve cannot
 //! poison the next.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{CStr, c_char, c_int};
 
 use super::types::{
     GridoxideBackend, GridoxideBus, GridoxideLine, GridoxideOptions, GridoxideShunt,
     GridoxideTransformer,
 };
-use super::{guard, invalid, island_status_code, set_error, write_slice, GridoxideIslandStatus, Status};
-use crate::branch_flow::{branch_params, bus_voltages, terminal_flow, BranchParams, Terminal};
-use crate::network::{build_ybus, stamp_shunts, ShuntAdm, YBusSparse};
-use crate::outerloop::SlackDistribution;
-use crate::solver::{
-    IslandReport, IslandStatus, JacobianBackend, PersistentSolver, SolveStats,
+use super::{
+    GridoxideIslandStatus, Status, guard, invalid, island_status_code, set_error, write_slice,
 };
+use crate::branch_flow::{BranchParams, Terminal, branch_params, bus_voltages, terminal_flow};
+use crate::network::{ShuntAdm, YBusSparse, build_ybus, stamp_shunts};
+use crate::outerloop::SlackDistribution;
+use crate::solver::{IslandReport, IslandStatus, JacobianBackend, PersistentSolver, SolveStats};
 use crate::types::{Bus, Line, Transformer};
 
 /// An opaque power-flow model. **Single-thread-affine** — see the module docs
@@ -53,15 +53,15 @@ fn backend_of(backend: GridoxideBackend) -> Result<JacobianBackend, String> {
         #[cfg(feature = "klu")]
         GridoxideBackend::Klu => Ok(JacobianBackend::Klu),
         #[cfg(not(feature = "klu"))]
-        GridoxideBackend::Klu => Err(
-            "backend KLU needs gridoxide built with the `klu` feature".to_string(),
-        ),
+        GridoxideBackend::Klu => {
+            Err("backend KLU needs gridoxide built with the `klu` feature".to_string())
+        }
         #[cfg(feature = "pardiso")]
         GridoxideBackend::Pardiso => Ok(JacobianBackend::Pardiso),
         #[cfg(not(feature = "pardiso"))]
-        GridoxideBackend::Pardiso => Err(
-            "backend PARDISO needs gridoxide built with the `pardiso` feature".to_string(),
-        ),
+        GridoxideBackend::Pardiso => {
+            Err("backend PARDISO needs gridoxide built with the `pardiso` feature".to_string())
+        }
     }
 }
 
@@ -102,7 +102,10 @@ impl GridoxidePowerFlow {
         self.stats = Some(stats);
 
         let worst = self.islands.iter().map(|i| i.status).find(|s| {
-            matches!(s, IslandStatus::Singular | IslandStatus::MaxIterationsReached)
+            matches!(
+                s,
+                IslandStatus::Singular | IslandStatus::MaxIterationsReached
+            )
         });
         match worst {
             Some(IslandStatus::Singular) => {
@@ -113,7 +116,10 @@ impl GridoxidePowerFlow {
                 set_error(format!(
                     "power flow did not converge within {} iterations (largest mismatch {:.3e})",
                     self.options.max_iterations,
-                    self.stats.as_ref().map(|s| s.final_mismatch()).unwrap_or(f64::NAN)
+                    self.stats
+                        .as_ref()
+                        .map(|s| s.final_mismatch())
+                        .unwrap_or(f64::NAN)
                 ));
                 Status::NotConverged
             }
@@ -131,7 +137,9 @@ impl GridoxidePowerFlow {
 ///
 /// `handle` must be null or a pointer returned by one of the constructors and
 /// not yet freed.
-unsafe fn handle_ref<'a>(handle: *const GridoxidePowerFlow) -> Result<&'a GridoxidePowerFlow, Status> {
+unsafe fn handle_ref<'a>(
+    handle: *const GridoxidePowerFlow,
+) -> Result<&'a GridoxidePowerFlow, Status> {
     if handle.is_null() {
         return Err(invalid("handle is null"));
     }
@@ -142,7 +150,9 @@ unsafe fn handle_ref<'a>(handle: *const GridoxidePowerFlow) -> Result<&'a Gridox
 /// # Safety
 ///
 /// As [`handle_ref`], and no other reference to the handle may be live.
-unsafe fn handle_mut<'a>(handle: *mut GridoxidePowerFlow) -> Result<&'a mut GridoxidePowerFlow, Status> {
+unsafe fn handle_mut<'a>(
+    handle: *mut GridoxidePowerFlow,
+) -> Result<&'a mut GridoxidePowerFlow, Status> {
     if handle.is_null() {
         return Err(invalid("handle is null"));
     }
@@ -160,7 +170,10 @@ fn options_or_default(options: *const GridoxideOptions) -> GridoxideOptions {
     }
 }
 
-fn build_from_pgm(text: &str, options: GridoxideOptions) -> Result<GridoxidePowerFlow, (Status, String)> {
+fn build_from_pgm(
+    text: &str,
+    options: GridoxideOptions,
+) -> Result<GridoxidePowerFlow, (Status, String)> {
     let input: crate::pgm::PgmInput = serde_json::from_str(text)
         .map_err(|e| (Status::Parse, format!("parsing PGM JSON: {e}")))?;
     // Shunts must be taken before the conversion consumes the document.
@@ -351,7 +364,11 @@ pub unsafe extern "C" fn gridoxide_powerflow_from_arrays(
         }
 
         let model = GridoxidePowerFlow::assemble(
-            bus_slice.iter().enumerate().map(|(i, b)| b.to_bus(i)).collect(),
+            bus_slice
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b.to_bus(i))
+                .collect(),
             line_slice.iter().map(|l| (*l).into()).collect(),
             tx_slice.iter().map(|t| (*t).into()).collect(),
             shunt_slice.iter().map(|s| (*s).into()).collect(),
@@ -438,8 +455,7 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_enforcing_q_limits(
         };
         let mut qlim = crate::outerloop::ReactiveLimits::new();
         let islands = {
-            let mut ctx =
-                crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
+            let mut ctx = crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
             let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = vec![&mut qlim];
             crate::outerloop::solve_with_loops(
                 &mut ctx,
@@ -516,8 +532,7 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_distributing_slack(
         let cap = distribution.max_outer_iter;
         let mut slack = crate::outerloop::DistributedSlack::new(distribution);
         let islands = {
-            let mut ctx =
-                crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
+            let mut ctx = crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
             let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = vec![&mut slack];
             crate::outerloop::solve_with_loops(
                 &mut ctx,
@@ -603,7 +618,9 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_with_controls(
             if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
                 return invalid("participation weights must be finite and non-negative");
             }
-            Some(crate::outerloop::SlackDistribution::from_weights(weights.to_vec()))
+            Some(crate::outerloop::SlackDistribution::from_weights(
+                weights.to_vec(),
+            ))
         };
 
         let backend = match backend_of(model.options.backend) {
@@ -614,8 +631,7 @@ pub unsafe extern "C" fn gridoxide_powerflow_solve_with_controls(
         let mut slack = distribution.map(crate::outerloop::DistributedSlack::new);
         let mut qlim = (enforce_q_limits != 0).then(crate::outerloop::ReactiveLimits::new);
         let islands = {
-            let mut ctx =
-                crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
+            let mut ctx = crate::outerloop::SolveContext::new(&mut model.buses, &mut model.ybus);
             let mut list: Vec<&mut dyn crate::outerloop::OuterLoop> = Vec::new();
             if let Some(l) = slack.as_mut() {
                 list.push(l);
@@ -654,7 +670,10 @@ fn stats_from_islands(islands: &[IslandReport]) -> SolveStats {
     SolveStats::from_loop(
         if islands.iter().any(|i| i.status == IslandStatus::Singular) {
             crate::solver::SolveStatus::Singular
-        } else if islands.iter().any(|i| i.status == IslandStatus::MaxIterationsReached) {
+        } else if islands
+            .iter()
+            .any(|i| i.status == IslandStatus::MaxIterationsReached)
+        {
             crate::solver::SolveStatus::MaxIterationsReached
         } else {
             crate::solver::SolveStatus::Converged
@@ -671,7 +690,9 @@ fn stats_from_islands(islands: &[IslandReport]) -> SolveStats {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gridoxide_powerflow_bus_count(handle: *const GridoxidePowerFlow) -> usize {
     // SAFETY: null-checked by `handle_ref`.
-    unsafe { handle_ref(handle) }.map(|m| m.buses.len()).unwrap_or(0)
+    unsafe { handle_ref(handle) }
+        .map(|m| m.buses.len())
+        .unwrap_or(0)
 }
 
 /// Number of branches — **lines first, then transformers**, which is the order
@@ -685,7 +706,9 @@ pub unsafe extern "C" fn gridoxide_powerflow_branch_count(
     handle: *const GridoxidePowerFlow,
 ) -> usize {
     // SAFETY: null-checked by `handle_ref`.
-    unsafe { handle_ref(handle) }.map(|m| m.branches.len()).unwrap_or(0)
+    unsafe { handle_ref(handle) }
+        .map(|m| m.branches.len())
+        .unwrap_or(0)
 }
 
 // These two were briefly a `macro_rules!` — two near-identical accessors are
@@ -886,7 +909,9 @@ pub unsafe extern "C" fn gridoxide_powerflow_island_count(
     handle: *const GridoxidePowerFlow,
 ) -> usize {
     // SAFETY: null-checked by `handle_ref`.
-    unsafe { handle_ref(handle) }.map(|m| m.islands.len()).unwrap_or(0)
+    unsafe { handle_ref(handle) }
+        .map(|m| m.islands.len())
+        .unwrap_or(0)
 }
 
 /// One island's outcome.

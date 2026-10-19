@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use super::model::{BusIdx, NodeBreakerTopology, NodeIdx, SwitchIdx, SwitchKind};
-use super::reduction::{merge_groups, UnionFind};
+use super::reduction::{UnionFind, merge_groups};
 
 /// Which switches survive into the bus view as elements rather than being
 /// merged away.
@@ -234,7 +234,12 @@ pub fn bus_view(topo: &NodeBreakerTopology, policy: &RetentionPolicy) -> BusView
         })
         .collect();
 
-    BusView { bus_of, nodes_of, representative, retained }
+    BusView {
+        bus_of,
+        nodes_of,
+        representative,
+        retained,
+    }
 }
 
 #[cfg(test)]
@@ -243,7 +248,12 @@ mod tests {
     use crate::topology::model::Switch;
 
     fn sw(kind: SwitchKind, a: usize, b: usize, open: bool) -> Switch {
-        Switch { kind, nodes: [NodeIdx(a), NodeIdx(b)], open, in_service: true }
+        Switch {
+            kind,
+            nodes: [NodeIdx(a), NodeIdx(b)],
+            open,
+            in_service: true,
+        }
     }
 
     /// 0 —[closed]— 1 —[open]— 2, plus an isolated node 3.
@@ -264,7 +274,10 @@ mod tests {
         assert_eq!(view.bus_of(NodeIdx(0)), view.bus_of(NodeIdx(1)));
         assert_ne!(view.bus_of(NodeIdx(1)), view.bus_of(NodeIdx(2)));
         assert!(view.retained().is_empty());
-        assert_eq!(view.nodes_of(view.bus_of(NodeIdx(0))), &[NodeIdx(0), NodeIdx(1)]);
+        assert_eq!(
+            view.nodes_of(view.bus_of(NodeIdx(0))),
+            &[NodeIdx(0), NodeIdx(1)]
+        );
     }
 
     /// The defining property of retention: a retained switch does *not* merge
@@ -284,7 +297,10 @@ mod tests {
     #[test]
     fn retain_kinds_selects_by_class() {
         let topo = fixture();
-        let view = bus_view(&topo, &RetentionPolicy::RetainKinds(vec![SwitchKind::Breaker]));
+        let view = bus_view(
+            &topo,
+            &RetentionPolicy::RetainKinds(vec![SwitchKind::Breaker]),
+        );
 
         // The breaker is retained (so 0 and 1 stay apart); the disconnector is
         // not retained but is open, so it merges nothing either.
@@ -309,7 +325,9 @@ mod tests {
     fn retain_adjacent_to_busbar_needs_busbars_and_says_so_when_absent() {
         let mut topo = fixture();
         assert!(
-            bus_view(&topo, &RetentionPolicy::RetainAdjacentToBusbar).retained().is_empty(),
+            bus_view(&topo, &RetentionPolicy::RetainAdjacentToBusbar)
+                .retained()
+                .is_empty(),
             "with no busbars declared, this policy retains nothing"
         );
 
@@ -411,7 +429,9 @@ mod tests {
                 assert_eq!(view.bus_of(node), BusIdx(bus));
             }
         }
-        let total: usize = (0..view.n_buses()).map(|b| view.nodes_of(BusIdx(b)).len()).sum();
+        let total: usize = (0..view.n_buses())
+            .map(|b| view.nodes_of(BusIdx(b)).len())
+            .sum();
         assert_eq!(total, view.n_nodes(), "every node lands on exactly one bus");
     }
 }

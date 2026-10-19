@@ -51,7 +51,7 @@
 use crate::sparse::RealFactorization;
 use crate::types::{Bus, BusType};
 
-use super::btheta::{partition, reduced_b_triplets, DcBranch, Partition, NOT_UNKNOWN};
+use super::btheta::{DcBranch, NOT_UNKNOWN, Partition, partition, reduced_b_triplets};
 use crate::network::Verdict;
 
 /// Below this, `1 − d_l` is treated as zero and the branch is called radial.
@@ -149,7 +149,10 @@ impl DcSensitivity {
     /// and every accessor returns `None` for their buses and branches.
     pub fn new(buses: &[Bus], branches: &[DcBranch], n_branches: usize) -> Option<Self> {
         let n = buses.len();
-        let Partition { classified, island_branches } = partition(buses, branches);
+        let Partition {
+            classified,
+            island_branches,
+        } = partition(buses, branches);
 
         let mut islands = Vec::new();
         let mut island_of = vec![NOT_UNKNOWN; n];
@@ -275,7 +278,10 @@ impl DcSensitivity {
                 continue;
             }
             let theta = island.factorization.solve(&rhs)?;
-            for (dst, src) in d_flow.iter_mut().zip(self.flows_from_angles(island, &theta)) {
+            for (dst, src) in d_flow
+                .iter_mut()
+                .zip(self.flows_from_angles(island, &theta))
+            {
                 *dst += src;
             }
             for (r, &bus) in island.unknown.iter().enumerate() {
@@ -336,11 +342,7 @@ impl DcSensitivity {
     /// flow.
     ///
     /// An empty set returns `base_flows` unchanged.
-    pub fn multi_outage_flows(
-        &self,
-        base_flows: &[f64],
-        branches: &[usize],
-    ) -> Option<Vec<f64>> {
+    pub fn multi_outage_flows(&self, base_flows: &[f64], branches: &[usize]) -> Option<Vec<f64>> {
         if base_flows.len() != self.n_branches {
             return None;
         }
@@ -401,7 +403,8 @@ impl DcSensitivity {
     /// for the same malformed inputs [`multi_outage_flows`](Self::multi_outage_flows)
     /// rejects.
     pub fn is_breaking_set(&self, branches: &[usize]) -> bool {
-        self.multi_outage_flows(&vec![0.0; self.n_branches], branches).is_none()
+        self.multi_outage_flows(&vec![0.0; self.n_branches], branches)
+            .is_none()
     }
 
     /// `∂P_branch/∂P_bus` over every branch, for injection at one bus.
@@ -524,12 +527,18 @@ impl DcSensitivity {
     pub fn ptdf_dense(&self) -> Option<DenseMatrix> {
         let mut data = vec![0.0; self.n_branches * self.n_buses];
         for bus in 0..self.n_buses {
-            let Some(column) = self.ptdf_column(bus) else { continue };
+            let Some(column) = self.ptdf_column(bus) else {
+                continue;
+            };
             for (k, v) in column.into_iter().enumerate() {
                 data[k * self.n_buses + bus] = v;
             }
         }
-        Some(DenseMatrix { rows: self.n_branches, cols: self.n_buses, data })
+        Some(DenseMatrix {
+            rows: self.n_branches,
+            cols: self.n_buses,
+            data,
+        })
     }
 
     /// The full `n_branches × n_branches` LODF.
@@ -541,19 +550,25 @@ impl DcSensitivity {
     pub fn lodf_dense(&self) -> Option<DenseMatrix> {
         let mut data = vec![0.0; self.n_branches * self.n_branches];
         for l in 0..self.n_branches {
-            let Some(column) = self.lodf_column(l) else { continue };
+            let Some(column) = self.lodf_column(l) else {
+                continue;
+            };
             for (k, v) in column.into_iter().enumerate() {
                 data[k * self.n_branches + l] = v;
             }
         }
-        Some(DenseMatrix { rows: self.n_branches, cols: self.n_branches, data })
+        Some(DenseMatrix {
+            rows: self.n_branches,
+            cols: self.n_branches,
+            data,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linear::{dc_branches, DcOptions};
+    use crate::linear::{DcOptions, dc_branches};
     use crate::types::Line;
 
     fn bus(idx: usize, bus_type: BusType) -> Bus {
@@ -572,7 +587,14 @@ mod tests {
     }
 
     fn line(from: usize, to: usize, x: f64) -> Line {
-        Line { from, to, r: 0.0, x, b_shunt: 0.0, g_shunt: 0.0 }
+        Line {
+            from,
+            to,
+            r: 0.0,
+            x,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }
     }
 
     /// Three buses in a triangle, all reactances equal, slack at 0. Injecting
@@ -581,7 +603,11 @@ mod tests {
     /// answer, and one that needs no solver to know.
     fn triangle() -> (Vec<Bus>, Vec<Line>) {
         (
-            vec![bus(0, BusType::Slack), bus(1, BusType::PQ), bus(2, BusType::PQ)],
+            vec![
+                bus(0, BusType::Slack),
+                bus(1, BusType::PQ),
+                bus(2, BusType::PQ),
+            ],
             vec![line(0, 1, 0.1), line(1, 2, 0.1), line(0, 2, 0.1)],
         )
     }
@@ -649,17 +675,27 @@ mod tests {
     /// the network rather than rerouting anything.
     #[test]
     fn a_radial_branch_has_no_lodf_column() {
-        let buses = vec![bus(0, BusType::Slack), bus(1, BusType::PQ), bus(2, BusType::PQ)];
+        let buses = vec![
+            bus(0, BusType::Slack),
+            bus(1, BusType::PQ),
+            bus(2, BusType::PQ),
+        ];
         let lines = vec![line(0, 1, 0.1), line(1, 2, 0.2)];
         let s = sensitivity(&buses, &lines);
 
         for branch in 0..2 {
             assert!(s.is_radial(branch), "branch {branch} should be radial");
-            assert!(s.lodf_column(branch).is_none(), "branch {branch} should have no LODF");
+            assert!(
+                s.lodf_column(branch).is_none(),
+                "branch {branch} should have no LODF"
+            );
         }
         // PTDF is still perfectly well defined on a radial network.
         let col = s.ptdf_column(2).unwrap();
-        assert!((col[0] + 1.0).abs() < 1e-12 && (col[1] + 1.0).abs() < 1e-12, "{col:?}");
+        assert!(
+            (col[0] + 1.0).abs() < 1e-12 && (col[1] + 1.0).abs() < 1e-12,
+            "{col:?}"
+        );
     }
 
     /// `transfer_factors` must agree with a weighted sum of PTDF columns,
@@ -675,9 +711,16 @@ mod tests {
         let c2 = s.ptdf_column(2).unwrap();
         for k in 0..3 {
             let expected = 0.3 * c1[k] + 0.7 * c2[k];
-            assert!((got[k] - expected).abs() < 1e-12, "branch {k}: {} vs {expected}", got[k]);
+            assert!(
+                (got[k] - expected).abs() < 1e-12,
+                "branch {k}: {} vs {expected}",
+                got[k]
+            );
         }
-        assert!(s.transfer_factors(&[0.0, 0.0]).is_none(), "length mismatch must be rejected");
+        assert!(
+            s.transfer_factors(&[0.0, 0.0]).is_none(),
+            "length mismatch must be rejected"
+        );
     }
 
     #[test]
@@ -719,7 +762,10 @@ mod tests {
         assert!(s.ptdf_column(1).is_some());
         assert!(s.ptdf_column(2).is_none());
         assert!(s.ptdf_column(3).is_none());
-        assert!(s.ptdf_row(1).is_none(), "the unreferenced island's branch has no row");
+        assert!(
+            s.ptdf_row(1).is_none(),
+            "the unreferenced island's branch has no row"
+        );
         assert!(s.is_radial(1));
     }
 
@@ -729,12 +775,18 @@ mod tests {
     /// the two would make `None` useless for detecting unreferenced islands.
     #[test]
     fn a_lone_reference_bus_has_a_zero_column_not_a_missing_one() {
-        let buses = vec![bus(0, BusType::Slack), bus(1, BusType::Slack), bus(2, BusType::PQ)];
+        let buses = vec![
+            bus(0, BusType::Slack),
+            bus(1, BusType::Slack),
+            bus(2, BusType::PQ),
+        ];
         // Bus 0 is an island unto itself; buses 1 and 2 are the other island.
         let lines = vec![line(1, 2, 0.1)];
         let s = sensitivity(&buses, &lines);
 
-        let column = s.ptdf_column(0).expect("a referenced island must not report None");
+        let column = s
+            .ptdf_column(0)
+            .expect("a referenced island must not report None");
         assert!(column.iter().all(|v| *v == 0.0), "{column:?}");
         assert!(s.ptdf_column(2).is_some());
         // Out of range still means None.
@@ -747,17 +799,32 @@ mod tests {
     /// carry no DC flow resolve to `None` rather than to a neighbour.
     #[test]
     fn branch_lookup_handles_gaps_in_the_flat_index() {
-        let buses = vec![bus(0, BusType::Slack), bus(1, BusType::PQ), bus(2, BusType::PQ)];
+        let buses = vec![
+            bus(0, BusType::Slack),
+            bus(1, BusType::PQ),
+            bus(2, BusType::PQ),
+        ];
         // Branch 1 is a self-loop: gridoxide's half-open representation, which
         // `dc_branches` skips, leaving a hole in the flat index space.
-        let lines = vec![line(0, 1, 0.1), line(1, 1, 0.2), line(1, 2, 0.3), line(0, 2, 0.4)];
+        let lines = vec![
+            line(0, 1, 0.1),
+            line(1, 1, 0.2),
+            line(1, 2, 0.3),
+            line(0, 2, 0.4),
+        ];
         let s = sensitivity(&buses, &lines);
 
         assert!(s.ptdf_row(0).is_some());
-        assert!(s.ptdf_row(1).is_none(), "the skipped self-loop must not resolve");
+        assert!(
+            s.ptdf_row(1).is_none(),
+            "the skipped self-loop must not resolve"
+        );
         assert!(s.ptdf_row(2).is_some());
         assert!(s.ptdf_row(3).is_some());
         assert!(s.ptdf_row(4).is_none(), "out of range must not resolve");
-        assert!(s.is_radial(1), "a branch carrying no DC flow has no factors");
+        assert!(
+            s.is_radial(1),
+            "a branch carrying no DC flow has no factors"
+        );
     }
 }

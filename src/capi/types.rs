@@ -175,7 +175,10 @@ pub struct GridoxideShunt {
 
 impl From<GridoxideShunt> for ShuntAdm {
     fn from(value: GridoxideShunt) -> Self {
-        ShuntAdm { at: value.at, y: value.y.into() }
+        ShuntAdm {
+            at: value.at,
+            y: value.y.into(),
+        }
     }
 }
 

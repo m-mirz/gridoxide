@@ -153,34 +153,144 @@ gridoxide security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowb
 # What should we do about it?
 gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json --depth 2
+
+# ... under the reference's own settings, rather than gridoxide's defaults.
+gridoxide rao tests/data/ucte/3nodes_pst.uct \
+    --crac docs/examples/pst-worked-example.crac.json \
+    --parameters RaoParameters.json
 ```
 
-Both need `--features rao` plus an importer (`ucte` or `iidm`). The CRAC may be OpenRAO JSON — the
+`--parameters` reads OpenRAO's own `RaoParameters` document: the objective (including `MIN_COST`),
+the flow model, MNEC handling, the second-preventive execution condition, the curative stop
+criterion and the search thresholds. Without it a run is max-min-margin on DC with no MNECs and no
+second pass, which is a fraction of what the optimizer does — and until `--parameters` existed that was the *only*
+thing the binary could be asked for, so the gate validated behaviour no user could reach. Settings
+the file states and gridoxide does not read are ignored rather than refused, and
+`src/rao/parameters.rs` lists which and why.
+
+Both take a UCTE `.uct`, an IIDM `.xiidm`, or a **CGMES** model — for CGMES, the directory holding
+the profile set or any one profile beside the others:
+
+```bash
+gridoxide security path/to/SmallGrid-Merged --crac smallgrid.crac.json
+```
+
+A CRAC names a CGMES element by the mRID of its `ConductingEquipment`, which is what powsybl gives an
+IIDM element converted from CGMES. Both need `--features rao` plus an importer (`ucte`, `iidm` or
+`cgmes`). The CRAC may be OpenRAO JSON — the
 format has 24 versions across the reference checkout's 428 files and the reader spans them — or
 gridoxide's own `<network>.rao.json` companion.
 
 ## What is validated
 
-22 scenarios from powsybl-open-rao's own Cucumber suite, read from the `benchmark-grids` submodule
-and selected by `tests/data/rao/dc_scenarios.txt`, are the gate here. They are the only check in
+197 scenarios from powsybl-open-rao's own Cucumber suite read from the `benchmark-grids` submodule
+and selected by the lists under `tests/data/rao/`, are the gate here. They are the only check in
 this repository that gridoxide did not write for itself: they state margins to the decimal and name
 which remedial actions should be used, and their authors wrote them to judge a different
 implementation.
 
-138 of 142 checkable assertions match, at the reference's own tolerance of `max(5 MW, 1.5%)` —
-margins, taps, named actions, action counts and security statuses. The four that do not are two
-phase-shifter taps and the margins that follow from them, in scenarios where the reference's own tap
-rounding takes a step that pays an MNEC penalty its rounding does not look at.
+**1830 of 1862 checkable assertions match**, at the reference's own tolerance of `max(5, 1.5%)` in
+whichever unit the step is written — margins, flows per side, taps, thresholds, named actions, action
+counts, set-points, objective values, security statuses and **which optimization steps ran**, across
+two flow models and three networks. **Nothing is skipped**: every step the corpus states is checked,
+so the ratio is the whole of it rather than the part that was convenient.
+
+| file | | |
+|---|---|---|
+| `dc_scenarios.txt` | 180 of 186 | |
+| `ac_scenarios.txt` | 276 of 282 | TestCase12Nodes |
+| `ac_scenarios_16nodes.txt` | 963 of 977 | TestCase16Nodes |
+| `second_preventive.txt` | **123 of 123** | |
+| `min_cost.txt` | 288 of 294 | costly optimization |
+
+Two of the five were vendored **before** the capability they test existed, which is the order the
+rest of this was built in and the only one that works. The second-preventive corpus scored 45 of 108
+with nothing implemented; the costly one scored 165. In both cases the gate then found every defect
+one scenario at a time, and a corpus vendored after the fact only ever confirms what its author
+already believed.
+
+All 32 assertions that do not match are **recorded disagreements rather than a backlog**, in ten
+scenarios. There is no open defect left in the corpus. Each has been measured on the reference's *own* objective, in the unit its own
+configuration selects and with its own MNEC violation cost applied, and in none of them is gridoxide
+worse: some are its `BestTapFinder` rounding a set-point on minimum margin alone, blind to a virtual
+cost its own javadoc warns about; two are gridoxide securing the network more cheaply than the
+reference asks under `MIN_COST`, which is the objective working rather than a defect; the rest are
+ties reached by a different route. The gate names each with the measurement behind it and refuses to
+let a scenario disagree without one — see `RECORDED_DISAGREEMENTS` in `tests/rao_cucumber_test.rs`.
+
+The last open defect — 1.4.1.5 and 1.4.1.6, a curative perimeter spending three actions where the
+reference spends one — is closed. Seven mechanisms had been implemented, measured and refuted
+for it; the eighth was **read** out of the reference's own source rather than guessed, which took a
+morning where the seven had taken weeks. `second_preventive.txt` went 118 → 123.
 
 ## What is not here
 
 - **Loop flows and relative margins.**
-- **Costly optimization** — minimizing the price of the actions rather than maximizing margin.
-- **HVDC range actions**, recognised and skipped: gridoxide models a DC network but nothing connects
-  it to a range action yet.
-- **Second-preventive optimization** and multi-timestamp (MARMOT) runs.
-- **Multi-perimeter range actions** — the `relativeToPreviousInstant` range kind needs several states
-  in one problem.
+- **HVDC and counter-trade range actions**, recognised and skipped. gridoxide models a DC network
+  but nothing connects it to a range action yet; a counter trade has no network sensitivity at all,
+  which is why the reference leaves it out of its own LP too. Neither appears in any CRAC the
+  vendored corpus loads, so building either would be building blind.
+- **Angle and voltage CNECs**, counted rather than modelled — the same boundary the reference draws,
+  which checks them in a separate monitoring pass after the fact. gridoxide has copied the exclusion
+  from the LP and **not** that monitoring pass, so a CRAC leaning on them is not fully answered. One
+  consequence is worth stating because nothing else does: a usage rule conditioned on an angle or
+  voltage constraint names a CNEC that is never evaluated, so it can never fire. That is
+  conservative — the action is not offered rather than offered freely — but it is a silence, not a
+  decision the optimizer makes.
+- **An integer tap.** `pst-model: APPROXIMATED_INTEGERS` is read by nothing and `TapModel::Discrete`
+  is declared and unbuilt — measured rather than assumed. Of 37 vendored configurations 5 ask for it,
+  governing 24 scenarios, and the reference built eight of them as controlled pairs ("copy of 2.6.2.x
+  with MIP for PSTs"). All 24 match with the continuous model and rounding, so building the integer
+  tap could win nothing here and could only lose.
+- **Multi-timestamp (MARMOT) runs.**
+- **A `relativeToPreviousInstant` curative range inside the second preventive problem.** The rest of
+  that problem is here. After the curative stage, the preventive perimeter is optimized again with
+  every CNEC in front of it and the automaton and curative *switching* held applied, and the result
+  is kept only if the whole plan it leads to is better. The curative *range* actions get a column of
+  their own in it — `A(r, s)`, a set-point per action per state — so the pass can see a curative
+  shifter paying for a preventive push; the column is scoped to the states it governs and is not
+  reported, because the curative perimeter that follows decides it properly.
+
+  A range written **relative to the previous instant** is expressed too, and the way it
+  had to be is the interesting part: its window is relative to another *column* — the preventive
+  set-point the same problem is deciding — so it is stated as a **row**, `min ≤ A(r,s) − A(r) ≤ max`,
+  rather than as the column's own bounds. An earlier version declined such a column on the grounds that the LP
+  carries one bound pair per column and no row coupling two of them, which was true of a bound and
+  not of a row. It changes no answer in the vendored corpus; what it removes is a case where the
+  second pass could not see a curative shifter at all.
+
+  What the reference additionally does is *keep* the curative decisions afterwards rather than
+  re-deriving them. That is a separate change, and measured on its own it cost 2 and fixed nothing.
+
+  What that pass holds is exact about two things it used to get wrong, and both were worth more than
+  any of the architecture around them. A curative **set-point** is deliberately *not* held: the pass
+  optimizes one network standing in for every state, so anything held in it is held in the preventive
+  and outage states too, where a curative decision is not in force. For a switch that is the price of
+  letting the pass see the curative CNECs at all. For a set-point it is a stale iterate — chosen
+  against preventive decisions the second pass exists to discard, and recomputed the moment it
+  returns — and holding one lets the two passes settle into a fixed point neither can leave. A
+  curative **close** *is* held, which took noticing: the held set is built by adding the branches a
+  curative perimeter leaves open, and a close is invisible to an add-only rule, so the second pass
+  optimized against an overload the curative stage had already removed.
+
+  And the switching is held **only in the states that see it**. This is the one perimeter that spans
+  every state at once, so one network for all of them puts a curative branch into the preventive and
+  outage states, where no curative decision has been taken, and reads their CNECs somewhere they do
+  not live. `evaluate::Held` carries the difference as a delta and the objective, the base flows and
+  the sensitivities all read a CNEC in its own state's network — which is why an outage CNEC and a
+  curative one under the same contingency no longer share a linearization.
+- **Several perimeters' set-points as variables in one LP.** Each perimeter is solved against the
+  previous one's fixed decisions, which is the CASTOR decomposition rather than a shortcut past it.
+  The `relativeToPreviousInstant` range kind *is* honoured — what chains across perimeters is the
+  bound, not the variable. See [the linear chapter](./linear.md#three-ways-to-say-how-far-it-may-move).
+
+The AC evaluation **distributes the slack**, weighted by generation, because every configuration the
+reference ships does. All three importers retain the per-bus generation it needs. It is not a refinement: when a contingency islands a generator the imbalance is
+that machine's whole output, and where it reappears decides the flows. On one vendored fixture a
+single slack sits at the end of a tie into the country that just lost 1000 MW, so it pushes the
+entire make-up back through that country and over the line being measured — 1165 MW against a true
+1000. Weighting by *net* injection rather than generation puts 70% of it back in the same place and
+barely helps, which is why the setting looked innocent for a long time.
 
 Angle and voltage CNECs are counted rather than modelled, which is what the reference does too: it
 checks them in a separate monitoring pass after the fact rather than putting them in its LP.

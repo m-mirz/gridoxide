@@ -15,7 +15,7 @@
 //! elimination rather than pulling in `solver.rs`'s sparse-LU machinery,
 //! which exists to scale to real AC networks with thousands of buses.
 
-use super::network::{connected_components, YBus};
+use super::network::{YBus, connected_components};
 use num_complex::Complex;
 
 /// What fixes a DC bus's voltage/current/power, mirroring the CGMES
@@ -146,7 +146,12 @@ pub fn injected_currents(buses: &[DcBus], lines: &[DcLine]) -> Vec<f64> {
 /// `UdcSlack`/`Ground` reference at all are excluded from the unknowns
 /// entirely and reported via `DcSolveStatus::isolated_buses`, rather than
 /// producing a singular (indeterminate) system.
-pub fn solve_dc_network(buses: &mut [DcBus], lines: &[DcLine], tol: f64, max_iter: usize) -> DcSolveStatus {
+pub fn solve_dc_network(
+    buses: &mut [DcBus],
+    lines: &[DcLine],
+    tol: f64,
+    max_iter: usize,
+) -> DcSolveStatus {
     let (g, components) = build_conductance(buses, lines);
 
     for b in buses.iter_mut() {
@@ -158,7 +163,9 @@ pub fn solve_dc_network(buses: &mut [DcBus], lines: &[DcLine], tol: f64, max_ite
     let mut isolated_buses = Vec::new();
     let mut unknown_idx = Vec::new();
     for component in &components {
-        let has_reference = component.iter().any(|&i| matches!(buses[i].role, DcBusRole::UdcSlack | DcBusRole::Ground));
+        let has_reference = component
+            .iter()
+            .any(|&i| matches!(buses[i].role, DcBusRole::UdcSlack | DcBusRole::Ground));
         if has_reference {
             for &i in component {
                 if !matches!(buses[i].role, DcBusRole::UdcSlack | DcBusRole::Ground) {
@@ -175,11 +182,16 @@ pub fn solve_dc_network(buses: &mut [DcBus], lines: &[DcLine], tol: f64, max_ite
     // fixed voltage in the network, so Newton starts from a physically
     // sensible point rather than 0 V.
     let fixed_avg = {
-        let fixed: Vec<f64> = buses.iter()
+        let fixed: Vec<f64> = buses
+            .iter()
             .filter(|b| matches!(b.role, DcBusRole::UdcSlack))
             .map(|b| b.udc_fixed)
             .collect();
-        if fixed.is_empty() { 1.0 } else { fixed.iter().sum::<f64>() / fixed.len() as f64 }
+        if fixed.is_empty() {
+            1.0
+        } else {
+            fixed.iter().sum::<f64>() / fixed.len() as f64
+        }
     };
     for &i in &unknown_idx {
         if buses[i].voltage == 0.0 {
@@ -189,7 +201,11 @@ pub fn solve_dc_network(buses: &mut [DcBus], lines: &[DcLine], tol: f64, max_ite
 
     let m = unknown_idx.len();
     if m == 0 {
-        return DcSolveStatus { converged: true, iterations: 0, isolated_buses };
+        return DcSolveStatus {
+            converged: true,
+            iterations: 0,
+            isolated_buses,
+        };
     }
 
     for iter in 0..max_iter {
@@ -203,14 +219,20 @@ pub fn solve_dc_network(buses: &mut [DcBus], lines: &[DcLine], tol: f64, max_ite
                 DcBusRole::FixedP { p_spec } => p_spec - vi * s[i],
                 DcBusRole::FixedIdc { idc_spec } => idc_spec - s[i],
                 DcBusRole::Passive => -s[i],
-                DcBusRole::UdcSlack | DcBusRole::Ground => unreachable!("fixed-voltage buses are excluded from unknown_idx"),
+                DcBusRole::UdcSlack | DcBusRole::Ground => {
+                    unreachable!("fixed-voltage buses are excluded from unknown_idx")
+                }
             };
             if mismatch[row].abs() > tol {
                 converged = false;
             }
         }
         if converged {
-            return DcSolveStatus { converged: true, iterations: iter, isolated_buses };
+            return DcSolveStatus {
+                converged: true,
+                iterations: iter,
+                isolated_buses,
+            };
         }
 
         let mut jac = vec![vec![0.0; m]; m];
@@ -229,14 +251,22 @@ pub fn solve_dc_network(buses: &mut [DcBus], lines: &[DcLine], tol: f64, max_ite
         }
 
         let Some(delta) = crate::sparse::solve_dense(jac, mismatch) else {
-            return DcSolveStatus { converged: false, iterations: iter, isolated_buses };
+            return DcSolveStatus {
+                converged: false,
+                iterations: iter,
+                isolated_buses,
+            };
         };
         for (row, &i) in unknown_idx.iter().enumerate() {
             buses[i].voltage -= delta[row];
         }
     }
 
-    DcSolveStatus { converged: false, iterations: max_iter, isolated_buses }
+    DcSolveStatus {
+        converged: false,
+        iterations: max_iter,
+        isolated_buses,
+    }
 }
 
 #[cfg(test)]
@@ -244,7 +274,13 @@ mod tests {
     use super::*;
 
     fn passive(idx: usize) -> DcBus {
-        DcBus { idx, role: DcBusRole::Passive, udc_fixed: 0.0, voltage: 0.0, shunt_g: 0.0 }
+        DcBus {
+            idx,
+            role: DcBusRole::Passive,
+            udc_fixed: 0.0,
+            voltage: 0.0,
+            shunt_g: 0.0,
+        }
     }
 
     #[test]
@@ -253,14 +289,34 @@ mod tests {
         // power from the network), so p_spec is negative — the physical
         // root is V1=90: S1 = (90-100)/2 = -5, P1 = 90*(-5) = -450.
         let mut buses = vec![
-            DcBus { idx: 0, role: DcBusRole::UdcSlack, udc_fixed: 100.0, voltage: 100.0, shunt_g: 0.0 },
-            DcBus { idx: 1, role: DcBusRole::FixedP { p_spec: -450.0 }, udc_fixed: 0.0, voltage: 0.0, shunt_g: 0.0 },
+            DcBus {
+                idx: 0,
+                role: DcBusRole::UdcSlack,
+                udc_fixed: 100.0,
+                voltage: 100.0,
+                shunt_g: 0.0,
+            },
+            DcBus {
+                idx: 1,
+                role: DcBusRole::FixedP { p_spec: -450.0 },
+                udc_fixed: 0.0,
+                voltage: 0.0,
+                shunt_g: 0.0,
+            },
         ];
-        let lines = vec![DcLine { from: 0, to: 1, r: 2.0 }];
+        let lines = vec![DcLine {
+            from: 0,
+            to: 1,
+            r: 2.0,
+        }];
         let status = solve_dc_network(&mut buses, &lines, 1e-9, 50);
         assert!(status.converged);
         assert!(status.isolated_buses.is_empty());
-        assert!((buses[1].voltage - 90.0).abs() < 1e-6, "V1 = {}", buses[1].voltage);
+        assert!(
+            (buses[1].voltage - 90.0).abs() < 1e-6,
+            "V1 = {}",
+            buses[1].voltage
+        );
     }
 
     #[test]
@@ -269,31 +325,83 @@ mod tests {
         // FixedIdc=-5 (load-like, draws current from the network).
         // Series resistance: idc = (V2 - 100) / 2 = -5 => V2 = 90, V1 = 95.
         let mut buses = vec![
-            DcBus { idx: 0, role: DcBusRole::UdcSlack, udc_fixed: 100.0, voltage: 100.0, shunt_g: 0.0 },
+            DcBus {
+                idx: 0,
+                role: DcBusRole::UdcSlack,
+                udc_fixed: 100.0,
+                voltage: 100.0,
+                shunt_g: 0.0,
+            },
             passive(1),
-            DcBus { idx: 2, role: DcBusRole::FixedIdc { idc_spec: -5.0 }, udc_fixed: 0.0, voltage: 0.0, shunt_g: 0.0 },
+            DcBus {
+                idx: 2,
+                role: DcBusRole::FixedIdc { idc_spec: -5.0 },
+                udc_fixed: 0.0,
+                voltage: 0.0,
+                shunt_g: 0.0,
+            },
         ];
         let lines = vec![
-            DcLine { from: 0, to: 1, r: 1.0 },
-            DcLine { from: 1, to: 2, r: 1.0 },
+            DcLine {
+                from: 0,
+                to: 1,
+                r: 1.0,
+            },
+            DcLine {
+                from: 1,
+                to: 2,
+                r: 1.0,
+            },
         ];
         let status = solve_dc_network(&mut buses, &lines, 1e-9, 50);
         assert!(status.converged);
-        assert!((buses[1].voltage - 95.0).abs() < 1e-6, "V1 = {}", buses[1].voltage);
-        assert!((buses[2].voltage - 90.0).abs() < 1e-6, "V2 = {}", buses[2].voltage);
+        assert!(
+            (buses[1].voltage - 95.0).abs() < 1e-6,
+            "V1 = {}",
+            buses[1].voltage
+        );
+        assert!(
+            (buses[2].voltage - 90.0).abs() < 1e-6,
+            "V2 = {}",
+            buses[2].voltage
+        );
     }
 
     #[test]
     fn fixed_idc_bus_converges_immediately_since_linear() {
         let mut buses = vec![
-            DcBus { idx: 0, role: DcBusRole::UdcSlack, udc_fixed: 100.0, voltage: 100.0, shunt_g: 0.0 },
-            DcBus { idx: 1, role: DcBusRole::FixedIdc { idc_spec: -10.0 }, udc_fixed: 0.0, voltage: 0.0, shunt_g: 0.0 },
+            DcBus {
+                idx: 0,
+                role: DcBusRole::UdcSlack,
+                udc_fixed: 100.0,
+                voltage: 100.0,
+                shunt_g: 0.0,
+            },
+            DcBus {
+                idx: 1,
+                role: DcBusRole::FixedIdc { idc_spec: -10.0 },
+                udc_fixed: 0.0,
+                voltage: 0.0,
+                shunt_g: 0.0,
+            },
         ];
-        let lines = vec![DcLine { from: 0, to: 1, r: 1.0 }];
+        let lines = vec![DcLine {
+            from: 0,
+            to: 1,
+            r: 1.0,
+        }];
         let status = solve_dc_network(&mut buses, &lines, 1e-9, 50);
         assert!(status.converged);
-        assert!(status.iterations <= 2, "expected near-immediate convergence for a linear row, got {} iterations", status.iterations);
-        assert!((buses[1].voltage - 90.0).abs() < 1e-6, "V1 = {}", buses[1].voltage);
+        assert!(
+            status.iterations <= 2,
+            "expected near-immediate convergence for a linear row, got {} iterations",
+            status.iterations
+        );
+        assert!(
+            (buses[1].voltage - 90.0).abs() < 1e-6,
+            "V1 = {}",
+            buses[1].voltage
+        );
     }
 
     #[test]
@@ -303,18 +411,42 @@ mod tests {
         // Dead subsystem: bus2 -- bus3, both Passive, no reference at all —
         // must be isolated, not solved, and must not perturb the live pair.
         let mut buses = vec![
-            DcBus { idx: 0, role: DcBusRole::UdcSlack, udc_fixed: 100.0, voltage: 100.0, shunt_g: 0.0 },
-            DcBus { idx: 1, role: DcBusRole::FixedP { p_spec: -450.0 }, udc_fixed: 0.0, voltage: 0.0, shunt_g: 0.0 },
+            DcBus {
+                idx: 0,
+                role: DcBusRole::UdcSlack,
+                udc_fixed: 100.0,
+                voltage: 100.0,
+                shunt_g: 0.0,
+            },
+            DcBus {
+                idx: 1,
+                role: DcBusRole::FixedP { p_spec: -450.0 },
+                udc_fixed: 0.0,
+                voltage: 0.0,
+                shunt_g: 0.0,
+            },
             passive(2),
             passive(3),
         ];
         let lines = vec![
-            DcLine { from: 0, to: 1, r: 2.0 },
-            DcLine { from: 2, to: 3, r: 1.0 },
+            DcLine {
+                from: 0,
+                to: 1,
+                r: 2.0,
+            },
+            DcLine {
+                from: 2,
+                to: 3,
+                r: 1.0,
+            },
         ];
         let status = solve_dc_network(&mut buses, &lines, 1e-9, 50);
         assert!(status.converged);
-        assert!((buses[1].voltage - 90.0).abs() < 1e-6, "V1 = {}", buses[1].voltage);
+        assert!(
+            (buses[1].voltage - 90.0).abs() < 1e-6,
+            "V1 = {}",
+            buses[1].voltage
+        );
         let mut isolated = status.isolated_buses.clone();
         isolated.sort_unstable();
         assert_eq!(isolated, vec![2, 3]);

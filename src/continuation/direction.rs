@@ -66,8 +66,14 @@ impl LoadingDirection {
     pub fn scale_loads(buses: &[Bus]) -> Self {
         let consumer = |b: &Bus| b.bus_type != BusType::Slack && b.p_spec < 0.0;
         Self {
-            d_p: buses.iter().map(|b| if consumer(b) { b.p_spec } else { 0.0 }).collect(),
-            d_q: buses.iter().map(|b| if consumer(b) { b.q_spec } else { 0.0 }).collect(),
+            d_p: buses
+                .iter()
+                .map(|b| if consumer(b) { b.p_spec } else { 0.0 })
+                .collect(),
+            d_q: buses
+                .iter()
+                .map(|b| if consumer(b) { b.q_spec } else { 0.0 })
+                .collect(),
         }
     }
 
@@ -131,13 +137,22 @@ impl LoadingDirection {
     /// MATPOWER's base-case-to-target-case form: `Δ = target − base`.
     pub fn to_target(buses: &[Bus], p_target: &[f64], q_target: &[f64]) -> Self {
         Self {
-            d_p: buses.iter().map(|b| p_target.get(b.idx).copied().unwrap_or(b.p_spec) - b.p_spec).collect(),
-            d_q: buses.iter().map(|b| q_target.get(b.idx).copied().unwrap_or(b.q_spec) - b.q_spec).collect(),
+            d_p: buses
+                .iter()
+                .map(|b| p_target.get(b.idx).copied().unwrap_or(b.p_spec) - b.p_spec)
+                .collect(),
+            d_q: buses
+                .iter()
+                .map(|b| q_target.get(b.idx).copied().unwrap_or(b.q_spec) - b.q_spec)
+                .collect(),
         }
     }
 
     pub fn zero(n: usize) -> Self {
-        Self { d_p: vec![0.0; n], d_q: vec![0.0; n] }
+        Self {
+            d_p: vec![0.0; n],
+            d_q: vec![0.0; n],
+        }
     }
 
     /// `Σ over net consumers of −Δp_i`: the per-unit *load* increase per unit

@@ -15,7 +15,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use gridoxide::branch_flow::{branch_params, bus_voltages, terminal_flow, Terminal};
+use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
 use gridoxide::run_power_flow_analysis_from_ybus;
@@ -53,7 +53,9 @@ fn assert_link_fixture(name: &str) {
     for node in expected["data"]["node"].as_array().expect("node output") {
         let id = node["id"].as_u64().expect("node id");
         let idx = net.node_idx[&id];
-        let Some(u) = node["u"].as_f64() else { continue };
+        let Some(u) = node["u"].as_f64() else {
+            continue;
+        };
         let got = report.buses[idx].voltage_mag * report.buses[idx].u_rated;
         assert!(
             (got - u).abs() < 1e-5 * u.abs().max(1.0),
@@ -64,7 +66,10 @@ fn assert_link_fixture(name: &str) {
     let params = branch_params(&net.lines, &net.transformers);
     let v = bus_voltages(&report.buses);
     let links = expected["data"]["link"].as_array().expect("link output");
-    assert!(!links.is_empty(), "{name}: fixture publishes no link output to check");
+    assert!(
+        !links.is_empty(),
+        "{name}: fixture publishes no link output to check"
+    );
 
     for out in links {
         let id = out["id"].as_u64().expect("link id");

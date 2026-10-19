@@ -48,7 +48,10 @@ fn every_case_carries_a_complete_opf_document() {
     for &(name, _buses, branches) in CASES {
         let data = load(name);
 
-        assert_eq!(data.base_mva, 100.0, "{name}: pglib cases are all on a 100 MVA base");
+        assert_eq!(
+            data.base_mva, 100.0,
+            "{name}: pglib cases are all on a 100 MVA base"
+        );
         assert!(!data.generator.is_empty(), "{name}: no generators");
         assert_eq!(
             data.branch_limit.len(),
@@ -57,7 +60,11 @@ fn every_case_carries_a_complete_opf_document() {
         );
 
         for g in &data.generator {
-            assert!(g.cost.is_some(), "{name}: generator {} has no cost curve", g.index);
+            assert!(
+                g.cost.is_some(),
+                "{name}: generator {} has no cost curve",
+                g.index
+            );
             assert!(
                 g.p_max >= g.p_min,
                 "{name}: generator {} has crossed active limits",
@@ -188,7 +195,10 @@ fn limits_convert_to_per_unit_on_the_documents_own_base() {
         let (p_min, p_max) = g.p_limits_pu(base);
         assert!((p_min - g.p_min / base).abs() < 1e-12);
         assert!((p_max - g.p_max / base).abs() < 1e-12);
-        assert!(p_max <= 100.0, "a per-unit limit of {p_max} suggests an unconverted MW value");
+        assert!(
+            p_max <= 100.0,
+            "a per-unit limit of {p_max} suggests an unconverted MW value"
+        );
     }
 
     for limit in &data.branch_limit {
@@ -229,11 +239,18 @@ fn marginal_cost_is_positive_across_the_operating_range() {
 #[test]
 fn a_known_cost_row_survives_the_conversion_in_ascending_order() {
     let data = load("pglib_opf_case3_lmbd");
-    let first = data.generator.iter().find(|g| g.index == 0).expect("generator 0");
+    let first = data
+        .generator
+        .iter()
+        .find(|g| g.index == 0)
+        .expect("generator 0");
     match first.cost.as_ref().expect("a cost curve") {
         CostCurve::Polynomial { coefficients } => {
             assert_eq!(coefficients.len(), 3, "{coefficients:?}");
-            assert!(coefficients[0].abs() < 1e-12, "constant term: {coefficients:?}");
+            assert!(
+                coefficients[0].abs() < 1e-12,
+                "constant term: {coefficients:?}"
+            );
             assert!(
                 coefficients[2] < coefficients[1],
                 "the quadratic term should be the small one — ordering looks reversed: \

@@ -44,7 +44,9 @@ fn profiles(dir: &Path) -> Vec<PathBuf> {
         .filter(|p| p.extension().is_some_and(|x| x == "xml"))
         .filter(|p| {
             let n = p.file_name().unwrap().to_string_lossy().to_uppercase();
-            ["_EQ", "_SSH", "_TP", "_SV", "EQ_BD"].iter().any(|k| n.contains(k))
+            ["_EQ", "_SSH", "_TP", "_SV", "EQ_BD"]
+                .iter()
+                .any(|k| n.contains(k))
         })
         .collect();
     paths.sort();
@@ -107,17 +109,44 @@ fn only_the_cross_border_fixtures_needed_harmonizing() {
         merged: &'static [(u64, u64)],
     }
     let expected = [
-        Case { fixture: "MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged", buses: 4,
-               merged: &[(400, 380), (225, 220)] },
-        Case { fixture: "FullGrid/FullGrid-Merged", buses: 3,
-               merged: &[(400, 380), (225, 220)] },
-        Case { fixture: "SmallGrid/SmallGrid-Merged", buses: 0, merged: &[] },
-        Case { fixture: "MiniGrid/MiniGrid-Merged", buses: 0, merged: &[] },
-        Case { fixture: "RealGrid/RealGrid-Merged", buses: 0, merged: &[] },
-        Case { fixture: "Svedala/Svedala-Merged", buses: 0, merged: &[] },
+        Case {
+            fixture: "MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged",
+            buses: 4,
+            merged: &[(400, 380), (225, 220)],
+        },
+        Case {
+            fixture: "FullGrid/FullGrid-Merged",
+            buses: 3,
+            merged: &[(400, 380), (225, 220)],
+        },
+        Case {
+            fixture: "SmallGrid/SmallGrid-Merged",
+            buses: 0,
+            merged: &[],
+        },
+        Case {
+            fixture: "MiniGrid/MiniGrid-Merged",
+            buses: 0,
+            merged: &[],
+        },
+        Case {
+            fixture: "RealGrid/RealGrid-Merged",
+            buses: 0,
+            merged: &[],
+        },
+        Case {
+            fixture: "Svedala/Svedala-Merged",
+            buses: 0,
+            merged: &[],
+        },
     ];
 
-    for Case { fixture: name, buses, merged: pairs } in expected {
+    for Case {
+        fixture: name,
+        buses,
+        merged: pairs,
+    } in expected
+    {
         let Some((_, net)) = load(name) else { continue };
         let r = &net.base_harmonization;
         assert_eq!(
@@ -147,7 +176,9 @@ fn only_the_cross_border_fixtures_needed_harmonizing() {
 /// `SvVoltage`, in kV.
 #[test]
 fn harmonizing_moves_the_per_unit_numbers_and_not_the_volts() {
-    let Some((ds, net)) = load("MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged") else { return };
+    let Some((ds, net)) = load("MicroGrid/MicroGrid-Type1/MicroGrid-Type1-Merged") else {
+        return;
+    };
     let idx = cgmes_topological_node_bus_index(&ds).expect("bus index");
 
     let report = gridoxide::run_power_flow(
@@ -156,7 +187,12 @@ fn harmonizing_moves_the_per_unit_numbers_and_not_the_volts() {
         &net.transformers,
         &net.shunts,
         gridoxide::TapData::none(),
-        PowerFlowOptions { enforce_q_limits: true, max_iter: 60, max_outer_iter: 60, ..Default::default() },
+        PowerFlowOptions {
+            enforce_q_limits: true,
+            max_iter: 60,
+            max_outer_iter: 60,
+            ..Default::default()
+        },
     );
     assert_eq!(report.stats.status, SolveStatus::Converged);
 
@@ -164,7 +200,9 @@ fn harmonizing_moves_the_per_unit_numbers_and_not_the_volts() {
     // document publishes for them — the per-unit value absorbed the change.
     let mut worst: f64 = 0.0;
     for e in cgmes_common::expected_voltages(&ds) {
-        let Some(&b) = idx.get(&e.tn_mrid) else { continue };
+        let Some(&b) = idx.get(&e.tn_mrid) else {
+            continue;
+        };
         if net.buses[b].u_rated <= 0.0 {
             continue;
         }

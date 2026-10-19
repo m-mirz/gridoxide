@@ -6,7 +6,7 @@
 //! recursion depth beyond what the non-recursive version already handles
 //! with an explicit stack).
 
-use super::super::types::{unflip, EMPTY};
+use super::super::types::{EMPTY, unflip};
 
 const UNVISITED: i64 = -2;
 const UNASSIGNED: i64 = -1;
@@ -114,7 +114,12 @@ fn dfs(
 /// each block), and `r` gives block boundaries — `r.len() == nblocks + 1`,
 /// block `b` spans rows/columns `r[b]..r[b+1]` of the permuted matrix. The
 /// number of blocks is `r.len() - 1`.
-pub fn strongcomp(n: usize, col_ptr: &[i64], row_idx: &[i64], q: Option<&mut [i64]>) -> (Vec<i64>, Vec<i64>) {
+pub fn strongcomp(
+    n: usize,
+    col_ptr: &[i64],
+    row_idx: &[i64],
+    q: Option<&mut [i64]>,
+) -> (Vec<i64>, Vec<i64>) {
     let mut time = vec![EMPTY; n];
     let mut flag = vec![UNVISITED; n];
     let mut low = vec![EMPTY; n];
@@ -132,8 +137,18 @@ pub fn strongcomp(n: usize, col_ptr: &[i64], row_idx: &[i64], q: Option<&mut [i6
     for j in 0..n {
         if flag[j] == UNVISITED {
             dfs(
-                j, col_ptr, row_idx, q_ref, &mut time, &mut flag, &mut low, &mut nblocks, &mut timestamp,
-                &mut cstack, &mut jstack, &mut pstack,
+                j,
+                col_ptr,
+                row_idx,
+                q_ref,
+                &mut time,
+                &mut flag,
+                &mut low,
+                &mut nblocks,
+                &mut timestamp,
+                &mut cstack,
+                &mut jstack,
+                &mut pstack,
             );
         }
     }

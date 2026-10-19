@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gridoxide::cgmes::{cgmes_to_network, load_profiles, CgmesNetwork};
+use gridoxide::cgmes::{CgmesNetwork, cgmes_to_network, load_profiles};
 use gridoxide::types::BusType;
 
 fn fixture(dir: &str) -> Option<CgmesNetwork> {
@@ -65,7 +65,10 @@ fn shared_control_is_common_on_real_data() {
         );
         checked += 1;
     }
-    assert!(checked >= 3, "expected most of the fixture set to be present");
+    assert!(
+        checked >= 3,
+        "expected most of the fixture set to be present"
+    );
 }
 
 /// **The defect, on the fixture that shows it most starkly.** FullGrid has a
@@ -115,7 +118,10 @@ fn no_summed_band_is_inverted_or_empty() {
             if b.bus_type != BusType::PV {
                 continue;
             }
-            assert!(!b.q_min.is_nan() && !b.q_max.is_nan(), "{name}: bus {i} has a NaN limit");
+            assert!(
+                !b.q_min.is_nan() && !b.q_max.is_nan(),
+                "{name}: bus {i} has a NaN limit"
+            );
             assert!(
                 b.q_min <= b.q_max,
                 "{name}: bus {i} has an inverted band [{}, {}]",

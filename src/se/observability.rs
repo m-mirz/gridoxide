@@ -57,16 +57,14 @@
 //! follow-up.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::linalg::cholesky::llt_pivoting::factor::{
-    cholesky_in_place, cholesky_in_place_scratch,
-};
+use faer::linalg::cholesky::llt_pivoting::factor::{cholesky_in_place, cholesky_in_place_scratch};
 use faer::{Mat, Par};
 
 use crate::measurement::Measurement;
 use crate::types::Bus;
 
-use super::jacobian::{measurement_jacobian, StateLayout};
 use super::SeNetwork;
+use super::jacobian::{StateLayout, measurement_jacobian};
 
 /// Largest state dimension [`analyze`] will densify, chosen so the gain matrix
 /// stays under ~32 MB (`2000² × 8` bytes).
@@ -177,12 +175,18 @@ impl ObservabilityReport {
 fn describe(layout: &StateLayout, col: usize) -> Unknown {
     let magnitude_start = layout.vmag(0);
     if col >= magnitude_start {
-        Unknown { bus: col - magnitude_start, quantity: Quantity::Magnitude }
+        Unknown {
+            bus: col - magnitude_start,
+            quantity: Quantity::Magnitude,
+        }
     } else {
         let bus = (0..layout.n_buses)
             .find(|&b| layout.theta(b) == Some(col))
             .expect("angle column belongs to some bus");
-        Unknown { bus, quantity: Quantity::Angle }
+        Unknown {
+            bus,
+            quantity: Quantity::Angle,
+        }
     }
 }
 
@@ -303,8 +307,10 @@ pub fn analyze(
         }
     }
     let live = |u: &Unknown| net.energized.get(u.bus).copied().unwrap_or(true);
-    let de_energized: Vec<Unknown> =
-        (0..n).map(|c| describe(layout, c)).filter(|u| !live(u)).collect();
+    let de_energized: Vec<Unknown> = (0..n)
+        .map(|c| describe(layout, c))
+        .filter(|u| !live(u))
+        .collect();
     let untouched = (0..n).filter(|&c| !touched[c]).count();
     let structurally_unmeasured: Vec<Unknown> = (0..n)
         .filter(|&c| !touched[c])
@@ -349,8 +355,11 @@ pub fn analyze(
             global_current_without_angle_reference,
         };
     };
-    let unobservable =
-        perm[rank..].iter().map(|&c| describe(layout, c)).filter(live).collect();
+    let unobservable = perm[rank..]
+        .iter()
+        .map(|&c| describe(layout, c))
+        .filter(live)
+        .collect();
 
     ObservabilityReport {
         n_unknowns: n,
@@ -371,7 +380,12 @@ mod tests {
     use crate::se::constraints::Constraints;
 
     fn m(kind: MeasurementKind, target: Target) -> Measurement {
-        Measurement { kind, target, value: 0.0, sigma: 0.01 }
+        Measurement {
+            kind,
+            target,
+            value: 0.0,
+            sigma: 0.01,
+        }
     }
 
     /// Builds a dense matrix from rows, for the kernel tests.
@@ -428,11 +442,20 @@ mod tests {
             m(MeasurementKind::ReactivePower, Target::Bus(1)),
             m(
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+        let report = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&[]),
+        );
         assert!(
             report.is_observable(),
             "expected observable, got {report:?}"
@@ -460,9 +483,17 @@ mod tests {
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
 
-        let without =
-            analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
-        assert!(!without.is_observable(), "the fixture must be under-determined without help");
+        let without = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&[]),
+        );
+        assert!(
+            !without.is_observable(),
+            "the fixture must be under-determined without help"
+        );
 
         // Declaring bus 1 a zero-injection node supplies the missing rows.
         let mut flags = vec![false; buses.len()];
@@ -494,16 +525,25 @@ mod tests {
             m(MeasurementKind::ReactivePower, Target::Bus(1)),
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let bare = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+        let bare = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&[]),
+        );
 
         let mut flags = vec![false; buses.len()];
         flags[1] = true;
-        let constrained =
-            analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&flags));
-        assert!(constrained.rank >= bare.rank);
-        assert!(
-            constrained.structurally_unmeasured.len() <= bare.structurally_unmeasured.len()
+        let constrained = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&flags),
         );
+        assert!(constrained.rank >= bare.rank);
+        assert!(constrained.structurally_unmeasured.len() <= bare.structurally_unmeasured.len());
     }
 
     /// One voltage magnitude cannot determine three unknowns, and the report
@@ -514,16 +554,23 @@ mod tests {
         let (net, buses) = crate::se::tests::two_bus_net();
         let measurements = vec![m(MeasurementKind::VoltageMagnitude, Target::Bus(0))];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+        let report = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&[]),
+        );
 
         assert!(!report.is_observable());
         assert_eq!(report.rank, 1, "only the measured magnitude is determined");
         assert_eq!(report.unobservable.len(), report.n_unknowns - 1);
         // The measured bus's magnitude is the one thing that *is* observable.
         assert!(
-            !report
-                .unobservable
-                .contains(&Unknown { bus: 0, quantity: Quantity::Magnitude }),
+            !report.unobservable.contains(&Unknown {
+                bus: 0,
+                quantity: Quantity::Magnitude
+            }),
             "the measured quantity must not be reported unobservable: {report:?}"
         );
     }
@@ -543,22 +590,37 @@ mod tests {
         let measurements = vec![
             m(
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
             m(
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+        let report = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&[]),
+        );
 
         assert_eq!(report.n_unknowns, 3);
         assert!(
             report.structurally_unmeasured.is_empty(),
             "every unknown is reached by a measurement, so structure alone sees no problem: {report:?}"
         );
-        assert_eq!(report.rank, 2, "two measurements cannot determine three unknowns");
+        assert_eq!(
+            report.rank, 2,
+            "two measurements cannot determine three unknowns"
+        );
         assert!(!report.is_observable());
         assert_eq!(report.unobservable.len(), 1);
     }
@@ -573,21 +635,37 @@ mod tests {
         let (net, buses) = crate::se::tests::two_bus_net();
         let flow = m(
             MeasurementKind::ActivePower,
-            Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+            Target::BranchTerminal {
+                branch: 0,
+                terminal: Terminal::From,
+            },
         );
         let measurements = vec![
             flow,
             m(
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
             // Same quantity, same terminal, independently reported.
             flow,
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+        let report = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&[]),
+        );
 
-        assert_eq!(measurements.len(), report.n_unknowns, "as many rows as unknowns");
+        assert_eq!(
+            measurements.len(),
+            report.n_unknowns,
+            "as many rows as unknowns"
+        );
         assert_eq!(report.rank, 2, "but only two of them are independent");
         assert!(!report.is_observable(), "{report:?}");
     }
@@ -604,16 +682,31 @@ mod tests {
             m(MeasurementKind::VoltageMagnitude, Target::Bus(1)),
             m(
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
             m(
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
             ),
         ];
         let layout = StateLayout::new(&buses, &measurements, &net);
-        assert!(layout.angle_ref.is_some(), "no angle measured, so one is pinned");
-        let report = analyze(&measurements, &buses, &net, &layout, &Constraints::from_flags(&[]));
+        assert!(
+            layout.angle_ref.is_some(),
+            "no angle measured, so one is pinned"
+        );
+        let report = analyze(
+            &measurements,
+            &buses,
+            &net,
+            &layout,
+            &Constraints::from_flags(&[]),
+        );
         assert!(report.is_observable(), "{report:?}");
     }
 }

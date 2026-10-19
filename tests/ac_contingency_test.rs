@@ -12,12 +12,12 @@ use std::path::PathBuf;
 
 use gridoxide::batch::{BatchError, BatchSolver, BusOverride, Scenario};
 use gridoxide::network::{
-    build_ybus, build_ybus_with_outages, stamp_shunts, structural_component_count, ShuntAdm,
+    ShuntAdm, build_ybus, build_ybus_with_outages, stamp_shunts, structural_component_count,
 };
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
+use gridoxide::run_power_flow_analysis_from_ybus;
 use gridoxide::solver::{IslandStatus, JacobianBackend, SolveStatus};
 use gridoxide::types::{Bus, Line, Transformer};
-use gridoxide::run_power_flow_analysis_from_ybus;
 
 mod common;
 
@@ -181,8 +181,7 @@ fn an_outaged_ybus_keeps_the_intact_sparsity_pattern() {
     for b in 0..(lines.len() + transformers.len()) {
         let mut outaged = vec![false; lines.len() + transformers.len()];
         outaged[b] = true;
-        let with_outage =
-            build_ybus_with_outages(n, &lines, &transformers, &outaged).finish();
+        let with_outage = build_ybus_with_outages(n, &lines, &transformers, &outaged).finish();
         assert_eq!(
             pattern(&with_outage),
             intact_pattern,
@@ -210,7 +209,14 @@ fn a_severing_contingency_reports_an_unreferenced_island() {
         u_rated: 0.0,
         zip_terms: Vec::new(),
     };
-    let line = |from, to| Line { from, to, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 };
+    let line = |from, to| Line {
+        from,
+        to,
+        r: 0.02,
+        x: 0.06,
+        b_shunt: 0.0,
+        g_shunt: 0.0,
+    };
     let buses = vec![
         mk(0, gridoxide::types::BusType::Slack, 0.0),
         mk(1, gridoxide::types::BusType::PQ, -0.2),
@@ -220,7 +226,10 @@ fn a_severing_contingency_reports_an_unreferenced_island() {
 
     // Fixture assumption: outaging branch 1 really does split the network.
     assert_eq!(structural_component_count(3, &lines, &[], &[]), 1);
-    assert_eq!(structural_component_count(3, &lines, &[], &[false, true]), 2);
+    assert_eq!(
+        structural_component_count(3, &lines, &[], &[false, true]),
+        2
+    );
 
     let mut sc = Scenario::new(vec![]);
     sc.branch_outages = vec![1];
@@ -312,7 +321,15 @@ fn outages_and_bus_overrides_compose() {
     scenario.branch_outages = vec![0];
 
     let report = BatchSolver::new(JacobianBackend::Scalar)
-        .solve_contingencies(&buses, &lines, &transformers, &shunts, &[scenario], TOL, MAX_ITER)
+        .solve_contingencies(
+            &buses,
+            &lines,
+            &transformers,
+            &shunts,
+            &[scenario],
+            TOL,
+            MAX_ITER,
+        )
         .unwrap()
         .pop()
         .unwrap();
@@ -356,19 +373,37 @@ fn no_outages_matches_the_plain_batch_path() {
 
     let batch = BatchSolver::new(JacobianBackend::Scalar);
     let via_contingencies = batch
-        .solve_contingencies(&buses, &lines, &transformers, &shunts, &scenarios, TOL, MAX_ITER)
+        .solve_contingencies(
+            &buses,
+            &lines,
+            &transformers,
+            &shunts,
+            &scenarios,
+            TOL,
+            MAX_ITER,
+        )
         .unwrap();
 
     let mut ybus = build_ybus(buses.len(), &lines, &transformers);
     stamp_shunts(&mut ybus, &shunts);
     let ybus = ybus.finish();
-    let via_plain = batch.solve(&buses, &ybus, &scenarios, TOL, MAX_ITER).unwrap();
+    let via_plain = batch
+        .solve(&buses, &ybus, &scenarios, TOL, MAX_ITER)
+        .unwrap();
 
     for (k, (a, b)) in via_contingencies.iter().zip(&via_plain).enumerate() {
         assert_eq!(a.stats.status, b.stats.status, "scenario {k}");
         for (i, (x, y)) in a.buses.iter().zip(&b.buses).enumerate() {
-            assert_eq!(x.voltage_mag.to_bits(), y.voltage_mag.to_bits(), "scenario {k} bus {i}");
-            assert_eq!(x.voltage_ang.to_bits(), y.voltage_ang.to_bits(), "scenario {k} bus {i}");
+            assert_eq!(
+                x.voltage_mag.to_bits(),
+                y.voltage_mag.to_bits(),
+                "scenario {k} bus {i}"
+            );
+            assert_eq!(
+                x.voltage_ang.to_bits(),
+                y.voltage_ang.to_bits(),
+                "scenario {k} bus {i}"
+            );
         }
     }
 }
@@ -385,7 +420,13 @@ fn malformed_input_is_rejected() {
     bad_branch.branch_outages = vec![n_branches];
     assert!(matches!(
         batch.solve_contingencies(
-            &buses, &lines, &transformers, &shunts, &[bad_branch], TOL, MAX_ITER
+            &buses,
+            &lines,
+            &transformers,
+            &shunts,
+            &[bad_branch],
+            TOL,
+            MAX_ITER
         ),
         Err(BatchError::BranchOutOfRange { scenario: 0, .. })
     ));
@@ -393,7 +434,13 @@ fn malformed_input_is_rejected() {
     let bad_bus = Scenario::new(vec![BusOverride::new(buses.len()).p(0.0)]);
     assert!(matches!(
         batch.solve_contingencies(
-            &buses, &lines, &transformers, &shunts, &[bad_bus], TOL, MAX_ITER
+            &buses,
+            &lines,
+            &transformers,
+            &shunts,
+            &[bad_bus],
+            TOL,
+            MAX_ITER
         ),
         Err(BatchError::BusOutOfRange { scenario: 0, .. })
     ));

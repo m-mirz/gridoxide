@@ -28,7 +28,13 @@ use std::os::raw::c_void;
 
 use super::{LinearProgram, OpfError, OptStatus, Solution, Solver};
 
-#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all)]
+#[allow(
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    dead_code,
+    clippy::all
+)]
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/highs_bindings.rs"));
 }
@@ -69,11 +75,7 @@ impl HighsSolver {
         // SAFETY: `self.handle` is non-null for the lifetime of `self`, and
         // `option` outlives the call.
         let status = unsafe {
-            bindings::Highs_setBoolOptionValue(
-                self.handle,
-                option.as_ptr(),
-                Int::from(enabled),
-            )
+            bindings::Highs_setBoolOptionValue(self.handle, option.as_ptr(), Int::from(enabled))
         };
         check(status, "Highs_setBoolOptionValue(output_flag)")
     }
@@ -91,9 +93,10 @@ impl HighsSolver {
     ///
     /// HiGHS refuses anything below `1e-10`.
     pub fn set_tolerance(&self, primal: f64, dual: f64) -> Result<(), OpfError> {
-        for (name, value) in
-            [("primal_feasibility_tolerance", primal), ("dual_feasibility_tolerance", dual)]
-        {
+        for (name, value) in [
+            ("primal_feasibility_tolerance", primal),
+            ("dual_feasibility_tolerance", dual),
+        ] {
             let option = CString::new(name).expect("literal has no interior nul");
             // SAFETY: `self.handle` is non-null for the lifetime of `self`, and
             // `option` outlives the call.
@@ -250,7 +253,14 @@ impl Solver for HighsSolver {
         // SAFETY: reads HiGHS-owned state.
         let objective = unsafe { bindings::Highs_getObjectiveValue(self.handle) };
 
-        Ok(Solution { status, objective, primal, row_activity, col_dual, row_dual })
+        Ok(Solution {
+            status,
+            objective,
+            primal,
+            row_activity,
+            col_dual,
+            row_dual,
+        })
     }
 }
 
@@ -345,7 +355,11 @@ impl Csc {
         }
         starts.push(indices.len() as Int);
 
-        Self { starts, indices, values }
+        Self {
+            starts,
+            indices,
+            values,
+        }
     }
 }
 

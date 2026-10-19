@@ -104,13 +104,25 @@ pub struct Layout {
 
 impl Layout {
     pub fn analyze(buses: &[Bus]) -> Self {
-        let non_slack_idx: Vec<usize> =
-            buses.iter().filter(|b| b.bus_type != BusType::Slack).map(|b| b.idx).collect();
-        let pq_idx: Vec<usize> =
-            buses.iter().filter(|b| b.bus_type == BusType::PQ).map(|b| b.idx).collect();
+        let non_slack_idx: Vec<usize> = buses
+            .iter()
+            .filter(|b| b.bus_type != BusType::Slack)
+            .map(|b| b.idx)
+            .collect();
+        let pq_idx: Vec<usize> = buses
+            .iter()
+            .filter(|b| b.bus_type == BusType::PQ)
+            .map(|b| b.idx)
+            .collect();
         let n_angle = non_slack_idx.len();
         let n_unknowns = n_angle + pq_idx.len();
-        Self { non_slack_idx, pq_idx, n_angle, n_unknowns, n_buses: buses.len() }
+        Self {
+            non_slack_idx,
+            pq_idx,
+            n_angle,
+            n_unknowns,
+            n_buses: buses.len(),
+        }
     }
 
     /// Re-expresses a tangent written in `from`'s layout in this one.
@@ -144,7 +156,6 @@ impl Layout {
         out[self.n_unknowns] = t[from.n_unknowns];
         out
     }
-
 
     /// The value of unknown `k`, with `k == n_unknowns` meaning λ itself.
     pub fn get(&self, buses: &[Bus], lambda: f64, k: usize) -> f64 {
@@ -209,7 +220,11 @@ impl AugmentedPattern {
     pub fn analyze(buses: &[Bus], ybus: &YBusSparse, border_cols: Vec<usize>) -> Self {
         let jac = JacobianPattern::analyze(buses, ybus);
         let n = jac.n_unknowns;
-        Self { jac, n, border_cols }
+        Self {
+            jac,
+            n,
+            border_cols,
+        }
     }
 
     /// The columns this pattern's border row occupies. A caller whose
@@ -236,8 +251,13 @@ impl AugmentedPattern {
     /// analyzes once.
     pub fn to_triplets(&self, values: &[f64]) -> Vec<(usize, usize, f64)> {
         let mut out = Vec::with_capacity(self.len());
-        for (k, ((&r, &c), &v)) in
-            self.jac.rows().iter().zip(self.jac.cols()).zip(values).enumerate()
+        for (k, ((&r, &c), &v)) in self
+            .jac
+            .rows()
+            .iter()
+            .zip(self.jac.cols())
+            .zip(values)
+            .enumerate()
         {
             let _ = k;
             out.push((r as usize, c as usize, v));

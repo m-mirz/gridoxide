@@ -21,14 +21,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::measurement::{Measurement, MeasurementKind, Target};
 use crate::types::Bus;
 
-use super::nr::{linear_start, PersistentEstimator, SeOptions, SeReport};
 use super::SeNetwork;
+use super::nr::{PersistentEstimator, SeOptions, SeReport, linear_start};
 
 /// A per-measurement change against the batch's shared template.
 ///
@@ -50,7 +50,11 @@ pub struct MeasurementOverride {
 
 impl MeasurementOverride {
     pub fn new(measurement: usize) -> Self {
-        Self { measurement, value: None, sigma: None }
+        Self {
+            measurement,
+            value: None,
+            sigma: None,
+        }
     }
 
     pub fn value(mut self, value: f64) -> Self {
@@ -93,7 +97,11 @@ pub struct SeBatchResult {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SeBatchError {
     /// An override named a row the template does not have.
-    MeasurementOutOfRange { scenario: usize, measurement: usize, n: usize },
+    MeasurementOutOfRange {
+        scenario: usize,
+        measurement: usize,
+        n: usize,
+    },
     /// A scenario measures a voltage angle where the template does not, or the
     /// reverse.
     ///
@@ -113,7 +121,11 @@ pub enum SeBatchError {
 impl fmt::Display for SeBatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SeBatchError::MeasurementOutOfRange { scenario, measurement, n } => write!(
+            SeBatchError::MeasurementOutOfRange {
+                scenario,
+                measurement,
+                n,
+            } => write!(
                 f,
                 "scenario {scenario} overrides measurement {measurement}, but the template has \
                  only {n} measurement(s)"
@@ -227,7 +239,10 @@ pub struct SeBatchSolver {
 impl SeBatchSolver {
     /// Uses rayon's global thread pool (honors `RAYON_NUM_THREADS`).
     pub fn new(options: SeOptions) -> Self {
-        Self { options, pool: None }
+        Self {
+            options,
+            pool: None,
+        }
     }
 
     /// Uses a dedicated pool of exactly `threads` workers.
@@ -236,7 +251,10 @@ impl SeBatchSolver {
             .num_threads(threads)
             .build()
             .map_err(|e| SeBatchError::ThreadPool(e.to_string()))?;
-        Ok(Self { options, pool: Some(pool) })
+        Ok(Self {
+            options,
+            pool: Some(pool),
+        })
     }
 
     /// Workers this solver will use for a batch.
@@ -345,7 +363,12 @@ mod tests {
     use crate::measurement::Target;
 
     fn m(kind: MeasurementKind, target: Target, value: f64, sigma: f64) -> Measurement {
-        Measurement { kind, target, value, sigma }
+        Measurement {
+            kind,
+            target,
+            value,
+            sigma,
+        }
     }
 
     /// The union is taken in first-seen order, and a row a scenario lacks comes
@@ -370,12 +393,18 @@ mod tests {
         let first = apply(&template, &scenarios[0]);
         assert_eq!(first[0].value, 1.0);
         assert_eq!(first[1].value, 0.5);
-        assert!(first[2].sigma.is_infinite(), "scenario 0 has no reactive row");
+        assert!(
+            first[2].sigma.is_infinite(),
+            "scenario 0 has no reactive row"
+        );
         assert_eq!(first[2].weight(), 0.0);
 
         let second = apply(&template, &scenarios[1]);
         assert_eq!(second[0].value, 1.1);
-        assert!(second[1].sigma.is_infinite(), "scenario 1 has no active row");
+        assert!(
+            second[1].sigma.is_infinite(),
+            "scenario 1 has no active row"
+        );
         assert_eq!(second[2].value, 0.3);
     }
 
@@ -400,6 +429,9 @@ mod tests {
             m(MeasurementKind::VoltageMagnitude, Target::Bus(0), 1.0, 0.1),
             m(MeasurementKind::VoltageMagnitude, Target::Bus(0), 1.2, 0.1),
         ];
-        assert_eq!(align_scenarios(&[dup]), Err(SeBatchError::IncompatibleScenarios));
+        assert_eq!(
+            align_scenarios(&[dup]),
+            Err(SeBatchError::IncompatibleScenarios)
+        );
     }
 }

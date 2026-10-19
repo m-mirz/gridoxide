@@ -14,11 +14,11 @@
 
 use num_complex::Complex;
 
-use gridoxide::dynamics::models::machine::{GenCls, GenClsParams};
 use gridoxide::dynamics::models::GeneratingUnit;
+use gridoxide::dynamics::models::machine::{GenCls, GenClsParams};
 use gridoxide::dynamics::{
-    build, run_dynamics, DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus,
-    DynamicsWarning, Event, EventKind, Relay, SystemSpec, Trigger, Watch,
+    DeviceSpec, DynamicSystem, DynamicsOptions, DynamicsStatus, DynamicsWarning, Event, EventKind,
+    Relay, SystemSpec, Trigger, Watch, build, run_dynamics,
 };
 use gridoxide::network::{build_ybus, power_injections};
 use gridoxide::types::{Bus, BusType, Line};
@@ -50,21 +50,51 @@ fn network() -> DynamicSystem {
         bus(2, BusType::Slack, 0.0, 0.0),
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.005, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.005, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.005, x: 0.16, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.005,
+            x: 0.08,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.005,
+            x: 0.08,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.005,
+            x: 0.16,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let report = gridoxide::run_power_flow_analysis(gridoxide::json::NetworkData {
         buses,
         lines: lines.clone(),
     });
-    assert_eq!(report.stats.status, gridoxide::solver::SolveStatus::Converged);
+    assert_eq!(
+        report.stats.status,
+        gridoxide::solver::SolveStatus::Converged
+    );
     let buses = report.buses;
     let ybus = build_ybus(buses.len(), &lines, &[]).finish();
     let (p_calc, q_calc) = power_injections(&buses, &ybus);
 
     let machine = GenCls::new(
-        GenClsParams { h: 5.0, d: 2.0, ra: 0.0, xdp: 0.3, mbase: S_BASE },
+        GenClsParams {
+            h: 5.0,
+            d: 2.0,
+            ra: 0.0,
+            xdp: 0.3,
+            mbase: S_BASE,
+        },
         S_BASE,
         F_NOM,
     )
@@ -86,7 +116,13 @@ fn network() -> DynamicSystem {
 }
 
 fn options(end: f64, events: Vec<Event>, relays: Vec<Relay>) -> DynamicsOptions {
-    DynamicsOptions { end_time: end, step: 0.005, events, relays, ..Default::default() }
+    DynamicsOptions {
+        end_time: end,
+        step: 0.005,
+        events,
+        relays,
+        ..Default::default()
+    }
 }
 
 /// An under-voltage relay trips a line after its delay, and the delay is
@@ -128,8 +164,14 @@ fn a_relay_fires_a_delay_after_the_located_crossing() {
     // threshold just before it and below just after.
     let time = &report.trajectory.time;
     let v = report.trajectory.series("bus1.vmag").unwrap();
-    let before = time.iter().rposition(|t| *t < action.crossed_at - 1e-6).unwrap();
-    let after = time.iter().position(|t| *t > action.crossed_at + 1e-6).unwrap();
+    let before = time
+        .iter()
+        .rposition(|t| *t < action.crossed_at - 1e-6)
+        .unwrap();
+    let after = time
+        .iter()
+        .position(|t| *t > action.crossed_at + 1e-6)
+        .unwrap();
     assert!(v[before] > 0.85, "before the crossing: {}", v[before]);
     assert!(v[after] < 0.85, "after the crossing: {}", v[after]);
 }
@@ -171,7 +213,10 @@ fn a_smooth_crossing_is_located_inside_the_step() {
     assert_eq!(report.status, DynamicsStatus::Completed);
     assert_eq!(report.relay_actions.len(), 1, "{:?}", report.relay_actions);
     let action = &report.relay_actions[0];
-    assert!((action.fired_at - action.crossed_at).abs() < 1e-12, "a zero delay acts at once");
+    assert!(
+        (action.fired_at - action.crossed_at).abs() < 1e-12,
+        "a zero delay acts at once"
+    );
 
     // The located time is a recorded point, and the speed there is the
     // threshold — to far better than a 20 ms step could have given.
@@ -206,8 +251,7 @@ fn a_smooth_crossing_is_located_inside_the_step() {
 fn a_condition_that_clears_in_time_trips_nothing() {
     let run = |fault_duration: f64| {
         let mut system = network();
-        let relay =
-            Relay::under_voltage("uv1", 1, 0.85, 0.4, EventKind::BranchTrip { branch: 2 });
+        let relay = Relay::under_voltage("uv1", 1, 0.85, 0.4, EventKind::BranchTrip { branch: 2 });
         let opts = options(
             5.0,
             vec![
@@ -221,7 +265,11 @@ fn a_condition_that_clears_in_time_trips_nothing() {
         report.relay_actions.len()
     };
 
-    assert_eq!(run(0.2), 0, "a fault cleared inside the delay must trip nothing");
+    assert_eq!(
+        run(0.2),
+        0,
+        "a fault cleared inside the delay must trip nothing"
+    );
     assert_eq!(run(0.9), 1, "a fault that outlasts the delay must trip");
 }
 
@@ -235,7 +283,10 @@ fn a_relay_can_watch_a_machine_and_fires_once() {
         watch: Watch::UnitSpeed { unit: 0 },
         trigger: Trigger::Above { threshold: 1.002 },
         delay: 0.05,
-        action: EventKind::LoadStep { bus: 1, ds: Complex::new(-0.2, 0.0) },
+        action: EventKind::LoadStep {
+            bus: 1,
+            ds: Complex::new(-0.2, 0.0),
+        },
         repeating: false,
     };
     let opts = options(
@@ -258,7 +309,10 @@ fn a_relay_can_watch_a_machine_and_fires_once() {
         .windows(2)
         .filter(|w| (w[0] < 1.002) != (w[1] < 1.002))
         .count();
-    assert!(crossings > 2, "the speed should cross the threshold more than once: {crossings}");
+    assert!(
+        crossings > 2,
+        "the speed should cross the threshold more than once: {crossings}"
+    );
 }
 
 /// A relay naming something that does not exist is dropped and named, not
@@ -305,7 +359,10 @@ fn relays_are_inert_when_there_are_none() {
     let with = trajectory(vec![quiet]);
     assert_eq!(without.len(), with.len());
     for (a, b) in without.iter().zip(with.iter()) {
-        assert_eq!(a.to_bits(), b.to_bits(), "an inert relay must change nothing");
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "an inert relay must change nothing"
+        );
     }
 }
-

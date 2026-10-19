@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gridoxide::cgmes::{cgmes_to_network, load_profiles, CgmesNetwork, TapRegulationReport};
+use gridoxide::cgmes::{CgmesNetwork, TapRegulationReport, cgmes_to_network, load_profiles};
 use gridoxide::outerloop::RegulationMode;
 
 fn network(dir: &str) -> Option<CgmesNetwork> {
@@ -45,18 +45,28 @@ fn svedala_reads_all_eleven_voltage_controls() {
     };
     assert_eq!(
         net.tap_report,
-        TapRegulationReport { converted: 11, ..Default::default() },
+        TapRegulationReport {
+            converted: 11,
+            ..Default::default()
+        },
         "everything Svedala declares should convert, with nothing skipped"
     );
     assert_eq!(net.regulation.len(), 11);
-    assert!(net.regulation.iter().all(|r| r.mode == RegulationMode::Voltage));
+    assert!(
+        net.regulation
+            .iter()
+            .all(|r| r.mode == RegulationMode::Voltage)
+    );
     assert!(net.regulation.iter().all(|r| r.enabled));
 
     // The four distinct targets the SSH states, converted against each
     // controlled bus's own nominal voltage: 129.5 kV on a 135 kV bus, 130 on
     // 135, 11 on 11, 51.6 on 51.6.
-    let mut targets: Vec<String> =
-        net.regulation.iter().map(|r| format!("{:.6}", r.target)).collect();
+    let mut targets: Vec<String> = net
+        .regulation
+        .iter()
+        .map(|r| format!("{:.6}", r.target))
+        .collect();
     targets.sort();
     targets.dedup();
     assert_eq!(targets, ["0.959259", "0.962963", "1.000000", "1.032000"]);
@@ -83,12 +93,19 @@ fn fullgrid_reads_both_modes_and_counts_the_disabled() {
     };
     assert_eq!(
         net.tap_report,
-        TapRegulationReport { converted: 3, disabled: 4, ..Default::default() },
+        TapRegulationReport {
+            converted: 3,
+            disabled: 4,
+            ..Default::default()
+        },
         "three enabled controls, four switched off — and nothing unresolved"
     );
 
-    let voltage: Vec<_> =
-        net.regulation.iter().filter(|r| r.mode == RegulationMode::Voltage).collect();
+    let voltage: Vec<_> = net
+        .regulation
+        .iter()
+        .filter(|r| r.mode == RegulationMode::Voltage)
+        .collect();
     let power: Vec<_> = net
         .regulation
         .iter()
@@ -99,8 +116,16 @@ fn fullgrid_reads_both_modes_and_counts_the_disabled() {
 
     // 10.5 kV on a bus whose own nominal is 10.5 kV, so exactly 1.0 pu — and
     // the deadband, 0.5 kV against the same base, is 0.047619.
-    assert!((voltage[0].target - 1.0).abs() < 1e-12, "{}", voltage[0].target);
-    assert!((voltage[0].deadband - 0.5 / 10.5).abs() < 1e-12, "{}", voltage[0].deadband);
+    assert!(
+        (voltage[0].target - 1.0).abs() < 1e-12,
+        "{}",
+        voltage[0].target
+    );
+    assert!(
+        (voltage[0].deadband - 0.5 / 10.5).abs() < 1e-12,
+        "{}",
+        voltage[0].deadband
+    );
 
     // -65 MW on a 100 MVA base, deadband 35 MW. `targetValueUnitMultiplier`
     // is "M" and covers both fields — powsybl's own SSH export writes it that
@@ -112,8 +137,14 @@ fn fullgrid_reads_both_modes_and_counts_the_disabled() {
     }
     // Both shifters hold the *same* flow, which is what makes FullGrid the
     // shared-control case the phase loop has to size jointly.
-    assert_eq!(power[0].mode, power[1].mode, "both should regulate one branch terminal");
-    assert_ne!(power[0].transformer, power[1].transformer, "on two different transformers");
+    assert_eq!(
+        power[0].mode, power[1].mode,
+        "both should regulate one branch terminal"
+    );
+    assert_ne!(
+        power[0].transformer, power[1].transformer,
+        "on two different transformers"
+    );
 }
 
 /// A control that exists but is switched off is data, not an error. PowerFlow's
@@ -125,8 +156,17 @@ fn a_disabled_control_is_counted_not_converted() {
         eprintln!("skipping: PowerFlow fixture not checked out");
         return;
     };
-    assert_eq!(net.tap_report, TapRegulationReport { disabled: 1, ..Default::default() });
-    assert!(net.regulation.is_empty(), "a disabled control must not become a live one");
+    assert_eq!(
+        net.tap_report,
+        TapRegulationReport {
+            disabled: 1,
+            ..Default::default()
+        }
+    );
+    assert!(
+        net.regulation.is_empty(),
+        "a disabled control must not become a live one"
+    );
     assert_eq!(
         net.tap_changers.iter().filter(|c| c.is_some()).count(),
         1,
@@ -144,7 +184,11 @@ fn a_changer_with_no_control_yields_nothing_and_is_not_counted() {
         eprintln!("skipping: SmallGrid fixture not checked out");
         return;
     };
-    assert_eq!(net.tap_report, TapRegulationReport::default(), "nothing to report at all");
+    assert_eq!(
+        net.tap_report,
+        TapRegulationReport::default(),
+        "nothing to report at all"
+    );
     assert!(net.regulation.is_empty());
     assert_eq!(net.tap_changers.iter().filter(|c| c.is_some()).count(), 10);
 }
@@ -163,8 +207,14 @@ fn an_active_power_target_names_a_branch_this_conversion_has() {
         let n_branches = net.lines.len() + net.transformers.len();
         match net.regulation[0].mode {
             RegulationMode::ActivePower { branch, .. } => {
-                assert!(branch < n_branches, "{name}: branch {branch} of {n_branches}");
-                assert!(branch >= net.lines.len(), "{name}: a PST regulates a transformer's flow");
+                assert!(
+                    branch < n_branches,
+                    "{name}: branch {branch} of {n_branches}"
+                );
+                assert!(
+                    branch >= net.lines.len(),
+                    "{name}: a PST regulates a transformer's flow"
+                );
             }
             m => panic!("{name}: expected an active-power control, got {m:?}"),
         }

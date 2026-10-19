@@ -1,6 +1,6 @@
-use gridoxide::network::{build_ybus, linear_initial_guess, power_injections, YBusSparse};
+use gridoxide::network::{YBusSparse, build_ybus, linear_initial_guess, power_injections};
 use gridoxide::outerloop::{OuterLoop, ReactiveLimits, SolveContext};
-use gridoxide::solver::{newton_raphson, IslandReport, IslandStatus, JacobianBackend};
+use gridoxide::solver::{IslandReport, IslandStatus, JacobianBackend, newton_raphson};
 use gridoxide::types::{Bus, BusType, Line};
 
 /// Reactive-limit enforcement is one outer loop among the list
@@ -20,7 +20,15 @@ fn enforcing_q_limits(
     let mut ctx = SolveContext::new(buses, &mut ybus);
 
     let mut list: Vec<&mut dyn OuterLoop> = vec![&mut qlim];
-    gridoxide::outerloop::solve_with_loops(&mut ctx, tol, max_iter, backend, &mut list, max_outer_iter).0
+    gridoxide::outerloop::solve_with_loops(
+        &mut ctx,
+        tol,
+        max_iter,
+        backend,
+        &mut list,
+        max_outer_iter,
+    )
+    .0
 }
 
 /// The same 3-bus slack/PV/PQ network as `tests/powerflow_test.rs`, except
@@ -31,22 +39,67 @@ fn enforcing_q_limits(
 fn three_bus_tight_q_min() -> (Vec<Bus>, Vec<Line>) {
     let buses = vec![
         Bus {
-            idx: 0, bus_type: BusType::Slack, voltage_mag: 1.06, voltage_ang: 0.0,
-            p_spec: 0.0, q_spec: 0.0, q_min: -999.0, q_max: 999.0, u_rated: 1.0, zip_terms: vec![],
+            idx: 0,
+            bus_type: BusType::Slack,
+            voltage_mag: 1.06,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            q_min: -999.0,
+            q_max: 999.0,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
         Bus {
-            idx: 1, bus_type: BusType::PV, voltage_mag: 1.04, voltage_ang: 0.0,
-            p_spec: 0.5, q_spec: 0.0, q_min: -0.25, q_max: 0.5, u_rated: 1.0, zip_terms: vec![],
+            idx: 1,
+            bus_type: BusType::PV,
+            voltage_mag: 1.04,
+            voltage_ang: 0.0,
+            p_spec: 0.5,
+            q_spec: 0.0,
+            q_min: -0.25,
+            q_max: 0.5,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
         Bus {
-            idx: 2, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-            p_spec: -0.6, q_spec: -0.25, q_min: -999.0, q_max: 999.0, u_rated: 1.0, zip_terms: vec![],
+            idx: 2,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: -0.6,
+            q_spec: -0.25,
+            q_min: -999.0,
+            q_max: 999.0,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03, g_shunt: 0.0 },
-        Line { from: 0, to: 2, r: 0.08, x: 0.24, b_shunt: 0.025, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.06, x: 0.18, b_shunt: 0.02, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.03,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.08,
+            x: 0.24,
+            b_shunt: 0.025,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.06,
+            x: 0.18,
+            b_shunt: 0.02,
+            g_shunt: 0.0,
+        },
     ];
     (buses, lines)
 }
@@ -59,11 +112,16 @@ fn test_unconstrained_violates_q_min() {
     newton_raphson(&mut buses, &ybus, 1e-6, 20);
 
     let (_, q_calc) = power_injections(&buses, &ybus);
-    assert_eq!(buses[1].bus_type, BusType::PV, "plain newton_raphson never switches bus types");
+    assert_eq!(
+        buses[1].bus_type,
+        BusType::PV,
+        "plain newton_raphson never switches bus types"
+    );
     assert!(
         q_calc[1] < buses[1].q_min,
         "fixture assumption broken: bus 1's unconstrained Q ({}) should violate q_min ({})",
-        q_calc[1], buses[1].q_min
+        q_calc[1],
+        buses[1].q_min
     );
 }
 
@@ -81,9 +139,20 @@ fn test_q_limit_enforcement_switches_pv_to_pq() {
         let islands = enforcing_q_limits(&mut buses, &ybus, 1e-6, 20, backend, 10);
 
         assert_eq!(islands.len(), 1, "backend {backend:?}");
-        assert_eq!(islands[0].status, IslandStatus::Converged, "backend {backend:?}");
-        assert_eq!(buses[1].bus_type, BusType::PQ, "bus 1 should switch PV -> PQ, backend {backend:?}");
-        assert!((buses[1].q_spec - (-0.25)).abs() < 1e-12, "q_spec should be pinned at q_min, backend {backend:?}");
+        assert_eq!(
+            islands[0].status,
+            IslandStatus::Converged,
+            "backend {backend:?}"
+        );
+        assert_eq!(
+            buses[1].bus_type,
+            BusType::PQ,
+            "bus 1 should switch PV -> PQ, backend {backend:?}"
+        );
+        assert!(
+            (buses[1].q_spec - (-0.25)).abs() < 1e-12,
+            "q_spec should be pinned at q_min, backend {backend:?}"
+        );
 
         let (p_calc, q_calc) = power_injections(&buses, &ybus);
         // P is unaffected by the switch (same P-mismatch equation whether PV or PQ).
@@ -91,10 +160,22 @@ fn test_q_limit_enforcement_switches_pv_to_pq() {
         // Q should now sit exactly at the clamped limit.
         assert!((q_calc[1] - (-0.25)).abs() < 1e-6, "backend {backend:?}");
         // Values pinned from a known-good run (all three backends agree exactly).
-        assert!((buses[1].voltage_mag - 1.043469).abs() < 1e-5, "backend {backend:?}");
-        assert!((buses[1].voltage_ang - 0.013207).abs() < 1e-5, "backend {backend:?}");
-        assert!((buses[2].voltage_mag - 1.005454).abs() < 1e-5, "backend {backend:?}");
-        assert!((buses[2].voltage_ang - (-0.043577)).abs() < 1e-5, "backend {backend:?}");
+        assert!(
+            (buses[1].voltage_mag - 1.043469).abs() < 1e-5,
+            "backend {backend:?}"
+        );
+        assert!(
+            (buses[1].voltage_ang - 0.013207).abs() < 1e-5,
+            "backend {backend:?}"
+        );
+        assert!(
+            (buses[2].voltage_mag - 1.005454).abs() < 1e-5,
+            "backend {backend:?}"
+        );
+        assert!(
+            (buses[2].voltage_ang - (-0.043577)).abs() < 1e-5,
+            "backend {backend:?}"
+        );
     }
 }
 
@@ -105,22 +186,67 @@ fn test_q_limit_enforcement_no_violation_matches_unconstrained() {
     // the converged answer at all.
     let mut buses = vec![
         Bus {
-            idx: 0, bus_type: BusType::Slack, voltage_mag: 1.06, voltage_ang: 0.0,
-            p_spec: 0.0, q_spec: 0.0, q_min: -999.0, q_max: 999.0, u_rated: 1.0, zip_terms: vec![],
+            idx: 0,
+            bus_type: BusType::Slack,
+            voltage_mag: 1.06,
+            voltage_ang: 0.0,
+            p_spec: 0.0,
+            q_spec: 0.0,
+            q_min: -999.0,
+            q_max: 999.0,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
         Bus {
-            idx: 1, bus_type: BusType::PV, voltage_mag: 1.04, voltage_ang: 0.0,
-            p_spec: 0.5, q_spec: 0.0, q_min: -0.5, q_max: 0.5, u_rated: 1.0, zip_terms: vec![],
+            idx: 1,
+            bus_type: BusType::PV,
+            voltage_mag: 1.04,
+            voltage_ang: 0.0,
+            p_spec: 0.5,
+            q_spec: 0.0,
+            q_min: -0.5,
+            q_max: 0.5,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
         Bus {
-            idx: 2, bus_type: BusType::PQ, voltage_mag: 1.0, voltage_ang: 0.0,
-            p_spec: -0.6, q_spec: -0.25, q_min: -999.0, q_max: 999.0, u_rated: 1.0, zip_terms: vec![],
+            idx: 2,
+            bus_type: BusType::PQ,
+            voltage_mag: 1.0,
+            voltage_ang: 0.0,
+            p_spec: -0.6,
+            q_spec: -0.25,
+            q_min: -999.0,
+            q_max: 999.0,
+            u_rated: 1.0,
+            zip_terms: vec![],
         },
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.03, g_shunt: 0.0 },
-        Line { from: 0, to: 2, r: 0.08, x: 0.24, b_shunt: 0.025, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.06, x: 0.18, b_shunt: 0.02, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.03,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 0,
+            to: 2,
+            r: 0.08,
+            x: 0.24,
+            b_shunt: 0.025,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.06,
+            x: 0.18,
+            b_shunt: 0.02,
+            g_shunt: 0.0,
+        },
     ];
     let ybus = build_ybus(3, &lines, &[]).finish();
     linear_initial_guess(&mut buses, &ybus);
@@ -128,7 +254,11 @@ fn test_q_limit_enforcement_no_violation_matches_unconstrained() {
 
     assert_eq!(islands.len(), 1);
     assert_eq!(islands[0].status, IslandStatus::Converged);
-    assert_eq!(buses[1].bus_type, BusType::PV, "no violation, should stay PV");
+    assert_eq!(
+        buses[1].bus_type,
+        BusType::PV,
+        "no violation, should stay PV"
+    );
     // Same expected voltages as tests/powerflow_test.rs's unconstrained run.
     assert!((buses[1].voltage_mag - 1.04).abs() < 1e-5);
     assert!((buses[1].voltage_ang - 0.014349).abs() < 1e-5);

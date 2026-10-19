@@ -34,12 +34,14 @@
 
 use crate::opf::Solver;
 
-use super::crac::{Crac, InstantKind, State};
-use super::evaluate::{evaluate_with, Network, Resolution};
+use super::automaton::{AutomatonResult, simulate};
+use super::crac::{Crac, InstantKind, RangeActionKind, State};
+use super::evaluate::{
+    Network, PerimeterResult, Resolution, SecurityResult, evaluate_model, evaluate_with,
+};
 use super::linear::Setpoint;
-use super::automaton::{simulate, AutomatonResult};
 use super::mnec::Baseline;
-use super::search::{search, SearchOptions, SearchResult};
+use super::search::{SearchOptions, SearchResult, objective_of, search, search_with_open};
 
 /// What one perimeter was told to do.
 #[derive(Clone, Debug)]
@@ -93,6 +95,61 @@ pub struct ScenarioPlan {
 }
 
 /// The complete answer.
+/// Which optimization steps actually ran, and how each turned out.
+///
+/// The reference reports this as a sentence and its Cucumber suite asserts it
+/// 171 times — more than any other single step — because it is the one thing a
+/// margin cannot tell you: whether the answer in front of you is the plan the
+/// optimizer wanted, the plan it fell back to, or the network untouched.
+///
+/// The strings are the reference's own, from `OptimizationStepsExecuted`, and
+/// they are reproduced verbatim rather than paraphrased: they are an interface,
+/// not prose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StepsExecuted {
+    /// One preventive optimization, kept.
+    #[default]
+    FirstPreventiveOnly,
+    /// One preventive optimization, and it lost ground — so the plan was
+    /// thrown away and the untouched network reported.
+    FirstPreventiveFellBackToInitial,
+    /// A second preventive pass ran and beat the first.
+    SecondPreventiveImproved,
+    /// A second preventive pass ran and did not beat the first, so the first
+    /// pass's answer stands. Running it and declining it is not a failure —
+    /// it is the check working.
+    SecondPreventiveFellBackToFirst,
+    /// A second preventive pass ran and the finished plan still lost ground to
+    /// doing nothing.
+    SecondPreventiveFellBackToInitial,
+}
+
+impl StepsExecuted {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstPreventiveOnly => "The RAO only went through first preventive",
+            Self::FirstPreventiveFellBackToInitial => {
+                "First preventive fell back to initial situation"
+            }
+            Self::SecondPreventiveImproved => "Second preventive improved first preventive results",
+            Self::SecondPreventiveFellBackToFirst => {
+                "Second preventive fell back to first preventive results"
+            }
+            Self::SecondPreventiveFellBackToInitial => {
+                "Second preventive fell back to initial situation"
+            }
+        }
+    }
+
+    /// The same step, once the plan has been thrown away.
+    fn fell_back(self) -> Self {
+        match self {
+            Self::FirstPreventiveOnly => Self::FirstPreventiveFellBackToInitial,
+            _ => Self::SecondPreventiveFellBackToInitial,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub preventive: PerimeterPlan,
@@ -104,6 +161,8 @@ pub struct Plan {
     /// Worst margin anywhere before and after.
     pub initial_margin_mw: f64,
     pub final_margin_mw: f64,
+    /// Which optimization steps ran, and how each turned out.
+    pub steps: StepsExecuted,
 }
 
 impl Plan {
@@ -120,6 +179,26 @@ impl Plan {
         std::iter::once(&self.preventive)
             .chain(self.scenarios.iter().flat_map(|s| s.perimeters.iter()))
     }
+
+    /// What this plan spends, as `(network actions, range actions moved)` —
+    /// the two lists [`Costly::activation`](super::costly::Costly::activation)
+    /// prices.
+    ///
+    /// Repeats are kept in both: activation is billed per **state**, so one
+    /// action taken after two contingencies is two activations, and a shifter
+    /// moved preventively and again curatively is two movements. Distance is in
+    /// taps for a phase shifter, the unit `variationCosts` is stated in.
+    ///
+    /// Exposed because the gate computes the same thing independently, and two
+    /// implementations of one question should be asserted equal rather than
+    /// trusted to stay so. They were changed together once — a fix removed a
+    /// `dedup()` from each — which is exactly the situation in which they drift.
+    pub fn spent(&self, crac: &Crac) -> (Vec<usize>, Vec<(usize, f64)>) {
+        (
+            activated_by(&self.preventive, &self.scenarios),
+            moved_by(crac, &self.preventive, &self.scenarios),
+        )
+    }
 }
 
 /// Run the whole optimization.
@@ -134,8 +213,13 @@ pub fn run(
 
     // Which curative states can actually be acted on.
     let actionable = |state: &State| -> bool {
-        crac.network_actions.iter().any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
-            || crac.range_actions.iter().any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
+        crac.network_actions
+            .iter()
+            .any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
+            || crac
+                .range_actions
+                .iter()
+                .any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
     };
 
     // The preventive perimeter: base case, every outage state, and any curative
@@ -179,22 +263,15 @@ pub fn run(
     // constraint exists to forbid.
     let options = &with_mnec_baseline(crac, network, resolution, options);
 
-    let preventive = search(crac, network, resolution, &preventive_states, solver, options);
-    let mut plan_preventive = PerimeterPlan {
-        states: preventive_states.clone(),
-        network_actions: preventive.network_actions.clone(),
-        setpoints: preventive.setpoints.clone(),
-        initial_margin_mw: preventive.initial_margin_mw,
-        final_margin_mw: preventive.final_margin_mw,
-        leaves: preventive.leaves,
-        open_branches: preventive.open_branches.clone(),
-        buses: preventive.buses.clone(),
-        transformers: preventive.transformers.clone(),
-    };
-
-    // Everything downstream sees the preventive decisions already taken.
-    let carried_open = preventive.open_branches.clone();
-    let carried_transformers = preventive.transformers.clone();
+    let preventive = search(
+        crac,
+        network,
+        resolution,
+        &preventive_states,
+        solver,
+        options,
+    );
+    let mut plan_preventive = perimeter_plan(&preventive, preventive_states.clone());
 
     // A curative perimeter does not search for the best answer it can find. It
     // searches until it is **better than preventive**, by a stated margin, and
@@ -212,130 +289,225 @@ pub fn run(
     //
     // Under `SECURE_FLOW` the target is 0 for every perimeter, so whatever the
     // caller set stands.
-    let curative_target = options.stop_at_target.unwrap_or_else(|| {
-        let target = preventive.final_objective + options.curative_min_obj_improvement;
-        // `enforce-curative-security` additionally demands a secure perimeter,
-        // which can only make the target harder to reach.
-        if options.enforce_curative_security { target.max(0.0) } else { target }
-    });
-    let options = &SearchOptions { stop_at_target: Some(curative_target), ..options.clone() };
+    let mut scenarios =
+        scenarios_after(crac, network, resolution, solver, options, &preventive, &[]);
 
-    let mut scenarios = Vec::new();
-    for (contingency, _) in crac.contingencies.iter().enumerate() {
-        let mut curative_instants: Vec<usize> = states
-            .iter()
-            .filter(|s| s.contingency == Some(contingency))
-            .filter(|s| crac.instants[s.instant].kind == InstantKind::Curative)
-            .filter(|s| actionable(s))
-            .map(|s| s.instant)
-            .collect();
-        curative_instants.sort_unstable();
-        curative_instants.dedup();
+    // Second preventive: optimize the preventive perimeter again, this time
+    // able to see what the curative stage could and could not do about the
+    // constraints the first pass left it.
+    // Which steps ran, narrowed as each one decides.
+    let mut steps = StepsExecuted::FirstPreventiveOnly;
 
-        // Automatons fire before anything curative is decided, and what they
-        // leave behind is what the curative perimeters see.
-        let mut open = carried_open.clone();
-        let mut transformers = carried_transformers.clone();
-        let automatons = {
-            let view = Network {
-                buses: network.buses,
-                lines: network.lines,
-                transformers: &transformers,
-                branch_ids: network.branch_ids,
-                bus_ids: network.bus_ids,
-                initially_open: network.initially_open,
-                bus_countries: network.bus_countries,
-                shunts: network.shunts,
-                tap_changers: network.tap_changers,
-                base_mva: network.base_mva,
-            };
-            simulate(crac, &view, resolution, contingency, &open, &transformers)
-        };
-        if let Some(result) = &automatons {
-            open = result.open_branches.clone();
-            transformers = result.transformers.clone();
+    // The plan as it stands, against doing nothing. Needed twice: to decide
+    // whether a cost increase should trigger a second pass, and — at the very
+    // end — whether the finished plan is worth keeping at all.
+    let all_states = crac.states();
+    let untouched = assess(crac, network, resolution, network.initially_open, options);
+    // Doing nothing costs nothing.
+    let before = objective_of(crac, &untouched, &all_states, &[], &[], &options.linear);
+    // The **whole plan's** actions, not none of them. Under a cost objective
+    // this is the difference between weighing a plan and weighing it as though
+    // it were free — and this judgement decides whether a second preventive
+    // pass runs, whether it is kept, and whether the finished plan is worse
+    // than doing nothing. That last guard is the one a cost objective needs
+    // most: "spend ten and gain nothing" is its characteristic failure, and it
+    // is invisible if the ten is not counted.
+    let judge = |p: &PerimeterPlan, s: &[ScenarioPlan]| {
+        objective_of(
+            crac,
+            &final_assessment(crac, network, resolution, p, s, options),
+            &all_states,
+            &activated_by(p, s),
+            &moved_by(crac, p, s),
+            &options.linear,
+        )
+    };
+    let first_objective = judge(&plan_preventive, &scenarios);
+
+    if let Some(second) = second_preventive(
+        crac,
+        network,
+        resolution,
+        solver,
+        options,
+        &preventive,
+        &scenarios,
+        first_objective < before - 1e-6,
+    ) {
+        // The curative range actions are **not** searched again. The second
+        // pass has just decided them on the whole plan's objective, and that is
+        // the judgement the reference keeps.
+        let after = scenarios_after(
+            crac,
+            network,
+            resolution,
+            solver,
+            options,
+            &second,
+            &second.held_setpoints,
+        );
+        // Kept only if the whole plan it leads to is better, measured the same
+        // way `postCheckResults` measures the plan against doing nothing. A
+        // second preventive that improves its own perimeter and costs a
+        // curative one more than it gains is not an improvement, and the first
+        // pass is a perfectly good answer to fall back to.
+        // Ran, and not yet kept. Running a second pass and declining it is a
+        // different outcome from never running one, and the reference reports
+        // the difference.
+        steps = StepsExecuted::SecondPreventiveFellBackToFirst;
+        let second_plan = perimeter_plan(&second, preventive_states.clone());
+        if judge(&second_plan, &after) > first_objective + 1e-6 {
+            steps = StepsExecuted::SecondPreventiveImproved;
+            plan_preventive = second_plan;
+            scenarios = after;
         }
-        if curative_instants.is_empty() && automatons.is_none() {
-            continue;
-        }
-        let mut perimeters = Vec::new();
-        for instant in curative_instants {
-            let state = State { instant, contingency: Some(contingency) };
-            let view = Network {
-                buses: network.buses,
-                lines: network.lines,
-                transformers: &transformers,
-                branch_ids: network.branch_ids,
-                bus_ids: network.bus_ids,
-                initially_open: network.initially_open,
-                bus_countries: network.bus_countries,
-                shunts: network.shunts,
-                tap_changers: network.tap_changers,
-                base_mva: network.base_mva,
-            };
-            let result = curative_search(
-                crac, &view, resolution, &[state.clone()], solver, options, &open,
-            );
-            let mut in_force = open.clone();
-            in_force.extend(result.open_branches.iter().copied());
-            in_force.sort_unstable();
-            in_force.dedup();
-            perimeters.push(PerimeterPlan {
-                states: vec![state],
-                network_actions: result.network_actions.clone(),
-                setpoints: result.setpoints.clone(),
-                initial_margin_mw: result.initial_margin_mw,
-                final_margin_mw: result.final_margin_mw,
-                leaves: result.leaves,
-                open_branches: in_force.clone(),
-                buses: result.buses.clone(),
-                transformers: result.transformers.clone(),
-            });
-            open = in_force;
-            transformers = result.transformers;
-        }
-        scenarios.push(ScenarioPlan { contingency, automatons, perimeters });
     }
 
     // The worst margin after everything, measured once over every state with
     // the preventive decisions in place. Curative decisions apply only in their
     // own scenario, so each scenario's own perimeters carry those figures.
-    let final_margin = plan_preventive
-        .final_margin_mw
-        .min(
-            scenarios
-                .iter()
-                .flat_map(|s| s.perimeters.iter())
-                .map(|p| p.final_margin_mw)
-                .fold(f64::INFINITY, f64::min),
-        )
-        .min(
-            scenarios
-                .iter()
-                .filter_map(|s| s.automatons.as_ref())
-                .map(|a| a.final_margin_mw)
-                .fold(f64::INFINITY, f64::min),
-        );
+    // The preventive perimeter's margin over **the states it governs**, not over
+    // every state it looked at.
+    //
+    // It looked at all of them — that is what the second pass is for — but a
+    // curative CNEC it read in the preventive network is one whose curative
+    // perimeter has not run yet, and that perimeter's own figure is in the
+    // minimum below. Counting the preventive reading too judges the plan on a
+    // network it never claims to produce. `preventive_states` is the honest set:
+    // the base case, every outage state, and the curative states nothing can act
+    // on, which are pulled forward for exactly this reason.
+    // Measured through [`final_assessment`], which is the one place that knows
+    // **which network each state is actually in**: its own curative perimeter's
+    // where it has one, its contingency's automatons' where it does not, and the
+    // preventive one otherwise.
+    //
+    // Assembled by hand here before, as the preventive reading over the states
+    // the preventive perimeter governs, folded together with each perimeter's own
+    // reported figure. That is right for every state except one kind: a curative
+    // state **pulled forward** because no curative action can reach it, in a
+    // contingency that nonetheless has a forced automaton. The pull-forward rule
+    // puts it in `preventive_states`, so it was read in the preventive network —
+    // as though its automaton never fired. On the reference's 3.4.1.12 that is
+    // `coBeFr3`, and it is the difference between the −66.67 the reference
+    // reports and a −100 that describes no network this plan produces.
+    let final_margin = final_assessment(
+        crac,
+        network,
+        resolution,
+        &plan_preventive,
+        &scenarios,
+        options,
+    )
+    .perimeters
+    .iter()
+    .filter_map(|p| p.min_optimized_margin(crac))
+    .fold(f64::INFINITY, f64::min);
     plan_preventive.states = preventive_states;
     pulled_forward.sort_unstable();
     pulled_forward.dedup();
 
-    Plan {
+    let plan = Plan {
         preventive: plan_preventive,
         scenarios,
         pulled_forward,
         initial_margin_mw: initial,
         final_margin_mw: final_margin,
+        steps,
+    };
+
+    // Having done all that, check it was worth doing.
+    //
+    // Every perimeter only ever accepts a candidate that improves *its own*
+    // objective, so it is tempting to conclude the plan cannot come out worse
+    // than the network it started from. It can, because the perimeters do not
+    // partition the harm. A preventive action is judged on the base case and
+    // the outage states; the damage it does to a **curative** state is invisible
+    // there, and by the time a curative perimeter sees it, the preventive
+    // decisions are fixed and it can only make the best of them. On the
+    // reference's scenario 1.4.4.2 the preventive perimeter improves itself from
+    // 590.6 to 681.7 MW by closing two circuits, and those closures take the
+    // curative state to −342; the curative perimeter recovers half of it and the
+    // plan still ends worse than doing nothing.
+    //
+    // So the last thing the reference does is compare the finished plan against
+    // the untouched network and, if the plan is worse, throw it away —
+    // `postCheckResults`, whose `handleCostIncrease` is passed `true` at every
+    // call site, so this is a rule rather than a setting. "First preventive fell
+    // back to initial situation" is what its own report calls the outcome.
+    //
+    // Compared on the **objective**, not on the megawatt margin: under an
+    // ampere objective two CNECs at different voltages order differently in the
+    // two units, and a monitored CNEC's violation is part of the cost the
+    // comparison is about.
+    // `before` was measured above, where the same comparison decided whether a
+    // second preventive pass was worth attempting.
+    let after = judge(&plan.preventive, &plan.scenarios);
+    if after < before - 1e-6 {
+        return unoptimized(network, &plan, initial, steps.fell_back());
+    }
+    plan
+}
+
+/// The plan that does nothing, reported as such.
+///
+/// Everything the optimizer chose is dropped and every perimeter is reported at
+/// the network as it arrived. The automatons go with it, which is the
+/// reference's own behaviour — `UnoptimizedRaoResultImpl` wraps the result from
+/// *before* they were simulated — and is worth flagging as a position rather
+/// than an accident: an automaton is not a choice, so an operator reading this
+/// plan is being told what the RAO decided, not what the equipment will do. No
+/// vendored scenario reaches this path with an automaton present, so the
+/// question has never been put.
+fn unoptimized(network: &Network<'_>, plan: &Plan, initial: f64, steps: StepsExecuted) -> Plan {
+    // `leaves` survives, alone among the fields. It is not a claim about the
+    // plan — it is the count of what the search evaluated on the way to
+    // deciding, and the search did evaluate them. Zeroing it would report that
+    // no work was done rather than that the work was rejected, and it is the
+    // one number a caller watching cost has to be able to trust.
+    let bare = |states: Vec<State>, leaves: usize| PerimeterPlan {
+        states,
+        network_actions: Vec::new(),
+        setpoints: Vec::new(),
+        initial_margin_mw: initial,
+        final_margin_mw: initial,
+        leaves,
+        open_branches: network.initially_open.to_vec(),
+        buses: network.buses.to_vec(),
+        transformers: network.transformers.to_vec(),
+    };
+    Plan {
+        preventive: bare(plan.preventive.states.clone(), plan.preventive.leaves),
+        scenarios: plan
+            .scenarios
+            .iter()
+            .map(|s| ScenarioPlan {
+                contingency: s.contingency,
+                automatons: None,
+                perimeters: s
+                    .perimeters
+                    .iter()
+                    .map(|p| bare(p.states.clone(), p.leaves))
+                    .collect(),
+            })
+            .collect(),
+        pulled_forward: plan.pulled_forward.clone(),
+        initial_margin_mw: initial,
+        final_margin_mw: initial,
+        steps,
     }
 }
 
 /// A search over a curative perimeter, with branches already open from earlier
 /// decisions.
 ///
-/// The open set has to be *inside* the leaf evaluation rather than applied to
-/// the network first, because a search leaf adds to it — and a branch opened
-/// twice is still one branch, which the union handles and a re-application
-/// would not.
+/// The set is **stated**, not applied to the network first. Writing
+/// `OPEN_BRANCH_Z` into a copy of the lines and searching the result looks
+/// equivalent and is not: a closing remedial action is expressed by removing a
+/// branch *from the open set*, so a set that has been emptied into the
+/// impedances leaves a close with nothing to remove and the branch open no
+/// matter what the action says. It does not fail — it evaluates as a change
+/// that does nothing, which is why the perimeter then reports that no remedial
+/// action was worth taking. See [`search_with_open`] for what that cost.
 fn curative_search(
     crac: &Crac,
     network: &Network<'_>,
@@ -345,46 +517,131 @@ fn curative_search(
     options: &SearchOptions,
     already_open: &[usize],
 ) -> SearchResult {
-    // No early return for an empty set. "Nothing is open" is a *result* here —
-    // an automaton that closes the file's only standby circuit produces exactly
-    // that — and handing the unmodified network back would let `search` re-derive
-    // the open set from `initially_open` and undo the closure. The set has to be
-    // stated, including when it is empty.
-    //
-    // Represent the already-open branches by removing them from the working
-    // copy, so the search's own candidates compose with them naturally.
-    let mut lines = network.lines.to_vec();
-    let mut transformers = network.transformers.to_vec();
-    for &branch in already_open {
-        if branch < lines.len() {
-            lines[branch].r = crate::topology::reduction::OPEN_BRANCH_Z;
-            lines[branch].x = crate::topology::reduction::OPEN_BRANCH_Z;
-            lines[branch].b_shunt = 0.0;
-            lines[branch].g_shunt = 0.0;
-        } else if let Some(t) = transformers.get_mut(branch - lines.len()) {
-            t.from_status = 0;
-            t.to_status = 0;
+    search_with_open(
+        crac,
+        network,
+        resolution,
+        perimeter,
+        solver,
+        options,
+        already_open,
+    )
+}
+
+/// Evaluate one network with the flow model the run is using.
+///
+/// The same choice [`search`](super::search) and [`automaton`](super::automaton)
+/// make, and for the same reason: what "the truth" means when an answer is
+/// judged has to be the model the answer will be reported in.
+fn assess(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    open: &[usize],
+    options: &SearchOptions,
+) -> SecurityResult {
+    let ac = super::evaluate::ac_options(network);
+    evaluate_model(
+        crac,
+        network,
+        resolution,
+        open,
+        options.linear.flow_model,
+        &ac,
+    )
+}
+
+/// The plan's own view of every state: each measured in the network *its* own
+/// decisions produced.
+///
+/// A preventive state is read in the post-preventive network, an `auto` state
+/// after that contingency's automatons, and a curative state after its curative
+/// perimeter. Three different networks, and reading a curative CNEC in the
+/// preventive one reports the overload the curative actions exist to remove.
+fn final_assessment(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    preventive: &PerimeterPlan,
+    scenarios: &[ScenarioPlan],
+    options: &SearchOptions,
+) -> SecurityResult {
+    let mut perimeters: Vec<PerimeterResult> = Vec::new();
+    let mut take = |result: SecurityResult, states: &[State]| {
+        for p in result.perimeters {
+            if states.contains(&p.state) && !perimeters.iter().any(|q| q.state == p.state) {
+                perimeters.push(p);
+            }
+        }
+    };
+
+    // Most specific first, so a state a curative perimeter governs is not taken
+    // from the preventive network that also reports it.
+    for scenario in scenarios {
+        for stage in scenario.perimeters.iter().rev() {
+            let net = Network {
+                buses: &stage.buses,
+                transformers: &stage.transformers,
+                ..*network
+            };
+            take(
+                assess(crac, &net, resolution, &stage.open_branches, options),
+                &stage.states,
+            );
+        }
+        if let Some(automatons) = &scenario.automatons {
+            let net = Network {
+                buses: &preventive.buses,
+                transformers: &automatons.transformers,
+                ..*network
+            };
+            // Every state of this contingency **at or after** the automatons,
+            // not only the auto ones.
+            //
+            // What the automatons leave behind stays behind: a curative instant
+            // of the same contingency sees that network too, unless a curative
+            // perimeter of its own has already claimed it — and those are taken
+            // first, just above, precisely so this can be the wider net.
+            //
+            // A contingency may have a forced automaton and nothing to decide
+            // curatively at all, and then it gets no curative perimeter. Claimed
+            // only for its auto states, its curative CNECs fall through to the
+            // preventive network at the end of this function and are read as
+            // though the automaton never fired. The reference's 3.4.1.12 is that
+            // case by construction — `coBeFr3` is "forced ARA and no CRA" in its
+            // own description — and it is the difference between a worst margin
+            // of −66.67 and one of −100.
+            let auto_states: Vec<State> = crac
+                .states()
+                .into_iter()
+                .filter(|s| s.contingency == Some(scenario.contingency))
+                .filter(|s| {
+                    matches!(
+                        crac.instants[s.instant].kind,
+                        InstantKind::Auto | InstantKind::Curative
+                    )
+                })
+                .collect();
+            take(
+                assess(crac, &net, resolution, &automatons.open_branches, options),
+                &auto_states,
+            );
         }
     }
-    let view = Network {
-        buses: network.buses,
-        lines: &lines,
-        transformers: &transformers,
-        branch_ids: network.branch_ids,
-        bus_ids: network.bus_ids,
-        // Empty, deliberately: the open state is already baked into
-        // `lines`/`transformers` above. Leaving the file's own list here
-        // would re-open branches a *closing* remedial action has just shut,
-        // because `evaluate` derives its open set from this field. That is
-        // silent — every margin stays self-consistent and the optimizer
-        // simply measures a network in which the automaton never acted.
-        initially_open: &[],
-        bus_countries: network.bus_countries,
-        shunts: network.shunts,
-        tap_changers: network.tap_changers,
-        base_mva: network.base_mva,
+    let net = Network {
+        buses: &preventive.buses,
+        transformers: &preventive.transformers,
+        ..*network
     };
-    search(crac, &view, resolution, perimeter, solver, options)
+    let rest = crac.states();
+    take(
+        assess(crac, &net, resolution, &preventive.open_branches, options),
+        &rest,
+    );
+    SecurityResult {
+        perimeters,
+        skipped: Vec::new(),
+    }
 }
 
 fn worst_margin(
@@ -423,4 +680,770 @@ fn with_mnec_baseline(
     options.linear.mnec.baseline =
         Baseline::measure(crac, network, resolution, options.linear.flow_model);
     options
+}
+
+/// Everything a preventive answer implies: the automatons it leaves to fire,
+/// and the curative perimeters that follow.
+///
+/// Extracted so it can run **twice** — once on the first preventive result and
+/// once on the second's — because the curative answer depends on the preventive
+/// one and comparing two preventive answers means comparing what each leads to,
+/// not just the preventive perimeter in isolation.
+#[allow(clippy::too_many_arguments)]
+fn scenarios_after(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    solver: &mut dyn Solver,
+    options: &SearchOptions,
+    preventive: &SearchResult,
+    decided: &[Setpoint],
+) -> Vec<ScenarioPlan> {
+    let states = crac.states();
+    let actionable = |state: &State| -> bool {
+        crac.network_actions
+            .iter()
+            .any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
+            || crac
+                .range_actions
+                .iter()
+                .any(|a| a.usage_rules.iter().any(|r| r.covers(state)))
+    };
+    let carried_open = preventive.open_branches.clone();
+    let carried_transformers = preventive.transformers.clone();
+    // The branch each decided action sits on, and the tap the perimeter it
+    // governs should start from.
+    let branch_of = |action: usize| -> Option<usize> {
+        let RangeActionKind::Pst { element, .. } = &crac.range_actions[action].kind else {
+            return None;
+        };
+        resolution.branch(element)
+    };
+    // Only what the second pass actually **moved**. `getActivatedRangeActions`
+    // is the reference's own word for it, and the distinction is load-bearing: a
+    // held column that did not move is sitting at the CRAC's `initialTap`, not at
+    // where the preventive stage left the machine. Applying its absolute value as
+    // a curative decision invents a move — on 1.4.1.5 a twelve-tap one, against a
+    // preventive answer of −7 — and that spurious move was the whole of the
+    // second curative action this rule was supposed to remove.
+    //
+    // An action the second pass left alone is simply absent from the plan: the
+    // curative state inherits whatever preventive chose, which is what "not
+    // activated" means.
+    // Two conditions, and the second is what a *chained* column needs.
+    //
+    // `moved()` is the reference's own `getActivatedRangeActions`: did this pass
+    // move the column at all. That alone is enough for an absolute range — on
+    // 1.4.1.5 `pst_fr_cra` sits untouched at its `initialTap`, and applying that
+    // absolute value would invent a twelve-tap curative move against a preventive
+    // answer of −7.
+    //
+    // A `relativeToPreviousInstant` column moves *because preventive moved*
+    // (the coupling row makes it follow), so `moved()` is true even when the
+    // curative state is doing nothing of its own. The second condition asks the
+    // question that actually matters: does it end somewhere other than where
+    // preventive left the machine? A column that tracks preventive exactly is
+    // inheriting a decision, not making one — the same distinction the rounding step draws
+    // when it rounds coupled columns together. 1.4.1.6 is 1.4.1.5 with exactly
+    // that range added, and it is the whole difference between them.
+    let preventive_tap = |action: usize| -> Option<i32> {
+        let branch = branch_of(action)?;
+        preventive
+            .setpoints
+            .iter()
+            .filter(|p| branch_of(p.action) == Some(branch))
+            .find_map(|p| p.tap)
+    };
+    let activated: Vec<&Setpoint> = decided
+        .iter()
+        .filter(|s| s.moved())
+        .filter(|s| match (s.tap, preventive_tap(s.action)) {
+            (Some(here), Some(there)) => here != there,
+            _ => true,
+        })
+        .collect();
+    let decided_taps: Vec<(usize, i32, f64)> = activated
+        .iter()
+        .filter_map(|s| Some((branch_of(s.action)?, s.tap?, s.value)))
+        .collect();
+    // Where each shifter stood before the decision, as the **CRAC's** angle for
+    // the tap the preventive stage left it on — not the transformer's own angle,
+    // which is in the opposite convention (`CRAC_ANGLE_SIGN`) and would make
+    // every comparison read "moved".
+    //
+    // Taken from the preventive perimeter's report for the same *machine*,
+    // whatever range action names it there: 1.4.1.5 states the two permissions
+    // as `pst_fr_pra` and `pst_fr_cra`, two actions on one shifter, the same
+    // identity the coupling row needed.
+    let before_decided: Vec<(usize, f64)> = activated
+        .iter()
+        .filter_map(|s| {
+            let RangeActionKind::Pst {
+                tap_to_angle,
+                initial_tap,
+                ..
+            } = &crac.range_actions[s.action].kind
+            else {
+                return None;
+            };
+            let branch = branch_of(s.action)?;
+            let tap = preventive
+                .setpoints
+                .iter()
+                .filter(|p| branch_of(p.action) == Some(branch))
+                .find_map(|p| p.tap)
+                .unwrap_or(*initial_tap);
+            let angle = tap_to_angle
+                .iter()
+                .find(|(t, _)| *t == tap)
+                .map(|(_, a)| *a)?;
+            Some((s.action, angle))
+        })
+        .collect();
+    let costly_objective = options.linear.objective_kind.costly().is_some();
+    // What a curative perimeter is searching *for*, or `None` when it is simply
+    // minimizing its own cost.
+    //
+    // Under a **margin** objective there is a target and it means something:
+    // `preventive.final_objective` is the worst margin over the preventive
+    // perimeter and a curative perimeter's is the worst margin over its own —
+    // both megawatts on one scale — so "beat it by `curative-min-obj-improvement`
+    // and stop" is a sentence about margins. The reasoning behind it is
+    // operational rather than mathematical: curative actions are carried out
+    // under time pressure by people who did not plan them, so an extra 40 A
+    // bought by a third switching operation is not worth having.
+    //
+    // Under a **cost** objective the two are not the same quantity at all. The
+    // preventive perimeter's cost carries whatever violation it could not clear
+    // — 52500 on the reference's 3.4.1.11 — while a single-state curative
+    // perimeter's carries only its own, a hundred times smaller. The target is
+    // then met before the perimeter has done anything, every curative perimeter
+    // stops at once, and the plan declines actions that pay for themselves
+    // several times over: on 3.4.1.11 the reference spends 735 twice on
+    // `closeBeFr8` and gridoxide spent nothing, having "reached" a target that
+    // was never about it.
+    //
+    // So a costly curative perimeter minimizes its own cost and stops when it
+    // cannot do better. That is not the weaker rule it looks like — security is
+    // enforced there by the violation penalty, and 1000 a megawatt dominates
+    // every activation these CRACs price.
+    let curative_target = if costly_objective {
+        options.stop_at_target
+    } else {
+        Some(options.stop_at_target.unwrap_or_else(|| {
+            let target = preventive.final_objective + options.curative_min_obj_improvement;
+            // `enforce-curative-security` additionally demands a secure
+            // perimeter, which can only make the target harder to reach.
+            if options.enforce_curative_security {
+                target.max(0.0)
+            } else {
+                target
+            }
+        }))
+    };
+    let options = &SearchOptions {
+        stop_at_target: curative_target,
+        max_depth: options.curative_max_depth.unwrap_or(options.max_depth),
+        linear: super::linear::LinearOptions {
+            decided: decided.iter().map(|s| s.action).collect(),
+            ..options.linear.clone()
+        },
+        ..options.clone()
+    };
+
+    // A curative perimeter gets its own depth where the configuration states
+    // one. The reference keeps `max-preventive-search-tree-depth` and
+    // `max-curative-search-tree-depth` apart because they answer different
+    // questions — how much may be planned, against how much may be carried out
+    // under time pressure — and this is the only layer that knows which
+    // perimeter it is about to search.
+
+    let mut scenarios = Vec::new();
+    for (contingency, _) in crac.contingencies.iter().enumerate() {
+        let mut curative_instants: Vec<usize> = states
+            .iter()
+            .filter(|s| s.contingency == Some(contingency))
+            .filter(|s| crac.instants[s.instant].kind == InstantKind::Curative)
+            .filter(|s| actionable(s))
+            .map(|s| s.instant)
+            .collect();
+        curative_instants.sort_unstable();
+        curative_instants.dedup();
+
+        // Automatons fire before anything curative is decided, and what they
+        // leave behind is what the curative perimeters see.
+        let mut open = carried_open.clone();
+        let mut transformers = carried_transformers.clone();
+        let automatons = {
+            let view = Network {
+                generation: network.generation,
+                buses: network.buses,
+                lines: network.lines,
+                transformers: &transformers,
+                branch_ids: network.branch_ids,
+                bus_ids: network.bus_ids,
+                initially_open: network.initially_open,
+                bus_countries: network.bus_countries,
+                shunts: network.shunts,
+                tap_changers: network.tap_changers,
+                base_mva: network.base_mva,
+            };
+            simulate(
+                crac,
+                &view,
+                resolution,
+                contingency,
+                &open,
+                &transformers,
+                options.linear.flow_model,
+            )
+        };
+        if let Some(result) = &automatons {
+            open = result.open_branches.clone();
+            transformers = result.transformers.clone();
+        }
+        // Then the decisions an upstream stage already made for these states —
+        // after the automatons, because a curative decision comes after them,
+        // and before the search, because the search must see the network its own
+        // answer will be measured in.
+        if !decided_taps.is_empty() {
+            super::search::apply_taps(
+                &mut transformers,
+                network.tap_changers,
+                network.lines.len(),
+                &decided_taps,
+            );
+        }
+        if curative_instants.is_empty() && automatons.is_none() {
+            continue;
+        }
+        let mut perimeters = Vec::new();
+        for instant in curative_instants {
+            let state = State {
+                instant,
+                contingency: Some(contingency),
+            };
+            let view = Network {
+                generation: network.generation,
+                buses: network.buses,
+                lines: network.lines,
+                transformers: &transformers,
+                branch_ids: network.branch_ids,
+                bus_ids: network.bus_ids,
+                initially_open: network.initially_open,
+                bus_countries: network.bus_countries,
+                shunts: network.shunts,
+                tap_changers: network.tap_changers,
+                base_mva: network.base_mva,
+            };
+            let mut result = curative_search(
+                crac,
+                &view,
+                resolution,
+                &[state.clone()],
+                solver,
+                options,
+                &open,
+            );
+            // The upstream decisions are this perimeter's too, and have to be
+            // *reported* as such: withholding them from the search stops the
+            // perimeter overruling the second pass, and must not also make the
+            // plan claim the shifter never moved.
+            for setpoint in &activated {
+                let Some((_, initial)) = before_decided.iter().find(|(a, _)| *a == setpoint.action)
+                else {
+                    continue;
+                };
+                result.setpoints.push(Setpoint {
+                    initial: *initial,
+                    ..(*setpoint).clone()
+                });
+            }
+            // The result's own set, not a union with what went in. A union
+            // would be safe only while a perimeter could never *close*
+            // anything: `result.open_branches` starts from `open` and the
+            // search removes from it, so re-adding `open` puts back exactly the
+            // branch a closing remedial action just shut.
+            let in_force = result.open_branches.clone();
+            perimeters.push(PerimeterPlan {
+                states: vec![state],
+                network_actions: result.network_actions.clone(),
+                setpoints: result.setpoints.clone(),
+                initial_margin_mw: result.initial_margin_mw,
+                final_margin_mw: result.final_margin_mw,
+                leaves: result.leaves,
+                open_branches: in_force.clone(),
+                buses: result.buses.clone(),
+                transformers: result.transformers.clone(),
+            });
+            open = in_force;
+            transformers = result.transformers;
+        }
+        scenarios.push(ScenarioPlan {
+            contingency,
+            automatons,
+            perimeters,
+        });
+    }
+    scenarios
+}
+
+/// Every network action a plan puts in force, anywhere in it.
+///
+/// Preventive, each contingency's automatons, and each curative perimeter, with
+/// **repeats kept**: activation is billed per state, so the same action taken
+/// after two contingencies is two activations. Only a cost objective reads
+/// this; a margin does not care how the network came to be the way it is.
+fn activated_by(preventive: &PerimeterPlan, scenarios: &[ScenarioPlan]) -> Vec<usize> {
+    let mut all: Vec<usize> = preventive.network_actions.clone();
+    for scenario in scenarios {
+        if let Some(automatons) = &scenario.automatons {
+            all.extend(&automatons.network_actions);
+        }
+        for perimeter in &scenario.perimeters {
+            all.extend(&perimeter.network_actions);
+        }
+    }
+    // Sorted for a stable answer, **not** deduped: activation is charged per
+    // state, so one action taken after two contingencies is paid for twice.
+    // The reference's 3.4.1.7 prices exactly that — `closeBeFr4` after
+    // `coBeFr2` and again after `coBeFr3`, 850 + 850 — and deduping here
+    // reports a plan at half what it costs, which is the one error a cost
+    // objective must not make.
+    all.sort_unstable();
+    all
+}
+
+/// Every range-action movement a plan makes, anywhere in it, as
+/// `(range action, distance)`.
+///
+/// The companion to [`activated_by`], and needed for the same reason: a cost
+/// counts what was *done*, and a plan that moves a shifter six taps has spent
+/// something no margin records. Without it the whole-plan judgement prices the
+/// network actions and treats every shifter as free, which is not a rounding —
+/// the reference's 3.4.3.3 turns on a difference of exactly one activation plus
+/// one tap, and a judge that sees neither declines the better plan.
+///
+/// Distance is in **taps** for a phase shifter, the unit `variationCosts` is
+/// stated in (see [`Costly::activation`](super::costly::Costly::activation)).
+/// A [`Setpoint`] carries the angle it started from rather than the tap, so the
+/// starting tap is recovered from the action's own table — the same table the
+/// optimizer used on the way in.
+///
+/// Repeats are kept, exactly as in `activated_by`: a shifter moved preventively
+/// and again curatively is two activations and two distances. 3.4.3.2 prices
+/// that at 20 + 5 x 15 preventively and 20 + 1 x 15 curatively, and says so.
+fn moved_by(
+    crac: &Crac,
+    preventive: &PerimeterPlan,
+    scenarios: &[ScenarioPlan],
+) -> Vec<(usize, f64)> {
+    // The tap whose angle is nearest `angle`, or `None` for an action whose
+    // set-point is not a tap at all — a redispatch travels in MW and its
+    // distance is the set-point difference.
+    let tap_at = |action: usize, angle: f64| -> Option<i32> {
+        let RangeActionKind::Pst { tap_to_angle, .. } = &crac.range_actions.get(action)?.kind
+        else {
+            return None;
+        };
+        tap_to_angle
+            .iter()
+            .min_by(|a, b| (a.1 - angle).abs().total_cmp(&(b.1 - angle).abs()))
+            .map(|(t, _)| *t)
+    };
+    let take = |all: &mut Vec<(usize, f64)>, plan: &PerimeterPlan| {
+        for s in plan.setpoints.iter().filter(|s| s.moved()) {
+            let distance = match (s.tap, tap_at(s.action, s.initial)) {
+                (Some(now), Some(was)) => f64::from(now - was),
+                _ => s.value - s.initial,
+            };
+            all.push((s.action, distance));
+        }
+    };
+    let mut all: Vec<(usize, f64)> = Vec::new();
+    take(&mut all, preventive);
+    for scenario in scenarios {
+        if let Some(automatons) = &scenario.automatons {
+            // An `AutomatonResult` reports where a range action ended, not where
+            // it began, so the distance is measured from the CRAC's own
+            // `initialTap` — the only starting point it states.
+            for &(action, value, tap) in &automatons.range_actions {
+                let distance = match (tap, crac.range_actions.get(action).map(|r| &r.kind)) {
+                    (Some(now), Some(RangeActionKind::Pst { initial_tap, .. })) => {
+                        f64::from(now - initial_tap)
+                    }
+                    _ => value,
+                };
+                all.push((action, distance));
+            }
+        }
+        for perimeter in &scenario.perimeters {
+            take(&mut all, perimeter);
+        }
+    }
+    all.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    all
+}
+
+/// One perimeter's answer, as the plan reports it.
+fn perimeter_plan(result: &SearchResult, states: Vec<State>) -> PerimeterPlan {
+    PerimeterPlan {
+        states,
+        network_actions: result.network_actions.clone(),
+        setpoints: result.setpoints.clone(),
+        initial_margin_mw: result.initial_margin_mw,
+        final_margin_mw: result.final_margin_mw,
+        leaves: result.leaves,
+        open_branches: result.open_branches.clone(),
+        buses: result.buses.clone(),
+        transformers: result.transformers.clone(),
+    }
+}
+
+/// Optimize the preventive perimeter a second time, now that the curative
+/// stage has shown what it can do.
+///
+/// # Why a second pass exists at all
+///
+/// The decomposition is sequential, and that is its one weakness. The first
+/// preventive perimeter is judged on the base case and the outage states, so a
+/// curative constraint that **no curative action can fix** is invisible to it —
+/// it is not in the perimeter, and the perimeter that does contain it comes
+/// later and cannot revisit preventive decisions. The result is a preventive
+/// answer that spends nothing on a problem only it could have solved.
+///
+/// So the reference runs the preventive perimeter again with three things
+/// changed, and this reproduces them:
+///
+/// - **Every CNEC is optimized**, whatever its state. That is the whole point:
+///   the curative constraints are now in front of the preventive optimizer.
+/// - **The automatons are held applied**, so it works on what they cannot fix
+///   rather than re-solving what they will.
+/// - **The curative decisions are held applied** too, for the same reason.
+///
+/// # What this does not do
+///
+/// The reference also **re-optimizes curative range actions** inside that same
+/// problem, which needs a set-point per range action *per state* — `A(r, s)`,
+/// which is not built here: this LP
+/// carries one set-point per action. So a shifter the CRAC allows in both
+/// instants is held at whatever the curative stage chose rather than re-tuned
+/// against the preventive answer, and four of the reference's fifteen
+/// second-preventive scenarios turn on exactly that. They are the ones that ask
+/// for one PST at two different taps.
+#[allow(clippy::too_many_arguments)]
+fn second_preventive(
+    crac: &Crac,
+    network: &Network<'_>,
+    resolution: &Resolution,
+    solver: &mut dyn Solver,
+    options: &SearchOptions,
+    preventive: &SearchResult,
+    scenarios: &[ScenarioPlan],
+    cost_increased: bool,
+) -> Option<SearchResult> {
+    if !options
+        .second_preventive
+        .runs(options, preventive, scenarios, cost_increased)
+    {
+        return None;
+    }
+
+    // The network the second pass starts from: the automatons' and the curative
+    // stage's decisions in force, the preventive stage's *not*. Those are what
+    // is being reconsidered.
+    //
+    // In force **where they are in force**, though, and not everywhere. This
+    // set governs the auto and curative states only; the preventive and outage
+    // ones keep the file's, because a curative decision has not been taken yet
+    // when they are measured. See [`Held`].
+    // The **delta**, not a set: what the automatons and the curative stage did
+    // to the network the preventive stage handed them. A delta because the set
+    // it applies to is not fixed — this pass is choosing the preventive
+    // switching while the delta is in force, and every candidate it tries
+    // changes what the curative states inherit. Stored as a set, a preventive
+    // action the pass takes would reach the preventive states and not the
+    // curative ones, and the two halves of the problem would describe different
+    // networks.
+    let mut opened: Vec<usize> = Vec::new();
+    let mut closed: Vec<usize> = Vec::new();
+    for scenario in scenarios {
+        // What that scenario ends up with, after its automatons and every
+        // curative perimeter in turn.
+        let after = scenario
+            .perimeters
+            .last()
+            .map(|p| &p.open_branches)
+            .or(scenario.automatons.as_ref().map(|a| &a.open_branches));
+        let Some(after) = after else { continue };
+        opened.extend(
+            after
+                .iter()
+                .filter(|b| !preventive.open_branches.contains(b))
+                .copied(),
+        );
+        closed.extend(
+            preventive
+                .open_branches
+                .iter()
+                .filter(|b| !after.contains(b))
+                .copied(),
+        );
+    }
+    // One network stands in for every contingency, so two scenarios can
+    // disagree about a branch. An open wins, as it does everywhere else here:
+    // it is the status quo the file states, and holding a branch closed for a
+    // contingency whose curative stage did not close it would invent capacity.
+    closed.retain(|b| !opened.contains(b));
+    opened.sort_unstable();
+    opened.dedup();
+    closed.sort_unstable();
+    closed.dedup();
+    let held = super::evaluate::Held {
+        open: opened,
+        close: closed,
+        // Filled in by the LP as it chooses them: a curative shifter's position
+        // is a variable of the second preventive problem, not an input to it.
+        taps: Vec::new(),
+        // The states that see it: everything at or after the automatons, which
+        // is where a curative decision has been taken. An **outage** state is
+        // not one of them — it is over before an automaton fires — and neither
+        // is the preventive state.
+        states: crac
+            .states()
+            .into_iter()
+            .filter(|s| {
+                matches!(
+                    crac.instants[s.instant].kind,
+                    InstantKind::Auto | InstantKind::Curative
+                )
+            })
+            .collect(),
+    };
+    // A curative **shifter**, by contrast, goes back to where the file had it.
+    //
+    // The asymmetry with the switching above is not an oversight. This is one
+    // network standing in for every state, so anything held in it is held in
+    // the preventive and outage states too, where a curative decision is not in
+    // force. For a switch that is the price of letting the second pass see the
+    // curative CNECs at all — without it the pass reads overloads the curative
+    // stage has already removed and overspends preventively to fix them again.
+    // A set-point is different in kind: it is a **stale iterate**. It was
+    // chosen against the first pass's preventive decisions, which this pass
+    // exists to discard, and `scenarios_after` recomputes it from scratch the
+    // moment this pass returns. Pinning the search to a number that is about to
+    // be thrown away is what lets the two passes settle into a fixed point that
+    // neither can leave: 1.4.4.4's curative `pst_be` at −16 caps the second
+    // pass's whole landscape at 553 A, so it takes `close_fr1_fr5` and a
+    // preventive shifter at its bound for 645 A, where releasing the set-point
+    // lets it find 798 A with no network action at all — the reference's own
+    // answer.
+    //
+    // Curative redispatch was never held: `buses` comes from `network`
+    // untouched. This makes the shifter agree with it. Nothing but the held
+    // switching now separates the second pass's network from the file's, so it
+    // is handed the network itself.
+
+    // Every CNEC, but still only the preventive perimeter's actions.
+    let all = crac.states();
+    let preventive_states: Vec<State> = all
+        .iter()
+        .filter(|s| crac.instants[s.instant].kind == InstantKind::Preventive)
+        .cloned()
+        .collect();
+    let mut linear = options.linear.clone();
+    linear.held = Some(held);
+    // The curative shifters get a column of their own here and nowhere else.
+    // The reference gates this on `re-optimize-curative-range-actions`, which no
+    // vendored configuration sets; what the corpus shows is that its answers
+    // need it regardless — 1.4.1.2 asserts a preventive tap of 4 that is only
+    // reachable if the pass can see the curative `pst_be` moving to −5 to pay
+    // for it.
+    linear.a_r_s = true;
+    let options = SearchOptions {
+        linear,
+        available_at: Some(preventive_states),
+        // The reference's `hint-from-first-preventive-rao`: offer the first
+        // pass's winning set as one candidate, so a second pass that agrees
+        // with it gets there at the first depth instead of rediscovering it.
+        predefined_combinations: if options.second_preventive.hint {
+            let hint: Vec<String> = preventive
+                .network_actions
+                .iter()
+                .map(|&a| crac.network_actions[a].id.clone())
+                .collect();
+            let mut combos = options.predefined_combinations.clone();
+            if hint.len() > 1 {
+                combos.push(hint);
+            }
+            combos
+        } else {
+            options.predefined_combinations.clone()
+        },
+        ..options.clone()
+    };
+    // The search starts from the **file's** open set, not the held one: what it
+    // returns is a preventive answer, and a preventive answer may not contain
+    // one contingency's curative switching — that would put it into force for
+    // every other contingency, which is the one thing the perimeter
+    // decomposition exists to prevent. The held set reaches the measurements
+    // through `LinearOptions::held`, which is where it belongs, so there is
+    // nothing to strip back out afterwards.
+    let result = search_with_open(
+        crac,
+        network,
+        resolution,
+        &all,
+        solver,
+        &options,
+        network.initially_open,
+    );
+    Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rao::costly::Costly;
+
+    /// A shifter whose taps are 0.5 degrees apart, priced at 15 a tap with 20 to
+    /// activate — the reference's 3.4.3.2 numbers.
+    fn pst_crac() -> Crac {
+        Crac {
+            range_actions: vec![crate::rao::crac::RangeAction {
+                id: "pstBeFr4".into(),
+                name: None,
+                operator: None,
+                speed: None,
+                activation_cost: Some(20.0),
+                variation_cost: Some(crate::rao::crac::VariationCost {
+                    up: 15.0,
+                    down: 15.0,
+                }),
+                group: None,
+                kind: RangeActionKind::Pst {
+                    element: "BBE2AA1  BBE3AA1  1".into(),
+                    initial_tap: 0,
+                    tap_to_angle: (-16..=16).map(|t| (t, f64::from(t) * 0.5)).collect(),
+                },
+                ranges: Vec::new(),
+                usage_rules: Vec::new(),
+            }],
+            ..Crac::default()
+        }
+    }
+
+    fn plan(setpoints: Vec<Setpoint>) -> PerimeterPlan {
+        PerimeterPlan {
+            states: Vec::new(),
+            network_actions: Vec::new(),
+            setpoints,
+            initial_margin_mw: 0.0,
+            final_margin_mw: 0.0,
+            leaves: 0,
+            open_branches: Vec::new(),
+            buses: Vec::new(),
+            transformers: Vec::new(),
+        }
+    }
+
+    /// A movement is measured in **taps**, not degrees.
+    ///
+    /// The distinction is not cosmetic: five taps of 0.5 degrees is a distance
+    /// of 5 to a CRAC that prices `variationCosts` per tap and 2.5 to one that
+    /// reads degrees, and the reference's 3.4.2.1 is built to tell them apart.
+    #[test]
+    fn a_shifter_movement_is_measured_in_taps() {
+        let crac = pst_crac();
+        let preventive = plan(vec![Setpoint {
+            action: 0,
+            value: -2.5,
+            initial: 0.0,
+            tap: Some(-5),
+        }]);
+        assert_eq!(moved_by(&crac, &preventive, &[]), vec![(0, -5.0)]);
+    }
+
+    /// A shifter moved preventively and again curatively is **two** activations
+    /// and two distances, not one of each.
+    ///
+    /// This is the whole of the reference's 3.4.3.2 arithmetic: 20 + 5 x 15
+    /// preventively and 20 + 1 x 15 curatively, reaching tap −6 for 140. A plan
+    /// that reached −6 preventively in one move would cost 20 + 6 x 15 = 110,
+    /// and the 30 between them is what its second-preventive twin 3.4.3.3 is
+    /// built to find.
+    #[test]
+    fn moving_one_shifter_in_two_states_is_billed_twice() {
+        let crac = pst_crac();
+        let preventive = plan(vec![Setpoint {
+            action: 0,
+            value: -2.5,
+            initial: 0.0,
+            tap: Some(-5),
+        }]);
+        let scenario = ScenarioPlan {
+            contingency: 0,
+            automatons: None,
+            perimeters: vec![plan(vec![Setpoint {
+                action: 0,
+                value: -3.0,
+                initial: -2.5,
+                tap: Some(-6),
+            }])],
+        };
+        let moved = moved_by(&crac, &preventive, std::slice::from_ref(&scenario));
+        assert_eq!(moved, vec![(0, -5.0), (0, -1.0)]);
+
+        // Priced, which is the thing the whole-plan judgement was getting wrong:
+        // two activations at 20 plus six taps at 15.
+        let costly = Costly::default();
+        assert_eq!(
+            costly.activation(&crac, &[], &moved),
+            2.0 * 20.0 + 6.0 * 15.0
+        );
+
+        // And the one-move plan that 3.4.3.3 asks for is 30 cheaper, which is
+        // exactly the margin the second preventive pass has to see.
+        let straight = plan(vec![Setpoint {
+            action: 0,
+            value: -3.0,
+            initial: 0.0,
+            tap: Some(-6),
+        }]);
+        let once = moved_by(&crac, &straight, &[]);
+        assert_eq!(costly.activation(&crac, &[], &once), 20.0 + 6.0 * 15.0);
+    }
+
+    /// A shifter that never moved is not billed. "Used" means *moved*, and a
+    /// tap assertion has an answer even when the answer is "where it was".
+    #[test]
+    fn a_shifter_left_where_it_stood_costs_nothing() {
+        let crac = pst_crac();
+        let still = plan(vec![Setpoint {
+            action: 0,
+            value: 0.0,
+            initial: 0.0,
+            tap: Some(0),
+        }]);
+        assert!(moved_by(&crac, &still, &[]).is_empty());
+    }
+
+    /// An `AutomatonResult` reports where a range action **ended**, not where it
+    /// began, so its distance is measured from the CRAC's own `initialTap` —
+    /// the only starting point it states.
+    #[test]
+    fn an_automaton_movement_is_measured_from_the_crac_s_initial_tap() {
+        let crac = pst_crac();
+        let scenario = ScenarioPlan {
+            contingency: 0,
+            automatons: Some(AutomatonResult {
+                network_actions: Vec::new(),
+                range_actions: vec![(0, -1.5, Some(-3))],
+                ..AutomatonResult::default()
+            }),
+            perimeters: Vec::new(),
+        };
+        let moved = moved_by(&crac, &plan(Vec::new()), std::slice::from_ref(&scenario));
+        assert_eq!(moved, vec![(0, -3.0)]);
+    }
 }

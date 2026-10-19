@@ -44,7 +44,7 @@
 
 use crate::batch::Scenario;
 use crate::jacobian::JacobianPattern;
-use crate::network::{effective_injection, linear_initial_guess, power_injections, YBusSparse};
+use crate::network::{YBusSparse, effective_injection, linear_initial_guess, power_injections};
 use crate::solver::{LinearSolver, SolveStats, SolveStatus};
 use crate::types::{Bus, BusType};
 
@@ -80,7 +80,13 @@ impl BlockDiagonal {
             cols.extend(block.cols().iter().map(|&c| c + off));
         }
 
-        Self { block, n_scenarios, block_size, rows, cols }
+        Self {
+            block,
+            n_scenarios,
+            block_size,
+            rows,
+            cols,
+        }
     }
 
     /// Total unknowns across the batch — `n_scenarios * block_size`.
@@ -130,7 +136,8 @@ impl BlockDiagonal {
         values.clear();
         for s in 0..self.n_scenarios {
             if active[s] {
-                self.block.fill_into(&states[s], &p_calc[s], &q_calc[s], values);
+                self.block
+                    .fill_into(&states[s], &p_calc[s], &q_calc[s], values);
             } else {
                 self.block.fill_identity_into(values);
             }

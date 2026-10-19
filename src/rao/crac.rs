@@ -89,7 +89,10 @@ pub struct State {
 
 impl State {
     pub fn preventive(instant: usize) -> Self {
-        Self { instant, contingency: None }
+        Self {
+            instant,
+            contingency: None,
+        }
     }
 
     pub fn is_preventive(&self) -> bool {
@@ -286,7 +289,11 @@ impl UsageRule {
             UsageRule::OnInstant { instant } => state.instant == *instant,
             UsageRule::OnContingencyState { state: s } => s == state,
             UsageRule::OnConstraint { instant, .. } => state.instant == *instant,
-            UsageRule::OnFlowConstraintInCountry { instant, contingency, .. } => {
+            UsageRule::OnFlowConstraintInCountry {
+                instant,
+                contingency,
+                ..
+            } => {
                 state.instant == *instant
                     && contingency.is_none_or(|c| state.contingency == Some(c))
             }
@@ -369,7 +376,10 @@ pub enum RangeActionKind {
     /// A cross-border exchange adjustment. Carried so a CRAC round-trips, but
     /// the optimizer does not model it — it has no network sensitivity, which
     /// is why the reference implementation leaves it out of the LP too.
-    CounterTrade { exporting: String, importing: String },
+    CounterTrade {
+        exporting: String,
+        importing: String,
+    },
 }
 
 /// A remedial action with a continuous degree of freedom.
@@ -384,6 +394,19 @@ pub struct RangeAction {
     pub speed: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<f64>,
+    /// What *moving* it costs, per unit of set-point, up and down separately.
+    ///
+    /// Distinct from [`activation_cost`](Self::activation_cost), which is paid
+    /// once for using the action at all: a shifter with an activation cost of 5
+    /// and a variation cost of 10 costs 55 to move five taps and 105 to move
+    /// ten, which is what makes a cost objective stop at the tap that secures
+    /// the network rather than the tap that maximizes the margin — the
+    /// reference's own scenario 3.4.2.1.
+    ///
+    /// Up and down are separate because a CRAC may price them so; every
+    /// vendored one states them equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variation_cost: Option<VariationCost>,
     /// Actions sharing a group id must move together — aligned phase shifters
     /// on parallel circuits, typically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -391,6 +414,21 @@ pub struct RangeAction {
     pub kind: RangeActionKind,
     pub ranges: Vec<Range>,
     pub usage_rules: Vec<UsageRule>,
+}
+
+/// What a range action charges per unit of movement, by direction.
+///
+/// **Per tap** for a phase shifter, and MW for a redispatch — the unit the CRAC
+/// states, carried through unconverted, with [`Costly::activation`] measuring
+/// movement in taps to match. The reference's 3.4.2.1 is what fixes it: an
+/// activation cost of 5 and a variation cost of 10 make five taps cost 55, where
+/// reading the number per degree would give 24.5.
+///
+/// [`Costly::activation`]: super::costly::Costly::activation
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VariationCost {
+    pub up: f64,
+    pub down: f64,
 }
 
 /// Caps on how many remedial actions may be used in one state.
@@ -449,7 +487,9 @@ impl Crac {
 
     /// The one preventive instant, if the CRAC declares one.
     pub fn preventive_instant(&self) -> Option<usize> {
-        self.instants.iter().position(|i| i.kind == InstantKind::Preventive)
+        self.instants
+            .iter()
+            .position(|i| i.kind == InstantKind::Preventive)
     }
 
     /// Curative instants in chronological order.

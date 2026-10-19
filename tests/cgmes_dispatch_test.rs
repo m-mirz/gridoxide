@@ -18,7 +18,7 @@ mod cgmes_common;
 use std::path::{Path, PathBuf};
 
 use gridoxide::cgmes::{cgmes_to_network, load_profiles};
-use gridoxide::dispatch::{allocate, reactive_keys, KeyBasis};
+use gridoxide::dispatch::{KeyBasis, allocate, reactive_keys};
 use gridoxide::network::{build_ybus, power_injections, stamp_shunts};
 use gridoxide::solver::PowerFlowOptions;
 
@@ -73,7 +73,10 @@ fn solve() -> Option<Solved> {
             ..Default::default()
         },
     );
-    assert_eq!(report.stats.status, gridoxide::solver::SolveStatus::Converged);
+    assert_eq!(
+        report.stats.status,
+        gridoxide::solver::SolveStatus::Converged
+    );
 
     let mut y = build_ybus(report.buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut y, &net.shunts);
@@ -99,8 +102,16 @@ fn solve() -> Option<Solved> {
 #[test]
 fn the_split_is_exact_and_accounts_for_everything() {
     let Some(s) = solve() else { return };
-    assert_eq!(s.machines.len(), 496, "every regulating machine is retained");
-    assert!(s.shared_buses >= 62, "RealGrid's shared-control buses: {}", s.shared_buses);
+    assert_eq!(
+        s.machines.len(),
+        496,
+        "every regulating machine is retained"
+    );
+    assert!(
+        s.shared_buses >= 62,
+        "RealGrid's shared-control buses: {}",
+        s.shared_buses
+    );
 
     for bd in &s.dispatch {
         let summed: f64 = bd.machines.iter().map(|m| m.q).sum();
@@ -192,11 +203,18 @@ fn unattributed_power_appears_only_where_a_load_shares_the_bus() {
         );
     }
 
-    let total: f64 =
-        s.dispatch.iter().map(|b| b.unattributed.abs()).filter(|u| *u > NEGLIGIBLE).sum();
+    let total: f64 = s
+        .dispatch
+        .iter()
+        .map(|b| b.unattributed.abs())
+        .filter(|u| *u > NEGLIGIBLE)
+        .sum();
     // Recorded, not targeted. If either moves, the bus model changed and the
     // reason is worth knowing before this number is updated.
-    assert_eq!(unattributable, 6, "buses whose machines cannot account for their own injection");
+    assert_eq!(
+        unattributable, 6,
+        "buses whose machines cannot account for their own injection"
+    );
     assert!(
         (total - 0.0436).abs() < 5e-4,
         "total unattributed {total:.4} pu against the recorded 0.0436"
@@ -218,8 +236,11 @@ fn the_split_reproduces_the_published_attribution() {
     let mut compared = 0usize;
 
     for bd in &s.dispatch {
-        let group: Vec<&gridoxide::types::RegulatingMachine> =
-            s.machines.iter().filter(|m| m.controls_bus == bd.bus).collect();
+        let group: Vec<&gridoxide::types::RegulatingMachine> = s
+            .machines
+            .iter()
+            .filter(|m| m.controls_bus == bd.bus)
+            .collect();
         if !bd.machines.iter().all(|m| s.published.contains_key(&m.id)) {
             continue;
         }
@@ -238,7 +259,10 @@ fn the_split_reproduces_the_published_attribution() {
         }
     }
 
-    assert!(compared > 100, "expected RealGrid's shared buses to be compared, got {compared}");
+    assert!(
+        compared > 100,
+        "expected RealGrid's shared buses to be compared, got {compared}"
+    );
     let solve_rel = 100.0 * solve_err / solve_abs;
     let split_rel = 100.0 * split_err / split_abs;
     eprintln!("bus totals (the solve): {solve_rel:.1}%   split rule: {split_rel:.1}%");
@@ -246,7 +270,10 @@ fn the_split_reproduces_the_published_attribution() {
     // Recorded. The split is the thing under test; the solve error is the
     // backdrop it has to be read against, and asserting it here keeps the two
     // from being confused if either moves.
-    assert!(solve_rel < 12.0, "solve-vs-published on these buses drifted to {solve_rel:.1}%");
+    assert!(
+        solve_rel < 12.0,
+        "solve-vs-published on these buses drifted to {solve_rel:.1}%"
+    );
     assert!(
         split_rel < 15.0,
         "capability-proportional split drifted to {split_rel:.1}% against the published \
@@ -275,10 +302,17 @@ fn realgrid_splits_on_capability_apart_from_one_implausible_pair() {
     }
 
     let shared: usize = by_basis.values().sum();
-    assert!(shared >= 62, "expected at least RealGrid's 62 shared buses, got {shared}");
+    assert!(
+        shared >= 62,
+        "expected at least RealGrid's 62 shared buses, got {shared}"
+    );
     assert_eq!(by_basis.get(&KeyBasis::Capability), Some(&61));
     assert_eq!(by_basis.get(&KeyBasis::Uniform), Some(&1));
-    assert_eq!(by_basis.get(&KeyBasis::Explicit), None, "CGMES states no per-machine keys");
+    assert_eq!(
+        by_basis.get(&KeyBasis::Explicit),
+        None,
+        "CGMES states no per-machine keys"
+    );
 
     let fallback = s
         .dispatch

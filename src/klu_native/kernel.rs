@@ -19,7 +19,7 @@
 //! `types.rs`'s guidance), and Eisenstat-Liu pruning — is ported as
 //! literally as this one storage change allows.
 
-use super::types::{flip, EMPTY};
+use super::types::{EMPTY, flip};
 
 /// Non-recursive DFS for column `k`'s symbolic reachability, starting at
 /// (already-pivotal) node `j0`. Ports `dfs` in `klu_kernel.c` exactly,
@@ -53,7 +53,11 @@ fn dfs(
         if flag[j] != k {
             // First time j has been visited this call.
             flag[j] = k;
-            ap_pos[hd] = if lpend[jnew] == EMPTY { l_cols[jnew].len() as i64 } else { lpend[jnew] };
+            ap_pos[hd] = if lpend[jnew] == EMPTY {
+                l_cols[jnew].len() as i64
+            } else {
+                lpend[jnew]
+            };
         }
 
         ap_pos[hd] -= 1;
@@ -120,7 +124,9 @@ fn lsolve_symbolic(
     for &i in col_entries {
         if flag[i] != kk {
             if pinv[i] >= 0 {
-                top = dfs(i, kk, pinv, l_cols, stack, flag, lpend, top, &mut lik, ap_pos);
+                top = dfs(
+                    i, kk, pinv, l_cols, stack, flag, lpend, top, &mut lik, ap_pos,
+                );
             } else {
                 flag[i] = kk;
                 lik.push(i);
@@ -158,7 +164,13 @@ fn construct_column(x: &mut [f64], col_entries: &[(i64, f64)], off_diagonal: &mu
 /// already-finalized L columns, using the symbolic pattern found by
 /// `lsolve_symbolic` (`stack[top..n]`, in an order that's already a valid
 /// elimination order for this triangular solve). Ports `lsolve_numeric`.
-fn lsolve_numeric(pinv: &[i64], l_cols: &[Vec<(usize, f64)>], stack: &[usize], top: usize, x: &mut [f64]) {
+fn lsolve_numeric(
+    pinv: &[i64],
+    l_cols: &[Vec<(usize, f64)>],
+    stack: &[usize],
+    top: usize,
+    x: &mut [f64],
+) {
     for &j in &stack[top..] {
         let jnew = pinv[j] as usize;
         let xj = x[j];
@@ -267,7 +279,13 @@ fn lpivot(diagrow: i64, tol: f64, x: &mut [f64], lik: Vec<usize>) -> Option<Lpiv
 /// hasn't been pruned yet and the current pivot row appears in `L`'s
 /// column `j`, partition that column so all non-pivotal rows come first
 /// (swapping with the tail) and record the split point in `lpend[j]`.
-fn prune(lpend: &mut [i64], pinv: &[i64], u_col_k: &[(usize, f64)], pivrow: usize, l_cols: &mut [Vec<(usize, f64)>]) {
+fn prune(
+    lpend: &mut [i64],
+    pinv: &[i64],
+    u_col_k: &[(usize, f64)],
+    pivrow: usize,
+    l_cols: &mut [Vec<(usize, f64)>],
+) {
     for &(j, _) in u_col_k {
         if lpend[j] == EMPTY {
             let lj = &mut l_cols[j];
@@ -364,10 +382,23 @@ pub fn factor_block(
         // block-local row (negative entries are off-diagonal, handled by
         // construct_column below).
         let raw_entries = column_entries(k);
-        let col_rows: Vec<usize> = raw_entries.iter().filter(|&&(r, _)| r >= 0).map(|&(r, _)| r as usize).collect();
+        let col_rows: Vec<usize> = raw_entries
+            .iter()
+            .filter(|&&(r, _)| r >= 0)
+            .map(|&(r, _)| r as usize)
+            .collect();
 
-        let (top, lik) =
-            lsolve_symbolic(nk, k, &col_rows, &pinv, &l_cols, &mut stack, &mut flag, &lpend, &mut ap_pos);
+        let (top, lik) = lsolve_symbolic(
+            nk,
+            k,
+            &col_rows,
+            &pinv,
+            &l_cols,
+            &mut stack,
+            &mut flag,
+            &lpend,
+            &mut ap_pos,
+        );
 
         let mut off_diag = std::mem::take(&mut off_diagonal_out[k]);
         construct_column(&mut x, &raw_entries, &mut off_diag);
@@ -412,7 +443,12 @@ pub fn factor_block(
         }
     }
 
-    Some(BlockFactor { l_cols, u_cols, udiag, p })
+    Some(BlockFactor {
+        l_cols,
+        u_cols,
+        udiag,
+        p,
+    })
 }
 
 /// Re-factors one BTF diagonal block against new numeric values, reusing an
@@ -480,7 +516,12 @@ pub fn refactor_block_in_place(
     columns: &[Vec<(i64, f64)>],
     off_diagonal_out: &mut [Vec<(i64, f64)>],
 ) -> bool {
-    let BlockFactor { l_cols, u_cols, udiag, .. } = block;
+    let BlockFactor {
+        l_cols,
+        u_cols,
+        udiag,
+        ..
+    } = block;
 
     for k in 0..nk {
         let mut off_diag = std::mem::take(&mut off_diagonal_out[k]);
@@ -536,7 +577,9 @@ mod tests {
         let mut a: Vec<Vec<f64>> = a.to_vec();
         let mut rhs = b.to_vec();
         for col in 0..n {
-            let pivot_row = (col..n).max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs())).unwrap();
+            let pivot_row = (col..n)
+                .max_by(|&r1, &r2| a[r1][col].abs().total_cmp(&a[r2][col].abs()))
+                .unwrap();
             a.swap(col, pivot_row);
             rhs.swap(col, pivot_row);
             for row in (col + 1)..n {
@@ -613,7 +656,12 @@ mod tests {
         let x = solve_with_factor(&bf, &b);
         let expected = dense_solve(&a, &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-10, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-10,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -628,7 +676,12 @@ mod tests {
         let x = solve_with_factor(&bf, &b);
         let expected = dense_solve(&a, &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-10, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-10,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -649,7 +702,12 @@ mod tests {
         let x = solve_with_factor(&bf, &b);
         let expected = dense_solve(&a, &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -679,7 +737,12 @@ mod tests {
         let x = solve_with_factor(&bf, &b);
         let expected = dense_solve(&a, &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -695,7 +758,11 @@ mod tests {
         assert!(factor_block(n, 1e-3, |k| by_col[k].clone(), &mut off).is_none());
     }
 
-    fn refactor_dense(n: usize, prev: &BlockFactor, entries: &[(usize, usize, f64)]) -> BlockFactor {
+    fn refactor_dense(
+        n: usize,
+        prev: &BlockFactor,
+        entries: &[(usize, usize, f64)],
+    ) -> BlockFactor {
         let mut by_col: Vec<Vec<(i64, f64)>> = vec![Vec::new(); n];
         for &(r, c, v) in entries {
             by_col[c].push((r as i64, v));
@@ -703,7 +770,10 @@ mod tests {
         let mut off = vec![Vec::new(); n];
         let mut x = vec![0.0; n];
         let mut block = prev.clone();
-        assert!(refactor_block_in_place(n, &mut block, &mut x, &by_col, &mut off), "should not be singular");
+        assert!(
+            refactor_block_in_place(n, &mut block, &mut x, &by_col, &mut off),
+            "should not be singular"
+        );
         block
     }
 
@@ -785,7 +855,12 @@ mod tests {
         let x = solve_with_factor(&refactored, &b);
         let expected = dense_solve(&a, &b);
         for i in 0..n {
-            assert!((x[i] - expected[i]).abs() < 1e-8, "index {i}: {} vs {}", x[i], expected[i]);
+            assert!(
+                (x[i] - expected[i]).abs() < 1e-8,
+                "index {i}: {} vs {}",
+                x[i],
+                expected[i]
+            );
         }
     }
 
@@ -808,7 +883,9 @@ mod tests {
         let mut off = vec![Vec::new(); n];
         let mut x = vec![0.0; n];
         let mut block = bf.clone();
-        assert!(!refactor_block_in_place(n, &mut block, &mut x, &by_col, &mut off));
+        assert!(!refactor_block_in_place(
+            n, &mut block, &mut x, &by_col, &mut off
+        ));
     }
 
     #[cfg(feature = "klu")]
@@ -832,7 +909,8 @@ mod tests {
             let mut entries: Vec<(usize, usize, f64)> = Vec::new();
             let mut row_sums = vec![0.0f64; n];
             let mut off_entries: Vec<(usize, usize, f64)> = Vec::new();
-            #[allow(clippy::needless_range_loop)] // `i` is also compared against `j`, not just an index
+            #[allow(clippy::needless_range_loop)]
+            // `i` is also compared against `j`, not just an index
             for i in 0..n {
                 // BTreeSet dedups (i, j) pairs -- factor_block's column_entries
                 // contract expects already-deduplicated entries per column,

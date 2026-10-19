@@ -1,61 +1,61 @@
-pub mod types;
-pub mod network;
-pub mod ratings;
-pub mod switches;
-pub mod topology;
+pub mod ac_sensitivity;
+pub mod batch;
+pub mod bde;
+pub mod block_sparse;
 pub mod branch_flow;
 #[cfg(feature = "capi")]
 pub mod capi;
-pub mod measurement;
-pub mod se;
-pub mod solver;
-pub mod outerloop;
+#[cfg(feature = "cgmes")]
+pub mod cgmes;
 pub mod constrained;
-pub mod jacobian;
 pub mod continuation;
+pub mod dc;
+pub mod dispatch;
 #[cfg(feature = "dynamics")]
 pub mod dynamics;
-pub mod dispatch;
-pub mod qv;
-pub mod batch;
-pub mod bde;
-pub mod ac_sensitivity;
-pub mod injection_hessian;
-pub mod dc;
-#[cfg(feature = "opf")]
-pub mod opf;
-pub mod linear;
-pub mod shortcircuit;
-pub mod json;
-pub mod pgm;
-#[cfg(feature = "ucte")]
-pub mod ucte;
 #[cfg(feature = "iidm")]
 pub mod iidm;
+pub mod injection_hessian;
+pub mod jacobian;
+pub mod json;
+pub mod klu_native;
+pub mod linear;
+pub mod measurement;
+pub mod network;
+#[cfg(feature = "opf")]
+pub mod opf;
+pub mod outerloop;
+pub mod pgm;
+#[cfg(feature = "python")]
+mod python;
+pub mod qv;
 #[cfg(feature = "rao")]
 pub mod rao;
+pub mod ratings;
+pub mod se;
+pub mod shortcircuit;
+pub mod solver;
 pub mod sparse;
-pub mod block_sparse;
-pub mod klu_native;
 #[cfg(feature = "klu")]
 pub mod sparse_klu;
 #[cfg(feature = "pardiso")]
 pub mod sparse_pardiso;
-#[cfg(feature = "cgmes")]
-pub mod cgmes;
-#[cfg(feature = "python")]
-mod python;
+pub mod switches;
+pub mod topology;
+pub mod types;
+#[cfg(feature = "ucte")]
+pub mod ucte;
 
+use json::NetworkData;
 use linear::{
-    btheta::{dc_power_flow, DcIslandStatus, DcSolution},
-    impedance::{linear_power_flow, LinearIslandStatus, LinearReport},
+    btheta::{DcIslandStatus, DcSolution, dc_power_flow},
+    impedance::{LinearIslandStatus, LinearReport, linear_power_flow},
 };
-use network::{build_ybus, linear_initial_guess, stamp_shunts, ShuntAdm, YBus};
+use network::{ShuntAdm, YBus, build_ybus, linear_initial_guess, stamp_shunts};
 use solver::{
     IslandReport, JacobianBackend, PersistentSolver, PowerFlowInit, PowerFlowMethod,
     PowerFlowOptions, SolveStats, SolveStatus,
 };
-use json::NetworkData;
 use types::{Bus, Line, Transformer};
 
 /// Result of a full power-flow analysis: the solved (or placeholder, for
@@ -177,7 +177,10 @@ impl PowerFlowReport {
         Self {
             buses,
             islands: Vec::new(),
-            stats: SolveStats { status, mismatch_history: Vec::new() },
+            stats: SolveStats {
+                status,
+                mismatch_history: Vec::new(),
+            },
             dc: None,
             linear: None,
             outer: None,
@@ -209,7 +212,15 @@ pub fn run_power_flow(
     taps: TapData<'_>,
     opts: PowerFlowOptions,
 ) -> PowerFlowReport {
-    run_power_flow_with_remote(buses, lines, transformers, shunts, taps, RemoteControlData::none(), opts)
+    run_power_flow_with_remote(
+        buses,
+        lines,
+        transformers,
+        shunts,
+        taps,
+        RemoteControlData::none(),
+        opts,
+    )
 }
 
 /// [`run_power_flow`] with the regulating machines a remote-voltage control
@@ -227,7 +238,11 @@ pub fn run_power_flow_with_remote(
     match opts.method {
         PowerFlowMethod::Dc => {
             let solution = dc_power_flow(&mut buses, lines, transformers, opts.dc);
-            let status = if solution.islands.iter().any(|i| i.status == DcIslandStatus::Singular) {
+            let status = if solution
+                .islands
+                .iter()
+                .any(|i| i.status == DcIslandStatus::Singular)
+            {
                 SolveStatus::Singular
             } else {
                 SolveStatus::Converged
@@ -239,12 +254,15 @@ pub fn run_power_flow_with_remote(
         PowerFlowMethod::LinearImpedance => {
             let ybus = finished_ybus(buses.len(), lines, transformers, shunts);
             let solution = linear_power_flow(&mut buses, &ybus);
-            let status =
-                if solution.islands.iter().any(|i| i.status == LinearIslandStatus::Singular) {
-                    SolveStatus::Singular
-                } else {
-                    SolveStatus::Converged
-                };
+            let status = if solution
+                .islands
+                .iter()
+                .any(|i| i.status == LinearIslandStatus::Singular)
+            {
+                SolveStatus::Singular
+            } else {
+                SolveStatus::Converged
+            };
             let mut report = PowerFlowReport::empty(buses, status);
             report.linear = Some(solution);
             report
@@ -320,7 +338,14 @@ fn newton_with_loops(
     {
         let mut solver = PersistentSolver::new(opts.backend);
         let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, opts.tol, opts.max_iter);
-        return PowerFlowReport { buses, islands, stats, dc: None, linear: None, outer: None };
+        return PowerFlowReport {
+            buses,
+            islands,
+            stats,
+            dc: None,
+            linear: None,
+            outer: None,
+        };
     }
 
     // Both would move the same schedules, so this is a caller mistake rather
@@ -338,8 +363,14 @@ fn newton_with_loops(
     let mut transformers = transformers.to_vec();
     let mut changers = taps.changers.to_vec();
 
-    let mut slack = opts.distribute_slack.clone().map(outerloop::DistributedSlack::new);
-    let mut area = opts.area_interchange.clone().map(outerloop::AreaInterchange::new);
+    let mut slack = opts
+        .distribute_slack
+        .clone()
+        .map(outerloop::DistributedSlack::new);
+    let mut area = opts
+        .area_interchange
+        .clone()
+        .map(outerloop::AreaInterchange::new);
     let mut qlim = opts.enforce_q_limits.then(outerloop::ReactiveLimits::new);
     let mut remote_loop =
         wants_remote.then(|| outerloop::RemoteVoltageControl::new(remote.machines));
@@ -393,20 +424,33 @@ fn newton_with_loops(
 
     let mut outcome = OuterLoopOutcome {
         report: Some(report),
-        q_limit_switches: qlim.as_ref().map(|l| l.switches().to_vec()).unwrap_or_default(),
+        q_limit_switches: qlim
+            .as_ref()
+            .map(|l| l.switches().to_vec())
+            .unwrap_or_default(),
         slack: slack.map(outerloop::DistributedSlack::into_report),
         area: area.map(outerloop::AreaInterchange::into_report),
         taps: Vec::new(),
-        remote: remote_loop.as_ref().map(|l| l.report_against(&buses)).unwrap_or_default(),
-        retyped: remote_loop.as_ref().map(|l| l.retyped().to_vec()).unwrap_or_default(),
+        remote: remote_loop
+            .as_ref()
+            .map(|l| l.report_against(&buses))
+            .unwrap_or_default(),
+        retyped: remote_loop
+            .as_ref()
+            .map(|l| l.retyped().to_vec())
+            .unwrap_or_default(),
         transformers: Vec::new(),
         changers: Vec::new(),
     };
     if let Some(l) = voltage.as_ref() {
-        outcome.taps.extend(l.report(taps.regulation, &changers).controllers);
+        outcome
+            .taps
+            .extend(l.report(taps.regulation, &changers).controllers);
     }
     if let Some(l) = phase.as_ref() {
-        outcome.taps.extend(l.report(taps.regulation, &changers).controllers);
+        outcome
+            .taps
+            .extend(l.report(taps.regulation, &changers).controllers);
     }
     if wants_taps {
         outcome.transformers = transformers;
@@ -416,12 +460,17 @@ fn newton_with_loops(
     // The outer loops re-solve through `PersistentSolver::solve`, which does
     // not hand back `SolveStats`; the status is reconstructed from the island
     // reports, which is the same verdict by a different route.
-    let status = if islands
-        .iter()
-        .all(|i| !matches!(i.status, solver::IslandStatus::Singular | solver::IslandStatus::MaxIterationsReached))
-    {
+    let status = if islands.iter().all(|i| {
+        !matches!(
+            i.status,
+            solver::IslandStatus::Singular | solver::IslandStatus::MaxIterationsReached
+        )
+    }) {
         SolveStatus::Converged
-    } else if islands.iter().any(|i| i.status == solver::IslandStatus::Singular) {
+    } else if islands
+        .iter()
+        .any(|i| i.status == solver::IslandStatus::Singular)
+    {
         SolveStatus::Singular
     } else {
         SolveStatus::MaxIterationsReached
@@ -430,7 +479,10 @@ fn newton_with_loops(
     PowerFlowReport {
         buses,
         islands,
-        stats: SolveStats { status, mismatch_history: Vec::new() },
+        stats: SolveStats {
+            status,
+            mismatch_history: Vec::new(),
+        },
         dc: None,
         linear: None,
         outer: Some(outcome),
@@ -464,13 +516,17 @@ fn finished_ybus(
 /// canonical solve entry point every public function in this crate
 /// (including this one) ultimately goes through. `PowerFlowReport::islands`
 /// gives the resulting per-component breakdown.
-pub fn run_power_flow_analysis_from_ybus(
-    mut buses: Vec<Bus>,
-    ybus: YBus,
-) -> PowerFlowReport {
+pub fn run_power_flow_analysis_from_ybus(mut buses: Vec<Bus>, ybus: YBus) -> PowerFlowReport {
     let ybus = ybus.finish();
     linear_initial_guess(&mut buses, &ybus);
     let mut solver = PersistentSolver::new(JacobianBackend::Scalar);
     let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, 1e-6, 20);
-    PowerFlowReport { buses, islands, stats, dc: None, linear: None, outer: None }
+    PowerFlowReport {
+        buses,
+        islands,
+        stats,
+        dc: None,
+        linear: None,
+        outer: None,
+    }
 }

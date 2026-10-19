@@ -43,12 +43,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use num_complex::Complex;
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 use crate::network::ShuntAdm;
 use crate::ratings::{BranchLimits, TemporaryLimit};
-use crate::topology::bus_view::{bus_view, BusView, RetentionPolicy};
+use crate::topology::bus_view::{BusView, RetentionPolicy, bus_view};
 use crate::topology::model::{NodeBreakerTopology, NodeIdx, Switch, SwitchKind};
 use crate::types::{Bus, BusType, Line, TapChanger, Transformer};
 
@@ -60,7 +60,10 @@ pub enum IidmError {
     Io(std::io::Error),
     Xml(String),
     /// An element referred to a voltage level or bus the file never declared.
-    UnknownReference { element: String, reference: String },
+    UnknownReference {
+        element: String,
+        reference: String,
+    },
     /// The document contained no `voltageLevel` at all.
     NoVoltageLevels,
 }
@@ -356,10 +359,20 @@ struct RawInjection {
 #[derive(Clone, Debug)]
 struct RawShunt {
     at: NodeKey,
-    /// Susceptance and conductance in siemens, already multiplied by the
-    /// section count.
+    /// Susceptance and conductance in siemens, **already multiplied by
+    /// [`sections`](Self::sections)** — which is now true. It was a claim this
+    /// struct made and the parser did not honour: `shuntLinearModel` added one
+    /// section's worth and nothing multiplied it.
     g: f64,
     b: f64,
+    /// `sectionCount`, from the parent `<shunt>` element. The per-section values
+    /// arrive later, on the `<shuntLinearModel>` child, so the count has to be
+    /// carried rather than applied on the spot.
+    ///
+    /// Every `sectionCount` in the tree is `1`, so no fixture can tell the two
+    /// readings apart — which is exactly how the comment above survived being
+    /// false.
+    sections: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -424,10 +437,16 @@ impl Attrs {
             .string(&format!("voltageLevelId{suffix}"))
             .or_else(|| fallback_level.map(|s| s.to_string()))?;
         if let Some(node) = self.text(&format!("node{suffix}")) {
-            return Some(NodeKey { voltage_level: level, key: format!("#{node}") });
+            return Some(NodeKey {
+                voltage_level: level,
+                key: format!("#{node}"),
+            });
         }
         let bus = self.text(&format!("bus{suffix}"))?;
-        Some(NodeKey { voltage_level: level, key: bus.to_string() })
+        Some(NodeKey {
+            voltage_level: level,
+            key: bus.to_string(),
+        })
     }
 }
 
@@ -445,7 +464,10 @@ fn boundary_key(attrs: &Attrs, id: &str) -> NodeKey {
         .string("pairingKey")
         .or_else(|| attrs.string("ucteXnodeCode"))
         .unwrap_or_else(|| id.to_string());
-    NodeKey { voltage_level: BOUNDARY_LEVEL.to_string(), key }
+    NodeKey {
+        voltage_level: BOUNDARY_LEVEL.to_string(),
+        key,
+    }
 }
 
 /// Voltage-level id reserved for boundary nodes.
@@ -506,6 +528,14 @@ struct Collected {
     /// than threaded through `open`/`close`, which already carry five pieces of
     /// parser state.
     open_area: Option<RawArea>,
+    /// Whether a `<reactiveCapabilityCurve>` is open, so its `<point>` children
+    /// attach to the generator being read. Kept here for the same reason
+    /// `open_area` is: `open`/`close` already carry five pieces of parser state.
+    in_curve: bool,
+    /// How many generators took their reactive limits from the **envelope** of a
+    /// capability curve rather than from a stated pair. Reported, because it is
+    /// an outer approximation — see the `reactiveCapabilityCurve` arm.
+    curve_envelopes: usize,
     /// Declared nodes, in declaration order, so bus labels are stable.
     nodes: Vec<NodeKey>,
     switches: Vec<RawSwitch>,
@@ -554,7 +584,14 @@ fn collect(text: &str) -> Result<Collected, IidmError> {
             Ok(Event::Empty(e)) => (Some(e.clone()), true),
             Ok(Event::End(e)) => {
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                close(&name, &mut level, &mut branch, &mut limit_side, &mut tap_target, &mut c);
+                close(
+                    &name,
+                    &mut level,
+                    &mut branch,
+                    &mut limit_side,
+                    &mut tap_target,
+                    &mut c,
+                );
                 buf.clear();
                 continue;
             }
@@ -569,10 +606,24 @@ fn collect(text: &str) -> Result<Collected, IidmError> {
         let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
         let attrs = Attrs::of(&e)?;
         open(
-            &name, &attrs, empty, &mut level, &mut branch, &mut limit_side, &mut tap_target, &mut c,
+            &name,
+            &attrs,
+            empty,
+            &mut level,
+            &mut branch,
+            &mut limit_side,
+            &mut tap_target,
+            &mut c,
         );
         if empty {
-            close(&name, &mut level, &mut branch, &mut limit_side, &mut tap_target, &mut c);
+            close(
+                &name,
+                &mut level,
+                &mut branch,
+                &mut limit_side,
+                &mut tap_target,
+                &mut c,
+            );
         }
         buf.clear();
     }
@@ -662,12 +713,17 @@ fn open(
                     None => return,
                 },
             };
-            c.declare(&NodeKey { voltage_level: vl, key });
+            c.declare(&NodeKey {
+                voltage_level: vl,
+                key,
+            });
         }
         "switch" => {
             let Some(vl) = level.clone() else { return };
-            let (Some(a), Some(b)) = (attrs.terminal("1", Some(&vl)), attrs.terminal("2", Some(&vl)))
-            else {
+            let (Some(a), Some(b)) = (
+                attrs.terminal("1", Some(&vl)),
+                attrs.terminal("2", Some(&vl)),
+            ) else {
                 return;
             };
             c.declare(&a);
@@ -699,7 +755,12 @@ fn open(
             let (g1, b1, g2, b2) = if transformer.is_some() {
                 (0.0, 0.0, attrs.or_zero("g"), attrs.or_zero("b"))
             } else {
-                (attrs.or_zero("g1"), attrs.or_zero("b1"), attrs.or_zero("g2"), attrs.or_zero("b2"))
+                (
+                    attrs.or_zero("g1"),
+                    attrs.or_zero("b1"),
+                    attrs.or_zero("g2"),
+                    attrs.or_zero("b2"),
+                )
             };
             *branch = Some(RawBranch {
                 id: attrs.string("id").unwrap_or_default(),
@@ -715,8 +776,24 @@ fn open(
                 transformer,
             });
         }
-        "generator" | "vscConverterStation" => {
-            let Some(at) = attrs.terminal("", level.as_deref()) else { return };
+        // An HVDC converter station is **not** a generator, and sharing this arm
+        // with one made it a generator producing nothing: a VSC station states no
+        // `targetP`, so `p` came out zero and the HVDC transfer vanished without
+        // a word. `docs/src/import/iidm.md` said it was "counted and then
+        // skipped"; now it is.
+        //
+        // Modelling it properly means reaching `src/dc.rs`, which is a real DC
+        // network and is currently only wired to CGMES. No IIDM fixture in the
+        // tree has an `hvdcLine` or a converter station, so that is work with no
+        // gate behind it — and until there is one, counting the element is the
+        // honest answer and a silently wrong injection is not.
+        "vscConverterStation" | "lccConverterStation" | "hvdcLine" => {
+            *c.unknown.entry(name.to_string()).or_insert(0) += 1;
+        }
+        "generator" => {
+            let Some(at) = attrs.terminal("", level.as_deref()) else {
+                return;
+            };
             c.declare(&at);
             let p = attrs.number("targetP").unwrap_or(0.0);
             let regulating = attrs.flag("voltageRegulatorOn").unwrap_or(false);
@@ -725,7 +802,10 @@ fn open(
                 id: attrs.string("id").unwrap_or_default(),
                 generator: true,
                 p,
-                q: attrs.number("targetQ").or(attrs.number("reactivePowerSetpoint")).unwrap_or(0.0),
+                q: attrs
+                    .number("targetQ")
+                    .or(attrs.number("reactivePowerSetpoint"))
+                    .unwrap_or(0.0),
                 regulates: regulating
                     .then(|| attrs.number("targetV").or(attrs.number("voltageSetpoint")))
                     .flatten(),
@@ -735,7 +815,9 @@ fn open(
             });
         }
         "load" => {
-            let Some(at) = attrs.terminal("", level.as_deref()) else { return };
+            let Some(at) = attrs.terminal("", level.as_deref()) else {
+                return;
+            };
             c.declare(&at);
             c.injections.push(RawInjection {
                 at,
@@ -757,7 +839,9 @@ fn open(
         // of a tie line find each other: they share a `pairingKey`, so they
         // land on the same boundary bus with no pairing logic at all.
         "danglingLine" | "boundaryLine" => {
-            let Some(at) = attrs.terminal("", level.as_deref()) else { return };
+            let Some(at) = attrs.terminal("", level.as_deref()) else {
+                return;
+            };
             let id = attrs.string("id").unwrap_or_default();
             let boundary = boundary_key(attrs, &id);
             c.declare(&at);
@@ -802,11 +886,15 @@ fn open(
             let id = attrs.string("id").unwrap_or_default();
             let boundary = boundary_key(attrs, &id);
             for half in ["1", "2"] {
-                let Some(at) = attrs.terminal(half, None) else { continue };
+                let Some(at) = attrs.terminal(half, None) else {
+                    continue;
+                };
                 c.declare(&at);
                 c.declare(&boundary);
                 c.branches.push(RawBranch {
-                    id: attrs.string(&format!("id_{half}")).unwrap_or_else(|| format!("{id}_{half}")),
+                    id: attrs
+                        .string(&format!("id_{half}"))
+                        .unwrap_or_else(|| format!("{id}_{half}")),
                     end1: Some(at),
                     end2: Some(boundary.clone()),
                     r: attrs.or_zero(&format!("r_{half}")),
@@ -822,15 +910,27 @@ fn open(
         }
         "tieLine" => {}
         "shunt" => {
-            let Some(at) = attrs.terminal("", level.as_deref()) else { return };
+            let Some(at) = attrs.terminal("", level.as_deref()) else {
+                return;
+            };
             c.declare(&at);
-            c.shunts.push(RawShunt { at, g: 0.0, b: 0.0 });
+            // `sectionCount` is on this element; the per-section admittance is on
+            // the `shuntLinearModel` child below. Defaulting to one section is
+            // what a document that omits it means.
+            let sections = attrs.number("sectionCount").unwrap_or(1.0);
+            c.shunts.push(RawShunt {
+                at,
+                g: 0.0,
+                b: 0.0,
+                sections,
+            });
         }
         "shuntLinearModel" => {
-            // Applies to the shunt currently being read.
+            // Applies to the shunt currently being read, scaled by how many of
+            // its sections are actually in service.
             if let Some(last) = c.shunts.last_mut() {
-                last.g += attrs.or_zero("gPerSection");
-                last.b += attrs.or_zero("bPerSection");
+                last.g += attrs.or_zero("gPerSection") * last.sections;
+                last.b += attrs.or_zero("bPerSection") * last.sections;
             }
         }
         "ratioTapChanger" | "phaseTapChanger" => {
@@ -861,12 +961,19 @@ fn open(
         "step" => {
             let Some(phase) = *tap_target else { return };
             let Some(b) = branch.as_mut() else { return };
-            let Some(t) = b.transformer.as_mut() else { return };
-            let target = if phase { t.phase.as_mut() } else { t.ratio.as_mut() };
+            let Some(t) = b.transformer.as_mut() else {
+                return;
+            };
+            let target = if phase {
+                t.phase.as_mut()
+            } else {
+                t.ratio.as_mut()
+            };
             if let Some(changer) = target {
-                changer
-                    .steps
-                    .push((attrs.number("rho").unwrap_or(1.0), attrs.number("alpha").unwrap_or(0.0)));
+                changer.steps.push((
+                    attrs.number("rho").unwrap_or(1.0),
+                    attrs.number("alpha").unwrap_or(0.0),
+                ));
             }
         }
         _ if name.starts_with("operationalLimitsGroup") => {
@@ -888,7 +995,9 @@ fn open(
         }
         "temporaryLimit" => {
             let Some(side) = *limit_side else { return };
-            let Some(value) = attrs.number("value") else { return };
+            let Some(value) = attrs.number("value") else {
+                return;
+            };
             if let Some(b) = branch.as_mut() {
                 b.limits[side].temporary.push(TemporaryLimit {
                     acceptable_duration_s: attrs.number("acceptableDuration"),
@@ -896,10 +1005,66 @@ fn open(
                 });
             }
         }
+        // A generator's reactive capability, stated as a pair.
+        //
+        // Read onto the injection currently being built, the way
+        // `shuntLinearModel` attaches to the shunt above. It used to sit in the
+        // no-op list below as an element "with nothing to contribute", which
+        // left every IIDM generator at ±infinity — so `outerloop::ReactiveLimits`
+        // and `gridoxide solve --enforce-q-limits` had nothing to enforce, and
+        // one network read as `.uct` and as `.xiidm` disagreed about its own
+        // machines. `TestCase12Nodes` is that network, and states ±9000 here.
+        "minMaxReactiveLimits" => {
+            if let Some(last) = c.injections.last_mut() {
+                if let Some(q) = attrs.number("minQ") {
+                    last.q_min = q;
+                }
+                if let Some(q) = attrs.number("maxQ") {
+                    last.q_max = q;
+                }
+            }
+        }
+        // The same capability stated as a curve of `(p, minQ, maxQ)` points.
+        //
+        // `types::Bus` carries one pair, not a function of P, so this takes the
+        // curve's **envelope** — the widest limit it ever allows. That is an
+        // outer approximation: it never forbids a reactive output the machine
+        // can actually produce, and it may permit one it cannot at the P it
+        // happens to be dispatched to. Reported rather than silently taken,
+        // because the alternative it replaces — no limit at all — is a worse
+        // approximation of the same kind, and because `network_one_voltage_level`
+        // has a genuinely varying curve (−59.3 at P=0, −54.55 at P=70) where
+        // `voltage_monitoring`'s is flat.
+        //
+        // The sentinels are inverted on purpose: a curve with no points leaves
+        // them infinite, and `convert` writes a limit only when it is finite, so
+        // an empty curve falls back to unbounded rather than to nonsense.
+        "reactiveCapabilityCurve" => {
+            c.in_curve = true;
+            c.curve_envelopes += 1;
+            if let Some(last) = c.injections.last_mut() {
+                last.q_min = f64::INFINITY;
+                last.q_max = f64::NEG_INFINITY;
+            }
+        }
+        "point" if c.in_curve => {
+            if let Some(last) = c.injections.last_mut() {
+                if let Some(q) = attrs.number("minQ") {
+                    last.q_min = last.q_min.min(q);
+                }
+                if let Some(q) = attrs.number("maxQ") {
+                    last.q_max = last.q_max.max(q);
+                }
+            }
+        }
         // Structural or presentational elements with nothing to contribute.
-        "substation" | "busBreakerTopology" | "nodeBreakerTopology"
-        | "minMaxReactiveLimits" | "reactiveCapabilityCurve" | "point" | "property"
-        | "extension" | "terminalRef" => {}
+        "substation"
+        | "busBreakerTopology"
+        | "nodeBreakerTopology"
+        | "point"
+        | "property"
+        | "extension"
+        | "terminalRef" => {}
         other => {
             *c.unknown.entry(other.to_string()).or_insert(0) += 1;
         }
@@ -921,6 +1086,7 @@ fn close(
             }
         }
         "voltageLevel" => *level = None,
+        "reactiveCapabilityCurve" => c.in_curve = false,
         "line" | "twoWindingsTransformer" | "danglingLine" | "boundaryLine" => {
             if let Some(b) = branch.take() {
                 c.branches.push(b);
@@ -940,8 +1106,11 @@ fn close(
 
 fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmError> {
     let s_base_va = options.base_mva * 1e6;
-    let nominal: HashMap<&str, f64> =
-        c.levels.iter().map(|l| (l.id.as_str(), l.nominal_v)).collect();
+    let nominal: HashMap<&str, f64> = c
+        .levels
+        .iter()
+        .map(|l| (l.id.as_str(), l.nominal_v))
+        .collect();
 
     // Every declared node becomes a topology node; the bus view then decides
     // which of them are one bus.
@@ -950,7 +1119,9 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     let mut topology = NodeBreakerTopology::new(c.nodes.len());
     let mut switch_ids = Vec::new();
     for s in &c.switches {
-        let (Some(&a), Some(&b)) = (node_of.get(&s.a), node_of.get(&s.b)) else { continue };
+        let (Some(&a), Some(&b)) = (node_of.get(&s.a), node_of.get(&s.b)) else {
+            continue;
+        };
         topology.add_switch(Switch {
             kind: s.kind,
             nodes: [NodeIdx(a), NodeIdx(b)],
@@ -969,7 +1140,9 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     // would be nonsense.
     let mut boundary_nominal: HashMap<&str, f64> = HashMap::new();
     for raw in &c.branches {
-        let (Some(k1), Some(k2)) = (&raw.end1, &raw.end2) else { continue };
+        let (Some(k1), Some(k2)) = (&raw.end1, &raw.end2) else {
+            continue;
+        };
         for (boundary, real) in [(k1, k2), (k2, k1)] {
             if boundary.voltage_level != BOUNDARY_LEVEL {
                 continue;
@@ -1042,7 +1215,9 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         // and it is counted.
         let mut claim: Option<usize> = None;
         for n in nodes {
-            let Some(&a) = area_of_level.get(c.nodes[n.0].voltage_level.as_str()) else { continue };
+            let Some(&a) = area_of_level.get(c.nodes[n.0].voltage_level.as_str()) else {
+                continue;
+            };
             match claim {
                 None => claim = Some(a),
                 Some(existing) if existing != a => areas.report.contested_buses += 1,
@@ -1066,9 +1241,8 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
         bus_labels.push(label);
     }
 
-    let bus_of = |key: &NodeKey| -> Option<usize> {
-        node_of.get(key).map(|&n| view.bus_of(NodeIdx(n)).0)
-    };
+    let bus_of =
+        |key: &NodeKey| -> Option<usize> { node_of.get(key).map(|&n| view.bus_of(NodeIdx(n)).0) };
 
     // Injections.
     let mut generation = vec![0.0f64; n_buses];
@@ -1106,7 +1280,10 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     for sh in &c.shunts {
         let Some(b) = bus_of(&sh.at) else { continue };
         let z_base = buses[b].u_rated * buses[b].u_rated / s_base_va;
-        shunts.push(ShuntAdm { at: b, y: Complex::new(sh.g * z_base, sh.b * z_base) });
+        shunts.push(ShuntAdm {
+            at: b,
+            y: Complex::new(sh.g * z_base, sh.b * z_base),
+        });
     }
 
     // Branches.
@@ -1245,7 +1422,10 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
     // Notes.
     let mut notes = Vec::new();
     if !disconnected.is_empty() {
-        notes.push(format!("{} branch(es) omitted as disconnected", disconnected.len()));
+        notes.push(format!(
+            "{} branch(es) omitted as disconnected",
+            disconnected.len()
+        ));
     }
     if unsupported_phase_mode > 0 {
         notes.push(format!(
@@ -1258,13 +1438,27 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
             "{asymmetric} line(s) declare asymmetric shunts; summed into one pi-model term"
         ));
     }
+    if c.curve_envelopes > 0 {
+        notes.push(format!(
+            "{} generator(s) state reactive limits as a capability curve; the envelope was taken, \
+             which is an outer approximation of a P-dependent limit",
+            c.curve_envelopes
+        ));
+    }
     let mut unknown: Vec<(&String, &usize)> = c.unknown.iter().collect();
     unknown.sort();
     for (name, count) in unknown {
         notes.push(format!("skipped {count} `{name}` element(s)"));
     }
 
-    let slack = choose_slack(&buses, &bus_labels, &generation, &regulating, &options.slack, &mut notes)?;
+    let slack = choose_slack(
+        &buses,
+        &bus_labels,
+        &generation,
+        &regulating,
+        &options.slack,
+        &mut notes,
+    )?;
     buses[slack].bus_type = BusType::Slack;
 
     Ok(IidmImport {
@@ -1291,7 +1485,10 @@ fn convert(c: &mut Collected, options: &IidmOptions) -> Result<IidmImport, IidmE
 }
 
 fn to_limits(raw: &RawLimits) -> BranchLimits {
-    BranchLimits { patl_a: raw.permanent, tatl: raw.temporary.clone() }
+    BranchLimits {
+        patl_a: raw.permanent,
+        tatl: raw.temporary.clone(),
+    }
 }
 
 /// The from-side complex tap, and the tap table when the file gave one.
@@ -1317,7 +1514,9 @@ fn build_tap(
     let base = Complex::new(nominal, 0.0);
 
     let step_of = |changer: &Option<RawTapChanger>, at: Option<i32>| -> Complex<f64> {
-        let Some(ch) = changer else { return Complex::new(1.0, 0.0) };
+        let Some(ch) = changer else {
+            return Complex::new(1.0, 0.0);
+        };
         let position = at.unwrap_or(ch.position);
         let index = position - ch.low;
         if index < 0 {
@@ -1359,7 +1558,9 @@ fn build_tap(
 
     let changer = TapChanger {
         low: source.low,
-        position: source.position.clamp(source.low, source.low + steps.len() as i32 - 1),
+        position: source
+            .position
+            .clamp(source.low, source.low + steps.len() as i32 - 1),
         neutral: source.low + steps.len() as i32 / 2,
         steps,
         // IIDM states per-step `rho`/`alpha` alongside `r`/`x`/`g`/`b` ratios;
@@ -1393,10 +1594,15 @@ fn choose_slack(
         (0..buses.len())
             .filter(|&i| regulating[i] == want_regulating && generation[i] > 0.0)
             .max_by(|&a, &b| {
-                generation[a].total_cmp(&generation[b]).then_with(|| labels[b].cmp(&labels[a]))
+                generation[a]
+                    .total_cmp(&generation[b])
+                    .then_with(|| labels[b].cmp(&labels[a]))
             })
     };
     let chosen = pick(true).or_else(|| pick(false)).unwrap_or(0);
-    notes.push(format!("slack chosen as `{}` (largest generation)", labels[chosen]));
+    notes.push(format!(
+        "slack chosen as `{}` (largest generation)",
+        labels[chosen]
+    ));
     Ok(chosen)
 }

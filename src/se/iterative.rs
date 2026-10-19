@@ -48,8 +48,8 @@ use crate::measurement::{AngleFrame, Measurement, MeasurementKind, Target};
 use crate::sparse::ComplexSparseSystem;
 use crate::types::Bus;
 
-use super::nr::{SeOptions, SeReport, SeStatus};
 use super::SeNetwork;
+use super::nr::{SeOptions, SeReport, SeStatus};
 
 /// What a linear row measures, and how its measured value becomes the complex
 /// current the row's equation is written in.
@@ -60,7 +60,11 @@ use super::SeNetwork;
 #[derive(Clone, Copy, Debug)]
 enum RowKind {
     /// A bus voltage. Magnitude-only rows borrow the previous iterate's angle.
-    Voltage { bus: usize, magnitude: f64, angle: Option<f64> },
+    Voltage {
+        bus: usize,
+        magnitude: f64,
+        angle: Option<f64>,
+    },
     /// A power, converted as `I = conj(S/U_at)`.
     ///
     /// The only variant whose weight is scaled by `|U_at|²`: dividing by `U`
@@ -93,9 +97,14 @@ impl RowKind {
     /// which leaves the row out of that pass rather than dividing by it.
     fn measured(&self, v: &[Complex<f64>], reference_bus: usize) -> Option<Complex<f64>> {
         match *self {
-            RowKind::Voltage { bus, magnitude, angle } => {
-                Some(Complex::from_polar(magnitude, angle.unwrap_or_else(|| v[bus].arg())))
-            }
+            RowKind::Voltage {
+                bus,
+                magnitude,
+                angle,
+            } => Some(Complex::from_polar(
+                magnitude,
+                angle.unwrap_or_else(|| v[bus].arg()),
+            )),
             RowKind::Power(s) => {
                 let u = v[reference_bus];
                 (u.norm() > 0.0).then(|| (s / u).conj())
@@ -205,12 +214,14 @@ fn build_rows(measurements: &[Measurement], net: &SeNetwork) -> Vec<LinearRow> {
         rows.push(LinearRow {
             coefficients: functional.coefficients,
             kind: match target {
-                Target::BranchTerminalCurrent { frame: AngleFrame::Global, .. } => {
-                    RowKind::GlobalCurrent(value)
-                }
-                Target::BranchTerminalCurrent { frame: AngleFrame::Local, .. } => {
-                    RowKind::LocalCurrent(value)
-                }
+                Target::BranchTerminalCurrent {
+                    frame: AngleFrame::Global,
+                    ..
+                } => RowKind::GlobalCurrent(value),
+                Target::BranchTerminalCurrent {
+                    frame: AngleFrame::Local,
+                    ..
+                } => RowKind::LocalCurrent(value),
                 _ => RowKind::Power(value),
             },
             reference_bus: functional.at,
@@ -444,7 +455,14 @@ pub fn estimate(
         .sum::<f64>()
         / 2.0;
 
-    SeReport { status, iterations, objective, last_step, residuals, unconstrained }
+    SeReport {
+        status,
+        iterations,
+        objective,
+        last_step,
+        residuals,
+        unconstrained,
+    }
 }
 
 #[cfg(test)]
@@ -455,7 +473,12 @@ mod tests {
     use crate::se::nr::flat_start;
 
     fn m(kind: MeasurementKind, target: Target, sigma: f64) -> Measurement {
-        Measurement { kind, target, value: 0.0, sigma }
+        Measurement {
+            kind,
+            target,
+            value: 0.0,
+            sigma,
+        }
     }
 
     /// A lone `P` with no matching `Q` cannot become a current, so it is
@@ -519,11 +542,17 @@ mod tests {
             &measurements,
             &mut buses,
             &net,
-            &SeOptions { max_iter: 1, ..SeOptions::default() },
+            &SeOptions {
+                max_iter: 1,
+                ..SeOptions::default()
+            },
         );
 
         for (i, r) in report.residuals.iter().enumerate() {
-            assert!(r.abs() < 1e-9, "measurement {i} residual {r} should stay at zero");
+            assert!(
+                r.abs() < 1e-9,
+                "measurement {i} residual {r} should stay at zero"
+            );
         }
         for (i, (got, want)) in buses.iter().zip(&truth).enumerate() {
             assert!(
@@ -558,12 +587,18 @@ mod tests {
             m(MeasurementKind::ReactivePower, Target::Bus(1), 0.001),
             m(
                 MeasurementKind::ActivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
                 0.001,
             ),
             m(
                 MeasurementKind::ReactivePower,
-                Target::BranchTerminal { branch: 0, terminal: Terminal::From },
+                Target::BranchTerminal {
+                    branch: 0,
+                    terminal: Terminal::From,
+                },
                 0.001,
             ),
         ];

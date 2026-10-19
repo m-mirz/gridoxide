@@ -29,7 +29,11 @@ fn dynamics(extra: &[&str]) -> Output {
 }
 
 fn stdout_of(out: &Output) -> String {
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -37,7 +41,10 @@ fn stdout_of(out: &Output) -> String {
 fn it_runs_a_document_and_reports_what_the_machines_did() {
     let text = stdout_of(&dynamics(&["--stop", "6", "--step", "0.005"]));
 
-    assert!(text.contains("3 bus(es), 13 differential state(s), 3 scheduled event(s)"), "{text}");
+    assert!(
+        text.contains("3 bus(es), 13 differential state(s), 3 scheduled event(s)"),
+        "{text}"
+    );
     // The initial derivative is printed because a nonzero one invalidates
     // everything after it, and a reader should not have to ask.
     assert!(text.contains("initial state derivative:"), "{text}");
@@ -55,7 +62,12 @@ fn it_runs_a_document_and_reports_what_the_machines_did() {
 fn the_csv_flag_writes_the_trajectory_and_observe_narrows_it() {
     let out = tempfile();
     let text = stdout_of(&dynamics(&[
-        "--stop", "3", "--csv", out.to_str().unwrap(), "--observe", "G1.omega",
+        "--stop",
+        "3",
+        "--csv",
+        out.to_str().unwrap(),
+        "--observe",
+        "G1.omega",
     ]));
     assert!(text.contains("wrote 1 column(s)"), "{text}");
 
@@ -72,7 +84,14 @@ fn the_csv_flag_writes_the_trajectory_and_observe_narrows_it() {
 #[test]
 fn an_observe_pattern_that_matches_nothing_is_an_error() {
     let out = tempfile();
-    let result = dynamics(&["--stop", "1", "--csv", out.to_str().unwrap(), "--observe", "nope"]);
+    let result = dynamics(&[
+        "--stop",
+        "1",
+        "--csv",
+        out.to_str().unwrap(),
+        "--observe",
+        "nope",
+    ]);
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("matched none of the"), "{stderr}");
@@ -87,9 +106,16 @@ fn the_backends_are_selectable_and_agree() {
     // The per-machine summary is printed to six figures, so identical text is a
     // real agreement rather than a rounded one.
     let line = |text: &str| {
-        text.lines().find(|l| l.trim_start().starts_with("G1")).unwrap_or_default().to_string()
+        text.lines()
+            .find(|l| l.trim_start().starts_with("G1"))
+            .unwrap_or_default()
+            .to_string()
     };
-    assert_eq!(line(&scalar), line(&klu), "the backend is a performance choice, not an answer");
+    assert_eq!(
+        line(&scalar),
+        line(&klu),
+        "the backend is a performance choice, not an answer"
+    );
 
     let bad = dynamics(&["--backend", "quantum"]);
     assert!(!bad.status.success());
@@ -143,13 +169,19 @@ fn the_machine_formulation_is_selectable_and_changes_the_answer() {
 
     let approximate = swing(&["--no-speed-voltages"]);
     let full = swing(&["--speed-voltages"]);
-    assert!(approximate > 0.5 && full > 0.5, "both should swing: {approximate} {full}");
+    assert!(
+        approximate > 0.5 && full > 0.5,
+        "both should swing: {approximate} {full}"
+    );
     // A modelling choice that moved nothing would mean the flag was not
     // reaching the equations; one that moved a great deal would mean something
     // other than a factor of omega had changed.
     let gap = (approximate - full).abs();
     assert!(gap > 1e-4, "the flag must reach the machines, gap {gap:e}");
-    assert!(gap < 0.05 * approximate, "but it is a per-cent effect, not a new model: {gap:e}");
+    assert!(
+        gap < 0.05 * approximate,
+        "but it is a per-cent effect, not a new model: {gap:e}"
+    );
 
     // The document's own setting is the default.
     assert_eq!(swing(&[]), approximate);
@@ -159,10 +191,16 @@ fn the_machine_formulation_is_selectable_and_changes_the_answer() {
 fn the_modes_flag_reports_the_linearized_system() {
     let text = stdout_of(&dynamics(&["--modes", "4"]));
 
-    assert!(text.contains("13 mode(s) over 13 differential state(s)"), "{text}");
+    assert!(
+        text.contains("13 mode(s) over 13 differential state(s)"),
+        "{text}"
+    );
     // Which method answered is part of the answer: "every mode" and "the four
     // nearest a point" support very different conclusions.
-    assert!(text.contains("every mode, by a dense decomposition"), "{text}");
+    assert!(
+        text.contains("every mode, by a dense decomposition"),
+        "{text}"
+    );
     assert!(text.contains("eigenvalue"), "{text}");
     assert!(text.contains("damping"), "{text}");
     assert!(text.contains("participation"), "{text}");
@@ -222,10 +260,20 @@ fn the_shift_can_be_named_outright() {
 /// Flags that contradict each other are refused rather than silently ranked.
 #[test]
 fn the_aiming_flags_are_checked_against_each_other() {
-    let out = dynamics(&["--modes", "2", "--modes-near", "-0.4,7.98", "--modes-freq", "1.0"]);
+    let out = dynamics(&[
+        "--modes",
+        "2",
+        "--modes-near",
+        "-0.4,7.98",
+        "--modes-freq",
+        "1.0",
+    ]);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--modes-near names the shift outright"), "{err}");
+    assert!(
+        err.contains("--modes-near names the shift outright"),
+        "{err}"
+    );
 
     // A damping ratio says how far off the axis, not where along it.
     let out = dynamics(&["--modes", "2", "--modes-damping", "0.05"]);
@@ -244,7 +292,10 @@ fn the_aiming_flags_are_checked_against_each_other() {
 fn the_sensitivity_flag_ranks_the_parameters() {
     let text = stdout_of(&dynamics(&["--modes", "2", "--modes-sensitivity"]));
 
-    assert!(text.contains("sensitivity of the least-damped mode"), "{text}");
+    assert!(
+        text.contains("sensitivity of the least-damped mode"),
+        "{text}"
+    );
     assert!(text.contains("dlambda/dp"), "{text}");
     assert!(text.contains("dzeta/dp"), "{text}");
     // The machine's inertia and damping coefficient, named against the device

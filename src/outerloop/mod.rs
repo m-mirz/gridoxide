@@ -40,9 +40,9 @@
 //! pass rather than as a failure on this one. A loop therefore declares what
 //! it invalidated ([`Invalidates`]) and the driver acts on it.
 
-use crate::network::{build_ybus, stamp_shunts, YBusSparse};
-use crate::solver::{IslandReport, IslandStatus, JacobianBackend, PersistentSolver};
 use crate::network::ShuntAdm;
+use crate::network::{YBusSparse, build_ybus, stamp_shunts};
+use crate::solver::{IslandReport, IslandStatus, JacobianBackend, PersistentSolver};
 use crate::types::{Bus, Line, TapChanger, Transformer};
 
 pub mod area;
@@ -280,9 +280,12 @@ pub fn ordered<'a>(
 }
 
 fn settled(reports: &[IslandReport]) -> bool {
-    reports
-        .iter()
-        .all(|r| !matches!(r.status, IslandStatus::Singular | IslandStatus::MaxIterationsReached))
+    reports.iter().all(|r| {
+        !matches!(
+            r.status,
+            IslandStatus::Singular | IslandStatus::MaxIterationsReached
+        )
+    })
 }
 
 /// Solve, then run an ordered list of outer loops to a fixed point.
@@ -321,7 +324,11 @@ pub fn solve_with_loops(
     let mut statuses = vec![OuterLoopStatus::Stable; loops.len()];
 
     {
-        let mut lc = OuterLoopContext { net: ctx, islands: &[], iteration: 0 };
+        let mut lc = OuterLoopContext {
+            net: ctx,
+            islands: &[],
+            iteration: 0,
+        };
         for l in loops.iter_mut() {
             l.initialize(&mut lc);
         }
@@ -436,5 +443,14 @@ pub fn solve_with_loops(
         && !budget_exhausted
         && settled(&reports)
         && statuses.iter().all(|s| *s == OuterLoopStatus::Stable);
-    finish(reports, loops, &counts, &statuses, total, solves, converged, budget_exhausted)
+    finish(
+        reports,
+        loops,
+        &counts,
+        &statuses,
+        total,
+        solves,
+        converged,
+        budget_exhausted,
+    )
 }

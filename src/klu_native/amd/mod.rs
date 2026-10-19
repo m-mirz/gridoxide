@@ -71,8 +71,16 @@ mod tests {
         let cases: Vec<(usize, Vec<i32>, Vec<i32>)> = vec![
             (3, vec![0, 1, 2, 3], vec![0, 1, 2]),
             (5, vec![0, 1, 3, 5, 7, 8], vec![1, 0, 2, 1, 3, 2, 4, 3]), // chain
-            (5, vec![0, 2, 4, 6, 8, 10], vec![1, 4, 0, 2, 1, 3, 2, 4, 0, 3]), // ring
-            (4, vec![0, 3, 6, 9, 12], vec![1, 2, 3, 0, 2, 3, 0, 1, 3, 0, 1, 2]), // clique
+            (
+                5,
+                vec![0, 2, 4, 6, 8, 10],
+                vec![1, 4, 0, 2, 1, 3, 2, 4, 0, 3],
+            ), // ring
+            (
+                4,
+                vec![0, 3, 6, 9, 12],
+                vec![1, 2, 3, 0, 2, 3, 0, 1, 3, 0, 1, 2],
+            ), // clique
         ];
         for (n, col_ptr, row_idx) in cases {
             let col_ptr64: Vec<i64> = col_ptr.iter().map(|&x| x as i64).collect();
@@ -132,7 +140,10 @@ mod tests {
             let col_ptr64: Vec<i64> = col_ptr.iter().map(|&x| x as i64).collect();
             let row_idx64: Vec<i64> = row_idx.iter().map(|&x| x as i64).collect();
             let rust_perm = amd_order(n, &col_ptr64, &row_idx64).unwrap();
-            assert!(is_permutation(&rust_perm, n), "trial {trial} (n={n}): not a permutation");
+            assert!(
+                is_permutation(&rust_perm, n),
+                "trial {trial} (n={n}): not a permutation"
+            );
 
             let c_perm = ffi_oracle::amd_order_oracle(n, &col_ptr, &row_idx).unwrap();
             let c_perm64: Vec<i64> = c_perm.iter().map(|&x| x as i64).collect();
@@ -176,7 +187,11 @@ mod tests {
         let mut total = 0usize;
         for &node in perm {
             let node = node as usize;
-            let neighbors: Vec<usize> = adj[node].iter().copied().filter(|&x| !eliminated[x]).collect();
+            let neighbors: Vec<usize> = adj[node]
+                .iter()
+                .copied()
+                .filter(|&x| !eliminated[x])
+                .collect();
             total += neighbors.len();
             for &a in &neighbors {
                 for &b in &neighbors {

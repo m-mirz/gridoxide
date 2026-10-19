@@ -13,11 +13,11 @@
 //! returned state and compares against what the schedules say they should be.
 //! Nothing is read back out of the solver's own bookkeeping.
 
-use gridoxide::network::{build_ybus, effective_injection, power_injections, YBusSparse};
+use gridoxide::network::{YBusSparse, build_ybus, effective_injection, power_injections};
 use gridoxide::outerloop::{
     DistributedSlack, OuterLoop, SlackDistribution, SlackDistributionReport, SolveContext,
 };
-use gridoxide::solver::{newton_raphson, IslandReport, IslandStatus, JacobianBackend};
+use gridoxide::solver::{IslandReport, IslandStatus, JacobianBackend, newton_raphson};
 use gridoxide::types::{Bus, BusType, Line, Transformer};
 
 /// Distributed slack is one outer loop among the list
@@ -69,10 +69,38 @@ fn ring() -> (Vec<Bus>, YBusSparse) {
         bus(3, BusType::PQ, -1.00, -0.20),
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.03, x: 0.08, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 2, to: 3, r: 0.02, x: 0.07, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 3, to: 0, r: 0.03, x: 0.09, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.03,
+            x: 0.08,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 2,
+            to: 3,
+            r: 0.02,
+            x: 0.07,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 3,
+            to: 0,
+            r: 0.03,
+            x: 0.09,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let ybus = build_ybus(4, &lines, &Vec::<Transformer>::new()).finish();
     (buses, ybus)
@@ -92,10 +120,19 @@ fn the_slack_keeps_only_its_own_share() {
     let single_slack_output = p_single[0];
 
     let distribution = SlackDistribution::uniform(&buses);
-    let (reports, report) =
-        distributing_slack(&mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution);
+    let (reports, report) = distributing_slack(
+        &mut buses,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
+    );
 
-    assert!(reports.iter().all(|r| r.status == IslandStatus::Converged), "{reports:?}");
+    assert!(
+        reports.iter().all(|r| r.status == IslandStatus::Converged),
+        "{reports:?}"
+    );
     assert!(report.converged, "{report:?}");
 
     let (p_calc, _) = power_injections(&buses, &ybus);
@@ -131,7 +168,12 @@ fn the_shifts_account_for_exactly_the_imbalance() {
 
     let distribution = SlackDistribution::uniform(&buses);
     let (_, report) = distributing_slack(
-        &mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
+        &mut buses,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
     );
 
     let total_shift: f64 = report.shift.iter().sum();
@@ -163,7 +205,12 @@ fn participation_is_proportional_to_the_weights() {
     // up back at its own schedule exactly.
     let distribution = SlackDistribution::from_weights(vec![0.0, 25.0, 75.0, 0.0]);
     let (_, report) = distributing_slack(
-        &mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
+        &mut buses,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
     );
     assert!(report.converged, "{report:?}");
 
@@ -188,7 +235,12 @@ fn the_answer_is_still_a_valid_power_flow() {
     let (mut buses, ybus) = ring();
     let distribution = SlackDistribution::uniform(&buses);
     distributing_slack(
-        &mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
+        &mut buses,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
     );
 
     let (p_calc, q_calc) = power_injections(&buses, &ybus);
@@ -230,7 +282,12 @@ fn the_outer_loop_settles_in_a_handful_of_passes() {
     let (mut buses, ybus) = ring();
     let distribution = SlackDistribution::uniform(&buses);
     let (_, report) = distributing_slack(
-        &mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
+        &mut buses,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
     );
     assert!(report.converged);
     assert!(
@@ -259,22 +316,62 @@ fn each_island_distributes_its_own_imbalance() {
         bus(5, BusType::PQ, -2.00, -0.30),
     ];
     let lines = vec![
-        Line { from: 0, to: 1, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 1, to: 2, r: 0.02, x: 0.07, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 3, to: 4, r: 0.02, x: 0.06, b_shunt: 0.0, g_shunt: 0.0 },
-        Line { from: 4, to: 5, r: 0.02, x: 0.07, b_shunt: 0.0, g_shunt: 0.0 },
+        Line {
+            from: 0,
+            to: 1,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 1,
+            to: 2,
+            r: 0.02,
+            x: 0.07,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 3,
+            to: 4,
+            r: 0.02,
+            x: 0.06,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
+        Line {
+            from: 4,
+            to: 5,
+            r: 0.02,
+            x: 0.07,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        },
     ];
     let ybus = build_ybus(6, &lines, &Vec::<Transformer>::new()).finish();
 
     let distribution = SlackDistribution::uniform(&buses);
     let (reports, report) = distributing_slack(
-        &mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
+        &mut buses,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
     );
 
     assert_eq!(reports.len(), 2, "expected two islands");
-    assert!(reports.iter().all(|r| r.status == IslandStatus::Converged), "{reports:?}");
+    assert!(
+        reports.iter().all(|r| r.status == IslandStatus::Converged),
+        "{reports:?}"
+    );
     assert!(report.converged, "{report:?}");
-    assert!(report.undistributed.is_empty(), "{:?}", report.undistributed);
+    assert!(
+        report.undistributed.is_empty(),
+        "{:?}",
+        report.undistributed
+    );
 
     let (p_calc, _) = power_injections(&buses, &ybus);
     for slack in [0usize, 3] {
@@ -308,16 +405,31 @@ fn an_island_with_no_participants_is_reported_not_silently_skipped() {
     // Weight only a load bus, which is not a generator.
     let distribution = SlackDistribution::from_weights(vec![0.0, 0.0, 0.0, 0.0]);
     let (reports, report) = distributing_slack(
-        &mut buses, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
+        &mut buses,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
     );
 
     assert!(reports.iter().all(|r| r.status == IslandStatus::Converged));
     assert_eq!(report.undistributed.len(), 1);
-    assert_eq!(report.undistributed[0].1, "no participating generator in this island");
-    assert!(report.shift.iter().all(|s| *s == 0.0), "nothing should have moved");
+    assert_eq!(
+        report.undistributed[0].1,
+        "no participating generator in this island"
+    );
+    assert!(
+        report.shift.iter().all(|s| *s == 0.0),
+        "nothing should have moved"
+    );
     // The untouched deviation is still reported, so a caller can see how much
     // the slack is carrying that nobody took.
-    assert!(report.residual[0].abs() > 0.01, "residual {:?}", report.residual);
+    assert!(
+        report.residual[0].abs() > 0.01,
+        "residual {:?}",
+        report.residual
+    );
 }
 
 /// Every sparse backend gives the same answer — the outer loop touches
@@ -328,9 +440,7 @@ fn every_backend_agrees() {
     for backend in [JacobianBackend::Scalar, JacobianBackend::Block] {
         let (mut buses, ybus) = ring();
         let distribution = SlackDistribution::uniform(&buses);
-        let (_, report) = distributing_slack(
-            &mut buses, &ybus, 1e-10, 30, backend, &distribution,
-        );
+        let (_, report) = distributing_slack(&mut buses, &ybus, 1e-10, 30, backend, &distribution);
         assert!(report.converged, "{backend:?}: {report:?}");
         answers.push(report.shift);
     }
@@ -353,7 +463,12 @@ fn the_slacks_own_schedule_is_respected() {
     scheduled[0].p_spec = 0.25;
     let distribution = SlackDistribution::from_weights(vec![0.0, 1.0, 1.0, 0.0]);
     let (_, report) = distributing_slack(
-        &mut scheduled, &ybus, 1e-10, 30, JacobianBackend::Scalar, &distribution,
+        &mut scheduled,
+        &ybus,
+        1e-10,
+        30,
+        JacobianBackend::Scalar,
+        &distribution,
     );
     assert!(report.converged);
 

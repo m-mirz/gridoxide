@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::rao::crac::*;
-use gridoxide::rao::{crac_json, evaluate_with, run, Network, Resolution, SearchOptions};
+use gridoxide::rao::{Network, Resolution, SearchOptions, crac_json, evaluate_with, run};
 use gridoxide::ucte;
 
 mod openrao;
@@ -47,6 +47,7 @@ impl Case {
 
     fn network(&self) -> Network<'_> {
         Network {
+            generation: &self.net.generation,
             buses: &self.net.buses,
             lines: &self.net.lines,
             transformers: &self.net.transformers,
@@ -62,7 +63,13 @@ impl Case {
 
     fn plan(&self) -> gridoxide::rao::Plan {
         let mut solver = IpmSolver::new();
-        run(&self.crac, &self.network(), &self.resolution(), &mut solver, &SearchOptions::default())
+        run(
+            &self.crac,
+            &self.network(),
+            &self.resolution(),
+            &mut solver,
+            &SearchOptions::default(),
+        )
     }
 }
 
@@ -78,10 +85,17 @@ fn the_preventive_perimeter_covers_the_outage_states_too() {
     let c = case("crac-for-12nodes.json");
     let plan = c.plan();
 
-    let kinds: Vec<InstantKind> =
-        plan.preventive.states.iter().map(|s| c.crac.instants[s.instant].kind).collect();
+    let kinds: Vec<InstantKind> = plan
+        .preventive
+        .states
+        .iter()
+        .map(|s| c.crac.instants[s.instant].kind)
+        .collect();
     assert!(kinds.contains(&InstantKind::Preventive), "{kinds:?}");
-    assert!(kinds.contains(&InstantKind::Outage), "the outage state must be secured here: {kinds:?}");
+    assert!(
+        kinds.contains(&InstantKind::Outage),
+        "the outage state must be secured here: {kinds:?}"
+    );
 
     // And no outage state may appear as a curative perimeter of its own.
     for scenario in &plan.scenarios {
@@ -100,11 +114,17 @@ fn a_curative_cnec_with_no_curative_action_is_pulled_forward() {
     let c = case("crac-topology-helps.json");
     let plan = c.plan();
 
-    assert!(!plan.pulled_forward.is_empty(), "this fixture has unactionable curative CNECs");
+    assert!(
+        !plan.pulled_forward.is_empty(),
+        "this fixture has unactionable curative CNECs"
+    );
     for &index in &plan.pulled_forward {
         let cnec = &c.crac.flow_cnecs[index];
         let kind = c.crac.instants[cnec.state.instant].kind;
-        assert!(matches!(kind, InstantKind::Curative | InstantKind::Auto), "{kind:?}");
+        assert!(
+            matches!(kind, InstantKind::Curative | InstantKind::Auto),
+            "{kind:?}"
+        );
         // Nothing may be available for it, or pulling it forward would be wrong.
         let actionable = c
             .crac
@@ -115,9 +135,17 @@ fn a_curative_cnec_with_no_curative_action_is_pulled_forward() {
                 .range_actions
                 .iter()
                 .any(|a| a.usage_rules.iter().any(|r| r.covers(&cnec.state)));
-        assert!(!actionable, "`{}` has a curative action and should not be pulled forward", cnec.id);
+        assert!(
+            !actionable,
+            "`{}` has a curative action and should not be pulled forward",
+            cnec.id
+        );
         // And its state must be in the preventive perimeter.
-        assert!(plan.preventive.states.contains(&cnec.state), "{:?}", plan.preventive.states);
+        assert!(
+            plan.preventive.states.contains(&cnec.state),
+            "{:?}",
+            plan.preventive.states
+        );
     }
 }
 
@@ -127,9 +155,16 @@ fn an_actionable_curative_state_gets_its_own_perimeter() {
     let plan = c.plan();
     // This CRAC has a curative network action and an auto range action, so both
     // states are actionable and neither is pulled forward.
-    let curative_states: Vec<&State> =
-        plan.scenarios.iter().flat_map(|s| s.perimeters.iter()).flat_map(|p| &p.states).collect();
-    assert!(!curative_states.is_empty(), "no curative perimeter was created");
+    let curative_states: Vec<&State> = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .flat_map(|p| &p.states)
+        .collect();
+    assert!(
+        !curative_states.is_empty(),
+        "no curative perimeter was created"
+    );
     for state in &curative_states {
         assert!(
             !plan.preventive.states.contains(state),
@@ -143,8 +178,11 @@ fn curative_perimeters_are_solved_in_chronological_order() {
     let c = case("crac-for-12nodes.json");
     let plan = c.plan();
     for scenario in &plan.scenarios {
-        let instants: Vec<usize> =
-            scenario.perimeters.iter().filter_map(|p| p.states.first().map(|s| s.instant)).collect();
+        let instants: Vec<usize> = scenario
+            .perimeters
+            .iter()
+            .filter_map(|p| p.states.first().map(|s| s.instant))
+            .collect();
         assert!(
             instants.windows(2).all(|w| w[0] < w[1]),
             "curative instants out of order: {instants:?}"
@@ -256,7 +294,11 @@ fn the_topology_fixture_ends_secure() {
     let c = case("crac-topology-helps.json");
     let plan = c.plan();
     assert!(plan.initial_margin_mw < 0.0, "it should start insecure");
-    assert!(plan.is_secure(), "one action secures it: {} MW", plan.final_margin_mw);
+    assert!(
+        plan.is_secure(),
+        "one action secures it: {} MW",
+        plan.final_margin_mw
+    );
     assert_eq!(plan.preventive.network_actions.len(), 1);
 }
 
@@ -279,7 +321,13 @@ fn a_crac_with_no_contingency_still_yields_a_preventive_plan() {
     crac.contingencies.clear();
     let resolution = Resolution::new(&crac, &c.net.branch_ids);
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &c.network(), &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &c.network(),
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
     assert!(plan.scenarios.is_empty());
     assert!(!plan.preventive.states.is_empty());
     assert!(plan.final_margin_mw >= plan.initial_margin_mw - 1e-9);
@@ -295,10 +343,16 @@ fn depth_zero_still_decomposes_even_when_it_finds_nothing() {
         &c.network(),
         &c.resolution(),
         &mut solver,
-        &SearchOptions { max_depth: 0, ..Default::default() },
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
     );
     assert!(plan.preventive.network_actions.is_empty());
-    assert!(plan.preventive.states.len() >= 2, "the decomposition should still happen");
+    assert!(
+        plan.preventive.states.len() >= 2,
+        "the decomposition should still happen"
+    );
     assert!(plan.final_margin_mw >= plan.initial_margin_mw - 1e-9);
 }
 
@@ -334,7 +388,10 @@ fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
     let plan = c.plan();
 
     // Both halves are in the answer.
-    assert!(!plan.preventive.network_actions.is_empty(), "no network action taken");
+    assert!(
+        !plan.preventive.network_actions.is_empty(),
+        "no network action taken"
+    );
     assert!(
         plan.preventive.setpoints.iter().any(|s| s.moved()),
         "no range action moved"
@@ -352,7 +409,10 @@ fn an_action_and_a_setpoint_that_help_only_together_are_both_found() {
         &c.network(),
         &c.resolution(),
         &mut solver,
-        &SearchOptions { max_depth: 0, ..Default::default() },
+        &SearchOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
     );
     // Not "nothing" — a little. The claim is proportion: whatever the shifter
     // manages by itself is a rounding error beside the combination.
@@ -408,12 +468,21 @@ fn monitored_cnecs_hold_the_optimizer_back_to_the_floor_they_are_owed() {
         .filter(|(_, x)| x.monitored)
         .map(|(i, _)| i)
         .collect();
-    assert!(!monitored.is_empty(), "this fixture is supposed to declare MNECs");
+    assert!(
+        !monitored.is_empty(),
+        "this fixture is supposed to declare MNECs"
+    );
 
     let mut unconstrained = SearchOptions::default();
     unconstrained.linear.mnec.options.enabled = false;
     let mut solver = IpmSolver::new();
-    let loose = run(&c.crac, &c.network(), &c.resolution(), &mut solver, &unconstrained);
+    let loose = run(
+        &c.crac,
+        &c.network(),
+        &c.resolution(),
+        &mut solver,
+        &unconstrained,
+    );
     let held = c.plan();
 
     assert!(
@@ -487,10 +556,8 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
     use gridoxide::rao::crac::RangeActionKind;
 
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic19/SL_ep19us3case1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic19/SL_ep19us3case1.json")).expect("crac");
 
     let curative = crac
         .usage_limits
@@ -503,6 +570,7 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
 
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -515,13 +583,23 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     let mut checked = 0;
     let mut most = 0;
     for scenario in &plan.scenarios {
         for perimeter in &scenario.perimeters {
-            if !perimeter.states.iter().any(|s| s.instant == curative.instant) {
+            if !perimeter
+                .states
+                .iter()
+                .any(|s| s.instant == curative.instant)
+            {
                 continue;
             }
             checked += 1;
@@ -537,19 +615,31 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
                 .map(|s| &crac.range_actions[s.action])
                 .filter(|a| a.operator.as_deref() == Some("be"))
                 .collect();
-            let psts =
-                moved.iter().filter(|a| matches!(a.kind, RangeActionKind::Pst { .. })).count();
+            let psts = moved
+                .iter()
+                .filter(|a| matches!(a.kind, RangeActionKind::Pst { .. }))
+                .count();
             assert!(topo <= 1, "{topo} BE topological actions, the cap is 1");
             assert!(psts <= 1, "{psts} BE shifters moved, the cap is 1");
-            assert!(topo + moved.len() <= 2, "{} BE actions, the cap is 2", topo + moved.len());
+            assert!(
+                topo + moved.len() <= 2,
+                "{} BE actions, the cap is 2",
+                topo + moved.len()
+            );
             most = most.max(topo + moved.len());
         }
     }
-    assert!(checked > 0, "no curative perimeter was examined, so nothing was tested");
+    assert!(
+        checked > 0,
+        "no curative perimeter was examined, so nothing was tested"
+    );
     // …and the caps are not being satisfied by a search that simply does
     // nothing. Some perimeter spends the whole allowance, so the assertions
     // above are on a plan that is actually pressing against them.
-    assert_eq!(most, 2, "no perimeter used its full allowance, so nothing was constrained");
+    assert_eq!(
+        most, 2,
+        "no perimeter used its full allowance, so nothing was constrained"
+    );
 }
 
 /// A curative perimeter stops once it beats the preventive one, and stopping
@@ -568,12 +658,11 @@ fn a_curative_perimeter_may_not_exceed_the_crac_s_usage_limits() {
 #[test]
 fn a_curative_perimeter_stops_once_it_is_better_than_preventive() {
     let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic13/SL_ep13us11case1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us11case1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -602,9 +691,7 @@ fn a_curative_perimeter_stops_once_it_is_better_than_preventive() {
         plan.scenarios
             .iter()
             .flat_map(|s| s.perimeters.iter())
-            .map(|p| {
-                p.network_actions.len() + p.setpoints.iter().filter(|s| s.moved()).count()
-            })
+            .map(|p| p.network_actions.len() + p.setpoints.iter().filter(|s| s.moved()).count())
             .sum()
     };
 
@@ -644,12 +731,11 @@ fn automatons_are_simulated_rather_than_chosen() {
     use gridoxide::rao::crac_json;
 
     let net = ucte::read(ucte_fixture("TestCase8Nodes_15_11_6_1.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/crac_15_11_6_1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/crac_15_11_6_1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -662,7 +748,13 @@ fn automatons_are_simulated_rather_than_chosen() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     let scenario = plan.scenarios.first().expect("a scenario");
     let automatons = scenario.automatons.as_ref().expect("an auto perimeter");
@@ -698,14 +790,21 @@ fn automatons_are_simulated_rather_than_chosen() {
 
     // The perimeter ends secure, having started well overloaded.
     assert!(automatons.initial_margin_mw < -100.0);
-    assert!(automatons.final_margin_mw > 0.0, "{}", automatons.final_margin_mw);
+    assert!(
+        automatons.final_margin_mw > 0.0,
+        "{}",
+        automatons.final_margin_mw
+    );
 }
 
 /// A standby circuit must survive import, or closing it is inexpressible.
 #[test]
 fn an_out_of_service_branch_can_be_closed_by_an_automaton() {
     let net = ucte::read(ucte_fixture("TestCase8Nodes_15_11_6_1.uct")).expect("network");
-    assert!(!net.initially_open.is_empty(), "this fixture has out-of-service circuits");
+    assert!(
+        !net.initially_open.is_empty(),
+        "this fixture has out-of-service circuits"
+    );
     for &branch in &net.initially_open {
         // Present in the model with real impedance — that is what makes it
         // closable — and open only by virtue of being in this list.
@@ -722,12 +821,11 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
     use gridoxide::rao::crac_json;
 
     let net = ucte::read(ucte_fixture("TestCase12Nodes_15_11_5_1.uct")).expect("network");
-    let (crac, _) = crac_json::read(
-        openrao::path("files/crac/epic15/crac_15_11_5_1.json"),
-    )
-    .expect("crac");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/crac_15_11_5_1.json")).expect("crac");
     let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
     let network = Network {
+        generation: &net.generation,
         buses: &net.buses,
         lines: &net.lines,
         transformers: &net.transformers,
@@ -740,10 +838,18 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
         base_mva: net.base_mva,
     };
     let mut solver = IpmSolver::new();
-    let plan = run(&crac, &network, &resolution, &mut solver, &SearchOptions::default());
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
 
     for scenario in &plan.scenarios {
-        let Some(automatons) = &scenario.automatons else { continue };
+        let Some(automatons) = &scenario.automatons else {
+            continue;
+        };
         for perimeter in &scenario.perimeters {
             // Whatever the automatons opened is still open in the curative
             // perimeter: a curative decision adds to their result, it does not
@@ -756,4 +862,986 @@ fn curative_perimeters_start_from_what_the_automatons_left() {
             }
         }
     }
+}
+
+/// A **curative** action may close a branch the network file has out of service.
+///
+/// This is the one the gate found the hard way. The already-open branches a
+/// curative perimeter inherits used to be applied by writing `OPEN_BRANCH_Z`
+/// into a copy of the lines, and a close is expressed by *removing* a branch
+/// from the open set — so once the set had been spent on the impedances there
+/// was nothing left to remove, and the branch stayed open however the CRAC read.
+///
+/// The failure was silent in the worst way: the action was not refused, it
+/// evaluated as a change that does nothing, lost to every other candidate, and
+/// the perimeter reported that no remedial action was worth taking. Against the
+/// reference's own suite that was 21 curative closes declined out of 21
+/// offered, while the same actions matched 8 of 8 in preventive and 3 of 3 in
+/// auto.
+///
+/// `close_fr1_fr5` on the scenario the reference numbers 1.3.3.4.
+#[test]
+fn a_curative_action_can_close_an_out_of_service_branch() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us3case4.json")).expect("crac");
+
+    let closes = crac
+        .network_actions
+        .iter()
+        .position(|a| a.id == "close_fr1_fr5")
+        .expect("the CRAC declares close_fr1_fr5");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let branch = match &crac.network_actions[closes].elementary[..] {
+        [
+            ElementaryAction::TerminalsConnection {
+                element,
+                connected: true,
+            },
+        ] => resolution.branch(element).expect("the branch resolves"),
+        other => panic!("expected one closing elementary action, got {other:?}"),
+    };
+    assert!(
+        net.initially_open.contains(&branch),
+        "this test needs a branch the file has out of service — otherwise there is \
+         nothing to close and the assertion below passes for the wrong reason"
+    );
+
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &[],
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
+
+    let taken = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find(|p| p.network_actions.contains(&closes))
+        .expect("some curative perimeter closes fr1-fr5");
+    // Not just chosen — actually in force. The open set the perimeter reports
+    // is what every downstream margin is measured against, so an action that is
+    // recorded and not applied is the same defect one step later.
+    assert!(
+        !taken.open_branches.contains(&branch),
+        "close_fr1_fr5 was chosen but the branch is still in the perimeter's open set"
+    );
+    assert!(
+        plan.preventive.open_branches.contains(&branch),
+        "the branch should still be open in the preventive perimeter, which does not close it"
+    );
+}
+
+/// A curative perimeter gets its own search depth.
+///
+/// The reference keeps `max-preventive-search-tree-depth` and
+/// `max-curative-search-tree-depth` apart because they answer different
+/// questions: how much may be planned in advance, against how much may be
+/// carried out under time pressure by people who did not plan it. Every
+/// vendored configuration sets the two the same, so this moves no assertion in
+/// the Cucumber gate — and a configuration that set them differently would
+/// otherwise have been scored against the preventive depth without a word,
+/// which is the only reason to have it.
+#[test]
+fn a_curative_perimeter_has_its_own_depth() {
+    let c = case("crac-for-12nodes.json");
+    let curative_leaves = |options: &SearchOptions| -> usize {
+        let mut solver = IpmSolver::new();
+        run(&c.crac, &c.network(), &c.resolution(), &mut solver, options)
+            .scenarios
+            .iter()
+            .flat_map(|s| s.perimeters.iter())
+            .map(|p| p.leaves)
+            .sum()
+    };
+
+    // Depth 0 evaluates the root and nothing else, so a curative perimeter held
+    // at zero must not evaluate a single leaf however deep preventive goes.
+    let shared = SearchOptions {
+        max_depth: 1,
+        // Take whatever scores best, so the count reflects the depth rather
+        // than a threshold.
+        absolute_min_impact: -1e9,
+        relative_min_impact: -1e9,
+        // A curative perimeter stops the moment it beats the preventive one,
+        // and these already do — with the default improvement of zero both
+        // settings would read as zero leaves for that reason rather than for
+        // the depth. Demanding an improvement nothing can reach keeps the
+        // search looking, which is what makes the depth observable.
+        curative_min_obj_improvement: 1e9,
+        ..Default::default()
+    };
+    let together = curative_leaves(&shared);
+    let apart = curative_leaves(&SearchOptions {
+        curative_max_depth: Some(0),
+        ..shared.clone()
+    });
+
+    assert!(
+        together > 0,
+        "the curative perimeters should evaluate something at depth 1"
+    );
+    assert_eq!(
+        apart, 0,
+        "held at curative depth 0, no curative leaf should be evaluated"
+    );
+}
+
+/// A `relativeToPreviousInstant` range is anchored on where the **perimeter
+/// began**, not on tap zero.
+///
+/// The reference's scenario 1.3.4.3, reduced to the property. `pst_fr` sits at
+/// tap 5 in the network, is available only in curative, and carries a single
+/// range of ±10 *relative to the previous instant*. The preventive perimeter
+/// moves nothing, so the previous instant is tap 5 and the curative box is
+/// [−5, 15]. Read as absolute — which is what an unhandled range kind
+/// degenerates to — the box is [−10, 10], and the optimizer stops at 10 with
+/// five taps of permitted travel it never knew it had.
+///
+/// Nothing about that is visible in a margin: the answer stays feasible,
+/// self-consistent and worse, which is why it survived nineteen other defects.
+#[test]
+fn a_relative_curative_range_is_anchored_on_the_preventive_result() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us4case3.json")).expect("crac");
+
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_fr")
+        .expect("the CRAC declares pst_fr");
+    let RangeActionKind::Pst { initial_tap, .. } = &crac.range_actions[pst].kind else {
+        panic!("pst_fr should be a phase shifter");
+    };
+    assert_eq!(*initial_tap, 5, "the fixture's anchor");
+    assert!(
+        crac.range_actions[pst]
+            .ranges
+            .iter()
+            .all(|r| r.kind == RangeKind::RelativeToPreviousInstant),
+        "this test needs the range to be relative to the previous instant"
+    );
+
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &[],
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
+
+    // Preventive leaves it where the file had it, so the anchor is 5.
+    assert!(
+        plan.preventive
+            .setpoints
+            .iter()
+            .all(|s| s.action != pst || !s.moved()),
+        "the preventive perimeter should not move pst_fr — it is curative-only here"
+    );
+
+    let tap = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .flat_map(|p| p.setpoints.iter())
+        .find(|s| s.action == pst)
+        .and_then(|s| s.tap)
+        .expect("the curative perimeter should optimize pst_fr");
+
+    assert!(
+        (-5..=15).contains(&tap),
+        "tap {tap} is outside the box the previous instant anchors, [-5, 15]"
+    );
+    assert_eq!(tap, 15, "the reference reaches the top of that box");
+}
+
+/// The three range kinds are **intersected**, and they disagree on purpose.
+///
+/// `SL_ep13us5case3` declares all three on one shifter: absolute [−16, 16],
+/// ±10 of the network as imported (tap 5, so [−5, 15]), and ±10 of the previous
+/// instant. The preventive perimeter moves it to −5, so the last is [−15, 5]
+/// and the intersection is [−5, 5] — narrower than any of the three alone, and
+/// narrower than it would be if the two relative kinds shared an anchor.
+#[test]
+fn the_range_kinds_intersect_rather_than_the_last_one_winning() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us5case3.json")).expect("crac");
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_fr")
+        .expect("pst_fr");
+    let kinds: Vec<RangeKind> = crac.range_actions[pst]
+        .ranges
+        .iter()
+        .map(|r| r.kind)
+        .collect();
+    assert_eq!(
+        kinds.len(),
+        3,
+        "this test needs all three kinds on one action"
+    );
+
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &[],
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut solver = IpmSolver::new();
+    let plan = run(
+        &crac,
+        &network,
+        &resolution,
+        &mut solver,
+        &SearchOptions::default(),
+    );
+
+    let preventive = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst)
+        .and_then(|s| s.tap)
+        .expect("the preventive perimeter optimizes pst_fr here");
+    assert_eq!(
+        preventive, -5,
+        "the preventive answer, and the curative anchor"
+    );
+
+    for perimeter in plan.scenarios.iter().flat_map(|s| s.perimeters.iter()) {
+        let Some(tap) = perimeter
+            .setpoints
+            .iter()
+            .find(|s| s.action == pst)
+            .and_then(|s| s.tap)
+        else {
+            continue;
+        };
+        assert!(
+            (-5..=5).contains(&tap),
+            "curative tap {tap} is outside the intersection [-5, 5]: absolute [-16, 16], \
+             ten of the imported network's tap 5, and ten of the preventive answer -5"
+        );
+    }
+}
+
+/// An automaton range action stays inside its declared range.
+///
+/// The reference's scenario 1.2.2.4: `pst_fr` sits at tap 5 and may travel ±5
+/// taps *relative to the previous instant*, so the auto perimeter's box is
+/// [0, 10]. An automaton is not exempt from that. Left unclamped, the shift
+/// stops only when it runs out of tap changer — 16 here, six taps past what the
+/// CRAC permits, with every margin downstream correspondingly too good.
+#[test]
+fn an_automaton_may_not_shift_past_its_own_range() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/SL_ep15us11-3case4.json")).expect("crac");
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_fr")
+        .expect("pst_fr");
+    let RangeActionKind::Pst { initial_tap, .. } = &crac.range_actions[pst].kind else {
+        panic!("pst_fr should be a phase shifter");
+    };
+    assert_eq!(*initial_tap, 5);
+    assert_eq!(crac.range_actions[pst].speed, Some(1), "an automaton");
+
+    let plan = ac_plan(&net, &crac);
+    let tap = plan
+        .scenarios
+        .iter()
+        .filter_map(|s| s.automatons.as_ref())
+        .flat_map(|a| a.range_actions.iter())
+        .find(|(i, _, _)| *i == pst)
+        .and_then(|(_, _, tap)| *tap)
+        .expect("the automaton should shift pst_fr");
+    assert!(
+        (0..=10).contains(&tap),
+        "tap {tap} is outside the ±5 the CRAC allows around the previous instant's 5"
+    );
+    assert_eq!(tap, 10, "and it needs all of it");
+}
+
+/// An automaton shifts until the circuits it watches are secure, and no further.
+///
+/// The reference's scenario 1.2.2.2, which is the one that shows why a single
+/// shift is not enough. The set-point is sized from a linear estimate — margin
+/// over sensitivity — and applied to a network that is not linear, so one shot
+/// lands on tap −7 with the watched CNEC still short of its limit. Iterating to
+/// −8 clears it, at a margin of 0.2 A: the reference's own answer, and visibly
+/// the *smallest* set-point that does the job.
+///
+/// Both halves are asserted, because each fails differently. Stopping early
+/// leaves a protection scheme that did not protect; going too far reports a
+/// network healthier than the equipment would actually have left.
+#[test]
+fn an_automaton_stops_at_the_smallest_set_point_that_secures() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/SL_ep15us11-3case2.json")).expect("crac");
+    let pst = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_be")
+        .expect("pst_be");
+
+    let plan = ac_plan(&net, &crac);
+    let automatons = plan
+        .scenarios
+        .iter()
+        .filter_map(|s| s.automatons.as_ref())
+        .find(|a| a.range_actions.iter().any(|(i, _, _)| *i == pst))
+        .expect("the automaton should shift pst_be");
+    let tap = automatons
+        .range_actions
+        .iter()
+        .find(|(i, _, _)| *i == pst)
+        .and_then(|(_, _, tap)| *tap)
+        .expect("a tap");
+
+    assert_eq!(
+        tap, -8,
+        "-7 leaves the watched CNEC overloaded, -9 and beyond overshoot"
+    );
+    assert!(
+        automatons.final_margin_mw >= 0.0,
+        "the perimeter should end secure, not {} MW",
+        automatons.final_margin_mw
+    );
+}
+
+/// Build an AC plan the way the reference's `@ac` scenarios are configured.
+fn ac_plan(net: &ucte::UcteImport, crac: &Crac) -> gridoxide::rao::Plan {
+    let resolution = Resolution::with_buses(crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    // `RaoUtil.getFlowUnit`: an AC load flow means an ampere objective, and the
+    // automaton ranks its overloads in the same unit.
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    let mut solver = IpmSolver::new();
+    run(crac, &network, &resolution, &mut solver, &options)
+}
+
+/// A range action whose starting set-point is outside its own range is not
+/// optimized — it is dropped.
+///
+/// The reference's `SL_ep15us11-3case2_withPstCra` declares **four** range
+/// actions on one phase shifter, and names one of them `useless_pst`: it
+/// permits tap 0 and nothing else. By the time the curative perimeter runs, an
+/// automaton has put that shifter on tap −8, so its permission describes
+/// positions the machine is not at and no movement can make that true. The
+/// reference removes it from the perimeter — `doesPrePerimeterSetpointRespectRange`.
+///
+/// Kept, it is not merely inert: it becomes a second control on a device that
+/// already has one, pinned to tap 0 and pulling against the curative action the
+/// scenario is about, so the perimeter moves nothing and reports that nothing
+/// helped. Which is why this asserts the *other* action's answer rather than
+/// the useless one's absence.
+#[test]
+fn a_range_action_that_starts_outside_its_range_is_dropped() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(openrao::path(
+        "files/crac/epic15/SL_ep15us11-3case2_withPstCra.json",
+    ))
+    .expect("crac");
+
+    let useless = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "useless_pst")
+        .expect("useless_pst");
+    let cra = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_be_cra")
+        .expect("pst_be_cra");
+    // Both name the same shifter, which is what makes the useless one harmful
+    // rather than merely pointless.
+    let element_of = |i: usize| match &crac.range_actions[i].kind {
+        RangeActionKind::Pst { element, .. } => element.clone(),
+        _ => panic!("both should be phase shifters"),
+    };
+    assert_eq!(element_of(useless), element_of(cra));
+
+    let plan = ac_plan(&net, &crac);
+    let curative = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find(|p| p.setpoints.iter().any(|s| s.action == cra && s.moved()))
+        .expect("the curative perimeter should move pst_be_cra");
+
+    let tap = curative
+        .setpoints
+        .iter()
+        .find(|s| s.action == cra)
+        .and_then(|s| s.tap)
+        .expect("a tap");
+    assert_eq!(
+        tap, -16,
+        "the reference's answer; -8 is the automaton's, left untouched"
+    );
+    assert!(
+        !curative.setpoints.iter().any(|s| s.action == useless),
+        "useless_pst permits only tap 0 and the shifter is at -8, so it should not be optimized"
+    );
+}
+
+/// An automaton that states no speed fires **first**, not last.
+///
+/// The tempting reading is the other one: "no speed stated" looks like "no
+/// claim to be fast", which argues for firing such an action last so it cannot
+/// pre-empt equipment the file actually timed. The reference reads it the other
+/// way — its `DEFAULT_SPEED` is zero — so an untimed automaton goes before
+/// everything that named a speed at all.
+///
+/// Scenario 1.2.2.4 is where that changes an answer rather than just an order.
+/// The untimed `open_be1_be4` opens a Belgian circuit; the two phase shifters
+/// that follow are sized against the network that leaves behind, and `pst_be`
+/// needs **one** tap. Fired last, they size themselves against an overload the
+/// line opening was about to remove, and spend four.
+#[test]
+fn an_automaton_with_no_stated_speed_fires_before_the_timed_ones() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic15/SL_ep15us11-3case4.json")).expect("crac");
+
+    let opening = crac
+        .network_actions
+        .iter()
+        .position(|a| a.id == "open_be1_be4")
+        .expect("open_be1_be4");
+    assert_eq!(crac.network_actions[opening].speed, None, "the untimed one");
+    let be = crac
+        .range_actions
+        .iter()
+        .position(|r| r.id == "pst_be")
+        .expect("pst_be");
+    assert_eq!(
+        crac.range_actions[be].speed,
+        Some(2),
+        "and a timed shifter after it"
+    );
+
+    let plan = ac_plan(&net, &crac);
+    let automatons = plan
+        .scenarios
+        .iter()
+        .filter_map(|s| s.automatons.as_ref())
+        .find(|a| a.network_actions.contains(&opening))
+        .expect("the untimed automaton should fire");
+
+    let tap = automatons
+        .range_actions
+        .iter()
+        .find(|(i, _, _)| *i == be)
+        .and_then(|(_, _, tap)| *tap)
+        .expect("pst_be should be sized after it");
+    assert_eq!(
+        tap, -1,
+        "sized against the network the line opening left; -4 is what it costs to be sized \
+         against the overload that opening was about to remove"
+    );
+}
+
+/// A plan that ends worse than doing nothing is thrown away.
+///
+/// Every perimeter only accepts a candidate that improves **its own**
+/// objective, so it looks as though the plan cannot come out worse than the
+/// network it started from. It can, because the perimeters do not partition the
+/// harm: a preventive action is judged on the base case and the outage states,
+/// and the damage it does to a *curative* state is invisible there. By the time
+/// a curative perimeter sees it the preventive decisions are fixed, and it can
+/// only make the best of them.
+///
+/// The reference's scenario 1.4.4.2 is built on exactly that. Closing two
+/// circuits takes the preventive perimeter from 590.6 to 681.7 MW and the
+/// curative state to −342; the curative perimeter recovers half and the plan
+/// still ends below where it began. So the last thing the reference does is
+/// compare the finished plan against the untouched network and discard it if it
+/// lost ground — `postCheckResults`, whose `handleCostIncrease` argument is
+/// `true` at every call site, so it is a rule and not a setting.
+#[test]
+fn a_plan_that_loses_ground_is_discarded() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic20/SL_ep20us5case2.json")).expect("crac");
+
+    let plan = ac_plan(&net, &crac);
+
+    assert!(
+        plan.preventive.network_actions.is_empty(),
+        "the preventive plan should be empty"
+    );
+    for perimeter in plan.scenarios.iter().flat_map(|s| s.perimeters.iter()) {
+        assert!(
+            perimeter.network_actions.is_empty(),
+            "and so should every curative one"
+        );
+        assert!(
+            !perimeter.setpoints.iter().any(|s| s.moved()),
+            "including its set-points — the fixture's search moves pst_be to -16 before the \
+             plan is thrown away"
+        );
+    }
+    assert!(
+        plan.is_secure(),
+        "doing nothing leaves this network secure, which is the whole point: {} MW",
+        plan.final_margin_mw
+    );
+    assert_eq!(
+        plan.final_margin_mw, plan.initial_margin_mw,
+        "a discarded plan reports the network it started from"
+    );
+}
+
+/// A curative range action's set-point is **not** carried into the second
+/// preventive problem.
+///
+/// The second pass optimizes the preventive perimeter again with every CNEC in
+/// front of it, and it does that in *one* network standing in for every state.
+/// Anything held in that network is therefore held in the preventive and outage
+/// states too, where a curative decision is not in force. For the curative
+/// stage's **switching** that is the price of the approximation: without it the
+/// pass reads overloads the curative stage has already removed, and overspends
+/// preventively to remove them a second time. For a **set-point** it is not a
+/// price, it is a stale iterate — chosen against the first pass's preventive
+/// decisions, which the second pass exists to discard, and recomputed from
+/// scratch by the curative stage the moment the second pass returns.
+///
+/// Held, the two passes settle into a fixed point neither can leave. This is
+/// the reference's own 1.4.4.4. Its curative shifter `pst_be` goes to −16,
+/// which caps the second pass's entire landscape at 553 A, so the pass takes
+/// `close_fr1_fr5` and puts the preventive shifter on its bound for 645 A —
+/// then the curative stage re-derives −16 against those new decisions, and the
+/// answer is self-consistent and 150 A short. Released, the same pass finds
+/// 798 A with **no network action at all**, which is the reference's answer.
+///
+/// Curative redispatch was never held — `second_preventive` takes `buses`
+/// straight from the network — so this is also what makes the shifter agree
+/// with it.
+#[test]
+fn the_second_preventive_pass_does_not_inherit_a_curative_set_point() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic20/SL_ep20us5case2.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    // `RaoParameters_maxMargin_ampere_2p_if_cost_increase.json`, in the fields
+    // that change this answer.
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.linear.max_iterations = 10;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition = gridoxide::rao::SecondPreventiveCondition::CostIncrease;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    assert_eq!(
+        plan.steps,
+        gridoxide::rao::StepsExecuted::SecondPreventiveImproved,
+        "the second pass should run and be kept"
+    );
+    // The whole point: the pass reaches the reference's answer with the shifter
+    // alone. Held, it spends `close_fr1_fr5` as well and lands at 638 A.
+    assert!(
+        plan.preventive.network_actions.is_empty(),
+        "the second pass should need no network action, not {:?}",
+        plan.preventive
+            .network_actions
+            .iter()
+            .map(|&a| crac.network_actions[a].id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let pst_fr = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr")
+        .expect("pst_fr");
+    let tap = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst_fr)
+        .and_then(|s| s.tap)
+        .expect("pst_fr set-point");
+    // The reference's own tap. It was 1 until `Held` gave the second pass a
+    // per-state open set; the last tap of the gap was the preventive CNEC being
+    // read in a network with the curative branch open.
+    assert_eq!(tap, 2, "pst_fr should end on the reference's tap");
+}
+
+/// The second preventive pass holds the curative stage's **closes**, not only
+/// its opens.
+///
+/// `second_preventive` builds one network with the curative decisions in force
+/// so the pass can see past them, and it built that set by *adding* every
+/// branch a curative perimeter leaves open. A close is invisible to an
+/// add-only rule: the branch is simply absent from the set, so the file's own
+/// out-of-service circuit stays out of service and the pass optimizes against
+/// an overload the curative stage has already removed.
+///
+/// The reference's 1.4.1.6 is the case. Its curative `close_fr1_fr5` is worth
+/// 209 A on `FFR2AA1 FFR3AA1 2`, and dropping it makes the second pass maximize
+/// a different curve entirely — one that peaks with the preventive shifter at
+/// −3, where the true one peaks at the shifter's own bound of −7. Both scenarios
+/// that turn on it assert −7.
+#[test]
+fn the_second_preventive_pass_holds_a_curative_close() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic20/crac_ep20us1case1_6.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    // `RaoParameters_maxMargin_ampere_second_preventive.json`, in the fields
+    // that change this answer.
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let pra = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr_pra")
+        .expect("pst_fr_pra");
+    let tap = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pra)
+        .and_then(|s| s.tap)
+        .expect("pst_fr_pra set-point");
+    assert_eq!(tap, -7, "the preventive shifter should reach its own bound");
+    // 43 A in the reference, on `FFR2AA1 DDE3AA1 1 - preventive`. Dropping the
+    // close lands the shifter on −3 and the plan at −32 A.
+    assert!(
+        plan.is_secure(),
+        "the plan should end secure, not {} MW",
+        plan.final_margin_mw
+    );
+}
+
+/// The second preventive pass measures each CNEC in the network **its own
+/// state** describes.
+///
+/// The pass spans every state at once and holds the curative stage's switching
+/// so it can see the curative CNECs at all. Held in a single network, that
+/// switching is in force in the preventive and outage states too, where no
+/// curative decision has been taken — and the preventive CNECs are then read
+/// somewhere they do not live.
+///
+/// It is not a rounding error. On this fixture the two landscapes are 77 A
+/// apart at the tap the pass was choosing, and they peak at *different* taps:
+/// held in every state the maximum is tap 2, measured per state it is tap 3.
+/// The search was finding the exact optimum of a landscape that was wrong for
+/// half its states.
+///
+/// The assertion is **4** rather than 3 because `A(r, s)` landed after this: with
+/// the curative `pst_be` given a column of its own the pass can see it moving to
+/// −5 to pay for a preventive push, and reaches the reference's own tap. Tap 3
+/// was the per-state optimum with that shifter frozen, and both numbers are
+/// gains over the 2 this test was written against.
+#[test]
+fn the_second_preventive_pass_measures_each_state_in_its_own_network() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us3case1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let pst_fr = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr")
+        .expect("pst_fr");
+    let tap = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst_fr)
+        .and_then(|s| s.tap)
+        .expect("pst_fr set-point");
+    // 2 while the preventive CNEC was read with the curative branch open; 3
+    // once it was not; 4 once `A(r, s)` gave the curative shifter its own column.
+    assert_eq!(tap, 4, "pst_fr should reach the reference's tap");
+}
+
+/// `A(r, s)`: the second preventive problem carries a **column per range action
+/// per state**, so it can see a curative shifter paying for a preventive push.
+///
+/// Without it the pass chooses its preventive set-points as though every
+/// curative shifter were frozen where it stands, which understates what a
+/// preventive move costs. The reference's 1.4.1.2 is the case: pushing `pst_fr`
+/// from tap 3 to 4 buys 13 A on a preventive CNEC and costs more than that on a
+/// curative one — but only until the curative stage moves `pst_be` to −5, which
+/// it does, the moment the pass is over. Seeing that, the pass takes tap 4 and
+/// a second preventive action, and the whole scenario matches.
+///
+/// The column is not the perimeter's to report: `Control::reported` keeps it out
+/// of the set-points, and the curative perimeter that follows decides it
+/// properly in a network where it is the only thing being decided. What is
+/// asserted here is therefore the *preventive* answer the column makes possible.
+#[test]
+fn a_curative_shifter_gets_its_own_column_in_the_second_preventive_problem() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) =
+        crac_json::read(openrao::path("files/crac/epic13/SL_ep13us3case1.json")).expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    // Two preventive decisions where a frozen curative shifter justifies one.
+    assert_eq!(
+        plan.preventive.network_actions.len(),
+        1,
+        "the pass should spend a network action alongside the shifter"
+    );
+    let pst_be = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_be")
+        .expect("pst_be");
+    assert!(
+        !plan
+            .preventive
+            .setpoints
+            .iter()
+            .any(|s| s.action == pst_be && s.moved()),
+        "the curative column is not the preventive perimeter's to report"
+    );
+    // The curative perimeter that follows makes the decision the column only
+    // anticipated, and lands where the reference does.
+    let curative = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find_map(|p| p.setpoints.iter().find(|s| s.action == pst_be))
+        .and_then(|s| s.tap)
+        .expect("pst_be set-point after the contingency");
+    assert_eq!(
+        curative, -5,
+        "pst_be should reach the reference's curative tap"
+    );
+}
+
+/// A **chained** curative range, and the preventive answer it governs.
+///
+/// This is the reference's 1.4.1.1.4, whose own title says what it is for:
+/// "Pst_fr limits relative to previous instant are the most impacting w.r.t
+/// relative to initial network". `pst_fr` is available preventively and
+/// curatively on one machine, with an absolute window about its initial tap
+/// **and** a `relativeToPreviousInstant` window of ±4. The reference's answer is
+/// preventive tap 1 and curative tap −3 — exactly four apart, so the chained
+/// window is binding and is what decides the preventive tap.
+///
+/// # Why this test exists separately from the gate
+///
+/// The Cucumber gate cannot protect this scenario. `run_gate` asserts only
+/// `matched >= baseline`, and `second_preventive.txt` carries a `pending`
+/// string that disables the per-scenario check — so losing five assertions here
+/// while gaining five on 1.4.1.6 passes silently, and the two are exactly the
+/// scenarios a change to chained ranges touches. Written before any such change,
+/// this turns that trade into a red test.
+///
+/// `src/rao/linear.rs` currently declines to give a chained range an `A(r, s)`
+/// column at all, and this scenario passes *because of* that: the second
+/// preventive pass chooses as though the curative shifter were frozen, and the
+/// curative perimeter afterwards gets its ±4 box measured from the tap the
+/// preventive stage actually left. Any change that offers the column must keep
+/// this answer.
+#[test]
+fn a_chained_curative_range_governs_the_preventive_tap() {
+    let net = ucte::read(ucte_fixture("TestCase16Nodes.uct")).expect("network");
+    let (crac, _) = crac_json::read(openrao::path(
+        "files/crac/epic20/second_preventive_ls_1_4.json",
+    ))
+    .expect("crac");
+    let resolution = Resolution::with_buses(&crac, &net.branch_ids, &net.node_codes);
+    let network = Network {
+        generation: &net.generation,
+        buses: &net.buses,
+        lines: &net.lines,
+        transformers: &net.transformers,
+        branch_ids: &net.branch_ids,
+        bus_ids: &net.node_codes,
+        initially_open: &net.initially_open,
+        bus_countries: &net.bus_countries,
+        shunts: &net.shunts,
+        tap_changers: &net.tap_changers,
+        base_mva: net.base_mva,
+    };
+    let mut options = SearchOptions::default();
+    options.linear.flow_model = gridoxide::rao::FlowModel::Ac;
+    options.linear.objective_unit = gridoxide::rao::ObjectiveUnit::Ampere;
+    options.linear.pst_penalty = 0.01;
+    options.absolute_min_impact = 1.0;
+    options.curative_min_obj_improvement = 10_000.0;
+    options.second_preventive.condition =
+        gridoxide::rao::SecondPreventiveCondition::PossibleCurativeImprovement;
+    let mut solver = IpmSolver::new();
+    let plan = run(&crac, &network, &resolution, &mut solver, &options);
+
+    let pst_fr = crac
+        .range_actions
+        .iter()
+        .position(|a| a.id == "pst_fr")
+        .expect("pst_fr");
+    let preventive = plan
+        .preventive
+        .setpoints
+        .iter()
+        .find(|s| s.action == pst_fr)
+        .and_then(|s| s.tap)
+        .expect("a preventive set-point for pst_fr");
+    let curative = plan
+        .scenarios
+        .iter()
+        .flat_map(|s| s.perimeters.iter())
+        .find_map(|p| p.setpoints.iter().find(|s| s.action == pst_fr))
+        .and_then(|s| s.tap)
+        .expect("a curative set-point for pst_fr");
+
+    assert_eq!(preventive, 1, "preventive tap, the reference's own answer");
+    assert_eq!(curative, -3, "curative tap, the reference's own answer");
+    // The point of the scenario: the two are exactly the chained window apart,
+    // so a change that widens or loses that window shows up here as a different
+    // preventive tap rather than as a plausible one.
+    assert_eq!(
+        preventive - curative,
+        4,
+        "the ±4 `relativeToPreviousInstant` window is what makes this scenario"
+    );
 }

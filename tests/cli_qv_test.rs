@@ -28,14 +28,21 @@ fn qv(extra: &[&str]) -> Output {
 }
 
 fn stdout_of(out: &Output) -> String {
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[test]
 fn it_ranks_buses_by_reactive_margin() {
     let text = stdout_of(&qv(&["--weakest", "5", "--v-min", "0.2"]));
-    assert!(text.contains("weakest 5 bus(es) by reactive margin"), "{text}");
+    assert!(
+        text.contains("weakest 5 bus(es) by reactive margin"),
+        "{text}"
+    );
     assert!(text.contains("margin (MVAr)"), "{text}");
     // The two voltage-stability views measure different things, and the output
     // says so rather than leaving a reader to assume they should agree.
@@ -47,7 +54,10 @@ fn a_single_bus_reports_its_margin_and_the_curve() {
     let plain = stdout_of(&qv(&["--bus", "13", "--v-min", "0.2"]));
     assert!(plain.contains("reactive margin"), "{plain}");
     assert!(plain.contains("MVAr, at |V|"), "{plain}");
-    assert!(plain.contains("(interpolated)"), "the minimum is refined by default");
+    assert!(
+        plain.contains("(interpolated)"),
+        "the minimum is refined by default"
+    );
     assert!(!plain.contains("Q needed (MVAr)"), "the curve is opt-in");
 
     let curve = stdout_of(&qv(&["--bus", "13", "--v-min", "0.2", "--curve"]));
@@ -60,14 +70,20 @@ fn a_single_bus_reports_its_margin_and_the_curve() {
 fn a_truncated_sweep_says_the_margin_is_a_lower_bound() {
     let text = stdout_of(&qv(&["--bus", "13", "--v-min", "0.85"]));
     assert!(text.contains("LOWER BOUND"), "{text}");
-    assert!(text.contains("lower --v-min"), "the output should say how to fix it");
+    assert!(
+        text.contains("lower --v-min"),
+        "the output should say how to fix it"
+    );
 }
 
 #[test]
 fn no_refine_reports_a_sampled_minimum() {
     let text = stdout_of(&qv(&["--bus", "13", "--v-min", "0.2", "--no-refine"]));
     assert!(text.contains("reactive margin"), "{text}");
-    assert!(!text.contains("(interpolated)"), "--no-refine means the raw sample");
+    assert!(
+        !text.contains("(interpolated)"),
+        "--no-refine means the raw sample"
+    );
 }
 
 #[test]

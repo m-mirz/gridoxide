@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 
 use super::crac::{Crac, State};
-use super::evaluate::{evaluate_model, AcOptions, FlowModel, Network, Resolution, SecurityResult};
+use super::evaluate::{FlowModel, Network, Resolution, SecurityResult, evaluate_model};
 use super::linear::ObjectiveUnit;
 
 /// The reference's own stand-in for "no margin at all to speak of".
@@ -170,9 +170,15 @@ impl Baseline {
         resolution: &Resolution,
         model: FlowModel,
     ) -> Self {
-        let ac = AcOptions { shunts: network.shunts, ..Default::default() };
-        let result =
-            evaluate_model(crac, network, resolution, network.initially_open, model, &ac);
+        let ac = super::evaluate::ac_options(network);
+        let result = evaluate_model(
+            crac,
+            network,
+            resolution,
+            network.initially_open,
+            model,
+            &ac,
+        );
         Self::from_result(&result)
     }
 
@@ -212,7 +218,10 @@ impl Mnec {
     /// `min(0, m₀ − d)` — zero for an MNEC that started with more than `d` of
     /// margin, and `m₀ − d` for one that did not.
     pub fn floor(&self, initial: Initial, unit: ObjectiveUnit) -> f64 {
-        f64::min(0.0, initial.margin(unit) - self.options.acceptable_margin_decrease)
+        f64::min(
+            0.0,
+            initial.margin(unit) - self.options.acceptable_margin_decrease,
+        )
     }
 
     /// How far below its floor one MNEC has been pushed. Never negative.
@@ -237,12 +246,18 @@ impl Mnec {
             return 0.0;
         }
         let mut total = 0.0;
-        for p in result.perimeters.iter().filter(|p| perimeter.contains(&p.state)) {
+        for p in result
+            .perimeters
+            .iter()
+            .filter(|p| perimeter.contains(&p.state))
+        {
             for cnec in &p.cnecs {
                 if !crac.flow_cnecs[cnec.cnec].monitored {
                     continue;
                 }
-                let Some(initial) = self.baseline.get(cnec.cnec) else { continue };
+                let Some(initial) = self.baseline.get(cnec.cnec) else {
+                    continue;
+                };
                 let margin = match unit {
                     ObjectiveUnit::Megawatt => cnec.margin_mw,
                     ObjectiveUnit::Ampere => cnec.margin_a,
@@ -260,19 +275,33 @@ mod tests {
 
     fn rule(decrease: f64) -> Mnec {
         Mnec {
-            options: MnecOptions { acceptable_margin_decrease: decrease, ..Default::default() },
+            options: MnecOptions {
+                acceptable_margin_decrease: decrease,
+                ..Default::default()
+            },
             // One entry, so `active` is true; the CNEC index is never read by
             // the two functions under test.
             baseline: Baseline {
-                initial: [(0, Initial { flow_mw: 0.0, margin_mw: 0.0, margin_a: 0.0 })]
-                    .into_iter()
-                    .collect(),
+                initial: [(
+                    0,
+                    Initial {
+                        flow_mw: 0.0,
+                        margin_mw: 0.0,
+                        margin_a: 0.0,
+                    },
+                )]
+                .into_iter()
+                .collect(),
             },
         }
     }
 
     fn started_at(margin: f64) -> Initial {
-        Initial { flow_mw: 0.0, margin_mw: margin, margin_a: margin }
+        Initial {
+            flow_mw: 0.0,
+            margin_mw: margin,
+            margin_a: margin,
+        }
     }
 
     /// The three cases the reference wrote one scenario each for.
@@ -318,7 +347,11 @@ mod tests {
         // inside the 50 and gets a negative floor; in amperes it is outside and
         // gets a floor of zero. Same CNEC, same network, different rule —
         // which is why the unit travels with the parameter.
-        let initial = Initial { flow_mw: 0.0, margin_mw: 40.0, margin_a: 60.0 };
+        let initial = Initial {
+            flow_mw: 0.0,
+            margin_mw: 40.0,
+            margin_a: 60.0,
+        };
         assert_eq!(mnec.floor(initial, ObjectiveUnit::Megawatt), -10.0);
         assert_eq!(mnec.floor(initial, ObjectiveUnit::Ampere), 0.0);
     }
@@ -329,6 +362,9 @@ mod tests {
     fn an_unmeasured_baseline_leaves_mnecs_alone() {
         let mnec = Mnec::default();
         assert!(!mnec.active(), "the default baseline is empty");
-        assert!(MnecOptions::default().enabled, "…which is not the same as being switched off");
+        assert!(
+            MnecOptions::default().enabled,
+            "…which is not the same as being switched off"
+        );
     }
 }

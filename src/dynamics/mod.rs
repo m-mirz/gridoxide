@@ -60,8 +60,8 @@ pub mod dyd;
 pub mod dyr;
 pub mod events;
 pub mod init;
-pub mod json;
 pub mod integrator;
+pub mod json;
 pub mod models;
 pub mod shift;
 pub mod smallsignal;
@@ -69,14 +69,16 @@ pub mod smallsignal;
 use num_complex::Complex;
 
 use crate::klu_native::KluNativeSystem;
-use crate::network::{build_ybus_with_outages, connected_components, stamp_shunts, ShuntAdm, YBusSparse};
+use crate::network::{
+    ShuntAdm, YBusSparse, build_ybus_with_outages, connected_components, stamp_shunts,
+};
 use crate::solver::JacobianBackend;
 use crate::sparse::RealSparseSystem;
-use crate::types::{Line, Transformer};
 #[cfg(feature = "klu")]
 use crate::sparse_klu::KluRealSystem;
 #[cfg(feature = "pardiso")]
 use crate::sparse_pardiso::PardisoRealSystem;
+use crate::types::{Line, Transformer};
 
 use dae::DaePattern;
 use models::DynamicModel;
@@ -84,7 +86,7 @@ use models::DynamicModel;
 pub use events::{
     DynamicsWarning, Event, EventError, EventKind, Relay, RelayAction, Trigger, Watch,
 };
-pub use init::{build, BuildError, DeviceSpec, SystemSpec};
+pub use init::{BuildError, DeviceSpec, SystemSpec, build};
 pub use json::{DynamicsData, DynamicsDocument, DynamicsError};
 
 /// What a run needs to know.
@@ -170,7 +172,11 @@ pub struct Trajectory {
 
 impl Trajectory {
     pub fn new(names: Vec<String>) -> Self {
-        Self { time: Vec::new(), names, rows: Vec::new() }
+        Self {
+            time: Vec::new(),
+            names,
+            rows: Vec::new(),
+        }
     }
 
     pub(crate) fn push(&mut self, t: f64, x: &[f64], v: &[Complex<f64>]) {
@@ -309,7 +315,7 @@ impl DynamicSystem {
     /// Column headings for [`Trajectory`], in row order.
     pub fn observable_names(&self) -> Vec<String> {
         let layout = self.pattern.layout();
-        let mut names = Vec::with_capacity(layout.n() );
+        let mut names = Vec::with_capacity(layout.n());
         for (d, model) in self.models.iter().enumerate() {
             for state in model.state_names() {
                 names.push(format!("{}.{}", self.ids[d], state));

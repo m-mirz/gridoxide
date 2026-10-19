@@ -68,12 +68,20 @@ impl SlackDistribution {
                 BusType::PQ => 0.0,
             })
             .collect();
-        Self { factors, tolerance: 1e-8, max_outer_iter: 20 }
+        Self {
+            factors,
+            tolerance: 1e-8,
+            max_outer_iter: 20,
+        }
     }
 
     /// Explicit per-bus weights.
     pub fn from_weights(factors: Vec<f64>) -> Self {
-        Self { factors, tolerance: 1e-8, max_outer_iter: 20 }
+        Self {
+            factors,
+            tolerance: 1e-8,
+            max_outer_iter: 20,
+        }
     }
 }
 

@@ -163,7 +163,11 @@ impl CostCurve {
 }
 
 fn slope(a: (f64, f64), b: (f64, f64)) -> f64 {
-    if b.0 == a.0 { 0.0 } else { (b.1 - a.1) / (b.0 - a.0) }
+    if b.0 == a.0 {
+        0.0
+    } else {
+        (b.1 - a.1) / (b.0 - a.0)
+    }
 }
 
 /// One dispatchable unit.
@@ -307,7 +311,9 @@ mod tests {
 
     fn quadratic() -> CostCurve {
         // 0.043 p^2 + 20 p + 0, the shape of a real `gencost` row.
-        CostCurve::Polynomial { coefficients: vec![0.0, 20.0, 0.043] }
+        CostCurve::Polynomial {
+            coefficients: vec![0.0, 20.0, 0.043],
+        }
     }
 
     #[test]
@@ -325,7 +331,9 @@ mod tests {
     #[test]
     fn per_unit_conversion_scales_each_coefficient_by_its_own_power() {
         let pu = quadratic().to_per_unit(100.0);
-        let CostCurve::Polynomial { coefficients } = &pu else { panic!("still polynomial") };
+        let CostCurve::Polynomial { coefficients } = &pu else {
+            panic!("still polynomial")
+        };
         assert!((coefficients[0] - 0.0).abs() < 1e-12);
         assert!((coefficients[1] - 2000.0).abs() < 1e-12, "{coefficients:?}");
         assert!((coefficients[2] - 430.0).abs() < 1e-12, "{coefficients:?}");
@@ -355,28 +363,55 @@ mod tests {
     #[test]
     fn convexity_is_judged_on_the_shape_that_matters() {
         assert!(quadratic().is_convex());
-        assert!(CostCurve::Polynomial { coefficients: vec![1.0, 2.0] }.is_convex());
-        assert!(!CostCurve::Polynomial { coefficients: vec![0.0, 20.0, -0.5] }.is_convex());
+        assert!(
+            CostCurve::Polynomial {
+                coefficients: vec![1.0, 2.0]
+            }
+            .is_convex()
+        );
+        assert!(
+            !CostCurve::Polynomial {
+                coefficients: vec![0.0, 20.0, -0.5]
+            }
+            .is_convex()
+        );
         // A cubic is non-convex whatever its coefficients.
-        assert!(!CostCurve::Polynomial { coefficients: vec![0.0, 1.0, 1.0, 1.0] }.is_convex());
+        assert!(
+            !CostCurve::Polynomial {
+                coefficients: vec![0.0, 1.0, 1.0, 1.0]
+            }
+            .is_convex()
+        );
 
         // Rising slopes are convex; falling ones are not.
-        assert!(CostCurve::PiecewiseLinear {
-            points: vec![(0.0, 0.0), (10.0, 100.0), (20.0, 300.0)]
-        }
-        .is_convex());
-        assert!(!CostCurve::PiecewiseLinear {
-            points: vec![(0.0, 0.0), (10.0, 300.0), (20.0, 400.0)]
-        }
-        .is_convex());
+        assert!(
+            CostCurve::PiecewiseLinear {
+                points: vec![(0.0, 0.0), (10.0, 100.0), (20.0, 300.0)]
+            }
+            .is_convex()
+        );
+        assert!(
+            !CostCurve::PiecewiseLinear {
+                points: vec![(0.0, 0.0), (10.0, 300.0), (20.0, 400.0)]
+            }
+            .is_convex()
+        );
     }
 
     #[test]
     fn a_zero_rate_reads_as_unlimited_not_as_a_binding_zero() {
-        let unlimited = BranchLimit { id: 1, rate_a: 0.0, unlimited: true };
+        let unlimited = BranchLimit {
+            id: 1,
+            rate_a: 0.0,
+            unlimited: true,
+        };
         assert_eq!(unlimited.rate_pu(100.0), None);
 
-        let rated = BranchLimit { id: 2, rate_a: 250.0, unlimited: false };
+        let rated = BranchLimit {
+            id: 2,
+            rate_a: 250.0,
+            unlimited: false,
+        };
         assert_eq!(rated.rate_pu(100.0), Some(2.5));
     }
 

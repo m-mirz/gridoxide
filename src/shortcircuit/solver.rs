@@ -12,15 +12,13 @@ use std::collections::HashMap;
 use num_complex::Complex;
 
 use crate::network::{
-    build_ybus_3ph, connected_components, line3ph_blocks, seq_to_phase_shunt,
-    stamp_shunts_3ph, stamp_transformers_3ph, transformer3ph_blocks,
+    build_ybus_3ph, connected_components, line3ph_blocks, seq_to_phase_shunt, stamp_shunts_3ph,
+    stamp_transformers_3ph, transformer3ph_blocks,
 };
 use crate::pgm::ScNetwork3Ph;
 use crate::sparse;
 
-use super::{
-    c_factor, Fault, FaultAdmittance, FaultType, ShortCircuitOptions, PHASE_ANG,
-};
+use super::{Fault, FaultAdmittance, FaultType, PHASE_ANG, ShortCircuitOptions, c_factor};
 
 const ZERO: Complex<f64> = Complex::new(0.0, 0.0);
 
@@ -269,8 +267,10 @@ pub fn short_circuit(
         .iter()
         .filter_map(|&(r, c, v)| Some((reduced_pos[r]?, reduced_pos[c]?, v)))
         .collect();
-    let reduced_rhs: Vec<Complex<f64>> =
-        (0..dim).filter(|&i| reduced_pos[i].is_some()).map(|i| rhs[i]).collect();
+    let reduced_rhs: Vec<Complex<f64>> = (0..dim)
+        .filter(|&i| reduced_pos[i].is_some())
+        .map(|i| rhs[i])
+        .collect();
 
     let mut u_bus = vec![[ZERO; 3]; n];
     if n_reduced > 0 {
@@ -288,17 +288,33 @@ pub fn short_circuit(
     // ── Results ──────────────────────────────────────────────────────────
     let mut fault_current = vec![[ZERO; 3]; faults.len()];
     resolve_fault_currents(
-        net, faults, &faults_by_bus, &bolted_count, &source_y, &source_emf,
-        &mut u_bus, &mut fault_current,
+        net,
+        faults,
+        &faults_by_bus,
+        &bolted_count,
+        &source_y,
+        &source_emf,
+        &mut u_bus,
+        &mut fault_current,
     );
 
-    Ok(assemble_report(net, faults, &fault_current, &source_y, &source_emf, u_bus, &energized))
+    Ok(assemble_report(
+        net,
+        faults,
+        &fault_current,
+        &source_y,
+        &source_emf,
+        u_bus,
+        &energized,
+    ))
 }
 
 /// power-grid-model's `check_input_valid`: one calculation, one fault type and
 /// phase.
 fn check_faults_agree(faults: &[Fault]) -> Result<(), ShortCircuitError> {
-    let Some(first) = faults.first() else { return Ok(()) };
+    let Some(first) = faults.first() else {
+        return Ok(());
+    };
     if faults
         .iter()
         .any(|f| f.fault_type != first.fault_type || f.fault_phase != first.fault_phase)
@@ -320,11 +336,7 @@ fn zero_column(entries: &mut Vec<(usize, usize, Complex<f64>)>, col: usize) {
 }
 
 /// Adds column `from` into column `into`, then empties column `from`.
-fn fold_column(
-    entries: &mut Vec<(usize, usize, Complex<f64>)>,
-    into: usize,
-    from: usize,
-) {
+fn fold_column(entries: &mut Vec<(usize, usize, Complex<f64>)>, into: usize, from: usize) {
     let folded: Vec<(usize, usize, Complex<f64>)> = entries
         .iter()
         .filter(|&&(_, c, _)| c == from)
@@ -668,8 +680,7 @@ fn assemble_report(
         .map(|(sh, &id)| {
             let y = seq_to_phase_shunt(sh.y1, sh.y0);
             let u = &u_bus[sh.at];
-            let i: [Complex<f64>; 3] =
-                [0, 1, 2].map(|p| (0..3).map(|q| y[p][q] * u[q]).sum());
+            let i: [Complex<f64>; 3] = [0, 1, 2].map(|p| (0..3).map(|q| y[p][q] * u[q]).sum());
             let base = i_base(net.u_rated[sh.at]);
             ShuntResult {
                 id,
@@ -679,7 +690,14 @@ fn assemble_report(
         })
         .collect();
 
-    ShortCircuitReport { nodes, faults: fault_results, branches, sources, shunts, u_bus }
+    ShortCircuitReport {
+        nodes,
+        faults: fault_results,
+        branches,
+        sources,
+        shunts,
+        u_bus,
+    }
 }
 
 /// Terminal currents for every branch, in [`ScNetwork3Ph::branch_ids`] order.
@@ -692,9 +710,9 @@ fn branch_currents(
     let mut out = Vec::with_capacity(net.lines.len() + net.transformers.len());
 
     let push = |from: usize,
-                    to: usize,
-                    blocks: [[[Complex<f64>; 3]; 3]; 4],
-                    out: &mut Vec<BranchResult>| {
+                to: usize,
+                blocks: [[[Complex<f64>; 3]; 3]; 4],
+                out: &mut Vec<BranchResult>| {
         let id = net.branch_ids[out.len()];
         let [from_closed, to_closed] = net.branch_closed[out.len()];
         let [yff, yft, ytf, ytt] = blocks;

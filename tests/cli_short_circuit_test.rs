@@ -30,7 +30,11 @@ fn stdout_of(out: &Output) -> String {
 fn reports_fault_current_sources_and_voltages() {
     let path = fixture("three_phase_c_maximum");
     let out = run(&["short-circuit", path.to_str().unwrap()]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let text = stdout_of(&out);
     for section in [
@@ -44,9 +48,13 @@ fn reports_fault_current_sources_and_voltages() {
         assert!(text.contains(section), "missing {section:?} in:\n{text}");
     }
     // Every node and both sources reported, by their document ids.
-    for id_line in
-        ["fault     10:", "source     4:", "node      3 :", "branch     8  from:", "shunt      9:"]
-    {
+    for id_line in [
+        "fault     10:",
+        "source     4:",
+        "node      3 :",
+        "branch     8  from:",
+        "shunt      9:",
+    ] {
         assert!(text.contains(id_line), "missing {id_line:?} in:\n{text}");
     }
 }
@@ -58,8 +66,12 @@ fn reports_fault_current_sources_and_voltages() {
 fn defaults_to_maximum_voltage_scaling() {
     let path = fixture("three_phase_c_maximum");
     let default = stdout_of(&run(&["short-circuit", path.to_str().unwrap()]));
-    let explicit =
-        stdout_of(&run(&["short-circuit", path.to_str().unwrap(), "--scaling", "max"]));
+    let explicit = stdout_of(&run(&[
+        "short-circuit",
+        path.to_str().unwrap(),
+        "--scaling",
+        "max",
+    ]));
     assert_eq!(default, explicit);
     assert!(default.contains("c_max"), "{default}");
 }
@@ -70,8 +82,18 @@ fn defaults_to_maximum_voltage_scaling() {
 #[test]
 fn minimum_scaling_gives_a_smaller_fault_current() {
     let path = fixture("three_phase_c_maximum");
-    let big = stdout_of(&run(&["short-circuit", path.to_str().unwrap(), "--scaling", "max"]));
-    let small = stdout_of(&run(&["short-circuit", path.to_str().unwrap(), "--scaling", "min"]));
+    let big = stdout_of(&run(&[
+        "short-circuit",
+        path.to_str().unwrap(),
+        "--scaling",
+        "max",
+    ]));
+    let small = stdout_of(&run(&[
+        "short-circuit",
+        path.to_str().unwrap(),
+        "--scaling",
+        "min",
+    ]));
     assert!(small.contains("c_min"), "{small}");
 
     let current = |text: &str| -> f64 {
@@ -81,10 +103,21 @@ fn minimum_scaling_gives_a_smaller_fault_current() {
             .lines()
             .find(|l| l.trim_start().starts_with("fault ") && l.contains(": a = "))
             .expect("a fault current line");
-        line.split("a = ").nth(1).unwrap().split(',').next().unwrap().trim().parse().unwrap()
+        line.split("a = ")
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
     };
     let (big, small) = (current(&big), current(&small));
-    assert!(small < big, "c_min current {small} should be below c_max {big}");
+    assert!(
+        small < big,
+        "c_min current {small} should be below c_max {big}"
+    );
 }
 
 /// A document with no `fault` is not an error — it is a network under its
@@ -104,7 +137,11 @@ fn a_document_without_faults_says_so() {
     .unwrap();
 
     let out = run(&["short-circuit", path.to_str().unwrap()]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout_of(&out);
     assert!(text.contains("no active `fault`"), "{text}");
 }
@@ -112,7 +149,12 @@ fn a_document_without_faults_says_so() {
 #[test]
 fn rejects_an_unknown_scaling() {
     let path = fixture("three_phase_c_maximum");
-    let out = run(&["short-circuit", path.to_str().unwrap(), "--scaling", "sideways"]);
+    let out = run(&[
+        "short-circuit",
+        path.to_str().unwrap(),
+        "--scaling",
+        "sideways",
+    ]);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--scaling"), "{err}");
