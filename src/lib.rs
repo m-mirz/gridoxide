@@ -52,11 +52,148 @@ use linear::{
     impedance::{LinearIslandStatus, LinearReport, linear_power_flow},
 };
 use network::{ShuntAdm, YBus, build_ybus, linear_initial_guess, stamp_shunts};
-use solver::{
-    IslandReport, JacobianBackend, PersistentSolver, PowerFlowInit, PowerFlowMethod,
-    PowerFlowOptions, SolveStats, SolveStatus,
-};
+use solver::{IslandReport, JacobianBackend, PersistentSolver, SolveStats, SolveStatus};
 use types::{Bus, Line, Transformer};
+
+/// Which method [`crate::run_power_flow`] uses.
+///
+/// The two linear methods are genuinely different algorithms, not two
+/// spellings of one — see `docs/src/powerflow/dc.md` and
+/// `linear_impedance.md`. Both are direct solves, so neither consults
+/// [`PowerFlowOptions::tol`] or `max_iter`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PowerFlowMethod {
+    /// The full nonlinear solve. Everything else in this crate's history.
+    #[default]
+    NewtonRaphson,
+    /// Real Bθ: active power only, `|V| = 1`, resistance discarded. One
+    /// factorization, no iterations. See
+    /// [`linear::btheta::dc_power_flow`].
+    Dc,
+    /// Complex constant-admittance: every load replaced by the admittance
+    /// drawing its rated power at `|V| = 1`. Mathematically
+    /// power-grid-model's `CalculationMethod.linear`. See
+    /// [`linear::impedance::linear_power_flow`].
+    LinearImpedance,
+}
+
+/// Where [`PowerFlowMethod::NewtonRaphson`] starts from. Ignored by the
+/// direct methods, which have no starting point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PowerFlowInit {
+    /// `|V| = 1`, `θ = 0`, untouched.
+    Flat,
+    /// One constant-admittance solve, via `network::linear_initial_guess`.
+    ///
+    /// The default because it is what this crate has always done — see
+    /// [`crate::run_power_flow_analysis_from_ybus`], which calls it
+    /// unconditionally — and because it is power-grid-model's only
+    /// robustness mechanism, needed where weak sources meet large transformer
+    /// phase shifts and flat-start Newton diverges.
+    #[default]
+    LinearImpedance,
+    /// One DC solve, seeding angles and **only** angles — bus types,
+    /// injections and magnitudes are all restored afterwards, since
+    /// `linear::btheta::dc_power_flow` is a solver rather than an
+    /// initializer and would otherwise pre-empt Newton's own classification
+    /// pass. DC has no magnitude information to offer in any case, beyond the
+    /// flat `|V| = 1` it assumes. This is powsybl's
+    /// `DcValueVoltageInitializer`.
+    ///
+    /// Opt-in rather than default only because `LinearImpedance` is the
+    /// long-standing behavior, not because it is weaker. Measured on the
+    /// committed PGM fixtures
+    /// (`tests/power_flow_methods_test.rs::both_warm_starts_rescue_a_case_flat_start_cannot_solve`):
+    /// on `distribution-case`, where a flat start does *not* converge inside
+    /// 20 iterations, DC init converges in 5 against `LinearImpedance`'s 4.
+    /// Both rescue the case; neither dominates.
+    ///
+    /// The one thing DC init cannot do is supply voltage magnitudes — it has
+    /// none to give beyond the flat 1 p.u. it assumes — so on networks whose
+    /// magnitudes stray far from nominal, `LinearImpedance` starts with
+    /// strictly more information.
+    Dc,
+}
+
+/// Everything [`crate::run_power_flow`] needs to know.
+///
+/// The pre-existing entry points — [`solver::newton_raphson`],
+/// [`solver::newton_raphson_with_backend`], [`solver::PersistentSolver::solve`],
+/// the outer-loop driver — keep their positional parameters
+/// and are unaffected by this type. It exists so that adding a fifth or sixth
+/// knob does not mean a fifth or sixth positional argument, following
+/// `se::nr::SeOptions`.
+#[derive(Clone, Debug)]
+pub struct PowerFlowOptions {
+    /// Convergence tolerance on the maximum P/Q mismatch. Newton only.
+    pub tol: f64,
+    /// Newton only.
+    pub max_iter: usize,
+    /// Which sparse-LU backend solves the Jacobian. Newton only: the direct
+    /// methods each own their factorization type.
+    pub backend: JacobianBackend,
+    pub method: PowerFlowMethod,
+    pub init: PowerFlowInit,
+    /// Adds [`crate::outerloop::ReactiveLimits`] to the outer-loop list.
+    pub enforce_q_limits: bool,
+    /// Adds [`crate::outerloop::DistributedSlack`] to the outer-loop list,
+    /// innermost, with these participation weights.
+    ///
+    /// Mutually exclusive with [`area_interchange`](Self::area_interchange),
+    /// which subsumes it — configuring both would move the same schedules
+    /// twice, and `run_power_flow` refuses rather than doing so.
+    pub distribute_slack: Option<crate::outerloop::SlackDistribution>,
+    /// Adds [`crate::outerloop::AreaInterchange`] in distributed slack's place,
+    /// holding each control area's net export at its scheduled value.
+    pub area_interchange: Option<crate::outerloop::AreaDefinition>,
+    /// Adds [`crate::outerloop::PhaseControl`] and
+    /// [`crate::outerloop::TransformerVoltageControl`], outermost. Needs an
+    /// importer that retained tap tables and regulating controls; with none,
+    /// both loops are stable on their first check and cost one call each.
+    pub control_taps: bool,
+    /// Adds [`crate::outerloop::RemoteVoltageControl`] to the loop list, for
+    /// machines that regulate a bus other than their own.
+    ///
+    /// Off by default, and the default is *wrong* rather than merely
+    /// conservative: without it a remote machine's reactive power appears at the
+    /// bus it holds instead of at the machine, so the reactive flow between them
+    /// is missing. It is opt-in because turning it on changes answers, and
+    /// because it needs network data only CGMES supplies — see
+    /// [`crate::RemoteControlData`].
+    pub control_remote_voltage: bool,
+    /// Positions a tap controller may move in one outer pass. The sensitivity
+    /// is exact only at the converged state, so a large step overshoots;
+    /// capping trades passes for stability.
+    pub tap_max_shift: i32,
+    /// Cap on total outer-loop re-solves across every configured loop.
+    pub max_outer_iter: usize,
+    /// Susceptance choice and transformer-ratio handling for
+    /// [`PowerFlowMethod::Dc`] and for [`PowerFlowInit::Dc`].
+    pub dc: crate::linear::DcOptions,
+}
+
+impl Default for PowerFlowOptions {
+    fn default() -> Self {
+        Self {
+            // The values `run_power_flow_analysis_from_ybus` has always
+            // hard-coded, so the default options reproduce today's behavior
+            // exactly.
+            tol: 1e-6,
+            max_iter: 20,
+            backend: JacobianBackend::Scalar,
+            method: PowerFlowMethod::default(),
+            init: PowerFlowInit::default(),
+            enforce_q_limits: false,
+            distribute_slack: None,
+            area_interchange: None,
+            control_taps: false,
+            control_remote_voltage: false,
+            tap_max_shift: 3,
+            max_outer_iter: 10,
+            dc: crate::linear::DcOptions::default(),
+        }
+    }
+}
 
 /// Result of a full power-flow analysis: the solved (or placeholder, for
 /// unreferenced islands) buses, plus a per-connected-component breakdown of
@@ -96,9 +233,9 @@ pub struct PowerFlowReport {
 /// The tap tables and regulating controls a solve may act on.
 ///
 /// Network data, so it travels in the signature rather than in
-/// [`solver::PowerFlowOptions`]. A caller with no tap control passes
+/// [`PowerFlowOptions`]. A caller with no tap control passes
 /// [`TapData::none`], which is what makes
-/// [`solver::PowerFlowOptions::control_taps`] a no-op rather than a lie.
+/// [`PowerFlowOptions::control_taps`] a no-op rather than a lie.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TapData<'a> {
     /// Parallel to the `transformers` slice.
@@ -121,9 +258,9 @@ impl TapData<'_> {
 /// The regulating machines a solve may act on.
 ///
 /// Network data, so it travels in the signature rather than in
-/// [`solver::PowerFlowOptions`] — the same place and for the same reason as
+/// [`PowerFlowOptions`] — the same place and for the same reason as
 /// [`TapData`]. A caller with none passes [`RemoteControlData::none`], which is
-/// what makes [`solver::PowerFlowOptions::control_remote_voltage`] a no-op
+/// what makes [`PowerFlowOptions::control_remote_voltage`] a no-op
 /// rather than a lie.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RemoteControlData<'a> {
@@ -148,16 +285,16 @@ pub struct OuterLoopOutcome {
     /// Per-loop iteration counts and final statuses.
     pub report: Option<outerloop::OuterLoopReport>,
     /// Buses switched `PV → PQ`, in switch order. Empty unless
-    /// [`solver::PowerFlowOptions::enforce_q_limits`].
+    /// [`PowerFlowOptions::enforce_q_limits`].
     pub q_limit_switches: Vec<usize>,
-    /// Populated when [`solver::PowerFlowOptions::distribute_slack`] was set.
+    /// Populated when [`PowerFlowOptions::distribute_slack`] was set.
     pub slack: Option<outerloop::SlackDistributionReport>,
-    /// Populated when [`solver::PowerFlowOptions::area_interchange`] was set.
+    /// Populated when [`PowerFlowOptions::area_interchange`] was set.
     pub area: Option<outerloop::AreaInterchangeReport>,
-    /// Populated when [`solver::PowerFlowOptions::control_taps`] was set:
+    /// Populated when [`PowerFlowOptions::control_taps`] was set:
     /// the voltage controllers, then the phase controllers.
     pub taps: Vec<outerloop::ControllerReport>,
-    /// Populated when [`solver::PowerFlowOptions::control_remote_voltage`] was
+    /// Populated when [`PowerFlowOptions::control_remote_voltage`] was
     /// set: what each remotely-regulating machine reached, and how.
     pub remote: Vec<outerloop::RemoteControlReport>,
     /// Buses this run re-typed to move a control onto the machine holding it,

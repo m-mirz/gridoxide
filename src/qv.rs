@@ -54,8 +54,9 @@
 //! strongest gate here: two independent methods agreeing is worth more than
 //! either agreeing with itself.
 
+use crate::PowerFlowOptions;
 use crate::network::{ShuntAdm, build_ybus, effective_injection, power_injections, stamp_shunts};
-use crate::solver::{PowerFlowOptions, SolveStatus};
+use crate::solver::SolveStatus;
 use crate::types::{Bus, BusType, Line, Transformer};
 
 /// Everything a Q-V sweep needs to know.
@@ -148,7 +149,7 @@ pub enum QvError {
     },
     /// `v_min >= v_max`, or a non-positive step.
     EmptyRange,
-    MethodUnsupported(crate::solver::PowerFlowMethod),
+    MethodUnsupported(crate::PowerFlowMethod),
 }
 
 /// A bus's Q-V curve.
@@ -214,7 +215,7 @@ pub fn qv_curve(
     if buses[bus].bus_type == BusType::Slack {
         return QvCurve::rejected(bus, QvError::SlackBus(bus));
     }
-    if opts.pf.method != crate::solver::PowerFlowMethod::NewtonRaphson {
+    if opts.pf.method != crate::PowerFlowMethod::NewtonRaphson {
         return QvCurve::rejected(bus, QvError::MethodUnsupported(opts.pf.method));
     }
     // Every case spelled out, so a NaN bound is visibly refused rather than

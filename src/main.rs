@@ -11,6 +11,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::ac_sensitivity::{AcSensitivity, Function, Variable};
 use gridoxide::branch_flow::Terminal;
 use gridoxide::json::NetworkData;
@@ -25,7 +26,7 @@ use gridoxide::se::observability;
 use gridoxide::shortcircuit::{
     SequenceValue, ShortCircuitOptions, VoltageScaling, short_circuit_from_pgm,
 };
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::{run_power_flow, run_power_flow_analysis};
 
 const USAGE: &str = "\
@@ -3327,8 +3328,9 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
 
 #[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
 fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::PowerFlowOptions;
     use gridoxide::outerloop::ControllerOutcome;
-    use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+    use gridoxide::solver::SolveStatus;
 
     let number = |flag: &str, default: f64| -> Result<f64, String> {
         match flag_value(flags, flag)? {

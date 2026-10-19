@@ -7,9 +7,9 @@
 //! a Python with numpy (`python3` unless `PYTHON` names another). Run with paths
 //! to trace other networks:
 //! `cargo run --release --example cpf_probe -- case1354pegase.json`
+use gridoxide::PowerFlowOptions;
 use gridoxide::continuation::{ContinuationOptions, LoadingDirection, run_continuation};
 use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
-use gridoxide::solver::PowerFlowOptions;
 use std::time::Instant;
 
 /// Converts the pglib cases into a scratch directory and returns it. Examples

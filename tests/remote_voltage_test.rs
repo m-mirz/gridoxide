@@ -14,8 +14,9 @@
 //! exact formulation (fix `|V|` at the controlled bus, free `Q` at the
 //! controller) asserts, without needing that formulation to be implemented.
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::outerloop::RemoteOutcome;
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::types::{Bus, BusType, Line, RegulatingMachine, Transformer};
 use num_complex::Complex;
 

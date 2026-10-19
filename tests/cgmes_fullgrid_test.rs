@@ -46,8 +46,9 @@
 
 use std::path::{Path, PathBuf};
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::cgmes::{CgmesNetwork, cgmes_to_network, load_profiles};
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::{TapData, run_power_flow};
 
 fn fullgrid() -> Option<CgmesNetwork> {

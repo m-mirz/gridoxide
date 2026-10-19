@@ -19,8 +19,9 @@ use std::path::PathBuf;
 
 use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::iidm;
-use gridoxide::solver::{PowerFlowMethod, PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::topology::bus_view::RetentionPolicy;
+use gridoxide::{PowerFlowMethod, PowerFlowOptions};
 
 mod openrao;
 
@@ -726,7 +727,7 @@ fn ucte_country_areas_and_iidm_area_elements_agree() {
             transformers,
             shunts,
             gridoxide::TapData::none(),
-            gridoxide::solver::PowerFlowOptions {
+            gridoxide::PowerFlowOptions {
                 tol: 1e-10,
                 max_iter: 40,
                 ..Default::default()

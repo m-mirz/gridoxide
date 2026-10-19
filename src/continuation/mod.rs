@@ -38,15 +38,14 @@ pub mod events;
 use crate::klu_native::KluNativeSystem;
 use crate::network::{ShuntAdm, YBusSparse, build_ybus, stamp_shunts};
 use crate::outerloop::{OuterLoop, OuterLoopContext, ReactiveLimits, SolveContext};
-use crate::solver::{
-    IslandReport, JacobianBackend, LinearSolver, PowerFlowMethod, PowerFlowOptions, SolveStatus,
-};
+use crate::solver::{IslandReport, JacobianBackend, LinearSolver, SolveStatus};
 use crate::sparse::RealSparseSystem;
 #[cfg(feature = "klu")]
 use crate::sparse_klu::KluRealSystem;
 #[cfg(feature = "pardiso")]
 use crate::sparse_pardiso::PardisoRealSystem;
 use crate::types::{Bus, BusType, Line, Transformer};
+use crate::{PowerFlowMethod, PowerFlowOptions};
 
 use augmented::{Layout, Parametrization, dominant_index};
 use corrector::{Constraint, CorrectorStatus, Segment, zip_buses};

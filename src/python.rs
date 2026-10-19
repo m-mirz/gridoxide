@@ -21,6 +21,7 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+use crate::PowerFlowMethod;
 use crate::batch::{BatchSolver, BusOverride, Scenario, uniform_load_scaling};
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
@@ -33,9 +34,7 @@ use crate::linear::{
 };
 use crate::network::{ShuntAdm, YBusSparse, build_ybus, linear_initial_guess, stamp_shunts};
 use crate::pgm::PgmInput;
-use crate::solver::{
-    IslandStatus, JacobianBackend, PersistentSolver, PowerFlowMethod, SolveStatus,
-};
+use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, SolveStatus};
 use crate::types::{Bus, Line, Transformer};
 
 fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
@@ -554,7 +553,7 @@ impl PowerFlowModel {
                 crate::RemoteControlData {
                     machines: &self.machines,
                 },
-                crate::solver::PowerFlowOptions {
+                crate::PowerFlowOptions {
                     control_taps,
                     control_remote_voltage,
                     tap_max_shift: max_tap_shift,
@@ -740,7 +739,7 @@ impl PowerFlowModel {
             &self.shunts,
             bus,
             QvOptions {
-                pf: crate::solver::PowerFlowOptions {
+                pf: crate::PowerFlowOptions {
                     enforce_q_limits,
                     tol: self.tol,
                     max_iter: self.max_iter.max(60),
@@ -2706,13 +2705,13 @@ fn continuation(
     s_base_va: Option<f64>,
     freq_hz: f64,
 ) -> PyResult<ContinuationCurve> {
+    use crate::PowerFlowOptions;
     use crate::continuation::augmented::Parametrization;
     use crate::continuation::{
         ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch, LoadingDirection,
         QLimitKind, StopCriterion, run_continuation,
     };
     use crate::pgm::pgm_to_buses_and_branches;
-    use crate::solver::PowerFlowOptions;
 
     // `None` takes the library default rather than naming it here: the choice
     // is a performance cliff (pseudo-arclength's bordering row is dense, and
@@ -3075,7 +3074,7 @@ impl AcSensitivityModel {
         let (buses, lines, transformers) =
             crate::pgm::pgm_to_buses_and_branches(input, s_base_va, freq_hz);
 
-        let opts = crate::solver::PowerFlowOptions {
+        let opts = crate::PowerFlowOptions {
             tol,
             max_iter,
             ..Default::default()

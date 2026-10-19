@@ -590,8 +590,9 @@ pub fn load_case(
     par_path: impl AsRef<Path>,
     f_nom: f64,
 ) -> Result<(super::DynamicSystem, Vec<DydWarning>), DydError> {
+    use crate::PowerFlowOptions;
     use crate::network::{build_ybus, power_injections, stamp_shunts};
-    use crate::solver::{PowerFlowOptions, SolveStatus};
+    use crate::solver::SolveStatus;
 
     let network = crate::iidm::read(iidm_path).map_err(|e| DydError::Iidm(e.to_string()))?;
     let dyd = read_dyd(dyd_path)?;

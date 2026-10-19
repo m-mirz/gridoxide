@@ -17,9 +17,10 @@
 
 use std::path::{Path, PathBuf};
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::cgmes::{CgmesNetwork, cgmes_to_network, load_profiles};
 use gridoxide::outerloop::{ControllerOutcome, RegulationMode, TapRegulation};
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::types::{Bus, BusType, Line, TapChanger, Transformer};
 use gridoxide::{PowerFlowReport, TapData, run_power_flow};
 

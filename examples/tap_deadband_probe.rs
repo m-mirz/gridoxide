@@ -52,7 +52,7 @@ fn main() {
             &net.transformers,
             &net.shunts,
             gridoxide::TapData::none(),
-            gridoxide::solver::PowerFlowOptions {
+            gridoxide::PowerFlowOptions {
                 tol: 1e-8,
                 max_iter: 30,
                 ..Default::default()
@@ -68,7 +68,7 @@ fn main() {
                 changers: &net.tap_changers,
                 regulation: &net.regulation,
             },
-            gridoxide::solver::PowerFlowOptions {
+            gridoxide::PowerFlowOptions {
                 control_taps: true,
                 max_outer_iter: 60,
                 tol: 1e-8,

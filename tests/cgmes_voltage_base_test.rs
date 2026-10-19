@@ -15,8 +15,9 @@ mod cgmes_common;
 
 use std::path::{Path, PathBuf};
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::cgmes::{cgmes_to_network, cgmes_topological_node_bus_index, load_profiles};
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 
 const S_BASE_VA: f64 = 100e6;
 

@@ -10,7 +10,7 @@ fn main() {
             &transformers,
             &net.shunts,
             gridoxide::TapData::none(),
-            gridoxide::solver::PowerFlowOptions {
+            gridoxide::PowerFlowOptions {
                 tol: 1e-10,
                 max_iter: 40,
                 ..Default::default()
