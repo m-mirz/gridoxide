@@ -37,7 +37,7 @@
 
 use std::sync::Mutex;
 
-use crate::batch::{BatchError, Scenario};
+use crate::scenario::{BatchError, Scenario};
 use crate::types::{Bus, Line, Transformer};
 
 use super::DcOptions;
