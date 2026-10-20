@@ -21,7 +21,6 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::PowerFlowMethod;
 use crate::batch::{BatchSolver, BusOverride, Scenario, uniform_load_scaling};
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
@@ -36,6 +35,7 @@ use crate::network::{ShuntAdm, YBusSparse, build_ybus, linear_initial_guess, sta
 use crate::pgm::PgmInput;
 use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, SolveStatus};
 use crate::types::{Bus, Line, Transformer};
+use crate::{PowerFlowInit, PowerFlowMethod};
 
 fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
     match name {
@@ -69,6 +69,17 @@ fn parse_method(name: &str) -> PyResult<PowerFlowMethod> {
         "linear_impedance" => Ok(PowerFlowMethod::LinearImpedance),
         other => Err(PyValueError::new_err(format!(
             "unknown method '{other}', expected 'newton_raphson', 'dc', or 'linear_impedance'"
+        ))),
+    }
+}
+
+fn parse_init(name: &str) -> PyResult<PowerFlowInit> {
+    match name {
+        "flat" => Ok(PowerFlowInit::Flat),
+        "linear_impedance" => Ok(PowerFlowInit::LinearImpedance),
+        "dc" => Ok(PowerFlowInit::Dc),
+        other => Err(PyValueError::new_err(format!(
+            "unknown init '{other}', expected 'flat', 'linear_impedance', or 'dc'"
         ))),
     }
 }
@@ -475,7 +486,7 @@ impl PowerFlowModel {
         self.tn_bus_index.get(mrid).copied()
     }
 
-    /// Solves from a fresh flat/linear-initial-guess start, reusing this
+    /// Solves from a fresh start (`init`, below), reusing this
     /// model's `PersistentSolver` cached factorization from any previous
     /// `solve()` call. Every disconnected component of the network is
     /// solved in this same call, not just the largest one (see
@@ -505,6 +516,14 @@ impl PowerFlowModel {
     ///
     /// Read what they did with `tap_positions()`, `tap_controllers()`,
     /// `q_limit_switches()` and `slack_shift()`.
+    ///
+    /// # Starting point
+    ///
+    /// `init` is where Newton starts: `"linear_impedance"` (default) solves
+    /// once with every load and generator as a constant admittance, `"flat"`
+    /// starts from |V| = 1 p.u. and the setpoints the buses carry, and `"dc"`
+    /// seeds angles from a DC solve. Every call starts afresh from it; nothing
+    /// is carried over from the previous solve. Newton only.
     #[pyo3(signature = (
         control_taps = false,
         enforce_q_limits = false,
@@ -512,7 +531,9 @@ impl PowerFlowModel {
         distribute_slack = false,
         max_outer = 40,
         max_tap_shift = 3,
+        init = "linear_impedance",
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn solve(
         &mut self,
         control_taps: bool,
@@ -521,7 +542,9 @@ impl PowerFlowModel {
         distribute_slack: bool,
         max_outer: usize,
         max_tap_shift: i32,
+        init: &str,
     ) -> PyResult<()> {
+        let init = parse_init(init)?;
         match self.method {
             PowerFlowMethod::Dc => return self.solve_dc(),
             PowerFlowMethod::LinearImpedance => return self.solve_linear_impedance(),
@@ -530,7 +553,14 @@ impl PowerFlowModel {
         self.dc_solution = None;
         self.outer = None;
         self.buses = self.buses_template.clone();
-        linear_initial_guess(&mut self.buses, &self.ybus);
+        crate::initialize_newton(
+            &mut self.buses,
+            &self.lines,
+            &self.transformers,
+            &self.ybus,
+            init,
+            self.dc_opts,
+        );
 
         let wants_taps = control_taps && !self.regulation.is_empty();
         // A machine regulating a bus other than its own. Without this the
@@ -560,6 +590,8 @@ impl PowerFlowModel {
                     enforce_q_limits,
                     distribute_slack: distribution,
                     max_outer_iter: max_outer,
+                    // Already applied above, to the buses handed over here.
+                    init: PowerFlowInit::Flat,
                     tol: self.tol,
                     max_iter: self.max_iter,
                     backend: self.backend,

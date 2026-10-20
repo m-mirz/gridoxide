@@ -107,3 +107,37 @@ def test_block_backend_matches_scalar_on_pv_bus(tmp_path):
     mag_b, ang_b = solved["block"]
     assert mag_b == pytest.approx(mag_s, abs=1e-9)
     assert ang_b == pytest.approx(ang_s, abs=1e-9)
+
+
+# A fixture a flat start cannot solve inside the default 20 iterations while
+# both warm starts can (tests/power_flow_methods_test.rs,
+# both_warm_starts_rescue_a_case_flat_start_cannot_solve), so each `init`
+# visibly reaches the solver rather than being accepted and ignored.
+DISTRIBUTION_CASE = INPUT_JSON.parent.parent / "distribution-case" / "input.json"
+
+
+def test_init_picks_the_starting_point():
+    model = gridoxide.PowerFlowModel.from_pgm_json(str(DISTRIBUTION_CASE))
+    with pytest.raises(RuntimeError, match="did not converge"):
+        model.solve(init="flat")
+
+    model.solve()
+    default = model.voltage_mag()
+    model.solve(init="dc")
+    dc = model.voltage_mag()
+    model.solve(init="linear_impedance")
+    assert model.voltage_mag() == default
+    assert dc == pytest.approx(default, abs=1e-6)
+
+
+def test_flat_start_solves_what_it_can():
+    model = gridoxide.PowerFlowModel.from_pgm_json(str(INPUT_JSON))
+    model.solve(init="flat")
+    for actual, expected in zip(model.voltage_mag()[:3], EXPECTED_U_PU):
+        assert actual == pytest.approx(expected, abs=1e-5)
+
+
+def test_unknown_init_raises():
+    model = gridoxide.PowerFlowModel.from_pgm_json(str(INPUT_JSON))
+    with pytest.raises(ValueError, match="unknown init"):
+        model.solve(init="warm")

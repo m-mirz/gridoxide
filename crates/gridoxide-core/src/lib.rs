@@ -404,42 +404,59 @@ pub fn run_power_flow_with_remote(
         }
         PowerFlowMethod::NewtonRaphson => {
             let ybus = finished_ybus(buses.len(), lines, transformers, shunts);
-            match opts.init {
-                PowerFlowInit::Flat => {}
-                PowerFlowInit::LinearImpedance => linear_initial_guess(&mut buses, &ybus),
-                // Seed angles and *only* angles.
-                //
-                // `dc_power_flow` is a solver, not an initializer: it also
-                // normalizes PQ magnitudes to its own |V| = 1 assumption, and
-                // it runs `network::mark_unreferenced_islands`, which rewrites
-                // a sourceless island's buses to `Slack` with zero injection.
-                // Both are right for a DC solve and wrong here — Newton has
-                // its own classification pass, and letting the initializer
-                // pre-empt it changes the island statuses that pass reports
-                // (a sourceless island comes back `AmbiguousReferenceBus`, or
-                // for a single bus, silently `Converged`). See
-                // `network::linear_initial_guess`, which states the same
-                // invariant for the other initializer.
-                //
-                // So everything but `voltage_ang` is restored afterwards.
-                PowerFlowInit::Dc => {
-                    let saved: Vec<(types::BusType, f64, f64, f64)> = buses
-                        .iter()
-                        .map(|b| (b.bus_type, b.p_spec, b.q_spec, b.voltage_mag))
-                        .collect();
-                    dc_power_flow(&mut buses, lines, transformers, opts.dc);
-                    for (bus, (bus_type, p_spec, q_spec, voltage_mag)) in
-                        buses.iter_mut().zip(saved)
-                    {
-                        bus.bus_type = bus_type;
-                        bus.p_spec = p_spec;
-                        bus.q_spec = q_spec;
-                        bus.voltage_mag = voltage_mag;
-                    }
-                }
-            }
+            initialize_newton(&mut buses, lines, transformers, &ybus, opts.init, opts.dc);
 
             newton_with_loops(buses, lines, transformers, shunts, taps, remote, ybus, opts)
+        }
+    }
+}
+
+/// Sets Newton's starting point in `buses`, as [`run_power_flow`] does
+/// before its first iteration.
+///
+/// Public so that a caller driving [`PersistentSolver`] itself — the Python
+/// bindings, which keep one solver per model — starts from the same point
+/// `run_power_flow` would for the same [`PowerFlowInit`]. `ybus` must be the
+/// network's finished admittance matrix (shunts stamped); `dc` is read only
+/// for [`PowerFlowInit::Dc`].
+pub fn initialize_newton(
+    buses: &mut [Bus],
+    lines: &[Line],
+    transformers: &[Transformer],
+    ybus: &network::YBusSparse,
+    init: PowerFlowInit,
+    dc: crate::linear::DcOptions,
+) {
+    match init {
+        PowerFlowInit::Flat => {}
+        PowerFlowInit::LinearImpedance => linear_initial_guess(buses, ybus),
+        // Seed angles and *only* angles.
+        //
+        // `dc_power_flow` is a solver, not an initializer: it also
+        // normalizes PQ magnitudes to its own |V| = 1 assumption, and
+        // it runs `network::mark_unreferenced_islands`, which rewrites
+        // a sourceless island's buses to `Slack` with zero injection.
+        // Both are right for a DC solve and wrong here — Newton has
+        // its own classification pass, and letting the initializer
+        // pre-empt it changes the island statuses that pass reports
+        // (a sourceless island comes back `AmbiguousReferenceBus`, or
+        // for a single bus, silently `Converged`). See
+        // `network::linear_initial_guess`, which states the same
+        // invariant for the other initializer.
+        //
+        // So everything but `voltage_ang` is restored afterwards.
+        PowerFlowInit::Dc => {
+            let saved: Vec<(types::BusType, f64, f64, f64)> = buses
+                .iter()
+                .map(|b| (b.bus_type, b.p_spec, b.q_spec, b.voltage_mag))
+                .collect();
+            dc_power_flow(buses, lines, transformers, dc);
+            for (bus, (bus_type, p_spec, q_spec, voltage_mag)) in buses.iter_mut().zip(saved) {
+                bus.bus_type = bus_type;
+                bus.p_spec = p_spec;
+                bus.q_spec = q_spec;
+                bus.voltage_mag = voltage_mag;
+            }
         }
     }
 }
