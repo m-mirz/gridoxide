@@ -244,6 +244,45 @@ fn two_imports_of_the_same_model_agree_on_every_index() {
     }
 }
 
+/// Buses synthesized for boundary `ConnectivityNode`s are numbered the same on
+/// every import too.
+///
+/// MicroGrid BE without the boundary TP leaves several boundary nodes with no
+/// `TopologicalNode`, and each becomes a bus of its own. They were numbered in
+/// `HashMap` order, so the buses after the TP ones — and every line ending on
+/// one — moved between imports. Four imports, so a shuffle of a handful of
+/// buses is all but certain to show.
+#[test]
+fn boundary_buses_are_numbered_the_same_on_every_import() {
+    let Some(dir) = config("MicroGrid/MicroGid-BaseCase/MicroGrid-BE-MAS") else {
+        eprintln!("skipping: MicroGrid fixture not checked out");
+        return;
+    };
+    let eq_bd = dir.join("../MicroGrid-BD-MAS/20171002T0930Z_ENTSO-E_EQ_BD_2.xml");
+    let files =
+        ["EQ", "SSH", "TP", "SV"].map(|p| dir.join(format!("20210325T1530Z_1D_BE_{p}_001.xml")));
+    let mut refs: Vec<&Path> = vec![&eq_bd];
+    refs.extend(files.iter().map(|p| p.as_path()));
+    let import = || {
+        let ds = load_profiles(&refs).expect("failed to decode CGMES profiles");
+        cgmes_to_network(&ds, 100e6).expect("conversion failed")
+    };
+
+    let first = import();
+    let tp_buses = first.bus_ids.iter().filter(|id| !id.is_empty()).count();
+    assert!(
+        first.buses.len() > tp_buses + 1,
+        "expected several synthesized boundary buses"
+    );
+    for _ in 0..3 {
+        let again = import();
+        let u = |n: &CgmesNetwork| n.buses.iter().map(|b| b.u_rated).collect::<Vec<_>>();
+        assert_eq!(u(&first), u(&again), "a boundary bus moved");
+        let ends = |n: &CgmesNetwork| n.lines.iter().map(|l| (l.from, l.to)).collect::<Vec<_>>();
+        assert_eq!(ends(&first), ends(&again), "a line's ends moved");
+    }
+}
+
 /// The whole point: a **phase-shifter range action on a CGMES network**.
 ///
 /// This is what the two halves were for. `cgmes_tap_table_test.rs` gave the

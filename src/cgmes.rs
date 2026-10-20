@@ -281,8 +281,10 @@ impl TerminalIndex {
         // with a usable BaseVoltage — not just whichever terminal happens to
         // be first (e.g. a tie-line's far-end ACLineSegment terminal, which
         // has no BaseVoltage of its own and would otherwise silently fall
-        // through to a nonsense placeholder).
-        let mut orphans_by_cn: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
+        // through to a nonsense placeholder). Ordered by mRID, because each
+        // group becomes a bus and its position is the bus index.
+        let mut orphans_by_cn: std::collections::BTreeMap<String, Vec<(String, Option<String>)>> =
+            std::collections::BTreeMap::new();
         for (t_mrid, cn_mrid, ce_mrid) in orphans {
             orphans_by_cn
                 .entry(cn_mrid)
