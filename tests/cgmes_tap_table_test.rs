@@ -2,7 +2,7 @@
 //!
 //! `TapChangerIndex::effect_for_end` computed one step and threw the rest
 //! away, which is all a fixed-tap power flow ever wanted. `src/ucte.rs` and
-//! `src/iidm.rs` retained the whole table; CGMES — the deepest importer in the
+//! `src/iidm/mod.rs` retained the whole table; CGMES — the deepest importer in the
 //! tree — did not, and a `PstRangeAction` on a CGMES network was therefore
 //! inexpressible.
 //!

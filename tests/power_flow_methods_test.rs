@@ -8,10 +8,9 @@ use std::path::{Path, PathBuf};
 use gridoxide::linear::{DcApproximation, DcIslandStatus, DcOptions, LinearIslandStatus};
 use gridoxide::network::{ShuntAdm, build_ybus, stamp_shunts};
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_buses_and_branches};
-use gridoxide::solver::{
-    IslandStatus, PowerFlowInit, PowerFlowMethod, PowerFlowOptions, SolveStatus,
-};
+use gridoxide::solver::{IslandStatus, SolveStatus};
 use gridoxide::types::{Bus, BusType, Line, Transformer};
+use gridoxide::{PowerFlowInit, PowerFlowMethod, PowerFlowOptions};
 use gridoxide::{run_power_flow, run_power_flow_analysis_from_ybus};
 
 mod common;

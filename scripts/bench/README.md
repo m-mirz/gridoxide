@@ -135,7 +135,7 @@ through their own importers. See `gridoxide.matpower`'s module docstring for the
 
 Generators are modelled as genuine PV buses in every tool. gridoxide parses PGM's `voltage_regulator`
 component the same way PGM's own `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types` does
-(`src/pgm.rs::pgm_to_buses_and_branches`).
+(`src/pgm/mod.rs::pgm_to_buses_and_branches`).
 
 Individual tools also run standalone: `matpower_to_pgm.py`, `bench_pgm.py`, `bench_lightsim2grid.py`,
 `bench_pypowsybl.py`, `bench_pandapower.py`, `bench_veragrid.py`, `convert_pandapower_case.py`.
@@ -182,7 +182,7 @@ residual on `case1888rte`). pandapower converges via its own native path.
 
 **Backends.** `block` beats `scalar` 2–3x on the larger cases (case9241pegase: 33.84 vs 110.81 ms) despite
 `scalar` using `faer` and `block`'s LU having no partial pivoting — factoring at 2×2-block granularity halves
-the elimination steps. `klu` is ~10–15% ahead of `block`. `klu_native` (`src/klu_native/`) converges to the
+the elimination steps. `klu` is ~10–15% ahead of `block`. `klu_native` (`crates/gridoxide-sparse/src/klu_native/`) converges to the
 same voltages as every other backend on all 12 cases and lands within 1.0–1.3x of `klu`, after `perf` traced
 an earlier 1.9–2x gap to allocator churn: `kernel::refactor_block` allocated two `Vec`s per column per Newton
 iteration where real KLU's `klu_refactor.c` allocates nothing. Rewriting it to mutate in place against a
@@ -363,7 +363,7 @@ Assembly measures at ~36% of iteration time, so single-threaded on the large cas
 roughly a third of that stage was allocation and index rebuilding. The gain is *smaller* at 8 threads: once
 all cores run, the solve is memory-stalled in the LU, so assembly is a smaller share. It is also smaller on
 the small case, whose triplet array (~20k nnz, ~0.5 MB) fits in cache; case9241pegase's is ~150k nnz, ~3.6 MB,
-rebuilt every iteration. Values are bit-for-bit identical — `src/jacobian.rs` compares `f64::to_bits`.
+rebuilt every iteration. Values are bit-for-bit identical — `crates/gridoxide-core/src/jacobian.rs` compares `f64::to_bits`.
 
 ### Why sub-linear scaling is not a solver defect
 
@@ -432,7 +432,7 @@ between two code paths cannot detect a fault in what they share, which is why ch
 
 ## 4d. Block-diagonal embedding on real sparse code
 
-`src/bde.rs` stacks B scenarios' Jacobians into one block-diagonal sparse matrix and takes a single
+`crates/gridoxide-core/src/bde.rs` stacks B scenarios' Jacobians into one block-diagonal sparse matrix and takes a single
 factorization per Newton iteration. §4c established equivalence with *dense* linear algebra; this extends it
 to the sparse backends the GPU path mirrors, where the claim is far less obvious — KLU applies BTF ordering,
 AMD permutation and partial pivoting to the stacked matrix, none of which know about the block structure.
@@ -550,7 +550,7 @@ comparing the input SV profile against itself. `bench_pypowsybl_cgmes.py` now pr
 stdout; it previously warned only on stderr, which the `2>/dev/null` used to produce these tables discarded.
 
 ² gridoxide's `n=2` reflects that this fixture's published SV set includes `TopologicalNode`s (DC-side detail
-resolved away by `cgmes_resolve_dc_converters`, `src/dc.rs`) with no AC bus in the solved output — not a
+resolved away by `cgmes_resolve_dc_converters`, `crates/gridoxide-core/src/dc.rs`) with no AC bus in the solved output — not a
 matching failure. This is the one row **not** re-measured after the two fixes below: reproducing `n=2` needs
 the original profile-file set, and including the `-BD-MAS` boundary files the fixture requires yields `n=4`.
 Treat these four figures as provisional.
@@ -579,7 +579,7 @@ p90=0.423% max=4.318%` — the entire 93% headline is fixture data, and the medi
 iteration_count=0, status_text="Network has no generator with voltage control enabled"`. CGMES
 `VsConverter`/`CsConverter` aren't recognized as AC voltage-controlling sources, so `get_buses()` echoes back
 the state its importer initialized from the input SV profile — both the 0.000% "deviation" and the timing are
-artifacts. gridoxide's DC-aware solve (`src/dc.rs`) is the only one of the two that solves this fixture.
+artifacts. gridoxide's DC-aware solve (`crates/gridoxide-core/src/dc.rs`) is the only one of the two that solves this fixture.
 
 Where both tools have comparable `n` (PowerFlow, PST, MicroGrid-BE, Svedala, RealGrid), accuracy against the
 published reference is close — consistent with §5, and not with either tool being systematically more correct.
@@ -655,7 +655,7 @@ caching in `se::functional`, worth 8-16% on the larger cases.
 system is not fully observable") on every case from 300 buses up, on documents its *own* iterative-linear
 method estimates from the same sensors without complaint. The suggested cause does not fit: gridoxide's
 Newton-Raphson converges on the same measurements to 1e-14, and gridoxide's observability analysis flags
-exactly one unobservable state per case — the virtual slack bus it appends per active source (`src/pgm.rs`),
+exactly one unobservable state per case — the virtual slack bus it appends per active source (`src/pgm/mod.rs`),
 which sits at index `n_nodes`, carries no sensor by construction, is pinned rather than estimated, and is not
 part of PGM's problem at all. Every physical node is observable. Reproduces from a plain `PowerGridModel`
 construct-and-call with no gridoxide code in the path; not investigated further.

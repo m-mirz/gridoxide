@@ -1,21 +1,31 @@
-[package]
-name = "gridoxide"
+[workspace]
+members = ["crates/gridoxide-core", "crates/gridoxide-sparse"]
+
+# Shared by every crate in the workspace, so they release in lockstep.
+[workspace.package]
 version = "0.0.2"
 edition = "2024"
+repository = "https://github.com/m-mirz/gridoxide"
+
+[package]
+name = "gridoxide"
+version.workspace = true
+edition.workspace = true
 build = "build.rs"
 # Integration tests are one binary, `tests/all.rs`; see the comment there.
 autotests = false
-# gridoxide's own code is Apache-2.0. `src/klu_native/` (always built, no
-# feature gate) is a close Rust translation of vendored SuiteSparse C —
-# BSD-3-Clause for the AMD-derived pieces, LGPL-2.1-or-later for the
-# BTF/KLU-derived pieces — so every default build now bundles all three.
-# See src/klu_native/PROVENANCE.md and docs/src/reference/provenance.md.
-# (Building with `--features klu` additionally links the vendored C itself,
-# already LGPL-2.1-or-later/BSD-3-Clause per vendor/suitesparse/PROVENANCE.md
-# — no new license beyond what's already listed here.)
+# gridoxide's own code is Apache-2.0. Every build depends on gridoxide-sparse,
+# whose `src/klu_native/` (always built, no feature gate) is a close Rust
+# translation of vendored SuiteSparse C — BSD-3-Clause for the AMD-derived
+# pieces, LGPL-2.1-or-later for the BTF/KLU-derived pieces — so every build
+# of gridoxide bundles all three. See
+# crates/gridoxide-sparse/src/klu_native/PROVENANCE.md and
+# docs/src/reference/provenance.md. (`--features klu` additionally links the
+# vendored C itself, per crates/gridoxide-sparse/vendor/suitesparse/PROVENANCE.md
+# — no licence beyond what's listed here.)
 license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
 description = "AC power flow and state estimation solver with a sparse Newton-Raphson core"
-repository = "https://github.com/m-mirz/gridoxide"
+repository.workspace = true
 documentation = "https://m-mirz.github.io/gridoxide/"
 readme = "README.md"
 keywords = ["power-flow", "state-estimation", "newton-raphson", "sparse", "energy"]
@@ -25,9 +35,6 @@ categories = ["science", "mathematics", "simulation"]
 # never runs, and two of them (tests/data/CGMES-Test-Configurations,
 # tests/data/benchmark-grids) are git submodules that aren't checked out in the
 # publish workflow at all — see .github/workflows/publish.yml.
-# `vendor/suitesparse/` is deliberately *not* excluded: `--features klu`
-# compiles it from source, so it has to ship (its redistribution terms are
-# covered by the `license` field above and vendor/suitesparse/PROVENANCE.md).
 exclude = [
     "tests/data/",
     "docs/book/",
@@ -64,9 +71,16 @@ features = ["cgmes", "ucte", "iidm", "opf", "rao", "dynamics", "capi", "python"]
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
+# The sparse LU backends and the vendored SuiteSparse they build on — see
+# crates/gridoxide-sparse. Its modules are re-exported under their old names
+# in src/lib.rs, so `gridoxide::sparse` and the rest resolve as before.
+gridoxide-sparse = { path = "crates/gridoxide-sparse", version = "0.0.2" }
+# The solvers — network model, power flow, state estimation, short circuit —
+# re-exported the same way; see crates/gridoxide-core.
+gridoxide-core = { path = "crates/gridoxide-core", version = "0.0.2" }
 faer = "0.24.4"
 num-complex = { version = "0.4.6", features = ["serde"] }
-# Powers `src/batch.rs`'s across-scenario parallelism. Not a new build cost:
+# Powers `crates/gridoxide-core/src/batch.rs`'s across-scenario parallelism. Not a new build cost:
 # `faer` (and `gemm` beneath it) already pull rayon in, so this only promotes
 # an existing transitive dependency to a direct one. Sharing rayon's pool
 # rather than spawning raw OS threads is deliberate — it keeps any nested
@@ -76,7 +90,7 @@ rayon = "1.12"
 # The IIDM importer's XML reader (`iidm` feature). Already present in the tree
 # as a transitive dependency of `cimdecoder`, so enabling `iidm` adds nothing to
 # a build that already has `cgmes` — this promotes it to a direct dependency the
-# same way `rayon` was promoted for `src/batch.rs`.
+# same way `rayon` was promoted for `crates/gridoxide-core/src/batch.rs`.
 quick-xml = { version = "0.37", optional = true }
 pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
@@ -90,7 +104,6 @@ cimdecoder = { package = "cimoxide-decoder", version = "0.3.0", optional = true 
 cimstructs = { package = "cimoxide-structs", version = "0.3.0", optional = true }
 
 [build-dependencies]
-cc = { version = "1.0", optional = true }
 bindgen = { version = "0.72", optional = true }
 # The outward-facing counterpart of `bindgen`: generates `include/gridoxide.h`
 # from the `#[no_mangle]` surface in `src/capi/`. See the `capi` feature.
@@ -98,16 +111,17 @@ cbindgen = { version = "0.29", optional = true }
 
 [features]
 default = []
-# Builds the vendored SuiteSparse KLU solver (vendor/suitesparse/) as a third,
-# opt-in JacobianBackend — see docs/src/solvers/backends.md. Needs a
-# C compiler and libclang (for bindgen) at build time. KLU and BTF (one of
-# KLU's own dependencies) are LGPL-2.1-or-later — see
-# vendor/suitesparse/PROVENANCE.md before enabling this in a distributed
-# binary.
-klu = ["dep:cc", "dep:bindgen"]
+# Builds the vendored SuiteSparse KLU solver
+# (crates/gridoxide-sparse/vendor/suitesparse/) as a third, opt-in
+# JacobianBackend — see docs/src/solvers/backends.md. Needs a C compiler and
+# libclang (for bindgen) at build time. KLU and BTF (one of KLU's own
+# dependencies) are LGPL-2.1-or-later — see that directory's PROVENANCE.md
+# before enabling this in a distributed binary. The build itself happens in
+# gridoxide-sparse; this forwards to it.
+klu = ["gridoxide-sparse/klu", "gridoxide-core/klu"]
 # Links a system-installed libklu.so instead of compiling the vendored
 # source statically, for anyone who needs strict LGPL relinking compliance.
-klu-dynamic = ["klu"]
+klu-dynamic = ["klu", "gridoxide-sparse/klu-dynamic"]
 # Builds `src/python.rs`'s PyO3 bindings (the `gridoxide` Python extension
 # module — see scripts/bench/README.md and pyproject.toml). Only ever build
 # this via `maturin` (`maturin develop --features python`), never as part of
@@ -132,7 +146,7 @@ python = ["dep:pyo3"]
 # `bindgen`) at build time, plus `MKLROOT` set (e.g. `source
 # /opt/intel/oneapi/setvars.sh`). Not built or tested in CI — no CI runner
 # has MKL installed — so this is a local/manual-verification-only backend.
-pardiso = ["dep:bindgen"]
+pardiso = ["gridoxide-sparse/pardiso", "gridoxide-core/pardiso"]
 # Builds CGMES (Common Grid Model Exchange Standard) RDF/XML dataset support
 # (src/cgmes.rs), converting a CGMES EQ+SSH+TP+SV profile set into gridoxide's
 # own Bus/Line/Transformer model. Depends on cimoxide's decoder/structs crates
@@ -151,10 +165,10 @@ cgmes = ["dep:cimdecoder", "dep:cimstructs"]
 # system-library features.
 #
 # It is also the only importer that arrives carrying branch *ratings* and tap
-# *tables* — see `src/ratings.rs` and `types::TapChanger` for why those two
+# *tables* — see `crates/gridoxide-core/src/ratings.rs` and `types::TapChanger` for why those two
 # were the gap worth closing.
 ucte = []
-# Reads PowSyBl's IIDM network format (src/iidm.rs) — `.xiidm` files, the native
+# Reads PowSyBl's IIDM network format (src/iidm/mod.rs) — `.xiidm` files, the native
 # serialization of powsybl-core's network model, and the second of the two
 # formats the published remedial-action test material comes in.
 #

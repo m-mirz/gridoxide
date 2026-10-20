@@ -17,10 +17,10 @@ mod cgmes_common;
 
 use std::path::{Path, PathBuf};
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::cgmes::{cgmes_to_network, load_profiles};
 use gridoxide::dispatch::{KeyBasis, allocate, reactive_keys};
 use gridoxide::network::{build_ybus, power_injections, stamp_shunts};
-use gridoxide::solver::PowerFlowOptions;
 
 const S_BASE_MVA: f64 = 100.0;
 

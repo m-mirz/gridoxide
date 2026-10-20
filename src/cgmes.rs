@@ -916,7 +916,7 @@ impl TapChangerIndex {
     /// that *moves* a tap needs the discarded half back: the map from position
     /// to ratio and angle is nonlinear, and for a table-driven changer it is
     /// not even regular, so it cannot be reconstructed from the current value
-    /// plus a step size. The other two importers (`src/ucte.rs`, `src/iidm.rs`)
+    /// plus a step size. The other two importers (`src/ucte.rs`, `src/iidm/mod.rs`)
     /// already retain it; this closes the asymmetry.
     ///
     /// Shares every formula with `effect_for_end` rather than reimplementing

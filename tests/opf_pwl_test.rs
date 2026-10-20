@@ -35,7 +35,7 @@ use std::collections::HashMap;
 
 use gridoxide::linear::DcApproximation;
 use gridoxide::linear::btheta::DcBranch;
-use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
 use gridoxide::opf::dc::{DcGenerator, DcLoad, DcOpf, DcOpfNetwork, DcOpfOptions};
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::opf::model::{CostCurve, OpfData};
@@ -56,7 +56,9 @@ fn documents(name: &str) -> (PgmInput, OpfData) {
 
 fn dc(name: &str) -> gridoxide::opf::dc::DcOpfResult {
     let (input, data) = documents(name);
-    let network = DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG).unwrap();
+    let network =
+        gridoxide::pgm::opf::dc_opf_network_from_pgm(input, &data, 50.0, DcApproximation::IgnoreG)
+            .unwrap();
     let opf = DcOpf::build(network, DcOpfOptions::default()).unwrap();
     opf.interpret(&IpmSolver::new().solve(opf.problem()).unwrap())
 }
@@ -64,7 +66,8 @@ fn dc(name: &str) -> gridoxide::opf::dc::DcOpfResult {
 fn ac(name: &str) -> gridoxide::opf::ac::AcOpfResult {
     let (input, data) = documents(name);
     let options = AcOpfOptions::default();
-    let network = AcOpfNetwork::from_pgm(input, &data, 50.0, &options).unwrap();
+    let network =
+        gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options).unwrap();
     AcOpf::build(network, options).unwrap().solve().unwrap()
 }
 

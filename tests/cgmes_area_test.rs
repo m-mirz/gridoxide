@@ -9,9 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::cgmes::{CgmesNetwork, cgmes_control_areas, cgmes_to_network, load_profiles};
 use gridoxide::outerloop::{AreaDefinition, AreaInterchange, OuterLoop, SolveContext};
-use gridoxide::solver::{JacobianBackend, PowerFlowOptions, SolveStatus};
+use gridoxide::solver::{JacobianBackend, SolveStatus};
 use gridoxide::{TapData, run_power_flow};
 
 const S_BASE: f64 = 100e6;

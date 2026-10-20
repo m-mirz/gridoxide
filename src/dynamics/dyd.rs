@@ -1,7 +1,7 @@
 //! Dynawo `.dyd` / `.par` / `.crv` files.
 //!
 //! Dynawo is MPL-2.0, RTE-maintained, ships validated cases, and **reads
-//! IIDM** — which `src/iidm.rs` already imports. That combination is why
+//! IIDM** — which `src/iidm/mod.rs` already imports. That combination is why
 //! `docs/src/reference/feature_comparison.md` named it the route for this whole
 //! feature: the corpus and the methodology come close to free.
 //!
@@ -76,6 +76,11 @@ use std::path::Path;
 use num_complex::Complex;
 use quick_xml::Reader;
 use quick_xml::events::Event as XmlEvent;
+
+use crate::PowerFlowOptions;
+use crate::network::{ShuntAdm, build_ybus, power_injections, stamp_shunts};
+use crate::solver::SolveStatus;
+use crate::types::{Bus, Line, Transformer};
 
 use super::init::{DeviceSpec, SystemSpec, build};
 use super::json::{AvrSpec, GovSpec, MachineSpec, UnitSpec};
@@ -254,7 +259,7 @@ fn attributes(e: &quick_xml::events::BytesStart<'_>) -> Result<HashMap<String, S
         // on, so feature unification makes this file compile under
         // `--features dynamics,iidm` and fail under `--features
         // dynamics,iidm,cgmes`: a configuration CI builds and no single-feature
-        // step can see. `src/iidm.rs`'s `Attrs::of` carries the same note and
+        // step can see. `src/iidm/mod.rs`'s `Attrs::of` carries the same note and
         // the same workaround, which is the other half of this reader.
         let raw = String::from_utf8_lossy(&attribute.value);
         let value = quick_xml::escape::unescape(&raw)
@@ -553,12 +558,28 @@ pub fn to_units(
     Ok((units, warnings))
 }
 
-/// Reads a whole Dynawo case — the IIDM network and the `.dyd`/`.par` pair —
-/// and returns a system ready to integrate.
+/// The static network a Dynawo case's dynamic models attach to, in whatever
+/// format it arrived — [`iidm::dynamics::load_case`](crate::iidm::dynamics::load_case)
+/// fills one from an IIDM file.
+pub struct StaticNetwork<'a> {
+    pub buses: &'a [Bus],
+    pub lines: &'a [Line],
+    pub transformers: &'a [Transformer],
+    pub shunts: &'a [ShuntAdm],
+    pub base_mva: f64,
+    /// Generator id → its bus. The `staticId` on a `blackBoxModel` names a
+    /// generator, not a bus, so this is the map a dynamic model is placed by.
+    pub generators: HashMap<String, usize>,
+    /// Every stated load as `(bus, p + jq)`, per unit — what comes off a bus's
+    /// solved injection to leave its machine's.
+    pub loads: Vec<(usize, Complex<f64>)>,
+}
+
+/// Builds a system ready to integrate from a case's static network and its
+/// `.dyd`/`.par` pair.
 ///
-/// This is what the two halves were always for. `src/iidm.rs` reads the static
-/// network, [`to_units`] reads the dynamic models, and the `staticId` on each
-/// `blackBoxModel` is the correspondence between them.
+/// [`to_units`] reads the dynamic models, and the `staticId` on each
+/// `blackBoxModel` is the correspondence between them and the network.
 ///
 /// # How each machine's terminal power is recovered, exactly
 ///
@@ -583,29 +604,13 @@ pub fn to_units(
 /// Tap changers, whose dynamics this library does not model, and saturation.
 /// A case that depends on either is known in advance to diverge — which is a
 /// better position than discovering it during a comparison.
-#[cfg(feature = "iidm")]
-pub fn load_case(
-    iidm_path: impl AsRef<Path>,
-    dyd_path: impl AsRef<Path>,
-    par_path: impl AsRef<Path>,
+pub fn case_from_network(
+    network: &StaticNetwork,
+    dyd: &DydDocument,
+    par: &ParDocument,
     f_nom: f64,
 ) -> Result<(super::DynamicSystem, Vec<DydWarning>), DydError> {
-    use crate::network::{build_ybus, power_injections, stamp_shunts};
-    use crate::solver::{PowerFlowOptions, SolveStatus};
-
-    let network = crate::iidm::read(iidm_path).map_err(|e| DydError::Iidm(e.to_string()))?;
-    let dyd = read_dyd(dyd_path)?;
-    let par = read_par(par_path)?;
-
-    // A dynamic model attaches to a *generator*, not to a bus, so the map is
-    // the one the importer now retains rather than a bus lookup.
-    let bus_of: HashMap<String, usize> = network
-        .injections
-        .iter()
-        .filter(|i| i.generator)
-        .map(|i| (i.id.clone(), i.bus))
-        .collect();
-    let (units, mut warnings) = to_units(&dyd, &par, &bus_of, network.base_mva)?;
+    let (units, mut warnings) = to_units(dyd, par, &network.generators, network.base_mva)?;
 
     // A model attached to a static element that is not a generator is a
     // dynamic model of something this library treats as static — the case's
@@ -624,10 +629,10 @@ pub fn load_case(
     }
 
     let report = crate::run_power_flow(
-        network.buses.clone(),
-        &network.lines,
-        &network.transformers,
-        &network.shunts,
+        network.buses.to_vec(),
+        network.lines,
+        network.transformers,
+        network.shunts,
         crate::TapData::none(),
         PowerFlowOptions::default(),
     );
@@ -636,8 +641,8 @@ pub fn load_case(
     }
     let buses = report.buses;
 
-    let mut ybus = build_ybus(buses.len(), &network.lines, &network.transformers);
-    stamp_shunts(&mut ybus, &network.shunts);
+    let mut ybus = build_ybus(buses.len(), network.lines, network.transformers);
+    stamp_shunts(&mut ybus, network.shunts);
     let (p_calc, q_calc) = power_injections(&buses, &ybus.finish());
 
     // Loads are stated, so they come off exactly; whatever is left at a bus is
@@ -648,9 +653,9 @@ pub fn load_case(
             .entry(unit.bus)
             .or_insert_with(|| Complex::new(p_calc[unit.bus], q_calc[unit.bus]));
     }
-    for injection in network.injections.iter().filter(|i| !i.generator) {
-        if let Some(share) = machine_share.get_mut(&injection.bus) {
-            *share -= Complex::new(injection.p, injection.q);
+    for &(bus, s) in &network.loads {
+        if let Some(share) = machine_share.get_mut(&bus) {
+            *share -= s;
         }
     }
 
@@ -683,9 +688,9 @@ pub fn load_case(
 
     let system = build(SystemSpec {
         buses: &buses,
-        lines: &network.lines,
-        transformers: &network.transformers,
-        shunts: &network.shunts,
+        lines: network.lines,
+        transformers: network.transformers,
+        shunts: network.shunts,
         devices,
         fixed_buses: Vec::new(),
     })

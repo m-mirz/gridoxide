@@ -69,7 +69,7 @@
 //! worse answer than optimizing them together.
 //!
 //! **HVDC range actions are recognised and skipped**: gridoxide models a DC
-//! network (`src/dc.rs`) but nothing connects it to a range action yet. A
+//! network (`crates/gridoxide-core/src/dc.rs`) but nothing connects it to a range action yet. A
 //! counter trade has no network sensitivity at all, which is why the reference
 //! leaves it out of its LP too.
 

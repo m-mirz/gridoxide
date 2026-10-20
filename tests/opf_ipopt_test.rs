@@ -31,7 +31,7 @@
 #![cfg(feature = "opf-ipopt")]
 
 use gridoxide::opf::OptStatus;
-use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
 use gridoxide::opf::ipopt::{self, IpoptOptions};
 use gridoxide::opf::model::OpfData;
 use gridoxide::opf::nlp::{self, NlpOptions, NonlinearProblem};
@@ -56,7 +56,8 @@ fn ac_opf(name: &str) -> AcOpf {
         OpfData::from_json(&std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap())
             .unwrap();
     let options = AcOpfOptions::default();
-    let network = AcOpfNetwork::from_pgm(input, &data, 50.0, &options).unwrap();
+    let network =
+        gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options).unwrap();
     AcOpf::build(network, options).unwrap()
 }
 

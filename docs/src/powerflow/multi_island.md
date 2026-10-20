@@ -104,7 +104,7 @@ solver algorithm itself** were needed; this is a data-preparation pass before th
 existing solve and a status-reporting pass after it.
 
 gridoxide has no DC-side traversal in this pass today, so its notion of "component" is
-both notions at once (§1) — `src/dc.rs`'s HVDC converters are resolved into AC-side
+both notions at once (§1) — `crates/gridoxide-core/src/dc.rs`'s HVDC converters are resolved into AC-side
 injections before `build_ybus` runs, so a DC link is not an edge in the graph this pass
 walks, making its components synchronous components by construction.
 

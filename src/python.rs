@@ -21,6 +21,7 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+use crate::PowerFlowMethod;
 use crate::batch::{BatchSolver, BusOverride, Scenario, uniform_load_scaling};
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
@@ -33,9 +34,7 @@ use crate::linear::{
 };
 use crate::network::{ShuntAdm, YBusSparse, build_ybus, linear_initial_guess, stamp_shunts};
 use crate::pgm::PgmInput;
-use crate::solver::{
-    IslandStatus, JacobianBackend, PersistentSolver, PowerFlowMethod, SolveStatus,
-};
+use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, SolveStatus};
 use crate::types::{Bus, Line, Transformer};
 
 fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
@@ -554,7 +553,7 @@ impl PowerFlowModel {
                 crate::RemoteControlData {
                     machines: &self.machines,
                 },
-                crate::solver::PowerFlowOptions {
+                crate::PowerFlowOptions {
                     control_taps,
                     control_remote_voltage,
                     tap_max_shift: max_tap_shift,
@@ -740,7 +739,7 @@ impl PowerFlowModel {
             &self.shunts,
             bus,
             QvOptions {
-                pf: crate::solver::PowerFlowOptions {
+                pf: crate::PowerFlowOptions {
                     enforce_q_limits,
                     tol: self.tol,
                     max_iter: self.max_iter.max(60),
@@ -1646,9 +1645,9 @@ impl StateEstimationModel {
         // that this binding and the CLI cannot drift apart in how they build a
         // model.
         let case = if asymmetric {
-            crate::se::case::SeCase::from_pgm_3ph(&input, s_base_va, freq_hz)
+            crate::pgm::se::se_case_from_pgm_3ph(&input, s_base_va, freq_hz)
         } else {
-            crate::se::case::SeCase::from_pgm(&input, s_base_va, freq_hz)
+            crate::pgm::se::se_case_from_pgm(&input, s_base_va, freq_hz)
         }
         .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
 
@@ -2706,13 +2705,13 @@ fn continuation(
     s_base_va: Option<f64>,
     freq_hz: f64,
 ) -> PyResult<ContinuationCurve> {
+    use crate::PowerFlowOptions;
     use crate::continuation::augmented::Parametrization;
     use crate::continuation::{
         ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch, LoadingDirection,
         QLimitKind, StopCriterion, run_continuation,
     };
     use crate::pgm::pgm_to_buses_and_branches;
-    use crate::solver::PowerFlowOptions;
 
     // `None` takes the library default rather than naming it here: the choice
     // is a performance cliff (pseudo-arclength's bordering row is dense, and
@@ -2872,9 +2871,8 @@ fn short_circuit(
     s_base_va: f64,
     freq_hz: f64,
 ) -> PyResult<ShortCircuitResult> {
-    use crate::shortcircuit::{
-        SequenceValue, ShortCircuitOptions, VoltageScaling, short_circuit_from_pgm,
-    };
+    use crate::pgm::shortcircuit::short_circuit_from_pgm;
+    use crate::shortcircuit::{SequenceValue, ShortCircuitOptions, VoltageScaling};
 
     let scaling = match scaling {
         "max" | "maximum" => VoltageScaling::Maximum,
@@ -3075,7 +3073,7 @@ impl AcSensitivityModel {
         let (buses, lines, transformers) =
             crate::pgm::pgm_to_buses_and_branches(input, s_base_va, freq_hz);
 
-        let opts = crate::solver::PowerFlowOptions {
+        let opts = crate::PowerFlowOptions {
             tol,
             max_iter,
             ..Default::default()
@@ -3364,7 +3362,7 @@ fn dc_opf(
     solver: &str,
     freq_hz: f64,
 ) -> PyResult<DcOpfResult> {
-    use crate::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+    use crate::opf::dc::{DcOpf, DcOpfOptions};
     use crate::opf::ipm::IpmSolver;
     use crate::opf::model::OpfData;
     use crate::opf::{OptStatus, Solver};
@@ -3393,7 +3391,7 @@ fn dc_opf(
         allow_shedding,
     };
     let approximation = parse_dc_approximation(dc_approximation)?;
-    let network = DcOpfNetwork::from_pgm(input, &data, freq_hz, approximation)
+    let network = crate::pgm::opf::dc_opf_network_from_pgm(input, &data, freq_hz, approximation)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let generator_index: Vec<usize> = network.generators.iter().map(|g| g.index).collect();
 
@@ -3492,7 +3490,7 @@ fn ac_opf(
     tolerance: f64,
     freq_hz: f64,
 ) -> PyResult<AcOpfResult> {
-    use crate::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+    use crate::opf::ac::{AcOpf, AcOpfOptions};
     use crate::opf::model::OpfData;
 
     let data_path = match data_path {
@@ -3524,7 +3522,7 @@ fn ac_opf(
     // interpreter lock through it would serialize callers for no reason.
     // (`detach` is pyo3 0.29's name for what was `allow_threads`.)
     let result = py.detach(|| {
-        let network = AcOpfNetwork::from_pgm(input, &data, freq_hz, &options)?;
+        let network = crate::pgm::opf::ac_opf_network_from_pgm(input, &data, freq_hz, &options)?;
         AcOpf::build(network, options)?.solve()
     });
     let result = result.map_err(|e| PyValueError::new_err(e.to_string()))?;

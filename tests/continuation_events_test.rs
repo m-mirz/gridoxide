@@ -15,12 +15,12 @@
 mod common;
 mod pglib;
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::continuation::{
     ContinuationOptions, CriticalPointKind, LoadingDirection, run_continuation,
 };
 use gridoxide::network::{build_ybus, power_injections};
 use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
-use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType, Line};
 
 fn fixture(

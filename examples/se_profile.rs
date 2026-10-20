@@ -4,8 +4,8 @@ use gridoxide::network::{build_ybus, linear_initial_guess, stamp_shunts};
 use gridoxide::pgm::{PgmInput, node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::{StateLayout, gain_and_rhs, measurement_jacobian};
+use gridoxide::se::measurement_functions;
 use gridoxide::se::nr::flat_start;
-use gridoxide::se::{SeNetwork, measurement_functions};
 use gridoxide::solver::{JacobianBackend, LinearSolver, PersistentSolver};
 use gridoxide::sparse::RealSparseSystem;
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ fn main() {
     let mut truth = net.buses.clone();
     linear_initial_guess(&mut truth, &ybus);
     PersistentSolver::new(JacobianBackend::Scalar).solve(&mut truth, &ybus, 1e-10, 40);
-    let se_net = SeNetwork::new(&net, ybus, &shunts);
+    let se_net = net.se_network(ybus, &shunts);
 
     // Same synthesis as bench_se.rs, inlined.
     let ms: Vec<Measurement> = {

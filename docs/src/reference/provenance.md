@@ -14,11 +14,11 @@ Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later
 ```
 
 That is accurate for **every default `cargo build`**, not just an opt-in one — because
-`src/klu_native/` is always built, with no feature gate.
+`crates/gridoxide-sparse/src/klu_native/` is always built, with no feature gate.
 
-## Always built: `src/klu_native/`
+## Always built: `crates/gridoxide-sparse/src/klu_native/`
 
-`src/klu_native/` is a from-scratch Rust *translation* of vendored SuiteSparse `AMD`, `BTF`, and
+`crates/gridoxide-sparse/src/klu_native/` is a from-scratch Rust *translation* of vendored SuiteSparse `AMD`, `BTF`, and
 `KLU` C source. A close translation of licensed source is reasonably a derivative work regardless of
 implementation language, so it carries forward its upstream license — and that is not one license
 here:
@@ -29,14 +29,14 @@ here:
 | `BTF` | LGPL-2.1-or-later | `btf/maxtrans.rs`, `btf/strongcomp.rs`, `btf/mod.rs` |
 | `KLU` | LGPL-2.1-or-later | `analyze.rs`, `kernel.rs`, `factor.rs`, `scale.rs`, `refactor.rs`, `solve.rs` |
 
-`src/klu_native/PROVENANCE.md` has the exact file-by-file mapping back to the upstream C, including
+`crates/gridoxide-sparse/src/klu_native/PROVENANCE.md` has the exact file-by-file mapping back to the upstream C, including
 which specific functions each Rust file was ported from and how shared header material was
 classified. See [Inside KLU](../solvers/klu.md) for what the ported algorithm actually does.
 
 ## Opt-in: `--features klu`
 
 Building with `cargo build --features klu` additionally compiles the vendored SuiteSparse C itself
-into the binary via FFI. `vendor/suitesparse/` is a partial vendoring of
+into the binary via FFI. `crates/gridoxide-sparse/vendor/suitesparse/` is a partial vendoring of
 [SuiteSparse](https://github.com/DrTimothyAldenDavis/SuiteSparse) at tag **`v7.12.2`** (commit
 `42151688813c45846a597edcb601435a0e38f3dd`, 2026-02-10) — only the `Source/` and `Include/`
 subdirectories of five packages (`SuiteSparse_config`, `AMD`, `COLAMD`, `BTF`, `KLU`), each keeping
@@ -53,7 +53,7 @@ its own `Doc/License.txt`:
 This adds no license beyond what is already listed above, but it does add **LGPL's relinking
 obligations** for anyone distributing a binary built with that feature. The `klu-dynamic`
 sub-feature exists for that case: it links a system-installed `libklu.so` instead of statically
-linking the vendored copy. See `vendor/suitesparse/PROVENANCE.md` for exactly what was and was not
+linking the vendored copy. See `crates/gridoxide-sparse/vendor/suitesparse/PROVENANCE.md` for exactly what was and was not
 vendored, and how to update to a newer SuiteSparse release.
 
 ## Opt-in: `--features pardiso`
@@ -139,4 +139,4 @@ powsybl-core's `ucte-network` module. The column positions and the tap-changer f
 established from the format specification and then *verified against* those implementations — the
 `.pypowsybl.json` files record the verification. Reading a reference to check an answer is not the
 same as transcribing it, and only the latter would carry the licence across. The same distinction
-applies to `src/klu_native/`, which **is** a translation and is licensed accordingly above.
+applies to `crates/gridoxide-sparse/src/klu_native/`, which **is** a translation and is licensed accordingly above.

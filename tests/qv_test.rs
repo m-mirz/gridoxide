@@ -15,9 +15,9 @@
 //! either. A test asserting they agree would have been asserting something
 //! untrue about the physics.
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::network::{build_ybus, power_injections};
 use gridoxide::qv::{QvError, QvOptions, QvStatus, qv_curve};
-use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType, Line};
 
 mod pglib;

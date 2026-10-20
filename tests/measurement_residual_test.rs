@@ -30,10 +30,10 @@ use std::path::{Path, PathBuf};
 
 use num_complex::Complex;
 
-use gridoxide::measurement::measurements_from_pgm;
 use gridoxide::network::{build_ybus, source_impedance_pu, stamp_shunts};
+use gridoxide::pgm::measurement::measurements_from_pgm;
 use gridoxide::pgm::{PgmInput, PgmNetwork, pgm_shunts_1ph, pgm_to_network};
-use gridoxide::se::{SeNetwork, measurement_functions};
+use gridoxide::se::measurement_functions;
 use gridoxide::types::Bus;
 
 const S_BASE_VA: f64 = 1e6;
@@ -125,7 +125,7 @@ fn assert_residuals_small(name: &str, max_sigma: f64) -> usize {
 
     let mut ybus = build_ybus(buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+    let se_net = net.se_network(ybus.finish(), &shunts);
     let modelled_all = measurement_functions(&measurements, &buses, &se_net);
 
     let mut checked = 0;

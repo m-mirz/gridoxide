@@ -15,12 +15,13 @@ use std::path::PathBuf;
 
 use num_complex::Complex;
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::ac_sensitivity::{AcSensitivity, Function, Variable};
 use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use gridoxide::network::build_ybus;
 use gridoxide::pgm::pgm_to_buses_and_branches;
 use gridoxide::run_power_flow;
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::types::{Bus, BusType, Line, Transformer};
 
 mod common;

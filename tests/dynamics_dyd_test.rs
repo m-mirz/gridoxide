@@ -343,12 +343,12 @@ fn the_curve_file_yields_its_requests() {
 /// A whole Dynawo case — the IIDM network and the `.dyd`/`.par` pair — loads in
 /// one call and initializes to an equilibrium.
 ///
-/// This is what the two halves were always for. `src/iidm.rs` reads the static
+/// This is what the two halves were always for. `src/iidm/` reads the static
 /// network, the reader above reads the dynamic models, and the `staticId` on
 /// each `blackBoxModel` is the correspondence between them.
 #[test]
 fn a_whole_case_loads_from_its_two_halves() {
-    let (system, warnings) = dyd::load_case(
+    let (system, warnings) = gridoxide::iidm::dynamics::load_case(
         format!("{DIR}/IEEE14.iidm"),
         format!("{DIR}/IEEE14.dyd"),
         format!("{DIR}/IEEE14.par"),
@@ -408,7 +408,7 @@ fn a_whole_case_loads_from_its_two_halves() {
 /// with a network the file also fixes, and it is not free to be.
 #[test]
 fn a_machine_sharing_its_bus_with_a_load_still_initializes() {
-    let (system, _) = dyd::load_case(
+    let (system, _) = gridoxide::iidm::dynamics::load_case(
         format!("{DIR}/IEEE14.iidm"),
         format!("{DIR}/IEEE14.dyd"),
         format!("{DIR}/IEEE14.par"),

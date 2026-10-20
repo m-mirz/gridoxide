@@ -321,7 +321,7 @@ fn only_the_global_rotation_is_a_symmetry_of_the_phase_domain() {
 /// are a three-phase total over `s_base` and a per-phase value over `s_base/3`.
 #[test]
 fn estimates_transmission_case_in_the_phase_domain() {
-    use gridoxide::measurement::measurements_from_pgm_3ph;
+    use gridoxide::pgm::measurement::measurements_from_pgm_3ph;
     use gridoxide::pgm::pgm_3ph_maps;
     use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
@@ -422,7 +422,7 @@ fn estimates_transmission_case_in_the_phase_domain() {
 /// angle handling — rather than on the estimator.
 #[test]
 fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
-    use gridoxide::measurement::measurements_from_pgm_3ph;
+    use gridoxide::pgm::measurement::measurements_from_pgm_3ph;
     use gridoxide::pgm::pgm_3ph_maps;
     use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
@@ -539,7 +539,7 @@ fn estimates_from_an_asymmetric_voltage_phasor_per_phase() {
 /// instead because it has no source-internal bus to be undetermined about.
 #[test]
 fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
-    use gridoxide::measurement::measurements_from_pgm_3ph;
+    use gridoxide::pgm::measurement::measurements_from_pgm_3ph;
     use gridoxide::pgm::pgm_3ph_maps;
     use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
@@ -612,13 +612,13 @@ fn magnitudes_alone_leave_the_phase_relationship_undetermined() {
 /// above it.
 fn case_3ph(path: &str) -> gridoxide::se::case::SeCase {
     let input = common::load_pgm_input(&fixture(path).join("input.json"));
-    gridoxide::se::case::SeCase::from_pgm_3ph(&input, S_BASE_VA, 50.0)
+    gridoxide::pgm::se::se_case_from_pgm_3ph(&input, S_BASE_VA, 50.0)
         .expect("this fixture uses no unsupported component")
 }
 
 fn case_1ph(path: &str) -> gridoxide::se::case::SeCase {
     let input = common::load_pgm_input(&fixture(path).join("input.json"));
-    gridoxide::se::case::SeCase::from_pgm(&input, S_BASE_VA, 50.0).expect("builds")
+    gridoxide::pgm::se::se_case_from_pgm(&input, S_BASE_VA, 50.0).expect("builds")
 }
 
 /// The entry point builds what the eight-call assembly built.
@@ -667,7 +667,7 @@ fn the_entry_point_agrees_with_the_assembly() {
 
     let u_rated = |bus: usize| buses[bus].u_rated;
     let expected =
-        gridoxide::measurement::measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated)
+        gridoxide::pgm::measurement::measurements_from_pgm_3ph(&input, &maps, S_BASE_VA, &u_rated)
             .unwrap();
     assert_eq!(case.measurements.len(), expected.len());
 
@@ -1026,8 +1026,6 @@ fn the_batch_solver_carries_over_to_the_phase_domain() {
 /// symmetric path read the same document without comment.
 #[test]
 fn a_voltage_regulator_does_not_stop_an_estimate() {
-    use gridoxide::se::case::SeCase;
-
     let dir = fixture("tests/data/pgm/state_estimation/transmission-case");
     let raw = std::fs::read_to_string(dir.join("input.json")).unwrap();
     let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -1055,7 +1053,8 @@ fn a_voltage_regulator_does_not_stop_an_estimate() {
     let input: gridoxide::pgm::PgmInput =
         serde_json::from_value(doc).expect("the document still parses");
 
-    let with = SeCase::from_pgm_3ph(&input, S_BASE_VA, 50.0).expect("estimable");
+    let with =
+        gridoxide::pgm::se::se_case_from_pgm_3ph(&input, S_BASE_VA, 50.0).expect("estimable");
     let without = case_3ph("tests/data/pgm/state_estimation/transmission-case");
 
     // And it changes nothing: same buses, same measurements, same model.
@@ -1150,7 +1149,7 @@ fn a_link_is_phase_transparent() {
 /// that far.
 #[test]
 fn a_current_sensor_on_a_link_is_refused() {
-    use gridoxide::measurement::{MeasurementError, measurements_from_pgm_3ph};
+    use gridoxide::pgm::measurement::{MeasurementError, measurements_from_pgm_3ph};
     use gridoxide::pgm::pgm_3ph_maps;
 
     let dir = fixture("tests/data/pgm/state_estimation/dummy-test-sym");

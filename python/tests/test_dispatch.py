@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import gridoxide
+from _pglib import fixtures
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 REALGRID = ROOT / "tests/data/CGMES-Test-Configurations/v3.0/RealGrid/RealGrid-Merged"
@@ -77,9 +78,7 @@ def test_unattributed_power_is_surfaced_not_hidden(solved):
 
 def test_a_model_without_machines_returns_nothing():
     """PGM states no per-machine capability, so there is nothing to attribute."""
-    pgm = ROOT / "tests/data/pglib-opf/pglib_opf_case14_ieee.json"
-    if not pgm.exists():
-        pytest.skip(f"missing fixture: {pgm}")
+    pgm = fixtures() / "pglib_opf_case14_ieee.json"
     model = gridoxide.PowerFlowModel.from_pgm_json(str(pgm), s_base_va=100e6)
     model.solve()
     assert model.machine_dispatch() == []

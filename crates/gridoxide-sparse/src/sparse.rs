@@ -1,0 +1,687 @@
+//! Thin internal wrapper around `faer`'s sparse LU, isolating gridoxide's
+//! power-flow math from the specific sparse-solver backend. Both a general
+//! (non-symmetric, since phase-shifting transformers make the admittance
+//! matrix non-Hermitian) complex solve and a real solve are provided, since
+//! Newton-Raphson needs the latter for its Jacobian and the linear
+//! initial-guess warm start needs the former for the Y-bus.
+//!
+//! Each of the two arithmetics comes in a *pattern-fixed* flavour, which
+//! recomputes numeric values on every solve ([`RealSparseSystem`]), and a
+//! *fully-fixed* flavour, which factorizes once and then only moves the
+//! right-hand side ([`ComplexSparseSystem`], [`RealFactorization`]). Which one
+//! a caller wants is decided by whether its matrix changes between solves, not
+//! by how often it solves.
+//!
+//! No `faer` type appears in any signature here: keeping the backend behind
+//! this module is what lets it be swapped without touching the power-flow math.
+
+use faer::Col;
+use faer::prelude::{Reborrow, Solve};
+use faer::sparse::linalg::solvers::{Lu, SymbolicLu};
+use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat, Triplet};
+use num_complex::Complex;
+
+/// The one operation the Newton loop needs from a sparse-LU backend: build a
+/// reusable symbolic factorization from a sparsity pattern once, then
+/// numerically refactorize and solve against that same pattern every
+/// iteration.
+///
+/// Every backend already had this exact pair of inherent methods before this
+/// trait existed — `sparse::RealSparseSystem`, `sparse_klu::KluRealSystem`,
+/// `klu_native::KluNativeSystem` and `sparse_pardiso::PardisoRealSystem` are
+/// all four one-line forwarders. The trait is what lets `newton_raphson_cached`
+/// be a single generic function instead of four near-identical copies of the
+/// same Newton loop, one per backend.
+///
+/// **Precondition, shared by every implementor:** the `entries` passed to
+/// `factor_and_solve` must carry the exact same `(row, col)` pairs in the
+/// exact same order as those passed to `new` — only the values may differ.
+/// Each backend caches a positional mapping from triplet index into its own
+/// CSC layout, so this is positional correspondence, not merely set equality.
+/// `jacobian::JacobianPattern` guarantees it by construction: it emits every
+/// topological neighbor regardless of computed value, in a fixed order
+/// derived once from the topology.
+pub trait LinearSolver: Sized {
+    /// Analyzes `entries`' sparsity pattern (fill-reducing ordering,
+    /// elimination structure) and factors it once. `None` if the pattern is
+    /// structurally invalid or the matrix is singular.
+    fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self>;
+
+    /// Numeric-only refactorization against the cached pattern, then solves
+    /// `A x = b`. `None` if the matrix is singular at these values.
+    fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>>;
+
+    /// As [`factor_and_solve`](Self::factor_and_solve), but taking only the
+    /// nonzero *values*, positionally matching the `entries` passed to
+    /// [`new`](Self::new).
+    ///
+    /// Every implementor already ignores the `(row, col)` half of `entries`
+    /// after construction — each caches its own positional mapping into its
+    /// CSC layout and reads nothing but `entries[i].2`. Handing over just the
+    /// values lets the Newton loop refill one reused `Vec<f64>` per iteration
+    /// via gridoxide's `jacobian::JacobianPattern`
+    /// instead of rebuilding a `Vec<(usize, usize, f64)>` from scratch, which
+    /// is 3x the bytes and a fresh allocation every time.
+    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>>;
+}
+
+/// A sparse matrix built once from a fixed set of (row, col, value) triplets
+/// (duplicates summed), kept around for repeated matrix-vector products —
+/// `power_injections` needs one every Newton-Raphson iteration, but the
+/// Y-bus itself never changes across iterations, so the conversion from
+/// triplets happens once at construction, not on every call.
+#[derive(Clone)]
+pub struct SparseMatrix {
+    n: usize,
+    mat: SparseColMat<usize, Complex<f64>>,
+}
+
+impl SparseMatrix {
+    pub fn build(n: usize, entries: &[(usize, usize, Complex<f64>)]) -> Option<Self> {
+        let triplets: Vec<Triplet<usize, usize, Complex<f64>>> = entries
+            .iter()
+            .map(|&(r, c, v)| Triplet::new(r, c, v))
+            .collect();
+        let mat =
+            SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
+        Some(Self { n, mat })
+    }
+
+    pub fn mul_vec(&self, v: &[Complex<f64>]) -> Vec<Complex<f64>> {
+        let vcol = Col::<Complex<f64>>::from_fn(self.n, |i| v[i]);
+        let result = &self.mat * &vcol;
+        (0..self.n).map(|i| result[i]).collect()
+    }
+}
+
+/// Solves a one-shot general complex sparse linear system `A x = b`.
+/// Returns `None` if the matrix is singular. Used by `linear_initial_guess`,
+/// which only solves once per power-flow run.
+///
+/// Unlike `nalgebra`'s dense LU, `faer`'s sparse LU does not detect
+/// singularity itself — it silently returns NaN-poisoned values instead of
+/// an error, so singularity is detected here via an explicit finiteness
+/// check on the result, to preserve the `None`-on-singular contract callers
+/// rely on.
+pub fn solve_complex(
+    n: usize,
+    entries: &[(usize, usize, Complex<f64>)],
+    rhs: &[Complex<f64>],
+) -> Option<Vec<Complex<f64>>> {
+    let triplets: Vec<Triplet<usize, usize, Complex<f64>>> = entries
+        .iter()
+        .map(|&(r, c, v)| Triplet::new(r, c, v))
+        .collect();
+    let mat = SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
+    let lu = mat.sp_lu().ok()?;
+    let b = Col::<Complex<f64>>::from_fn(n, |i| rhs[i]);
+    let x = lu.solve(&b);
+    if (0..n).any(|i| !x[i].re.is_finite() || !x[i].im.is_finite()) {
+        return None;
+    }
+    Some((0..n).map(|i| x[i]).collect())
+}
+
+/// A real sparse system whose sparsity *pattern* is fixed across repeated
+/// solves (Newton-Raphson's Jacobian: same bus topology every iteration,
+/// only numeric values change) — caches both the LU symbolic factorization
+/// (ordering + fill-in) and the triplet *argsort* (which sparse-matrix slot
+/// each triplet's value lands in) once, and reuses both on each call.
+///
+/// Reusing the argsort matters on its own, separately from the LU symbolic
+/// reuse: without it, every call would still re-sort and re-deduplicate the
+/// full triplet list from scratch even though only the *values* differ
+/// between calls — profiling with `perf` on a 2,605-node benchmark showed
+/// this re-sorting cost was ~10% of total Newton-Raphson time (comparable to
+/// the LU factorization itself), since a fresh `try_new_from_triplets` was
+/// being paid for on every iteration despite the (row, col) pattern never
+/// changing. `new_from_argsort` skips straight to placing values using the
+/// cached order.
+pub struct RealSparseSystem {
+    n: usize,
+    /// How many values the cached argsort expects — i.e. `entries.len()` at
+    /// construction. Kept so a mismatched call can be refused rather than
+    /// tripping an assertion inside `faer`; see [`solve_values`](Self::solve_values).
+    n_values: usize,
+    symbolic_mat: SymbolicSparseColMat<usize>,
+    argsort: Argsort<usize>,
+    symbolic_lu: SymbolicLu<usize>,
+}
+
+impl RealSparseSystem {
+    /// Builds the symbolic factorization and argsort from an initial
+    /// sparsity pattern. Subsequent calls to `factor_and_solve` must supply
+    /// entries with the exact same (row, col) pairs in the exact same order
+    /// (values may differ) — the cached argsort assumes positional
+    /// correspondence, not just set equality.
+    pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        let pairs: Vec<Pair<usize, usize>> = entries
+            .iter()
+            .map(|&(r, c, _)| Pair { row: r, col: c })
+            .collect();
+        let (symbolic_mat, argsort) =
+            SymbolicSparseColMat::try_new_from_indices(n, n, &pairs).ok()?;
+        let symbolic_lu = SymbolicLu::try_new(symbolic_mat.rb()).ok()?;
+        Some(Self {
+            n,
+            n_values: entries.len(),
+            symbolic_mat,
+            argsort,
+            symbolic_lu,
+        })
+    }
+
+    /// Numeric-only refactorization against the cached symbolic pattern and
+    /// argsort, then solves `A x = b`. Returns `None` if the matrix is
+    /// singular (see `solve_complex`'s doc comment for why this needs an
+    /// explicit check).
+    pub fn factor_and_solve(
+        &self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
+        let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
+        self.solve_values(&vals, rhs)
+    }
+
+    /// The body of [`factor_and_solve`](Self::factor_and_solve) once the
+    /// `(row, col)` half of the triplets has been dropped — which this
+    /// backend never needed after `new` built the argsort.
+    ///
+    /// A `vals` length other than the one `new` was given means the caller's
+    /// pattern is not this factorization's — a stale cache, which
+    /// gridoxide's `PersistentSolver::invalidate_admittances`
+    /// can produce when a topology change alters the *bus types* and therefore
+    /// the unknown count. That is refused here rather than left to trip an
+    /// assertion inside `faer`: this type's whole contract is `None` on a
+    /// system it cannot solve, and a panic crossing an FFI boundary is a much
+    /// worse failure than a reported one.
+    pub fn solve_values(&self, vals: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        if vals.len() != self.n_values || rhs.len() < self.n {
+            return None;
+        }
+        let mat =
+            SparseColMat::new_from_argsort(self.symbolic_mat.clone(), &self.argsort, vals).ok()?;
+        let lu = Lu::try_new_with_symbolic(self.symbolic_lu.clone(), mat.as_ref()).ok()?;
+        let b = Col::<f64>::from_fn(self.n, |i| rhs[i]);
+        let x = lu.solve(&b);
+        if (0..self.n).any(|i| !x[i].is_finite()) {
+            return None;
+        }
+        Some((0..self.n).map(|i| x[i]).collect())
+    }
+}
+
+/// `factor_and_solve` is inherently `&self` here (faer keeps no mutable
+/// per-solve state), but the trait takes `&mut self` because the FFI-backed
+/// backends genuinely need it. Taking the stricter receiver costs nothing.
+impl LinearSolver for RealSparseSystem {
+    fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        RealSparseSystem::new(n, entries)
+    }
+
+    fn factor_and_solve(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        rhs: &[f64],
+    ) -> Option<Vec<f64>> {
+        RealSparseSystem::factor_and_solve(self, entries, rhs)
+    }
+
+    fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        self.solve_values(values, rhs)
+    }
+}
+
+/// A complex sparse system whose sparsity *pattern* and *values* are both fixed
+/// across repeated solves, so the whole factorization — not merely the symbolic
+/// half — is computed once and reused.
+///
+/// This is the stronger guarantee [`RealSparseSystem`] cannot make: Newton's
+/// Jacobian changes numerically every iteration, so only the ordering can be
+/// cached. The iterative-linear state estimator
+/// (gridoxide's `se::iterative`) is different — its system matrix
+/// depends on the measurement set and on the *assumption* that voltage
+/// magnitudes stay near their initial values, so it is genuinely constant and
+/// only the right-hand side moves. That is exactly what makes the method
+/// cheaper per iteration than Newton-Raphson, and it is why this type exists.
+pub struct ComplexSparseSystem {
+    n: usize,
+    lu: Lu<usize, Complex<f64>>,
+}
+
+impl ComplexSparseSystem {
+    /// Factorizes once. Returns `None` if the matrix is singular or malformed.
+    pub fn new(n: usize, entries: &[(usize, usize, Complex<f64>)]) -> Option<Self> {
+        let triplets: Vec<Triplet<usize, usize, Complex<f64>>> = entries
+            .iter()
+            .map(|&(r, c, v)| Triplet::new(r, c, v))
+            .collect();
+        let mat =
+            SparseColMat::<usize, Complex<f64>>::try_new_from_triplets(n, n, &triplets).ok()?;
+        Some(Self {
+            n,
+            lu: mat.sp_lu().ok()?,
+        })
+    }
+
+    /// Solves `A x = b` against the cached factorization.
+    ///
+    /// Singularity is checked on the result rather than reported by `faer`,
+    /// which returns NaN-poisoned values instead of an error — the same
+    /// contract [`solve_complex`] documents.
+    pub fn solve(&self, rhs: &[Complex<f64>]) -> Option<Vec<Complex<f64>>> {
+        let b = Col::<Complex<f64>>::from_fn(self.n, |i| rhs[i]);
+        let x = self.lu.solve(&b);
+        if (0..self.n).any(|i| !x[i].re.is_finite() || !x[i].im.is_finite()) {
+            return None;
+        }
+        Some((0..self.n).map(|i| x[i]).collect())
+    }
+
+    /// Solves `Aᴴ x = b` — the *conjugate* transpose — against the same cached
+    /// factorization.
+    ///
+    /// No second factorization is involved, for the reason
+    /// [`RealFactorization::solve_transpose`] documents: an `LU = PAQ`
+    /// decomposition solves the transposed system by running the same
+    /// triangular factors in the opposite order.
+    ///
+    /// The conjugate transpose rather than the plain one, because that is the
+    /// form the question comes in. A *left* eigenvector satisfies
+    /// `wᴴ A = λ wᴴ`, i.e. `Aᴴ w = λ̄ w`, and left eigenvectors are what
+    /// participation factors and eigenvalue sensitivities are built from
+    /// (`dynamics::smallsignal`). `faer` offers it directly as
+    /// `solve_adjoint_in_place`, so nothing here has to conjugate by hand.
+    pub fn solve_adjoint(&self, rhs: &[Complex<f64>]) -> Option<Vec<Complex<f64>>> {
+        debug_assert_eq!(rhs.len(), self.n);
+        let mut b = Col::<Complex<f64>>::from_fn(self.n, |i| rhs[i]);
+        self.lu.solve_adjoint_in_place(b.as_mut());
+        if (0..self.n).any(|i| !b[i].re.is_finite() || !b[i].im.is_finite()) {
+            return None;
+        }
+        Some((0..self.n).map(|i| b[i]).collect())
+    }
+}
+
+/// A real sparse system whose sparsity *pattern* and *values* are both fixed
+/// across repeated solves, so the whole factorization — not merely the
+/// symbolic half — is computed once and reused.
+///
+/// This is the real-arithmetic twin of [`ComplexSparseSystem`], and it exists
+/// for the same reason that type does: the DC (Bθ) susceptance matrix
+/// (`linear::btheta`) depends only on the topology, so a DC solve, a PTDF
+/// column and a LODF column are all just different right-hand sides against
+/// one factorization.
+///
+/// [`RealSparseSystem`] cannot serve that. Its contract — the one
+/// [`LinearSolver`] codifies — is
+/// "pattern fixed, values change every call", so it numerically refactorizes
+/// on every `factor_and_solve`. That is exactly right for Newton-Raphson,
+/// whose Jacobian really does change every iteration, and exactly wrong for
+/// PTDF, which would pay a fresh factorization once per bus.
+pub struct RealFactorization {
+    n: usize,
+    lu: Lu<usize, f64>,
+}
+
+impl RealFactorization {
+    /// Factorizes once. Returns `None` if the matrix is singular or malformed.
+    pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        let triplets: Vec<Triplet<usize, usize, f64>> = entries
+            .iter()
+            .map(|&(r, c, v)| Triplet::new(r, c, v))
+            .collect();
+        let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).ok()?;
+        Some(Self {
+            n,
+            lu: mat.sp_lu().ok()?,
+        })
+    }
+
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Solves `A x = b` against the cached factorization.
+    ///
+    /// Singularity is checked on the result rather than reported by `faer`,
+    /// which returns NaN-poisoned values instead of an error — the same
+    /// contract [`solve_complex`] documents.
+    pub fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        let mut out = vec![0.0; self.n];
+        self.solve_into(rhs, &mut out).then_some(out)
+    }
+
+    /// Solves `Aᵀ x = b` against the *same* cached factorization.
+    ///
+    /// No second factorization is involved: an `LU = PAQ` decomposition solves
+    /// the transposed system by running the same triangular factors in the
+    /// opposite order, which is what `faer`'s `solve_transpose_in_place` does.
+    ///
+    /// This is what makes an adjoint sensitivity affordable. A forward
+    /// sensitivity answers "how does everything respond to *this* variable" in
+    /// one solve against `A`; the adjoint answers "how does *this* quantity
+    /// respond to everything" in one solve against `Aᵀ`. Both directions are
+    /// useful and neither is derivable from the other cheaply, so
+    /// `ac_sensitivity` offers both — see `linear::sensitivity`'s
+    /// `ptdf_column`/`ptdf_row` pair for the same duality on the DC side.
+    pub fn solve_transpose(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        debug_assert_eq!(rhs.len(), self.n);
+        let mut b = Col::<f64>::from_fn(self.n, |i| rhs[i]);
+        self.lu.solve_transpose_in_place(b.as_mut());
+        if (0..self.n).any(|i| !b[i].is_finite()) {
+            return None;
+        }
+        Some((0..self.n).map(|i| b[i]).collect())
+    }
+
+    /// The body of [`solve`](Self::solve), writing into a caller-owned buffer
+    /// rather than allocating.
+    ///
+    /// Private because nothing needs the buffer-reusing form yet: the
+    /// sensitivity accessors in `linear::sensitivity` each return an owned
+    /// `Vec` anyway, and one allocation per column is nowhere near the cost of
+    /// the triangular solve beside it. Worth making public if a caller ever
+    /// does want to hoist that allocation out of a loop.
+    ///
+    /// Returns `false` (leaving `out` in an unspecified state) if the matrix
+    /// is singular at these values.
+    fn solve_into(&self, rhs: &[f64], out: &mut [f64]) -> bool {
+        debug_assert_eq!(rhs.len(), self.n);
+        debug_assert_eq!(out.len(), self.n);
+        let b = Col::<f64>::from_fn(self.n, |i| rhs[i]);
+        let x = self.lu.solve(&b);
+        if (0..self.n).any(|i| !x[i].is_finite()) {
+            return false;
+        }
+        for i in 0..self.n {
+            out[i] = x[i];
+        }
+        true
+    }
+}
+
+/// Solves a small dense `A x = b` by Gaussian elimination with partial
+/// pivoting. Returns `None` if `A` is singular — no pivot clears a small
+/// absolute threshold.
+///
+/// Deliberately dense and deliberately unsophisticated: both callers pass a
+/// matrix whose order is a handful, where a sparse factorization's setup
+/// would cost more than the whole solve. `dc::solve_dc_network` uses it for
+/// the HVDC Newton step, and `linear::sensitivity` for the `k × k`
+/// generalized-LODF system over an outage set of `k` branches. It lives here
+/// rather than in either of those because it is a numeric utility with no
+/// power-system content, and because a reader looking for the crate's linear
+/// algebra looks here.
+///
+/// The absolute pivot threshold is meaningful for both callers: their
+/// matrices are O(1)-scaled (a Jacobian in per-unit, and `I - Ψ` whose
+/// entries are transfer fractions), so "no pivot above 1e-12" really does mean
+/// structurally singular rather than merely badly scaled.
+pub fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for col in 0..n {
+        let pivot_row = (col..n).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+        if a[pivot_row][col].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(col, pivot_row);
+        b.swap(col, pivot_row);
+        for row in (col + 1)..n {
+            let factor = a[row][col] / a[col][col];
+            if factor == 0.0 {
+                continue;
+            }
+            for k in col..n {
+                a[row][k] -= factor * a[col][k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for row in (0..n).rev() {
+        let sum: f64 = (row + 1..n).map(|k| a[row][k] * x[k]).sum();
+        x[row] = (b[row] - sum) / a[row][row];
+    }
+    Some(x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solve_dense_matches_a_hand_solution() {
+        // [[2,1],[1,3]] x = [5,10] => x = [1,3]
+        let x = solve_dense(vec![vec![2.0, 1.0], vec![1.0, 3.0]], vec![5.0, 10.0]).unwrap();
+        assert!(
+            (x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12,
+            "{x:?}"
+        );
+    }
+
+    /// Partial pivoting must handle a zero leading pivot rather than dividing
+    /// by it.
+    #[test]
+    fn solve_dense_pivots_past_a_zero_diagonal() {
+        let x = solve_dense(vec![vec![0.0, 2.0], vec![1.0, 1.0]], vec![4.0, 3.0]).unwrap();
+        assert!(
+            (x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12,
+            "{x:?}"
+        );
+    }
+
+    #[test]
+    fn solve_dense_singular_returns_none() {
+        assert!(solve_dense(vec![vec![1.0, 1.0], vec![2.0, 2.0]], vec![1.0, 2.0]).is_none());
+    }
+
+    #[test]
+    fn solve_complex_simple_system() {
+        // [[2, 1], [1, 3]] * [x0, x1] = [5, 10]  =>  x0=1, x1=3
+        let entries = vec![
+            (0, 0, Complex::new(2.0, 0.0)),
+            (0, 1, Complex::new(1.0, 0.0)),
+            (1, 0, Complex::new(1.0, 0.0)),
+            (1, 1, Complex::new(3.0, 0.0)),
+        ];
+        let rhs = vec![Complex::new(5.0, 0.0), Complex::new(10.0, 0.0)];
+        let x = solve_complex(2, &entries, &rhs).unwrap();
+        assert!((x[0] - Complex::new(1.0, 0.0)).norm() < 1e-10);
+        assert!((x[1] - Complex::new(3.0, 0.0)).norm() < 1e-10);
+    }
+
+    #[test]
+    fn solve_complex_duplicate_entries_sum() {
+        // (0,0) contributed twice as 1.0+1.0=2.0, matching dense += semantics.
+        let entries = vec![
+            (0, 0, Complex::new(1.0, 0.0)),
+            (0, 0, Complex::new(1.0, 0.0)),
+            (0, 1, Complex::new(1.0, 0.0)),
+            (1, 0, Complex::new(1.0, 0.0)),
+            (1, 1, Complex::new(3.0, 0.0)),
+        ];
+        let rhs = vec![Complex::new(5.0, 0.0), Complex::new(10.0, 0.0)];
+        let x = solve_complex(2, &entries, &rhs).unwrap();
+        assert!((x[0] - Complex::new(1.0, 0.0)).norm() < 1e-10);
+        assert!((x[1] - Complex::new(3.0, 0.0)).norm() < 1e-10);
+    }
+
+    #[test]
+    fn real_sparse_system_refactor_reuses_symbolic() {
+        let entries_a = vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)];
+        let sys = RealSparseSystem::new(2, &entries_a).unwrap();
+        let x = sys.factor_and_solve(&entries_a, &[5.0, 10.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-10);
+        assert!((x[1] - 3.0).abs() < 1e-10);
+
+        // Same sparsity pattern, different numeric values (as across NR iterations).
+        let entries_b = vec![(0, 0, 4.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 2.0)];
+        // [[4,1],[1,2]] * x = [6, 5] => x0=1, x1=2
+        let x2 = sys.factor_and_solve(&entries_b, &[6.0, 5.0]).unwrap();
+        assert!((x2[0] - 1.0).abs() < 1e-10);
+        assert!((x2[1] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn singular_matrix_returns_none() {
+        let entries = vec![(0, 0, 1.0), (0, 1, 1.0), (1, 0, 2.0), (1, 1, 2.0)];
+        let sys = RealSparseSystem::new(2, &entries);
+        // Symbolic analysis may succeed even for a numerically singular matrix
+        // (it only depends on the sparsity pattern); the failure surfaces at
+        // factor_and_solve time.
+        if let Some(sys) = sys {
+            assert!(sys.factor_and_solve(&entries, &[1.0, 2.0]).is_none());
+        }
+    }
+
+    /// The whole point of the type: one factorization, many right-hand sides.
+    /// Solving the two unit vectors recovers the inverse column by column, so
+    /// this doubles as a check that the cached `Lu` is genuinely reusable
+    /// rather than consumed by the first solve.
+    #[test]
+    fn real_factorization_reuses_one_factorization_across_right_hand_sides() {
+        // [[2, 1], [1, 3]], det = 5, inverse = [[0.6, -0.2], [-0.2, 0.4]].
+        let entries = vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)];
+        let sys = RealFactorization::new(2, &entries).unwrap();
+        assert_eq!(sys.n(), 2);
+
+        let x = sys.solve(&[5.0, 10.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12, "got {}", x[0]);
+        assert!((x[1] - 3.0).abs() < 1e-12, "got {}", x[1]);
+
+        let c0 = sys.solve(&[1.0, 0.0]).unwrap();
+        assert!(
+            (c0[0] - 0.6).abs() < 1e-12 && (c0[1] + 0.2).abs() < 1e-12,
+            "{c0:?}"
+        );
+        let c1 = sys.solve(&[0.0, 1.0]).unwrap();
+        assert!(
+            (c1[0] + 0.2).abs() < 1e-12 && (c1[1] - 0.4).abs() < 1e-12,
+            "{c1:?}"
+        );
+    }
+
+    #[test]
+    fn real_factorization_solve_into_matches_solve() {
+        let entries = vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)];
+        let sys = RealFactorization::new(2, &entries).unwrap();
+        let mut out = vec![0.0; 2];
+        assert!(sys.solve_into(&[5.0, 10.0], &mut out));
+        assert_eq!(out, sys.solve(&[5.0, 10.0]).unwrap());
+    }
+
+    /// Duplicate `(row, col)` triplets sum, matching `solve_complex`'s
+    /// documented `+=` semantics — the B-matrix assembly in `linear::btheta`
+    /// relies on this, since parallel branches each stamp their own entry.
+    #[test]
+    fn real_factorization_duplicate_entries_sum() {
+        let entries = vec![
+            (0, 0, 1.0),
+            (0, 0, 1.0),
+            (0, 1, 1.0),
+            (1, 0, 1.0),
+            (1, 1, 3.0),
+        ];
+        let sys = RealFactorization::new(2, &entries).unwrap();
+        let x = sys.solve(&[5.0, 10.0]).unwrap();
+        assert!(
+            (x[0] - 1.0).abs() < 1e-12 && (x[1] - 3.0).abs() < 1e-12,
+            "{x:?}"
+        );
+    }
+
+    /// The transposed solve must use the *same* factorization and still give
+    /// the answer a separately-factorized `Aᵀ` would. Checked on a
+    /// deliberately asymmetric matrix, since on a symmetric one the two
+    /// directions agree for the wrong reason.
+    #[test]
+    fn real_factorization_solve_transpose_matches_an_explicit_transpose() {
+        let entries = vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 5.0), (1, 1, 3.0)];
+        let transposed: Vec<(usize, usize, f64)> =
+            entries.iter().map(|&(r, c, v)| (c, r, v)).collect();
+
+        let a = RealFactorization::new(2, &entries).unwrap();
+        let at = RealFactorization::new(2, &transposed).unwrap();
+
+        for rhs in [[1.0, 0.0], [0.0, 1.0], [3.0, -7.0]] {
+            let via_transpose = a.solve_transpose(&rhs).unwrap();
+            let via_explicit = at.solve(&rhs).unwrap();
+            for i in 0..2 {
+                assert!(
+                    (via_transpose[i] - via_explicit[i]).abs() < 1e-12,
+                    "rhs {rhs:?}: {via_transpose:?} vs {via_explicit:?}"
+                );
+            }
+        }
+
+        // And it is genuinely the transpose, not the same solve twice.
+        let forward = a.solve(&[1.0, 0.0]).unwrap();
+        let adjoint = a.solve_transpose(&[1.0, 0.0]).unwrap();
+        assert!(
+            (forward[1] - adjoint[1]).abs() > 1e-6,
+            "{forward:?} vs {adjoint:?}"
+        );
+    }
+
+    /// The complex adjoint solve must reuse the same factorization and agree
+    /// with a separately-factorized `Aᴴ`. Checked on a matrix that is neither
+    /// symmetric nor real, since on either of those the conjugate transpose
+    /// coincides with something else and the test would pass for the wrong
+    /// reason.
+    #[test]
+    fn complex_system_solve_adjoint_matches_an_explicit_conjugate_transpose() {
+        let c = |re: f64, im: f64| Complex::new(re, im);
+        let entries = vec![
+            (0, 0, c(2.0, 1.0)),
+            (0, 1, c(1.0, -3.0)),
+            (1, 0, c(5.0, 2.0)),
+            (1, 1, c(3.0, 0.5)),
+        ];
+        let adjoint_entries: Vec<(usize, usize, Complex<f64>)> = entries
+            .iter()
+            .map(|&(r, c_, v)| (c_, r, v.conj()))
+            .collect();
+
+        let a = ComplexSparseSystem::new(2, &entries).unwrap();
+        let ah = ComplexSparseSystem::new(2, &adjoint_entries).unwrap();
+
+        for rhs in [
+            [c(1.0, 0.0), c(0.0, 0.0)],
+            [c(0.0, 0.0), c(1.0, 0.0)],
+            [c(3.0, -1.0), c(-7.0, 2.0)],
+        ] {
+            let via_adjoint = a.solve_adjoint(&rhs).unwrap();
+            let via_explicit = ah.solve(&rhs).unwrap();
+            for i in 0..2 {
+                assert!(
+                    (via_adjoint[i] - via_explicit[i]).norm() < 1e-12,
+                    "rhs {rhs:?}: {via_adjoint:?} vs {via_explicit:?}"
+                );
+            }
+        }
+
+        // And it is genuinely the adjoint, not the same solve twice.
+        let forward = a.solve(&[c(1.0, 0.0), c(0.0, 0.0)]).unwrap();
+        let adjoint = a.solve_adjoint(&[c(1.0, 0.0), c(0.0, 0.0)]).unwrap();
+        assert!(
+            (forward[1] - adjoint[1]).norm() > 1e-6,
+            "{forward:?} vs {adjoint:?}"
+        );
+    }
+
+    #[test]
+    fn real_factorization_singular_returns_none() {
+        let entries = vec![(0, 0, 1.0), (0, 1, 1.0), (1, 0, 2.0), (1, 1, 2.0)];
+        // As above, `new` may or may not detect this; if it does not, the
+        // finiteness check on the solve must.
+        if let Some(sys) = RealFactorization::new(2, &entries) {
+            assert!(sys.solve(&[1.0, 2.0]).is_none());
+        }
+    }
+}

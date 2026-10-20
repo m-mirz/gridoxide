@@ -13,13 +13,14 @@
 //! against an independently-constructed slow one, as `ac_contingency_test`'s
 //! `direct_solve` does.
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::continuation::augmented::Parametrization;
 use gridoxide::continuation::{
     ContinuationError, ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch,
     LoadingDirection, StopCriterion, run_continuation,
 };
 use gridoxide::network::{build_ybus, effective_injection, power_injections};
-use gridoxide::solver::{JacobianBackend, PowerFlowOptions};
+use gridoxide::solver::JacobianBackend;
 use gridoxide::types::{Bus, BusType, Line};
 
 mod pglib;

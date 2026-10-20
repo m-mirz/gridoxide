@@ -111,7 +111,7 @@ it equally between both ends.
 
 - **HVDC.** `hvdcLine`, `vscConverterStation` and `lccConverterStation` are
   counted and then skipped with a note. gridoxide has a real DC-side network
-  (`src/dc.rs`) reachable from CGMES, and wiring IIDM into it is its own piece of
+  (`crates/gridoxide-core/src/dc.rs`) reachable from CGMES, and wiring IIDM into it is its own piece of
   work — one no fixture in the tree calls for, since none contains an HVDC
   element.
 

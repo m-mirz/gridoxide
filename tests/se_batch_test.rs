@@ -23,8 +23,9 @@ mod common;
 
 use std::path::PathBuf;
 
-use gridoxide::measurement::{Measurement, measurements_from_pgm};
+use gridoxide::measurement::Measurement;
 use gridoxide::network::{build_ybus, stamp_shunts};
+use gridoxide::pgm::measurement::measurements_from_pgm;
 use gridoxide::pgm::{node_id_to_idx, pgm_shunts_1ph, pgm_to_network};
 use gridoxide::se::SeNetwork;
 use gridoxide::se::batch::{
@@ -69,7 +70,7 @@ fn load(name: &str) -> Loaded {
     );
     let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
     stamp_shunts(&mut ybus, &shunts);
-    let se_net = SeNetwork::new(&net, ybus.finish(), &shunts);
+    let se_net = net.se_network(ybus.finish(), &shunts);
 
     let per_scenario: Vec<Vec<Measurement>> = batch["data"]
         .as_array()

@@ -23,7 +23,7 @@ zero-sequence calculations, which this project doesn't run against these
 grids):
 
 - `power_grid_model_io`'s `PandaPowerConverter` only emits positive-sequence
-  line impedance (`r1`/`x1`) — gridoxide's PGM parser (`src/pgm.rs`) requires
+  line impedance (`r1`/`x1`) — gridoxide's PGM parser (`src/pgm/mod.rs`) requires
   `r0`/`x0` on every line unconditionally (mirroring the hand-written PGM
   test fixtures under `tests/data/pgm/`, which always specify both). Backfill
   `r0`/`x0` from `r1`/`x1` when absent.
@@ -41,7 +41,7 @@ voltage magnitude, floating Q) — the converter represents this as a
 This is PGM's actual PV-bus mechanism (see PGM's own
 `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types`, which assigns
 `BusType::pv` to any bus with an active regulator) — not an approximation.
-gridoxide's `pgm_to_buses_and_branches` (`src/pgm.rs`) now parses
+gridoxide's `pgm_to_buses_and_branches` (`src/pgm/mod.rs`) now parses
 `voltage_regulator` the same way, assigning `BusType::PV` and pinning
 `voltage_mag` to `u_ref` for the regulated bus, so it solves these cases as
 true PV buses rather than fixed-PQ approximations. Reactive power limits

@@ -8,10 +8,10 @@
 //! The cases are converted from the `benchmark-grids` submodule by
 //! `tests/data/pglib_opf.py`, the same as the tests do, which needs a Python
 //! with numpy (`python3` unless `PYTHON` names another).
+use gridoxide::PowerFlowOptions;
 use gridoxide::continuation::{ContinuationOptions, LoadingDirection, run_continuation};
 use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 use gridoxide::qv::{QvOptions, QvStatus, qv_curve};
-use gridoxide::solver::PowerFlowOptions;
 use gridoxide::types::{Bus, BusType};
 
 /// Converts the pglib cases into a scratch directory and returns it, as

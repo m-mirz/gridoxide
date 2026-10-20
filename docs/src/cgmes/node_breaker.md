@@ -168,7 +168,7 @@ that the chosen stiffness happens to produce.
 ```rust
 let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
 stamp_shunts(&mut ybus, &net.shunts);
-let se = net.se_network(ybus.finish());
+let se = SeNetwork::from_node_breaker(&net, ybus.finish());
 
 let mut buses = net.buses.clone();
 se::nr::linear_start(&mut buses, &se, &measurements);

@@ -27,7 +27,7 @@
 
 use gridoxide::network::power_injections;
 use gridoxide::opf::OptStatus;
-use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
 use gridoxide::opf::model::OpfData;
 use gridoxide::opf::nlp::NonlinearProblem;
 use gridoxide::pgm::PgmInput;
@@ -51,7 +51,8 @@ fn build(name: &str, options: AcOpfOptions) -> AcOpf {
     let data =
         OpfData::from_json(&std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap())
             .unwrap();
-    let network = AcOpfNetwork::from_pgm(input, &data, 50.0, &options).unwrap();
+    let network =
+        gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options).unwrap();
     AcOpf::build(network, options).unwrap()
 }
 
@@ -338,7 +339,8 @@ fn every_starting_point_reaches_the_same_optimum() {
                         &std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap(),
                     )
                     .unwrap();
-                    AcOpfNetwork::from_pgm(input, &data, 50.0, &options).unwrap()
+                    gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options)
+                        .unwrap()
                 };
                 opf_network.v_start = Some(v_start);
                 let result = AcOpf::build(opf_network, options).unwrap().solve().unwrap();
@@ -400,7 +402,8 @@ fn the_locational_marginal_price_is_the_cost_of_one_more_megawatt() {
             &std::fs::read_to_string(dir.join(format!("{name}.opf.json"))).unwrap(),
         )
         .unwrap();
-        AcOpfNetwork::from_pgm(input, &data, 50.0, &AcOpfOptions::default()).unwrap()
+        gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &AcOpfOptions::default())
+            .unwrap()
     };
     perturbed_network.p_load[bus] += delta_mw / base_mva;
     let perturbed = AcOpf::build(perturbed_network, AcOpfOptions::default())
@@ -434,7 +437,7 @@ fn the_locational_marginal_price_is_the_cost_of_one_more_megawatt() {
 fn ac_and_dc_prices_agree_to_within_losses() {
     use gridoxide::linear::DcApproximation;
     use gridoxide::opf::Solver;
-    use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+    use gridoxide::opf::dc::{DcOpf, DcOpfOptions};
     use gridoxide::opf::ipm::IpmSolver;
 
     let name = "pglib_opf_case5_pjm";
@@ -448,7 +451,9 @@ fn ac_and_dc_prices_agree_to_within_losses() {
     let input: PgmInput =
         serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap())
             .unwrap();
-    let dc_network = DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG).unwrap();
+    let dc_network =
+        gridoxide::pgm::opf::dc_opf_network_from_pgm(input, &data, 50.0, DcApproximation::IgnoreG)
+            .unwrap();
     let dc_opf = DcOpf::build(dc_network, DcOpfOptions::default()).unwrap();
     let dc = dc_opf.interpret(&IpmSolver::new().solve(dc_opf.problem()).unwrap());
 

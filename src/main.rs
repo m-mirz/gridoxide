@@ -11,21 +11,21 @@
 use std::fs;
 use std::path::PathBuf;
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::ac_sensitivity::{AcSensitivity, Function, Variable};
 use gridoxide::branch_flow::Terminal;
 use gridoxide::json::NetworkData;
 use gridoxide::linear::{DcApproximation, DcOptions, DcSensitivity, dc_branches, dc_power_flow};
 use gridoxide::network::{build_ybus, stamp_shunts};
+use gridoxide::pgm::shortcircuit::short_circuit_from_pgm;
 use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
 use gridoxide::se::nr::{SeMethod, SeOptions, SeStatus, estimate, linear_start};
 use gridoxide::se::observability;
-use gridoxide::shortcircuit::{
-    SequenceValue, ShortCircuitOptions, VoltageScaling, short_circuit_from_pgm,
-};
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::shortcircuit::{SequenceValue, ShortCircuitOptions, VoltageScaling};
+use gridoxide::solver::SolveStatus;
 use gridoxide::{run_power_flow, run_power_flow_analysis};
 
 const USAGE: &str = "\
@@ -483,9 +483,9 @@ fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), Strin
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
 
     let case = if phases == 3 {
-        SeCase::from_pgm_3ph(&input, s_base_va, 50.0)
+        gridoxide::pgm::se::se_case_from_pgm_3ph(&input, s_base_va, 50.0)
     } else {
-        SeCase::from_pgm(&input, s_base_va, 50.0)
+        gridoxide::pgm::se::se_case_from_pgm(&input, s_base_va, 50.0)
     }
     .map_err(|e| format!("{path}: {e}"))?;
 
@@ -686,7 +686,7 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     if flags.iter().any(|f| f == "--ac") {
         return run_ac_opf(path, flags);
     }
-    use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+    use gridoxide::opf::dc::{DcOpf, DcOpfOptions};
     use gridoxide::opf::model::OpfData;
     use gridoxide::opf::{OptStatus, Solver};
 
@@ -727,8 +727,8 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     } else {
         gridoxide::linear::DcApproximation::IgnoreG
     };
-    let network =
-        DcOpfNetwork::from_pgm(input, &data, 50.0, approximation).map_err(|e| e.to_string())?;
+    let network = gridoxide::pgm::opf::dc_opf_network_from_pgm(input, &data, 50.0, approximation)
+        .map_err(|e| e.to_string())?;
     let n_buses = network.n_buses;
     let generators = network.generators.clone();
     let total_load: f64 = network.loads.iter().map(|l| l.p).sum::<f64>() * network.base_mva;
@@ -840,7 +840,7 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
 #[cfg(feature = "opf")]
 fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::opf::OptStatus;
-    use gridoxide::opf::ac::{AcOpf, AcOpfNetwork, AcOpfOptions};
+    use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
     use gridoxide::opf::model::OpfData;
 
     let data_path = match flag_value(flags, "--data")? {
@@ -869,8 +869,8 @@ fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
             .map_err(|_| format!("--max-iter: {raw:?} is not a number"))?;
     }
 
-    let network =
-        AcOpfNetwork::from_pgm(input, &data, 50.0, &options).map_err(|e| e.to_string())?;
+    let network = gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options)
+        .map_err(|e| e.to_string())?;
     let n_buses = network.n_buses;
     let demand: f64 = network.p_load.iter().sum::<f64>() * network.base_mva;
     let opf = AcOpf::build(network, options).map_err(|e| e.to_string())?;
@@ -3327,8 +3327,9 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
 
 #[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
 fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
+    use gridoxide::PowerFlowOptions;
     use gridoxide::outerloop::ControllerOutcome;
-    use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+    use gridoxide::solver::SolveStatus;
 
     let number = |flag: &str, default: f64| -> Result<f64, String> {
         match flag_value(flags, flag)? {

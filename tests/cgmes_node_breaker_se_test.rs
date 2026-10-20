@@ -188,7 +188,7 @@ fn minigrid_node_breaker_state_is_recovered_from_scada() {
     let truth = true_state(&net);
     let measurements = scada(&net, &truth, 0.01);
 
-    let se = net.se_network(ybus_of(&net));
+    let se = gridoxide::se::SeNetwork::from_node_breaker(&net, ybus_of(&net));
     let constrained = se.constrained_buses().iter().filter(|&&c| c).count();
     assert!(
         constrained >= 25,
@@ -227,7 +227,7 @@ fn the_zero_injection_constraints_are_what_make_the_bays_observable() {
     };
     let truth = true_state(&net);
     let measurements = scada(&net, &truth, 0.01);
-    let se = net.se_network(ybus_of(&net));
+    let se = gridoxide::se::SeNetwork::from_node_breaker(&net, ybus_of(&net));
     let layout = StateLayout::new(&net.buses, &measurements, &se);
 
     let with = observability::analyze(
@@ -303,7 +303,7 @@ fn a_measurement_attaches_to_a_switch() {
         });
     }
 
-    let se = net.se_network(ybus_of(&net));
+    let se = gridoxide::se::SeNetwork::from_node_breaker(&net, ybus_of(&net));
     let mut buses = net.buses.clone();
     gridoxide::se::nr::linear_start(&mut buses, &se, &measurements);
     let report = estimate(&measurements, &mut buses, &se, &SeOptions::default());
@@ -340,7 +340,7 @@ fn the_merged_view_estimates_through_the_same_path() {
     let truth = true_state(&net);
     let measurements = scada(&net, &truth, 0.01);
 
-    let se = net.se_network(ybus_of(&net));
+    let se = gridoxide::se::SeNetwork::from_node_breaker(&net, ybus_of(&net));
     let mut buses = net.buses.clone();
     gridoxide::se::nr::linear_start(&mut buses, &se, &measurements);
     let report = estimate(&measurements, &mut buses, &se, &SeOptions::default());

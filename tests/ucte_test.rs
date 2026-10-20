@@ -13,9 +13,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gridoxide::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
-use gridoxide::solver::{PowerFlowMethod, PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::types::BusType;
 use gridoxide::ucte;
+use gridoxide::{PowerFlowMethod, PowerFlowOptions};
 
 mod openrao;
 
@@ -727,7 +728,7 @@ fn the_measured_positions_sum_to_the_tie_losses() {
         &transformers,
         &net.shunts,
         gridoxide::TapData::none(),
-        gridoxide::solver::PowerFlowOptions {
+        gridoxide::PowerFlowOptions {
             tol: 1e-10,
             max_iter: 40,
             ..Default::default()

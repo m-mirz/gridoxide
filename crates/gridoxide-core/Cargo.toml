@@ -1,0 +1,32 @@
+[package]
+name = "gridoxide-core"
+description = "gridoxide's solvers: the network model, AC power flow and what is built on it, state estimation and short circuit"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/gridoxide-core"
+keywords = ["power-flow", "state-estimation", "short-circuit", "newton-raphson", "power-systems"]
+categories = ["science", "simulation"]
+# All of this crate is gridoxide's own code. Its dependency gridoxide-sparse
+# is not: see that crate's licence field.
+license = "Apache-2.0"
+
+[dependencies]
+gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.0.2" }
+faer = "0.24.4"
+num-complex = { version = "0.4.6", features = ["serde"] }
+# The batch solvers — power flow's and state estimation's — run scenarios
+# across rayon's pool; see the comment on this dependency in the workspace
+# root's Cargo.toml.
+rayon = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[features]
+default = []
+# The two FFI sparse backends, as `JacobianBackend` variants. Both are built
+# in gridoxide-sparse; see its features for what each needs.
+klu = ["gridoxide-sparse/klu"]
+pardiso = ["gridoxide-sparse/pardiso"]

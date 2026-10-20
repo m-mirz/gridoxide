@@ -28,10 +28,11 @@ mod cgmes_common;
 
 use std::path::{Path, PathBuf};
 
+use gridoxide::PowerFlowOptions;
 use gridoxide::cgmes::{cgmes_to_network, load_profiles};
 use gridoxide::network::{build_ybus, power_injections, stamp_shunts};
 use gridoxide::outerloop::RemoteOutcome;
-use gridoxide::solver::{PowerFlowOptions, SolveStatus};
+use gridoxide::solver::SolveStatus;
 use gridoxide::types::BusType;
 
 const S_BASE_VA: f64 = 100e6;

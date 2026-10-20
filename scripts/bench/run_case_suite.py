@@ -30,7 +30,7 @@ object, not PGM JSON); pypowsybl and VeraGrid both load the same MATPOWER
 
 gridoxide now models these cases' generators as genuine PV (voltage-
 controlled) buses via PGM's `voltage_regulator` component
-(`src/pgm.rs::pgm_to_buses_and_branches`, mirroring PGM's own
+(`src/pgm/mod.rs::pgm_to_buses_and_branches`, mirroring PGM's own
 `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types`) — so PGM is a full
 column here, not excluded on a PV-support technicality.
 

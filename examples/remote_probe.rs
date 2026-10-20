@@ -4,9 +4,9 @@
 //! Reports both modes side by side, because the interesting quantity is the
 //! difference: which bus the reactive power comes out of, and how the solution
 //! compares to the fixture's own published one.
+use gridoxide::PowerFlowOptions;
 use gridoxide::cgmes::{cgmes_to_network, cgmes_topological_node_bus_index, load_profiles};
 use gridoxide::network::{build_ybus, power_injections, stamp_shunts};
-use gridoxide::solver::PowerFlowOptions;
 use std::path::{Path, PathBuf};
 
 /// Published per-equipment reactive output, per-unit, in injection sign.

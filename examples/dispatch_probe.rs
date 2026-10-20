@@ -1,7 +1,7 @@
 //! Probe: per-machine reactive allocation at shared buses.
+use gridoxide::PowerFlowOptions;
 use gridoxide::dispatch::{allocate, reactive_keys};
 use gridoxide::network::{build_ybus, stamp_shunts};
-use gridoxide::solver::PowerFlowOptions;
 
 fn main() {
     let path = std::env::args().nth(1).expect("path to a CGMES directory");

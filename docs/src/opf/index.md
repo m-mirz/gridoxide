@@ -308,11 +308,12 @@ option, `--shed-price` re-prices it, `--ignore-r` selects the textbook \\(b = 1/
 
 ```rust
 use gridoxide::linear::DcApproximation;
-use gridoxide::opf::dc::{DcOpf, DcOpfNetwork, DcOpfOptions};
+use gridoxide::opf::dc::{DcOpf, DcOpfOptions};
 use gridoxide::opf::ipm::IpmSolver;
 use gridoxide::opf::Solver;
+use gridoxide::pgm::opf::dc_opf_network_from_pgm;
 
-let network = DcOpfNetwork::from_pgm(input, &data, 50.0, DcApproximation::IgnoreG)?;
+let network = dc_opf_network_from_pgm(input, &data, 50.0, DcApproximation::IgnoreG)?;
 let opf = DcOpf::build(network, DcOpfOptions::default())?;
 
 let mut solver = IpmSolver::new();

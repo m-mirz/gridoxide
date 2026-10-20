@@ -9,11 +9,11 @@ KLU is the sparse LU solver gridoxide uses for that step. It was designed by Tim
 Palamadai specifically for circuit-simulation matrices — very sparse, unsymmetric, with a strong
 zero-free diagonal — which describes a power-flow Jacobian almost exactly. gridoxide has two KLU
 backends (`JacobianBackend::Klu`, the vendored C via FFI, and `JacobianBackend::KluNative`, a
-from-scratch Rust port of the same algorithm in `src/klu_native/`), and both run the pipeline
+from-scratch Rust port of the same algorithm in `crates/gridoxide-sparse/src/klu_native/`), and both run the pipeline
 described below.
 
 This page walks that pipeline one phase at a time, on matrices small enough to check by hand. Every
-number shown was produced by running the actual `src/klu_native/` code on the matrix shown.
+number shown was produced by running the actual `crates/gridoxide-sparse/src/klu_native/` code on the matrix shown.
 
 ## The pipeline at a glance
 
@@ -451,7 +451,7 @@ k=2  udiag =  9.413792   L = []                                U = [(0, −1.462
 
 ## What this port deliberately leaves out
 
-`src/klu_native/` implements KLU for exactly the configuration gridoxide uses, and the omissions are
+`crates/gridoxide-sparse/src/klu_native/` implements KLU for exactly the configuration gridoxide uses, and the omissions are
 documented rather than silent:
 
 - **Row scaling is ported but not wired in.** `scale.rs` implements both of KLU's variants and is
@@ -471,18 +471,18 @@ documented rather than silent:
 
 | File | Ports | Contents |
 |---|---|---|
-| `src/klu_native/types.rs` | `klu_internal.h`, `klu_defaults.c` | `EMPTY`/`flip` sentinels, `Options` |
-| `src/klu_native/btf/maxtrans.rs` | `btf_maxtrans.c` | step 1a, bipartite matching |
-| `src/klu_native/btf/strongcomp.rs` | `btf_strongcomp.c` | step 1b, Tarjan SCC |
-| `src/klu_native/btf/mod.rs` | `btf_order.c` | step 1, both halves combined |
-| `src/klu_native/amd/` | `amd_order.c`, `amd_2.c` | step 2, approximate minimum degree |
-| `src/klu_native/analyze.rs` | `klu_analyze.c` | steps 1–2 driver, produces `Symbolic` |
-| `src/klu_native/kernel.rs` | `klu_kernel.c` | step 3, one block: DFS, pivot, prune |
-| `src/klu_native/factor.rs` | `klu_factor.c` | step 3 driver, off-diagonal bookkeeping |
-| `src/klu_native/scale.rs` | `klu_scale.c` | row scaling (not wired in) |
-| `src/klu_native/refactor.rs` | `klu_refactor.c` | step 5 |
-| `src/klu_native/solve.rs` | `klu_solve.c` | step 4 |
-| `src/sparse_klu.rs` | — | the FFI backend, same algorithm via vendored C |
+| `crates/gridoxide-sparse/src/klu_native/types.rs` | `klu_internal.h`, `klu_defaults.c` | `EMPTY`/`flip` sentinels, `Options` |
+| `crates/gridoxide-sparse/src/klu_native/btf/maxtrans.rs` | `btf_maxtrans.c` | step 1a, bipartite matching |
+| `crates/gridoxide-sparse/src/klu_native/btf/strongcomp.rs` | `btf_strongcomp.c` | step 1b, Tarjan SCC |
+| `crates/gridoxide-sparse/src/klu_native/btf/mod.rs` | `btf_order.c` | step 1, both halves combined |
+| `crates/gridoxide-sparse/src/klu_native/amd/` | `amd_order.c`, `amd_2.c` | step 2, approximate minimum degree |
+| `crates/gridoxide-sparse/src/klu_native/analyze.rs` | `klu_analyze.c` | steps 1–2 driver, produces `Symbolic` |
+| `crates/gridoxide-sparse/src/klu_native/kernel.rs` | `klu_kernel.c` | step 3, one block: DFS, pivot, prune |
+| `crates/gridoxide-sparse/src/klu_native/factor.rs` | `klu_factor.c` | step 3 driver, off-diagonal bookkeeping |
+| `crates/gridoxide-sparse/src/klu_native/scale.rs` | `klu_scale.c` | row scaling (not wired in) |
+| `crates/gridoxide-sparse/src/klu_native/refactor.rs` | `klu_refactor.c` | step 5 |
+| `crates/gridoxide-sparse/src/klu_native/solve.rs` | `klu_solve.c` | step 4 |
+| `crates/gridoxide-sparse/src/sparse_klu.rs` | — | the FFI backend, same algorithm via vendored C |
 
-`src/klu_native/PROVENANCE.md` maps each file to its upstream source and license; the vendored C it
-was ported from lives in `vendor/suitesparse/`.
+`crates/gridoxide-sparse/src/klu_native/PROVENANCE.md` maps each file to its upstream source and license; the vendored C it
+was ported from lives in `crates/gridoxide-sparse/vendor/suitesparse/`.

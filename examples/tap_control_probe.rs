@@ -33,7 +33,7 @@ fn main() {
                 changers: &net.tap_changers,
                 regulation: &net.regulation,
             },
-            gridoxide::solver::PowerFlowOptions {
+            gridoxide::PowerFlowOptions {
                 control_taps: true,
                 enforce_q_limits: true,
                 max_outer_iter: 40,

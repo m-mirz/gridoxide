@@ -58,7 +58,7 @@ def test_convert_then_solve_converges(tmp_path):
     model.solve()
     vm = model.voltage_mag()
     # 2 physical nodes + 1 virtual slack bus gridoxide adds per active
-    # `source` (src/pgm.rs), appended after the physical nodes.
+    # `source` (src/pgm/mod.rs), appended after the physical nodes.
     assert len(vm) == 3
     assert vm[-1] == pytest.approx(1.0, abs=1e-6)  # virtual slack bus holds u_ref
 
