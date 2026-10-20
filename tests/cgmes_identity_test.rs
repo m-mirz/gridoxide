@@ -543,6 +543,7 @@ fn generation_totals_come_from_the_machines() {
 /// `with_bus_aliases`. Asserting only that the alias resolves would pass just as
 /// well if every name resolved for some unrelated reason, and the point is the
 /// difference.
+#[cfg(feature = "rao")]
 #[test]
 fn a_crac_may_name_any_node_merged_into_a_bus() {
     use gridoxide::rao::Resolution;
