@@ -85,8 +85,13 @@ Two helpers produce or convert PGM JSON, so a working grid doesn't require hand-
 
   or from the shell: `gridoxide-generate-grid grid.json --target-nodes 2200 --seed 42`.
 
+- `PowerFlowModel.from_matpower("case14.m")` reads a MATPOWER `.m` case directly, solving the
+  problem MATPOWER's `runpf` solves; `bus_numbers()` names each bus. See
+  [Reading MATPOWER Input](https://github.com/m-mirz/gridoxide/blob/main/docs/src/import/matpower.md).
+
 - `gridoxide.matpower` (needs `pip install gridoxide[matpower]`) — converts a raw MATPOWER case
-  (`.m` or `.mat`) into PGM JSON:
+  (`.m` or `.mat`) into PGM JSON, for tools that read PGM. It cannot carry a case exactly: PGM's
+  slack is a source behind an impedance, and its transformers hold phase shifts in 30° steps only:
 
   ```python
   from gridoxide.matpower import convert

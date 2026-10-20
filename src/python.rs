@@ -227,6 +227,8 @@ struct PowerFlowModel {
     /// to separately re-derive `cgmes::cgmes_topological_node_bus_index`'s
     /// own post-switch-merge index remapping themselves.
     tn_bus_index: std::collections::HashMap<String, usize>,
+    /// Bus index -> MATPOWER bus number, populated by `from_matpower` only.
+    bus_numbers: Vec<u64>,
 }
 
 #[pymethods]
@@ -313,7 +315,82 @@ impl PowerFlowModel {
             tol,
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
+            bus_numbers: Vec::new(),
         })
+    }
+
+    /// Loads a MATPOWER case (`.m`) by gridoxide's own reader
+    /// (`src/matpower.rs`), solving the problem MATPOWER's `runpf` solves:
+    /// the case's reference bus as the slack, PV buses at their generators'
+    /// `Vg`, isolated buses and out-of-service equipment left out.
+    ///
+    /// Per unit on the case's own `baseMVA`, so `tol` is the largest power
+    /// mismatch in the same units MATPOWER measures it in. Buses keep the
+    /// order of `mpc.bus`; `bus_numbers()` gives each one's `BUS_I`.
+    /// Branches are lines first, then transformers (every branch with a ratio
+    /// or a phase shift), in file order within each.
+    #[staticmethod]
+    #[pyo3(signature = (
+        path,
+        backend="scalar",
+        tol=1e-6,
+        max_iter=20,
+        method="newton_raphson",
+        dc_approximation="ignore_r",
+    ))]
+    fn from_matpower(
+        path: &str,
+        backend: &str,
+        tol: f64,
+        max_iter: usize,
+        method: &str,
+        dc_approximation: &str,
+    ) -> PyResult<Self> {
+        let net = crate::matpower::read(path).map_err(|e| match e {
+            crate::matpower::MatpowerError::Io(e) => {
+                PyRuntimeError::new_err(format!("reading {path}: {e}"))
+            }
+            e => PyValueError::new_err(format!("{path}: {e}")),
+        })?;
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &net.shunts);
+        let ybus = ybus.finish();
+        let backend = parse_backend(backend)?;
+        Ok(Self {
+            buses: net.buses.clone(),
+            buses_template: net.buses,
+            ybus,
+            lines: net.lines,
+            transformers: net.transformers,
+            shunts: net.shunts,
+            solver: PersistentSolver::new(backend),
+            backend,
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
+            method: parse_method(method)?,
+            dc_opts: DcOptions {
+                approximation: parse_dc_approximation(dc_approximation)?,
+                ..DcOptions::default()
+            },
+            dc_solution: None,
+            sensitivity: None,
+            #[cfg(feature = "cgmes")]
+            node_breaker: None,
+            batch: None,
+            tap_changers: Vec::new(),
+            regulation: Vec::new(),
+            outer: None,
+            tol,
+            max_iter,
+            tn_bus_index: std::collections::HashMap::new(),
+            bus_numbers: net.bus_numbers,
+        })
+    }
+
+    /// Each bus's MATPOWER bus number (`BUS_I`), in bus order. Empty unless
+    /// the model was built by `from_matpower`.
+    fn bus_numbers(&self) -> Vec<u64> {
+        self.bus_numbers.clone()
     }
 
     /// Loads a CGMES profile bundle (any number of EQ/EQBD/SSH/TP/SV files,
@@ -458,6 +535,7 @@ impl PowerFlowModel {
             tol,
             max_iter,
             tn_bus_index,
+            bus_numbers: Vec::new(),
         })
     }
 

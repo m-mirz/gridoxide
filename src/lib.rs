@@ -28,6 +28,8 @@ pub mod cgmes;
 pub mod dynamics;
 #[cfg(feature = "iidm")]
 pub mod iidm;
+#[cfg(feature = "matpower")]
+pub mod matpower;
 #[cfg(feature = "opf")]
 pub mod opf;
 pub mod pgm;

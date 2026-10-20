@@ -57,10 +57,13 @@ jobs:
     #   `tests/rao_cucumber_test.rs`, reads powsybl-open-rao's own Cucumber
     #   suite from benchmark-grids and needs no Java.
     # - `capi`: pure Rust plus cbindgen.
+    # - `matpower`: plain text, no dependency. Its suite reads the cases in
+    #   benchmark-grids and checks each solution against the case's own
+    #   equations.
     - name: Check each feature set on its own
       run: |
         for features in "" opf ucte iidm iidm,ucte dynamics dynamics,iidm \
-                        rao rao,ucte,iidm capi; do
+                        rao rao,ucte,iidm capi matpower; do
           echo "::group::cargo check --features '$features'"
           cargo check --all-targets --features "$features"
           echo "::endgroup::"
@@ -71,7 +74,7 @@ jobs:
     # combination compiled in no single-feature step and broke in the one
     # nobody ran. This is that step.
     - name: Check every CI-covered feature together
-      run: cargo check --all-targets --features cgmes,ucte,iidm,opf,rao,dynamics,capi
+      run: cargo check --all-targets --features cgmes,ucte,iidm,opf,rao,dynamics,capi,matpower
     # Tested on the union, *less `cgmes`*: its tests read
     # CGMES-Test-Configurations (158 MB), which CI does not fetch, and nine of
     # them fail rather than skip without it. CI has never run them; fetching
@@ -79,7 +82,7 @@ jobs:
     #
     # The integration tests are one binary (`tests/all.rs`), so this links once.
     - name: Test every CI-covered feature together
-      run: cargo test --features ucte,iidm,opf,rao,dynamics,capi
+      run: cargo test --features ucte,iidm,opf,rao,dynamics,capi,matpower
     # The library is split into crates (see crates/), and a plain `cargo test`
     # at the root tests only the root package. The others' own unit tests —
     # the KLU port's among them — run here.

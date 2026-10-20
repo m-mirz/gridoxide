@@ -192,6 +192,9 @@ mod klu_jacobian_test;
 mod klu_native_jacobian_test;
 #[path = "link_test.rs"]
 mod link_test;
+#[cfg(feature = "matpower")]
+#[path = "matpower_test.rs"]
+mod matpower_test;
 #[path = "measurement_residual_test.rs"]
 mod measurement_residual_test;
 #[path = "multi_island_test.rs"]
