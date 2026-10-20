@@ -363,7 +363,7 @@ Assembly measures at ~36% of iteration time, so single-threaded on the large cas
 roughly a third of that stage was allocation and index rebuilding. The gain is *smaller* at 8 threads: once
 all cores run, the solve is memory-stalled in the LU, so assembly is a smaller share. It is also smaller on
 the small case, whose triplet array (~20k nnz, ~0.5 MB) fits in cache; case9241pegase's is ~150k nnz, ~3.6 MB,
-rebuilt every iteration. Values are bit-for-bit identical — `src/jacobian.rs` compares `f64::to_bits`.
+rebuilt every iteration. Values are bit-for-bit identical — `crates/gridoxide-core/src/jacobian.rs` compares `f64::to_bits`.
 
 ### Why sub-linear scaling is not a solver defect
 
@@ -432,7 +432,7 @@ between two code paths cannot detect a fault in what they share, which is why ch
 
 ## 4d. Block-diagonal embedding on real sparse code
 
-`src/bde.rs` stacks B scenarios' Jacobians into one block-diagonal sparse matrix and takes a single
+`crates/gridoxide-core/src/bde.rs` stacks B scenarios' Jacobians into one block-diagonal sparse matrix and takes a single
 factorization per Newton iteration. §4c established equivalence with *dense* linear algebra; this extends it
 to the sparse backends the GPU path mirrors, where the claim is far less obvious — KLU applies BTF ordering,
 AMD permutation and partial pivoting to the stacked matrix, none of which know about the block structure.
@@ -550,7 +550,7 @@ comparing the input SV profile against itself. `bench_pypowsybl_cgmes.py` now pr
 stdout; it previously warned only on stderr, which the `2>/dev/null` used to produce these tables discarded.
 
 ² gridoxide's `n=2` reflects that this fixture's published SV set includes `TopologicalNode`s (DC-side detail
-resolved away by `cgmes_resolve_dc_converters`, `src/dc.rs`) with no AC bus in the solved output — not a
+resolved away by `cgmes_resolve_dc_converters`, `crates/gridoxide-core/src/dc.rs`) with no AC bus in the solved output — not a
 matching failure. This is the one row **not** re-measured after the two fixes below: reproducing `n=2` needs
 the original profile-file set, and including the `-BD-MAS` boundary files the fixture requires yields `n=4`.
 Treat these four figures as provisional.
@@ -579,7 +579,7 @@ p90=0.423% max=4.318%` — the entire 93% headline is fixture data, and the medi
 iteration_count=0, status_text="Network has no generator with voltage control enabled"`. CGMES
 `VsConverter`/`CsConverter` aren't recognized as AC voltage-controlling sources, so `get_buses()` echoes back
 the state its importer initialized from the input SV profile — both the 0.000% "deviation" and the timing are
-artifacts. gridoxide's DC-aware solve (`src/dc.rs`) is the only one of the two that solves this fixture.
+artifacts. gridoxide's DC-aware solve (`crates/gridoxide-core/src/dc.rs`) is the only one of the two that solves this fixture.
 
 Where both tools have comparable `n` (PowerFlow, PST, MicroGrid-BE, Svedala, RealGrid), accuracy against the
 published reference is close — consistent with §5, and not with either tool being systematically more correct.

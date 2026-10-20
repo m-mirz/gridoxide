@@ -83,7 +83,7 @@ With the same reference bus pinned on both sides, per-bus angle deviation
 now tops out around 0.07 degrees, now that gridoxide also converts
 `ACLineSegment.gch` (shunt conductance — real, not just reactive, line
 charging) into a `Line.g_shunt` term stamped into the Y-bus (`src/cgmes.rs`'s
-Step 4, `src/network.rs`'s `build_ybus`). Before that fix, gridoxide simply
+Step 4, `crates/gridoxide-core/src/network.rs`'s `build_ybus`). Before that fix, gridoxide simply
 dropped `gch` (despite its own comment already documenting the field),
 undercounting real-power losses on `BE-Line_6`/`BE-Line_2` (~6 MW and ~3 MW
 respectively at nominal voltage) — both of which feed straight into the
@@ -119,7 +119,7 @@ RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 def run_gridoxide() -> dict:
     """Runs examples/cgmes_microgrid_be_dump.rs and parses its JSON. That
     binary also prints Newton-Raphson iteration diagnostics to stdout
-    (src/solver.rs's own `println!`, shared with every other solver
+    (crates/gridoxide-core/src/solver.rs's own `println!`, shared with every other solver
     caller — not specific to this example) ahead of the JSON, so only the
     last line is parsed."""
     proc = subprocess.run(

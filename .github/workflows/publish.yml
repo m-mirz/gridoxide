@@ -62,9 +62,9 @@ jobs:
       # noticing: a file the package needs that `exclude` dropped, and a
       # dependency that resolves locally but not from the registry.
       #
-      # `--workspace` packages gridoxide-sparse too, and verifies gridoxide
-      # against the gridoxide-sparse it just packaged rather than against
-      # crates.io, where this version does not exist yet. Verifies on
+      # `--workspace` packages the other workspace crates too, and
+      # verifies each crate against the others it just packaged rather than
+      # against crates.io, where this version does not exist yet. Verifies on
       # default features only, matching build.yml — `klu`/`pardiso` need a C
       # toolchain, libclang, or a local oneMKL install. That's a limit on what
       # this job *compiles*, not on what ships: the crate is source-only, so
@@ -81,14 +81,20 @@ jobs:
         run: |
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gridoxide") | .version')
-          tar xzf "target/package/gridoxide-$version.crate" -C target/package
-          tar xzf "target/package/gridoxide-sparse-$version.crate" -C target/package
-          # This version of gridoxide-sparse is not on crates.io until the
-          # step below, so point the extracted gridoxide at the extracted
-          # gridoxide-sparse — again, exactly what a consumer gets.
+          # Every workspace crate's .crate, unpacked side by side.
+          for crate in target/package/*-$version.crate; do
+            tar xzf "$crate" -C target/package
+          done
+          # This version of the workspace's other crates is not on crates.io
+          # until the step below, so point the extracted gridoxide at the
+          # extracted crates — again, exactly what a consumer gets.
+          patches=()
+          for dir in target/package/gridoxide-*-$version/; do
+            name=$(basename "$dir" "-$version")
+            patches+=(--config "patch.crates-io.$name.path='$PWD/$dir'")
+          done
           cargo build --features cgmes \
-            --manifest-path "target/package/gridoxide-$version/Cargo.toml" \
-            --config "patch.crates-io.gridoxide-sparse.path='$PWD/target/package/gridoxide-sparse-$version'"
+            --manifest-path "target/package/gridoxide-$version/Cargo.toml" "${patches[@]}"
 
       # Everything above is the dry run: a `workflow_dispatch` with dry_run
       # left on exercises the whole packaging path and stops here, without
@@ -96,8 +102,8 @@ jobs:
       #
       # `--no-verify` because the `cargo package` step above already built the
       # very same .crates; re-verifying would just compile faer twice.
-      # `--workspace` publishes gridoxide-sparse first, since gridoxide
-      # depends on it.
+      # `--workspace` publishes in dependency order, gridoxide-sparse first
+      # and gridoxide last.
       - name: Publish
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
         env:

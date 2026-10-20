@@ -1067,7 +1067,7 @@ fn a_shunt_is_scaled_by_its_section_count() {
 ///
 /// No fixture in the tree contains one, which is why this is written against a
 /// document rather than a fixture, and why the fix is to *report* rather than to
-/// model: reaching `src/dc.rs`, which is a real DC network, is work with no gate
+/// model: reaching `crates/gridoxide-core/src/dc.rs`, which is a real DC network, is work with no gate
 /// behind it until a fixture calls for it.
 #[test]
 fn an_hvdc_converter_station_is_counted_rather_than_mistaken_for_a_generator() {

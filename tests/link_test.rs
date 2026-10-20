@@ -9,7 +9,7 @@
 //!
 //! A test that only compared node voltages would pass under either treatment
 //! and so would not be testing the decision at all. See
-//! `docs/src/powerflow/zero_impedance_branches.md` and `src/topology.rs`.
+//! `docs/src/powerflow/zero_impedance_branches.md` and `crates/gridoxide-core/src/topology/`.
 
 mod common;
 

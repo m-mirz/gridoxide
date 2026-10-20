@@ -785,7 +785,7 @@ fn open(
         // a word. `docs/src/import/iidm.md` said it was "counted and then
         // skipped"; now it is.
         //
-        // Modelling it properly means reaching `src/dc.rs`, which is a real DC
+        // Modelling it properly means reaching `crates/gridoxide-core/src/dc.rs`, which is a real DC
         // network and is currently only wired to CGMES. No IIDM fixture in the
         // tree has an `hvdcLine` or a converter station, so that is work with no
         // gate behind it — and until there is one, counting the element is the

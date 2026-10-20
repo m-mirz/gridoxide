@@ -80,11 +80,11 @@ jobs:
     # The integration tests are one binary (`tests/all.rs`), so this links once.
     - name: Test every CI-covered feature together
       run: cargo test --features ucte,iidm,opf,rao,dynamics,capi
-    # The sparse backends are their own crate, and a plain `cargo test` at the
-    # root tests only the root package. Its own unit tests — the KLU port's
-    # among them — run here.
-    - name: Test gridoxide-sparse
-      run: cargo test -p gridoxide-sparse
+    # The library is split into crates (see crates/), and a plain `cargo test`
+    # at the root tests only the root package. The others' own unit tests —
+    # the KLU port's among them — run here.
+    - name: Test the workspace's other crates
+      run: cargo test --workspace --exclude gridoxide
     - name: Build the dynamics scaling examples
       run: |
         cargo build --release --features dynamics --example dynamics_scale

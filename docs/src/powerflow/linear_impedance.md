@@ -81,7 +81,7 @@ alongside Newton-Raphson rather than instead of it.
 
 ### Validated against real data
 
-In-module tests in `src/linear/impedance.rs`.
+In-module tests in `crates/gridoxide-core/src/linear/impedance.rs`.
 `a_constant_impedance_load_is_reproduced_exactly` checks the defining property: a load
 that genuinely is constant-impedance is solved exactly, so the solved voltages reproduce
 the specified power to round-off. `agrees_with_the_warm_start_entry_point` pins the

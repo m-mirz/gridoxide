@@ -75,7 +75,7 @@ def test_invalid_json_raises():
 def test_block_backend_matches_scalar_on_pv_bus(tmp_path):
     """JacobianBackend::Block handles PV buses by replacing their (absent)
     Q-mismatch row with a dummy `ΔVmag = 0` equation rather than reducing
-    the system's dimension like Scalar does (src/solver.rs's
+    the system's dimension like Scalar does (crates/gridoxide-core/src/solver.rs's
     `build_jacobian_blocks`); the two formulations must converge to the
     same solution. The Rust-side equivalent is
     tests/block_jacobian_test.rs::block_backend_matches_scalar_backend_with_pv_bus

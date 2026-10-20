@@ -641,10 +641,23 @@ dependencies = [
  "cimoxide-decoder",
  "cimoxide-structs",
  "faer",
+ "gridoxide-core",
  "gridoxide-sparse",
  "num-complex",
  "pyo3",
  "quick-xml",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gridoxide-core"
+version = "0.0.2"
+dependencies = [
+ "faer",
+ "gridoxide-sparse",
+ "num-complex",
  "rayon",
  "serde",
  "serde_json",
