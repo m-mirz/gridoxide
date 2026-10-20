@@ -299,8 +299,8 @@ impl Segment {
 
 /// Whether any bus still carries a voltage-dependent term.
 ///
-/// Neither `jacobian::JacobianPattern::fill` nor its reference oracle
-/// `solver::build_jacobian_triplets` includes `∂s_eff/∂|V|` for ZIP terms. For
+/// Neither `jacobian::JacobianPattern::fill` nor the reference oracle in
+/// `jacobian`'s tests includes `∂s_eff/∂|V|` for ZIP terms. For
 /// an ordinary solve that is a converged-answer-preserving inexactness: the
 /// mismatch is exact, so only the step direction is off. For continuation it is
 /// not — the Jacobian's singularity *is* the answer, so a Jacobian missing

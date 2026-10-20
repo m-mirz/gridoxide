@@ -30,8 +30,8 @@ pub enum JacobianBackend {
     /// every other unknown. See `build_jacobian_blocks`.
     Block,
     /// Experimental, opt-in, only compiled with the `klu` Cargo feature:
-    /// the same scalar Jacobian as `Scalar` (reuses `build_jacobian_triplets`
-    /// unchanged), solved via the **vendored SuiteSparse KLU C library**,
+    /// the same scalar Jacobian as `Scalar` (one `jacobian::JacobianPattern`
+    /// serves both), solved via the **vendored SuiteSparse KLU C library**,
     /// linked over FFI (`sparse_klu::KluRealSystem`) instead of `faer`. Needs
     /// a C compiler and `libclang` at build time. See
     /// `docs/src/solvers/backends.md` and
@@ -582,183 +582,6 @@ fn newton_raphson_cached(
     SolveStats::from_loop(SolveStatus::MaxIterationsReached, history)
 }
 
-/// Derives the index bookkeeping `build_jacobian_triplets` needs and calls
-/// it, so a caller holding only `(buses, ybus, p_calc, q_calc)` can obtain
-/// the Jacobian triplets directly.
-///
-/// Exists as the **reference oracle** for `jacobian::JacobianPattern`, whose
-/// precomputed-offset assembler must agree with this bit-for-bit (see
-/// `jacobian`'s own tests). Kept deliberately naive — it re-derives
-/// everything from scratch on every call, which is exactly the cost
-/// `JacobianPattern` was written to remove, and exactly what makes it a
-/// trustworthy oracle.
-#[cfg(test)]
-pub(crate) fn jacobian_triplets_reference(
-    buses: &[Bus],
-    ybus: &YBusSparse,
-    p_calc: &[f64],
-    q_calc: &[f64],
-) -> Vec<(usize, usize, f64)> {
-    let non_slack_idx: Vec<usize> = buses
-        .iter()
-        .filter(|b| !matches!(b.bus_type, BusType::Slack))
-        .map(|b| b.idx)
-        .collect();
-    let pq_idx: Vec<usize> = buses
-        .iter()
-        .filter(|b| matches!(b.bus_type, BusType::PQ))
-        .map(|b| b.idx)
-        .collect();
-
-    let n_angle = non_slack_idx.len();
-    let mut non_slack_pos: Vec<Option<usize>> = vec![None; buses.len()];
-    for (pos, &i) in non_slack_idx.iter().enumerate() {
-        non_slack_pos[i] = Some(pos);
-    }
-    let mut pq_pos: Vec<Option<usize>> = vec![None; buses.len()];
-    for (pos, &i) in pq_idx.iter().enumerate() {
-        pq_pos[i] = Some(pos);
-    }
-    let cap = jacobian_triplet_capacity(ybus, &non_slack_idx, &pq_idx);
-
-    build_jacobian_triplets(
-        buses,
-        ybus,
-        &non_slack_idx,
-        &pq_idx,
-        &non_slack_pos,
-        &pq_pos,
-        n_angle,
-        p_calc,
-        q_calc,
-        cap,
-    )
-}
-
-/// Upper bound on `build_jacobian_triplets`' output length for a given
-/// topology — computed once per solve (not per iteration) and reused via
-/// `Vec::with_capacity`, since the sparsity pattern, and hence this bound,
-/// never changes across a solve's iterations while `build_jacobian_triplets`
-/// itself starts a fresh `Vec` from scratch every iteration. Each Y-bus
-/// neighbor contributes at most 2 triplets to the H/N block (one per
-/// non-slack row) and at most 2 to the M/L block (one per PQ row).
-#[cfg(test)]
-fn jacobian_triplet_capacity(
-    ybus: &YBusSparse,
-    non_slack_idx: &[usize],
-    pq_idx: &[usize],
-) -> usize {
-    let non_slack_degree: usize = non_slack_idx.iter().map(|&i| ybus.row(i).len()).sum();
-    let pq_degree: usize = pq_idx.iter().map(|&i| ybus.row(i).len()).sum();
-    2 * non_slack_degree + 2 * pq_degree
-}
-
-/// The **reference implementation** of Jacobian assembly, retained as the
-/// oracle `jacobian::JacobianPattern` is checked against bit-for-bit. The
-/// Newton loop itself no longer calls this — it refills values at
-/// precomputed offsets instead — so this is compiled only under `cfg(test)`.
-/// Kept deliberately straightforward: its value is being obviously correct,
-/// not being fast.
-///
-/// Assembles the Newton-Raphson Jacobian's nonzero entries as `(row, col,
-/// value)` triplets, walking only each unknown bus's actual Y-bus neighbors
-/// (`ybus.row(i)`) instead of the full cross product of unknown-bus indices.
-/// Every topological neighbor is always included regardless of its computed
-/// value (even if it happens to evaluate to exactly zero at some iteration),
-/// so the resulting sparsity *pattern* is identical across calls — required
-/// for `RealSparseSystem`'s cached symbolic factorization to stay valid.
-///
-/// Block structure (H/N/M/L), matching the original dense Jacobian:
-/// ```text
-/// J = [ H  N ]   H = dP/d_ang, N = dP/d_vmag
-///     [ M  L ]   M = dQ/d_ang, L = dQ/d_vmag
-/// ```
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn build_jacobian_triplets(
-    buses: &[Bus],
-    ybus: &YBusSparse,
-    non_slack_idx: &[usize],
-    pq_idx: &[usize],
-    non_slack_pos: &[Option<usize>],
-    pq_pos: &[Option<usize>],
-    n_angle: usize,
-    p_calc: &[f64],
-    q_calc: &[f64],
-    triplet_capacity: usize,
-) -> Vec<(usize, usize, f64)> {
-    let vm: Vec<f64> = buses.iter().map(|b| b.voltage_mag).collect();
-    let va: Vec<f64> = buses.iter().map(|b| b.voltage_ang).collect();
-    let mut triplets = Vec::with_capacity(triplet_capacity);
-
-    // H and N blocks: rows = non_slack_idx (P-mismatch equations).
-    for (row_idx, &i) in non_slack_idx.iter().enumerate() {
-        for &(k, y_ik) in ybus.row(i) {
-            if k == i {
-                // H_ii = -Q_i - V_i^2 * B_ii
-                triplets.push((row_idx, row_idx, -q_calc[i] - vm[i].powi(2) * y_ik.im));
-                // N_ii = P_i/V_i + V_i * G_ii (only if i has a magnitude unknown)
-                if let Some(col_idx) = pq_pos[i] {
-                    triplets.push((
-                        row_idx,
-                        n_angle + col_idx,
-                        p_calc[i] / vm[i] + vm[i] * y_ik.re,
-                    ));
-                }
-                continue;
-            }
-            let angle_ik = va[i] - va[k];
-            if let Some(col_idx) = non_slack_pos[k] {
-                // H_ik = V_i * V_k * (G_ik * sin(d_ik) - B_ik * cos(d_ik))
-                let h_ik = vm[i] * vm[k] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
-                triplets.push((row_idx, col_idx, h_ik));
-            }
-            if let Some(col_idx) = pq_pos[k] {
-                // N_ik = V_i * (G_ik * cos(d_ik) + B_ik * sin(d_ik))
-                let n_ik = vm[i] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
-                triplets.push((row_idx, n_angle + col_idx, n_ik));
-            }
-        }
-    }
-
-    // M and L blocks: rows = pq_idx (Q-mismatch equations).
-    for (row_idx, &i) in pq_idx.iter().enumerate() {
-        for &(k, y_ik) in ybus.row(i) {
-            if k == i {
-                // M_ii = P_i - V_i^2 * G_ii; column is i's position among
-                // *all* non-slack buses, not just PQ ones (may differ from
-                // row_idx once PV buses exist).
-                let col_idx = non_slack_pos[i].expect("a PQ bus is always non-slack");
-                triplets.push((
-                    n_angle + row_idx,
-                    col_idx,
-                    p_calc[i] - vm[i].powi(2) * y_ik.re,
-                ));
-                // L_ii = Q_i/V_i - V_i * B_ii
-                triplets.push((
-                    n_angle + row_idx,
-                    n_angle + row_idx,
-                    q_calc[i] / vm[i] - vm[i] * y_ik.im,
-                ));
-                continue;
-            }
-            let angle_ik = va[i] - va[k];
-            if let Some(col_idx) = non_slack_pos[k] {
-                // M_ik = -V_i * V_k * (G_ik * cos(d_ik) + B_ik * sin(d_ik))
-                let m_ik = -vm[i] * vm[k] * (y_ik.re * angle_ik.cos() + y_ik.im * angle_ik.sin());
-                triplets.push((n_angle + row_idx, col_idx, m_ik));
-            }
-            if let Some(col_idx) = pq_pos[k] {
-                // L_ik = V_i * (G_ik * sin(d_ik) - B_ik * cos(d_ik))
-                let l_ik = vm[i] * (y_ik.re * angle_ik.sin() - y_ik.im * angle_ik.cos());
-                triplets.push((n_angle + row_idx, n_angle + col_idx, l_ik));
-            }
-        }
-    }
-
-    triplets
-}
-
 /// Experimental block-per-bus Newton-Raphson, backed by
 /// `block_sparse::BlockLu`. See `JacobianBackend::Block`'s doc comment for
 /// scope. Like `newton_raphson_scalar_cached`'s `RealSparseSystem` reuse,
@@ -837,10 +660,10 @@ fn newton_raphson_block_cached(
     SolveStats::from_loop(SolveStatus::MaxIterationsReached, history)
 }
 
-/// Assembles the same H/N/M/L formulas as `build_jacobian_triplets`, but as
-/// one 2×2 block per (bus, bus) pair — `[[H, N], [M, L]]` on the diagonal,
-/// `[[H_ik, N_ik], [M_ik, L_ik]]` off-diagonal — instead of four separate
-/// scalar triplets.
+/// Assembles the same H/N/M/L formulas as the scalar Jacobian
+/// (`jacobian::JacobianPattern`), but as one 2×2 block per (bus, bus) pair —
+/// `[[H, N], [M, L]]` on the diagonal, `[[H_ik, N_ik], [M_ik, L_ik]]`
+/// off-diagonal — instead of four separate scalar triplets.
 ///
 /// A `PV` row bus has no real Q-mismatch equation, so its block's second row
 /// is replaced with the dummy `ΔVmag_i = 0` equation instead: `[0, 1]` on
@@ -850,7 +673,7 @@ fn newton_raphson_block_cached(
 /// to pin exactly `0`, not something entangled with the rest of the solve).
 /// The H/N formulas themselves (first row) are unaffected — they're already
 /// correct for any non-slack bus, PV or PQ, matching
-/// `build_jacobian_triplets`'s scalar H/N block.
+/// the scalar Jacobian's H/N block.
 fn build_jacobian_blocks(
     buses: &[Bus],
     ybus: &YBusSparse,
