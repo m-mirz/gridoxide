@@ -52,6 +52,9 @@ use crate::topology::bus_view::{BusView, RetentionPolicy, bus_view};
 use crate::topology::model::{NodeBreakerTopology, NodeIdx, Switch, SwitchKind};
 use crate::types::{Bus, BusType, Line, TapChanger, Transformer};
 
+#[cfg(feature = "dynamics")]
+pub mod dynamics;
+
 /// Default system base. IIDM states powers in MW/MVar and names no base.
 pub const DEFAULT_BASE_MVA: f64 = 100.0;
 

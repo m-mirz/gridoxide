@@ -106,10 +106,11 @@ between reading a model and guessing one from its data.
 
 ### A whole case, in one call
 
-`dyd::load_case` reads both halves together — the IIDM network through
+`iidm::dynamics::load_case` reads both halves together — the IIDM network through
 [gridoxide's IIDM importer](../import/iidm.md), the models through the reader above — and returns a
 system ready to integrate. The `staticId` on each `blackBoxModel` is the correspondence between
-them.
+them. The joining itself is `dyd::case_from_network`, which takes the static network as a
+`dyd::StaticNetwork` and so does not care which format it came from.
 
 Each machine's **own** terminal power is recovered exactly rather than apportioned. A power flow
 produces a bus's total; the IIDM states every load's `p0` and `q0`, and those are precisely what went
