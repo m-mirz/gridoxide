@@ -33,6 +33,7 @@ pub mod qv;
 #[cfg(feature = "rao")]
 pub mod rao;
 pub mod ratings;
+pub mod roots;
 pub mod scenario;
 pub mod se;
 pub mod shortcircuit;

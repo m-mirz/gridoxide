@@ -508,7 +508,7 @@ pub fn integrate(system: &mut DynamicSystem, opts: &DynamicsOptions) -> Dynamics
                 if relay.trigger.holds(after) && !relay.trigger.holds(before) {
                     // Illinois on the step fraction: the same locator
                     // `continuation` uses to find a Q-limit along its curve.
-                    let mut bracket = crate::continuation::events::Illinois {
+                    let mut bracket = crate::roots::Illinois {
                         lo: 0.0,
                         hi: 1.0,
                         f_lo: relay.trigger.residual(before),
