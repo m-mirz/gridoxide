@@ -1670,7 +1670,12 @@ impl PowerFlowModel {
 /// noisy measurements and computes the most likely voltages. They do not even
 /// share an unknown count — state estimation has no PV buses, so every bus
 /// carries a magnitude.
-#[pyclass]
+///
+/// `unsendable` for the reason `PowerFlowModel` is: with `klu` or `pardiso`
+/// its persistent estimator holds a factorization through raw pointers, which
+/// are not `Send`, so without it the bindings do not compile with either
+/// backend.
+#[pyclass(unsendable)]
 struct StateEstimationModel {
     buses: Vec<Bus>,
     /// The state every `solve()` restarts from, so calling one after another is
