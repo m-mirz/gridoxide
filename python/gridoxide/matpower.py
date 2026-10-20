@@ -377,7 +377,7 @@ def convert(mat_path: Path, output_path: Path, opf_path: Path | None = None) -> 
     # Summed across every active gen at a bus (same as gen_p_by_bus), not
     # just the first one voltage_regulator's u_ref comes from — q_min/q_max
     # bound the *bus's* net reactive injection (see PgmVoltageRegulator's
-    # doc comment in src/pgm.rs), consistent with p_specified/q_specified
+    # doc comment in src/pgm/mod.rs), consistent with p_specified/q_specified
     # already being summed across every load/gen at a node.
     gen_qmin_by_bus: dict[int, float] = {}
     gen_qmax_by_bus: dict[int, float] = {}
@@ -433,7 +433,7 @@ def convert(mat_path: Path, output_path: Path, opf_path: Path | None = None) -> 
             # valid JSON and fail to parse on the Rust side. Omitting
             # matches PGM's own "unset means unbounded" convention for
             # these fields (see PgmVoltageRegulator's `#[serde(default =
-            # "nan")]` in src/pgm.rs) exactly.
+            # "nan")]` in src/pgm/mod.rs) exactly.
             q_min_var = gen_qmin_by_bus[node_id] * 1e6
             q_max_var = gen_qmax_by_bus[node_id] * 1e6
             if math.isfinite(q_min_var):

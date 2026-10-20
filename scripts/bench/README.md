@@ -135,7 +135,7 @@ through their own importers. See `gridoxide.matpower`'s module docstring for the
 
 Generators are modelled as genuine PV buses in every tool. gridoxide parses PGM's `voltage_regulator`
 component the same way PGM's own `newton_raphson_pf_solver.hpp::set_u_ref_and_bus_types` does
-(`src/pgm.rs::pgm_to_buses_and_branches`).
+(`src/pgm/mod.rs::pgm_to_buses_and_branches`).
 
 Individual tools also run standalone: `matpower_to_pgm.py`, `bench_pgm.py`, `bench_lightsim2grid.py`,
 `bench_pypowsybl.py`, `bench_pandapower.py`, `bench_veragrid.py`, `convert_pandapower_case.py`.
@@ -655,7 +655,7 @@ caching in `se::functional`, worth 8-16% on the larger cases.
 system is not fully observable") on every case from 300 buses up, on documents its *own* iterative-linear
 method estimates from the same sensors without complaint. The suggested cause does not fit: gridoxide's
 Newton-Raphson converges on the same measurements to 1e-14, and gridoxide's observability analysis flags
-exactly one unobservable state per case — the virtual slack bus it appends per active source (`src/pgm.rs`),
+exactly one unobservable state per case — the virtual slack bus it appends per active source (`src/pgm/mod.rs`),
 which sits at index `n_nodes`, carries no sensor by construction, is pinned rather than estimated, and is not
 part of PGM's problem at all. Every physical node is observable. Reproduces from a plain `PowerGridModel`
 construct-and-call with no gridoxide code in the path; not investigated further.

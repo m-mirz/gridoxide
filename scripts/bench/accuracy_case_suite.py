@@ -50,7 +50,7 @@ number somewhere, confirmed empirically per tool (not assumed):
 gridoxide's own bus index needs one extra step beyond the JSON's sorted
 order: `PowerFlowModel.from_pgm_json` appends one virtual Slack bus (the
 `source` component's own ideal-source-behind-impedance bus, see
-`src/pgm.rs`'s "Virtual Slack bus" comment) after all `n` physical buses,
+`src/pgm/mod.rs`'s "Virtual Slack bus" comment) after all `n` physical buses,
 so `voltage_mag()` has `n + 1` entries — the last one is trimmed off before
 matching, matching `n_nodes` reported elsewhere in this suite always being
 one more than the case's own real bus count.

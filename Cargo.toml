@@ -154,7 +154,7 @@ cgmes = ["dep:cimdecoder", "dep:cimstructs"]
 # *tables* — see `src/ratings.rs` and `types::TapChanger` for why those two
 # were the gap worth closing.
 ucte = []
-# Reads PowSyBl's IIDM network format (src/iidm.rs) — `.xiidm` files, the native
+# Reads PowSyBl's IIDM network format (src/iidm/mod.rs) — `.xiidm` files, the native
 # serialization of powsybl-core's network model, and the second of the two
 # formats the published remedial-action test material comes in.
 #

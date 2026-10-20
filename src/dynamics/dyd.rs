@@ -1,7 +1,7 @@
 //! Dynawo `.dyd` / `.par` / `.crv` files.
 //!
 //! Dynawo is MPL-2.0, RTE-maintained, ships validated cases, and **reads
-//! IIDM** — which `src/iidm.rs` already imports. That combination is why
+//! IIDM** — which `src/iidm/mod.rs` already imports. That combination is why
 //! `docs/src/reference/feature_comparison.md` named it the route for this whole
 //! feature: the corpus and the methodology come close to free.
 //!
@@ -259,7 +259,7 @@ fn attributes(e: &quick_xml::events::BytesStart<'_>) -> Result<HashMap<String, S
         // on, so feature unification makes this file compile under
         // `--features dynamics,iidm` and fail under `--features
         // dynamics,iidm,cgmes`: a configuration CI builds and no single-feature
-        // step can see. `src/iidm.rs`'s `Attrs::of` carries the same note and
+        // step can see. `src/iidm/mod.rs`'s `Attrs::of` carries the same note and
         // the same workaround, which is the other half of this reader.
         let raw = String::from_utf8_lossy(&attribute.value);
         let value = quick_xml::escape::unescape(&raw)
