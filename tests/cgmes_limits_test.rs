@@ -9,12 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cimdecoder_alias::CimDataset;
-use gridoxide::cgmes::{self, load_profiles};
-
-mod cimdecoder_alias {
-    pub use gridoxide::cgmes::CimDataset;
-}
+use gridoxide::cgmes::{self, CimDataset, load_profiles};
 
 fn configurations() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/CGMES-Test-Configurations/v3.0")

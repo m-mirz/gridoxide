@@ -4,7 +4,6 @@
 //! fixture is a defect or a finding. Compares, at the positions the SSH names:
 //! the controlled bus's voltage as gridoxide solves it, and as the fixture's
 //! own SV profile publishes it, each against the control's target and deadband.
-use cimstructs;
 use std::path::{Path, PathBuf};
 
 fn main() {
@@ -32,15 +31,14 @@ fn main() {
         // The published SvVoltage per bus, in per unit.
         let mut published = vec![f64::NAN; net.buses.len()];
         for mrid in &ds.by_type["SvVoltage"] {
-            let sv: &cimstructs::SvVoltage = ds.entries[mrid]
-                .element
-                .as_any()
-                .downcast_ref()
-                .expect("SvVoltage downcast");
-            let (Some(tn), Some(v)) = (sv.topological_node.as_ref(), sv.v) else {
+            let sv = &ds.entries[mrid];
+            let (Some(tn), Some(v)) = (
+                sv.get_ref("SvVoltage.TopologicalNode"),
+                sv.get_f64("SvVoltage.v"),
+            ) else {
                 continue;
             };
-            if let Some(&b) = index.get(&tn.mrid) {
+            if let Some(&b) = index.get(tn) {
                 published[b] = v * 1e3 / net.buses[b].u_rated;
             }
         }

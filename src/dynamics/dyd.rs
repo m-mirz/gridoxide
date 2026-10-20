@@ -255,7 +255,7 @@ fn attributes(e: &quick_xml::events::BytesStart<'_>) -> Result<HashMap<String, S
         // Decoded by hand rather than through `unescape_value`, which
         // quick-xml compiles only when its `encoding` feature is *off* —
         // `decode_and_unescape_value` replaces it and wants a `Decoder` whose
-        // shape depends on that same feature. `cimdecoder` turns `encoding`
+        // shape depends on that same feature. `cimmodel` turns `encoding`
         // on, so feature unification makes this file compile under
         // `--features dynamics,iidm` and fail under `--features
         // dynamics,iidm,cgmes`: a configuration CI builds and no single-feature

@@ -77,7 +77,7 @@ already says it's at* and bakes that into the transformer's `tap` field before N
 built, since nothing in gridoxide exports one:
 
 ```rust
-fn phase_tap_linear(ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f64) -> Result<TapEffect, CgmesError> {
+fn phase_tap_linear(ptc: &Element, mrid: &str, xtx: f64, at: Option<f64>) -> Result<TapEffect, CgmesError> {
     ...
     let angle_rad_at = |s: f64| -> f64 { ((s - neutral) * inc_deg).to_radians() };
 
@@ -85,7 +85,9 @@ fn phase_tap_linear(ptc: &cimstructs::PhaseTapChangerLinear, mrid: &str, xtx: f6
     let tap = Complex::from_polar(1.0, alpha);
 
     let alpha_max = (low..=high).map(|s| angle_rad_at(s as f64)).fold(f64::MIN, f64::max);
-    let x_override = match (x_min_max(ptc.x_min, ptc.x_max, xtx), alpha_max != 0.0) {
+    let x_min = ptc.get_f64("PhaseTapChangerLinear.xMin");
+    let x_max = ptc.get_f64("PhaseTapChangerLinear.xMax");
+    let x_override = match (x_min_max(x_min, x_max, xtx), alpha_max != 0.0) {
         (Some((x_min, x_max)), true) => {
             let ratio = (alpha / 2.0).sin() / (alpha_max / 2.0).sin();
             Some(x_min + (x_max - x_min) * ratio * ratio)

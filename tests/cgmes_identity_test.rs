@@ -211,17 +211,19 @@ fn a_crac_resolves_against_an_imported_cgmes_network() {
 
 /// The order is the same on every import.
 ///
-/// `CimDataset::merge` iterates a `HashMap`, so `by_type` lists elements first
-/// seen in a merged profile in a randomized order — and a CGMES import is
-/// almost always several profiles merged. The transformer loop had imposed its
+/// `CimDataset::merge` iterates a hash map, so `by_type` lists elements first
+/// seen in a merged profile in hash order — and a CGMES import is almost
+/// always several profiles merged. The transformer loop had imposed its
 /// own order for exactly this reason; the line loops had not, and their indices
 /// genuinely shuffled, so a branch's flat index differed between two imports of
 /// the same files. Nothing asserted on a line index, so it never surfaced. It
 /// surfaces the moment a branch has a name and a CRAC resolves to an index.
 ///
-/// Two imports in one process is a real test of it: `RandomState` seeds each
-/// `HashMap` differently, so the two datasets iterate differently, and before
-/// `sorted_mrids` the two line orders disagreed.
+/// Two imports in one process were a real test of it under cimoxide 0.3, which
+/// seeded each map differently, so the two datasets iterated differently and
+/// before `sorted_mrids` the two line orders disagreed. cimoxide 0.6 hashes
+/// with a fixed seed and iterates the same way twice, so what this still
+/// catches is gridoxide's own `HashMap`s, which `RandomState` seeds per map.
 #[test]
 fn two_imports_of_the_same_model_agree_on_every_index() {
     for name in CONFIGS {
@@ -241,6 +243,45 @@ fn two_imports_of_the_same_model_agree_on_every_index() {
         for (i, (a, b)) in first.lines.iter().zip(&second.lines).enumerate() {
             assert_eq!((a.from, a.to), (b.from, b.to), "{name}: line {i} moved");
         }
+    }
+}
+
+/// Buses synthesized for boundary `ConnectivityNode`s are numbered the same on
+/// every import too.
+///
+/// MicroGrid BE without the boundary TP leaves several boundary nodes with no
+/// `TopologicalNode`, and each becomes a bus of its own. They were numbered in
+/// `HashMap` order, so the buses after the TP ones — and every line ending on
+/// one — moved between imports. Four imports, so a shuffle of a handful of
+/// buses is all but certain to show.
+#[test]
+fn boundary_buses_are_numbered_the_same_on_every_import() {
+    let Some(dir) = config("MicroGrid/MicroGid-BaseCase/MicroGrid-BE-MAS") else {
+        eprintln!("skipping: MicroGrid fixture not checked out");
+        return;
+    };
+    let eq_bd = dir.join("../MicroGrid-BD-MAS/20171002T0930Z_ENTSO-E_EQ_BD_2.xml");
+    let files =
+        ["EQ", "SSH", "TP", "SV"].map(|p| dir.join(format!("20210325T1530Z_1D_BE_{p}_001.xml")));
+    let mut refs: Vec<&Path> = vec![&eq_bd];
+    refs.extend(files.iter().map(|p| p.as_path()));
+    let import = || {
+        let ds = load_profiles(&refs).expect("failed to decode CGMES profiles");
+        cgmes_to_network(&ds, 100e6).expect("conversion failed")
+    };
+
+    let first = import();
+    let tp_buses = first.bus_ids.iter().filter(|id| !id.is_empty()).count();
+    assert!(
+        first.buses.len() > tp_buses + 1,
+        "expected several synthesized boundary buses"
+    );
+    for _ in 0..3 {
+        let again = import();
+        let u = |n: &CgmesNetwork| n.buses.iter().map(|b| b.u_rated).collect::<Vec<_>>();
+        assert_eq!(u(&first), u(&again), "a boundary bus moved");
+        let ends = |n: &CgmesNetwork| n.lines.iter().map(|l| (l.from, l.to)).collect::<Vec<_>>();
+        assert_eq!(ends(&first), ends(&again), "a line's ends moved");
     }
 }
 
@@ -502,6 +543,7 @@ fn generation_totals_come_from_the_machines() {
 /// `with_bus_aliases`. Asserting only that the alias resolves would pass just as
 /// well if every name resolved for some unrelated reason, and the point is the
 /// difference.
+#[cfg(feature = "rao")]
 #[test]
 fn a_crac_may_name_any_node_merged_into_a_bus() {
     use gridoxide::rao::Resolution;

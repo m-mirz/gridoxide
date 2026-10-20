@@ -73,9 +73,9 @@ jobs:
         run: cargo package --workspace
 
       # The `cgmes` feature is the one whose dependencies come from outside
-      # this repo (cimoxide's `cimoxide-decoder`/`cimoxide-structs`), so build
-      # it from the packaged .crate rather than the working tree — that is what
-      # a crates.io consumer actually gets. Pure Rust, so unlike `klu` it needs
+      # this repo (cimoxide's `cimoxide-model`), so build it from the packaged
+      # .crate rather than the working tree — that is what a crates.io
+      # consumer actually gets. Pure Rust, so unlike `klu` it needs
       # nothing extra on the runner.
       - name: Check the packaged crate builds with --features cgmes
         run: |

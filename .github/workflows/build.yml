@@ -66,7 +66,7 @@ jobs:
           echo "::endgroup::"
         done
     # Feature *unification* is its own failure mode, which the checks above
-    # cannot see: `iidm` and `cgmes` share quick-xml, and cimdecoder enables its
+    # cannot see: `iidm` and `cgmes` share quick-xml, and cimmodel enables its
     # `encoding` feature — which changes the shape of a public type. That
     # combination compiled in no single-feature step and broke in the one
     # nobody ran. This is that step.

@@ -1,9 +1,9 @@
 use gridoxide::cgmes::CimDataset;
 
 /// A minimal, self-contained CGMES fragment (not sourced from any external
-/// file) exercising a scalar field, a cross-reference, and a downcast —
-/// enough to prove the `cimdecoder`/`cimstructs` dependency resolves, builds,
-/// and decodes correctly. Nothing about conversion correctness yet;
+/// file) exercising a scalar field, a cross-reference, and a class —
+/// enough to prove the `cimmodel` dependency resolves, builds, and decodes
+/// correctly. Nothing about conversion correctness yet;
 /// see tests/cgmes_microgrid_be_test.rs for that.
 const FRAGMENT: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
@@ -26,21 +26,13 @@ fn decodes_inline_fragment_and_reports_type_counts() {
     assert_eq!(ds.by_type["TopologicalNode"].len(), 1);
 
     let tn_mrid = &ds.by_type["TopologicalNode"][0];
-    let tn = ds.entries[tn_mrid]
-        .element
-        .as_any()
-        .downcast_ref::<cimstructs::TopologicalNode>()
-        .expect("TopologicalNode downcast");
-    let base_voltage_mrid = &tn
-        .base_voltage
-        .as_ref()
-        .expect("missing BaseVoltage ref")
-        .mrid;
+    let tn = &ds.entries[tn_mrid];
+    assert_eq!(tn.type_name(), "TopologicalNode");
+    let base_voltage_mrid = tn
+        .get_ref("TopologicalNode.BaseVoltage")
+        .expect("missing BaseVoltage ref");
 
-    let bv = ds.entries[base_voltage_mrid]
-        .element
-        .as_any()
-        .downcast_ref::<cimstructs::BaseVoltage>()
-        .expect("BaseVoltage downcast");
-    assert_eq!(bv.nominal_voltage, Some(110.0));
+    let bv = &ds.entries[base_voltage_mrid];
+    assert_eq!(bv.type_name(), "BaseVoltage");
+    assert_eq!(bv.get_f64("BaseVoltage.nominalVoltage"), Some(110.0));
 }
