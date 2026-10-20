@@ -72,47 +72,53 @@ redistribution terms — this project doesn't audit that on their behalf.
 ## Opt-in: `--features cgmes` — the cimoxide dependency
 
 The optional `cgmes` feature (`src/cgmes.rs`) depends on
-[cimoxide](https://github.com/m-mirz/cimoxide)'s decoder and generated-structs crates, a separate
-Rust project by the same author providing CGMES RDF/XML decoding into typed CIM structs.
+[cimoxide](https://github.com/m-mirz/cimoxide)'s model crate, a separate Rust project by the same
+author providing CGMES RDF/XML decoding. Each decoded object is an `Element` — its class, its mRID
+and its fields as written, read by `Class.attr` key — checked against class tables generated from
+ENTSO-E's schemas.
 
 - **Upstream**: <https://github.com/m-mirz/cimoxide>
-- **Crates**: [`cimoxide-decoder`](https://crates.io/crates/cimoxide-decoder) and
-  [`cimoxide-structs`](https://crates.io/crates/cimoxide-structs), both `0.3.0`
+- **Crate**: [`cimoxide-model`](https://crates.io/crates/cimoxide-model) `0.6.0`
 
 cimoxide is Apache-2.0, matching gridoxide's own license — no licensing mismatch from this
 dependency.
 
 ### The `package =` rename
 
-`Cargo.toml` pulls both in under their old, shorter names:
-
 ```toml
-cimdecoder = { package = "cimoxide-decoder", version = "0.3.0", optional = true }
-cimstructs = { package = "cimoxide-structs", version = "0.3.0", optional = true }
+cimmodel = { package = "cimoxide-model", version = "0.6.0", optional = true }
 ```
 
-The crates.io names are `cimoxide-`-prefixed, but `src/cgmes.rs` and the CGMES tests were written
-against `cimdecoder`/`cimstructs`, so `package =` keeps every existing `use` path valid rather than
-renaming 33 references for no behavioural gain.
+The crate's library is named `cimmodel`, so the code says `cimmodel::CimDataset` whatever the
+package is called; `package =` makes the dependency's name match it.
+
+### Formerly typed structs
+
+Up to 0.3, cimoxide published `cimoxide-decoder` and `cimoxide-structs`: one generated Rust struct
+per CIM class, read by field (`line.r`). 0.4 merged them into `cimoxide-model` and replaced the
+structs with `Element`s read by key (`line.get_f64("ACLineSegment.r")`). A key names the class that
+declares the attribute, so a breaker's `open` is `Switch.open`. The compiler no longer checks a key:
+a misspelt one reads as absent, the same as an attribute the file leaves out. The CGMES tests are
+what catch one.
 
 ### Formerly a git dependency
 
-Until cimoxide's crates.io release, these were a git dependency pinned to a `vendor/gridoxide`
+Until cimoxide's crates.io release, its crates were a git dependency pinned to a `vendor/gridoxide`
 branch — `main` plus one commit force-adding the code generator's normally-gitignored output, since
-`cimstructs`'s source is produced by `cargo run -p cimgen` from ENTSO-E's RDF/SHACL schemas and so
-does not exist on a fresh `main` clone.
+the generated source is produced by `cargo run -p cimgen` from ENTSO-E's RDF/SHACL schemas and so
+did not exist on a fresh `main` clone.
 
 ### Updating
 
 To pick up a newer cimoxide schema or generator change:
 
 1. Release the new version from the cimoxide repo (`make generate`, then `make build && make test`
-   before publishing — `cimstructs`'s generated source is what a schema change moves).
-2. Bump the `version =` value in this repo's `Cargo.toml` for the `cimdecoder` and `cimstructs`
-   dependencies, and update the version noted above.
+   before publishing — the generated class tables are what a schema change moves).
+2. Bump the `version =` value in this repo's `Cargo.toml` for the `cimmodel` dependency, and update
+   the version noted above.
 3. Run `cargo build --features cgmes` and `cargo test --features cgmes` to confirm the converter
-   still matches `tests/cgmes_microgrid_be_test.rs`'s expectations — CGMES field names or shapes
-   could in principle change between schema versions. The fixture-backed CGMES tests **silently
+   still matches `tests/cgmes_microgrid_be_test.rs`'s expectations — CGMES attribute names could
+   change between schema versions, and a renamed one compiles and reads as absent. The fixture-backed CGMES tests **silently
    skip** when `tests/data/CGMES-Test-Configurations` isn't checked out, so
    `git submodule update --init tests/data/CGMES-Test-Configurations` first, or the run proves
    nothing beyond "it compiles".

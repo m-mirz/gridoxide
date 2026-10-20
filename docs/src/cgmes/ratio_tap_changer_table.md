@@ -52,13 +52,13 @@ taps — see the [PhaseTapChangerLinear](./phase_tap_changer_linear.md) page for
 ```rust
 fn ratio_tap_table(ds: &CimDataset, table_mrid: &str, step: i64, xtx: f64) -> Option<TapEffect> {
     for pt_mrid in by_type(ds, "RatioTapChangerTablePoint") {
-        let pt: &cimstructs::RatioTapChangerTablePoint = get(ds, pt_mrid)?;
-        let Some(owner) = &pt.ratio_tap_changer_table else { continue };
-        if owner.mrid != *table_mrid || pt.base.step != Some(step) {
+        let pt = get(ds, pt_mrid, "RatioTapChangerTablePoint")?;
+        let Some(owner) = pt.get_ref("RatioTapChangerTablePoint.RatioTapChangerTable") else { continue };
+        if owner != table_mrid || pt.get_i64("TapChangerTablePoint.step") != Some(step) {
             continue;
         }
-        let ratio = pt.base.ratio.unwrap_or(1.0);
-        let x_pct = pt.base.x.unwrap_or(0.0);
+        let ratio = pt.get_f64("TapChangerTablePoint.ratio").unwrap_or(1.0);
+        let x_pct = pt.get_f64("TapChangerTablePoint.x").unwrap_or(0.0);
         return Some(TapEffect { tap: Complex::new(ratio, 0.0), x_override: Some(xtx * (1.0 + x_pct / 100.0)) });
     }
     None

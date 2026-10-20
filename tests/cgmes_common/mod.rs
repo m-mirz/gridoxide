@@ -25,16 +25,16 @@ pub fn expected_voltages(ds: &CimDataset) -> Vec<ExpectedVoltage> {
         return out;
     };
     for mrid in mrids {
-        let sv: &cimstructs::SvVoltage = ds.entries[mrid]
-            .element
-            .as_any()
-            .downcast_ref()
-            .expect("SvVoltage downcast");
-        let (Some(tn), Some(v), Some(angle_deg)) = (&sv.topological_node, sv.v, sv.angle) else {
+        let sv = &ds.entries[mrid];
+        let (Some(tn), Some(v), Some(angle_deg)) = (
+            sv.get_ref("SvVoltage.TopologicalNode"),
+            sv.get_f64("SvVoltage.v"),
+            sv.get_f64("SvVoltage.angle"),
+        ) else {
             continue;
         };
         out.push(ExpectedVoltage {
-            tn_mrid: tn.mrid.clone(),
+            tn_mrid: tn.to_string(),
             v,
             angle_deg,
         });
@@ -181,13 +181,8 @@ pub fn expected_injections(ds: &CimDataset, s_base_mva: f64) -> Vec<ExpectedInje
     let mut equipment_of: std::collections::HashMap<&str, &str> = Default::default();
     if let Some(mrids) = ds.by_type.get("Terminal") {
         for mrid in mrids {
-            let t: &cimstructs::Terminal = ds.entries[mrid]
-                .element
-                .as_any()
-                .downcast_ref()
-                .expect("Terminal downcast");
-            if let Some(eq) = &t.conducting_equipment {
-                equipment_of.insert(mrid.as_str(), eq.mrid.as_str());
+            if let Some(eq) = ds.entries[mrid].get_ref("Terminal.ConductingEquipment") {
+                equipment_of.insert(mrid.as_str(), eq);
             }
         }
     }
@@ -197,15 +192,15 @@ pub fn expected_injections(ds: &CimDataset, s_base_mva: f64) -> Vec<ExpectedInje
         return out;
     };
     for mrid in mrids {
-        let sv: &cimstructs::SvPowerFlow = ds.entries[mrid]
-            .element
-            .as_any()
-            .downcast_ref()
-            .expect("SvPowerFlow downcast");
-        let (Some(term), Some(p), Some(q)) = (&sv.terminal, sv.p, sv.q) else {
+        let sv = &ds.entries[mrid];
+        let (Some(term), Some(p), Some(q)) = (
+            sv.get_ref("SvPowerFlow.Terminal"),
+            sv.get_f64("SvPowerFlow.p"),
+            sv.get_f64("SvPowerFlow.q"),
+        ) else {
             continue;
         };
-        let Some(eq) = equipment_of.get(term.mrid.as_str()) else {
+        let Some(eq) = equipment_of.get(term) else {
             continue;
         };
         out.push(ExpectedInjection {

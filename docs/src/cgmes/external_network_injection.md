@@ -62,10 +62,10 @@ injection when not actively regulating — with concept 2's sign convention:
 
 ```rust
 for mrid in by_type(ds, "ExternalNetworkInjection") {
-    let eni: &cimstructs::ExternalNetworkInjection = require(ds, mrid, "ExternalNetworkInjection", mrid, "(self)")?;
+    let eni = own(ds, mrid, "ExternalNetworkInjection")?;
     ...
-    buses[bus].p_spec += -eni.p.unwrap_or(0.0) * 1e6 / s_base_va;
-    buses[bus].q_spec += -eni.q.unwrap_or(0.0) * 1e6 / s_base_va;
+    buses[bus].p_spec += -eni.get_f64("ExternalNetworkInjection.p").unwrap_or(0.0) * 1e6 / s_base_va;
+    buses[bus].q_spec += -eni.get_f64("ExternalNetworkInjection.q").unwrap_or(0.0) * 1e6 / s_base_va;
     ...
 ```
 

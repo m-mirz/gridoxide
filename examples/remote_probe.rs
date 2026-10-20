@@ -17,19 +17,19 @@ fn published_q(
     let mut equipment_of: std::collections::HashMap<&str, &str> = Default::default();
     if let Some(ms) = ds.by_type.get("Terminal") {
         for m in ms {
-            let t: &cimstructs::Terminal = ds.entries[m].element.as_any().downcast_ref().unwrap();
-            if let Some(e) = &t.conducting_equipment {
-                equipment_of.insert(m.as_str(), e.mrid.as_str());
+            if let Some(e) = ds.entries[m].get_ref("Terminal.ConductingEquipment") {
+                equipment_of.insert(m.as_str(), e);
             }
         }
     }
     let mut out = std::collections::HashMap::new();
     if let Some(ms) = ds.by_type.get("SvPowerFlow") {
         for m in ms {
-            let sv: &cimstructs::SvPowerFlow =
-                ds.entries[m].element.as_any().downcast_ref().unwrap();
-            if let (Some(t), Some(q)) = (&sv.terminal, sv.q)
-                && let Some(e) = equipment_of.get(t.mrid.as_str())
+            let sv = &ds.entries[m];
+            if let (Some(t), Some(q)) = (
+                sv.get_ref("SvPowerFlow.Terminal"),
+                sv.get_f64("SvPowerFlow.q"),
+            ) && let Some(e) = equipment_of.get(t)
             {
                 out.insert((*e).to_string(), -q / base_mva);
             }
@@ -163,12 +163,14 @@ fn main() {
             if let (Some(idx), Some(sv)) = (idx.as_ref(), ds.by_type.get("SvVoltage")) {
                 let mut errs: Vec<f64> = Vec::new();
                 for mrid in sv {
-                    let v: &cimstructs::SvVoltage =
-                        ds.entries[mrid].element.as_any().downcast_ref().unwrap();
-                    let (Some(tn), Some(kv)) = (&v.topological_node, v.v) else {
+                    let v = &ds.entries[mrid];
+                    let (Some(tn), Some(kv)) = (
+                        v.get_ref("SvVoltage.TopologicalNode"),
+                        v.get_f64("SvVoltage.v"),
+                    ) else {
                         continue;
                     };
-                    let Some(&b) = idx.get(&tn.mrid) else {
+                    let Some(&b) = idx.get(tn) else {
                         continue;
                     };
                     let got = rep.buses[b].voltage_mag * net.buses[b].u_rated / 1e3;

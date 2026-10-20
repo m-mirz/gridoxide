@@ -211,17 +211,19 @@ fn a_crac_resolves_against_an_imported_cgmes_network() {
 
 /// The order is the same on every import.
 ///
-/// `CimDataset::merge` iterates a `HashMap`, so `by_type` lists elements first
-/// seen in a merged profile in a randomized order — and a CGMES import is
-/// almost always several profiles merged. The transformer loop had imposed its
+/// `CimDataset::merge` iterates a hash map, so `by_type` lists elements first
+/// seen in a merged profile in hash order — and a CGMES import is almost
+/// always several profiles merged. The transformer loop had imposed its
 /// own order for exactly this reason; the line loops had not, and their indices
 /// genuinely shuffled, so a branch's flat index differed between two imports of
 /// the same files. Nothing asserted on a line index, so it never surfaced. It
 /// surfaces the moment a branch has a name and a CRAC resolves to an index.
 ///
-/// Two imports in one process is a real test of it: `RandomState` seeds each
-/// `HashMap` differently, so the two datasets iterate differently, and before
-/// `sorted_mrids` the two line orders disagreed.
+/// Two imports in one process were a real test of it under cimoxide 0.3, which
+/// seeded each map differently, so the two datasets iterated differently and
+/// before `sorted_mrids` the two line orders disagreed. cimoxide 0.6 hashes
+/// with a fixed seed and iterates the same way twice, so what this still
+/// catches is gridoxide's own `HashMap`s, which `RandomState` seeds per map.
 #[test]
 fn two_imports_of_the_same_model_agree_on_every_index() {
     for name in CONFIGS {

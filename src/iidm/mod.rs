@@ -393,7 +393,7 @@ impl Attrs {
             let key = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
             // Decoded by hand rather than through `decode_and_unescape_value`,
             // which needs a `Decoder`. `Decoder`'s shape depends on whether
-            // quick-xml's `encoding` feature is on, and cimdecoder turns it on
+            // quick-xml's `encoding` feature is on, and cimmodel turns it on
             // — so constructing one compiles under `--features iidm` and fails
             // under `--features iidm,cgmes`. Feature unification makes that a
             // real configuration, not a hypothetical one.

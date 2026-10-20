@@ -88,19 +88,20 @@ fn main() {
     if let Some(mrids) = ds.by_type.get("Terminal") {
         let mut eq_of: std::collections::HashMap<&str, &str> = Default::default();
         for m in mrids {
-            let t: &cimstructs::Terminal = ds.entries[m].element.as_any().downcast_ref().unwrap();
-            if let Some(e) = &t.conducting_equipment {
-                eq_of.insert(m.as_str(), e.mrid.as_str());
+            if let Some(e) = ds.entries[m].get_ref("Terminal.ConductingEquipment") {
+                eq_of.insert(m.as_str(), e);
             }
         }
         if let Some(fl) = ds.by_type.get("SvPowerFlow") {
             for m in fl {
-                let sv: &cimstructs::SvPowerFlow =
-                    ds.entries[m].element.as_any().downcast_ref().unwrap();
-                let (Some(t), Some(q)) = (&sv.terminal, sv.q) else {
+                let sv = &ds.entries[m];
+                let (Some(t), Some(q)) = (
+                    sv.get_ref("SvPowerFlow.Terminal"),
+                    sv.get_f64("SvPowerFlow.q"),
+                ) else {
                     continue;
                 };
-                if let Some(e) = eq_of.get(t.mrid.as_str()) {
+                if let Some(e) = eq_of.get(t) {
                     published.insert((*e).to_string(), -q / 100.0);
                 }
             }
