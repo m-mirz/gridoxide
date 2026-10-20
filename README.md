@@ -108,7 +108,7 @@ as many of them.
 ## License
 
 gridoxide's own code is Apache-2.0 ([`LICENSE`](LICENSE)). A **default** build always includes
-`src/klu_native/`, a from-scratch Rust translation of vendored SuiteSparse AMD/BTF/KLU source, so
+`crates/gridoxide-sparse/src/klu_native/`, a from-scratch Rust translation of vendored SuiteSparse AMD/BTF/KLU source, so
 `Cargo.toml`'s license field is `Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later` — accurate for
 every default build, not just an opt-in one.
 
@@ -118,4 +118,4 @@ that case). Building with `--features pardiso` dynamically links a locally-insta
 under Intel's own proprietary license; nothing MKL-derived is vendored or shipped by this repo.
 
 See [Provenance and Licensing](docs/src/reference/provenance.md) for the full breakdown, and the
-`PROVENANCE.md` files under `src/klu_native/` and `vendor/suitesparse/` for per-file detail.
+`PROVENANCE.md` files under `crates/gridoxide-sparse/src/klu_native/` and `crates/gridoxide-sparse/vendor/suitesparse/` for per-file detail.

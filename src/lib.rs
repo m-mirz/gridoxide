@@ -1,7 +1,15 @@
+// The sparse LU backends live in their own crate; re-exporting them under
+// their old module names keeps `crate::sparse::…` working inside this crate
+// and `gridoxide::sparse::…` working for everyone else.
+#[cfg(feature = "klu")]
+pub use gridoxide_sparse::sparse_klu;
+#[cfg(feature = "pardiso")]
+pub use gridoxide_sparse::sparse_pardiso;
+pub use gridoxide_sparse::{block_sparse, klu_native, lu, sparse};
+
 pub mod ac_sensitivity;
 pub mod batch;
 pub mod bde;
-pub mod block_sparse;
 pub mod branch_flow;
 #[cfg(feature = "capi")]
 pub mod capi;
@@ -18,9 +26,7 @@ pub mod iidm;
 pub mod injection_hessian;
 pub mod jacobian;
 pub mod json;
-pub mod klu_native;
 pub mod linear;
-pub mod lu;
 pub mod measurement;
 pub mod network;
 #[cfg(feature = "opf")]
@@ -38,11 +44,6 @@ pub mod scenario;
 pub mod se;
 pub mod shortcircuit;
 pub mod solver;
-pub mod sparse;
-#[cfg(feature = "klu")]
-pub mod sparse_klu;
-#[cfg(feature = "pardiso")]
-pub mod sparse_pardiso;
 pub mod switches;
 pub mod topology;
 pub mod types;

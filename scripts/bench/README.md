@@ -182,7 +182,7 @@ residual on `case1888rte`). pandapower converges via its own native path.
 
 **Backends.** `block` beats `scalar` 2–3x on the larger cases (case9241pegase: 33.84 vs 110.81 ms) despite
 `scalar` using `faer` and `block`'s LU having no partial pivoting — factoring at 2×2-block granularity halves
-the elimination steps. `klu` is ~10–15% ahead of `block`. `klu_native` (`src/klu_native/`) converges to the
+the elimination steps. `klu` is ~10–15% ahead of `block`. `klu_native` (`crates/gridoxide-sparse/src/klu_native/`) converges to the
 same voltages as every other backend on all 12 cases and lands within 1.0–1.3x of `klu`, after `perf` traced
 an earlier 1.9–2x gap to allocator churn: `kernel::refactor_block` allocated two `Vec`s per column per Newton
 iteration where real KLU's `klu_refactor.c` allocates nothing. Rewriting it to mutate in place against a

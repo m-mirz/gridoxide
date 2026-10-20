@@ -63,7 +63,7 @@ pub trait LinearSolver: Sized {
     /// after construction — each caches its own positional mapping into its
     /// CSC layout and reads nothing but `entries[i].2`. Handing over just the
     /// values lets the Newton loop refill one reused `Vec<f64>` per iteration
-    /// via [`jacobian::JacobianPattern`](crate::jacobian::JacobianPattern)
+    /// via gridoxide's `jacobian::JacobianPattern`
     /// instead of rebuilding a `Vec<(usize, usize, f64)>` from scratch, which
     /// is 3x the bytes and a fresh allocation every time.
     fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>>;
@@ -194,7 +194,7 @@ impl RealSparseSystem {
     ///
     /// A `vals` length other than the one `new` was given means the caller's
     /// pattern is not this factorization's — a stale cache, which
-    /// [`PersistentSolver::invalidate_admittances`](crate::solver::PersistentSolver::invalidate_admittances)
+    /// gridoxide's `PersistentSolver::invalidate_admittances`
     /// can produce when a topology change alters the *bus types* and therefore
     /// the unknown count. That is refused here rather than left to trip an
     /// assertion inside `faer`: this type's whole contract is `None` on a
@@ -244,7 +244,7 @@ impl LinearSolver for RealSparseSystem {
 /// This is the stronger guarantee [`RealSparseSystem`] cannot make: Newton's
 /// Jacobian changes numerically every iteration, so only the ordering can be
 /// cached. The iterative-linear state estimator
-/// ([`se::iterative`](crate::se::iterative)) is different — its system matrix
+/// (gridoxide's `se::iterative`) is different — its system matrix
 /// depends on the measurement set and on the *assumption* that voltage
 /// magnitudes stay near their initial values, so it is genuinely constant and
 /// only the right-hand side moves. That is exactly what makes the method
@@ -423,7 +423,7 @@ impl RealFactorization {
 /// matrices are O(1)-scaled (a Jacobian in per-unit, and `I - Ψ` whose
 /// entries are transfer fractions), so "no pivot above 1e-12" really does mean
 /// structurally singular rather than merely badly scaled.
-pub(crate) fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+pub fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     let n = b.len();
     for col in 0..n {
         let pivot_row = (col..n).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;

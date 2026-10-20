@@ -1,0 +1,47 @@
+[package]
+name = "gridoxide-sparse"
+description = "Sparse LU backends for gridoxide: faer, a pure-Rust port of KLU, and optionally SuiteSparse KLU and oneMKL PARDISO"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/gridoxide-sparse"
+keywords = ["sparse", "lu", "klu", "linear-algebra", "power-flow"]
+categories = ["science", "mathematics"]
+build = "build.rs"
+# gridoxide's own code is Apache-2.0. `src/klu_native/` (always built, no
+# feature gate) is a close Rust translation of vendored SuiteSparse C —
+# BSD-3-Clause for the AMD-derived pieces, LGPL-2.1-or-later for the
+# BTF/KLU-derived pieces — so every build of this crate bundles all three.
+# See src/klu_native/PROVENANCE.md. `--features klu` additionally links the
+# vendored C itself (vendor/suitesparse/, licensed per its PROVENANCE.md),
+# which adds no licence beyond these.
+license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
+
+[package.metadata.docs.rs]
+# `klu` and `pardiso` need a C toolchain, libclang and, for PARDISO, a local
+# oneMKL — none of which docs.rs has.
+features = []
+
+[dependencies]
+faer = "0.24.4"
+num-complex = "0.4.6"
+
+[build-dependencies]
+cc = { version = "1.0", optional = true }
+bindgen = { version = "0.72", optional = true }
+
+[features]
+default = []
+# Builds the vendored SuiteSparse KLU (vendor/suitesparse/) as a backend —
+# see `lu::LuBackend::Klu`. Needs a C compiler and libclang (for bindgen) at
+# build time. KLU and BTF are LGPL-2.1-or-later; see
+# vendor/suitesparse/PROVENANCE.md before enabling this in a distributed
+# binary.
+klu = ["dep:cc", "dep:bindgen"]
+# Links a system-installed libklu.so instead of compiling the vendored
+# source, for anyone who needs strict LGPL relinking compliance.
+klu-dynamic = ["klu"]
+# Builds a backend on Intel oneMKL's PARDISO, linked dynamically against a
+# local install found through `MKLROOT`. Nothing MKL-derived is
+# redistributed. Needs libclang (for bindgen) at build time.
+pardiso = ["dep:bindgen"]

@@ -35,7 +35,7 @@ pub enum JacobianBackend {
     /// linked over FFI (`sparse_klu::KluRealSystem`) instead of `faer`. Needs
     /// a C compiler and `libclang` at build time. See
     /// `docs/src/solvers/backends.md` and
-    /// `vendor/suitesparse/PROVENANCE.md`. For the
+    /// `crates/gridoxide-sparse/vendor/suitesparse/PROVENANCE.md`. For the
     /// pure-Rust reimplementation of the same algorithm, see `KluNative`.
     #[cfg(feature = "klu")]
     Klu,

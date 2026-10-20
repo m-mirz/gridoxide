@@ -50,7 +50,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gridoxide") | .version')
           tag="${GITHUB_REF_NAME#v}"
           if [ "$tag" != "$version" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
@@ -60,13 +60,17 @@ jobs:
 
       # Catches the two ways a .crate can be broken without any local build
       # noticing: a file the package needs that `exclude` dropped, and a
-      # dependency that resolves locally but not from the registry. Verifies on
+      # dependency that resolves locally but not from the registry.
+      #
+      # `--workspace` packages gridoxide-sparse too, and verifies gridoxide
+      # against the gridoxide-sparse it just packaged rather than against
+      # crates.io, where this version does not exist yet. Verifies on
       # default features only, matching build.yml — `klu`/`pardiso` need a C
       # toolchain, libclang, or a local oneMKL install. That's a limit on what
       # this job *compiles*, not on what ships: the crate is source-only, so
       # every feature's source is published either way.
       - name: Package
-        run: cargo package
+        run: cargo package --workspace
 
       # The `cgmes` feature is the one whose dependencies come from outside
       # this repo (cimoxide's `cimoxide-decoder`/`cimoxide-structs`), so build
@@ -76,18 +80,26 @@ jobs:
       - name: Check the packaged crate builds with --features cgmes
         run: |
           set -euo pipefail
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gridoxide") | .version')
           tar xzf "target/package/gridoxide-$version.crate" -C target/package
-          cargo build --features cgmes --manifest-path "target/package/gridoxide-$version/Cargo.toml"
+          tar xzf "target/package/gridoxide-sparse-$version.crate" -C target/package
+          # This version of gridoxide-sparse is not on crates.io until the
+          # step below, so point the extracted gridoxide at the extracted
+          # gridoxide-sparse — again, exactly what a consumer gets.
+          cargo build --features cgmes \
+            --manifest-path "target/package/gridoxide-$version/Cargo.toml" \
+            --config "patch.crates-io.gridoxide-sparse.path='$PWD/target/package/gridoxide-sparse-$version'"
 
       # Everything above is the dry run: a `workflow_dispatch` with dry_run
       # left on exercises the whole packaging path and stops here, without
       # spending a version number.
       #
       # `--no-verify` because the `cargo package` step above already built the
-      # very same .crate; re-verifying would just compile faer twice.
+      # very same .crates; re-verifying would just compile faer twice.
+      # `--workspace` publishes gridoxide-sparse first, since gridoxide
+      # depends on it.
       - name: Publish
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --no-verify
+        run: cargo publish --workspace --no-verify

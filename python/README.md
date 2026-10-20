@@ -172,6 +172,6 @@ sparse system — so the choice is performance only.
 ## License
 
 gridoxide's own code is Apache-2.0. A default build (and this published wheel) also always bundles
-`src/klu_native/`, a from-scratch Rust translation of vendored SuiteSparse AMD/BTF/KLU source
+`crates/gridoxide-sparse/src/klu_native/`, a from-scratch Rust translation of vendored SuiteSparse AMD/BTF/KLU source
 (BSD-3-Clause for the AMD-derived pieces, LGPL-2.1-or-later for the BTF/KLU-derived pieces) — see the
 [main README's License section](https://github.com/m-mirz/gridoxide#license) for the full breakdown.

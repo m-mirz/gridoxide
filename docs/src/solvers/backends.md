@@ -57,7 +57,7 @@ warm-vs-cold figures.
 
 ## The backend interface
 
-`src/sparse.rs` is the thin backend wrapper around [`faer`](https://crates.io/crates/faer), and
+`crates/gridoxide-sparse/src/sparse.rs` is the thin backend wrapper around [`faer`](https://crates.io/crates/faer), and
 intentionally the only file that imports `faer` types directly, so a different sparse-solver backend
 can be swapped in behind the same interface without touching the rest of the codebase.
 
@@ -66,23 +66,23 @@ can be swapped in behind the same interface without touching the rest of the cod
 
 ### `Block`
 
-`src/block_sparse.rs`, no extra build requirements. Groups each bus's own (angle,
+`crates/gridoxide-sparse/src/block_sparse.rs`, no extra build requirements. Groups each bus's own (angle,
 voltage-magnitude) unknowns into one dense 2×2 block, mirroring power-grid-model's block-per-bus
 matrix structure, with a hand-written Gilbert-Peierls sparse block LU (`block_sparse::BlockLu`).
 Symmetric power flow only. Consistently faster than `Scalar`.
 
 ### `Klu`
 
-`src/sparse_klu.rs`, needs `cargo build --features klu`. The same scalar Jacobian as `Scalar`, solved
+`crates/gridoxide-sparse/src/sparse_klu.rs`, needs `cargo build --features klu`. The same scalar Jacobian as `Scalar`, solved
 by [SuiteSparse's KLU](https://github.com/DrTimothyAldenDavis/SuiteSparse) instead of `faer`,
-vendored and compiled from source (`vendor/suitesparse/`) rather than depending on a third-party Rust
+vendored and compiled from source (`crates/gridoxide-sparse/vendor/suitesparse/`) rather than depending on a third-party Rust
 wrapper crate. Needs a C compiler and `libclang` (for `bindgen`) at build time.
 
 **KLU and BTF (one of KLU's own dependencies) are LGPL-2.1-or-later**. See [Provenance and Licensing](../reference/provenance.md).
 
 ### `KluNative`
 
-`src/klu_native/`, no extra build requirements. A from-scratch Rust *translation* of the same KLU
+`crates/gridoxide-sparse/src/klu_native/`, no extra build requirements. A from-scratch Rust *translation* of the same KLU
 algorithm `Klu` links over FFI: BTF block-triangular preprocessing, per-block AMD ordering, a
 partial-pivoting Gilbert-Peierls LU kernel with Eisenstat-Liu pruning, and cheap numeric-only
 refactorization — all faithfully ported, not a simplified reimplementation. No C compiler or
@@ -91,7 +91,7 @@ refactorization — all faithfully ported, not a simplified reimplementation. No
 Validated end-to-end against real KLU on all 13 real MATPOWER benchmark cases (14 to 9,241 buses):
 identical iteration counts and identical converged voltages on every case. One known, documented gap
 — row scaling (`klu_native::scale`) is ported and independently tested but not yet wired into the
-factor/refactor path (see `src/klu_native/mod.rs`'s module doc comment). That is a
+factor/refactor path (see `crates/gridoxide-sparse/src/klu_native/mod.rs`'s module doc comment). That is a
 numerical-stability preconditioning step, not a correctness one, so it doesn't affect the results
 above.
 
@@ -99,7 +99,7 @@ above.
 
 ### `Pardiso`
 
-`src/sparse_pardiso.rs`, needs `cargo build --features pardiso` and `MKLROOT` set at build time. The
+`crates/gridoxide-sparse/src/sparse_pardiso.rs`, needs `cargo build --features pardiso` and `MKLROOT` set at build time. The
 same scalar Jacobian as `Scalar`, solved by
 [Intel oneMKL's PARDISO](https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/)
 direct solver. Unlike `Klu`, nothing is vendored — MKL is proprietary (Intel Simplified Software
