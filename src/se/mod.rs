@@ -170,6 +170,38 @@ impl SeNetwork {
         )
     }
 
+    /// The measurement model for state estimation over a node-breaker
+    /// network's bus view.
+    ///
+    /// `ybus` must be the one built from *its* lines and transformers with
+    /// [`stamp_shunts`](crate::network::stamp_shunts) applied — the estimator
+    /// reads the branch list a second time to build its functionals, and a
+    /// disagreement produces an estimate that converges confidently to the
+    /// wrong answer.
+    ///
+    /// The retained switches are already in the branch list, so a measurement on
+    /// a breaker is an ordinary branch-terminal measurement at
+    /// [`branch_of_switch`](crate::switches::NodeBreakerNetwork::branch_of_switch)
+    /// — as with power flow, the estimator never learns that any of its
+    /// branches is a switch.
+    ///
+    /// What *is* specific to this view is the constraint set. Almost every bus
+    /// the node-breaker topology adds is a bay-internal node with nothing
+    /// attached, so
+    /// [`zero_injection`](crate::switches::NodeBreakerNetwork::zero_injection)
+    /// is dense here in a way it never is on a bus-branch model, and those
+    /// buses are observable only because of it.
+    pub fn from_node_breaker(net: &crate::switches::NodeBreakerNetwork, ybus: YBusSparse) -> Self {
+        Self::from_bus_network(
+            &net.buses,
+            ybus,
+            &net.lines,
+            &net.transformers,
+            &net.shunts,
+            net.zero_injection.clone(),
+        )
+    }
+
     /// Builds the model for a network whose sources are **bus types** rather
     /// than synthesized source branches — everything that does not come through
     /// [`pgm`](crate::pgm), which for now means CGMES, including the

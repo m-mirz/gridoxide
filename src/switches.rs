@@ -751,35 +751,6 @@ impl NodeBreakerNetwork {
             .collect()
     }
 
-    /// The measurement model for state estimation over this network.
-    ///
-    /// `ybus` must be the one built from *these* lines and transformers with
-    /// [`stamp_shunts`](crate::network::stamp_shunts) applied — the estimator
-    /// reads the branch list a second time to build its functionals, and a
-    /// disagreement produces an estimate that converges confidently to the
-    /// wrong answer.
-    ///
-    /// The retained switches are already in the branch list, so a measurement on
-    /// a breaker is an ordinary branch-terminal measurement at
-    /// [`branch_of_switch`](Self::branch_of_switch) — as with power flow, the
-    /// estimator never learns that any of its branches is a switch.
-    ///
-    /// What *is* specific to this view is the constraint set. Almost every bus
-    /// the node-breaker topology adds is a bay-internal node with nothing
-    /// attached, so [`zero_injection`](Self::zero_injection) is dense here in a
-    /// way it never is on a bus-branch model, and those buses are observable
-    /// only because of it.
-    pub fn se_network(&self, ybus: crate::network::YBusSparse) -> crate::se::SeNetwork {
-        crate::se::SeNetwork::from_bus_network(
-            &self.buses,
-            ybus,
-            &self.lines,
-            &self.transformers,
-            &self.shunts,
-            self.zero_injection.clone(),
-        )
-    }
-
     /// Complex power entering a switch at its `from` terminal, given solved bus
     /// voltages. `None` if the switch has no branch.
     ///
