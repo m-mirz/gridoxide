@@ -11,8 +11,8 @@
 //!   backward error ‖J·x − r‖∞ / (‖J‖∞‖x‖∞ + ‖r‖∞) — what partial pivoting is
 //!   meant to keep near machine precision — and the difference from KLU's x.
 //! - **The whole Newton solve**, per backend (SuiteSparse's KLU and the native
-//!   port as the solver runs it, unscaled): status, iterations and the final
-//!   mismatch, from both starts.
+//!   port as the solver runs it, which scales): status, iterations and the
+//!   final mismatch, from both starts.
 
 use std::path::{Path, PathBuf};
 
@@ -226,7 +226,7 @@ fn main() {
 
         for (label, backend) in [
             ("SuiteSparse KLU", JacobianBackend::Klu),
-            ("native, unscaled", JacobianBackend::KluNative),
+            ("native", JacobianBackend::KluNative),
         ] {
             for init in [PowerFlowInit::LinearImpedance, PowerFlowInit::Flat] {
                 let report = run_power_flow(

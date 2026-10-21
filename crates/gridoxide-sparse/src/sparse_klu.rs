@@ -279,6 +279,11 @@ impl KluRealSystem {
     }
 
     /// `klu_refactor` on `values` (CSC order), then `klu_solve`.
+    ///
+    /// A refactor keeps the last factorization's pivots, and new values can
+    /// put an exact zero on one; then `klu_factor` factors afresh, with new
+    /// pivots, on the same symbolic analysis — lightsim2grid's fallback —
+    /// and only if that fails is the matrix singular.
     fn refactor_and_solve(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
         // SAFETY: KLU's `Ax` is declared `double []` but only read —
         // `klu_refactor` and the `klu_scale` it calls never write through it
@@ -295,7 +300,22 @@ impl KluRealSystem {
             )
         };
         if self.common.status != KLU_OK {
-            return None;
+            // SAFETY: `numeric` is ours and freed exactly once here, then
+            // replaced; `klu_free_numeric` accepts the null a failed
+            // `klu_factor` leaves, which `Drop` then frees again harmlessly.
+            unsafe {
+                klu_free_numeric(&mut self.numeric, &mut self.common);
+                self.numeric = klu_factor(
+                    self.col_ptr.as_mut_ptr(),
+                    self.row_idx.as_mut_ptr(),
+                    values.as_ptr().cast_mut(),
+                    self.symbolic,
+                    &mut self.common,
+                );
+            }
+            if self.numeric.is_null() || self.common.status != KLU_OK {
+                return None;
+            }
         }
 
         let mut b = rhs.to_vec();

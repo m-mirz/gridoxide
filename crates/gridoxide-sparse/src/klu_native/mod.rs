@@ -41,27 +41,25 @@
 //! is always AMD here), multi-RHS solve, complex arithmetic, and int64
 //! (`DLONG`) indices.
 //!
-//! **Row scaling is optional, and off by default** (`KluNativeSystem::new`;
-//! `with_scale(.., 2)` scales as KLU's default does). Scaling divides every
-//! row by its largest magnitude before each factorization; it decides which
-//! pivots partial pivoting sees as large and how the arithmetic rounds, never
-//! what the solution is. Scaled, the port solves as SuiteSparse's KLU does —
-//! the same pivots and, on most matrices, the same bits
+//! **Rows are scaled by default**, as SuiteSparse's KLU scales them
+//! (`KluNativeSystem::new`; `with_scale(.., 0)` turns it off). Scaling divides
+//! every row by its largest magnitude before each factorization; it decides
+//! which pivots partial pivoting sees as large and how the arithmetic rounds,
+//! never what the solution is. Scaled, the port solves as SuiteSparse's KLU
+//! does — the same pivots and, on most matrices, the same bits
 //! (`tests::scaled_matches_real_klu`).
 //!
-//! Off by default because it buys nothing measurable for power-flow
-//! Jacobians and costs 11–15% of a solve. `examples/klu_scaling_stress.rs`
-//! runs the worst-scaled networks at hand — the PEGASE and RTE MATPOWER
-//! cases, CGMES RealGrid, MiniGrid and SmallGrid with every switch kept as
-//! a stiff branch, and PGM feeders whose source is made 1e30 VA stiff, rows
-//! spanning up to 24 orders of magnitude. Unscaled, the backward error of a
-//! Jacobian solve stays at machine precision (≤ 7e-17) and the solution is
-//! within 5e-11 of KLU's; every Newton solve takes the same iterations as on
-//! SuiteSparse's KLU and fails, where it fails, the same way. A Newton step
-//! only has to point the right way — the mismatch it is judged by is
-//! recomputed from the network every iteration — which is why a little
-//! less pivoting accuracy, if there were any, would cost an iteration rather
-//! than a wrong answer.
+//! Power-flow Jacobians do not need it: `examples/klu_scaling_stress.rs`
+//! runs the worst-scaled networks at hand, with rows spanning up to 24
+//! orders of magnitude, and unscaled the backward error stays at machine
+//! precision and every Newton solve takes the iterations SuiteSparse's KLU
+//! takes. State estimation does: its system weights every measurement by
+//! 1/σ², and on the three-phase transmission case with one sensor fifteen σ
+//! off (`se_three_phase_test::bad_data_detection_finds_the_corrupted_measurement`)
+//! the unscaled port's steps stall at 6e-8 and Gauss-Newton runs out of
+//! iterations, where scaled — like SuiteSparse's KLU and faer — it converges
+//! in 8. Scaling costs 11–15% of a power-flow solve; a caller that knows its
+//! matrices are well scaled can switch it off.
 //!
 //! **Module layout** (mirrors the phased port plan; each submodule's doc
 //! comment names the specific upstream `.c` file(s) it was translated from):
@@ -182,10 +180,11 @@ impl KluNativeSystem {
     /// same order (values may differ) — same precondition as
     /// `KluRealSystem::new`, for the same reason (the cached CSC position
     /// mapping in `groups` assumes positional correspondence, not just set
-    /// equality). Returns `None` if the matrix is structurally or
+    /// equality). Scales rows as SuiteSparse's KLU does by default (see the
+    /// module documentation). Returns `None` if the matrix is structurally or
     /// numerically singular.
     pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
-        Self::with_scale(n, entries, 0)
+        Self::with_scale(n, entries, types::Options::default().scale)
     }
 
     /// [`new`](Self::new) with KLU's row scaling: `scale` is
@@ -287,6 +286,13 @@ impl KluNativeSystem {
 
     /// Shared tail of both `factor_and_solve` paths, taking already-packed
     /// CSC values.
+    ///
+    /// A refactor keeps the pivot order of the last factorization, and new
+    /// values can put an exact zero on one of those pivots — a fault switched
+    /// on or off in a dynamic simulation does. Then the matrix is factored
+    /// afresh, with new pivots, on the same symbolic analysis, as
+    /// lightsim2grid falls back from `klu_refactor` to `klu_factor`; only if
+    /// that fails too is the matrix singular.
     fn solve_packed(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
         if self.scale > 0 {
             scale::row_factors_into(self.scale, self.n, &self.row_idx, values, &mut self.raw);
@@ -301,17 +307,44 @@ impl KluNativeSystem {
             &mut self.scratch,
             (self.scale > 0).then_some(&self.raw[..]),
         );
-        if !ok {
-            return None;
+        if ok {
+            self.permute_scale();
+            if let Some(x) = self.solve_factored(rhs) {
+                return Some(x);
+            }
         }
-        self.permute_scale();
 
+        let scaled: Vec<f64>;
+        let to_factor = if self.scale > 0 {
+            scaled = values
+                .iter()
+                .zip(&self.row_idx)
+                .map(|(&v, &row)| v / self.raw[row as usize])
+                .collect();
+            &scaled
+        } else {
+            values
+        };
+        self.num = factor::factor(
+            self.n,
+            &self.col_ptr,
+            &self.row_idx,
+            to_factor,
+            &self.sym,
+            types::Options::default().tol,
+        )?;
+        // The scatter targets follow the pivot order, which just changed.
+        self.scratch.forget_targets();
+        self.permute_scale();
+        self.solve_factored(rhs)
+    }
+
+    /// Solves with the current factorization; `None` if the result is not
+    /// finite.
+    fn solve_factored(&self, rhs: &[f64]) -> Option<Vec<f64>> {
         let rs = (!self.rs.is_empty()).then_some(&self.rs[..]);
         let x = solve::solve(&self.sym, &self.num, rs, rhs);
-        if x.iter().any(|v| !v.is_finite()) {
-            return None;
-        }
-        Some(x)
+        x.iter().all(|v| v.is_finite()).then_some(x)
     }
 }
 

@@ -55,6 +55,12 @@ impl RefactorScratch {
             target: Vec::new(),
         }
     }
+
+    /// Drops the scatter targets, to be found again on the next call: for
+    /// after a fresh factorization, whose pivot order they depend on.
+    pub fn forget_targets(&mut self) {
+        self.target.clear();
+    }
 }
 
 /// Re-factors the whole `n`-by-`n` matrix (CSC: `col_ptr`/`row_idx`/`values`)
