@@ -261,7 +261,8 @@ fn every_converging_initializer_reaches_the_same_solution() {
 
 /// The reason this crate warm-starts by default, demonstrated rather than
 /// asserted: on `distribution-case` a flat start does not converge inside the
-/// default 20 iterations — it is still at a mismatch of order 1 — while
+/// default 20 iterations — it wanders between 0.1 and a few per unit and never
+/// approaches the tolerance — while
 /// **both** warm starts land it in 4–5. DC init is not merely a faster route
 /// to an answer flat start would have reached; on this fixture it is the
 /// difference between an answer and none.
@@ -291,10 +292,16 @@ fn both_warm_starts_rescue_a_case_flat_start_cannot_solve() {
         SolveStatus::MaxIterationsReached,
         "fixture no longer defeats a flat start, so this proves nothing"
     );
+    // Never close, rather than ending far: the walk is chaotic, and where its
+    // twentieth step lands moves with the last bits of the Jacobian.
+    let closest = flat
+        .mismatch_history
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
     assert!(
-        flat.final_mismatch() > 1.0,
-        "flat start got closer than expected: {}",
-        flat.final_mismatch()
+        closest > 1e-2,
+        "flat start came within {closest} of converging"
     );
 
     for init in [PowerFlowInit::LinearImpedance, PowerFlowInit::Dc] {

@@ -22,8 +22,11 @@
 //!   exactly this layout, extended to a batch by adding a scenario stride.
 //!
 //! [`JacobianPattern::fill`] is a transliteration of `build_jacobian_triplets`' H/N/M/L
-//! formulas, not a rederivation — `tests/jacobian_pattern_test.rs` asserts
-//! the two agree bit-for-bit in f64.
+//! formulas, not a rederivation. The one difference is how it reaches
+//! `sin(θi − θk)` and `cos(θi − θk)`: from each bus's own sine and cosine,
+//! once per bus, rather than per entry. That rounds differently, so the tests
+//! below hold the two to the same positions exactly and to the same values
+//! within a few units in the last place.
 
 use num_complex::Complex;
 
@@ -237,17 +240,29 @@ impl JacobianPattern {
     pub fn fill_into(&self, buses: &[Bus], p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
         values.reserve(self.entries.len());
 
+        // sin θ and cos θ once per bus, so an off-diagonal entry forms
+        // sin(θi − θk) and cos(θi − θk) from four products instead of calling
+        // the trigonometric functions itself. Each Y-bus off-diagonal feeds up
+        // to four entries (H, N, M, L), so evaluating the difference's trig
+        // per entry made `sincos` the largest single cost of a Newton
+        // iteration — more than the sparse LU's numeric refactorization.
+        let trig: Vec<(f64, f64)> = buses.iter().map(|b| b.voltage_ang.sin_cos()).collect();
+        // And the magnitudes beside them: a `Bus` is wide, and every entry
+        // gathers one or two, so reading them out of a contiguous array keeps
+        // the fill's loads in cache.
+        let vm: Vec<f64> = buses.iter().map(|b| b.voltage_mag).collect();
+
         for e in &self.entries {
             let i = e.i as usize;
             let k = e.k as usize;
-            let vm_i = buses[i].voltage_mag;
+            let vm_i = vm[i];
             let (g, b) = (e.y.re, e.y.im);
 
             let v = match e.kind {
                 // H_ii = -Q_i - V_i^2 * B_ii
                 // `powi(2)` rather than `vm_i * vm_i` to stay textually
-                // identical to `build_jacobian_triplets`, so bit-for-bit
-                // agreement can't hinge on how the two lower.
+                // identical to `build_jacobian_triplets`, so the diagonal
+                // agrees with it to the last bit.
                 EntryKind::Hii => -q_calc[i] - vm_i.powi(2) * b,
                 // N_ii = P_i/V_i + V_i * G_ii
                 EntryKind::Nii => p_calc[i] / vm_i + vm_i * g,
@@ -256,9 +271,10 @@ impl JacobianPattern {
                 // L_ii = Q_i/V_i - V_i * B_ii
                 EntryKind::Lii => q_calc[i] / vm_i - vm_i * b,
                 _ => {
-                    let vm_k = buses[k].voltage_mag;
-                    let ang = buses[i].voltage_ang - buses[k].voltage_ang;
-                    let (sin, cos) = (ang.sin(), ang.cos());
+                    let vm_k = vm[k];
+                    let ((s_i, c_i), (s_k, c_k)) = (trig[i], trig[k]);
+                    let sin = s_i * c_k - c_i * s_k;
+                    let cos = c_i * c_k + s_i * s_k;
                     match e.kind {
                         // H_ik = V_i * V_k * (G_ik * sin - B_ik * cos)
                         EntryKind::Hik => vm_i * vm_k * (g * sin - b * cos),
@@ -364,11 +380,21 @@ mod tests {
         (buses, ybus)
     }
 
+    /// Values agree with the reference to rounding: the fill forms the
+    /// angle difference's sine and cosine from the buses' own, which rounds
+    /// differently from evaluating them at the difference.
+    fn assert_same_value(got: f64, expected: f64, what: &str) {
+        assert!(
+            (got - expected).abs() <= 1e-13 * expected.abs().max(1.0),
+            "{what}: {got} vs {expected}"
+        );
+    }
+
     /// The precomputed-offset assembler must reproduce the reference
-    /// implementation's `(row, col, value)` sequence exactly — same order,
-    /// same indices, and values equal to the last bit, not merely close.
+    /// implementation's `(row, col, value)` sequence — same order and same
+    /// indices exactly, values to rounding (see `assert_same_value`).
     #[test]
-    fn pattern_matches_reference_bit_for_bit() {
+    fn pattern_matches_reference() {
         let (mut buses, ybus) = mixed_network();
         let pattern = JacobianPattern::analyze(&buses, &ybus);
         let mut values = Vec::new();
@@ -396,13 +422,7 @@ mod tests {
                     (e.0, e.1),
                     "entry {idx} position at step {step}"
                 );
-                assert_eq!(
-                    g.2.to_bits(),
-                    e.2.to_bits(),
-                    "entry {idx} value at step {step}: {} vs {}",
-                    g.2,
-                    e.2
-                );
+                assert_same_value(g.2, e.2, &format!("entry {idx} value at step {step}"));
             }
         }
     }
@@ -430,7 +450,7 @@ mod tests {
         assert_eq!(got.len(), expected.len());
         for (idx, (g, e)) in got.iter().zip(&expected).enumerate() {
             assert_eq!((g.0, g.1), (e.0, e.1), "entry {idx} position");
-            assert_eq!(g.2.to_bits(), e.2.to_bits(), "entry {idx} value");
+            assert_same_value(g.2, e.2, &format!("entry {idx} value"));
         }
     }
 
@@ -457,7 +477,7 @@ mod tests {
     /// the Jacobian triplets directly.
     ///
     /// Exists as the **reference oracle** for `jacobian::JacobianPattern`, whose
-    /// precomputed-offset assembler must agree with this bit-for-bit (see
+    /// precomputed-offset assembler must agree with this to rounding (see
     /// `jacobian`'s own tests). Kept deliberately naive — it re-derives
     /// everything from scratch on every call, which is exactly the cost
     /// `JacobianPattern` was written to remove, and exactly what makes it a
@@ -522,7 +542,7 @@ mod tests {
     }
 
     /// The **reference implementation** of Jacobian assembly, retained as the
-    /// oracle `jacobian::JacobianPattern` is checked against bit-for-bit. The
+    /// oracle `jacobian::JacobianPattern` is checked against. The
     /// Newton loop itself no longer calls this — it refills values at
     /// precomputed offsets instead — so it lives here, beside the tests it serves.
     /// Kept deliberately straightforward: its value is being obviously correct,
