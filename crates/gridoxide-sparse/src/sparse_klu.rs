@@ -89,13 +89,38 @@ fn pack_real_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> V
         .collect()
 }
 
-/// `pack_real_values` for callers that already hold just the values — see
-/// `sparse::LinearSolver::factor_and_solve_values`.
-fn pack_real_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups
-        .iter()
-        .map(|g| g.iter().map(|&i| values[i]).sum())
-        .collect()
+/// `groups` flattened into two arrays: CSC position `k` sums the inputs
+/// `src[ptr[k]..ptr[k + 1]]`.
+///
+/// What a repeated solve packs through, every iteration. A `Vec` per
+/// position cost a pointer chase per nonzero, and the packed values a fresh
+/// allocation per call; together they were a tenth of a warm Newton solve on
+/// case9241pegase, where a Newton Jacobian has no duplicate position at all.
+struct FlatGroups {
+    ptr: Vec<usize>,
+    src: Vec<usize>,
+}
+
+impl FlatGroups {
+    fn new(groups: &[Vec<usize>]) -> Self {
+        let mut ptr = Vec::with_capacity(groups.len() + 1);
+        let mut src = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+        ptr.push(0);
+        for g in groups {
+            src.extend_from_slice(g);
+            ptr.push(src.len());
+        }
+        Self { ptr, src }
+    }
+
+    /// Packs `value(i)` for every input `i` into `out`, in CSC order.
+    fn pack_into(&self, value: impl Fn(usize) -> f64, out: &mut Vec<f64>) {
+        out.clear();
+        out.extend(self.ptr.windows(2).map(|w| match &self.src[w[0]..w[1]] {
+            [only] => value(*only),
+            several => several.iter().map(|&i| value(i)).sum(),
+        }));
+    }
 }
 
 fn pack_complex_values(
@@ -127,7 +152,10 @@ pub struct KluRealSystem {
     n: usize,
     col_ptr: Vec<i32>,
     row_idx: Vec<i32>,
-    groups: Vec<Vec<usize>>,
+    groups: FlatGroups,
+    /// The packed values of the last call, kept so the next reuses the
+    /// allocation.
+    packed: Vec<f64>,
     common: klu_common,
     symbolic: *mut klu_symbolic,
     numeric: *mut klu_numeric,
@@ -179,7 +207,8 @@ impl KluRealSystem {
             n,
             col_ptr,
             row_idx,
-            groups,
+            groups: FlatGroups::new(&groups),
+            packed: values,
             common,
             symbolic,
             numeric,
@@ -204,12 +233,13 @@ impl KluRealSystem {
         entries: &[(usize, usize, f64)],
         rhs: &[f64],
     ) -> Option<Vec<f64>> {
-        let values = pack_real_values(entries, &self.groups);
+        let mut values = std::mem::take(&mut self.packed);
+        self.groups.pack_into(|i| entries[i].2, &mut values);
         self.solve_packed(values, rhs)
     }
 
     /// Shared tail of both `factor_and_solve` paths, taking already-packed
-    /// CSC values.
+    /// CSC values, whose allocation it keeps for the next call.
     fn solve_packed(&mut self, mut values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
         unsafe {
             klu_refactor(
@@ -221,6 +251,7 @@ impl KluRealSystem {
                 &mut self.common,
             )
         };
+        self.packed = values;
         if self.common.status != KLU_OK {
             return None;
         }
@@ -257,7 +288,9 @@ impl crate::sparse::LinearSolver for KluRealSystem {
     }
 
     fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
-        self.solve_packed(pack_real_values_slice(values, &self.groups), rhs)
+        let mut packed = std::mem::take(&mut self.packed);
+        self.groups.pack_into(|i| values[i], &mut packed);
+        self.solve_packed(packed, rhs)
     }
 }
 
