@@ -1,7 +1,7 @@
 use super::jacobian::JacobianPattern;
 use super::network::{
-    Classified, Verdict, YBusSparse, classify, connected_components, effective_injection,
-    mark_unreferenced_islands, power_injections,
+    BusVoltages, Classified, Verdict, YBusSparse, classify, connected_components,
+    effective_injection, mark_unreferenced_islands, power_injections, power_injections_from,
 };
 use gridoxide_sparse::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
 // Defined beside the backends it abstracts over, so that they need nothing
@@ -549,9 +549,11 @@ fn newton_raphson_cached(
     // symbolic factorization (ordering + fill-in) is computed once here and
     // reused via `factor_and_solve` for every iteration's numeric-only
     // refactorization, mirroring PGM's own prefactorization-reuse approach.
+    let mut voltages = BusVoltages::default();
     for _ in 0..max_iter {
-        // compute injections
-        let (p_calc, q_calc) = power_injections(buses, ybus);
+        // compute injections, from voltages the Jacobian fill reads too
+        voltages.update(buses);
+        let (p_calc, q_calc) = power_injections_from(&voltages, ybus);
 
         // Build mismatch vector
         let mut mismatch = vec![0.0; n_unknowns];
@@ -576,7 +578,7 @@ fn newton_raphson_cached(
         }
 
         // Refill the Jacobian's values at their precomputed offsets.
-        pattern.fill(buses, &p_calc, &q_calc, &mut values);
+        pattern.fill_with(&voltages, &p_calc, &q_calc, &mut values);
 
         // The backend's symbolic analysis needs the `(row, col)` pairs, but
         // only once per topology — every subsequent iteration hands over

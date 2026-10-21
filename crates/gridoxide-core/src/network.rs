@@ -1045,17 +1045,52 @@ pub fn linear_initial_guess(buses: &mut [Bus], ybus: &YBusSparse) {
     solve_constant_admittance(buses, ybus, &unknown_idx);
 }
 
+/// Every bus's voltage magnitude and the sine and cosine of its angle, taken
+/// once per Newton iteration and read by both the power injections and the
+/// Jacobian fill — which used to evaluate the same sines and cosines each.
+#[derive(Clone, Debug, Default)]
+pub struct BusVoltages {
+    pub vm: Vec<f64>,
+    pub sin: Vec<f64>,
+    pub cos: Vec<f64>,
+}
+
+impl BusVoltages {
+    pub fn of(buses: &[Bus]) -> Self {
+        let mut v = Self::default();
+        v.update(buses);
+        v
+    }
+
+    /// Refills from `buses`, reusing the allocations.
+    pub fn update(&mut self, buses: &[Bus]) {
+        self.vm.clear();
+        self.sin.clear();
+        self.cos.clear();
+        for b in buses {
+            let (s, c) = b.voltage_ang.sin_cos();
+            self.vm.push(b.voltage_mag);
+            self.sin.push(s);
+            self.cos.push(c);
+        }
+    }
+}
+
 pub fn power_injections(buses: &[Bus], ybus: &YBusSparse) -> (Vec<f64>, Vec<f64>) {
+    power_injections_from(&BusVoltages::of(buses), ybus)
+}
+
+/// [`power_injections`] from voltages already taken.
+pub fn power_injections_from(v: &BusVoltages, ybus: &YBusSparse) -> (Vec<f64>, Vec<f64>) {
     // Calculates the complex power injection into each bus.
     // S = V .* conj(I) where I = Ybus * V
     // S_k = V_k * I_k^*
-    let n = buses.len();
+    let n = v.vm.len();
     let mut p = vec![0.0; n];
     let mut q = vec![0.0; n];
 
-    let v: Vec<Complex<f64>> = buses
-        .iter()
-        .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
+    let v: Vec<Complex<f64>> = (0..n)
+        .map(|k| Complex::new(v.vm[k] * v.cos[k], v.vm[k] * v.sin[k]))
         .collect();
     let i = ybus.mul_vec(&v);
 

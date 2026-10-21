@@ -30,7 +30,7 @@
 
 use num_complex::Complex;
 
-use crate::network::YBusSparse;
+use crate::network::{BusVoltages, YBusSparse};
 use crate::types::{Bus, BusType};
 
 /// Which of the Jacobian's eight distinct formulas an [`Entry`] evaluates.
@@ -201,8 +201,6 @@ impl JacobianPattern {
         }
     }
 
-    /// Number of Jacobian nonzeros — the length of `values` that
-    /// [`fill`](Self::fill) expects.
     /// Reorders the entries so that entry `k` is the one that was at
     /// `order[k]`: from then on [`fill`](Self::fill) writes, and
     /// [`to_triplets`](Self::to_triplets) lists, in that order. What
@@ -230,6 +228,8 @@ impl JacobianPattern {
         self.entries = order.iter().map(|&i| self.entries[i]).collect();
     }
 
+    /// Number of Jacobian nonzeros — the length of `values` that
+    /// [`fill`](Self::fill) expects.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -266,19 +266,39 @@ impl JacobianPattern {
     /// values to `values`. What lets `bde::BlockDiagonal` concatenate B
     /// scenarios' blocks into one flat array for a block-diagonal solve.
     pub fn fill_into(&self, buses: &[Bus], p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
-        values.reserve(self.entries.len());
+        self.fill_from(&BusVoltages::of(buses), p_calc, q_calc, values);
+    }
 
-        // sin θ and cos θ once per bus, so an off-diagonal entry forms
-        // sin(θi − θk) and cos(θi − θk) from four products instead of calling
-        // the trigonometric functions itself. Each Y-bus off-diagonal feeds up
-        // to four entries (H, N, M, L), so evaluating the difference's trig
-        // per entry made `sincos` the largest single cost of a Newton
-        // iteration — more than the sparse LU's numeric refactorization.
-        let trig: Vec<(f64, f64)> = buses.iter().map(|b| b.voltage_ang.sin_cos()).collect();
-        // And the magnitudes beside them: a `Bus` is wide, and every entry
-        // gathers one or two, so reading them out of a contiguous array keeps
-        // the fill's loads in cache.
-        let vm: Vec<f64> = buses.iter().map(|b| b.voltage_mag).collect();
+    /// [`fill`](Self::fill) from voltages already taken, which the Newton
+    /// loop shares with the power injections.
+    pub fn fill_with(
+        &self,
+        v: &BusVoltages,
+        p_calc: &[f64],
+        q_calc: &[f64],
+        values: &mut Vec<f64>,
+    ) {
+        values.clear();
+        self.fill_from(v, p_calc, q_calc, values);
+    }
+
+    /// Appends, as [`fill_into`](Self::fill_into).
+    ///
+    /// An off-diagonal entry forms sin(θi − θk) and cos(θi − θk) from the two
+    /// buses' own sines and cosines instead of calling the trigonometric
+    /// functions itself. Each Y-bus off-diagonal feeds up to four entries (H,
+    /// N, M, L), so evaluating the difference's trig per entry made `sincos`
+    /// the largest single cost of a Newton iteration — more than the sparse
+    /// LU's numeric refactorization.
+    ///
+    /// The four entries of one pair also share two products, but forming
+    /// those once per pair and gathering them was measured slower: once the
+    /// entries are in a factorization's column order, a pair's four are far
+    /// apart, and the extra pass's scattered reads cost more than the few
+    /// multiplications they save.
+    fn fill_from(&self, v: &BusVoltages, p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
+        values.reserve(self.entries.len());
+        let vm = &v.vm;
 
         for e in &self.entries {
             let i = e.i as usize;
@@ -300,7 +320,7 @@ impl JacobianPattern {
                 EntryKind::Lii => q_calc[i] / vm_i - vm_i * b,
                 _ => {
                     let vm_k = vm[k];
-                    let ((s_i, c_i), (s_k, c_k)) = (trig[i], trig[k]);
+                    let (s_i, c_i, s_k, c_k) = (v.sin[i], v.cos[i], v.sin[k], v.cos[k]);
                     let sin = s_i * c_k - c_i * s_k;
                     let cos = c_i * c_k + s_i * s_k;
                     match e.kind {
