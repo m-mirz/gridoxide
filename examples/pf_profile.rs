@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use gridoxide::jacobian::JacobianPattern;
 use gridoxide::lu::SparseLu;
 use gridoxide::network::{
-    build_ybus, connected_components, effective_injection, power_injections, stamp_shunts,
+    BusVoltages, build_ybus, connected_components, effective_injection, power_injections_from,
+    stamp_shunts,
 };
 use gridoxide::solver::{JacobianBackend, PersistentSolver};
 use gridoxide::types::{Bus, BusType};
@@ -85,7 +86,8 @@ fn main() {
         // 2. The same loop by hand, phase by phase (no island handling: these
         // cases are one island).
         let mut lu = SparseLu::new(backend.lu_backend());
-        let pattern = JacobianPattern::analyze(&template, &ybus);
+        let mut pattern = JacobianPattern::analyze(&template, &ybus);
+        let mut voltages = BusVoltages::default();
         let non_slack: Vec<usize> = template
             .iter()
             .filter(|b| b.bus_type != BusType::Slack)
@@ -112,7 +114,8 @@ fn main() {
             };
             for _ in 0..max_iter {
                 let t = Instant::now();
-                let (p_calc, q_calc) = power_injections(&buses, &ybus);
+                voltages.update(&buses);
+                let (p_calc, q_calc) = power_injections_from(&voltages, &ybus);
                 phases.injections += t.elapsed();
 
                 let t = Instant::now();
@@ -133,12 +136,17 @@ fn main() {
                 }
 
                 let t = Instant::now();
-                pattern.fill(&buses, &p_calc, &q_calc, &mut values);
+                pattern.fill_with(&voltages, &p_calc, &q_calc, &mut values);
                 phases.fill += t.elapsed();
 
                 let t = Instant::now();
                 if !lu.is_analyzed() {
                     assert!(lu.analyze(n, &pattern.to_triplets(&values)));
+                    // As `PersistentSolver` does: fill in the backend's order.
+                    if let Some(order) = lu.adopt_storage_order() {
+                        pattern.permute(&order);
+                        values = order.iter().map(|&i| values[i]).collect();
+                    }
                 }
                 let dx = lu
                     .factor_and_solve_values(&values, &mismatch)
