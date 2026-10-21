@@ -370,6 +370,12 @@ pub struct PersistentSolver {
     /// shares one Y-bus) and is not automatic for a contingency sweep (each
     /// outage has its own). See [`invalidate_admittances`](Self::invalidate_admittances).
     jacobian: Option<JacobianPattern>,
+    /// The Y-bus's connected components, which depend on its structure alone
+    /// — the same thing the symbolic factorization assumes fixed until
+    /// [`reset`](Self::reset), and kept by
+    /// [`invalidate_admittances`](Self::invalidate_admittances) for the same
+    /// reason. Finding them cost 4% of a warm solve on case9241pegase.
+    components: Option<Vec<Vec<usize>>>,
     /// The general sparse LU, for every backend but `Block`.
     lu: SparseLu,
     block: Option<BlockSymbolic>,
@@ -380,6 +386,7 @@ impl PersistentSolver {
         Self {
             backend,
             jacobian: None,
+            components: None,
             lu: SparseLu::new(backend.lu_backend()),
             block: None,
         }
@@ -416,8 +423,17 @@ impl PersistentSolver {
         tol: f64,
         max_iter: usize,
     ) -> (Vec<IslandReport>, SolveStats) {
-        let components = connected_components(ybus);
-        let classified = classify(buses, &components);
+        // Recomputed if the bus count changed, the one structural change
+        // that is cheap to notice.
+        if self
+            .components
+            .as_ref()
+            .is_none_or(|c| c.iter().map(Vec::len).sum::<usize>() != buses.len())
+        {
+            self.components = Some(connected_components(ybus));
+        }
+        let components = self.components.as_ref().expect("just populated above");
+        let classified = classify(buses, components);
         mark_unreferenced_islands(buses, &classified);
 
         let stats = match self.backend {
@@ -463,6 +479,7 @@ impl PersistentSolver {
 
     pub fn reset(&mut self) {
         self.jacobian = None;
+        self.components = None;
         self.lu.reset();
         self.block = None;
     }
