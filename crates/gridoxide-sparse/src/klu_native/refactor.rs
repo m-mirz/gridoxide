@@ -14,21 +14,17 @@
 //! `kernel::refactor_block_in_place` instead of `kernel::factor_block` per
 //! block.
 //!
-//! **In place, allocation-light** (see `kernel::refactor_block_in_place`'s
-//! own doc comment for the profiling story behind this): `num` is mutated
-//! directly rather than rebuilt, and the per-block column-entry scratch
-//! (`RefactorScratch::columns`, `RefactorScratch::x`) persists across
+//! **In place, allocation-free after the first call** (see
+//! `kernel::refactor_block_in_place`'s own doc comment for the profiling
+//! story behind this): `num` is mutated directly rather than rebuilt, its
+//! off-diagonal arrays are refilled in their own allocations, and the
+//! scratch (`RefactorScratch::x`, `RefactorScratch::target`) persists across
 //! repeated calls on the same `RefactorScratch` — the caller
 //! (`KluNativeSystem`) keeps one alive for the system's whole lifetime
-//! rather than creating a fresh one per solve. `num.pnum`/`num.pinv` aren't
-//! touched at all (previously needlessly `.clone()`d into a discarded
-//! result even though refactor never changes them). `num.off_p`/`off_i`/
-//! `off_x` are still rebuilt fresh each call — proportional to `nzoff`
-//! (cross-BTF-block nonzeros), which is zero for the common case of a
-//! single strongly-connected power system (one BTF block), so this
-//! remaining allocation is off the hot path for gridoxide's own real
-//! Jacobians; revisit if a topology with genuine BTF structure ever makes
-//! it show up in a profile.
+//! rather than creating a fresh one per solve. Each input value is
+//! scattered straight to where `target` says it goes, as `klu_refactor.c`
+//! scatters from `Ax`, rather than first copied into per-column vectors.
+//! `num.pnum`/`num.pinv` aren't touched at all.
 
 use super::analyze::Symbolic;
 use super::factor::Numeric;
@@ -43,18 +39,20 @@ pub struct RefactorScratch {
     /// `kernel::refactor_block_in_place`'s doc comment for why this is
     /// always safely all-zero on entry.
     x: Vec<f64>,
-    /// `columns[k]` = global column `k`'s raw entries for the current call,
-    /// `.clear()`-then-repopulated each `refactor` call rather than
-    /// rebuilt from `Vec::new()` — keeps each column's already-grown
-    /// capacity across calls, matching the sparsity pattern being fixed.
-    columns: Vec<Vec<(i64, f64)>>,
+    /// Where each input value goes, by its CSC position: its block-local
+    /// row, or `flip(oldrow)` for an entry of an off-diagonal block. Fixed by
+    /// the pattern and the pivot order, so found on the first call and
+    /// scattered through directly after — `klu_refactor.c`'s own
+    /// `Pinv[Ai[p]] - k1`, without recomputing it per call or first copying
+    /// every column out.
+    target: Vec<i64>,
 }
 
 impl RefactorScratch {
     pub fn new(n: usize) -> Self {
         Self {
             x: vec![0.0; n],
-            columns: vec![Vec::new(); n],
+            target: Vec::new(),
         }
     }
 }
@@ -85,52 +83,57 @@ pub fn refactor(
     // `newrow = Pinv[Ai[p]] - k1` where `Pinv = Numeric->Pinv`.
     let nblocks = sym.nblocks();
 
-    let mut off_p = vec![0i64; n + 1];
-    let mut off_i: Vec<i64> = Vec::new();
-    let mut off_x: Vec<f64> = Vec::new();
-    let mut poff: i64 = 0;
-
-    for block in 0..nblocks {
-        let k1 = sym.r[block];
-        let k2 = sym.r[block + 1];
-        let nk = k2 - k1;
-
-        for k in 0..nk {
-            let oldcol = sym.q[k + k1];
-            let entries = &mut scratch.columns[k + k1];
-            entries.clear();
-            for p in col_ptr[oldcol] as usize..col_ptr[oldcol + 1] as usize {
-                let oldrow = row_idx[p];
-                let newrow = num.pinv[oldrow as usize];
-                let value = values[p];
-                if (newrow as usize) < k1 {
-                    entries.push((flip(oldrow), value));
-                } else {
-                    entries.push((newrow - k1 as i64, value));
+    if scratch.target.len() != values.len() {
+        scratch.target = vec![0; values.len()];
+        for block in 0..nblocks {
+            let (k1, k2) = (sym.r[block], sym.r[block + 1]);
+            for &oldcol in &sym.q[k1..k2] {
+                let column = col_ptr[oldcol] as usize..col_ptr[oldcol + 1] as usize;
+                for (to, &oldrow) in scratch.target[column.clone()]
+                    .iter_mut()
+                    .zip(&row_idx[column])
+                {
+                    let newrow = num.pinv[oldrow as usize];
+                    *to = if (newrow as usize) < k1 {
+                        flip(oldrow)
+                    } else {
+                        newrow - k1 as i64
+                    };
                 }
             }
         }
+    }
 
-        let mut off_diag_out: Vec<Vec<(i64, f64)>> = vec![Vec::new(); nk];
-        let ok = refactor_block_in_place(
-            nk,
-            &mut num.blocks[block],
-            &mut scratch.x[..nk],
-            &scratch.columns[k1..k2],
-            &mut off_diag_out,
-        );
+    // The off-diagonal arrays are rebuilt every call, into last call's
+    // allocations.
+    let mut off_p = std::mem::take(&mut num.off_p);
+    off_p.clear();
+    off_p.resize(n + 1, 0);
+    let mut off_i = std::mem::take(&mut num.off_i);
+    off_i.clear();
+    let mut off_x = std::mem::take(&mut num.off_x);
+    off_x.clear();
+    let target = &scratch.target;
+
+    for block in 0..nblocks {
+        let (k1, k2) = (sym.r[block], sym.r[block + 1]);
+        let nk = k2 - k1;
+        let ok =
+            refactor_block_in_place(nk, &mut num.blocks[block], &mut scratch.x[..nk], |k, x| {
+                let oldcol = sym.q[k + k1];
+                for p in col_ptr[oldcol] as usize..col_ptr[oldcol + 1] as usize {
+                    let to = target[p];
+                    if to >= 0 {
+                        x[to as usize] = values[p];
+                    } else {
+                        off_i.push(flip(to));
+                        off_x.push(values[p]);
+                    }
+                }
+                off_p[k + k1 + 1] = off_i.len() as i64;
+            });
         if !ok {
             return false;
-        }
-
-        for (k, entries) in off_diag_out.into_iter().enumerate() {
-            let global_col = k + k1;
-            for (oldrow, value) in entries {
-                off_i.push(oldrow);
-                off_x.push(value);
-                poff += 1;
-            }
-            off_p[global_col + 1] = poff;
         }
     }
 
