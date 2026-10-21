@@ -79,7 +79,8 @@ pub struct Entry {
 ///
 /// `rows`/`cols`/`entries` are parallel arrays of the same length, in the
 /// exact emission order `solver::build_jacobian_triplets` used, so a cached
-/// symbolic factorization keyed on that order stays valid.
+/// symbolic factorization keyed on that order stays valid — until
+/// [`permute`](Self::permute) puts them in a sparse LU's own storage order.
 pub struct JacobianPattern {
     pub n_unknowns: usize,
     rows: Vec<u32>,
@@ -202,6 +203,33 @@ impl JacobianPattern {
 
     /// Number of Jacobian nonzeros — the length of `values` that
     /// [`fill`](Self::fill) expects.
+    /// Reorders the entries so that entry `k` is the one that was at
+    /// `order[k]`: from then on [`fill`](Self::fill) writes, and
+    /// [`to_triplets`](Self::to_triplets) lists, in that order. What
+    /// `lu::SparseLu::adopt_storage_order` returns, so the fill writes
+    /// straight into the factorization's own layout.
+    ///
+    /// # Panics
+    ///
+    /// If `order` is not a permutation of `0..len()`.
+    pub fn permute(&mut self, order: &[usize]) {
+        assert_eq!(
+            order.len(),
+            self.entries.len(),
+            "order must cover every entry"
+        );
+        let mut seen = vec![false; order.len()];
+        for &i in order {
+            assert!(
+                !std::mem::replace(&mut seen[i], true),
+                "order repeats entry {i}"
+            );
+        }
+        self.rows = order.iter().map(|&i| self.rows[i]).collect();
+        self.cols = order.iter().map(|&i| self.cols[i]).collect();
+        self.entries = order.iter().map(|&i| self.entries[i]).collect();
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -452,6 +480,25 @@ mod tests {
             assert_eq!((g.0, g.1), (e.0, e.1), "entry {idx} position");
             assert_same_value(g.2, e.2, &format!("entry {idx} value"));
         }
+    }
+
+    /// `permute` reorders what `fill` writes and `to_triplets` lists, and
+    /// nothing else.
+    #[test]
+    fn permute_reorders_the_entries() {
+        let (buses, ybus) = mixed_network();
+        let (p_calc, q_calc) = power_injections(&buses, &ybus);
+        let mut pattern = JacobianPattern::analyze(&buses, &ybus);
+        let mut values = Vec::new();
+        pattern.fill(&buses, &p_calc, &q_calc, &mut values);
+        let before = pattern.to_triplets(&values);
+
+        let order: Vec<usize> = (0..pattern.len()).rev().collect();
+        pattern.permute(&order);
+        pattern.fill(&buses, &p_calc, &q_calc, &mut values);
+        let after = pattern.to_triplets(&values);
+        let expected: Vec<_> = order.iter().map(|&i| before[i]).collect();
+        assert_eq!(after, expected);
     }
 
     /// `fill` must fully overwrite its buffer, so reusing one across

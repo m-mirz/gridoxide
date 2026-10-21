@@ -530,9 +530,15 @@ fn newton_raphson_cached(
     // only on the topology and the bus-type assignment, so they are derived
     // once here (or reused from a previous solve) rather than per iteration.
     if pattern.is_none() {
-        *pattern = Some(JacobianPattern::analyze(buses, ybus));
+        let mut fresh = JacobianPattern::analyze(buses, ybus);
+        // A factorization kept across `invalidate_admittances` still takes
+        // its values in the order it adopted below.
+        if let Some(order) = lu.storage_order() {
+            fresh.permute(order);
+        }
+        *pattern = Some(fresh);
     }
-    let pattern = pattern.as_ref().expect("just populated above");
+    let pattern = pattern.as_mut().expect("just populated above");
 
     // Refilled in place every iteration — the allocation happens once.
     let mut values: Vec<f64> = Vec::with_capacity(pattern.len());
@@ -575,8 +581,16 @@ fn newton_raphson_cached(
         // The backend's symbolic analysis needs the `(row, col)` pairs, but
         // only once per topology — every subsequent iteration hands over
         // nothing but the values.
-        if !lu.is_analyzed() && !lu.analyze(n_unknowns, &pattern.to_triplets(&values)) {
-            return SolveStats::from_loop(SolveStatus::Singular, history);
+        if !lu.is_analyzed() {
+            if !lu.analyze(n_unknowns, &pattern.to_triplets(&values)) {
+                return SolveStats::from_loop(SolveStatus::Singular, history);
+            }
+            // Where the backend has one layout (both KLUs), fill straight into
+            // it from here on rather than have it copy every iteration.
+            if let Some(order) = lu.adopt_storage_order() {
+                pattern.permute(&order);
+                values = order.iter().map(|&i| values[i]).collect();
+            }
         }
         let Some(dx) = lu.factor_and_solve_values(&values, &mismatch) else {
             return SolveStats::from_loop(SolveStatus::Singular, history);

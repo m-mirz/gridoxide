@@ -147,6 +147,9 @@ pub struct KluNativeSystem {
     col_ptr: Vec<i64>,
     row_idx: Vec<i64>,
     groups: Vec<Vec<usize>>,
+    /// Set by [`adopt_storage_order`](Self::adopt_storage_order): values
+    /// arrive in CSC order and are refactored as they are.
+    in_order: bool,
     sym: analyze::Symbolic,
     num: factor::Numeric,
     /// Reused across every `factor_and_solve` call (see
@@ -186,6 +189,7 @@ impl KluNativeSystem {
             col_ptr,
             row_idx,
             groups,
+            in_order: false,
             sym,
             num,
             scratch,
@@ -205,17 +209,36 @@ impl KluNativeSystem {
         rhs: &[f64],
     ) -> Option<Vec<f64>> {
         let values = pack_values(entries, &self.groups);
-        self.solve_packed(values, rhs)
+        self.solve_packed(&values, rhs)
+    }
+
+    /// From now on takes values in this system's own storage order and
+    /// refactors them without copying: returns `order`, where `order[k]` is
+    /// the input index (in the order `new` was given) that position `k`
+    /// holds. The caller reorders its values to match, once, and keeps them
+    /// so. `None`, changing nothing, if some position sums several inputs.
+    pub fn adopt_storage_order(&mut self) -> Option<Vec<usize>> {
+        let order: Vec<usize> = self
+            .groups
+            .iter()
+            .map(|g| match g[..] {
+                [only] => Some(only),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        self.groups = (0..order.len()).map(|k| vec![k]).collect();
+        self.in_order = true;
+        Some(order)
     }
 
     /// Shared tail of both `factor_and_solve` paths, taking already-packed
     /// CSC values.
-    fn solve_packed(&mut self, values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
+    fn solve_packed(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
         let ok = refactor::refactor(
             self.n,
             &self.col_ptr,
             &self.row_idx,
-            &values,
+            values,
             &self.sym,
             &mut self.num,
             &mut self.scratch,
@@ -246,7 +269,10 @@ impl crate::sparse::LinearSolver for KluNativeSystem {
     }
 
     fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
-        self.solve_packed(pack_values_slice(values, &self.groups), rhs)
+        if self.in_order {
+            return self.solve_packed(values, rhs);
+        }
+        self.solve_packed(&pack_values_slice(values, &self.groups), rhs)
     }
 }
 
