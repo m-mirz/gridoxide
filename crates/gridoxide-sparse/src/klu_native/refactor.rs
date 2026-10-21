@@ -66,6 +66,10 @@ impl RefactorScratch {
 /// (matching `KLU_refactor`'s own "return FALSE, `Numeric` in an
 /// unspecified state" contract; the caller is expected to treat the whole
 /// solve as failed, not to keep using `num`).
+///
+/// With `rs` (row-indexed scale factors), each value is divided by its
+/// row's as it is scattered, as `klu_refactor.c` does when scaling.
+#[allow(clippy::too_many_arguments)]
 pub fn refactor(
     n: usize,
     col_ptr: &[i64],
@@ -74,6 +78,7 @@ pub fn refactor(
     sym: &Symbolic,
     num: &mut Numeric,
     scratch: &mut RefactorScratch,
+    rs: Option<&[f64]>,
 ) -> bool {
     // Row mapping uses the *final numeric* permutation from the previous
     // factorization (`num.pinv`), not the symbolic-only `pinv_sym`
@@ -122,12 +127,17 @@ pub fn refactor(
             refactor_block_in_place(nk, &mut num.blocks[block], &mut scratch.x[..nk], |k, x| {
                 let oldcol = sym.q[k + k1];
                 for p in col_ptr[oldcol] as usize..col_ptr[oldcol + 1] as usize {
+                    // `Az[p] / Rs[oldrow]`, as klu_refactor.c scatters it.
+                    let value = match rs {
+                        Some(rs) => values[p] / rs[row_idx[p] as usize],
+                        None => values[p],
+                    };
                     let to = target[p];
                     if to >= 0 {
-                        x[to as usize] = values[p];
+                        x[to as usize] = value;
                     } else {
                         off_i.push(flip(to));
-                        off_x.push(values[p]);
+                        off_x.push(value);
                     }
                 }
                 off_p[k + k1 + 1] = off_i.len() as i64;
@@ -285,7 +295,8 @@ mod tests {
             &values2,
             &sym,
             &mut num,
-            &mut scratch
+            &mut scratch,
+            None,
         ));
 
         let b = vec![1.0, -2.0, 0.5, 3.0, -1.0];
@@ -330,7 +341,7 @@ mod tests {
                 base.iter().map(|&(r, c, v)| (r, c, v * scale)).collect();
             let (cp, ri, vals) = to_csc(n, &updated);
             assert!(
-                refactor(n, &cp, &ri, &vals, &sym, &mut num, &mut scratch),
+                refactor(n, &cp, &ri, &vals, &sym, &mut num, &mut scratch, None),
                 "trial {trial}"
             );
 
@@ -412,7 +423,8 @@ mod tests {
                     &values2,
                     &sym,
                     &mut num,
-                    &mut scratch
+                    &mut scratch,
+                    None,
                 ),
                 "trial {trial} (n={n}): unexpectedly singular (refactor)"
             );

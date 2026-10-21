@@ -41,21 +41,27 @@
 //! is always AMD here), multi-RHS solve, complex arithmetic, and int64
 //! (`DLONG`) indices.
 //!
-//! **Row scaling (`scale.rs`) is ported but not yet wired into
-//! `KluNativeSystem` below** — a real, deliberate gap, not a silent one:
-//! `scale::scale` is fully implemented and differentially tested against
-//! real `klu_scale` in isolation, but `factor`/`refactor` here always run as
-//! if `Options.scale` were disabled (`Rs = None` throughout). Row scaling
-//! is a numerical-*stability* preconditioning step (which candidate pivots
-//! partial pivoting compares), not a correctness requirement — an unscaled
-//! factorization of a well-conditioned matrix still produces the exact
-//! solution, just with potentially different (still valid) pivot choices
-//! than real KLU's default-scaled path. gridoxide's own per-unit power-flow
-//! Jacobian is not pathologically ill-scaled, and the differential tests in
-//! `solve.rs`/`factor.rs`/`refactor.rs` (unscaled Rust vs. scaled real KLU,
-//! same matrices) already confirm the final solved `x` still matches to
-//! 1e-8. Wiring `Rs` all the way through `KluNativeSystem` remains future
-//! work if a pathological topology ever needs it.
+//! **Row scaling is optional, and off by default** (`KluNativeSystem::new`;
+//! `with_scale(.., 2)` scales as KLU's default does). Scaling divides every
+//! row by its largest magnitude before each factorization; it decides which
+//! pivots partial pivoting sees as large and how the arithmetic rounds, never
+//! what the solution is. Scaled, the port solves as SuiteSparse's KLU does —
+//! the same pivots and, on most matrices, the same bits
+//! (`tests::scaled_matches_real_klu`).
+//!
+//! Off by default because it buys nothing measurable for power-flow
+//! Jacobians and costs 11–15% of a solve. `examples/klu_scaling_stress.rs`
+//! runs the worst-scaled networks at hand — the PEGASE and RTE MATPOWER
+//! cases, CGMES RealGrid, MiniGrid and SmallGrid with every switch kept as
+//! a stiff branch, and PGM feeders whose source is made 1e30 VA stiff, rows
+//! spanning up to 24 orders of magnitude. Unscaled, the backward error of a
+//! Jacobian solve stays at machine precision (≤ 7e-17) and the solution is
+//! within 5e-11 of KLU's; every Newton solve takes the same iterations as on
+//! SuiteSparse's KLU and fails, where it fails, the same way. A Newton step
+//! only has to point the right way — the mismatch it is judged by is
+//! recomputed from the network every iteration — which is why a little
+//! less pivoting accuracy, if there were any, would cost an iteration rather
+//! than a wrong answer.
 //!
 //! **Module layout** (mirrors the phased port plan; each submodule's doc
 //! comment names the specific upstream `.c` file(s) it was translated from):
@@ -152,6 +158,16 @@ pub struct KluNativeSystem {
     in_order: bool,
     sym: analyze::Symbolic,
     num: factor::Numeric,
+    /// KLU's `Common->scale`: 2 divides every row by its largest magnitude
+    /// before each factorization (KLU's default), 1 by its sum, 0 not at all.
+    scale: i32,
+    /// The row scale factors of the last factorization, in pivot order
+    /// (`rs[k]` for row `pnum[k]`), as `klu_solve.c` reads `Numeric->Rs`;
+    /// empty when not scaling.
+    rs: Vec<f64>,
+    /// The row-indexed scale factors of the last call, kept so the next
+    /// reuses the allocation.
+    raw: Vec<f64>,
     /// Reused across every `factor_and_solve` call (see
     /// `refactor::RefactorScratch`'s own doc comment) — keeping this alive
     /// for the system's whole lifetime, instead of creating one per call,
@@ -169,31 +185,69 @@ impl KluNativeSystem {
     /// equality). Returns `None` if the matrix is structurally or
     /// numerically singular.
     pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
+        Self::with_scale(n, entries, 0)
+    }
+
+    /// [`new`](Self::new) with KLU's row scaling: `scale` is
+    /// `Common->scale` (2 divides each row by its largest magnitude, KLU's
+    /// default; 1 by its sum; 0 does not scale). As in `klu_factor.c` and
+    /// `klu_refactor.c`, the factors are recomputed from every new set of
+    /// values, each value is divided by its row's, and the solve divides the
+    /// right-hand side by the same, so the solution is unchanged: scaling
+    /// only decides which pivots partial pivoting sees as large, and how the
+    /// arithmetic rounds.
+    pub fn with_scale(n: usize, entries: &[(usize, usize, f64)], scale: i32) -> Option<Self> {
         let pairs: Vec<(usize, usize)> = entries.iter().map(|&(r, c, _)| (r, c)).collect();
         let (col_ptr, row_idx, groups) = build_csc_structure(n, &pairs);
         let values = pack_values(entries, &groups);
 
         let sym = analyze::analyze(n, &col_ptr, &row_idx);
-        let num = factor::factor(
-            n,
-            &col_ptr,
-            &row_idx,
-            &values,
-            &sym,
-            types::Options::default().tol,
-        )?;
-        let scratch = refactor::RefactorScratch::new(n);
-
-        Some(Self {
+        let mut system = Self {
             n,
             col_ptr,
             row_idx,
             groups,
             in_order: false,
             sym,
-            num,
-            scratch,
-        })
+            num: factor::Numeric::default(),
+            scale,
+            rs: Vec::new(),
+            raw: Vec::new(),
+            scratch: refactor::RefactorScratch::new(n),
+        };
+        // The first factorization validates the pattern as `klu_scale`
+        // does; every refactorization after reuses it unchecked.
+        let scaled: Vec<f64> = if scale > 0 {
+            system.raw = scale::scale(scale, n, &system.col_ptr, &system.row_idx, &values, false)?;
+            values
+                .iter()
+                .zip(&system.row_idx)
+                .map(|(&v, &row)| v / system.raw[row as usize])
+                .collect()
+        } else {
+            values
+        };
+        system.num = factor::factor(
+            n,
+            &system.col_ptr,
+            &system.row_idx,
+            &scaled,
+            &system.sym,
+            types::Options::default().tol,
+        )?;
+        system.permute_scale();
+        Some(system)
+    }
+
+    /// Puts the row-indexed factors of the last factorization in pivot
+    /// order, `rs[k] = raw[pnum[k]]`, as `klu_factor.c` does at its end.
+    fn permute_scale(&mut self) {
+        self.rs.clear();
+        if self.scale > 0 {
+            let raw = &self.raw;
+            self.rs
+                .extend(self.num.pnum.iter().map(|&row| raw[row as usize]));
+        }
     }
 
     /// Numeric-only refactorization against the cached symbolic pattern,
@@ -234,6 +288,9 @@ impl KluNativeSystem {
     /// Shared tail of both `factor_and_solve` paths, taking already-packed
     /// CSC values.
     fn solve_packed(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        if self.scale > 0 {
+            scale::row_factors_into(self.scale, self.n, &self.row_idx, values, &mut self.raw);
+        }
         let ok = refactor::refactor(
             self.n,
             &self.col_ptr,
@@ -242,12 +299,15 @@ impl KluNativeSystem {
             &self.sym,
             &mut self.num,
             &mut self.scratch,
+            (self.scale > 0).then_some(&self.raw[..]),
         );
         if !ok {
             return None;
         }
+        self.permute_scale();
 
-        let x = solve::solve(&self.sym, &self.num, None, rhs);
+        let rs = (!self.rs.is_empty()).then_some(&self.rs[..]);
+        let x = solve::solve(&self.sym, &self.num, rs, rhs);
         if x.iter().any(|v| !v.is_finite()) {
             return None;
         }
@@ -302,6 +362,74 @@ mod tests {
     fn singular_matrix_returns_none() {
         let entries = vec![(0, 0, 1.0), (0, 1, 1.0), (1, 0, 2.0), (1, 1, 2.0)];
         assert!(KluNativeSystem::new(2, &entries).is_none());
+    }
+
+    /// Random matrices whose rows span twelve orders of magnitude and whose
+    /// diagonals do not dominate, so partial pivoting has real choices and
+    /// row scaling changes them.
+    #[cfg(feature = "klu")]
+    fn badly_scaled(
+        trial: usize,
+        next_f64: &mut impl FnMut() -> f64,
+    ) -> (usize, Vec<(usize, usize, f64)>) {
+        let n = 5 + (trial % 20);
+        let row_scale: Vec<f64> = (0..n)
+            .map(|_| 10f64.powf(next_f64() * 12.0 - 6.0))
+            .collect();
+        let mut entries = Vec::new();
+        for i in 0..n {
+            let mut js: std::collections::BTreeSet<usize> = [i, (i + 1) % n].into();
+            for _ in 0..3 {
+                js.insert((next_f64() * n as f64) as usize);
+            }
+            for j in js {
+                entries.push((i, j, (next_f64() * 2.0 - 1.0) * row_scale[i]));
+            }
+        }
+        (n, entries)
+    }
+
+    /// With KLU's default row scaling the port solves as KLU does, on
+    /// matrices where scaling changes the pivots: to rounding (most trials
+    /// agree to the last bit; the rest differ in the order a sum is taken).
+    #[cfg(feature = "klu")]
+    #[test]
+    fn scaled_matches_real_klu() {
+        let mut seed: u64 = 0x5DEECE66D2F1A3B7;
+        let mut next_f64 = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut compared = 0;
+        for trial in 0..60 {
+            let (n, entries) = badly_scaled(trial, &mut next_f64);
+            let (Some(mut real), Some(mut native)) = (
+                crate::sparse_klu::KluRealSystem::new(n, &entries),
+                KluNativeSystem::with_scale(n, &entries, 2),
+            ) else {
+                continue;
+            };
+            for pass in 0..2 {
+                let b: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.3 + pass as f64).collect();
+                let (Some(real_x), Some(native_x)) = (
+                    real.factor_and_solve(&entries, &b),
+                    native.factor_and_solve(&entries, &b),
+                ) else {
+                    continue;
+                };
+                let size = real_x.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+                for (i, (a, b)) in native_x.iter().zip(&real_x).enumerate() {
+                    assert!(
+                        (a - b).abs() <= 1e-12 * size,
+                        "trial {trial} pass {pass} (n={n}), index {i}: native={a} real={b}"
+                    );
+                }
+                compared += 1;
+            }
+        }
+        assert!(compared > 60, "only {compared} solves compared");
     }
 
     #[cfg(feature = "klu")]

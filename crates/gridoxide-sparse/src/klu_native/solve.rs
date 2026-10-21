@@ -273,7 +273,8 @@ mod tests {
             &values2,
             &sym,
             &mut num,
-            &mut scratch
+            &mut scratch,
+            None,
         ));
 
         let b = vec![1.0, 2.0, -1.0, 0.5];
