@@ -330,6 +330,11 @@ path = "examples/tap_control_probe.rs"
 required-features = ["cgmes"]
 
 [[example]]
+name = "klu_scaling_stress"
+path = "examples/klu_scaling_stress.rs"
+required-features = ["matpower", "cgmes", "klu"]
+
+[[example]]
 name = "pf_profile"
 path = "examples/pf_profile.rs"
 required-features = ["matpower"]
