@@ -330,6 +330,11 @@ path = "examples/tap_control_probe.rs"
 required-features = ["cgmes"]
 
 [[example]]
+name = "pf_profile"
+path = "examples/pf_profile.rs"
+required-features = ["matpower"]
+
+[[example]]
 name = "tap_deadband_probe"
 path = "examples/tap_deadband_probe.rs"
 required-features = ["cgmes"]
