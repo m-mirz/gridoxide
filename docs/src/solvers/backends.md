@@ -61,8 +61,13 @@ warm-vs-cold figures.
 intentionally the only file that imports `faer` types directly, so a different sparse-solver backend
 can be swapped in behind the same interface without touching the rest of the codebase.
 
-`solver::newton_raphson` always uses the default `Scalar` (`faer`-backed) path.
-`newton_raphson_with_backend` additionally accepts four alternatives via `solver::JacobianBackend`:
+The default backend is `KluNative`, the Rust port of KLU: on the power-flow Jacobians gridoxide is
+benchmarked on it is about six times faster than `Scalar` (case9241pegase: 15 ms against 87) and within
+15% of SuiteSparse's own KLU, with no build requirement. It scales rows and falls back to a fresh
+factorization when a refactor meets a zero pivot, as SuiteSparse's KLU is used. `solver::newton_raphson` uses it, as does every
+`Default` that names a backend (`PowerFlowOptions`, `SeOptions`, `DynamicsOptions`, the Python
+constructors, the C API's `gridoxide_options_default`). `newton_raphson_with_backend` accepts any of
+`solver::JacobianBackend`'s variants: `Scalar` (`faer`) and the alternatives below.
 
 ### `Block`
 

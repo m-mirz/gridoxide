@@ -4,8 +4,9 @@
 //! separate scalar unknowns scattered across the Jacobian.
 //!
 //! This is a **parallel, opt-in** backend (`solver::JacobianBackend::Block`)
-//! — the default `Scalar` path (`sparse.rs`, backed by `faer`) is completely
-//! untouched by this module, so a bug here cannot affect existing behavior.
+//! — the `Scalar` path (`sparse.rs`, backed by `faer`) and the default
+//! `KluNative` are untouched by this module, so a bug here cannot affect
+//! them.
 //! Scoped to symmetric power flow only. Every non-slack bus, PV or PQ, gets
 //! a uniform 2×2 block here — this module itself has no notion of bus
 //! types; `solver::build_jacobian_blocks` is what encodes a `PV` bus's

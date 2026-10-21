@@ -236,8 +236,8 @@ impl PowerFlowModel {
     /// Loads a PGM-format JSON file (the same format `examples/bench_network.rs`
     /// and `matpower_to_pgm.py`/`convert_pandapower_case.py` produce).
     ///
-    /// `backend` is `"scalar"` (default), `"block"`, `"klu"` (needs the
-    /// crate's `klu` feature built in too), `"klu_native"`, or `"pardiso"`
+    /// `backend` is `"klu_native"` (default), `"scalar"`, `"block"`, `"klu"`
+    /// (needs the crate's `klu` feature built in too), or `"pardiso"`
     /// (needs the crate's `pardiso` feature built in too, plus `MKLROOT`
     /// set at build time).
     /// `s_base_va`/`freq_hz` match
@@ -254,7 +254,7 @@ impl PowerFlowModel {
     #[staticmethod]
     #[pyo3(signature = (
         path,
-        backend="scalar",
+        backend="klu_native",
         tol=1e-6,
         max_iter=20,
         s_base_va=1e6,
@@ -332,7 +332,7 @@ impl PowerFlowModel {
     #[staticmethod]
     #[pyo3(signature = (
         path,
-        backend="scalar",
+        backend="klu_native",
         tol=1e-6,
         max_iter=20,
         method="newton_raphson",
@@ -410,7 +410,7 @@ impl PowerFlowModel {
     #[staticmethod]
     #[pyo3(signature = (
         paths,
-        backend="scalar",
+        backend="klu_native",
         tol=1e-6,
         max_iter=20,
         s_base_va=100e6,
@@ -1730,7 +1730,7 @@ impl StateEstimationModel {
     /// not carry: `link`, `three_winding_transformer`, `voltage_regulator`, and
     /// transformer winding pairs outside Dyn and YNyn.
     #[staticmethod]
-    #[pyo3(signature = (path, backend="scalar", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0, asymmetric=false))]
+    #[pyo3(signature = (path, backend="klu_native", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0, asymmetric=false))]
     #[allow(clippy::too_many_arguments)]
     fn from_pgm_json(
         path: &str,

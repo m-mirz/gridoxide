@@ -178,7 +178,7 @@ impl Default for PowerFlowOptions {
             // exactly.
             tol: 1e-6,
             max_iter: 20,
-            backend: JacobianBackend::Scalar,
+            backend: JacobianBackend::default(),
             method: PowerFlowMethod::default(),
             init: PowerFlowInit::default(),
             enforce_q_limits: false,
@@ -671,7 +671,7 @@ fn finished_ybus(
 pub fn run_power_flow_analysis_from_ybus(mut buses: Vec<Bus>, ybus: YBus) -> PowerFlowReport {
     let ybus = ybus.finish();
     linear_initial_guess(&mut buses, &ybus);
-    let mut solver = PersistentSolver::new(JacobianBackend::Scalar);
+    let mut solver = PersistentSolver::new(JacobianBackend::default());
     let (islands, stats) = solver.solve_with_stats(&mut buses, &ybus, 1e-6, 20);
     PowerFlowReport {
         buses,

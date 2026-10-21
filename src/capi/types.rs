@@ -191,13 +191,13 @@ impl From<GridoxideShunt> for ShuntAdm {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GridoxideBackend {
-    /// faer's sparse LU. Always available; the default.
+    /// faer's sparse LU. Always available.
     Scalar = 0,
     /// Per-bus 2×2 real blocks. Always available.
     Block = 1,
     /// SuiteSparse KLU. Needs the `klu` feature.
     Klu = 2,
-    /// The pure-Rust KLU port. Needs no feature.
+    /// The pure-Rust KLU port. Needs no feature; the default.
     KluNative = 3,
     /// Intel oneMKL PARDISO. Needs the `pardiso` feature.
     Pardiso = 4,
@@ -231,7 +231,7 @@ pub struct GridoxideOptions {
 impl Default for GridoxideOptions {
     fn default() -> Self {
         Self {
-            backend: GridoxideBackend::Scalar,
+            backend: GridoxideBackend::KluNative,
             tolerance: 1e-8,
             max_iterations: 20,
             s_base_va: 1e6,

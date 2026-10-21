@@ -131,7 +131,7 @@ impl Default for DynamicsOptions {
             damping_steps: 2,
             events: Vec::new(),
             relays: Vec::new(),
-            backend: JacobianBackend::Scalar,
+            backend: JacobianBackend::default(),
         }
     }
 }

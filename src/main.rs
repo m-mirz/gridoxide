@@ -1037,8 +1037,8 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
     }
 
     let backend = match flag_value(flags, "--backend")?.as_deref() {
-        None | Some("scalar") => JacobianBackend::Scalar,
-        Some("klu-native") => JacobianBackend::KluNative,
+        Some("scalar") => JacobianBackend::Scalar,
+        None | Some("klu-native") => JacobianBackend::KluNative,
         Some(other) => {
             return Err(format!(
                 "--backend: expected scalar or klu-native, got {other:?}"

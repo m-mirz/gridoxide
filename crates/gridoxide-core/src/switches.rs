@@ -297,7 +297,7 @@ pub fn conditioning_probe(
 
             let ybus = build_ybus(n_buses, &lines, &switches).finish();
             crate::network::linear_initial_guess(&mut buses, &ybus);
-            let (_, stats) = PersistentSolver::new(JacobianBackend::Scalar)
+            let (_, stats) = PersistentSolver::new(JacobianBackend::default())
                 .solve_with_stats(&mut buses, &ybus, tol, max_iter);
 
             let finite = buses
