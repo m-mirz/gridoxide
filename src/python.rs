@@ -1720,6 +1720,38 @@ struct StateEstimationModel {
     estimator: crate::se::nr::PersistentEstimator,
 }
 
+impl StateEstimationModel {
+    /// The model of `case`. One value of `options` is shared by the field and
+    /// the estimator: these used to be two separately-constructed copies,
+    /// harmless while nothing read the field — `solve_batch` now does.
+    fn from_case(
+        case: crate::se::case::SeCase,
+        options: crate::se::nr::SeOptions,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            buses: case.buses.clone(),
+            buses_template: case.buses,
+            phases: case.phases,
+            node_idx: case.node_idx,
+            se_net: case.network,
+            measurements: case.measurements,
+            options,
+            report: None,
+            estimator: crate::se::nr::PersistentEstimator::new(options),
+        })
+    }
+}
+
+fn parse_se_method(name: &str) -> PyResult<crate::se::nr::SeMethod> {
+    match name {
+        "newton_raphson" => Ok(crate::se::nr::SeMethod::NewtonRaphson),
+        "iterative_linear" => Ok(crate::se::nr::SeMethod::IterativeLinear),
+        other => Err(PyValueError::new_err(format!(
+            "unknown method {other:?}, expected 'newton_raphson' or 'iterative_linear'"
+        ))),
+    }
+}
+
 #[pymethods]
 impl StateEstimationModel {
     /// Loads a PGM-format JSON document containing sensors.
@@ -1787,15 +1819,7 @@ impl StateEstimationModel {
                  its impedance",
             ));
         }
-        let method = match method {
-            "newton_raphson" => crate::se::nr::SeMethod::NewtonRaphson,
-            "iterative_linear" => crate::se::nr::SeMethod::IterativeLinear,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown method {other:?}, expected 'newton_raphson' or 'iterative_linear'"
-                )));
-            }
-        };
+        let method = parse_se_method(method)?;
         let raw = std::fs::read_to_string(path)
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
         let input: PgmInput = serde_json::from_str(&raw)
@@ -1820,27 +1844,89 @@ impl StateEstimationModel {
             case.drop_zero_injection();
         }
 
-        // One value shared by the field and the estimator. These used to be two
-        // separately-constructed copies, harmless while nothing read the field
-        // — `solve_batch` now does.
-        let options = crate::se::nr::SeOptions {
-            tol,
-            max_iter,
-            backend: parse_backend(backend)?,
-            method,
-        };
+        Self::from_case(
+            case,
+            crate::se::nr::SeOptions {
+                tol,
+                max_iter,
+                backend: parse_backend(backend)?,
+                method,
+            },
+        )
+    }
 
-        Ok(Self {
-            buses: case.buses.clone(),
-            buses_template: case.buses,
-            phases: case.phases,
-            node_idx: case.node_idx,
-            se_net: case.network,
-            measurements: case.measurements,
-            options,
-            report: None,
-            estimator: crate::se::nr::PersistentEstimator::new(options),
-        })
+    /// Loads a MATPOWER case (`.m`) by gridoxide's own reader, the one
+    /// `PowerFlowModel.from_matpower` uses, and places `measurements` on it.
+    ///
+    /// The network is the one MATPOWER's `runpf` solves, read directly: the
+    /// reference bus is the angle reference, with its magnitude estimated, and
+    /// no converter stands in between, so phase shifts and transformer charging
+    /// are exactly the case's. No bus is held at zero injection.
+    ///
+    /// Each measurement is `(kind, at, value, sigma)`, in MATPOWER's own terms:
+    ///
+    /// - `"vm"`: |V| at bus number `at`, per unit;
+    /// - `"p_inj"`, `"q_inj"`: the injection at bus number `at`, MW and MVAr,
+    ///   positive into the network (generation less load; not the shunt);
+    /// - `"p_from"`, `"q_from"`, `"p_to"`, `"q_to"`: the flow at one end of the
+    ///   branch in row `at` of `mpc.branch` (0-based), MW and MVAr, positive
+    ///   out of that end's bus into the branch.
+    ///
+    /// `sigma` is in the value's own units. `nodes()` pairs each bus number
+    /// with its index.
+    #[staticmethod]
+    #[pyo3(signature = (path, measurements, backend="klu_native", method="newton_raphson", tol=1e-8, max_iter=20))]
+    fn from_matpower(
+        path: &str,
+        measurements: Vec<(String, u64, f64, f64)>,
+        backend: &str,
+        method: &str,
+        tol: f64,
+        max_iter: usize,
+    ) -> PyResult<Self> {
+        use crate::matpower::{CaseMeasurement, MatpowerError, MeasuredQuantity as Q};
+        let method = parse_se_method(method)?;
+        let net = crate::matpower::read(path).map_err(|e| match e {
+            MatpowerError::Io(e) => PyRuntimeError::new_err(format!("reading {path}: {e}")),
+            e => PyValueError::new_err(format!("{path}: {e}")),
+        })?;
+        let measurements = measurements
+            .into_iter()
+            .map(|(kind, at, value, sigma)| {
+                let quantity = match kind.as_str() {
+                    "vm" => Q::VoltageMagnitude,
+                    "p_inj" => Q::ActiveInjection,
+                    "q_inj" => Q::ReactiveInjection,
+                    "p_from" => Q::ActiveFlowFrom,
+                    "q_from" => Q::ReactiveFlowFrom,
+                    "p_to" => Q::ActiveFlowTo,
+                    "q_to" => Q::ReactiveFlowTo,
+                    other => {
+                        return Err(PyValueError::new_err(format!(
+                            "unknown measurement kind {other:?}, expected 'vm', 'p_inj', \
+                             'q_inj', 'p_from', 'q_from', 'p_to' or 'q_to'"
+                        )));
+                    }
+                };
+                Ok(CaseMeasurement {
+                    quantity,
+                    at,
+                    value,
+                    sigma,
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let case = crate::matpower::se_case(&net, &measurements)
+            .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        Self::from_case(
+            case,
+            crate::se::nr::SeOptions {
+                tol,
+                max_iter,
+                backend: parse_backend(backend)?,
+                method,
+            },
+        )
     }
 
     /// 1 symmetric, 3 in the phase domain.
