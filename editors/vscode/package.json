@@ -1,0 +1,71 @@
+{
+  "name": "gridoxide",
+  "displayName": "gridoxide — power flow",
+  "description": "An MCP server that lets chat find, summarise and solve the power networks of your workspace: MATPOWER, UCTE-DEF, IIDM and CGMES",
+  "version": "0.0.2",
+  "publisher": "m-mirz",
+  "icon": "icon.png",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m-mirz/gridoxide"
+  },
+  "homepage": "https://m-mirz.github.io/gridoxide/",
+  "keywords": [
+    "power flow",
+    "power systems",
+    "matpower",
+    "cgmes",
+    "mcp"
+  ],
+  "categories": [
+    "AI",
+    "Data Science"
+  ],
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "activationEvents": [
+    "onMcpServerDefinitionProvider:gridoxide"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "gridoxide",
+        "label": "gridoxide — power networks"
+      }
+    ],
+    "configuration": {
+      "title": "gridoxide",
+      "properties": {
+        "gridoxide.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Offer the `gridmcp` MCP server to chat (Copilot agent mode and other MCP clients in VS Code): tools to list, summarise and solve the power networks of the workspace."
+        },
+        "gridoxide.mcp.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to a `gridmcp` binary. Empty: the one bundled with the extension, else `gridmcp` on `PATH`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build -- --minify && node -e \"require('fs').copyFileSync('../../LICENSE', 'LICENSE')\"",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18",
+    "watch": "npm run build -- --sourcemap --watch",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "test": "npm run build && esbuild test/suite.ts --bundle --outfile=dist/test/suite.js --external:vscode --format=cjs --platform=node && node test/run.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "~1.101.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

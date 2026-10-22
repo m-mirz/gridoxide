@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 128 128">
+  <!-- The extension's icon, after cimoxide's: a meshed grid of buses fed from the slack at its
+       centre, power flowing outward along each line. Copper for the conductor, verdigris for its
+       oxide. icon.png is rendered from this file. -->
+  <rect width="128" height="128" rx="26" fill="#14232b"/>
+  <g stroke="#4fb59c" stroke-width="6" stroke-linecap="round" fill="none">
+    <path d="M30 30H98V98H30Z" stroke-linejoin="round"/>
+    <path d="M64 64L30 30M64 64L98 30M64 64L98 98M64 64L30 98"/>
+  </g>
+  <!-- Flow arrows, midway along each spoke, pointing away from the slack. -->
+  <g fill="#f1e4d6">
+    <path d="M39 39L53 43.5L43.5 53Z"/>
+    <path d="M89 39L75 43.5L84.5 53Z"/>
+    <path d="M89 89L75 84.5L84.5 75Z"/>
+    <path d="M39 89L53 84.5L43.5 75Z"/>
+  </g>
+  <g fill="#d9773f">
+    <circle cx="30" cy="30" r="10"/><circle cx="98" cy="30" r="10"/>
+    <circle cx="98" cy="98" r="10"/><circle cx="30" cy="98" r="10"/>
+  </g>
+  <circle cx="64" cy="64" r="12" fill="#f1e4d6"/>
+</svg>

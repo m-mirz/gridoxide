@@ -1,0 +1,29 @@
+# The `gridmcp` binary as a Python wheel, so MCP clients can run it with
+# `uvx --from gridoxide-mcp gridmcp` and nothing installed beforehand. No Python
+# code: maturin puts the binary in each platform's wheel as a script.
+
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gridoxide-mcp"
+dynamic = ["version"]
+description = "gridmcp: an MCP server that lets an LLM chat find, summarise and solve power networks (MATPOWER, UCTE-DEF, IIDM, CGMES)"
+readme = "README.md"
+license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
+requires-python = ">=3.8"
+keywords = ["mcp", "power-flow", "cgmes", "matpower", "power-systems"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Environment :: Console",
+]
+
+[project.urls]
+Repository = "https://github.com/m-mirz/gridoxide"
+Issues = "https://github.com/m-mirz/gridoxide/issues"
+Documentation = "https://m-mirz.github.io/gridoxide/"
+
+[tool.maturin]
+bindings = "bin"

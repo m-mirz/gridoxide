@@ -28,6 +28,13 @@ pub mod cgmes;
 pub mod dynamics;
 #[cfg(feature = "iidm")]
 pub mod iidm;
+#[cfg(any(
+    feature = "ucte",
+    feature = "iidm",
+    feature = "cgmes",
+    feature = "matpower"
+))]
+pub mod load;
 #[cfg(feature = "matpower")]
 pub mod matpower;
 #[cfg(feature = "opf")]

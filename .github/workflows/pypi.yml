@@ -114,10 +114,49 @@ jobs:
           name: wheels-sdist
           path: dist
 
+  # gridoxide-mcp: the `gridmcp` binary as a wheel (maturin `bindings = "bin"`),
+  # so MCP clients can start it with `uvx --from gridoxide-mcp gridmcp`. Wheels
+  # only, for the platforms the bindings ship. No submodules: the binary is
+  # built from source alone.
+  mcp:
+    name: gridoxide-mcp ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest, target: x86_64 }
+          - { name: windows-x64, os: windows-latest, target: x64 }
+          - { name: macos-aarch64, os: macos-latest, target: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mcp-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-mcp-${{ matrix.target }}-
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          working-directory: crates/gridoxide-mcp
+          args: --release --out ../../dist
+          manylinux: auto
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-mcp-${{ matrix.name }}
+          path: dist
+
   publish:
     name: Publish to PyPI
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, windows, macos, sdist]
+    needs: [linux, windows, macos, sdist, mcp]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
