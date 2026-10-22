@@ -62,6 +62,25 @@ def test_reset_then_solve_still_converges():
         assert actual == pytest.approx(expected, abs=1e-5)
 
 
+def test_ideal_sources_drop_the_virtual_bus(tmp_path):
+    """An ideal source holds its node at `u_ref` with no bus of its own, and a
+    very stiff impedance source tends to it."""
+    data = json.loads(INPUT_JSON.read_text())
+    n_nodes = len(data["data"]["node"])
+    ideal = gridoxide.PowerFlowModel.from_pgm_json(str(INPUT_JSON), tol=1e-10, ideal_sources=True)
+    ideal.solve()
+    assert len(ideal.voltage_mag()) == n_nodes
+    for source in data["data"]["source"]:
+        source["sk"] = 1e20
+    stiff_input = tmp_path / "stiff.json"
+    stiff_input.write_text(json.dumps(data))
+    stiff = gridoxide.PowerFlowModel.from_pgm_json(str(stiff_input), tol=1e-10)
+    stiff.solve()
+    assert len(stiff.voltage_mag()) == n_nodes + len(data["data"]["source"])
+    assert ideal.voltage_mag() == pytest.approx(stiff.voltage_mag()[:n_nodes], abs=1e-9)
+    assert ideal.voltage_ang() == pytest.approx(stiff.voltage_ang()[:n_nodes], abs=1e-9)
+
+
 def test_missing_file_raises():
     with pytest.raises(RuntimeError):
         gridoxide.PowerFlowModel.from_pgm_json("/nonexistent/path/does/not/exist.json")

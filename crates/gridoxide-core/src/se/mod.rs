@@ -720,9 +720,10 @@ pub(crate) mod tests {
 
     /// The identity that makes `NodeInjection` a separate measurement function
     /// rather than a relabelling of `Bus`: it is the bus injection plus the
-    /// contributions gridoxide models structurally.
+    /// source's, which gridoxide models structurally. The shunt at the bus is
+    /// left out, as power-grid-model leaves it out.
     #[test]
-    fn node_injection_is_bus_plus_source_plus_shunt() {
+    fn node_injection_is_bus_plus_source() {
         let (net, buses) = two_bus_net();
         let ms = |target| Measurement {
             kind: MeasurementKind::ActivePower,
@@ -738,9 +739,7 @@ pub(crate) mod tests {
             .map(|b| Complex::from_polar(b.voltage_mag, b.voltage_ang))
             .collect();
         let power = |t| net.functional(t).expect("functional").power(&v).re;
-        let expected = h[0]
-            + power(Target::SourceInjection { branch: 0 })
-            + power(Target::ShuntInjection { bus: 1 });
+        let expected = h[0] + power(Target::SourceInjection { branch: 0 });
         assert!(
             (h[1] - expected).abs() < 1e-12,
             "node={} expected={expected}",

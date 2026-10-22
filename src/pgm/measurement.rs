@@ -256,6 +256,8 @@ struct Accumulators {
 trait Resolver {
     fn resolve_terminal(&self, id: u64, terminal: Terminal) -> Option<(usize, Terminal)>;
     fn source_branch(&self, id: u64) -> Option<usize>;
+    /// The bus an ideal source injects at; see [`SourceModel::Ideal`](super::SourceModel::Ideal).
+    fn ideal_source_bus(&self, id: u64) -> Option<usize>;
     fn appliance_bus(&self, id: u64) -> Option<usize>;
     fn node_bus(&self, id: u64) -> Option<usize>;
     fn three_winding_legs(&self, id: u64) -> Option<[usize; 3]>;
@@ -267,6 +269,9 @@ impl Resolver for PgmNetwork {
     }
     fn source_branch(&self, id: u64) -> Option<usize> {
         self.source_branch_idx.get(&id).copied()
+    }
+    fn ideal_source_bus(&self, id: u64) -> Option<usize> {
+        self.ideal_source_bus.get(&id).copied()
     }
     fn appliance_bus(&self, id: u64) -> Option<usize> {
         self.appliance_bus.get(&id).copied()
@@ -302,6 +307,10 @@ impl Resolver for PhaseView<'_> {
             .source_branch_idx
             .get(&id)
             .map(|&b| 3 * b + self.phase)
+    }
+    fn ideal_source_bus(&self, _id: u64) -> Option<usize> {
+        // The phase domain models every source with its impedance.
+        None
     }
     fn appliance_bus(&self, id: u64) -> Option<usize> {
         self.net.appliance_bus.get(&id).map(|&k| 3 * k + self.phase)
@@ -364,6 +373,30 @@ fn route_power_reading(
         // gridoxide puts a virtual slack bus and an impedance branch behind
         // every source, so by KCL its power never reaches the node's injection.
         // Generator reference direction, so no sign change.
+        // An ideal source has no branch: its node is the slack, and its power
+        // is part of that node's injection like a generator's, so it joins the
+        // appliances there.
+        2 if net.ideal_source_bus(measured_object).is_some() => {
+            let bus = net
+                .ideal_source_bus(measured_object)
+                .expect("checked by the guard");
+            let entry = acc
+                .appliances
+                .entry(measured_object)
+                .or_insert(ApplianceAccumulator {
+                    bus,
+                    sign: 1.0,
+                    is_shunt: false,
+                    p: Merged::default(),
+                    q: Merged::default(),
+                });
+            if let Some((v, s)) = p {
+                entry.p.add(v, s);
+            }
+            if let Some((v, s)) = q {
+                entry.q.add(v, s);
+            }
+        }
         2 => {
             let Some(branch) = net.source_branch(measured_object) else {
                 // An inactive source has no synthesized branch, so there is
@@ -1003,7 +1036,7 @@ fn flatten(mut acc: Accumulators) -> Vec<Measurement> {
         // observations of one quantity, so they stay separate rows. Merging
         // them (as an earlier version did) would assert that a node-injection
         // sensor and a load sensor see the same thing, which is only true when
-        // the bus has no source and no shunt.
+        // the bus has no source.
         for (kind, appliance, shunt, node) in [
             (
                 MeasurementKind::ActivePower,

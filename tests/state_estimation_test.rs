@@ -284,6 +284,135 @@ fn estimates_from_a_local_angle_current_sensor() {
     assert_estimate_matches("local-current-sensor", JacobianBackend::Scalar, 1e-6);
 }
 
+/// A node-injection sensor on a bus with a shunt reads the load alone:
+/// power-grid-model counts the shunt as part of the network. Reading it as
+/// one of the node's appliances misses the shunt's power at every iteration
+/// and settles on a wrong state.
+#[test]
+fn node_injection_sensor_leaves_the_shunt_out() {
+    assert_estimate_matches(
+        "node-injection-sensor-with-shunt",
+        JacobianBackend::Scalar,
+        1e-6,
+    );
+}
+
+/// An ideal source: its node is the slack, with no virtual bus behind it, and a
+/// sensor on the source reads part of that node's injection, the way a
+/// generator's does.
+///
+/// power-grid-model's estimate of this fixture puts its source behind the
+/// default 1e10 VA, but with every magnitude and both other injections measured
+/// the state does not depend on the source model, so the ideal estimate has to
+/// reproduce it, up to the angle reference.
+#[test]
+fn an_ideal_source_estimates_and_reads_its_sensor_at_the_node() {
+    use gridoxide::pgm::SourceModel;
+    use gridoxide::pgm::se::se_case_from_pgm_with;
+
+    let dir = fixture_dir("node-injection-sensor-with-shunt");
+    let expected = common::load_json(&dir.join("sym_output.json"));
+    let nodes = expected["data"]["node"].as_array().expect("node output");
+    // Node 1 carries the source and nothing else, so its published injection
+    // is the source's power.
+    let (p1, q1) = (
+        nodes[0]["p"].as_f64().unwrap(),
+        nodes[0]["q"].as_f64().unwrap(),
+    );
+    let mut raw = common::load_json(&dir.join("input.json"));
+    raw["data"]["sym_power_sensor"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": 99, "measured_object": 6, "measured_terminal_type": 2,
+            "power_sigma": 1e4, "p_measured": p1, "q_measured": q1
+        }));
+    let input: gridoxide::pgm::PgmInput = serde_json::from_value(raw).expect("input");
+
+    let case = se_case_from_pgm_with(&input, S_BASE_VA, 50.0, SourceModel::Ideal).expect("case");
+    assert_eq!(case.buses.len(), 3, "no virtual bus");
+    let source_bus = case.node_idx[&1];
+    let row = case
+        .measurements
+        .iter()
+        .find(|m| m.kind == MeasurementKind::ActivePower && m.target == Target::Bus(source_bus))
+        .expect("the source sensor becomes an injection row at its node");
+    assert!((row.value - p1 / S_BASE_VA).abs() < 1e-12);
+
+    let mut buses = case.buses.clone();
+    linear_start(&mut buses, &case.network, &case.measurements);
+    let report = estimate(
+        &case.measurements,
+        &mut buses,
+        &case.network,
+        &SeOptions::default(),
+    );
+    assert_eq!(report.status, SeStatus::Converged, "{report:?}");
+    assert!(
+        report.objective < 1e-12,
+        "objective {:.3e}",
+        report.objective
+    );
+    let reference = nodes[0]["u_angle"].as_f64().unwrap();
+    for node in nodes {
+        let idx = case.node_idx[&node["id"].as_u64().unwrap()];
+        let (u_pu, u_angle) = (
+            node["u_pu"].as_f64().unwrap(),
+            node["u_angle"].as_f64().unwrap(),
+        );
+        assert!(
+            (buses[idx].voltage_mag - u_pu).abs() < 1e-6,
+            "node {}",
+            node["id"]
+        );
+        assert!(
+            (buses[idx].voltage_ang - (u_angle - reference)).abs() < 1e-6,
+            "node {}",
+            node["id"]
+        );
+    }
+}
+
+/// A schedule that says nothing about the measurements cannot steer the start
+/// wrong.
+///
+/// `linear_start` solves the network with each load's `p_specified` as a
+/// constant admittance. A power-flow document carries a schedule, and it can be
+/// nothing like the state the sensors read: MATPOWER's case118, converted,
+/// starts Gauss-Newton at |V| = 0.67 p.u. from it and diverges. The flat state is
+/// a candidate too, and the one the measurements fit better is the start.
+#[test]
+fn a_misleading_schedule_does_not_spoil_the_start() {
+    let dir = fixture_dir("transmission-case");
+    let mut input = common::load_pgm_input(&dir.join("input.json"));
+    for load in &mut input.data.sym_load {
+        load.p_specified *= 200.0;
+        load.q_specified *= 200.0;
+    }
+    let expected = common::load_json(&dir.join("sym_output.json"));
+    let case = gridoxide::pgm::se::se_case_from_pgm(&input, S_BASE_VA, 50.0).expect("case");
+
+    let mut buses = case.buses.clone();
+    linear_start(&mut buses, &case.network, &case.measurements);
+    let report = estimate(
+        &case.measurements,
+        &mut buses,
+        &case.network,
+        &SeOptions::default(),
+    );
+    assert_eq!(report.status, SeStatus::Converged, "{report:?}");
+    for node in expected["data"]["node"].as_array().expect("node output") {
+        let idx = case.node_idx[&node["id"].as_u64().expect("node id")];
+        let u_pu = node["u_pu"].as_f64().expect("u_pu");
+        assert!(
+            (buses[idx].voltage_mag - u_pu).abs() < 1e-6,
+            "node {}: |V| = {}, PGM says {u_pu}",
+            node["id"],
+            buses[idx].voltage_mag
+        );
+    }
+}
+
 /// Both frames, through the iterative-linear method as well — both fixtures
 /// list it in their own `params.json`.
 #[test]
@@ -384,6 +513,52 @@ fn zero_injection_constraint_overrides_a_conflicting_sensor() {
         "node-injection-sensor-and-zero-injection",
         JacobianBackend::Scalar,
         1e-6,
+    );
+}
+
+/// The same fixture with the node constraints dropped is plain weighted least
+/// squares: the sensor is the only word on the empty node's injection, so the
+/// estimate fits it exactly instead of overriding it, and the node moves off
+/// the 1.0 p.u. power-grid-model publishes.
+#[test]
+fn dropping_zero_injection_fits_the_sensor_instead() {
+    let dir = fixture_dir("node-injection-sensor-and-zero-injection");
+    let input = common::load_pgm_input(&dir.join("input.json"));
+    let mut case = gridoxide::pgm::se::se_case_from_pgm(&input, S_BASE_VA, 50.0).expect("case");
+    let (source_node, empty_node) = (case.node_idx[&1], case.node_idx[&2]);
+    assert!(case.network.constrained_buses()[empty_node]);
+    case.drop_zero_injection();
+    let constrained = case.network.constrained_buses();
+    assert!(
+        !constrained[empty_node],
+        "the empty node's constraint is dropped"
+    );
+    assert!(
+        constrained[source_node],
+        "the source node's stays: it is what determines the source branch's flow"
+    );
+
+    let mut buses = case.buses.clone();
+    linear_start(&mut buses, &case.network, &case.measurements);
+    let report = estimate(
+        &case.measurements,
+        &mut buses,
+        &case.network,
+        &SeOptions::default(),
+    );
+    assert_eq!(report.status, SeStatus::Converged, "{report:?}");
+    assert!(
+        report.objective < 1e-12,
+        "objective {:.3e}",
+        report.objective
+    );
+    let moved = case
+        .nodes()
+        .iter()
+        .any(|&(_, bus)| (buses[bus].voltage_mag - 1.0).abs() > 1e-6);
+    assert!(
+        moved,
+        "the sensor's injection should move a node off 1.0 p.u."
     );
 }
 
@@ -656,9 +831,9 @@ fn per_node_injections_survive_across_a_link() {
                 continue;
             };
 
-            // power-grid-model's node injection: every appliance at the bus,
+            // power-grid-model's node injection: loads, generators and sources,
             // which for gridoxide means the bus injection plus the structural
-            // source and shunt contributions. Same composition as
+            // source contribution. Same composition as
             // `Target::NodeInjection`'s measurement function.
             let probe = |kind| Measurement {
                 kind,

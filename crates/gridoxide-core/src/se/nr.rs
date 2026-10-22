@@ -161,6 +161,10 @@ pub fn flat_start(buses: &mut [Bus], measurements: &[Measurement]) {
 /// construction: a singular linear system leaves the flat state untouched rather
 /// than failing.
 ///
+/// Where nothing shifts a phase it can be worse than flat, so the flat state
+/// (sources kept, see below) is a candidate too, and the start is whichever of
+/// the two has the lower objective.
+///
 /// power-grid-model reaches the same place differently, carrying a per-bus
 /// `phase_shift` in its math topology and initializing its voltages with it.
 pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurement]) {
@@ -177,25 +181,55 @@ pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurem
     // with all three phases at one angle — a balanced-collapsed state that
     // Gauss-Newton does not recover from, and which looks like a modelling bug
     // rather than a starting one.
-    for b in buses.iter_mut() {
+    let mut flat = buses.to_vec();
+    for b in flat.iter_mut() {
         if !matches!(b.bus_type, crate::types::BusType::Slack) {
             b.voltage_mag = 1.0;
             b.voltage_ang = 0.0;
         }
     }
-    crate::network::linear_initial_guess(buses, &net.ybus);
-    apply_measured_magnitudes(buses, measurements);
-    // A de-energized bus is reported at exactly zero, which is both
-    // power-grid-model's convention for `energized: 0` and what
-    // `network::mark_unreferenced_islands` already does on the power-flow side.
-    // Nothing determines these buses, so `mask_untouched` pins them wherever the
-    // start leaves them — which makes the start the answer, and zero the only
-    // defensible one.
-    for (b, &live) in buses.iter_mut().zip(&net.energized) {
-        if !live {
-            b.voltage_mag = 0.0;
-            b.voltage_ang = 0.0;
+    let mut linear = flat.clone();
+    crate::network::linear_initial_guess(&mut linear, &net.ybus);
+
+    // The linear solve is the right start where transformers shift phases and
+    // can be a poor one elsewhere: on case118 (MATPOWER's, through the PGM
+    // converter, whose loads carry their power-flow `p_specified`) it starts
+    // Gauss-Newton at |V| = 0.67 p.u., from where it diverges on a noisy
+    // measurement set it solves in five steps from flat. Whichever of the two
+    // the measurements fit better is kept, for the price of evaluating `h`
+    // twice.
+    let mut best: Option<(f64, Vec<Bus>)> = None;
+    for mut candidate in [linear, flat] {
+        apply_measured_magnitudes(&mut candidate, measurements);
+        // A de-energized bus is reported at exactly zero, which is both
+        // power-grid-model's convention for `energized: 0` and what
+        // `network::mark_unreferenced_islands` already does on the power-flow
+        // side. Nothing determines these buses, so `mask_untouched` pins them
+        // wherever the start leaves them — which makes the start the answer,
+        // and zero the only defensible one.
+        for (b, &live) in candidate.iter_mut().zip(&net.energized) {
+            if !live {
+                b.voltage_mag = 0.0;
+                b.voltage_ang = 0.0;
+            }
         }
+        let h = measurement_functions(measurements, &candidate, net);
+        let residuals: Vec<f64> = measurements
+            .iter()
+            .zip(&h)
+            .map(|(m, &hi)| m.value - hi)
+            .collect();
+        let j = objective(measurements, &residuals);
+        // A NaN objective loses to anything, and the linear candidate, tried
+        // first, keeps a tie.
+        if best.as_ref().is_none_or(|(b, _)| j < *b || b.is_nan()) {
+            best = Some((j, candidate));
+        }
+    }
+    let (_, start) = best.expect("two candidates");
+    for (b, s) in buses.iter_mut().zip(start) {
+        b.voltage_mag = s.voltage_mag;
+        b.voltage_ang = s.voltage_ang;
     }
 }
 

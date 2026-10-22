@@ -110,6 +110,41 @@ def test_bad_data_rejects_the_conflicting_sensor():
     assert normalized > 3.0
 
 
+def test_zero_injection_can_be_turned_off():
+    """The same conflicting sensor without the constraint: plain weighted
+    least squares fits it exactly, so there is no conflict left to flag."""
+    constrained = model("node-injection-sensor-and-zero-injection")
+    constrained.solve()
+    plain = model("node-injection-sensor-and-zero-injection", zero_injection=False)
+    plain.solve()
+    assert constrained.objective > 1e3
+    assert plain.objective == pytest.approx(0.0, abs=1e-12)
+    assert plain.voltage_mag() != pytest.approx(constrained.voltage_mag(), abs=1e-6)
+
+
+def test_ideal_sources_estimate_the_same_state():
+    """With every magnitude and the other injections measured, the state does
+    not depend on how the source is modelled: the ideal one only drops the
+    virtual bus and moves the angle reference onto the source's node."""
+    name = "node-injection-sensor-with-shunt"
+    m = model(name, ideal_sources=True)
+    m.solve()
+    expected = expected_nodes(name)
+    assert m.n_nodes == len(expected)
+    assert m.objective == pytest.approx(0.0, abs=1e-12)
+    vm, va = m.voltage_mag(), m.voltage_ang()
+    reference = expected[1][1]
+    for node, idx in m.nodes():
+        u_pu, u_angle = expected[node]
+        assert vm[idx] == pytest.approx(u_pu, abs=1e-6)
+        assert va[idx] == pytest.approx(u_angle - reference, abs=1e-6)
+
+
+def test_ideal_sources_are_symmetric_only():
+    with pytest.raises(ValueError, match="symmetric only"):
+        model("1os2msr", asymmetric=True, ideal_sources=True)
+
+
 def test_bad_data_is_quiet_on_consistent_data():
     m = model("1os2msr")
     m.solve()

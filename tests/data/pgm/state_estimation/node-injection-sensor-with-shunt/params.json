@@ -1,0 +1,9 @@
+{
+  "calculation_method": [
+    "newton_raphson"
+  ],
+  "rtol": 1e-06,
+  "atol": {
+    "default": 1e-06
+  }
+}

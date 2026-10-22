@@ -30,8 +30,8 @@ use crate::se::SeNetwork;
 use crate::se::case::SeCase;
 use crate::types::Bus;
 
-use super::PgmInput;
 use super::measurement::MeasurementError;
+use super::{PgmInput, SourceModel};
 
 /// Why a document could not be turned into an estimate.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,9 +74,23 @@ pub fn se_case_from_pgm(
     s_base_va: f64,
     f_nom: f64,
 ) -> Result<SeCase, SeCaseError> {
+    se_case_from_pgm_with(input, s_base_va, f_nom, SourceModel::Impedance)
+}
+
+/// [`se_case_from_pgm`] with the sources modelled as `sources` says.
+///
+/// Under [`SourceModel::Ideal`] a source's node is the slack: its angle is the
+/// reference and its magnitude is estimated like any other bus's, and a
+/// sensor on the source reads part of that node's injection.
+pub fn se_case_from_pgm_with(
+    input: &PgmInput,
+    s_base_va: f64,
+    f_nom: f64,
+    sources: SourceModel,
+) -> Result<SeCase, SeCaseError> {
     let id_to_idx = super::node_id_to_idx(input);
     let shunts = super::pgm_shunts_1ph(input, &id_to_idx, s_base_va);
-    let net = super::pgm_to_network(input.clone(), s_base_va, f_nom);
+    let net = super::pgm_to_network_with(input.clone(), s_base_va, f_nom, sources);
     let measurements = super::measurement::measurements_from_pgm(input, &net, s_base_va)?;
 
     let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
