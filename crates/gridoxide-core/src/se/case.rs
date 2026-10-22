@@ -47,6 +47,34 @@ impl SeCase {
         Some(self.phases * idx + if self.phases == 1 { 0 } else { phase })
     }
 
+    /// Drops the zero-injection constraint on every document node, leaving
+    /// plain weighted least squares there: a node with no load or generator
+    /// injects whatever its measurements say, within their sigmas, rather than
+    /// exactly nothing. That is the problem most textbook estimators and
+    /// JuliaGrid solve, and the one to compare against them.
+    ///
+    /// The constraints gridoxide's own model needs stay. A node fed by a source
+    /// keeps its own: the source's power enters through a synthesized branch
+    /// from a virtual bus, and the node's constraint is what says nothing else
+    /// enters, without which that branch's flow (and the virtual bus) is
+    /// undetermined. A three-winding transformer's star point keeps its own
+    /// too: it is not a document node, no sensor can measure it, and the
+    /// constraint is all that determines it.
+    ///
+    /// The constraints are worth keeping otherwise: they are exact knowledge,
+    /// and they make nodes without meters observable, so without them such a
+    /// node leaves the gain matrix singular.
+    pub fn drop_zero_injection(&mut self) {
+        let net = &mut self.network;
+        for &idx in self.node_idx.values() {
+            for bus in self.phases * idx..self.phases * (idx + 1) {
+                if net.source_branches[bus].is_empty() {
+                    net.zero_injection[bus] = false;
+                }
+            }
+        }
+    }
+
     /// The document's node ids, in index order — what a report iterates to name
     /// its rows.
     pub fn nodes(&self) -> Vec<(u64, usize)> {
