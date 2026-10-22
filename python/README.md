@@ -174,6 +174,38 @@ print(model.bad_data())
 `PowerFlowModel`. Every backend produces the same estimate — the gain matrix is an ordinary square
 sparse system — so the choice is performance only.
 
+### From a MATPOWER case
+
+A `.m` case is read by the same reader `PowerFlowModel.from_matpower` uses, with no conversion to PGM
+in between, so phase shifts and transformer line charging are exactly the case's. Measurements are
+given in MATPOWER's own terms: buses by number, branches by their 0-based row in `mpc.branch`, values
+and sigmas in per unit (|V|) or MW and MVAr.
+
+```python
+measurements = [
+    ("vm", 1, 1.06, 0.004),          # |V| at bus 1, p.u.
+    ("p_inj", 2, 18.3, 0.5),         # injection at bus 2, MW, generation less load
+    ("q_inj", 2, 30.9, 0.5),         # MVAr
+    ("p_from", 0, 156.9, 3.2),       # flow at the from end of branch row 0, MW
+    ("q_to", 0, 27.6, 0.7),          # at its to end, MVAr ("p_to" likewise)
+    # ...
+]
+model = gridoxide.StateEstimationModel.from_matpower("case14.m", measurements)
+model.solve()
+```
+
+The case's reference bus is the angle reference; its magnitude is estimated like any other bus's. No
+bus is held at zero injection: a bus without load or generator injects what its measurements say.
+
+### Options on a PGM document
+
+- `zero_injection=False` drops the constraint that holds every node without a load or generator at
+  exactly zero injection, as power-grid-model does. What remains is plain weighted least squares,
+  which is what most textbook estimators solve. A node without sensors is then unobservable.
+- `ideal_sources=True` makes each `source`'s node the slack, with no impedance behind it, instead of
+  power-grid-model's virtual bus behind the source impedance. A sensor on the source then reads part
+  of its node's injection. Symmetric only.
+
 ## License
 
 gridoxide's own code is Apache-2.0. A default build (and this published wheel) also always bundles
