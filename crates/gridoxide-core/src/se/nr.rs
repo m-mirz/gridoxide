@@ -162,8 +162,9 @@ pub fn flat_start(buses: &mut [Bus], measurements: &[Measurement]) {
 /// than failing.
 ///
 /// Where nothing shifts a phase it can be worse than flat, so the flat state
-/// (sources kept, see below) is a candidate too, and the start is whichever of
-/// the two has the lower objective.
+/// (sources kept, see below) is a candidate too, and each is tried with and
+/// without the measured magnitudes applied. The start is the candidate with
+/// the lowest objective among those with a plausible voltage profile.
 ///
 /// power-grid-model reaches the same place differently, carrying a per-bus
 /// `phase_shift` in its math topology and initializing its voltages with it.
@@ -195,12 +196,31 @@ pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurem
     // can be a poor one elsewhere: on case118 (MATPOWER's, through the PGM
     // converter, whose loads carry their power-flow `p_specified`) it starts
     // Gauss-Newton at |V| = 0.67 p.u., from where it diverges on a noisy
-    // measurement set it solves in five steps from flat. Whichever of the two
-    // the measurements fit better is kept, for the price of evaluating `h`
-    // twice.
+    // measurement set it solves in five steps from flat.
+    //
+    // Measured magnitudes can spoil a start too. Where only some buses are
+    // metered (generators, on a SCADA-like set), each metered bus sits at its
+    // reading beside unmetered neighbours, and across a small or negative
+    // impedance that is a large reactive flow: case3120sp's noisy set diverges
+    // from the flat state with them and converges in five steps without.
+    //
+    // So each of the two is a candidate with and without them, and the start
+    // is whichever plausible one the measurements fit best, for the price of
+    // evaluating `h` four times. Plausible means every energized magnitude
+    // within `PLAUSIBLE_MAGNITUDE`: the objective alone favours a collapsed
+    // profile, whose small powers fit injection readings well. case9241pegase's
+    // linear solve puts 8,872 buses below 0.5 p.u. (some at 0.02) and has the
+    // lowest objective of the four, and Gauss-Newton crawls from it with steps
+    // in the hundreds. The flat state is always a candidate.
+    let mut measured = [linear.clone(), flat.clone()];
+    for candidate in &mut measured {
+        apply_measured_magnitudes(candidate, measurements);
+    }
+    let [linear_measured, flat_measured] = measured;
     let mut best: Option<(f64, Vec<Bus>)> = None;
-    for mut candidate in [linear, flat] {
-        apply_measured_magnitudes(&mut candidate, measurements);
+    let candidates = [linear_measured, linear, flat_measured, flat];
+    let last = candidates.len() - 1;
+    for (k, mut candidate) in candidates.into_iter().enumerate() {
         // A de-energized bus is reported at exactly zero, which is both
         // power-grid-model's convention for `energized: 0` and what
         // `network::mark_unreferenced_islands` already does on the power-flow
@@ -213,6 +233,13 @@ pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurem
                 b.voltage_ang = 0.0;
             }
         }
+        let plausible = candidate
+            .iter()
+            .zip(&net.energized)
+            .all(|(b, &live)| !live || PLAUSIBLE_MAGNITUDE.contains(&b.voltage_mag));
+        if !plausible && k != last {
+            continue;
+        }
         let h = measurement_functions(measurements, &candidate, net);
         let residuals: Vec<f64> = measurements
             .iter()
@@ -220,23 +247,29 @@ pub fn linear_start(buses: &mut [Bus], net: &SeNetwork, measurements: &[Measurem
             .map(|(m, &hi)| m.value - hi)
             .collect();
         let j = objective(measurements, &residuals);
-        // A NaN objective loses to anything, and the linear candidate, tried
-        // first, keeps a tie.
+        // A NaN objective loses to anything, and an earlier candidate keeps a
+        // tie.
         if best.as_ref().is_none_or(|(b, _)| j < *b || b.is_nan()) {
             best = Some((j, candidate));
         }
     }
-    let (_, start) = best.expect("two candidates");
+    let (_, start) = best.expect("the flat state is always a candidate");
     for (b, s) in buses.iter_mut().zip(start) {
         b.voltage_mag = s.voltage_mag;
         b.voltage_ang = s.voltage_ang;
     }
 }
 
+/// The magnitudes, per unit, a starting state has to keep every energized bus
+/// within to be a candidate in [`linear_start`]; wide enough for any operating
+/// state, narrow enough to rule out a collapsed one.
+const PLAUSIBLE_MAGNITUDE: std::ops::RangeInclusive<f64> = 0.5..=1.5;
+
 /// Overwrites each bus's magnitude with a directly measured one where it exists.
 ///
-/// Shared by [`flat_start`] and [`linear_start`]: a measured magnitude is a
-/// better starting value than either produces on its own, and costs nothing.
+/// Shared by [`flat_start`] and [`linear_start`]. A measured magnitude is
+/// usually a better starting value than either produces on its own, but not
+/// where only some buses are metered; [`linear_start`] tries both.
 fn apply_measured_magnitudes(buses: &mut [Bus], measurements: &[Measurement]) {
     for m in measurements {
         if let (
