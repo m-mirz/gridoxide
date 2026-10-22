@@ -824,7 +824,8 @@ fn bad_data_detection_finds_the_corrupted_measurement() {
     );
 }
 
-/// A large enough error makes Gauss-Newton diverge — and it says so.
+/// A gross error is absorbed, not diverged from; and an estimate cut short
+/// still says so.
 ///
 /// Found while writing the test above, which originally corrupted a measurement
 /// by twenty sigmas and then blamed bad-data detection for the nonsense that
@@ -833,20 +834,20 @@ fn bad_data_detection_finds_the_corrupted_measurement() {
 /// diverged to an objective of `3.5e43`, and a residual covariance means
 /// nothing about a state that does not solve anything.
 ///
-/// The cliff is not a property of the phase domain, though the phase domain
-/// reaches it sooner: on this fixture the phase-domain estimate converges at
-/// fifteen sigmas and diverges at twenty, while the symmetric one converges at
-/// twenty and diverges at fifty. Gauss-Newton takes an undamped step, so a
-/// measurement far enough from consistent throws the first step past the basin
-/// and there is nothing to come back to. A line search would raise the cliff;
-/// there is none.
+/// The divergence was the start's, not Gauss-Newton's: `linear_start` used to
+/// put every metered bus at its reading, the corrupted one included, and from
+/// a start twenty sigmas off on one phase the first step left the basin. It
+/// now also tries the starts without the readings and keeps the one the
+/// measurements fit best, and the estimate converges at any size of error, to
+/// the optimum that holds the error in its own residual: `J = k²/2` for `k`
+/// sigmas.
 ///
-/// What is gated is therefore not that it survives, but that it **reports**:
+/// What stays gated is that an estimate which has not converged **reports**
 /// `MaxIterations` rather than a converged-looking answer. An estimator that
-/// returned this state as an estimate would be the dangerous outcome, and the
+/// returned such a state as an estimate would be the dangerous outcome, and the
 /// bad-data report built on top of it is exactly what that danger looks like.
 #[test]
-fn a_large_error_diverges_and_says_so() {
+fn a_large_error_is_absorbed_and_a_short_estimate_says_so() {
     use gridoxide::se::nr::{SeOptions, SeStatus, estimate, linear_start};
 
     let mut case = case_3ph("tests/data/pgm/state_estimation/transmission-case");
@@ -860,30 +861,38 @@ fn a_large_error_diverges_and_says_so() {
             )
         })
         .unwrap();
+    let k = 1000.0;
     let sigma = case.measurements[victim].sigma;
-    case.measurements[victim].value += 20.0 * sigma;
+    case.measurements[victim].value += k * sigma;
 
-    let mut buses = case.buses.clone();
-    linear_start(&mut buses, &case.network, &case.measurements);
-    let report = estimate(
-        &case.measurements,
-        &mut buses,
-        &case.network,
-        &SeOptions {
-            max_iter: 40,
-            ..SeOptions::default()
-        },
+    let run = |max_iter| {
+        let mut buses = case.buses.clone();
+        linear_start(&mut buses, &case.network, &case.measurements);
+        estimate(
+            &case.measurements,
+            &mut buses,
+            &case.network,
+            &SeOptions {
+                max_iter,
+                ..SeOptions::default()
+            },
+        )
+    };
+
+    let report = run(40);
+    assert_eq!(report.status, SeStatus::Converged, "{report:?}");
+    assert!(
+        (report.objective - k * k / 2.0).abs() < 1e-3 * k * k,
+        "objective {:.6e}, expected k²/2 = {:.6e}",
+        report.objective,
+        k * k / 2.0
     );
 
+    let report = run(1);
     assert_eq!(
         report.status,
         SeStatus::MaxIterations,
-        "a diverged estimate must not report success, objective {:.3e}",
-        report.objective
-    );
-    assert!(
-        report.objective > 1e6,
-        "expected a diverged objective, got {:.3e}",
+        "an estimate cut short must not report success, objective {:.3e}",
         report.objective
     );
 }
