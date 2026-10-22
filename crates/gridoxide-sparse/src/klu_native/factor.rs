@@ -29,6 +29,7 @@ use super::types::flip;
 /// `solve.rs` will implement), with its row indices already translated to
 /// final numeric pivot order (mirrors `klu_factor.c`'s own late
 /// `Offi[p] = Pinv[Offi[p]]` pass, done once all blocks are known).
+#[derive(Default)]
 pub struct Numeric {
     pub blocks: Vec<BlockFactor>,
     pub pnum: Vec<i64>,

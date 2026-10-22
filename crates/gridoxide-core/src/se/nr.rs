@@ -86,7 +86,7 @@ impl Default for SeOptions {
         Self {
             tol: 1e-8,
             max_iter: 20,
-            backend: JacobianBackend::Scalar,
+            backend: JacobianBackend::default(),
             method: SeMethod::default(),
         }
     }

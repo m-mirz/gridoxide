@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use gridoxide::json::NetworkData;
 use gridoxide::network::{YBusSparse, build_ybus, linear_initial_guess};
-use gridoxide::solver::{JacobianBackend, PersistentSolver, newton_raphson_with_backend};
+use gridoxide::solver::{
+    IslandStatus, JacobianBackend, PersistentSolver, newton_raphson_with_backend,
+};
 use gridoxide::types::Bus;
 
 fn load_network() -> (Vec<Bus>, YBusSparse) {
@@ -115,4 +117,62 @@ fn persistent_solver_reset_then_solve_matches_fresh() {
             "bus {i} va after reset"
         );
     }
+}
+
+#[test]
+fn persistent_solver_klu_native_matches_fresh_solve() {
+    assert_persistent_solver_matches_fresh(JacobianBackend::KluNative);
+}
+
+/// The KLU backends take the Jacobian in their own storage order once
+/// analyzed, and `invalidate_admittances` keeps that factorization while
+/// dropping the Jacobian pattern. The pattern rebuilt next must be put in the
+/// same order, or every value lands in another entry's place: this solves a
+/// network whose admittances changed but whose structure did not, on a kept
+/// solver, against a fresh one.
+fn assert_kept_order_survives_new_admittances(backend: JacobianBackend) {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/data/network.json");
+    let network: NetworkData =
+        serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("parse");
+    let (buses, ybus) = load_network();
+
+    let mut solver = PersistentSolver::new(backend);
+    let mut warm = buses.clone();
+    solver.solve(&mut warm, &ybus, 1e-10, 20);
+
+    // Same branches, different impedances.
+    let mut lines = network.lines.clone();
+    for line in &mut lines {
+        line.x *= 1.3;
+    }
+    let changed = build_ybus(buses.len(), &lines, &[]).finish();
+
+    solver.invalidate_admittances();
+    let mut kept = buses.clone();
+    let islands = solver.solve(&mut kept, &changed, 1e-10, 20);
+    assert!(islands.iter().all(|i| i.status == IslandStatus::Converged));
+
+    let mut fresh = buses.clone();
+    newton_raphson_with_backend(&mut fresh, &changed, 1e-10, 20, backend);
+    for (i, (k, f)) in kept.iter().zip(&fresh).enumerate() {
+        assert!(
+            (k.voltage_mag - f.voltage_mag).abs() < 1e-12
+                && (k.voltage_ang - f.voltage_ang).abs() < 1e-12,
+            "bus {i}: kept solver {:?} vs fresh {:?}",
+            (k.voltage_mag, k.voltage_ang),
+            (f.voltage_mag, f.voltage_ang)
+        );
+    }
+}
+
+#[test]
+fn klu_native_keeps_its_order_across_new_admittances() {
+    assert_kept_order_survives_new_admittances(JacobianBackend::KluNative);
+}
+
+#[test]
+#[cfg(feature = "klu")]
+fn klu_keeps_its_order_across_new_admittances() {
+    assert_kept_order_survives_new_admittances(JacobianBackend::Klu);
 }

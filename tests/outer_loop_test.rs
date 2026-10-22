@@ -226,7 +226,8 @@ fn an_empty_list_is_a_plain_solve() {
             &mut ctx,
             1e-10,
             30,
-            JacobianBackend::Scalar,
+            // What `newton_raphson` uses, so the two solves are the same one.
+            JacobianBackend::default(),
             &mut [],
             40,
         )

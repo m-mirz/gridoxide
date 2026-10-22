@@ -35,10 +35,8 @@
 /// `KLU_scale`'s behavior when `KLU_factor`/`KLU_refactor` pass their `W`
 /// workspace (which they always do).
 ///
-/// Not yet called from `KluNativeSystem` — see `mod.rs`'s module doc
-/// comment on why row scaling isn't wired in yet (a documented, deliberate
-/// gap, not dead code left behind by accident).
-#[allow(dead_code)]
+/// Called by `KluNativeSystem::with_scale` before every factorization and
+/// refactorization, as `klu_factor.c` and `klu_refactor.c` call `KLU_scale`.
 pub fn scale(
     scale: i32,
     n: usize,
@@ -110,6 +108,27 @@ pub fn scale(
     }
 
     Some(rs)
+}
+
+/// [`scale`]'s factors without its validation, into a buffer kept across
+/// calls: for a pattern `scale` has already accepted, which is every
+/// refactorization's. `scale` is 1 (row sums) or 2 (row maxima).
+pub fn row_factors_into(scale: i32, n: usize, row_idx: &[i64], values: &[f64], out: &mut Vec<f64>) {
+    out.clear();
+    out.resize(n, 0.0);
+    for (&row, &v) in row_idx.iter().zip(values) {
+        let r = &mut out[row as usize];
+        if scale == 1 {
+            *r += v.abs();
+        } else {
+            *r = r.max(v.abs());
+        }
+    }
+    for r in out.iter_mut() {
+        if *r == 0.0 {
+            *r = 1.0;
+        }
+    }
 }
 
 #[cfg(test)]

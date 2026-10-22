@@ -22,12 +22,15 @@
 //!   exactly this layout, extended to a batch by adding a scenario stride.
 //!
 //! [`JacobianPattern::fill`] is a transliteration of `build_jacobian_triplets`' H/N/M/L
-//! formulas, not a rederivation — `tests/jacobian_pattern_test.rs` asserts
-//! the two agree bit-for-bit in f64.
+//! formulas, not a rederivation. The one difference is how it reaches
+//! `sin(θi − θk)` and `cos(θi − θk)`: from each bus's own sine and cosine,
+//! once per bus, rather than per entry. That rounds differently, so the tests
+//! below hold the two to the same positions exactly and to the same values
+//! within a few units in the last place.
 
 use num_complex::Complex;
 
-use crate::network::YBusSparse;
+use crate::network::{BusVoltages, YBusSparse};
 use crate::types::{Bus, BusType};
 
 /// Which of the Jacobian's eight distinct formulas an [`Entry`] evaluates.
@@ -76,12 +79,23 @@ pub struct Entry {
 ///
 /// `rows`/`cols`/`entries` are parallel arrays of the same length, in the
 /// exact emission order `solver::build_jacobian_triplets` used, so a cached
-/// symbolic factorization keyed on that order stays valid.
+/// symbolic factorization keyed on that order stays valid — until
+/// [`permute`](Self::permute) puts them in a sparse LU's own storage order.
 pub struct JacobianPattern {
     pub n_unknowns: usize,
     rows: Vec<u32>,
     cols: Vec<u32>,
     entries: Vec<Entry>,
+    /// Where each entry's value is in the array [`fill`](Self::fill)
+    /// computes first, parallel to `entries`: the fill itself is then one
+    /// gather per entry, with no branch on its kind.
+    src: Vec<u32>,
+    /// Row buses in non-slack order with their `Y[i][i]` (zero if the Y-bus
+    /// has no diagonal there); bus `d` owns slots `4d..4d + 4` (H, N, M, L).
+    diag: Vec<(u32, Complex<f64>)>,
+    /// Off-diagonal `(i, k)` pairs with `i` a row bus, in Y-bus order; pair
+    /// `p` owns slots `4 · diag.len() + 4p ..` (H, N, M, L).
+    pairs: Vec<(u32, u32, Complex<f64>)>,
 }
 
 impl JacobianPattern {
@@ -124,45 +138,99 @@ impl JacobianPattern {
         let mut rows = Vec::with_capacity(capacity);
         let mut cols = Vec::with_capacity(capacity);
         let mut entries = Vec::with_capacity(capacity);
-        let mut push =
-            |row: usize, col: usize, kind: EntryKind, i: usize, k: usize, y: Complex<f64>| {
-                rows.push(row as u32);
-                cols.push(col as u32);
-                entries.push(Entry {
-                    kind,
-                    i: i as u32,
-                    k: k as u32,
-                    y,
-                });
-            };
+        let mut src = Vec::with_capacity(capacity);
+        // Slots: four per non-slack bus first (its diagonal H, N, M, L), then
+        // four per off-diagonal pair. `slot` is the entry's offset within its
+        // four, the kind's position in H, N, M, L.
+        let pair_base = 4 * n_angle;
+        let mut push = |row: usize,
+                        col: usize,
+                        kind: EntryKind,
+                        i: usize,
+                        k: usize,
+                        y: Complex<f64>,
+                        slot: usize| {
+            rows.push(row as u32);
+            cols.push(col as u32);
+            entries.push(Entry {
+                kind,
+                i: i as u32,
+                k: k as u32,
+                y,
+            });
+            src.push(slot as u32);
+        };
+        let has_column = |k: usize| non_slack_pos[k].is_some() || pq_pos[k].is_some();
 
-        // H and N blocks: rows = non_slack_idx (P-mismatch equations).
+        // H and N blocks: rows = non_slack_idx (P-mismatch equations). Every
+        // pair is met here first and numbered; a PQ row's M and L walk the
+        // same neighbors in the same order below.
+        let mut diag: Vec<(u32, Complex<f64>)> = non_slack_idx
+            .iter()
+            .map(|&i| (i as u32, Complex::new(0.0, 0.0)))
+            .collect();
+        let mut pairs: Vec<(u32, u32, Complex<f64>)> = Vec::new();
+        let mut first_pair = vec![0usize; buses.len()];
         for (row_idx, &i) in non_slack_idx.iter().enumerate() {
+            first_pair[i] = pairs.len();
+            let d = 4 * row_idx;
             for &(k, y_ik) in ybus.row(i) {
                 if k == i {
-                    push(row_idx, row_idx, EntryKind::Hii, i, i, y_ik);
+                    diag[row_idx].1 = y_ik;
+                    push(row_idx, row_idx, EntryKind::Hii, i, i, y_ik, d);
                     if let Some(col_idx) = pq_pos[i] {
-                        push(row_idx, n_angle + col_idx, EntryKind::Nii, i, i, y_ik);
+                        push(
+                            row_idx,
+                            n_angle + col_idx,
+                            EntryKind::Nii,
+                            i,
+                            i,
+                            y_ik,
+                            d + 1,
+                        );
                     }
                     continue;
                 }
+                if !has_column(k) {
+                    continue;
+                }
+                let at = pair_base + 4 * pairs.len();
+                pairs.push((i as u32, k as u32, y_ik));
                 if let Some(col_idx) = non_slack_pos[k] {
-                    push(row_idx, col_idx, EntryKind::Hik, i, k, y_ik);
+                    push(row_idx, col_idx, EntryKind::Hik, i, k, y_ik, at);
                 }
                 if let Some(col_idx) = pq_pos[k] {
-                    push(row_idx, n_angle + col_idx, EntryKind::Nik, i, k, y_ik);
+                    push(
+                        row_idx,
+                        n_angle + col_idx,
+                        EntryKind::Nik,
+                        i,
+                        k,
+                        y_ik,
+                        at + 1,
+                    );
                 }
             }
         }
 
         // M and L blocks: rows = pq_idx (Q-mismatch equations).
         for (row_idx, &i) in pq_idx.iter().enumerate() {
+            let d = 4 * non_slack_pos[i].expect("a PQ bus is always non-slack");
+            let mut pair = first_pair[i];
             for &(k, y_ik) in ybus.row(i) {
                 if k == i {
                     // Column is i's position among *all* non-slack buses, not
                     // just PQ ones — these differ once PV buses exist.
                     let col_idx = non_slack_pos[i].expect("a PQ bus is always non-slack");
-                    push(n_angle + row_idx, col_idx, EntryKind::Mii, i, i, y_ik);
+                    push(
+                        n_angle + row_idx,
+                        col_idx,
+                        EntryKind::Mii,
+                        i,
+                        i,
+                        y_ik,
+                        d + 2,
+                    );
                     push(
                         n_angle + row_idx,
                         n_angle + row_idx,
@@ -170,11 +238,25 @@ impl JacobianPattern {
                         i,
                         i,
                         y_ik,
+                        d + 3,
                     );
                     continue;
                 }
+                if !has_column(k) {
+                    continue;
+                }
+                debug_assert_eq!((pairs[pair].0, pairs[pair].1), (i as u32, k as u32));
+                let at = pair_base + 4 * pair;
                 if let Some(col_idx) = non_slack_pos[k] {
-                    push(n_angle + row_idx, col_idx, EntryKind::Mik, i, k, y_ik);
+                    push(
+                        n_angle + row_idx,
+                        col_idx,
+                        EntryKind::Mik,
+                        i,
+                        k,
+                        y_ik,
+                        at + 2,
+                    );
                 }
                 if let Some(col_idx) = pq_pos[k] {
                     push(
@@ -184,8 +266,10 @@ impl JacobianPattern {
                         i,
                         k,
                         y_ik,
+                        at + 3,
                     );
                 }
+                pair += 1;
             }
         }
 
@@ -194,7 +278,38 @@ impl JacobianPattern {
             rows,
             cols,
             entries,
+            src,
+            diag,
+            pairs,
         }
+    }
+
+    /// Reorders the entries so that entry `k` is the one that was at
+    /// `order[k]`: from then on [`fill`](Self::fill) writes, and
+    /// [`to_triplets`](Self::to_triplets) lists, in that order. What
+    /// `lu::SparseLu::adopt_storage_order` returns, so the fill writes
+    /// straight into the factorization's own layout.
+    ///
+    /// # Panics
+    ///
+    /// If `order` is not a permutation of `0..len()`.
+    pub fn permute(&mut self, order: &[usize]) {
+        assert_eq!(
+            order.len(),
+            self.entries.len(),
+            "order must cover every entry"
+        );
+        let mut seen = vec![false; order.len()];
+        for &i in order {
+            assert!(
+                !std::mem::replace(&mut seen[i], true),
+                "order repeats entry {i}"
+            );
+        }
+        self.rows = order.iter().map(|&i| self.rows[i]).collect();
+        self.cols = order.iter().map(|&i| self.cols[i]).collect();
+        self.entries = order.iter().map(|&i| self.entries[i]).collect();
+        self.src = order.iter().map(|&i| self.src[i]).collect();
     }
 
     /// Number of Jacobian nonzeros — the length of `values` that
@@ -235,45 +350,76 @@ impl JacobianPattern {
     /// values to `values`. What lets `bde::BlockDiagonal` concatenate B
     /// scenarios' blocks into one flat array for a block-diagonal solve.
     pub fn fill_into(&self, buses: &[Bus], p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
-        values.reserve(self.entries.len());
+        self.fill_from(&BusVoltages::of(buses), p_calc, q_calc, values);
+    }
 
-        for e in &self.entries {
-            let i = e.i as usize;
-            let k = e.k as usize;
-            let vm_i = buses[i].voltage_mag;
-            let (g, b) = (e.y.re, e.y.im);
+    /// [`fill`](Self::fill) from voltages already taken, which the Newton
+    /// loop shares with the power injections.
+    pub fn fill_with(
+        &self,
+        v: &BusVoltages,
+        p_calc: &[f64],
+        q_calc: &[f64],
+        values: &mut Vec<f64>,
+    ) {
+        values.clear();
+        self.fill_from(v, p_calc, q_calc, values);
+    }
 
-            let v = match e.kind {
+    /// Appends, as [`fill_into`](Self::fill_into).
+    ///
+    /// In two passes. The first computes every value the Jacobian can hold,
+    /// in the order the Y-bus stores them: for each non-slack bus its
+    /// diagonal H, N, M and L, and for each off-diagonal pair its four,
+    /// which share their sine and cosine — formed from the two buses' own
+    /// rather than by calling the trigonometric functions per entry, which
+    /// made `sincos` the largest cost of an iteration. The second copies
+    /// them into the entries through the precomputed `src`, in whatever
+    /// order the entries are in.
+    ///
+    /// The point of the split is that neither pass branches on an entry's
+    /// kind. Once the entries are in a factorization's column order
+    /// ([`permute`](Self::permute)) the kinds interleave unpredictably, and
+    /// a per-entry `match` cost more than the arithmetic: this fill is
+    /// several times faster than one, on the same values.
+    fn fill_from(&self, v: &BusVoltages, p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
+        let vm = &v.vm;
+        let mut slots = Vec::with_capacity(4 * (self.diag.len() + self.pairs.len()));
+        for &(i, y) in &self.diag {
+            let i = i as usize;
+            let (vm_i, g, b) = (vm[i], y.re, y.im);
+            // `powi(2)` rather than `vm_i * vm_i` to stay textually
+            // identical to `build_jacobian_triplets`, so the diagonal agrees
+            // with it to the last bit.
+            slots.extend([
                 // H_ii = -Q_i - V_i^2 * B_ii
-                // `powi(2)` rather than `vm_i * vm_i` to stay textually
-                // identical to `build_jacobian_triplets`, so bit-for-bit
-                // agreement can't hinge on how the two lower.
-                EntryKind::Hii => -q_calc[i] - vm_i.powi(2) * b,
+                -q_calc[i] - vm_i.powi(2) * b,
                 // N_ii = P_i/V_i + V_i * G_ii
-                EntryKind::Nii => p_calc[i] / vm_i + vm_i * g,
+                p_calc[i] / vm_i + vm_i * g,
                 // M_ii = P_i - V_i^2 * G_ii
-                EntryKind::Mii => p_calc[i] - vm_i.powi(2) * g,
+                p_calc[i] - vm_i.powi(2) * g,
                 // L_ii = Q_i/V_i - V_i * B_ii
-                EntryKind::Lii => q_calc[i] / vm_i - vm_i * b,
-                _ => {
-                    let vm_k = buses[k].voltage_mag;
-                    let ang = buses[i].voltage_ang - buses[k].voltage_ang;
-                    let (sin, cos) = (ang.sin(), ang.cos());
-                    match e.kind {
-                        // H_ik = V_i * V_k * (G_ik * sin - B_ik * cos)
-                        EntryKind::Hik => vm_i * vm_k * (g * sin - b * cos),
-                        // N_ik = V_i * (G_ik * cos + B_ik * sin)
-                        EntryKind::Nik => vm_i * (g * cos + b * sin),
-                        // M_ik = -V_i * V_k * (G_ik * cos + B_ik * sin)
-                        EntryKind::Mik => -vm_i * vm_k * (g * cos + b * sin),
-                        // L_ik = V_i * (G_ik * sin - B_ik * cos)
-                        EntryKind::Lik => vm_i * (g * sin - b * cos),
-                        _ => unreachable!("diagonal kinds handled above"),
-                    }
-                }
-            };
-            values.push(v);
+                q_calc[i] / vm_i - vm_i * b,
+            ]);
         }
+        for &(i, k, y) in &self.pairs {
+            let (i, k) = (i as usize, k as usize);
+            let (vm_i, vm_k, g, b) = (vm[i], vm[k], y.re, y.im);
+            let (s_i, c_i, s_k, c_k) = (v.sin[i], v.cos[i], v.sin[k], v.cos[k]);
+            let sin = s_i * c_k - c_i * s_k;
+            let cos = c_i * c_k + s_i * s_k;
+            slots.extend([
+                // H_ik = V_i * V_k * (G_ik * sin - B_ik * cos)
+                vm_i * vm_k * (g * sin - b * cos),
+                // N_ik = V_i * (G_ik * cos + B_ik * sin)
+                vm_i * (g * cos + b * sin),
+                // M_ik = -V_i * V_k * (G_ik * cos + B_ik * sin)
+                -vm_i * vm_k * (g * cos + b * sin),
+                // L_ik = V_i * (G_ik * sin - B_ik * cos)
+                vm_i * (g * sin - b * cos),
+            ]);
+        }
+        values.extend(self.src.iter().map(|&s| slots[s as usize]));
     }
 
     /// Appends an identity block in this pattern's own layout: `1.0` at every
@@ -364,11 +510,21 @@ mod tests {
         (buses, ybus)
     }
 
+    /// Values agree with the reference to rounding: the fill forms the
+    /// angle difference's sine and cosine from the buses' own, which rounds
+    /// differently from evaluating them at the difference.
+    fn assert_same_value(got: f64, expected: f64, what: &str) {
+        assert!(
+            (got - expected).abs() <= 1e-13 * expected.abs().max(1.0),
+            "{what}: {got} vs {expected}"
+        );
+    }
+
     /// The precomputed-offset assembler must reproduce the reference
-    /// implementation's `(row, col, value)` sequence exactly — same order,
-    /// same indices, and values equal to the last bit, not merely close.
+    /// implementation's `(row, col, value)` sequence — same order and same
+    /// indices exactly, values to rounding (see `assert_same_value`).
     #[test]
-    fn pattern_matches_reference_bit_for_bit() {
+    fn pattern_matches_reference() {
         let (mut buses, ybus) = mixed_network();
         let pattern = JacobianPattern::analyze(&buses, &ybus);
         let mut values = Vec::new();
@@ -396,13 +552,7 @@ mod tests {
                     (e.0, e.1),
                     "entry {idx} position at step {step}"
                 );
-                assert_eq!(
-                    g.2.to_bits(),
-                    e.2.to_bits(),
-                    "entry {idx} value at step {step}: {} vs {}",
-                    g.2,
-                    e.2
-                );
+                assert_same_value(g.2, e.2, &format!("entry {idx} value at step {step}"));
             }
         }
     }
@@ -430,8 +580,27 @@ mod tests {
         assert_eq!(got.len(), expected.len());
         for (idx, (g, e)) in got.iter().zip(&expected).enumerate() {
             assert_eq!((g.0, g.1), (e.0, e.1), "entry {idx} position");
-            assert_eq!(g.2.to_bits(), e.2.to_bits(), "entry {idx} value");
+            assert_same_value(g.2, e.2, &format!("entry {idx} value"));
         }
+    }
+
+    /// `permute` reorders what `fill` writes and `to_triplets` lists, and
+    /// nothing else.
+    #[test]
+    fn permute_reorders_the_entries() {
+        let (buses, ybus) = mixed_network();
+        let (p_calc, q_calc) = power_injections(&buses, &ybus);
+        let mut pattern = JacobianPattern::analyze(&buses, &ybus);
+        let mut values = Vec::new();
+        pattern.fill(&buses, &p_calc, &q_calc, &mut values);
+        let before = pattern.to_triplets(&values);
+
+        let order: Vec<usize> = (0..pattern.len()).rev().collect();
+        pattern.permute(&order);
+        pattern.fill(&buses, &p_calc, &q_calc, &mut values);
+        let after = pattern.to_triplets(&values);
+        let expected: Vec<_> = order.iter().map(|&i| before[i]).collect();
+        assert_eq!(after, expected);
     }
 
     /// `fill` must fully overwrite its buffer, so reusing one across
@@ -457,7 +626,7 @@ mod tests {
     /// the Jacobian triplets directly.
     ///
     /// Exists as the **reference oracle** for `jacobian::JacobianPattern`, whose
-    /// precomputed-offset assembler must agree with this bit-for-bit (see
+    /// precomputed-offset assembler must agree with this to rounding (see
     /// `jacobian`'s own tests). Kept deliberately naive — it re-derives
     /// everything from scratch on every call, which is exactly the cost
     /// `JacobianPattern` was written to remove, and exactly what makes it a
@@ -522,7 +691,7 @@ mod tests {
     }
 
     /// The **reference implementation** of Jacobian assembly, retained as the
-    /// oracle `jacobian::JacobianPattern` is checked against bit-for-bit. The
+    /// oracle `jacobian::JacobianPattern` is checked against. The
     /// Newton loop itself no longer calls this — it refills values at
     /// precomputed offsets instead — so it lives here, beside the tests it serves.
     /// Kept deliberately straightforward: its value is being obviously correct,

@@ -123,7 +123,8 @@ Two consequences are stated rather than hidden:
   \\(\lambda\\) unknown, so `run_continuation` returns `BackendUnsupported` instead of quietly
   substituting another backend.
 - **BTF is defeated** by the border, so the KLU backends lose any block-triangular split.
-  Negligible on connected transmission networks; real on multi-island ones. `Scalar` is the default.
+  Negligible on connected transmission networks; real on multi-island ones. `KluNative`, the
+  default, is one of them; `Scalar` is unaffected.
 
 ## Two kinds of limit, and why the difference matters
 

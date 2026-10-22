@@ -1,7 +1,7 @@
 use super::jacobian::JacobianPattern;
 use super::network::{
-    Classified, Verdict, YBusSparse, classify, connected_components, effective_injection,
-    mark_unreferenced_islands, power_injections,
+    BusVoltages, Classified, Verdict, YBusSparse, classify, connected_components,
+    effective_injection, mark_unreferenced_islands, power_injections, power_injections_from,
 };
 use gridoxide_sparse::block_sparse::{BlockLu, BlockMatrix, BlockSymbolic};
 // Defined beside the backends it abstracts over, so that they need nothing
@@ -12,10 +12,16 @@ pub use gridoxide_sparse::sparse::LinearSolver;
 
 /// Selects which sparse-LU backend `newton_raphson_with_backend` uses to
 /// solve the Jacobian system each iteration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The default is [`KluNative`](Self::KluNative): the KLU algorithm power
+/// systems are usually solved with, in Rust, with no build requirement. It
+/// solves the power-flow Jacobians gridoxide is benchmarked on about six
+/// times faster than `Scalar` (case9241pegase: 15 ms against 87), within 15%
+/// of SuiteSparse's own KLU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum JacobianBackend {
-    /// The default, production path: scalar sparse triplets solved via
-    /// `faer` (`sparse::RealSparseSystem`). Used by `newton_raphson`.
+    /// Scalar sparse triplets solved via `faer` (`sparse::RealSparseSystem`).
+    /// The default until KLU's native port caught up with SuiteSparse's.
     Scalar,
     /// Experimental, opt-in: groups each bus's own (angle, magnitude)
     /// unknowns into one 2×2 block, mirroring power-grid-model's
@@ -39,13 +45,13 @@ pub enum JacobianBackend {
     /// pure-Rust reimplementation of the same algorithm, see `KluNative`.
     #[cfg(feature = "klu")]
     Klu,
-    /// Experimental: the same scalar Jacobian as `Scalar`, solved via a
+    /// **The default**: the same scalar Jacobian as `Scalar`, solved via a
     /// from-scratch Rust port of the same KLU algorithm `Klu` links over FFI
     /// — no C toolchain needed, **always compiled** (unlike `Klu`, no
-    /// feature gate). See `klu_native`'s module doc comment for scope and
-    /// what's ported vs. simplified (row scaling is ported but not yet
-    /// wired in; everything else — BTF, AMD, partial pivoting, Eisenstat-Liu
-    /// pruning, refactor — is a faithful translation).
+    /// feature gate). See `klu_native`'s module doc comment for scope: BTF,
+    /// AMD, row scaling, partial pivoting, Eisenstat-Liu pruning and refactor
+    /// are faithful translations.
+    #[default]
     KluNative,
     /// Experimental, opt-in, only compiled with the `pardiso` Cargo feature:
     /// the same scalar Jacobian as `Scalar`, solved via **Intel oneMKL's
@@ -283,7 +289,7 @@ pub fn newton_raphson(
     tol: f64,
     max_iter: usize,
 ) -> Vec<IslandReport> {
-    newton_raphson_with_backend(buses, ybus, tol, max_iter, JacobianBackend::Scalar)
+    newton_raphson_with_backend(buses, ybus, tol, max_iter, JacobianBackend::default())
 }
 
 /// Partitions `buses` into connected components first (`network::
@@ -370,6 +376,12 @@ pub struct PersistentSolver {
     /// shares one Y-bus) and is not automatic for a contingency sweep (each
     /// outage has its own). See [`invalidate_admittances`](Self::invalidate_admittances).
     jacobian: Option<JacobianPattern>,
+    /// The Y-bus's connected components, which depend on its structure alone
+    /// — the same thing the symbolic factorization assumes fixed until
+    /// [`reset`](Self::reset), and kept by
+    /// [`invalidate_admittances`](Self::invalidate_admittances) for the same
+    /// reason. Finding them cost 4% of a warm solve on case9241pegase.
+    components: Option<Vec<Vec<usize>>>,
     /// The general sparse LU, for every backend but `Block`.
     lu: SparseLu,
     block: Option<BlockSymbolic>,
@@ -380,6 +392,7 @@ impl PersistentSolver {
         Self {
             backend,
             jacobian: None,
+            components: None,
             lu: SparseLu::new(backend.lu_backend()),
             block: None,
         }
@@ -416,8 +429,17 @@ impl PersistentSolver {
         tol: f64,
         max_iter: usize,
     ) -> (Vec<IslandReport>, SolveStats) {
-        let components = connected_components(ybus);
-        let classified = classify(buses, &components);
+        // Recomputed if the bus count changed, the one structural change
+        // that is cheap to notice.
+        if self
+            .components
+            .as_ref()
+            .is_none_or(|c| c.iter().map(Vec::len).sum::<usize>() != buses.len())
+        {
+            self.components = Some(connected_components(ybus));
+        }
+        let components = self.components.as_ref().expect("just populated above");
+        let classified = classify(buses, components);
         mark_unreferenced_islands(buses, &classified);
 
         let stats = match self.backend {
@@ -463,6 +485,7 @@ impl PersistentSolver {
 
     pub fn reset(&mut self) {
         self.jacobian = None;
+        self.components = None;
         self.lu.reset();
         self.block = None;
     }
@@ -513,9 +536,15 @@ fn newton_raphson_cached(
     // only on the topology and the bus-type assignment, so they are derived
     // once here (or reused from a previous solve) rather than per iteration.
     if pattern.is_none() {
-        *pattern = Some(JacobianPattern::analyze(buses, ybus));
+        let mut fresh = JacobianPattern::analyze(buses, ybus);
+        // A factorization kept across `invalidate_admittances` still takes
+        // its values in the order it adopted below.
+        if let Some(order) = lu.storage_order() {
+            fresh.permute(order);
+        }
+        *pattern = Some(fresh);
     }
-    let pattern = pattern.as_ref().expect("just populated above");
+    let pattern = pattern.as_mut().expect("just populated above");
 
     // Refilled in place every iteration — the allocation happens once.
     let mut values: Vec<f64> = Vec::with_capacity(pattern.len());
@@ -526,9 +555,11 @@ fn newton_raphson_cached(
     // symbolic factorization (ordering + fill-in) is computed once here and
     // reused via `factor_and_solve` for every iteration's numeric-only
     // refactorization, mirroring PGM's own prefactorization-reuse approach.
+    let mut voltages = BusVoltages::default();
     for _ in 0..max_iter {
-        // compute injections
-        let (p_calc, q_calc) = power_injections(buses, ybus);
+        // compute injections, from voltages the Jacobian fill reads too
+        voltages.update(buses);
+        let (p_calc, q_calc) = power_injections_from(&voltages, ybus);
 
         // Build mismatch vector
         let mut mismatch = vec![0.0; n_unknowns];
@@ -553,13 +584,21 @@ fn newton_raphson_cached(
         }
 
         // Refill the Jacobian's values at their precomputed offsets.
-        pattern.fill(buses, &p_calc, &q_calc, &mut values);
+        pattern.fill_with(&voltages, &p_calc, &q_calc, &mut values);
 
         // The backend's symbolic analysis needs the `(row, col)` pairs, but
         // only once per topology — every subsequent iteration hands over
         // nothing but the values.
-        if !lu.is_analyzed() && !lu.analyze(n_unknowns, &pattern.to_triplets(&values)) {
-            return SolveStats::from_loop(SolveStatus::Singular, history);
+        if !lu.is_analyzed() {
+            if !lu.analyze(n_unknowns, &pattern.to_triplets(&values)) {
+                return SolveStats::from_loop(SolveStatus::Singular, history);
+            }
+            // Where the backend has one layout (both KLUs), fill straight into
+            // it from here on rather than have it copy every iteration.
+            if let Some(order) = lu.adopt_storage_order() {
+                pattern.permute(&order);
+                values = order.iter().map(|&i| values[i]).collect();
+            }
         }
         let Some(dx) = lu.factor_and_solve_values(&values, &mismatch) else {
             return SolveStats::from_loop(SolveStatus::Singular, history);

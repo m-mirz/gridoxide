@@ -1098,7 +1098,7 @@ impl Default for AcOptions<'_> {
             shunts: &[],
             tol: 1e-8,
             max_iter: 30,
-            backend: JacobianBackend::Scalar,
+            backend: JacobianBackend::default(),
             distribute_slack: false,
             slack_weights: &[],
         }

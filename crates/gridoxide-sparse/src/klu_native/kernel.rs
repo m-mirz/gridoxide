@@ -18,6 +18,13 @@
 //! (including its `Pinv` `FLIP`-sentinel bookkeeping, kept literal per
 //! `types.rs`'s guidance), and Eisenstat-Liu pruning — is ported as
 //! literally as this one storage change allows.
+//!
+//! That growable storage is for the factorization only. A finished
+//! [`BlockFactor`] holds its columns [`Packed`], as KLU's own buffer does:
+//! refactor and solve run over them on every Newton iteration, and one
+//! heap allocation per column with 16-byte `(usize, f64)` entries cost the
+//! refactor about a third more than KLU's contiguous 4-byte indices and
+//! separate values.
 
 use super::types::{EMPTY, flip};
 
@@ -316,8 +323,12 @@ fn prune(
 /// `Pnum[k+k1] = P[Pblock[k]+k1]` composition.
 #[derive(Clone)]
 pub struct BlockFactor {
-    pub l_cols: Vec<Vec<(usize, f64)>>,
-    pub u_cols: Vec<Vec<(usize, f64)>>,
+    /// Below-diagonal L, by column, rows in pivotal order (unit diagonal
+    /// not stored).
+    pub l: Packed,
+    /// Above-diagonal U, by column, each column's rows in the topological
+    /// order its elimination needs (diagonal in `udiag`).
+    pub u: Packed,
     pub udiag: Vec<f64>,
     /// The block-local numeric row permutation this block's partial
     /// pivoting chose. The block-local *inverse* (`pinv`) is deliberately
@@ -444,11 +455,61 @@ pub fn factor_block(
     }
 
     Some(BlockFactor {
-        l_cols,
-        u_cols,
+        l: Packed::pack(l_cols),
+        u: Packed::pack(u_cols),
         udiag,
         p,
     })
+}
+
+/// A finished triangular factor's columns in one contiguous buffer, as
+/// KLU's own `LU` holds them: column `k`'s rows are `idx[ptr[k]..ptr[k+1]]`
+/// and its values the same range of `val`. Rows are block-local, so `u32`
+/// is wide enough by a margin no power system approaches.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Packed {
+    ptr: Vec<usize>,
+    idx: Vec<u32>,
+    val: Vec<f64>,
+}
+
+impl Packed {
+    fn pack(cols: Vec<Vec<(usize, f64)>>) -> Self {
+        let nnz = cols.iter().map(Vec::len).sum();
+        let mut packed = Self {
+            ptr: Vec::with_capacity(cols.len() + 1),
+            idx: Vec::with_capacity(nnz),
+            val: Vec::with_capacity(nnz),
+        };
+        packed.ptr.push(0);
+        for col in cols {
+            for (row, value) in col {
+                packed
+                    .idx
+                    .push(u32::try_from(row).expect("block row fits in u32"));
+                packed.val.push(value);
+            }
+            packed.ptr.push(packed.idx.len());
+        }
+        packed
+    }
+
+    /// Number of columns.
+    pub fn len(&self) -> usize {
+        self.ptr.len() - 1
+    }
+
+    /// Column `k`'s rows and values.
+    pub fn col(&self, k: usize) -> (&[u32], &[f64]) {
+        let range = self.ptr[k]..self.ptr[k + 1];
+        (&self.idx[range.clone()], &self.val[range])
+    }
+
+    /// Column `k`'s rows, and its values to overwrite.
+    pub fn col_mut(&mut self, k: usize) -> (&[u32], &mut [f64]) {
+        let range = self.ptr[k]..self.ptr[k + 1];
+        (&self.idx[range.clone()], &mut self.val[range])
+    }
 }
 
 /// Re-factors one BTF diagonal block against new numeric values, reusing an
@@ -464,9 +525,9 @@ pub fn factor_block(
 /// supply the *same sparsity pattern* `factor_block` originally saw, just
 /// with new values, matching `KLU_refactor`'s own precondition). So
 /// `block.p` (the row permutation) and every column's row *set*
-/// (`block.l_cols[k]`/`block.u_cols[k]`, iterated in their already-recorded
+/// (`block.l.col(k)`/`block.u.col(k)`, iterated in their already-recorded
 /// order) are reused verbatim — only the numeric values change. Critically,
-/// `block.u_cols[k]`'s stored order is *already* a valid topological order
+/// `block.u.col(k)`'s stored order is *already* a valid topological order
 /// for this column's Doolittle-style elimination (it came from
 /// `lsolve_symbolic`'s DFS, which only ever visits already-pivotal
 /// ancestors before their dependents), so no fresh symbolic pass is needed —
@@ -479,10 +540,9 @@ pub fn factor_block(
 ///
 /// **In place, allocation-free** (unlike `factor_block`, which only runs
 /// once per `PersistentSolver` lifetime): `block.p` and every column's row
-/// *pattern* — `block.l_cols[k]`/`block.u_cols[k]`'s existing `.0` (row)
-/// fields — are left completely untouched; only the `.1` (value) fields are
-/// overwritten, iterating each column's existing entries via `.iter_mut()`
-/// instead of building new `Vec`s. This is safe precisely because no
+/// *pattern* — the packed row indices of `block.l`/`block.u` — are left
+/// completely untouched; only the values are overwritten, in place, instead
+/// of building new `Vec`s. This is safe precisely because no
 /// pivoting happens here (see above) — the row pattern this function reads
 /// (to know *which* entries to overwrite) is exactly the pattern it also
 /// writes into, so an in-place pass is a faithful translation of the same
@@ -504,29 +564,21 @@ pub fn factor_block(
 /// of the elimination itself (never left dangling for a future call to
 /// trip over).
 ///
-/// `columns[k]` gives block-local column `k`'s raw entries (same contract
-/// `factor_block`'s `column_entries(k)` closure had, just as a plain slice
-/// instead of a closure — the caller already has to build this once into
-/// its own reusable buffer to avoid *its* own allocation, so a closure
-/// indirection here would add nothing).
+/// `scatter(k, x)` writes block-local column `k`'s values into `x` at their
+/// block-local rows, and takes care of the column's off-diagonal entries
+/// itself — `construct_column`'s job, done by the caller because it knows
+/// where each input value goes without building the column first (see
+/// `refactor::refactor`).
 pub fn refactor_block_in_place(
     nk: usize,
     block: &mut BlockFactor,
     x: &mut [f64],
-    columns: &[Vec<(i64, f64)>],
-    off_diagonal_out: &mut [Vec<(i64, f64)>],
+    mut scatter: impl FnMut(usize, &mut [f64]),
 ) -> bool {
-    let BlockFactor {
-        l_cols,
-        u_cols,
-        udiag,
-        ..
-    } = block;
+    let BlockFactor { l, u, udiag, .. } = block;
 
     for k in 0..nk {
-        let mut off_diag = std::mem::take(&mut off_diagonal_out[k]);
-        construct_column(x, &columns[k], &mut off_diag);
-        off_diagonal_out[k] = off_diag;
+        scatter(k, x);
 
         // Compute column k of U, updating column k of A in place -- same
         // order as originally recorded, so this is a valid elimination.
@@ -536,13 +588,15 @@ pub fn refactor_block_in_place(
         // overwrites the shared LU buffer column-by-column in place, so its
         // own `GET_POINTER(LU, Lip, Llen, Li, Lx, j, ...)` for j < k always
         // reads values already refactored earlier in this same call.
-        for entry in u_cols[k].iter_mut() {
-            let j = entry.0;
+        let (u_rows, u_vals) = u.col_mut(k);
+        for (&j, u_jk) in u_rows.iter().zip(u_vals.iter_mut()) {
+            let j = j as usize;
             let ujk = x[j];
             x[j] = 0.0;
-            entry.1 = ujk;
-            for &(row, lij) in l_cols[j].iter() {
-                x[row] -= lij * ujk;
+            *u_jk = ujk;
+            let (l_rows, l_vals) = l.col(j);
+            for (&row, &lij) in l_rows.iter().zip(l_vals) {
+                x[row as usize] -= lij * ujk;
             }
         }
 
@@ -554,9 +608,10 @@ pub fn refactor_block_in_place(
         udiag[k] = ukk;
 
         // Gather and divide by the pivot to overwrite column k of L.
-        for entry in l_cols[k].iter_mut() {
-            let row = entry.0;
-            entry.1 = x[row] / ukk;
+        let (l_rows, l_vals) = l.col_mut(k);
+        for (&row, l_ik) in l_rows.iter().zip(l_vals.iter_mut()) {
+            let row = row as usize;
+            *l_ik = x[row] / ukk;
             x[row] = 0.0;
         }
     }
@@ -613,8 +668,9 @@ mod tests {
         // Forward: L y = Pb (unit lower triangular, L stored by pivotal row).
         for k in 0..n {
             let yk = y[k];
-            for &(row, lij) in &bf.l_cols[k] {
-                y[row] -= lij * yk;
+            let (rows, vals) = bf.l.col(k);
+            for (&row, &lij) in rows.iter().zip(vals) {
+                y[row as usize] -= lij * yk;
             }
         }
         // Backward: U x = y.
@@ -622,8 +678,9 @@ mod tests {
         for k in (0..n).rev() {
             x[k] /= bf.udiag[k];
             let xk = x[k];
-            for &(row, uij) in &bf.u_cols[k] {
-                x[row] -= uij * xk;
+            let (rows, vals) = bf.u.col(k);
+            for (&row, &uij) in rows.iter().zip(vals) {
+                x[row as usize] -= uij * xk;
             }
         }
         x
@@ -767,11 +824,12 @@ mod tests {
         for &(r, c, v) in entries {
             by_col[c].push((r as i64, v));
         }
-        let mut off = vec![Vec::new(); n];
         let mut x = vec![0.0; n];
         let mut block = prev.clone();
         assert!(
-            refactor_block_in_place(n, &mut block, &mut x, &by_col, &mut off),
+            refactor_block_in_place(n, &mut block, &mut x, |k, x| {
+                construct_column(x, &by_col[k], &mut Vec::new())
+            }),
             "should not be singular"
         );
         block
@@ -800,10 +858,8 @@ mod tests {
         // Same pattern (unchanged pivot order) and, since the arithmetic is
         // identical, the exact same values -- not just numerically close.
         assert_eq!(refactored.p, bf.p);
-        for k in 0..n {
-            assert_eq!(refactored.l_cols[k], bf.l_cols[k], "L column {k}");
-            assert_eq!(refactored.u_cols[k], bf.u_cols[k], "U column {k}");
-        }
+        assert_eq!(refactored.l, bf.l, "L");
+        assert_eq!(refactored.u, bf.u, "U");
         assert_eq!(refactored.udiag, bf.udiag);
     }
 
@@ -880,12 +936,11 @@ mod tests {
         for &(r, c, v) in &singular {
             by_col[c].push((r as i64, v));
         }
-        let mut off = vec![Vec::new(); n];
         let mut x = vec![0.0; n];
         let mut block = bf.clone();
-        assert!(!refactor_block_in_place(
-            n, &mut block, &mut x, &by_col, &mut off
-        ));
+        assert!(!refactor_block_in_place(n, &mut block, &mut x, |k, x| {
+            construct_column(x, &by_col[k], &mut Vec::new())
+        }));
     }
 
     #[cfg(feature = "klu")]

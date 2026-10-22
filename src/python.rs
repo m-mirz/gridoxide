@@ -21,7 +21,6 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::PowerFlowMethod;
 use crate::batch::{BatchSolver, BusOverride, Scenario, uniform_load_scaling};
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
@@ -36,6 +35,7 @@ use crate::network::{ShuntAdm, YBusSparse, build_ybus, linear_initial_guess, sta
 use crate::pgm::PgmInput;
 use crate::solver::{IslandStatus, JacobianBackend, PersistentSolver, SolveStatus};
 use crate::types::{Bus, Line, Transformer};
+use crate::{PowerFlowInit, PowerFlowMethod};
 
 fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
     match name {
@@ -69,6 +69,17 @@ fn parse_method(name: &str) -> PyResult<PowerFlowMethod> {
         "linear_impedance" => Ok(PowerFlowMethod::LinearImpedance),
         other => Err(PyValueError::new_err(format!(
             "unknown method '{other}', expected 'newton_raphson', 'dc', or 'linear_impedance'"
+        ))),
+    }
+}
+
+fn parse_init(name: &str) -> PyResult<PowerFlowInit> {
+    match name {
+        "flat" => Ok(PowerFlowInit::Flat),
+        "linear_impedance" => Ok(PowerFlowInit::LinearImpedance),
+        "dc" => Ok(PowerFlowInit::Dc),
+        other => Err(PyValueError::new_err(format!(
+            "unknown init '{other}', expected 'flat', 'linear_impedance', or 'dc'"
         ))),
     }
 }
@@ -216,6 +227,8 @@ struct PowerFlowModel {
     /// to separately re-derive `cgmes::cgmes_topological_node_bus_index`'s
     /// own post-switch-merge index remapping themselves.
     tn_bus_index: std::collections::HashMap<String, usize>,
+    /// Bus index -> MATPOWER bus number, populated by `from_matpower` only.
+    bus_numbers: Vec<u64>,
 }
 
 #[pymethods]
@@ -223,8 +236,8 @@ impl PowerFlowModel {
     /// Loads a PGM-format JSON file (the same format `examples/bench_network.rs`
     /// and `matpower_to_pgm.py`/`convert_pandapower_case.py` produce).
     ///
-    /// `backend` is `"scalar"` (default), `"block"`, `"klu"` (needs the
-    /// crate's `klu` feature built in too), `"klu_native"`, or `"pardiso"`
+    /// `backend` is `"klu_native"` (default), `"scalar"`, `"block"`, `"klu"`
+    /// (needs the crate's `klu` feature built in too), or `"pardiso"`
     /// (needs the crate's `pardiso` feature built in too, plus `MKLROOT`
     /// set at build time).
     /// `s_base_va`/`freq_hz` match
@@ -241,7 +254,7 @@ impl PowerFlowModel {
     #[staticmethod]
     #[pyo3(signature = (
         path,
-        backend="scalar",
+        backend="klu_native",
         tol=1e-6,
         max_iter=20,
         s_base_va=1e6,
@@ -302,7 +315,82 @@ impl PowerFlowModel {
             tol,
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
+            bus_numbers: Vec::new(),
         })
+    }
+
+    /// Loads a MATPOWER case (`.m`) by gridoxide's own reader
+    /// (`src/matpower.rs`), solving the problem MATPOWER's `runpf` solves:
+    /// the case's reference bus as the slack, PV buses at their generators'
+    /// `Vg`, isolated buses and out-of-service equipment left out.
+    ///
+    /// Per unit on the case's own `baseMVA`, so `tol` is the largest power
+    /// mismatch in the same units MATPOWER measures it in. Buses keep the
+    /// order of `mpc.bus`; `bus_numbers()` gives each one's `BUS_I`.
+    /// Branches are lines first, then transformers (every branch with a ratio
+    /// or a phase shift), in file order within each.
+    #[staticmethod]
+    #[pyo3(signature = (
+        path,
+        backend="klu_native",
+        tol=1e-6,
+        max_iter=20,
+        method="newton_raphson",
+        dc_approximation="ignore_r",
+    ))]
+    fn from_matpower(
+        path: &str,
+        backend: &str,
+        tol: f64,
+        max_iter: usize,
+        method: &str,
+        dc_approximation: &str,
+    ) -> PyResult<Self> {
+        let net = crate::matpower::read(path).map_err(|e| match e {
+            crate::matpower::MatpowerError::Io(e) => {
+                PyRuntimeError::new_err(format!("reading {path}: {e}"))
+            }
+            e => PyValueError::new_err(format!("{path}: {e}")),
+        })?;
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &net.shunts);
+        let ybus = ybus.finish();
+        let backend = parse_backend(backend)?;
+        Ok(Self {
+            buses: net.buses.clone(),
+            buses_template: net.buses,
+            ybus,
+            lines: net.lines,
+            transformers: net.transformers,
+            shunts: net.shunts,
+            solver: PersistentSolver::new(backend),
+            backend,
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
+            method: parse_method(method)?,
+            dc_opts: DcOptions {
+                approximation: parse_dc_approximation(dc_approximation)?,
+                ..DcOptions::default()
+            },
+            dc_solution: None,
+            sensitivity: None,
+            #[cfg(feature = "cgmes")]
+            node_breaker: None,
+            batch: None,
+            tap_changers: Vec::new(),
+            regulation: Vec::new(),
+            outer: None,
+            tol,
+            max_iter,
+            tn_bus_index: std::collections::HashMap::new(),
+            bus_numbers: net.bus_numbers,
+        })
+    }
+
+    /// Each bus's MATPOWER bus number (`BUS_I`), in bus order. Empty unless
+    /// the model was built by `from_matpower`.
+    fn bus_numbers(&self) -> Vec<u64> {
+        self.bus_numbers.clone()
     }
 
     /// Loads a CGMES profile bundle (any number of EQ/EQBD/SSH/TP/SV files,
@@ -322,7 +410,7 @@ impl PowerFlowModel {
     #[staticmethod]
     #[pyo3(signature = (
         paths,
-        backend="scalar",
+        backend="klu_native",
         tol=1e-6,
         max_iter=20,
         s_base_va=100e6,
@@ -447,6 +535,7 @@ impl PowerFlowModel {
             tol,
             max_iter,
             tn_bus_index,
+            bus_numbers: Vec::new(),
         })
     }
 
@@ -475,7 +564,7 @@ impl PowerFlowModel {
         self.tn_bus_index.get(mrid).copied()
     }
 
-    /// Solves from a fresh flat/linear-initial-guess start, reusing this
+    /// Solves from a fresh start (`init`, below), reusing this
     /// model's `PersistentSolver` cached factorization from any previous
     /// `solve()` call. Every disconnected component of the network is
     /// solved in this same call, not just the largest one (see
@@ -505,6 +594,14 @@ impl PowerFlowModel {
     ///
     /// Read what they did with `tap_positions()`, `tap_controllers()`,
     /// `q_limit_switches()` and `slack_shift()`.
+    ///
+    /// # Starting point
+    ///
+    /// `init` is where Newton starts: `"linear_impedance"` (default) solves
+    /// once with every load and generator as a constant admittance, `"flat"`
+    /// starts from |V| = 1 p.u. and the setpoints the buses carry, and `"dc"`
+    /// seeds angles from a DC solve. Every call starts afresh from it; nothing
+    /// is carried over from the previous solve. Newton only.
     #[pyo3(signature = (
         control_taps = false,
         enforce_q_limits = false,
@@ -512,7 +609,9 @@ impl PowerFlowModel {
         distribute_slack = false,
         max_outer = 40,
         max_tap_shift = 3,
+        init = "linear_impedance",
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn solve(
         &mut self,
         control_taps: bool,
@@ -521,7 +620,9 @@ impl PowerFlowModel {
         distribute_slack: bool,
         max_outer: usize,
         max_tap_shift: i32,
+        init: &str,
     ) -> PyResult<()> {
+        let init = parse_init(init)?;
         match self.method {
             PowerFlowMethod::Dc => return self.solve_dc(),
             PowerFlowMethod::LinearImpedance => return self.solve_linear_impedance(),
@@ -530,7 +631,14 @@ impl PowerFlowModel {
         self.dc_solution = None;
         self.outer = None;
         self.buses = self.buses_template.clone();
-        linear_initial_guess(&mut self.buses, &self.ybus);
+        crate::initialize_newton(
+            &mut self.buses,
+            &self.lines,
+            &self.transformers,
+            &self.ybus,
+            init,
+            self.dc_opts,
+        );
 
         let wants_taps = control_taps && !self.regulation.is_empty();
         // A machine regulating a bus other than its own. Without this the
@@ -560,6 +668,8 @@ impl PowerFlowModel {
                     enforce_q_limits,
                     distribute_slack: distribution,
                     max_outer_iter: max_outer,
+                    // Already applied above, to the buses handed over here.
+                    init: PowerFlowInit::Flat,
                     tol: self.tol,
                     max_iter: self.max_iter,
                     backend: self.backend,
@@ -1560,7 +1670,12 @@ impl PowerFlowModel {
 /// noisy measurements and computes the most likely voltages. They do not even
 /// share an unknown count — state estimation has no PV buses, so every bus
 /// carries a magnitude.
-#[pyclass]
+///
+/// `unsendable` for the reason `PowerFlowModel` is: with `klu` or `pardiso`
+/// its persistent estimator holds a factorization through raw pointers, which
+/// are not `Send`, so without it the bindings do not compile with either
+/// backend.
+#[pyclass(unsendable)]
 struct StateEstimationModel {
     buses: Vec<Bus>,
     /// The state every `solve()` restarts from, so calling one after another is
@@ -1615,7 +1730,7 @@ impl StateEstimationModel {
     /// not carry: `link`, `three_winding_transformer`, `voltage_regulator`, and
     /// transformer winding pairs outside Dyn and YNyn.
     #[staticmethod]
-    #[pyo3(signature = (path, backend="scalar", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0, asymmetric=false))]
+    #[pyo3(signature = (path, backend="klu_native", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0, asymmetric=false))]
     #[allow(clippy::too_many_arguments)]
     fn from_pgm_json(
         path: &str,

@@ -11,7 +11,7 @@ pub use gridoxide_sparse::{block_sparse, klu_native, lu, sparse};
 // types at the crate root.
 pub use gridoxide_core::{
     OuterLoopOutcome, PowerFlowInit, PowerFlowMethod, PowerFlowOptions, PowerFlowReport,
-    RemoteControlData, TapData, run_power_flow, run_power_flow_analysis,
+    RemoteControlData, TapData, initialize_newton, run_power_flow, run_power_flow_analysis,
     run_power_flow_analysis_from_ybus, run_power_flow_with_remote,
 };
 pub use gridoxide_core::{
@@ -28,6 +28,8 @@ pub mod cgmes;
 pub mod dynamics;
 #[cfg(feature = "iidm")]
 pub mod iidm;
+#[cfg(feature = "matpower")]
+pub mod matpower;
 #[cfg(feature = "opf")]
 pub mod opf;
 pub mod pgm;

@@ -265,11 +265,14 @@ def test_small_signal_can_be_aimed_at_a_frequency():
     assert re < 0, "a damped shift sits left of the axis"
     assert "sparse" in repr(near)
 
-    # The mode nearest 1.27 Hz is the swing mode, and both methods agree on it.
+    # The mode nearest 1.27 Hz is the swing mode, and both methods agree on it,
+    # to the 1e-8 the Rust gate holds them to (dynamics_smallsignal_test.rs):
+    # two eigensolvers, one direct and one iterative, agree that far and not
+    # to the last digit.
     swing = min(every, key=lambda m: abs(m.frequency - 1.27))
     found = min(near, key=lambda m: abs(m.frequency - 1.27))
-    assert found.sigma == pytest.approx(swing.sigma, abs=1e-9)
-    assert found.omega == pytest.approx(swing.omega, abs=1e-9)
+    assert found.sigma == pytest.approx(swing.sigma, abs=1e-8)
+    assert found.omega == pytest.approx(swing.omega, abs=1e-8)
     assert [n for n, _ in found.participation] == [n for n, _ in swing.participation]
 
     # The sparse method measures how far off it might be; the dense one has

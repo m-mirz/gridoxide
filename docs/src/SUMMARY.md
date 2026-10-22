@@ -74,6 +74,7 @@
 
 - [Reading UCTE-DEF Input](./import/ucte.md)
 - [Reading IIDM Input](./import/iidm.md)
+- [Reading MATPOWER Input](./import/matpower.md)
 
 # CGMES Data Model
 

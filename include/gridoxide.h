@@ -89,7 +89,7 @@ typedef enum gridoxide_status {
  */
 typedef enum gridoxide_backend {
     /**
-     * faer's sparse LU. Always available; the default.
+     * faer's sparse LU. Always available.
      */
     GRIDOXIDE_BACKEND_SCALAR = 0,
     /**
@@ -101,7 +101,7 @@ typedef enum gridoxide_backend {
      */
     GRIDOXIDE_BACKEND_KLU = 2,
     /**
-     * The pure-Rust KLU port. Needs no feature.
+     * The pure-Rust KLU port. Needs no feature; the default.
      */
     GRIDOXIDE_BACKEND_KLU_NATIVE = 3,
     /**

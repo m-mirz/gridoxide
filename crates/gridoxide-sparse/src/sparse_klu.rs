@@ -89,13 +89,52 @@ fn pack_real_values(entries: &[(usize, usize, f64)], groups: &[Vec<usize>]) -> V
         .collect()
 }
 
-/// `pack_real_values` for callers that already hold just the values — see
-/// `sparse::LinearSolver::factor_and_solve_values`.
-fn pack_real_values_slice(values: &[f64], groups: &[Vec<usize>]) -> Vec<f64> {
-    groups
-        .iter()
-        .map(|g| g.iter().map(|&i| values[i]).sum())
-        .collect()
+/// `groups` flattened into two arrays: CSC position `k` sums the inputs
+/// `src[ptr[k]..ptr[k + 1]]`.
+///
+/// What a repeated solve packs through, every iteration. A `Vec` per
+/// position cost a pointer chase per nonzero, and the packed values a fresh
+/// allocation per call; together they were a tenth of a warm Newton solve on
+/// case9241pegase, where a Newton Jacobian has no duplicate position at all.
+struct FlatGroups {
+    ptr: Vec<usize>,
+    src: Vec<usize>,
+}
+
+impl FlatGroups {
+    fn new(groups: &[Vec<usize>]) -> Self {
+        let mut ptr = Vec::with_capacity(groups.len() + 1);
+        let mut src = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+        ptr.push(0);
+        for g in groups {
+            src.extend_from_slice(g);
+            ptr.push(src.len());
+        }
+        Self { ptr, src }
+    }
+
+    /// The CSC position of every input, if each position has exactly one —
+    /// `order[k]` the input stored at position `k`.
+    fn one_to_one(&self) -> Option<Vec<usize>> {
+        (self.src.len() + 1 == self.ptr.len()).then(|| self.src.clone())
+    }
+
+    /// Positions that take input `k` as-is.
+    fn identity(n: usize) -> Self {
+        Self {
+            ptr: (0..=n).collect(),
+            src: (0..n).collect(),
+        }
+    }
+
+    /// Packs `value(i)` for every input `i` into `out`, in CSC order.
+    fn pack_into(&self, value: impl Fn(usize) -> f64, out: &mut Vec<f64>) {
+        out.clear();
+        out.extend(self.ptr.windows(2).map(|w| match &self.src[w[0]..w[1]] {
+            [only] => value(*only),
+            several => several.iter().map(|&i| value(i)).sum(),
+        }));
+    }
 }
 
 fn pack_complex_values(
@@ -127,7 +166,13 @@ pub struct KluRealSystem {
     n: usize,
     col_ptr: Vec<i32>,
     row_idx: Vec<i32>,
-    groups: Vec<Vec<usize>>,
+    groups: FlatGroups,
+    /// The packed values of the last call, kept so the next reuses the
+    /// allocation.
+    packed: Vec<f64>,
+    /// Set by [`adopt_storage_order`](Self::adopt_storage_order): values
+    /// arrive in CSC order and are handed to KLU as they are.
+    in_order: bool,
     common: klu_common,
     symbolic: *mut klu_symbolic,
     numeric: *mut klu_numeric,
@@ -179,7 +224,9 @@ impl KluRealSystem {
             n,
             col_ptr,
             row_idx,
-            groups,
+            groups: FlatGroups::new(&groups),
+            packed: values,
+            in_order: false,
             common,
             symbolic,
             numeric,
@@ -204,25 +251,71 @@ impl KluRealSystem {
         entries: &[(usize, usize, f64)],
         rhs: &[f64],
     ) -> Option<Vec<f64>> {
-        let values = pack_real_values(entries, &self.groups);
+        let mut values = std::mem::take(&mut self.packed);
+        self.groups.pack_into(|i| entries[i].2, &mut values);
         self.solve_packed(values, rhs)
     }
 
+    /// From now on takes values in KLU's own storage order, and hands them
+    /// to KLU without copying: returns `order`, where `order[k]` is the
+    /// input index (in the order `new` was given) that position `k` holds.
+    /// The caller reorders its values to match, once, and keeps them so.
+    ///
+    /// `None`, changing nothing, if some position sums several inputs —
+    /// duplicate `(row, col)` pairs, which a one-to-one order cannot express.
+    pub fn adopt_storage_order(&mut self) -> Option<Vec<usize>> {
+        let order = self.groups.one_to_one()?;
+        self.groups = FlatGroups::identity(order.len());
+        self.in_order = true;
+        Some(order)
+    }
+
     /// Shared tail of both `factor_and_solve` paths, taking already-packed
-    /// CSC values.
-    fn solve_packed(&mut self, mut values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
+    /// CSC values, whose allocation it keeps for the next call.
+    fn solve_packed(&mut self, values: Vec<f64>, rhs: &[f64]) -> Option<Vec<f64>> {
+        let x = self.refactor_and_solve(&values, rhs);
+        self.packed = values;
+        x
+    }
+
+    /// `klu_refactor` on `values` (CSC order), then `klu_solve`.
+    ///
+    /// A refactor keeps the last factorization's pivots, and new values can
+    /// put an exact zero on one; then `klu_factor` factors afresh, with new
+    /// pivots, on the same symbolic analysis — lightsim2grid's fallback —
+    /// and only if that fails is the matrix singular.
+    fn refactor_and_solve(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
+        // SAFETY: KLU's `Ax` is declared `double []` but only read —
+        // `klu_refactor` and the `klu_scale` it calls never write through it
+        // (vendor/suitesparse/KLU/Source/klu_refactor.c, klu_scale.c) — so
+        // passing a shared slice's pointer is sound.
         unsafe {
             klu_refactor(
                 self.col_ptr.as_mut_ptr(),
                 self.row_idx.as_mut_ptr(),
-                values.as_mut_ptr(),
+                values.as_ptr().cast_mut(),
                 self.symbolic,
                 self.numeric,
                 &mut self.common,
             )
         };
         if self.common.status != KLU_OK {
-            return None;
+            // SAFETY: `numeric` is ours and freed exactly once here, then
+            // replaced; `klu_free_numeric` accepts the null a failed
+            // `klu_factor` leaves, which `Drop` then frees again harmlessly.
+            unsafe {
+                klu_free_numeric(&mut self.numeric, &mut self.common);
+                self.numeric = klu_factor(
+                    self.col_ptr.as_mut_ptr(),
+                    self.row_idx.as_mut_ptr(),
+                    values.as_ptr().cast_mut(),
+                    self.symbolic,
+                    &mut self.common,
+                );
+            }
+            if self.numeric.is_null() || self.common.status != KLU_OK {
+                return None;
+            }
         }
 
         let mut b = rhs.to_vec();
@@ -257,7 +350,12 @@ impl crate::sparse::LinearSolver for KluRealSystem {
     }
 
     fn factor_and_solve_values(&mut self, values: &[f64], rhs: &[f64]) -> Option<Vec<f64>> {
-        self.solve_packed(pack_real_values_slice(values, &self.groups), rhs)
+        if self.in_order {
+            return self.refactor_and_solve(values, rhs);
+        }
+        let mut packed = std::mem::take(&mut self.packed);
+        self.groups.pack_into(|i| values[i], &mut packed);
+        self.solve_packed(packed, rhs)
     }
 }
 

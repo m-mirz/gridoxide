@@ -130,7 +130,7 @@ klu-dynamic = ["klu", "gridoxide-sparse/klu-dynamic"]
 # binary/test harness fail to link, since *those* do need libpython linked
 # in directly. This is a well-known, expected PyO3 constraint, not a
 # gridoxide-specific issue.
-python = ["dep:pyo3"]
+python = ["dep:pyo3", "matpower"]
 # Builds a fifth, opt-in `JacobianBackend` (`Pardiso`) backed by Intel oneMKL's
 # PARDISO sparse direct solver, linked dynamically against a locally-installed
 # oneMKL (discovered via the `MKLROOT` env var — see
@@ -166,6 +166,13 @@ cgmes = ["dep:cimmodel"]
 # *tables* — see `crates/gridoxide-core/src/ratings.rs` and `types::TapChanger` for why those two
 # were the gap worth closing.
 ucte = []
+# Reads MATPOWER case files (src/matpower.rs) — the `.m` text format the
+# standard transmission test cases (IEEE, PEGASE, RTE, PGLib) are published
+# in. Plain text, no dependency, like `ucte`. Read directly rather than
+# through `python/gridoxide/matpower.py`'s PGM conversion, which puts the
+# reference bus behind a source impedance and rounds phase shifts to 30°.
+# The Python bindings always include it.
+matpower = []
 # Reads PowSyBl's IIDM network format (src/iidm/mod.rs) — `.xiidm` files, the native
 # serialization of powsybl-core's network model, and the second of the two
 # formats the published remedial-action test material comes in.
@@ -321,6 +328,16 @@ required-features = ["cgmes"]
 name = "tap_control_probe"
 path = "examples/tap_control_probe.rs"
 required-features = ["cgmes"]
+
+[[example]]
+name = "klu_scaling_stress"
+path = "examples/klu_scaling_stress.rs"
+required-features = ["matpower", "cgmes", "klu"]
+
+[[example]]
+name = "pf_profile"
+path = "examples/pf_profile.rs"
+required-features = ["matpower"]
 
 [[example]]
 name = "tap_deadband_probe"

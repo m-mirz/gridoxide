@@ -10,6 +10,7 @@ sidesteps having to pass a matching `s_base_va` explicitly, which isn't
 what's under test here.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -79,3 +80,47 @@ def test_repeated_convert_calls_do_not_share_id_state(tmp_path):
     data1 = json.loads(out_path_1.read_text())["data"]
     data2 = json.loads(out_path_2.read_text())["data"]
     assert data1["source"][0]["id"] == data2["source"][0]["id"]
+
+
+# `PowerFlowModel.from_matpower`: the native reader, no PGM conversion.
+
+CASE14 = Path(__file__).resolve().parents[2] / "tests/data/benchmark-grids/matpower/case14.m"
+CASE33BW = CASE14.with_name("case33bw.m")
+
+needs_case14 = pytest.mark.skipif(not CASE14.exists(), reason="benchmark-grids submodule not checked out")
+
+
+@needs_case14
+def test_from_matpower_holds_the_case_setpoints():
+    model = gridoxide.PowerFlowModel.from_matpower(str(CASE14), tol=1e-8)
+    model.solve(init="flat")
+    numbers = model.bus_numbers()
+    assert numbers == list(range(1, 15))
+    vm = dict(zip(numbers, model.voltage_mag()))
+    va = dict(zip(numbers, model.voltage_ang()))
+    # The generators' Vg, which case14's Vm column happens to round to.
+    for bus, vg in {1: 1.06, 2: 1.045, 3: 1.01, 6: 1.07, 8: 1.09}.items():
+        assert vm[bus] == pytest.approx(vg, abs=1e-12)
+    assert va[1] == 0.0
+    # MATPOWER's runpf answer for bus 14.
+    assert vm[14] == pytest.approx(1.0355, abs=1e-4)
+
+
+@needs_case14
+def test_from_matpower_refuses_a_case_that_edits_its_matrices():
+    with pytest.raises(ValueError, match="modified by MATLAB code"):
+        gridoxide.PowerFlowModel.from_matpower(str(CASE33BW))
+
+
+def test_from_matpower_reads_a_written_case(tmp_path):
+    path = tmp_path / "test_case.m"
+    path.write_text(CASE_M.replace("mpc.branch", "mpc.gen = [\n\t1\t0\t0\t0\t0\t1.0\t1\t1;\n];\nmpc.branch"))
+    model = gridoxide.PowerFlowModel.from_matpower(str(path))
+    model.solve()
+    assert model.bus_numbers() == [1, 2]
+    assert model.voltage_mag()[1] < 1.0
+
+
+def test_from_matpower_without_a_file_raises():
+    with pytest.raises(RuntimeError, match="reading"):
+        gridoxide.PowerFlowModel.from_matpower("/nonexistent/case.m")

@@ -66,8 +66,9 @@ usage:
                                 ##Z country codes and states no schedule, so
                                 every target is zero there.
                                 The network may be CGMES (a directory, or the
-                                profile .xml files), UCTE-DEF (.uct) or IIDM
-                                (.xiidm). Needs the matching importer feature.
+                                profile .xml files), UCTE-DEF (.uct), IIDM
+                                (.xiidm) or MATPOWER (.m). Needs the matching
+                                importer feature.
   gridoxide estimate <path> [--iterative-linear] [--asymmetric]
                                 run state estimation over a PGM JSON document
                                 containing voltage, power or current sensors.
@@ -1036,8 +1037,8 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
     }
 
     let backend = match flag_value(flags, "--backend")?.as_deref() {
-        None | Some("scalar") => JacobianBackend::Scalar,
-        Some("klu-native") => JacobianBackend::KluNative,
+        Some("scalar") => JacobianBackend::Scalar,
+        None | Some("klu-native") => JacobianBackend::KluNative,
         Some(other) => {
             return Err(format!(
                 "--backend: expected scalar or klu-native, got {other:?}"
@@ -3138,7 +3139,12 @@ fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
 /// feature and carries CRAC-shaped fields (countries, initially-open branches)
 /// a power flow has no use for, and it cannot load CGMES — which is the only
 /// format whose fixtures declare tap controls.
-#[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
+#[cfg(any(
+    feature = "ucte",
+    feature = "iidm",
+    feature = "cgmes",
+    feature = "matpower"
+))]
 struct SolveNetwork {
     buses: Vec<gridoxide::types::Bus>,
     lines: Vec<gridoxide::types::Line>,
@@ -3163,12 +3169,39 @@ struct SolveNetwork {
     nonregulating_q: Vec<f64>,
 }
 
-#[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
+#[cfg(any(
+    feature = "ucte",
+    feature = "iidm",
+    feature = "cgmes",
+    feature = "matpower"
+))]
 fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
-    // Only the two extension-dispatched importers look at it; a cgmes-only
+    // Only the extension-dispatched importers look at it; a cgmes-only
     // build reaches the directory branch without ever asking.
-    #[cfg(any(feature = "ucte", feature = "iidm"))]
+    #[cfg(any(feature = "ucte", feature = "iidm", feature = "matpower"))]
     let lower = path.to_ascii_lowercase();
+
+    #[cfg(feature = "matpower")]
+    if lower.ends_with(".m") {
+        let n = gridoxide::matpower::read(path).map_err(|e| e.to_string())?;
+        return Ok(SolveNetwork {
+            buses: n.buses,
+            lines: n.lines,
+            transformers: n.transformers,
+            shunts: n.shunts,
+            // MATPOWER's power flow has no tap control, and its `area` column
+            // states no schedule to hold.
+            tap_changers: Vec::new(),
+            regulation: Vec::new(),
+            areas: (Vec::new(), Vec::new()),
+            area_targets: Vec::new(),
+            labels: n.bus_numbers.iter().map(u64::to_string).collect(),
+            notes: n.notes,
+            s_base_va: n.base_mva * 1e6,
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
+        });
+    }
 
     #[cfg(feature = "ucte")]
     if lower.ends_with(".uct") || lower.ends_with(".ucte") {
@@ -3321,11 +3354,16 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
 
     #[allow(unreachable_code)]
     Err(format!(
-        "cannot tell what `{path}` is; expected a .uct, .xiidm, or a directory of CGMES profiles"
+        "cannot tell what `{path}` is; expected a .uct, .xiidm, .m, or a directory of CGMES profiles"
     ))
 }
 
-#[cfg(any(feature = "ucte", feature = "iidm", feature = "cgmes"))]
+#[cfg(any(
+    feature = "ucte",
+    feature = "iidm",
+    feature = "cgmes",
+    feature = "matpower"
+))]
 fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::PowerFlowOptions;
     use gridoxide::outerloop::ControllerOutcome;
@@ -3668,10 +3706,15 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     }
 }
 
-#[cfg(not(any(feature = "ucte", feature = "iidm", feature = "cgmes")))]
+#[cfg(not(any(
+    feature = "ucte",
+    feature = "iidm",
+    feature = "cgmes",
+    feature = "matpower"
+)))]
 fn run_solve(_path: &str, _flags: &[String]) -> Result<(), String> {
     Err(
-        "solve needs an importer feature (`cgmes`, `ucte` or `iidm`); \
+        "solve needs an importer feature (`cgmes`, `ucte`, `iidm` or `matpower`); \
          rebuild with `--features cgmes`"
             .to_string(),
     )

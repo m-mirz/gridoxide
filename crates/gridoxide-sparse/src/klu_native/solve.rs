@@ -16,28 +16,31 @@
 
 use super::analyze::Symbolic;
 use super::factor::Numeric;
+use super::kernel::Packed;
 
 /// Solves `L x = b` in place: `L` is unit lower triangular (diagonal not
-/// stored), `l_cols[k]` gives column `k`'s below-diagonal pattern. Ports
+/// stored), `l.col(k)` gives column `k`'s below-diagonal entries. Ports
 /// `KLU_lsolve`'s `case 1` body.
-fn lsolve(l_cols: &[Vec<(usize, f64)>], x: &mut [f64]) {
-    for k in 0..l_cols.len() {
+fn lsolve(l: &Packed, x: &mut [f64]) {
+    for k in 0..l.len() {
         let xk = x[k];
-        for &(row, lik) in &l_cols[k] {
-            x[row] -= lik * xk;
+        let (rows, vals) = l.col(k);
+        for (&row, &lik) in rows.iter().zip(vals) {
+            x[row as usize] -= lik * xk;
         }
     }
 }
 
 /// Solves `U x = b` in place: `U` is non-unit upper triangular, diagonal
-/// entries in `udiag` (not stored in `u_cols`). Ports `KLU_usolve`'s
+/// entries in `udiag` (not stored in `u`). Ports `KLU_usolve`'s
 /// `case 1` body.
-fn usolve(u_cols: &[Vec<(usize, f64)>], udiag: &[f64], x: &mut [f64]) {
-    for k in (0..u_cols.len()).rev() {
+fn usolve(u: &Packed, udiag: &[f64], x: &mut [f64]) {
+    for k in (0..u.len()).rev() {
         x[k] /= udiag[k];
         let xk = x[k];
-        for &(row, uik) in &u_cols[k] {
-            x[row] -= uik * xk;
+        let (rows, vals) = u.col(k);
+        for (&row, &uik) in rows.iter().zip(vals) {
+            x[row as usize] -= uik * xk;
         }
     }
 }
@@ -74,8 +77,8 @@ pub fn solve(sym: &Symbolic, num: &Numeric, rs: Option<&[f64]>, b: &[f64]) -> Ve
         let bf = &num.blocks[block];
 
         let x_block = &mut x[k1..k2];
-        lsolve(&bf.l_cols, x_block);
-        usolve(&bf.u_cols, &bf.udiag, x_block);
+        lsolve(&bf.l, x_block);
+        usolve(&bf.u, &bf.udiag, x_block);
 
         // Block back-substitution for the off-diagonal entries: subtract
         // this now-solved block's contribution out of not-yet-solved
@@ -270,7 +273,8 @@ mod tests {
             &values2,
             &sym,
             &mut num,
-            &mut scratch
+            &mut scratch,
+            None,
         ));
 
         let b = vec![1.0, 2.0, -1.0, 0.5];
