@@ -1,0 +1,25 @@
+[package]
+name = "gridoxide-mcp"
+description = "gridmcp: Model Context Protocol server for gridoxide — lets an LLM chat find, summarise and solve the power networks of a workspace"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["mcp", "power-flow", "cgmes", "matpower", "power-systems"]
+categories = ["science", "simulation"]
+# The binary links all of gridoxide, and with it gridoxide-sparse's klu_native
+# translation of SuiteSparse — so it carries gridoxide's licence, not just
+# this crate's own Apache-2.0 code. See the root Cargo.toml.
+license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
+
+[[bin]]
+name = "gridmcp"
+path = "src/main.rs"
+
+[dependencies]
+# Every importer: the server reads whatever network it finds. All four are pure
+# Rust (cgmes pulls cimoxide-model from crates.io), so the binary needs no
+# system library on any platform.
+gridoxide = { path = "../..", version = "0.0.2", features = ["cgmes", "ucte", "iidm", "matpower"] }
+num-complex = "0.4.6"
+serde_json = "1.0"

@@ -30,8 +30,18 @@ model.solve()
 print(model.voltage_mag(), model.voltage_ang())
 ```
 
-See [Building and Running](docs/src/getting_started/building.md) and
-[Python Bindings](docs/src/getting_started/python.md).
+Chat — `gridmcp` is an [MCP](https://modelcontextprotocol.io) server that lets an LLM chat find,
+summarise and solve the networks in a directory. Install the
+[VS Code extension](https://marketplace.visualstudio.com/items?itemName=m-mirz.gridoxide), or
+register it with any other client:
+
+```bash
+claude mcp add gridoxide -- uvx --from gridoxide-mcp gridmcp
+```
+
+See [Building and Running](docs/src/getting_started/building.md),
+[Python Bindings](docs/src/getting_started/python.md) and
+[MCP Server](docs/src/getting_started/mcp.md).
 
 ## What it does
 

@@ -1,0 +1,7 @@
+**
+!dist/extension.js
+!server/**
+!README.md
+!LICENSE
+!icon.png
+!package.json

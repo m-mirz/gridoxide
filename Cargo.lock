@@ -699,6 +699,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridoxide-mcp"
+version = "0.0.2"
+dependencies = [
+ "gridoxide",
+ "num-complex",
+ "serde_json",
+]
+
+[[package]]
 name = "gridoxide-sparse"
 version = "0.0.2"
 dependencies = [

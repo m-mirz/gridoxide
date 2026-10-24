@@ -3133,231 +3133,6 @@ fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
 // `gridoxide solve`
 // ---------------------------------------------------------------------------
 
-/// A network loaded for a solve, whichever importer produced it.
-///
-/// Deliberately not `SecurityNetwork`: that one is gated behind the `rao`
-/// feature and carries CRAC-shaped fields (countries, initially-open branches)
-/// a power flow has no use for, and it cannot load CGMES — which is the only
-/// format whose fixtures declare tap controls.
-#[cfg(any(
-    feature = "ucte",
-    feature = "iidm",
-    feature = "cgmes",
-    feature = "matpower"
-))]
-struct SolveNetwork {
-    buses: Vec<gridoxide::types::Bus>,
-    lines: Vec<gridoxide::types::Line>,
-    transformers: Vec<gridoxide::types::Transformer>,
-    shunts: Vec<gridoxide::network::ShuntAdm>,
-    tap_changers: Vec<Option<gridoxide::types::TapChanger>>,
-    regulation: Vec<gridoxide::outerloop::TapRegulation>,
-    /// Area index per bus, and what each area is called. Empty when the format
-    /// says nothing about areas.
-    areas: (Vec<Option<usize>>, Vec<String>),
-    /// Scheduled net export per area, per-unit. Empty unless the format states
-    /// one — only CGMES does.
-    area_targets: Vec<f64>,
-    labels: Vec<String>,
-    notes: Vec<String>,
-    s_base_va: f64,
-    /// The regulating machines the document declared, where it declares any.
-    /// Only CGMES states per-machine reactive capability; the other importers
-    /// leave this empty and `--dispatch` then has nothing to attribute.
-    machines: Vec<gridoxide::types::RegulatingMachine>,
-    /// Per-bus reactive injection that is not a regulating machine's.
-    nonregulating_q: Vec<f64>,
-}
-
-#[cfg(any(
-    feature = "ucte",
-    feature = "iidm",
-    feature = "cgmes",
-    feature = "matpower"
-))]
-fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
-    // Only the extension-dispatched importers look at it; a cgmes-only
-    // build reaches the directory branch without ever asking.
-    #[cfg(any(feature = "ucte", feature = "iidm", feature = "matpower"))]
-    let lower = path.to_ascii_lowercase();
-
-    #[cfg(feature = "matpower")]
-    if lower.ends_with(".m") {
-        let n = gridoxide::matpower::read(path).map_err(|e| e.to_string())?;
-        return Ok(SolveNetwork {
-            buses: n.buses,
-            lines: n.lines,
-            transformers: n.transformers,
-            shunts: n.shunts,
-            // MATPOWER's power flow has no tap control, and its `area` column
-            // states no schedule to hold.
-            tap_changers: Vec::new(),
-            regulation: Vec::new(),
-            areas: (Vec::new(), Vec::new()),
-            area_targets: Vec::new(),
-            labels: n.bus_numbers.iter().map(u64::to_string).collect(),
-            notes: n.notes,
-            s_base_va: n.base_mva * 1e6,
-            machines: Vec::new(),
-            nonregulating_q: Vec::new(),
-        });
-    }
-
-    #[cfg(feature = "ucte")]
-    if lower.ends_with(".uct") || lower.ends_with(".ucte") {
-        let n = gridoxide::ucte::read(path).map_err(|e| e.to_string())?;
-        let areas = n.country_areas();
-        return Ok(SolveNetwork {
-            buses: n.buses,
-            lines: n.lines,
-            transformers: n.transformers,
-            shunts: n.shunts,
-            tap_changers: n.tap_changers,
-            regulation: n.regulation,
-            areas,
-            // UCTE states no scheduled net position anywhere; `##Z<cc>` gives
-            // the membership and nothing else.
-            area_targets: Vec::new(),
-            labels: n.node_codes,
-            notes: n.notes,
-            s_base_va: n.base_mva * 1e6,
-            // UCTE-DEF and IIDM state no per-machine reactive capability, so
-            // there is nothing to attribute and `--dispatch` says so rather
-            // than printing an empty table.
-            machines: Vec::new(),
-            nonregulating_q: Vec::new(),
-        });
-    }
-
-    #[cfg(feature = "iidm")]
-    if lower.ends_with(".xiidm") {
-        let n = gridoxide::iidm::read(path).map_err(|e| e.to_string())?;
-        let mut notes = n.notes.clone();
-        if n.areas.report.areas > 0 || n.areas.report.other_types > 0 {
-            let r = &n.areas.report;
-            notes.push(format!(
-                "{} control area(s): {} of another areaType, {} without a schedule, \
-                 {} unknown voltage level(s), {} contested bus(es), {} bus(es) in no area",
-                r.areas,
-                r.other_types,
-                r.without_target.len(),
-                r.unknown_voltage_levels,
-                r.contested_buses,
-                r.unassigned_buses
-            ));
-        }
-        return Ok(SolveNetwork {
-            buses: n.buses,
-            lines: n.lines,
-            transformers: n.transformers,
-            shunts: n.shunts,
-            areas: (
-                n.areas.of_bus.clone(),
-                n.areas
-                    .ids
-                    .iter()
-                    .map(|(id, name)| {
-                        if name.trim().is_empty() {
-                            id.clone()
-                        } else {
-                            name.trim().to_string()
-                        }
-                    })
-                    .collect(),
-            ),
-            area_targets: n.areas.targets.clone(),
-            tap_changers: n.tap_changers,
-            regulation: n.regulation,
-            labels: n.bus_labels,
-            notes,
-            s_base_va: n.base_mva * 1e6,
-            // See the UCTE branch above.
-            machines: Vec::new(),
-            nonregulating_q: Vec::new(),
-        });
-    }
-
-    #[cfg(feature = "cgmes")]
-    {
-        // A directory of profiles, or one profile file whose siblings are the
-        // rest of the set — which is how every conformity configuration is
-        // laid out, and how a user actually has them on disk.
-        let dir = std::path::Path::new(path);
-        let dir = if dir.is_dir() {
-            dir.to_path_buf()
-        } else {
-            dir.parent().unwrap_or(dir).to_path_buf()
-        };
-        let mut profiles: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-            .map_err(|e| format!("reading {}: {e}", dir.display()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "xml"))
-            .collect();
-        profiles.sort();
-        if profiles.is_empty() {
-            return Err(format!("no CGMES profile .xml files in {}", dir.display()));
-        }
-        let refs: Vec<&std::path::Path> = profiles.iter().map(|p| p.as_path()).collect();
-        let ds = gridoxide::cgmes::load_profiles(&refs).map_err(|e| e.to_string())?;
-        let s_base_va = 100e6;
-        let net = gridoxide::cgmes::cgmes_to_network(&ds, s_base_va).map_err(|e| e.to_string())?;
-        let mut notes = Vec::new();
-        let r = &net.tap_report;
-        notes.push(format!(
-            "{} CGMES profile file(s); tap controls: {} read, {} disabled, {} unattached, \
-             {} without a target, {} in an unmodelled mode, {} with an unresolvable flow",
-            profiles.len(),
-            r.converted,
-            r.disabled,
-            r.unattached,
-            r.without_target,
-            r.unsupported_mode,
-            r.unresolved_flow
-        ));
-        let areas = gridoxide::cgmes::cgmes_control_areas(&ds, &net, s_base_va)
-            .map_err(|e| e.to_string())?;
-        if areas.report.areas > 0 {
-            notes.push(format!(
-                "{} control area(s), {} tie flow(s): {} unresolved, {} without a boundary, \
-                 {} without a schedule, {} contested bus(es), {} bus(es) in no area",
-                areas.report.areas,
-                areas.report.tie_flows,
-                areas.report.unresolved_tie_flows,
-                areas.report.without_boundary.len(),
-                areas.report.without_target.len(),
-                areas.report.contested_buses,
-                areas.report.unassigned_buses
-            ));
-        }
-        let labels = (0..net.buses.len()).map(|i| format!("bus {i}")).collect();
-        let machines = net.voltage_control.machines;
-        let nonregulating_q = net.voltage_control.nonregulating_q;
-        return Ok(SolveNetwork {
-            areas: (
-                areas.of_bus,
-                areas.ids.into_iter().map(|(_, n)| n).collect(),
-            ),
-            area_targets: areas.targets,
-            buses: net.buses,
-            lines: net.lines,
-            transformers: net.transformers,
-            shunts: net.shunts,
-            tap_changers: net.tap_changers,
-            regulation: net.regulation,
-            labels,
-            notes,
-            s_base_va,
-            machines,
-            nonregulating_q,
-        });
-    }
-
-    #[allow(unreachable_code)]
-    Err(format!(
-        "cannot tell what `{path}` is; expected a .uct, .xiidm, .m, or a directory of CGMES profiles"
-    ))
-}
-
 #[cfg(any(
     feature = "ucte",
     feature = "iidm",
@@ -3365,7 +3140,6 @@ fn load_network_for_solve(path: &str) -> Result<SolveNetwork, String> {
     feature = "matpower"
 ))]
 fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
-    use gridoxide::PowerFlowOptions;
     use gridoxide::outerloop::ControllerOutcome;
     use gridoxide::solver::SolveStatus;
 
@@ -3386,83 +3160,26 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
         }
     };
 
-    let control_taps = flags.iter().any(|f| f == "--control-taps");
-    let enforce_q_limits = flags.iter().any(|f| f == "--enforce-q-limits");
-    let distribute = flags.iter().any(|f| f == "--distribute-slack");
-    let area_control = flags.iter().any(|f| f == "--area-interchange");
-    if distribute && area_control {
-        return Err(
-            "--distribute-slack and --area-interchange cannot both be given: area \
-                    interchange subsumes distributed slack (one area with a zero target *is* \
-                    distributed slack)"
-                .to_string(),
-        );
-    }
-    let tol = number("--tol", 1e-8)?;
-    let max_iter = count("--max-iter", 30)?;
-    let max_outer = count("--max-outer", 40)?;
-    let max_tap_shift = count("--max-tap-shift", 3)? as i32;
+    let settings = gridoxide::load::SolveSettings {
+        control_taps: flags.iter().any(|f| f == "--control-taps"),
+        enforce_q_limits: flags.iter().any(|f| f == "--enforce-q-limits"),
+        distribute_slack: flags.iter().any(|f| f == "--distribute-slack"),
+        area_interchange: flags.iter().any(|f| f == "--area-interchange"),
+        control_remote_voltage: flags.iter().any(|f| f == "--control-remote-voltage"),
+        tol: number("--tol", 1e-8)?,
+        max_iter: count("--max-iter", 30)?,
+        max_outer: count("--max-outer", 40)?,
+        max_tap_shift: count("--max-tap-shift", 3)? as i32,
+    };
+    settings.check()?;
     let dispatch = flags.iter().any(|f| f == "--dispatch");
-    let remote_voltage = flags.iter().any(|f| f == "--control-remote-voltage");
 
-    let net = load_network_for_solve(path)?;
+    let net = gridoxide::load::load(path)?;
     for note in &net.notes {
         println!("note: {note}");
     }
-
-    let distribution =
-        distribute.then(|| gridoxide::outerloop::SlackDistribution::uniform(&net.buses));
-    let (of_bus, area_names) = net.areas.clone();
-    let area_definition = if area_control {
-        if area_names.is_empty() {
-            return Err(format!(
-                "--area-interchange needs an area assignment, and `{path}` states none. CGMES \
-                 supplies one through ControlArea/TieFlow and UCTE through its ##Z country codes"
-            ));
-        }
-        // Weighted by generation rather than by bus type: a net position is met
-        // by redispatch, and a generator held at a fixed active set-point — a
-        // `PQ` bus here — is exactly the machine an operator redispatches. The
-        // `uniform` policy distributed slack uses would leave such an area with
-        // no participant at all.
-        let mut d = gridoxide::outerloop::AreaDefinition::by_generation(
-            &net.buses,
-            of_bus,
-            area_names.len(),
-        );
-        if !net.area_targets.is_empty() {
-            d.targets = net.area_targets.clone();
-        }
-        d.max_outer_iter = max_outer;
-        Some(d)
-    } else {
-        None
-    };
-    let report = gridoxide::run_power_flow_with_remote(
-        net.buses.clone(),
-        &net.lines,
-        &net.transformers,
-        &net.shunts,
-        gridoxide::TapData {
-            changers: &net.tap_changers,
-            regulation: &net.regulation,
-        },
-        gridoxide::RemoteControlData {
-            machines: &net.machines,
-        },
-        PowerFlowOptions {
-            control_taps,
-            control_remote_voltage: remote_voltage,
-            enforce_q_limits,
-            distribute_slack: distribution,
-            area_interchange: area_definition,
-            tap_max_shift: max_tap_shift,
-            max_outer_iter: max_outer,
-            tol,
-            max_iter,
-            ..Default::default()
-        },
-    );
+    let area_names = &net.areas.1;
+    let report = net.solve(&settings)?;
 
     println!(
         "\n{} bus(es), {} line(s), {} transformer(s); {} tap table(s), {} regulating control(s)",

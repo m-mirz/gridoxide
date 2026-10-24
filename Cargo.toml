@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gridoxide-core", "crates/gridoxide-sparse"]
+members = ["crates/gridoxide-core", "crates/gridoxide-sparse", "crates/gridoxide-mcp"]
 
 # Shared by every crate in the workspace, so they release in lockstep.
 [workspace.package]
@@ -37,6 +37,8 @@ categories = ["science", "mathematics", "simulation"]
 # publish workflow at all — see .github/workflows/publish.yml.
 exclude = [
     "tests/data/",
+    # The VS Code extension that bundles gridmcp (crates/gridoxide-mcp).
+    "editors/",
     "docs/book/",
     "scripts/bench/.case-cache/",
 ]
