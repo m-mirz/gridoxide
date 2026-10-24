@@ -670,7 +670,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gridoxide"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "bindgen",
  "cbindgen",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "gridoxide-core"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "faer",
  "gridoxide-sparse",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "gridoxide-mcp"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "gridoxide",
  "num-complex",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "gridoxide-sparse"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "bindgen",
  "cc",
