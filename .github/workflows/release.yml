@@ -1,0 +1,104 @@
+name: Release
+
+# A GitHub release per `v*` tag with the `gridoxide` CLI for each platform
+# attached. The MCP server is not attached: it ships on PyPI and inside the
+# VS Code extension (vscode.yml).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Attaches binaries to a tag pushed before this workflow existed, or re-runs
+  # a release that failed half-way. Without `tag` it only builds.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release, e.g. v0.1.0'
+        type: string
+        default: ''
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # musl: a static binary runs on any Linux distribution.
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-musl
+            exe: gridoxide
+            artifact: gridoxide-linux-x64
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            exe: gridoxide.exe
+            artifact: gridoxide-windows-x64.exe
+          - os: macos-latest
+            rust_target: aarch64-apple-darwin
+            exe: gridoxide
+            artifact: gridoxide-macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install musl tools
+        if: contains(matrix.rust_target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.rust_target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.rust_target }}-cargo-release-
+
+      # Every feature that needs no system library; klu, pardiso, opf-highs,
+      # opf-ipopt and smallsignal-arpack each link one, so they stay off.
+      - name: Build gridoxide
+        run: >
+          cargo build --release --bin gridoxide --target ${{ matrix.rust_target }}
+          --features cgmes,ucte,iidm,matpower,opf,rao,dynamics
+
+      - name: Stage artifact
+        shell: bash
+        run: cp target/${{ matrix.rust_target }}/release/${{ matrix.exe }} ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Create GitHub release
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      # A release made by hand before the run finished only gets the binaries.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber --repo ${{ github.repository }} gridoxide-*
+          else
+            gh release create "$TAG" --generate-notes \
+              --repo ${{ github.repository }} gridoxide-*
+          fi
