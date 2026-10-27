@@ -1714,14 +1714,14 @@ impl PowerFlowModel {
         let (_, batch) = self.batch.as_mut().expect("just populated above");
         batch.set_start(start);
         let reports = batch
-            .solve(&template, &self.ybus, scenarios, self.tol, self.max_iter)
+            .solve_voltages(&template, &self.ybus, scenarios, self.tol, self.max_iter)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(reports
             .into_iter()
             .map(|r| BatchResult {
-                voltage_mag: r.buses.iter().map(|b| b.voltage_mag).collect(),
-                voltage_ang: r.buses.iter().map(|b| b.voltage_ang).collect(),
+                voltage_mag: r.voltage_mag,
+                voltage_ang: r.voltage_ang,
                 iterations: r.stats.iterations(),
                 converged: r.stats.status == SolveStatus::Converged,
                 max_mismatch: r.stats.final_mismatch(),

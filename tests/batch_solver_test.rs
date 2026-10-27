@@ -328,3 +328,23 @@ fn a_cached_worker_solver_is_not_reused_on_another_network() {
         }
     }
 }
+
+/// `solve_voltages` is `solve` with only the voltages kept.
+#[test]
+fn solve_voltages_keeps_what_solve_reports() {
+    let (template, ybus) = load_network();
+    let scs = scenarios(&template, 12);
+    let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 3).unwrap();
+    let full = batch.solve(&template, &ybus, &scs, 1e-8, 20).unwrap();
+    let lean = batch
+        .solve_voltages(&template, &ybus, &scs, 1e-8, 20)
+        .unwrap();
+    assert_eq!(full.len(), lean.len());
+    for (a, b) in full.iter().zip(&lean) {
+        assert_eq!(a.stats, b.stats);
+        let vm: Vec<f64> = a.buses.iter().map(|x| x.voltage_mag).collect();
+        let va: Vec<f64> = a.buses.iter().map(|x| x.voltage_ang).collect();
+        assert_eq!(vm, b.voltage_mag);
+        assert_eq!(va, b.voltage_ang);
+    }
+}

@@ -43,7 +43,7 @@ use crate::network::{
     structural_component_count,
 };
 pub use crate::scenario::{BatchError, BusOverride, Scenario, uniform_load_scaling};
-use crate::solver::{JacobianBackend, PersistentSolver};
+use crate::solver::{IslandReport, JacobianBackend, PersistentSolver, SolveStats};
 use crate::types::{Bus, Line, Transformer};
 
 /// Solves many scenarios over one shared topology, in parallel.
@@ -71,6 +71,16 @@ pub struct BatchSolver {
     start: BatchStart,
     /// Distinguishes this solver's cached worker solvers from another's.
     id: u64,
+}
+
+/// One scenario's result from [`BatchSolver::solve_voltages`].
+#[derive(Clone, Debug)]
+pub struct ScenarioVoltages {
+    /// Per bus, per unit.
+    pub voltage_mag: Vec<f64>,
+    /// Per bus, radians.
+    pub voltage_ang: Vec<f64>,
+    pub stats: SolveStats,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -180,6 +190,64 @@ impl BatchSolver {
         tol: f64,
         max_iter: usize,
     ) -> Result<Vec<PowerFlowReport>, BatchError> {
+        self.solve_each(
+            buses_template,
+            ybus,
+            scenarios,
+            tol,
+            max_iter,
+            |buses, islands, stats| PowerFlowReport {
+                buses: std::mem::take(buses),
+                islands,
+                stats,
+                dc: None,
+                linear: None,
+                outer: None,
+            },
+        )
+    }
+
+    /// [`solve`](Self::solve), keeping only each scenario's voltages and
+    /// convergence: what a sweep reads.
+    ///
+    /// Each worker solves its scenarios in one reused bus buffer, where
+    /// `solve` hands every scenario's whole bus vector to its report. Those
+    /// are what a batch allocates most of (13.5 MB for 100 scenarios of
+    /// case1354pegase), which glibc returns to the system after each batch
+    /// and faults back in on the next: a tenth of a single-threaded sweep.
+    pub fn solve_voltages(
+        &self,
+        buses_template: &[Bus],
+        ybus: &YBusSparse,
+        scenarios: &[Scenario],
+        tol: f64,
+        max_iter: usize,
+    ) -> Result<Vec<ScenarioVoltages>, BatchError> {
+        self.solve_each(
+            buses_template,
+            ybus,
+            scenarios,
+            tol,
+            max_iter,
+            |buses, _, stats| ScenarioVoltages {
+                voltage_mag: buses.iter().map(|b| b.voltage_mag).collect(),
+                voltage_ang: buses.iter().map(|b| b.voltage_ang).collect(),
+                stats,
+            },
+        )
+    }
+
+    /// Every scenario, solved in a worker's bus buffer and handed to `keep`,
+    /// which makes the scenario's result; in scenario order.
+    fn solve_each<R: Send>(
+        &self,
+        buses_template: &[Bus],
+        ybus: &YBusSparse,
+        scenarios: &[Scenario],
+        tol: f64,
+        max_iter: usize,
+        keep: impl Fn(&mut Vec<Bus>, Vec<IslandReport>, SolveStats) -> R + Sync,
+    ) -> Result<Vec<R>, BatchError> {
         for (i, sc) in scenarios.iter().enumerate() {
             if !sc.branch_outages.is_empty() {
                 return Err(BatchError::OutagesUnsupported { scenario: i });
@@ -199,8 +267,7 @@ impl BatchSolver {
         }
 
         let next = AtomicUsize::new(0);
-        let collected: Mutex<Vec<(usize, PowerFlowReport)>> =
-            Mutex::new(Vec::with_capacity(scenarios.len()));
+        let collected: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(scenarios.len()));
         let n_workers = self.threads().max(1).min(scenarios.len());
         let backend = self.backend;
         let start = self.start;
@@ -238,6 +305,7 @@ impl BatchSolver {
                         let mut solver = cached
                             .map(|(_, solver)| solver)
                             .unwrap_or_else(|| PersistentSolver::new(backend));
+                        let mut buses: Vec<Bus> = Vec::with_capacity(buses_template.len());
 
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
@@ -245,7 +313,8 @@ impl BatchSolver {
                                 break;
                             }
 
-                            let mut buses = buses_template.to_vec();
+                            buses.clear();
+                            buses.extend_from_slice(buses_template);
                             for ov in &scenarios[i].bus_overrides {
                                 let b = &mut buses[ov.bus];
                                 if let Some(p) = ov.p_spec {
@@ -264,20 +333,11 @@ impl BatchSolver {
                             }
                             let (islands, stats) =
                                 solver.solve_with_stats(&mut buses, ybus, tol, max_iter);
+                            let result = keep(&mut buses, islands, stats);
                             collected
                                 .lock()
                                 .expect("batch result mutex poisoned by a panicking worker")
-                                .push((
-                                    i,
-                                    PowerFlowReport {
-                                        buses,
-                                        islands,
-                                        stats,
-                                        dc: None,
-                                        linear: None,
-                                        outer: None,
-                                    },
-                                ));
+                                .push((i, result));
                         }
                         if let Some(key) = key {
                             WORKER_SOLVER.with(|slot| *slot.borrow_mut() = Some((key, solver)));
