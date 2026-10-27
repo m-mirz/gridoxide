@@ -189,6 +189,7 @@ const MODELLED_FIXTURES: &[&str] = &[
     "transmission-case",
     "global-current-sensor",
     "local-current-sensor",
+    "node-injection-sensor-with-shunt",
 ];
 
 /// Fixtures whose measurements deliberately disagree with the state

@@ -1175,8 +1175,14 @@ pub struct PgmNetwork {
     /// side-1/2/3 order.
     pub three_winding_branch_idx: HashMap<u64, [usize; 3]>,
     /// `source` id → the flat branch index of the virtual source-impedance
-    /// branch gridoxide synthesizes for it. Inactive sources are absent.
+    /// branch gridoxide synthesizes for it. Inactive sources are absent, and so
+    /// is every source under [`SourceModel::Ideal`], which synthesizes none.
     pub source_branch_idx: HashMap<u64, usize>,
+    /// How the sources were modelled; see [`SourceModel`].
+    pub sources: SourceModel,
+    /// Active `source` id → its node's bus, under [`SourceModel::Ideal`]: the
+    /// bus whose injection the source's power is part of. Empty otherwise.
+    pub ideal_source_bus: HashMap<u64, usize>,
     /// Appliance id (`sym_load`, `asym_load`, `sym_gen`, `asym_gen`, `shunt`,
     /// `source`) → the bus it is attached to. Includes inactive appliances: a
     /// sensor may reference one, and reporting a zero flow for a disconnected
@@ -1240,6 +1246,18 @@ impl PgmNetwork {
     /// The state-estimation model of this network, given its Y-bus and the
     /// shunts stamped into it — see [`SeNetwork::new`](crate::se::SeNetwork::new).
     pub fn se_network(&self, ybus: YBusSparse, shunts: &[ShuntAdm]) -> crate::se::SeNetwork {
+        // An ideal source is a `Slack` bus, as in a CGMES network: there is no
+        // source branch to say which components are fed, the bus types do.
+        if self.sources == SourceModel::Ideal {
+            return crate::se::SeNetwork::from_bus_network(
+                &self.buses,
+                ybus,
+                &self.lines,
+                &self.transformers,
+                shunts,
+                self.zero_injection.clone(),
+            );
+        }
         crate::se::SeNetwork::new(
             ybus,
             &self.lines,
@@ -1257,6 +1275,39 @@ impl PgmNetwork {
 ///
 /// [`pgm_to_buses_and_branches`] is the same conversion with the maps dropped.
 pub fn pgm_to_network(input: PgmInput, s_base_va: f64, freq_hz: f64) -> PgmNetwork {
+    pgm_to_network_with(input, s_base_va, freq_hz, SourceModel::Impedance)
+}
+
+/// How a PGM `source` enters the network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SourceModel {
+    /// power-grid-model's: a virtual `Slack` bus at `u_ref`, behind the
+    /// source's own impedance (`sk`, `rx_ratio`), feeding the node through a
+    /// synthesized branch.
+    #[default]
+    Impedance,
+    /// An ideal voltage source: the node itself is the `Slack` bus at `u_ref`,
+    /// and `sk` and `rx_ratio` are not read. power-grid-model has no such
+    /// source (it refuses an infinite `sk`), and a very large `sk` is the
+    /// usual stand-in, which leaves a branch of ~1e-32 p.u. impedance in the
+    /// network: harmless to a power flow, numerically singular to state
+    /// estimation. This is the source a bus-branch case means, MATPOWER's
+    /// reference bus among them: the reference bus's own voltage held, its
+    /// injection whatever balances the network.
+    ///
+    /// Two ideal sources on one node put two voltages on one bus; the first
+    /// active one in the document sets it. Symmetric conversion only: the
+    /// phase domain models every source with its impedance.
+    Ideal,
+}
+
+/// [`pgm_to_network`] with the sources modelled as `sources` says.
+pub fn pgm_to_network_with(
+    input: PgmInput,
+    s_base_va: f64,
+    freq_hz: f64,
+    sources: SourceModel,
+) -> PgmNetwork {
     let id_to_idx = node_id_to_idx(&input);
     let id_to_u_rated: HashMap<u64, f64> =
         input.data.node.iter().map(|n| (n.id, n.u_rated)).collect();
@@ -1542,12 +1593,29 @@ pub fn pgm_to_network(input: PgmInput, s_base_va: f64, freq_hz: f64) -> PgmNetwo
     }
     let n_3wdg = input.data.three_winding_transformer.len();
 
+    // An ideal source makes its node the Slack bus, in document order, so the
+    // first one on a node sets its voltage.
+    let mut ideal_nodes = std::collections::HashSet::new();
+    let mut ideal_source_bus = HashMap::new();
+    if sources == SourceModel::Ideal {
+        for src in input.data.source.iter().filter(|s| s.status != 0) {
+            let idx = id_to_idx[&src.node];
+            ideal_source_bus.insert(src.id, idx);
+            if ideal_nodes.insert(idx) {
+                let bus = &mut buses[idx];
+                bus.bus_type = BusType::Slack;
+                bus.voltage_mag = src.u_ref;
+                bus.voltage_ang = 0.0;
+            }
+        }
+    }
+
     // Virtual Slack bus + source-impedance Line for each active source.
     for (i, src) in input
         .data
         .source
         .iter()
-        .filter(|s| s.status != 0)
+        .filter(|s| s.status != 0 && sources == SourceModel::Impedance)
         .enumerate()
     {
         let virtual_idx = n_nodes + n_3wdg + i;
@@ -1631,6 +1699,10 @@ pub fn pgm_to_network(input: PgmInput, s_base_va: f64, freq_hz: f64) -> PgmNetwo
     for &branch in source_branch_idx.values() {
         zero_injection[lines[branch].from] = false;
     }
+    // An ideal source's power enters at its node, like a generator's.
+    for &idx in &ideal_nodes {
+        zero_injection[idx] = false;
+    }
 
     PgmNetwork {
         buses,
@@ -1641,6 +1713,8 @@ pub fn pgm_to_network(input: PgmInput, s_base_va: f64, freq_hz: f64) -> PgmNetwo
         branch_idx,
         three_winding_branch_idx,
         source_branch_idx,
+        sources,
+        ideal_source_bus,
         appliance_bus,
         half_open_terminal,
     }

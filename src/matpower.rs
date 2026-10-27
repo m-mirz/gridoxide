@@ -128,6 +128,8 @@ pub enum MatpowerError {
     /// Something the file says that this importer will not read rather than
     /// read wrongly — see the module documentation.
     Unsupported(String),
+    /// A measurement [`se_case`] cannot place on the case.
+    Measurement(String),
 }
 
 impl std::fmt::Display for MatpowerError {
@@ -152,6 +154,7 @@ impl std::fmt::Display for MatpowerError {
                 )
             }
             MatpowerError::Unsupported(what) => write!(f, "{what}"),
+            MatpowerError::Measurement(what) => write!(f, "{what}"),
         }
     }
 }
@@ -602,6 +605,165 @@ fn statement_end(code: &str, j: usize) -> usize {
 
 fn line_of(code: &str, pos: usize) -> usize {
     code[..pos].matches(['\n', CONTINUED]).count() + 1
+}
+
+/// What a [`CaseMeasurement`] measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeasuredQuantity {
+    /// |V| at a bus, per unit.
+    VoltageMagnitude,
+    /// A bus's injection, MW and MVAr, positive into the network: its online
+    /// generators' output less its load, MATPOWER's `Sbus`. Not its shunt,
+    /// which is part of the network, as in `makeYbus`.
+    ActiveInjection,
+    ReactiveInjection,
+    /// A branch's flow at its from end, MW and MVAr, positive out of the
+    /// from bus into the branch, as MATPOWER's `PF` and `QF`.
+    ActiveFlowFrom,
+    ReactiveFlowFrom,
+    /// The same at its to end (`PT`, `QT`), positive out of the to bus.
+    ActiveFlowTo,
+    ReactiveFlowTo,
+}
+
+/// One measurement on a MATPOWER case, in the case's own terms: the bus by
+/// its number (`BUS_I`), the branch by its 0-based row in `mpc.branch`, and
+/// the value and its standard deviation in MATPOWER's units (p.u. for |V|,
+/// MW and MVAr for powers).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaseMeasurement {
+    pub quantity: MeasuredQuantity,
+    /// Bus number for |V| and injections, branch row for flows.
+    pub at: u64,
+    pub value: f64,
+    pub sigma: f64,
+}
+
+/// A state-estimation case on a MATPOWER network, read by [`read`]: the
+/// network exactly as `runpf` sees it, with no converter in between, and
+/// `measurements` placed on it.
+///
+/// The case's reference bus is the angle reference and its magnitude is
+/// estimated like any other bus's; bus types mean nothing else to an
+/// estimator. No bus is held at zero injection: a `.m` says what a bus
+/// injects in one snapshot, not that it can inject nothing, so a bus without
+/// load or generator injects whatever its measurements say. Node ids of the
+/// result are bus numbers.
+///
+/// A measurement on an isolated bus, or on a branch out of service or
+/// touching one, is refused: nothing in the solved network carries it.
+pub fn se_case(
+    net: &MatpowerNetwork,
+    measurements: &[CaseMeasurement],
+) -> Result<crate::se::case::SeCase, MatpowerError> {
+    use crate::branch_flow::Terminal;
+    use crate::measurement::{Measurement, MeasurementKind, Target};
+
+    let n = net.buses.len();
+    let mut ybus = crate::network::build_ybus(n, &net.lines, &net.transformers);
+    crate::network::stamp_shunts(&mut ybus, &net.shunts);
+    let network = crate::se::SeNetwork::from_bus_network(
+        &net.buses,
+        ybus.finish(),
+        &net.lines,
+        &net.transformers,
+        &net.shunts,
+        vec![false; n],
+    );
+
+    let node_idx: HashMap<u64, usize> = net
+        .bus_numbers
+        .iter()
+        .enumerate()
+        .map(|(i, &number)| (number, i))
+        .collect();
+    let branch_of_row: HashMap<u64, usize> = net
+        .branch_rows
+        .iter()
+        .enumerate()
+        .map(|(branch, &row)| (row as u64, branch))
+        .collect();
+    let refuse = |what: String| Err(MatpowerError::Measurement(what));
+
+    let mut rows = Vec::with_capacity(measurements.len());
+    for m in measurements {
+        if !(m.sigma.is_finite() && m.sigma > 0.0 && m.value.is_finite()) {
+            return refuse(format!(
+                "{:?} at {} has value {} and sigma {}; a measurement needs a finite value \
+                 and a positive sigma",
+                m.quantity, m.at, m.value, m.sigma
+            ));
+        }
+        let bus = || match node_idx.get(&m.at) {
+            Some(&i) if network.energized[i] => Ok(i),
+            Some(_) => Err(MatpowerError::Measurement(format!(
+                "{:?} at bus {}: the bus is isolated",
+                m.quantity, m.at
+            ))),
+            None => Err(MatpowerError::Measurement(format!(
+                "{:?} at bus {}, which mpc.bus does not define",
+                m.quantity, m.at
+            ))),
+        };
+        let branch = |terminal| match branch_of_row.get(&m.at) {
+            Some(&branch) => Ok(Target::BranchTerminal { branch, terminal }),
+            None => Err(MatpowerError::Measurement(format!(
+                "{:?} on mpc.branch row {}: no such branch in service",
+                m.quantity, m.at
+            ))),
+        };
+        use MeasuredQuantity as Q;
+        let (kind, target, scale) = match m.quantity {
+            Q::VoltageMagnitude => (MeasurementKind::VoltageMagnitude, Target::Bus(bus()?), 1.0),
+            Q::ActiveInjection => (
+                MeasurementKind::ActivePower,
+                Target::Bus(bus()?),
+                net.base_mva,
+            ),
+            Q::ReactiveInjection => (
+                MeasurementKind::ReactivePower,
+                Target::Bus(bus()?),
+                net.base_mva,
+            ),
+            Q::ActiveFlowFrom => (
+                MeasurementKind::ActivePower,
+                branch(Terminal::From)?,
+                net.base_mva,
+            ),
+            Q::ReactiveFlowFrom => (
+                MeasurementKind::ReactivePower,
+                branch(Terminal::From)?,
+                net.base_mva,
+            ),
+            Q::ActiveFlowTo => (
+                MeasurementKind::ActivePower,
+                branch(Terminal::To)?,
+                net.base_mva,
+            ),
+            Q::ReactiveFlowTo => (
+                MeasurementKind::ReactivePower,
+                branch(Terminal::To)?,
+                net.base_mva,
+            ),
+        };
+        rows.push(Measurement {
+            kind,
+            target,
+            value: m.value / scale,
+            sigma: m.sigma / scale,
+        });
+    }
+    if rows.is_empty() {
+        return refuse("no measurements: there is nothing to estimate from".into());
+    }
+
+    Ok(crate::se::case::SeCase {
+        network,
+        buses: net.buses.clone(),
+        measurements: rows,
+        node_idx,
+        phases: 1,
+    })
 }
 
 #[cfg(test)]

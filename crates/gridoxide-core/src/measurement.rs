@@ -101,12 +101,13 @@ pub enum Target {
     /// a single Y-bus entry and cannot be told apart afterwards, so this is
     /// their total.
     ShuntInjection { bus: usize },
-    /// power-grid-model's node injection: the sum of *every* appliance at the
-    /// bus — loads, generators, sources and shunts alike.
+    /// power-grid-model's node injection: what the loads, generators and
+    /// sources at the bus put into it. Not its shunts: power-grid-model counts
+    /// a shunt as part of the network, as gridoxide's Y-bus does.
     ///
-    /// Equals [`Target::Bus`] plus the source and shunt injections at the same
-    /// bus, which is what makes it a distinct measurement function rather than
-    /// a relabelling.
+    /// Equals [`Target::Bus`] plus the source injections at the same bus, which
+    /// is what makes it a distinct measurement function rather than a
+    /// relabelling.
     NodeInjection(usize),
     /// A current sensor on a branch terminal.
     ///

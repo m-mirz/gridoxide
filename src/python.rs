@@ -62,6 +62,14 @@ fn parse_backend(name: &str) -> PyResult<JacobianBackend> {
     }
 }
 
+fn source_model(ideal: bool) -> crate::pgm::SourceModel {
+    if ideal {
+        crate::pgm::SourceModel::Ideal
+    } else {
+        crate::pgm::SourceModel::Impedance
+    }
+}
+
 fn parse_method(name: &str) -> PyResult<PowerFlowMethod> {
     match name {
         "newton_raphson" => Ok(PowerFlowMethod::NewtonRaphson),
@@ -251,6 +259,11 @@ impl PowerFlowModel {
     /// `dc_approximation` is `"ignore_r"` (default, `b = 1/x`) or
     /// `"ignore_g"` (`b = x/(r²+x²)`); it also governs the sensitivity
     /// factors, which are available whatever `method` is set to.
+    ///
+    /// `ideal_sources=True` makes each `source`'s node the slack bus at its
+    /// `u_ref`, with no impedance behind it (`sk` and `rx_ratio` are not read).
+    /// The default is power-grid-model's source: a virtual slack bus behind
+    /// the source impedance, which `voltage_mag()` lists after the nodes.
     #[staticmethod]
     #[pyo3(signature = (
         path,
@@ -261,6 +274,7 @@ impl PowerFlowModel {
         freq_hz=50.0,
         method="newton_raphson",
         dc_approximation="ignore_r",
+        ideal_sources=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn from_pgm_json(
@@ -272,6 +286,7 @@ impl PowerFlowModel {
         freq_hz: f64,
         method: &str,
         dc_approximation: &str,
+        ideal_sources: bool,
     ) -> PyResult<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
@@ -282,8 +297,12 @@ impl PowerFlowModel {
         // is a self-admittance, not a branch, so `build_ybus` never sees it.
         let id_to_idx = crate::pgm::node_id_to_idx(&input);
         let shunts = crate::pgm::pgm_shunts_1ph(&input, &id_to_idx, s_base_va);
-        let (buses_template, lines, transformers) =
-            crate::pgm::pgm_to_buses_and_branches(input, s_base_va, freq_hz);
+        let crate::pgm::PgmNetwork {
+            buses: buses_template,
+            lines,
+            transformers,
+            ..
+        } = crate::pgm::pgm_to_network_with(input, s_base_va, freq_hz, source_model(ideal_sources));
         let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
         stamp_shunts(&mut ybus, &shunts);
         let ybus = ybus.finish();
@@ -1701,6 +1720,38 @@ struct StateEstimationModel {
     estimator: crate::se::nr::PersistentEstimator,
 }
 
+impl StateEstimationModel {
+    /// The model of `case`. One value of `options` is shared by the field and
+    /// the estimator: these used to be two separately-constructed copies,
+    /// harmless while nothing read the field — `solve_batch` now does.
+    fn from_case(
+        case: crate::se::case::SeCase,
+        options: crate::se::nr::SeOptions,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            buses: case.buses.clone(),
+            buses_template: case.buses,
+            phases: case.phases,
+            node_idx: case.node_idx,
+            se_net: case.network,
+            measurements: case.measurements,
+            options,
+            report: None,
+            estimator: crate::se::nr::PersistentEstimator::new(options),
+        })
+    }
+}
+
+fn parse_se_method(name: &str) -> PyResult<crate::se::nr::SeMethod> {
+    match name {
+        "newton_raphson" => Ok(crate::se::nr::SeMethod::NewtonRaphson),
+        "iterative_linear" => Ok(crate::se::nr::SeMethod::IterativeLinear),
+        other => Err(PyValueError::new_err(format!(
+            "unknown method {other:?}, expected 'newton_raphson' or 'iterative_linear'"
+        ))),
+    }
+}
+
 #[pymethods]
 impl StateEstimationModel {
     /// Loads a PGM-format JSON document containing sensors.
@@ -1729,8 +1780,26 @@ impl StateEstimationModel {
     /// The phase domain refuses, by name, the components its conversion does
     /// not carry: `link`, `three_winding_transformer`, `voltage_regulator`, and
     /// transformer winding pairs outside Dyn and YNyn.
+    ///
+    /// # `zero_injection`
+    ///
+    /// `True` (the default) holds every node with no load or generator at
+    /// exactly zero injection, as a hard constraint, as power-grid-model does.
+    /// `False` drops them on the document's nodes: such a node injects whatever
+    /// its sensors say, which is plain weighted least squares. The constraints
+    /// gridoxide's own model needs stay (a source's node, a three-winding
+    /// transformer's star point; see `SeCase::drop_zero_injection`). An
+    /// unmetered node without the constraint is unobservable, and `solve` then
+    /// reports a singular gain matrix.
+    ///
+    /// # `ideal_sources`
+    ///
+    /// `True` makes each `source`'s node the slack (its angle the reference,
+    /// its magnitude estimated) with no impedance behind it, instead of
+    /// power-grid-model's virtual bus behind the source impedance. A sensor on
+    /// the source then reads part of its node's injection. Symmetric only.
     #[staticmethod]
-    #[pyo3(signature = (path, backend="klu_native", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0, asymmetric=false))]
+    #[pyo3(signature = (path, backend="klu_native", method="newton_raphson", tol=1e-8, max_iter=20, s_base_va=1e6, freq_hz=50.0, asymmetric=false, zero_injection=true, ideal_sources=false))]
     #[allow(clippy::too_many_arguments)]
     fn from_pgm_json(
         path: &str,
@@ -1741,16 +1810,16 @@ impl StateEstimationModel {
         s_base_va: f64,
         freq_hz: f64,
         asymmetric: bool,
+        zero_injection: bool,
+        ideal_sources: bool,
     ) -> PyResult<Self> {
-        let method = match method {
-            "newton_raphson" => crate::se::nr::SeMethod::NewtonRaphson,
-            "iterative_linear" => crate::se::nr::SeMethod::IterativeLinear,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown method {other:?}, expected 'newton_raphson' or 'iterative_linear'"
-                )));
-            }
-        };
+        if asymmetric && ideal_sources {
+            return Err(PyValueError::new_err(
+                "ideal_sources is symmetric only: the phase domain models every source with \
+                 its impedance",
+            ));
+        }
+        let method = parse_se_method(method)?;
         let raw = std::fs::read_to_string(path)
             .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
         let input: PgmInput = serde_json::from_str(&raw)
@@ -1762,31 +1831,102 @@ impl StateEstimationModel {
         let case = if asymmetric {
             crate::pgm::se::se_case_from_pgm_3ph(&input, s_base_va, freq_hz)
         } else {
-            crate::pgm::se::se_case_from_pgm(&input, s_base_va, freq_hz)
+            crate::pgm::se::se_case_from_pgm_with(
+                &input,
+                s_base_va,
+                freq_hz,
+                source_model(ideal_sources),
+            )
         }
         .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        let mut case = case;
+        if !zero_injection {
+            case.drop_zero_injection();
+        }
 
-        // One value shared by the field and the estimator. These used to be two
-        // separately-constructed copies, harmless while nothing read the field
-        // — `solve_batch` now does.
-        let options = crate::se::nr::SeOptions {
-            tol,
-            max_iter,
-            backend: parse_backend(backend)?,
-            method,
-        };
+        Self::from_case(
+            case,
+            crate::se::nr::SeOptions {
+                tol,
+                max_iter,
+                backend: parse_backend(backend)?,
+                method,
+            },
+        )
+    }
 
-        Ok(Self {
-            buses: case.buses.clone(),
-            buses_template: case.buses,
-            phases: case.phases,
-            node_idx: case.node_idx,
-            se_net: case.network,
-            measurements: case.measurements,
-            options,
-            report: None,
-            estimator: crate::se::nr::PersistentEstimator::new(options),
-        })
+    /// Loads a MATPOWER case (`.m`) by gridoxide's own reader, the one
+    /// `PowerFlowModel.from_matpower` uses, and places `measurements` on it.
+    ///
+    /// The network is the one MATPOWER's `runpf` solves, read directly: the
+    /// reference bus is the angle reference, with its magnitude estimated, and
+    /// no converter stands in between, so phase shifts and transformer charging
+    /// are exactly the case's. No bus is held at zero injection.
+    ///
+    /// Each measurement is `(kind, at, value, sigma)`, in MATPOWER's own terms:
+    ///
+    /// - `"vm"`: |V| at bus number `at`, per unit;
+    /// - `"p_inj"`, `"q_inj"`: the injection at bus number `at`, MW and MVAr,
+    ///   positive into the network (generation less load; not the shunt);
+    /// - `"p_from"`, `"q_from"`, `"p_to"`, `"q_to"`: the flow at one end of the
+    ///   branch in row `at` of `mpc.branch` (0-based), MW and MVAr, positive
+    ///   out of that end's bus into the branch.
+    ///
+    /// `sigma` is in the value's own units. `nodes()` pairs each bus number
+    /// with its index.
+    #[staticmethod]
+    #[pyo3(signature = (path, measurements, backend="klu_native", method="newton_raphson", tol=1e-8, max_iter=20))]
+    fn from_matpower(
+        path: &str,
+        measurements: Vec<(String, u64, f64, f64)>,
+        backend: &str,
+        method: &str,
+        tol: f64,
+        max_iter: usize,
+    ) -> PyResult<Self> {
+        use crate::matpower::{CaseMeasurement, MatpowerError, MeasuredQuantity as Q};
+        let method = parse_se_method(method)?;
+        let net = crate::matpower::read(path).map_err(|e| match e {
+            MatpowerError::Io(e) => PyRuntimeError::new_err(format!("reading {path}: {e}")),
+            e => PyValueError::new_err(format!("{path}: {e}")),
+        })?;
+        let measurements = measurements
+            .into_iter()
+            .map(|(kind, at, value, sigma)| {
+                let quantity = match kind.as_str() {
+                    "vm" => Q::VoltageMagnitude,
+                    "p_inj" => Q::ActiveInjection,
+                    "q_inj" => Q::ReactiveInjection,
+                    "p_from" => Q::ActiveFlowFrom,
+                    "q_from" => Q::ReactiveFlowFrom,
+                    "p_to" => Q::ActiveFlowTo,
+                    "q_to" => Q::ReactiveFlowTo,
+                    other => {
+                        return Err(PyValueError::new_err(format!(
+                            "unknown measurement kind {other:?}, expected 'vm', 'p_inj', \
+                             'q_inj', 'p_from', 'q_from', 'p_to' or 'q_to'"
+                        )));
+                    }
+                };
+                Ok(CaseMeasurement {
+                    quantity,
+                    at,
+                    value,
+                    sigma,
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let case = crate::matpower::se_case(&net, &measurements)
+            .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        Self::from_case(
+            case,
+            crate::se::nr::SeOptions {
+                tol,
+                max_iter,
+                backend: parse_backend(backend)?,
+                method,
+            },
+        )
     }
 
     /// 1 symmetric, 3 in the phase domain.

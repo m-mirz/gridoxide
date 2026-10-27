@@ -44,7 +44,7 @@ pub struct CurrentFunctional {
     /// Duplicate buses are allowed and sum, which is what makes gridoxide's
     /// half-open branch — represented as a self-loop, so `from == to` — come
     /// out right, and what lets a node injection concatenate its Y-bus row with
-    /// its source and shunt terms instead of merging them.
+    /// its source terms instead of merging them.
     pub coefficients: Vec<(usize, Complex<f64>)>,
 }
 
@@ -140,7 +140,11 @@ pub fn power_partials_of(
             let unit_k = unit(v[k]);
             let mut d_dtheta = -J * v_at * (c * v[k]).conj();
             let mut d_dvmag = v_at * (c * unit_k).conj();
-            if k == at {
+            // The leading factor `V_at` is one factor, however many
+            // coefficients sit on `at` (a node injection's Y-bus row and source
+            // terms, a half-open branch's self-loop): its derivative is added
+            // once, with the first of them.
+            if k == at && !saw_at {
                 saw_at = true;
                 d_dtheta += J * s;
                 d_dvmag += s * inv_mag;
@@ -223,10 +227,14 @@ pub fn local_current_partials_of(
         return;
     }
     let s = local_current_of(at, coefficients, v) * mag;
+    // Once, like the leading factor's term in `power_partials_of`: a self-loop
+    // puts `at` in more than one entry.
+    let mut saw_at = false;
     for p in out[start..].iter_mut() {
         p.d_dtheta /= mag;
         p.d_dvmag /= mag;
-        if p.bus == at {
+        if p.bus == at && !saw_at {
+            saw_at = true;
             p.d_dvmag -= s / (mag * mag);
         }
     }
@@ -293,11 +301,13 @@ impl SeNetwork {
                 at: bus,
                 coefficients: vec![(bus, -self.shunt_y[bus])],
             },
-            // power-grid-model's node injection is the sum over *every*
-            // appliance at the bus. gridoxide's bus injection covers loads and
-            // generators; sources and shunts are structural and are added back.
-            // All three share `at`, so concatenating their coefficients adds
-            // their powers.
+            // power-grid-model's node injection is what its loads, generators
+            // and sources put into the bus. gridoxide's bus injection covers
+            // loads and generators; a source is structural and is added back,
+            // sharing `at`, so concatenating coefficients adds the powers. A
+            // shunt is not added: power-grid-model counts it as part of the
+            // network, not of the node's injection, and so does the Y-bus row
+            // it is stamped into.
             Target::NodeInjection(bus) => {
                 let mut coefficients = self.ybus.row(bus).to_vec();
                 for &branch in &self.source_branches[bus] {
@@ -308,7 +318,6 @@ impl SeNetwork {
                     );
                     coefficients.extend(f.coefficients.iter().map(|&(k, c)| (k, -c)));
                 }
-                coefficients.push((bus, -self.shunt_y[bus]));
                 CurrentFunctional {
                     at: bus,
                     coefficients,

@@ -69,7 +69,8 @@ usage:
                                 profile .xml files), UCTE-DEF (.uct), IIDM
                                 (.xiidm) or MATPOWER (.m). Needs the matching
                                 importer feature.
-  gridoxide estimate <path> [--iterative-linear] [--asymmetric]
+  gridoxide estimate <path> [--iterative-linear] [--asymmetric] [--no-zero-injection]
+                                [--ideal-sources]
                                 run state estimation over a PGM JSON document
                                 containing voltage, power or current sensors.
                                 The default method is Newton-Raphson; the flag
@@ -82,7 +83,18 @@ usage:
                                 on a distribution feeder the unbalance is the
                                 question rather than a refinement. It refuses,
                                 by name, the components the three-phase model
-                                does not carry.
+                                does not carry. --no-zero-injection drops the
+                                constraint holding each node with no load or
+                                generator at exactly zero injection: such a
+                                node then injects whatever its sensors say
+                                (plain weighted least squares), and one without
+                                sensors is unobservable. A source's node and a
+                                three-winding star point keep theirs, which
+                                gridoxide's model of them needs.
+                                --ideal-sources makes each source's node the
+                                slack, with no impedance behind it, instead of
+                                power-grid-model's virtual bus behind the
+                                source impedance (symmetric only).
   gridoxide security <network> --crac <crac.json> [--json]
                                 assess a network against a CRAC: which critical
                                 elements are overloaded, in which state, and by
@@ -286,7 +298,13 @@ fn main() {
                 } else {
                     1
                 };
-                if let Err(message) = run_estimate(path, method, phases) {
+                let zero_injection = !args.iter().any(|a| a == "--no-zero-injection");
+                let sources = if args.iter().any(|a| a == "--ideal-sources") {
+                    gridoxide::pgm::SourceModel::Ideal
+                } else {
+                    gridoxide::pgm::SourceModel::Impedance
+                };
+                if let Err(message) = run_estimate(path, method, phases, zero_injection, sources) {
                     eprintln!("error: {message}");
                     std::process::exit(1);
                 }
@@ -476,7 +494,13 @@ fn power_flow_demo() {
 
 /// Estimates the state of the grid in `path` and prints it, along with the two
 /// analyses that say whether the answer should be trusted.
-fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), String> {
+fn run_estimate(
+    path: &str,
+    method: SeMethod,
+    phases: usize,
+    zero_injection: bool,
+    sources: gridoxide::pgm::SourceModel,
+) -> Result<(), String> {
     use gridoxide::se::case::{PHASE_NAMES, SeCase};
 
     let s_base_va = 1e6;
@@ -484,11 +508,22 @@ fn run_estimate(path: &str, method: SeMethod, phases: usize) -> Result<(), Strin
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
 
     let case = if phases == 3 {
+        if sources == gridoxide::pgm::SourceModel::Ideal {
+            return Err(
+                "--ideal-sources is symmetric only: the phase domain models every \
+                        source with its impedance"
+                    .into(),
+            );
+        }
         gridoxide::pgm::se::se_case_from_pgm_3ph(&input, s_base_va, 50.0)
     } else {
-        gridoxide::pgm::se::se_case_from_pgm(&input, s_base_va, 50.0)
+        gridoxide::pgm::se::se_case_from_pgm_with(&input, s_base_va, 50.0, sources)
     }
     .map_err(|e| format!("{path}: {e}"))?;
+    let mut case = case;
+    if !zero_injection {
+        case.drop_zero_injection();
+    }
 
     let nodes = case.nodes();
     let n_physical = case.phases * nodes.len();
