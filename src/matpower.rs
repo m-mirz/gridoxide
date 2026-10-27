@@ -45,6 +45,14 @@
 //! Reactive limits (`Qmax`, `Qmin`) are carried on each bus, summed over its
 //! online generators, and enforced only if a caller asks for it.
 //!
+//! # Optimal power flow
+//!
+//! [`ac_opf_network`] reads the same case as MATPOWER's `runopf` does: the
+//! columns above plus `mpc.gencost`, bus voltage limits (`VMAX`, `VMIN`),
+//! generator output limits (`PMAX`, `PMIN`, `QMAX`, `QMIN`), `RATE_A` as an
+//! apparent-power limit at both ends (0 unlimited) and the branch
+//! angle-difference limits `ANGMIN`/`ANGMAX`. See its documentation.
+//!
 //! Every value is per unit on the case's own `baseMVA`, so a mismatch
 //! tolerance means the same thing it does to MATPOWER. Starting values are a
 //! flat start: 1 p.u. and zero angle, except where the case fixes a setpoint.
@@ -77,6 +85,10 @@ const BS: usize = 5;
 const VA: usize = 8;
 const BASE_KV: usize = 9;
 const BUS_COLUMNS: usize = 10;
+#[cfg(feature = "opf")]
+const VMAX: usize = 11;
+#[cfg(feature = "opf")]
+const VMIN: usize = 12;
 
 const GEN_BUS: usize = 0;
 const PG: usize = 1;
@@ -86,6 +98,10 @@ const QMIN: usize = 4;
 const VG: usize = 5;
 const GEN_STATUS: usize = 7;
 const GEN_COLUMNS: usize = 8;
+#[cfg(feature = "opf")]
+const PMAX: usize = 8;
+#[cfg(feature = "opf")]
+const PMIN: usize = 9;
 
 const F_BUS: usize = 0;
 const T_BUS: usize = 1;
@@ -96,6 +112,24 @@ const TAP: usize = 8;
 const SHIFT: usize = 9;
 const BR_STATUS: usize = 10;
 const BRANCH_COLUMNS: usize = 11;
+#[cfg(feature = "opf")]
+const RATE_A: usize = 5;
+#[cfg(feature = "opf")]
+const ANGMIN: usize = 11;
+#[cfg(feature = "opf")]
+const ANGMAX: usize = 12;
+
+// From MATPOWER's `idx_cost`.
+#[cfg(feature = "opf")]
+const MODEL: usize = 0;
+#[cfg(feature = "opf")]
+const NCOST: usize = 3;
+#[cfg(feature = "opf")]
+const COST: usize = 4;
+#[cfg(feature = "opf")]
+const PW_LINEAR: f64 = 1.0;
+#[cfg(feature = "opf")]
+const POLYNOMIAL: f64 = 2.0;
 
 const PQ: f64 = 1.0;
 const PV: f64 = 2.0;
@@ -174,6 +208,8 @@ pub struct MatpowerCase {
     pub bus: Vec<Vec<f64>>,
     pub gens: Vec<Vec<f64>>,
     pub branch: Vec<Vec<f64>>,
+    /// `mpc.gencost`, if the case has one; only an OPF reads it.
+    pub gencost: Option<Vec<Vec<f64>>>,
 }
 
 /// A case converted for the solver, per unit on [`base_mva`](Self::base_mva).
@@ -217,7 +253,7 @@ pub fn read(path: impl AsRef<Path>) -> Result<MatpowerNetwork, MatpowerError> {
 pub fn parse(text: &str) -> Result<MatpowerCase, MatpowerError> {
     let code = strip_comments(text);
     let mut case = MatpowerCase::default();
-    let (mut base_mva, mut bus, mut gens, mut branch) = (None, None, None, None);
+    let (mut base_mva, mut bus, mut gens, mut branch, mut gencost) = (None, None, None, None, None);
 
     let bytes = code.as_bytes();
     let mut i = 0;
@@ -236,7 +272,10 @@ pub fn parse(text: &str) -> Result<MatpowerCase, MatpowerError> {
         let name = &code[i..name_end];
         let line = line_of(&code, start);
         let mut j = skip_blanks(bytes, name_end);
-        let read = matches!(name, "bus" | "gen" | "branch" | "baseMVA" | "version");
+        let read = matches!(
+            name,
+            "bus" | "gen" | "branch" | "gencost" | "baseMVA" | "version"
+        );
         if j >= bytes.len() || bytes[j] != b'=' || bytes.get(j + 1) == Some(&b'=') {
             if read {
                 return Err(MatpowerError::Unsupported(format!(
@@ -248,7 +287,7 @@ pub fn parse(text: &str) -> Result<MatpowerCase, MatpowerError> {
         }
         j = skip_blanks(bytes, j + 1);
         match name {
-            "bus" | "gen" | "branch" => {
+            "bus" | "gen" | "branch" | "gencost" => {
                 if bytes.get(j) != Some(&b'[') {
                     return Err(MatpowerError::Unsupported(format!(
                         "line {line}: mpc.{name} is assigned an expression, not a literal \
@@ -268,6 +307,7 @@ pub fn parse(text: &str) -> Result<MatpowerCase, MatpowerError> {
                 match name {
                     "bus" => bus = Some(rows),
                     "gen" => gens = Some(rows),
+                    "gencost" => gencost = Some(rows),
                     _ => branch = Some(rows),
                 }
             }
@@ -299,6 +339,7 @@ pub fn parse(text: &str) -> Result<MatpowerCase, MatpowerError> {
     case.bus = bus.ok_or(MatpowerError::Missing("bus"))?;
     case.gens = gens.ok_or(MatpowerError::Missing("gen"))?;
     case.branch = branch.ok_or(MatpowerError::Missing("branch"))?;
+    case.gencost = gencost;
     if case.base_mva.is_nan() || case.base_mva <= 0.0 {
         return Err(MatpowerError::Unsupported(format!(
             "mpc.baseMVA = {} is not positive",
@@ -764,6 +805,274 @@ pub fn se_case(
         node_idx,
         phases: 1,
     })
+}
+
+/// MATPOWER's AC-OPF on a case, ready for [`AcOpf::build`](crate::opf::ac::AcOpf::build).
+#[cfg(feature = "opf")]
+#[derive(Clone, Debug)]
+pub struct MatpowerOpf {
+    /// Isolated buses are left out, so its bus indices are not
+    /// [`MatpowerNetwork`]'s: [`bus_numbers`](Self::bus_numbers) maps them.
+    pub network: crate::opf::ac::AcOpfNetwork,
+    /// OPF bus index → MATPOWER bus number (`BUS_I`).
+    pub bus_numbers: Vec<u64>,
+    /// The reference bus's `VA`, radians. The OPF holds the reference at
+    /// zero; adding this gives the angles MATPOWER reports.
+    pub reference_angle: f64,
+    /// What the conversion decided on the case's behalf.
+    pub notes: Vec<String>,
+}
+
+/// The AC-OPF `runopf` solves on `case`, in polar form.
+///
+/// The network is [`to_network`]'s, so out-of-service branches and
+/// generators, isolated buses and the reference bus follow the power-flow
+/// rules; isolated buses are then dropped, as MATPOWER's `ext2int` does. On
+/// top of it:
+///
+/// - **Cost**: `mpc.gencost`, one row per generator row. Polynomial (model
+///   2) up to quadratic, or piecewise linear (model 1). Rows beyond the
+///   generators, MATPOWER's reactive-power costs, are refused, as is a
+///   polynomial of higher degree: the AC-OPF's Hessian carries only a
+///   quadratic term.
+/// - **Generators** keep their row in `mpc.gen` as
+///   [`AcGenerator::index`](crate::opf::ac::AcGenerator::index), bounded by
+///   `PMIN`..`PMAX` and `QMIN`..`QMAX`.
+/// - **Voltage magnitudes** within `VMIN`..`VMAX`.
+/// - **Branch limits**: `RATE_A` as apparent power at both ends; 0 is
+///   unlimited.
+/// - **Angle differences**: `ANGMIN <= θ_f − θ_t <= ANGMAX`, a side ignored
+///   when it is 0 or at ±360 degrees or beyond, as `makeAang` reads it.
+/// - **The reference** angle is held at zero: one reference bus, which an
+///   OPF of a case with several islands would need more of, so such a case
+///   is refused.
+///
+/// The start is [`AcOpf`](crate::opf::ac::AcOpf)'s own: flat voltages, the
+/// dispatch spread over the generators' ranges to meet the load.
+#[cfg(feature = "opf")]
+pub fn ac_opf_network(case: &MatpowerCase) -> Result<MatpowerOpf, MatpowerError> {
+    use crate::opf::ac::{AcGenerator, AcOpfNetwork, AngleLimit};
+
+    check_columns("bus", &case.bus, VMIN + 1)?;
+    check_columns("gen", &case.gens, PMIN + 1)?;
+    check_columns("branch", &case.branch, ANGMAX + 1)?;
+    let gencost = case
+        .gencost
+        .as_ref()
+        .ok_or(MatpowerError::Missing("gencost"))?;
+    if gencost.len() != case.gens.len() {
+        return Err(MatpowerError::Unsupported(format!(
+            "mpc.gencost has {} rows for {} generators; only active-power costs, one row \
+             per generator, are read",
+            gencost.len(),
+            case.gens.len()
+        )));
+    }
+    check_columns("gencost", gencost, COST)?;
+
+    let net = to_network(case)?;
+    let base = net.base_mva;
+    let mut notes = net.notes.clone();
+
+    // Energized buses only, renumbered in file order.
+    let mut opf_index = vec![None; net.buses.len()];
+    let mut bus_numbers = Vec::new();
+    for (i, b) in case.bus.iter().enumerate() {
+        if b[BUS_TYPE] != NONE {
+            opf_index[i] = Some(bus_numbers.len());
+            bus_numbers.push(net.bus_numbers[i]);
+        }
+    }
+    let at = |i: usize| opf_index[i].expect("to_network drops what touches an isolated bus");
+    let n = bus_numbers.len();
+
+    let references: Vec<usize> = net
+        .buses
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.bus_type == BusType::Slack)
+        .map(|(i, _)| i)
+        .collect();
+    let reference = match references[..] {
+        [one] => one,
+        [] => {
+            return Err(MatpowerError::Unsupported(
+                "the case has no reference bus with an online generator".into(),
+            ));
+        }
+        _ => {
+            return Err(MatpowerError::Unsupported(format!(
+                "the case has {} reference buses; an OPF here holds one angle reference",
+                references.len()
+            )));
+        }
+    };
+
+    let mut p_load = vec![0.0; n];
+    let mut q_load = vec![0.0; n];
+    let mut v_min = vec![0.0; n];
+    let mut v_max = vec![0.0; n];
+    for (i, b) in case.bus.iter().enumerate() {
+        if let Some(k) = opf_index[i] {
+            p_load[k] = b[PD] / base;
+            q_load[k] = b[QD] / base;
+            v_min[k] = b[VMIN];
+            v_max[k] = b[VMAX];
+        }
+    }
+
+    let index: HashMap<u64, usize> = net
+        .bus_numbers
+        .iter()
+        .enumerate()
+        .map(|(i, &number)| (number, i))
+        .collect();
+    let mut generators = Vec::new();
+    for (row, g) in case.gens.iter().enumerate() {
+        let bus = bus_number(g[GEN_BUS])
+            .and_then(|number| index.get(&number).copied())
+            .ok_or(MatpowerError::UnknownBus {
+                matrix: "gen",
+                row: row + 1,
+                bus: g[GEN_BUS],
+            })?;
+        let Some(bus) = opf_index[bus].filter(|_| g[GEN_STATUS] > 0.0) else {
+            continue;
+        };
+        generators.push(AcGenerator {
+            index: row,
+            bus,
+            p_min: g[PMIN] / base,
+            p_max: g[PMAX] / base,
+            q_min: g[QMIN] / base,
+            q_max: g[QMAX] / base,
+            cost: Some(cost_curve(&gencost[row], row)?.to_per_unit(base)),
+        });
+    }
+
+    let lines: Vec<Line> = net
+        .lines
+        .iter()
+        .map(|l| Line {
+            from: at(l.from),
+            to: at(l.to),
+            ..l.clone()
+        })
+        .collect();
+    let transformers: Vec<Transformer> = net
+        .transformers
+        .iter()
+        .map(|t| Transformer {
+            from: at(t.from),
+            to: at(t.to),
+            ..t.clone()
+        })
+        .collect();
+
+    let mut limits = HashMap::new();
+    let mut angle_limits = Vec::new();
+    for (flat, &row) in net.branch_rows.iter().enumerate() {
+        let br = &case.branch[row];
+        if br[RATE_A] > 0.0 {
+            limits.insert(flat, Some(br[RATE_A] / base));
+        }
+        let min = if br[ANGMIN] != 0.0 && br[ANGMIN] > -360.0 {
+            br[ANGMIN].to_radians()
+        } else {
+            f64::NEG_INFINITY
+        };
+        let max = if br[ANGMAX] != 0.0 && br[ANGMAX] < 360.0 {
+            br[ANGMAX].to_radians()
+        } else {
+            f64::INFINITY
+        };
+        if min.is_finite() || max.is_finite() {
+            let (from, to) = if flat < lines.len() {
+                (lines[flat].from, lines[flat].to)
+            } else {
+                let t = &transformers[flat - lines.len()];
+                (t.from, t.to)
+            };
+            angle_limits.push(AngleLimit { from, to, min, max });
+        }
+    }
+    if generators.is_empty() {
+        notes.push("no online generator".into());
+    }
+
+    Ok(MatpowerOpf {
+        network: AcOpfNetwork {
+            n_buses: n,
+            reference: at(reference),
+            lines,
+            transformers,
+            generators,
+            p_load,
+            q_load,
+            v_min,
+            v_max,
+            limits,
+            shunts: net.shunts.iter().map(|s| (at(s.at), s.y)).collect(),
+            base_mva: base,
+            v_start: None,
+            angle_limits,
+        },
+        bus_numbers,
+        reference_angle: case.bus[reference][VA].to_radians(),
+        notes,
+    })
+}
+
+/// A `gencost` row as a cost in MW, ascending coefficients.
+#[cfg(feature = "opf")]
+fn cost_curve(row: &[f64], gen_row: usize) -> Result<crate::opf::model::CostCurve, MatpowerError> {
+    use crate::opf::model::CostCurve;
+
+    let count = row[NCOST];
+    let values = |n: usize| {
+        row.get(COST..COST + n).ok_or(MatpowerError::ShortRow {
+            matrix: "gencost",
+            row: gen_row + 1,
+            columns: row.len(),
+            required: COST + n,
+        })
+    };
+    if !(count >= 0.0 && count.fract() == 0.0) {
+        return Err(MatpowerError::Unsupported(format!(
+            "mpc.gencost row {}: NCOST = {count}",
+            gen_row + 1
+        )));
+    }
+    let count = count as usize;
+    match row[MODEL] {
+        m if m == POLYNOMIAL => {
+            // Highest degree first in the file.
+            let mut coefficients: Vec<f64> = values(count)?.iter().rev().copied().collect();
+            while coefficients.len() > 3 && coefficients.last() == Some(&0.0) {
+                coefficients.pop();
+            }
+            if coefficients.len() > 3 {
+                return Err(MatpowerError::Unsupported(format!(
+                    "mpc.gencost row {}: a polynomial cost of degree {}; only up to \
+                     quadratic is read",
+                    gen_row + 1,
+                    coefficients.len() - 1
+                )));
+            }
+            Ok(CostCurve::Polynomial { coefficients })
+        }
+        m if m == PW_LINEAR => Ok(CostCurve::PiecewiseLinear {
+            points: values(2 * count)?
+                .chunks_exact(2)
+                .map(|p| (p[0], p[1]))
+                .collect(),
+        }),
+        m => Err(MatpowerError::Unsupported(format!(
+            "mpc.gencost row {}: cost model {m}; only 1 (piecewise linear) and 2 \
+             (polynomial) exist",
+            gen_row + 1
+        ))),
+    }
 }
 
 #[cfg(test)]

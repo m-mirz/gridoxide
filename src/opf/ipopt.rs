@@ -43,6 +43,7 @@
 
 #![allow(non_upper_case_globals)]
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 
@@ -96,8 +97,23 @@ struct Context<'a> {
     jacobian_pattern: Vec<(usize, usize)>,
     /// Lower-triangle Hessian pattern.
     hessian_pattern: Vec<(usize, usize)>,
+    /// Each pattern entry's slot, built once: the value callbacks run every
+    /// iteration, and rebuilding these maps there is a cost that grows with
+    /// the network.
+    jacobian_slots: HashMap<(usize, usize), usize>,
+    hessian_slots: HashMap<(usize, usize), usize>,
     /// Set when a callback saw a pattern it could not honour.
     pattern_mismatch: bool,
+    /// The last iteration count IPOPT passed to the intermediate callback.
+    iterations: usize,
+}
+
+fn slots(pattern: &[(usize, usize)]) -> HashMap<(usize, usize), usize> {
+    pattern
+        .iter()
+        .enumerate()
+        .map(|(k, &key)| (key, k))
+        .collect()
 }
 
 fn lower_triangle(triplets: &[(usize, usize, f64)]) -> Vec<(usize, usize)> {
@@ -111,7 +127,8 @@ fn lower_triangle(triplets: &[(usize, usize, f64)]) -> Vec<(usize, usize)> {
     seen
 }
 
-/// `σ∇²f + Σ λᵢ∇²cᵢ`, folded into the caller's lower-triangle pattern.
+/// `σ∇²f + Σ λᵢ∇²cᵢ`, folded into the lower-triangle pattern whose entries
+/// `slots` places. An entry outside the pattern is dropped.
 ///
 /// The `σ ≠ 1` branch costs a second Hessian evaluation and is worth it:
 /// IPOPT sets `σ = 0` in its restoration phase, and quietly using the
@@ -122,14 +139,13 @@ fn scaled_hessian(
     x: &[f64],
     lambda: &[f64],
     sigma: f64,
-    pattern: &[(usize, usize)],
+    slots: &HashMap<(usize, usize), usize>,
 ) -> Vec<f64> {
     let negated: Vec<f64> = lambda.iter().map(|v| -v).collect();
-    let mut dense: std::collections::HashMap<(usize, usize), f64> =
-        std::collections::HashMap::new();
+    let mut out = vec![0.0; slots.len()];
     for (r, c, v) in problem.lagrangian_hessian(x, &negated) {
-        if r >= c {
-            *dense.entry((r, c)).or_insert(0.0) += v;
+        if let Some(&k) = slots.get(&(r, c)) {
+            out[k] += v;
         }
     }
     if sigma != 1.0 {
@@ -137,15 +153,12 @@ fn scaled_hessian(
         // the implicit factor of one above.
         let zero = vec![0.0; lambda.len()];
         for (r, c, v) in problem.lagrangian_hessian(x, &zero) {
-            if r >= c {
-                *dense.entry((r, c)).or_insert(0.0) += (sigma - 1.0) * v;
+            if let Some(&k) = slots.get(&(r, c)) {
+                out[k] += (sigma - 1.0) * v;
             }
         }
     }
-    pattern
-        .iter()
-        .map(|key| dense.get(key).copied().unwrap_or(0.0))
-        .collect()
+    out
 }
 
 unsafe extern "C" fn eval_f(
@@ -224,13 +237,8 @@ unsafe extern "C" fn eval_jac_g(
     // the captured pattern rather than assuming a one-to-one correspondence.
     let x = unsafe { std::slice::from_raw_parts(x, n as usize) };
     let mut folded = vec![0.0; count];
-    let mut index: std::collections::HashMap<(usize, usize), usize> =
-        std::collections::HashMap::with_capacity(count);
-    for (k, key) in context.jacobian_pattern.iter().enumerate() {
-        index.insert(*key, k);
-    }
     for (r, c, v) in context.problem.jacobian(x) {
-        match index.get(&(r, c)) {
+        match context.jacobian_slots.get(&(r, c)) {
             Some(&k) => folded[k] += v,
             None => {
                 // A pattern that grew since the structure pass cannot be
@@ -284,10 +292,31 @@ unsafe extern "C" fn eval_h(
         x,
         &lambda,
         obj_factor,
-        &context.hessian_pattern,
+        &context.hessian_slots,
     );
     let out = unsafe { std::slice::from_raw_parts_mut(values, count) };
     out.copy_from_slice(&folded);
+    true
+}
+
+/// Records the iteration count, which `IpoptSolve` does not return.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn intermediate(
+    _alg_mod: bindings::ipindex,
+    iter_count: bindings::ipindex,
+    _obj_value: bindings::ipnumber,
+    _inf_pr: bindings::ipnumber,
+    _inf_du: bindings::ipnumber,
+    _mu: bindings::ipnumber,
+    _d_norm: bindings::ipnumber,
+    _regularization_size: bindings::ipnumber,
+    _alpha_du: bindings::ipnumber,
+    _alpha_pr: bindings::ipnumber,
+    _ls_trials: bindings::ipindex,
+    user_data: bindings::UserDataPtr,
+) -> bool {
+    let context = unsafe { &mut *(user_data as *mut Context) };
+    context.iterations = iter_count.max(0) as usize;
     true
 }
 
@@ -397,9 +426,12 @@ pub fn solve(
 
     let mut context = Context {
         problem,
+        jacobian_slots: slots(&jacobian_pattern),
+        hessian_slots: slots(&hessian_pattern),
         jacobian_pattern,
         hessian_pattern,
         pattern_mismatch: false,
+        iterations: 0,
     };
 
     // SAFETY: every pointer below is to a live local that outlives the call;
@@ -436,6 +468,8 @@ pub fn solve(
         }
     }
     let guard = Handle(handle);
+    // SAFETY: `handle` is live; the callback reaches only `user_data`.
+    unsafe { bindings::SetIntermediateCallback(handle, Some(intermediate)) };
 
     set_string_option(handle, "sb", "yes")?;
     let tol = CString::new("tol").unwrap();
@@ -507,9 +541,7 @@ pub fn solve(
         // Negated back into this crate's convention — see the module docs.
         y: mult_g[..m].iter().map(|v| -v).collect(),
         z: (0..n).map(|k| mult_x_lower[k] - mult_x_upper[k]).collect(),
-        // IPOPT's C API does not expose the iteration count through
-        // `IpoptSolve`; reporting zero is honest, where a guess would not be.
-        iterations: 0,
+        iterations: context.iterations,
         violation,
     })
 }

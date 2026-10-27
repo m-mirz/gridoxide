@@ -192,6 +192,9 @@ mod klu_jacobian_test;
 mod klu_native_jacobian_test;
 #[path = "link_test.rs"]
 mod link_test;
+#[cfg(all(feature = "matpower", feature = "opf"))]
+#[path = "matpower_opf_test.rs"]
+mod matpower_opf_test;
 #[cfg(feature = "matpower")]
 #[path = "matpower_se_test.rs"]
 mod matpower_se_test;

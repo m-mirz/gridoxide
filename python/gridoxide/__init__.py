@@ -41,11 +41,11 @@ __all__ = [
 # are gridoxide's own, pure Rust. Only the optional `opf-highs` reference
 # backend needs a system library.
 try:
-    from ._gridoxide import ac_opf, dc_opf  # noqa: F401
+    from ._gridoxide import OptimalPowerFlowModel, ac_opf, dc_opf  # noqa: F401
 except ImportError:  # pragma: no cover - depends on build features
     pass
 else:
-    __all__ += ["ac_opf", "dc_opf"]
+    __all__ += ["OptimalPowerFlowModel", "ac_opf", "dc_opf"]
 
 # RMS dynamic simulation needs the `dynamics` feature compiled in, so like the
 # optimal power flow it is present in some builds and not others.

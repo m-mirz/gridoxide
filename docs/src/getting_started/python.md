@@ -196,6 +196,11 @@ for index, p, q in zip(r.generator_index, r.p_gen, r.q_gen):
     print(f"generator {index}: {p:8.2f} MW  {q:8.2f} MVAr")
 ```
 
+- `OptimalPowerFlowModel.from_matpower(path, solver="nlp", tol=1e-8, max_iter=300)` reads a
+  MATPOWER `.m` case with its `gencost` directly and solves on `solve()`; `solver="ipopt"` needs
+  the `opf-ipopt` feature. `objective`, `iterations`, `violation`, `voltage_mag()`,
+  `voltage_ang()`, `nodes()` (bus number, index) and `dispatch()` (gen row, MW, MVAr). See
+  [Optimal Power Flow](../opf/index.md#matpower-cases-read-directly).
 - `ac_opf(path, data_path=None, enforce_limits=True, max_iterations=300, tolerance=1e-8,
   freq_hz=50.0)` — the companion document supplies costs, branch ratings *and* per-bus voltage
   limits. Raises if no first-order point is reached.

@@ -260,8 +260,10 @@ mod ipopt {
             // `ipopt.pc` puts this in its own Cflags; the header's `bool`
             // handling depends on it.
             .clang_arg("-DHAVE_CSTDDEF")
-            .allowlist_function("(Create|Free|Add|Open|Close|Set|Get)?Ipopt.*")
-            .allowlist_type("Ipopt.*|Eval_.*|ip(index|number)|UserDataPtr|ApplicationReturnStatus")
+            .allowlist_function("(Create|Free|Add|Open|Close|Set|Get)?Ipopt.*|SetIntermediateCallback")
+            .allowlist_type(
+                "Ipopt.*|Eval_.*|Intermediate_CB|ip(index|number)|UserDataPtr|ApplicationReturnStatus",
+            )
             .allowlist_var("IPOPT_.*");
 
         // Same libclang-without-a-full-clang-toolchain fallback the other

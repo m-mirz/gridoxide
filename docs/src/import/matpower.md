@@ -71,3 +71,10 @@ substitutes the solution into the power-flow equations rebuilt from the raw
 matrices with MATPOWER's own formulas. Every case lands below 1e-7 p.u., and
 flipping the sign of the phase shift in the importer fails case1354pegase by
 0.44 p.u.
+
+## Optimal power flow
+
+With `mpc.gencost` and the OPF columns (`VMAX`/`VMIN`, `PMAX`/`PMIN`, `RATE_A`,
+`ANGMIN`/`ANGMAX`), `matpower::ac_opf_network` builds the AC-OPF `runopf` solves, and
+`OptimalPowerFlowModel.from_matpower` exposes it to Python. See
+[Optimal Power Flow](../opf/index.md#matpower-cases-read-directly).
