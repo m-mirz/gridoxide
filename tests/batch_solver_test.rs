@@ -289,3 +289,42 @@ fn a_solved_base_case_is_a_start() {
     assert_eq!(from_base.last().unwrap().stats.iterations(), 1);
     assert!(linear.last().unwrap().stats.iterations() > 1);
 }
+
+/// A dedicated pool keeps each worker's solver between calls. Its Jacobian
+/// carries the Y-bus admittances, so a call on a network with other values
+/// must not reuse it: the answers must be a fresh solver's.
+#[test]
+fn a_cached_worker_solver_is_not_reused_on_another_network() {
+    let (template, ybus) = load_network();
+    let scs = scenarios(&template, 16);
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/data/network.json");
+    let network: NetworkData = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let mut lines = network.lines.clone();
+    for line in &mut lines {
+        line.x *= 1.3;
+    }
+    let other = build_ybus(template.len(), &lines, &[]).finish();
+
+    let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 4).unwrap();
+    let first = batch.solve(&template, &ybus, &scs, 1e-8, 20).unwrap();
+    let again = batch.solve(&template, &ybus, &scs, 1e-8, 20).unwrap();
+    let changed = batch.solve(&template, &other, &scs, 1e-8, 20).unwrap();
+    let fresh = BatchSolver::with_threads(JacobianBackend::KluNative, 4)
+        .unwrap()
+        .solve(&template, &other, &scs, 1e-8, 20)
+        .unwrap();
+
+    for (a, b) in first.iter().zip(&again) {
+        for (x, y) in a.buses.iter().zip(&b.buses) {
+            assert_eq!(x.voltage_mag, y.voltage_mag);
+        }
+    }
+    for (a, b) in changed.iter().zip(&fresh) {
+        assert_eq!(a.stats.status, SolveStatus::Converged);
+        for (x, y) in a.buses.iter().zip(&b.buses) {
+            assert!((x.voltage_mag - y.voltage_mag).abs() < 1e-12);
+            assert!((x.voltage_ang - y.voltage_ang).abs() < 1e-12);
+        }
+    }
+}

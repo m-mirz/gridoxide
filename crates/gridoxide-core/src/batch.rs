@@ -32,8 +32,10 @@
 //! This is also the CPU baseline any future GPU work has to beat: beating a
 //! single-threaded CPU solver is not a result.
 
+use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::PowerFlowReport;
 use crate::network::{
@@ -67,6 +69,40 @@ pub struct BatchSolver {
     /// is what prevents nested parallelism from oversubscribing the machine.
     pool: Option<rayon::ThreadPool>,
     start: BatchStart,
+    /// Distinguishes this solver's cached worker solvers from another's.
+    id: u64,
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// A dedicated pool's worker solver, kept between [`BatchSolver::solve`]
+    /// calls with the key it was built for: `(BatchSolver::id, network
+    /// fingerprint)`. Setting a worker's solver up (the network's
+    /// components, the Jacobian's pattern, the symbolic factorization) costs
+    /// about three scenarios' solves on case1354pegase, and every call paid
+    /// it again on every worker. Thread-local, so a `!Send` backend never
+    /// crosses a thread; taken out while in use, so a task rayon runs on
+    /// this thread while one waits finds none and builds its own.
+    static WORKER_SOLVER: RefCell<Option<((u64, u64), PersistentSolver)>> =
+        const { RefCell::new(None) };
+}
+
+/// What a cached worker solver depends on: the Y-bus, structure and values
+/// (the Jacobian's recipe carries the admittances), and the bus types,
+/// which decide the Jacobian's unknowns.
+fn network_fingerprint(buses: &[Bus], ybus: &YBusSparse) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ybus.n().hash(&mut h);
+    for i in 0..ybus.n() {
+        for &(j, y) in ybus.row(i) {
+            (j, y.re.to_bits(), y.im.to_bits()).hash(&mut h);
+        }
+    }
+    for b in buses {
+        std::mem::discriminant(&b.bus_type).hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Where every scenario of a batch starts.
@@ -88,6 +124,7 @@ impl BatchSolver {
             backend,
             pool: None,
             start: BatchStart::default(),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -108,6 +145,7 @@ impl BatchSolver {
             backend,
             pool: Some(pool),
             start: BatchStart::default(),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         })
     }
 
@@ -166,6 +204,12 @@ impl BatchSolver {
         let n_workers = self.threads().max(1).min(scenarios.len());
         let backend = self.backend;
         let start = self.start;
+        // Only a dedicated pool's threads keep a solver between calls: the
+        // global pool's are everyone's, and would hold it indefinitely.
+        let key = self
+            .pool
+            .is_some()
+            .then(|| (self.id, network_fingerprint(buses_template, ybus)));
 
         let run = || {
             rayon::scope(|s| {
@@ -183,7 +227,17 @@ impl BatchSolver {
                         // this local stays on one thread for its lifetime.
                         // (`rayon`'s `map_init` would demand `T: Send` and
                         // silently exclude those two backends.)
-                        let mut solver = PersistentSolver::new(backend);
+                        //
+                        // Or taken from this thread's cache, when it was
+                        // built for this solver and this network.
+                        let cached = key.and_then(|key| {
+                            WORKER_SOLVER
+                                .with(|slot| slot.borrow_mut().take())
+                                .filter(|(k, _)| *k == key)
+                        });
+                        let mut solver = cached
+                            .map(|(_, solver)| solver)
+                            .unwrap_or_else(|| PersistentSolver::new(backend));
 
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
@@ -224,6 +278,9 @@ impl BatchSolver {
                                         outer: None,
                                     },
                                 ));
+                        }
+                        if let Some(key) = key {
+                            WORKER_SOLVER.with(|slot| *slot.borrow_mut() = Some((key, solver)));
                         }
                     });
                 }
