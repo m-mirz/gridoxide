@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use gridoxide::batch::{BatchError, BatchSolver, BusOverride, Scenario};
+use gridoxide::batch::{BatchError, BatchSolver, BatchStart, BusOverride, Scenario};
 use gridoxide::json::NetworkData;
 use gridoxide::network::{YBusSparse, build_ybus, linear_initial_guess};
 use gridoxide::solver::{JacobianBackend, PersistentSolver, SolveStatus};
@@ -255,4 +255,37 @@ fn empty_batch_is_not_an_error() {
         .solve(&template, &ybus, &[], 1e-6, 20)
         .expect("empty batch");
     assert!(got.is_empty());
+}
+
+/// `BatchStart::Template` starts every scenario from a solved base case:
+/// the same answers as the linear start, and no Newton step for a scenario
+/// that is the base.
+#[test]
+fn a_solved_base_case_is_a_start() {
+    let (template, ybus) = load_network();
+    let mut base = template.clone();
+    linear_initial_guess(&mut base, &ybus);
+    let mut solver = PersistentSolver::new(JacobianBackend::KluNative);
+    solver.solve(&mut base, &ybus, 1e-10, 20);
+
+    let mut scs = scenarios(&template, 8);
+    scs.push(Scenario::new(Vec::new()));
+    let linear = BatchSolver::with_threads(JacobianBackend::KluNative, 2)
+        .unwrap()
+        .solve(&template, &ybus, &scs, 1e-8, 20)
+        .unwrap();
+    let mut batch = BatchSolver::with_threads(JacobianBackend::KluNative, 2).unwrap();
+    batch.set_start(BatchStart::Template);
+    let from_base = batch.solve(&base, &ybus, &scs, 1e-8, 20).unwrap();
+
+    for (a, b) in linear.iter().zip(&from_base) {
+        assert_eq!(b.stats.status, SolveStatus::Converged);
+        for (x, y) in a.buses.iter().zip(&b.buses) {
+            assert!((x.voltage_mag - y.voltage_mag).abs() < 1e-7);
+            assert!((x.voltage_ang - y.voltage_ang).abs() < 1e-7);
+        }
+    }
+    // `iterations()` counts mismatch evaluations: one, and no Newton step.
+    assert_eq!(from_base.last().unwrap().stats.iterations(), 1);
+    assert!(linear.last().unwrap().stats.iterations() > 1);
 }

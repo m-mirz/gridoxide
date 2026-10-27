@@ -66,6 +66,19 @@ pub struct BatchSolver {
     /// global pool, which is also what `faer` uses internally — sharing it
     /// is what prevents nested parallelism from oversubscribing the machine.
     pool: Option<rayon::ThreadPool>,
+    start: BatchStart,
+}
+
+/// Where every scenario of a batch starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BatchStart {
+    /// A fresh [`linear_initial_guess`] on the scenario's own buses.
+    #[default]
+    Linear,
+    /// The template's voltages as given, overrides applied: pass a solved
+    /// base case as the template to start every scenario from its solution,
+    /// as a sweep or N-1 study from a solved operating point is run.
+    Template,
 }
 
 impl BatchSolver {
@@ -74,7 +87,13 @@ impl BatchSolver {
         Self {
             backend,
             pool: None,
+            start: BatchStart::default(),
         }
+    }
+
+    /// Sets where every scenario of later batches starts.
+    pub fn set_start(&mut self, start: BatchStart) {
+        self.start = start;
     }
 
     /// Uses a dedicated pool of exactly `threads` workers. Built once here
@@ -88,6 +107,7 @@ impl BatchSolver {
         Ok(Self {
             backend,
             pool: Some(pool),
+            start: BatchStart::default(),
         })
     }
 
@@ -103,10 +123,12 @@ impl BatchSolver {
     /// scenario order regardless of thread count**.
     ///
     /// Each scenario starts from `buses_template` with its overrides applied
-    /// and a fresh [`linear_initial_guess`], so scenarios never influence
-    /// each other's starting point — results are identical to a sequential
-    /// loop over `PersistentSolver::solve`, which `tests/batch_solver_test.rs`
-    /// asserts directly.
+    /// and, under [`BatchStart::Linear`], a fresh [`linear_initial_guess`];
+    /// under [`BatchStart::Template`], from the template's own voltages.
+    /// Either way scenarios never influence each other's starting point —
+    /// results are identical to a sequential loop over
+    /// `PersistentSolver::solve`, which `tests/batch_solver_test.rs` asserts
+    /// directly.
     ///
     /// A scenario that fails to converge is *not* an error: its report
     /// carries `SolveStatus::MaxIterationsReached`/`Singular` and the rest of
@@ -143,6 +165,7 @@ impl BatchSolver {
             Mutex::new(Vec::with_capacity(scenarios.len()));
         let n_workers = self.threads().max(1).min(scenarios.len());
         let backend = self.backend;
+        let start = self.start;
 
         let run = || {
             rayon::scope(|s| {
@@ -182,7 +205,9 @@ impl BatchSolver {
                                 }
                             }
 
-                            linear_initial_guess(&mut buses, ybus);
+                            if start == BatchStart::Linear {
+                                linear_initial_guess(&mut buses, ybus);
+                            }
                             let (islands, stats) =
                                 solver.solve_with_stats(&mut buses, ybus, tol, max_iter);
                             collected
@@ -313,6 +338,7 @@ impl BatchSolver {
             Mutex::new(Vec::with_capacity(scenarios.len()));
         let n_workers = self.threads().max(1).min(scenarios.len());
         let backend = self.backend;
+        let start = self.start;
 
         let run = || {
             rayon::scope(|s| {
@@ -371,7 +397,9 @@ impl BatchSolver {
                             stamp_shunts(&mut ybus, shunts);
                             let ybus = ybus.finish();
 
-                            linear_initial_guess(&mut buses, &ybus);
+                            if start == BatchStart::Linear {
+                                linear_initial_guess(&mut buses, &ybus);
+                            }
                             let (islands, stats) =
                                 solver.solve_with_stats(&mut buses, &ybus, tol, max_iter);
                             if *splits {

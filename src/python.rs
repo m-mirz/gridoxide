@@ -21,7 +21,7 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::batch::{BatchSolver, BusOverride, Scenario, uniform_load_scaling};
+use crate::batch::{BatchSolver, BatchStart, BusOverride, Scenario, uniform_load_scaling};
 #[cfg(feature = "cgmes")]
 use crate::cgmes::{
     cgmes_resolve_dc_converters, cgmes_to_buses_and_branches, cgmes_topological_node_bus_index,
@@ -116,6 +116,21 @@ fn parse_dc_approximation(name: &str) -> PyResult<DcApproximation> {
     }
 }
 
+/// `solve_batch`'s `(bus_index, p_spec, q_spec)` lists as scenarios.
+fn overrides_to_scenarios(scenarios: Vec<Vec<(usize, f64, f64)>>) -> Vec<Scenario> {
+    scenarios
+        .into_iter()
+        .map(|overrides| {
+            Scenario::new(
+                overrides
+                    .into_iter()
+                    .map(|(bus, p, q)| BusOverride::new(bus).p(p).q(q))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 /// One scenario's outcome from [`PowerFlowModel::solve_batch`]. Carries
 /// voltages plus the convergence detail `solver::SolveStats` now returns
 /// instead of printing.
@@ -202,6 +217,9 @@ struct PowerFlowModel {
     /// repeated `solve_batch` calls at one thread count reuse a single rayon
     /// pool instead of respawning workers per call.
     batch: Option<(usize, BatchSolver)>,
+    /// What `set_scenarios` stored, for a `solve_batch()` called without
+    /// scenarios.
+    stored_scenarios: Vec<Scenario>,
     /// Parallel to `transformers`: every position of that transformer's tap
     /// changer, where the importer retained one. Empty for every format but
     /// CGMES's bus-branch view, which is the only one this class loads from.
@@ -328,6 +346,7 @@ impl PowerFlowModel {
             #[cfg(feature = "cgmes")]
             node_breaker: None,
             batch: None,
+            stored_scenarios: Vec::new(),
             tap_changers: Vec::new(),
             regulation: Vec::new(),
             outer: None,
@@ -396,6 +415,7 @@ impl PowerFlowModel {
             #[cfg(feature = "cgmes")]
             node_breaker: None,
             batch: None,
+            stored_scenarios: Vec::new(),
             tap_changers: Vec::new(),
             regulation: Vec::new(),
             outer: None,
@@ -548,6 +568,7 @@ impl PowerFlowModel {
             sensitivity: None,
             node_breaker,
             batch: None,
+            stored_scenarios: Vec::new(),
             tap_changers: taps.0,
             regulation: taps.1,
             outer: None,
@@ -1248,12 +1269,16 @@ impl PowerFlowModel {
     /// leaves the network connected; those that sever it fall back to a full
     /// rebuild, and their orphaned buses come back pinned to zero rather than
     /// as a spurious singular solve.
-    #[pyo3(signature = (contingencies, threads=None))]
+    ///
+    /// `start` as for `solve_batch`.
+    #[pyo3(signature = (contingencies, threads=None, start="linear"))]
     fn solve_contingencies(
         &mut self,
         contingencies: Vec<Vec<usize>>,
         threads: Option<usize>,
+        start: &str,
     ) -> PyResult<Vec<(String, Vec<f64>, Vec<f64>)>> {
+        let (template, start) = self.batch_start(start)?;
         let scenarios: Vec<Scenario> = contingencies
             .into_iter()
             .map(|branch_outages| Scenario {
@@ -1261,14 +1286,15 @@ impl PowerFlowModel {
                 branch_outages,
             })
             .collect();
-        let batch = match threads {
+        let mut batch = match threads {
             Some(t) => BatchSolver::with_threads(self.backend, t.max(1))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
             None => BatchSolver::new(self.backend),
         };
+        batch.set_start(start);
         let reports = batch
             .solve_contingencies(
-                &self.buses_template,
+                &template,
                 &self.lines,
                 &self.transformers,
                 &self.shunts,
@@ -1435,7 +1461,13 @@ impl PowerFlowModel {
     ///
     /// `scenarios` is a list of per-scenario override lists, each entry a
     /// `(bus_index, p_spec, q_spec)` triple in per-unit. Buses not mentioned
-    /// keep the model's own loaded values.
+    /// keep the model's own loaded values. `None` solves the scenarios
+    /// `set_scenarios` stored, which keeps their conversion out of the call.
+    ///
+    /// `start` is where every scenario starts: `"linear"` (default), a
+    /// linear solve of the scenario itself; or `"last"`, the voltages of the
+    /// last `solve()`, the solved base case of a sweep run from one operating
+    /// point.
     ///
     /// `threads` defaults to rayon's global thread count. The underlying
     /// pool is cached per thread count, so repeated calls at one setting
@@ -1451,24 +1483,31 @@ impl PowerFlowModel {
     /// `Send`) is unavailable. The rayon workers never touch Python, so this
     /// is correct — it only blocks *other* Python threads meanwhile, which
     /// is acceptable for the benchmark/analysis use this binding exists for.
-    #[pyo3(signature = (scenarios, threads=None))]
+    #[pyo3(signature = (scenarios=None, threads=None, start="linear"))]
     fn solve_batch(
         &mut self,
-        scenarios: Vec<Vec<(usize, f64, f64)>>,
+        scenarios: Option<Vec<Vec<(usize, f64, f64)>>>,
         threads: Option<usize>,
+        start: &str,
     ) -> PyResult<Vec<BatchResult>> {
-        let scenarios: Vec<Scenario> = scenarios
-            .into_iter()
-            .map(|overrides| {
-                Scenario::new(
-                    overrides
-                        .into_iter()
-                        .map(|(bus, p, q)| BusOverride::new(bus).p(p).q(q))
-                        .collect(),
-                )
-            })
-            .collect();
-        self.run_batch(scenarios, threads)
+        match scenarios {
+            Some(scenarios) => {
+                let scenarios = overrides_to_scenarios(scenarios);
+                self.run_batch(&scenarios, threads, start)
+            }
+            None => {
+                let scenarios = std::mem::take(&mut self.stored_scenarios);
+                let result = self.run_batch(&scenarios, threads, start);
+                self.stored_scenarios = scenarios;
+                result
+            }
+        }
+    }
+
+    /// Stores scenarios, in `solve_batch`'s format, for later
+    /// `solve_batch()` calls without them.
+    fn set_scenarios(&mut self, scenarios: Vec<Vec<(usize, f64, f64)>>) {
+        self.stored_scenarios = overrides_to_scenarios(scenarios);
     }
 
     /// `solve_batch` for the common time-series/QSTS shape: each entry of
@@ -1484,7 +1523,7 @@ impl PowerFlowModel {
             .into_iter()
             .map(|f| uniform_load_scaling(&self.buses_template, f))
             .collect();
-        self.run_batch(scenarios, threads)
+        self.run_batch(&scenarios, threads, "linear")
     }
 
     /// Workers the next `solve_batch` call would use with `threads=None`.
@@ -1638,11 +1677,31 @@ impl PowerFlowModel {
         Ok(())
     }
 
+    /// The template a batch starts from, and how, for `start`.
+    fn batch_start(&self, start: &str) -> PyResult<(Vec<Bus>, BatchStart)> {
+        match start {
+            "linear" => Ok((self.buses_template.clone(), BatchStart::Linear)),
+            "last" => {
+                let mut template = self.buses_template.clone();
+                for (t, b) in template.iter_mut().zip(&self.buses) {
+                    t.voltage_mag = b.voltage_mag;
+                    t.voltage_ang = b.voltage_ang;
+                }
+                Ok((template, BatchStart::Template))
+            }
+            other => Err(PyValueError::new_err(format!(
+                "unknown start {other:?}, expected 'linear' or 'last'"
+            ))),
+        }
+    }
+
     fn run_batch(
         &mut self,
-        scenarios: Vec<Scenario>,
+        scenarios: &[Scenario],
         threads: Option<usize>,
+        start: &str,
     ) -> PyResult<Vec<BatchResult>> {
+        let (template, start) = self.batch_start(start)?;
         let want = threads.unwrap_or_else(rayon::current_num_threads).max(1);
         if self.batch.as_ref().map(|(n, _)| *n) != Some(want) {
             let solver = BatchSolver::with_threads(self.backend, want)
@@ -1652,15 +1711,10 @@ impl PowerFlowModel {
 
         // Disjoint field borrows: `batch` immutably, `buses_template`/`ybus`
         // immutably. Nothing here needs `&mut self`.
-        let (_, batch) = self.batch.as_ref().expect("just populated above");
+        let (_, batch) = self.batch.as_mut().expect("just populated above");
+        batch.set_start(start);
         let reports = batch
-            .solve(
-                &self.buses_template,
-                &self.ybus,
-                &scenarios,
-                self.tol,
-                self.max_iter,
-            )
+            .solve(&template, &self.ybus, scenarios, self.tol, self.max_iter)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(reports
