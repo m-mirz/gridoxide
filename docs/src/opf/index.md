@@ -498,7 +498,7 @@ solver:
 ```python
 model = gridoxide.OptimalPowerFlowModel.from_matpower(
     "pglib_opf_case118_ieee.m", solver="ipopt", tol=1e-6, max_iter=200)
-model.solve()
+model.solve()                # or solve(init="flat"): generators at mid-range
 print(model.objective, model.iterations, model.violation)
 for row, p_mw, q_mvar in model.dispatch():   # row in mpc.gen, 0-based
     ...

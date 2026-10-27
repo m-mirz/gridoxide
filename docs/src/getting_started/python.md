@@ -197,7 +197,8 @@ for index, p, q in zip(r.generator_index, r.p_gen, r.q_gen):
 ```
 
 - `OptimalPowerFlowModel.from_matpower(path, solver="nlp", tol=1e-8, max_iter=300)` reads a
-  MATPOWER `.m` case with its `gencost` directly and solves on `solve()`; `solver="ipopt"` needs
+  MATPOWER `.m` case with its `gencost` directly and solves on `solve(init="proportional")`
+  (`init="flat"` starts generators at mid-range, as MATPOWER does); `solver="ipopt"` needs
   the `opf-ipopt` feature. `objective`, `iterations`, `violation`, `voltage_mag()`,
   `voltage_ang()`, `nodes()` (bus number, index) and `dispatch()` (gen row, MW, MVAr). See
   [Optimal Power Flow](../opf/index.md#matpower-cases-read-directly).

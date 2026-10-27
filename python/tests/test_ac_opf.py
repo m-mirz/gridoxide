@@ -164,6 +164,16 @@ def test_ipopt_is_refused_or_agrees():
     assert model.iterations > 0
 
 
+def test_a_flat_start_reaches_the_same_optimum():
+    # case14 only: from the flat start `opf::nlp` stalls on case118, the
+    # reason the proportional start is the default.
+    model = gridoxide.OptimalPowerFlowModel.from_matpower(pglib_m("pglib_opf_case14_ieee"))
+    model.solve(init="flat")
+    assert model.objective == pytest.approx(2178.1, rel=1e-4)
+    with pytest.raises(ValueError, match="unknown init"):
+        model.solve(init="cold")
+
+
 def test_an_unknown_solver_is_refused():
     with pytest.raises(ValueError, match="unknown solver"):
         gridoxide.OptimalPowerFlowModel.from_matpower(pglib_m("pglib_opf_case14_ieee"), solver="mips")

@@ -3855,8 +3855,7 @@ impl OptimalPowerFlowModel {
     /// feature. `tol` and `max_iter` go to the solver as its own tolerance
     /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
     ///
-    /// Every solve starts from the same point: flat voltages, the dispatch
-    /// spread over the generators' ranges to meet the load.
+    /// Every solve starts from the point `solve(init=...)` names.
     #[staticmethod]
     #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300))]
     fn from_matpower(path: &str, solver: &str, tol: f64, max_iter: usize) -> PyResult<Self> {
@@ -3902,9 +3901,30 @@ impl OptimalPowerFlowModel {
         })
     }
 
-    /// Solves from the model's start. Raises `RuntimeError` unless the
-    /// solver reports a local optimum.
-    fn solve(&mut self, py: Python<'_>) -> PyResult<()> {
+    /// Solves, starting every bus at 1 p.u. (clamped into its limits) and
+    /// zero angle and every generator's Q at the middle of its range, and
+    /// its P as `init` says:
+    ///
+    /// - `"proportional"` (default): the load plus 5%, spread over the
+    ///   generators in proportion to their ranges. On PGLib's cases the
+    ///   midpoints fall about 23% short of load, and `solver="nlp"` needs
+    ///   this start to converge on some of them.
+    /// - `"flat"`: at the middle of its range, MATPOWER's and PowerModels'
+    ///   flat start.
+    ///
+    /// Raises `RuntimeError` unless the solver reports a local optimum.
+    #[pyo3(signature = (init="proportional"))]
+    fn solve(&mut self, py: Python<'_>, init: &str) -> PyResult<()> {
+        use crate::opf::ac::AcOpfStart;
+        self.opf.set_start(match init {
+            "proportional" => AcOpfStart::Proportional,
+            "flat" => AcOpfStart::Flat,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown init {other:?}, expected 'proportional' or 'flat'"
+                )));
+            }
+        });
         self.result = None;
         let (opf, solver, tol, max_iter) = (&self.opf, self.solver, self.tol, self.max_iter);
         let result = py.detach(|| match solver {

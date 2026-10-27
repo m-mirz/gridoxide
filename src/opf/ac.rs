@@ -129,6 +129,8 @@ pub struct AcOpfOptions {
     /// off is the cleanest way to tell a *binding limit* apart from an
     /// infeasible network when a case will not solve.
     pub enforce_limits: bool,
+    /// Where every solve starts; see [`AcOpfStart`].
+    pub start: AcOpfStart,
     pub nlp: NlpOptions,
 }
 
@@ -138,9 +140,25 @@ impl Default for AcOpfOptions {
             default_v_min: 0.9,
             default_v_max: 1.1,
             enforce_limits: true,
+            start: AcOpfStart::default(),
             nlp: NlpOptions::default(),
         }
     }
+}
+
+/// The starting point of a solve. Both start every bus at
+/// [`AcOpfNetwork::v_start`] (1 p.u. unless set), clamped into its limits,
+/// and zero angle, and every generator's reactive output at the middle of its
+/// range; they differ in active output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcOpfStart {
+    /// Demand plus 5%, spread over the generators in proportion to their
+    /// ranges above `max(p_min, 0)`. See `initial_point` for why.
+    #[default]
+    Proportional,
+    /// Every generator at the middle of its active-power range: MATPOWER's
+    /// and PowerModels' flat start, for comparing solvers from one point.
+    Flat,
 }
 
 /// Value, gradient and Hessian of one terminal's `(P, Q)`, in the four local
@@ -372,6 +390,11 @@ impl AcOpf {
 
     pub fn network(&self) -> &AcOpfNetwork {
         &self.network
+    }
+
+    /// Changes where later solves start; the model is otherwise unchanged.
+    pub fn set_start(&mut self, start: AcOpfStart) {
+        self.options.start = start;
     }
 
     /// The bus vector at a given state, for tests that want to re-derive the
@@ -729,7 +752,8 @@ impl NonlinearProblem for AcOpf {
     /// Nothing about correctness depends on it — a nonconvex solver's starting
     /// point selects *which* local optimum is found, not whether the answer is
     /// one — but on these cases it is the difference between converging and
-    /// not.
+    /// not. [`AcOpfStart::Flat`] takes the midpoints anyway, for a caller
+    /// comparing solvers from the start they share.
     fn initial_point(&self) -> Vec<f64> {
         let n = self.network.n_buses;
         let mut x = vec![0.0; self.n_vars];
@@ -764,7 +788,9 @@ impl NonlinearProblem for AcOpf {
 
         for (k, unit) in self.network.generators.iter().enumerate() {
             let low = unit.p_min.max(0.0);
-            x[self.pg + k] = if unit.p_max > low {
+            x[self.pg + k] = if self.options.start == AcOpfStart::Flat {
+                midpoint(unit.p_min, unit.p_max)
+            } else if unit.p_max > low {
                 low + share * (unit.p_max - low)
             } else {
                 midpoint(unit.p_min, unit.p_max)
