@@ -476,6 +476,41 @@ obvious choice — leaves the dispatch about 23% short of demand on every pglib 
 iteration limit. Distributing demand proportionally across the generators' ranges instead costs
 nothing and fixed both.
 
+### MATPOWER cases, read directly
+
+`matpower::ac_opf_network` builds the AC-OPF MATPOWER's `runopf` solves from a `.m` case, with no
+conversion to PGM in between, so phase shifts and the reference bus stay as the case states
+them:
+
+- the cost from `mpc.gencost`, polynomial up to quadratic or piecewise linear, one row per
+  generator (reactive-power cost rows are refused);
+- voltage limits `VMIN`/`VMAX`, generator limits `PMIN`/`PMAX` and `QMIN`/`QMAX`;
+- `RATE_A` as an apparent-power limit at both branch ends, 0 unlimited;
+- `ANGMIN <= θ_f − θ_t <= ANGMAX` per branch, a side ignored at 0 or at ±360° and beyond, as
+  MATPOWER's `makeAang` reads it. These are linear rows of the AC-OPF (`AcOpfNetwork::angle_limits`),
+  enforced whatever `enforce_limits` says;
+- out-of-service branches and generators, and isolated buses, left out; one reference bus, its
+  angle held at zero and reported at the case's `VA`.
+
+From Python, `OptimalPowerFlowModel` reads the case once and solves on demand, with either
+solver:
+
+```python
+model = gridoxide.OptimalPowerFlowModel.from_matpower(
+    "pglib_opf_case118_ieee.m", solver="ipopt", tol=1e-6, max_iter=200)
+model.solve()                # or solve(init="flat"): generators at mid-range
+print(model.objective, model.iterations, model.violation)
+for row, p_mw, q_mvar in model.dispatch():   # row in mpc.gen, 0-based
+    ...
+voltages = {bus: model.voltage_mag()[i] for bus, i in model.nodes()}
+```
+
+`solver="ipopt"` needs the extension built with `opf-ipopt`. On the eleven PGLib cases
+[grid-bench](https://github.com/m-mirz/grid-bench) runs (case14 to case2869_pegase, with the
+`__api` and `__sad` variants of the IEEE cases), IPOPT at `tol=1e-6` reaches PGLib's published
+objective on every one, within 5e-5, in 14 to 51 iterations. `opf::nlp` reaches it on seven within
+200 iterations; it stalls on case300, case300__sad, case118__api and case1354_pegase.
+
 ### Reading the answer
 
 ```python

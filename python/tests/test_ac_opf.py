@@ -114,3 +114,66 @@ def test_the_flows_are_consistent_with_the_reported_angles(congested):
     apparent = [math.hypot(p, q) for p, q in congested.flows]
     assert all(math.isfinite(s) and s >= 0 for s in apparent)
     assert max(apparent) > 1.0
+
+
+# `OptimalPowerFlowModel` reads the `.m` itself, so these need only the
+# submodule, not the converted fixtures.
+PGLIB = os.path.join(os.path.dirname(__file__), "..", "..", "tests", "data", "benchmark-grids", "pglib")
+
+
+def pglib_m(name):
+    variant = name.rpartition("__")[2] if "__" in name else ""
+    path = os.path.join(PGLIB, variant, f"{name}.m")
+    if not os.path.exists(path):
+        pytest.skip("benchmark-grids submodule not initialized")
+    return path
+
+
+@pytest.mark.parametrize(
+    "name,published",
+    [("pglib_opf_case14_ieee", 2178.1), ("pglib_opf_case14_ieee__sad", 2776.8)],
+)
+def test_the_model_reads_the_case_itself(name, published):
+    model = gridoxide.OptimalPowerFlowModel.from_matpower(pglib_m(name))
+    with pytest.raises(RuntimeError, match="solve"):
+        model.objective
+    model.solve()
+    assert model.objective == pytest.approx(published, rel=1e-4)
+    assert model.violation < 1e-6
+
+    nodes = model.nodes()
+    assert [b for b, _ in nodes] == list(range(1, 15))
+    assert len(model.voltage_mag()) == len(model.voltage_ang()) == 14
+    # case14's reference bus 1 has VA = 0.
+    assert model.voltage_ang()[0] == pytest.approx(0.0, abs=1e-12)
+
+    dispatch = model.dispatch()
+    assert [row for row, _, _ in dispatch] == [0, 1, 2, 3, 4]
+    assert sum(p for _, p, _ in dispatch) > 259.0  # load plus losses
+
+
+def test_ipopt_is_refused_or_agrees():
+    path = pglib_m("pglib_opf_case14_ieee")
+    try:
+        model = gridoxide.OptimalPowerFlowModel.from_matpower(path, solver="ipopt", tol=1e-6)
+    except ValueError as e:
+        assert "opf-ipopt" in str(e)
+        return
+    model.solve()
+    assert model.objective == pytest.approx(2178.1, rel=1e-4)
+    assert model.iterations > 0
+
+
+def test_a_flat_start_reaches_the_same_optimum():
+    # case14 only: from the flat start `opf::nlp` stalls on case118, the
+    # reason the proportional start is the default.
+    model = gridoxide.OptimalPowerFlowModel.from_matpower(pglib_m("pglib_opf_case14_ieee"))
+    model.solve(init="flat")
+    assert model.objective == pytest.approx(2178.1, rel=1e-4)
+    with pytest.raises(ValueError, match="unknown init"):
+        model.solve(init="cold")
+
+
+def test_an_unknown_solver_is_refused():
+    with pytest.raises(ValueError, match="unknown solver"):
+        gridoxide.OptimalPowerFlowModel.from_matpower(pglib_m("pglib_opf_case14_ieee"), solver="mips")

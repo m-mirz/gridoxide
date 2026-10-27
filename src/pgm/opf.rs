@@ -268,5 +268,6 @@ pub fn ac_opf_network_from_pgm(
         shunts: shunts_raw,
         base_mva,
         v_start: None,
+        angle_limits: Vec::new(),
     })
 }

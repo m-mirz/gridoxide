@@ -41,6 +41,9 @@
 //!   the interior-point method handles directly through its barrier rather
 //!   than as constraint rows.
 //! - **The reference angle**, pinned by equal bounds.
+//! - **Angle-difference limits**, \\(\theta_{min} \le \theta_f - \theta_t \le
+//!   \theta_{max}\\) per limited branch: linear rows, so a constant Jacobian
+//!   and nothing in the Hessian. MATPOWER's `ANGMIN`/`ANGMAX`.
 //!
 //! # Where the derivatives come from
 //!
@@ -102,6 +105,19 @@ pub struct AcOpfNetwork {
     pub base_mva: f64,
     /// Initial voltage magnitude. `None` starts flat at 1.0.
     pub v_start: Option<f64>,
+    /// Bounds on the angle difference across a branch, enforced whatever
+    /// [`AcOpfOptions::enforce_limits`] says: that switch is about apparent
+    /// power.
+    pub angle_limits: Vec<AngleLimit>,
+}
+
+/// `min ≤ θ_from − θ_to ≤ max`, radians; either side may be infinite.
+#[derive(Clone, Copy, Debug)]
+pub struct AngleLimit {
+    pub from: usize,
+    pub to: usize,
+    pub min: f64,
+    pub max: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,6 +129,8 @@ pub struct AcOpfOptions {
     /// off is the cleanest way to tell a *binding limit* apart from an
     /// infeasible network when a case will not solve.
     pub enforce_limits: bool,
+    /// Where every solve starts; see [`AcOpfStart`].
+    pub start: AcOpfStart,
     pub nlp: NlpOptions,
 }
 
@@ -122,9 +140,25 @@ impl Default for AcOpfOptions {
             default_v_min: 0.9,
             default_v_max: 1.1,
             enforce_limits: true,
+            start: AcOpfStart::default(),
             nlp: NlpOptions::default(),
         }
     }
+}
+
+/// The starting point of a solve. Both start every bus at
+/// [`AcOpfNetwork::v_start`] (1 p.u. unless set), clamped into its limits,
+/// and zero angle, and every generator's reactive output at the middle of its
+/// range; they differ in active output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcOpfStart {
+    /// Demand plus 5%, spread over the generators in proportion to their
+    /// ranges above `max(p_min, 0)`. See `initial_point` for why.
+    #[default]
+    Proportional,
+    /// Every generator at the middle of its active-power range: MATPOWER's
+    /// and PowerModels' flat start, for comparing solvers from one point.
+    Flat,
 }
 
 /// Value, gradient and Hessian of one terminal's `(P, Q)`, in the four local
@@ -358,6 +392,11 @@ impl AcOpf {
         &self.network
     }
 
+    /// Changes where later solves start; the model is otherwise unchanged.
+    pub fn set_start(&mut self, start: AcOpfStart) {
+        self.options.start = start;
+    }
+
     /// The bus vector at a given state, for tests that want to re-derive the
     /// power flow independently of the solver's own residual.
     #[doc(hidden)]
@@ -479,7 +518,10 @@ impl NonlinearProblem for AcOpf {
     }
 
     fn n_constraints(&self) -> usize {
-        2 * self.network.n_buses + self.limit_rows.len() + self.cost_rows.len()
+        2 * self.network.n_buses
+            + self.limit_rows.len()
+            + self.network.angle_limits.len()
+            + self.cost_rows.len()
     }
 
     fn var_bounds(&self) -> (Vec<f64>, Vec<f64>) {
@@ -520,6 +562,10 @@ impl NonlinearProblem for AcOpf {
         for limit in &self.limit_rows {
             lower.push(f64::NEG_INFINITY);
             upper.push(limit.rate_squared);
+        }
+        for angle in &self.network.angle_limits {
+            lower.push(angle.min);
+            upper.push(angle.max);
         }
         // `z − m·p ≥ k`, one row per segment.
         for &(_, _, _, intercept) in &self.cost_rows {
@@ -566,7 +612,7 @@ impl NonlinearProblem for AcOpf {
         let buses = self.buses_at(x);
         let (p_inj, q_inj) = power_injections(&buses, &self.ybus);
 
-        let mut out = vec![0.0; 2 * n + self.limit_rows.len() + self.cost_rows.len()];
+        let mut out = vec![0.0; self.n_constraints()];
         for i in 0..n {
             out[i] = p_inj[i] + self.network.p_load[i];
             out[n + i] = q_inj[i] + self.network.q_load[i];
@@ -583,6 +629,10 @@ impl NonlinearProblem for AcOpf {
             out[2 * n + r] = d.p * d.p + d.q * d.q;
         }
         let base = 2 * n + self.limit_rows.len();
+        for (r, angle) in self.network.angle_limits.iter().enumerate() {
+            out[base + r] = x[self.theta + angle.from] - x[self.theta + angle.to];
+        }
+        let base = base + self.network.angle_limits.len();
         for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
             out[base + r] = x[epigraph] - slope * x[column];
         }
@@ -614,9 +664,15 @@ impl NonlinearProblem for AcOpf {
                 ));
             }
         }
-        // The epigraph rows are linear, so their Jacobian is constant — and
-        // for the same reason they contribute nothing to the Hessian.
+        // The angle and epigraph rows are linear, so their Jacobian is
+        // constant — and for the same reason they contribute nothing to the
+        // Hessian.
         let base = 2 * n + self.limit_rows.len();
+        for (r, angle) in self.network.angle_limits.iter().enumerate() {
+            out.push((base + r, self.theta + angle.from, 1.0));
+            out.push((base + r, self.theta + angle.to, -1.0));
+        }
+        let base = base + self.network.angle_limits.len();
         for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
             out.push((base + r, epigraph, 1.0));
             out.push((base + r, column, -slope));
@@ -668,9 +724,9 @@ impl NonlinearProblem for AcOpf {
                             + d.p * d.d2p[a][b]
                             + d.dq[a] * d.dq[b]
                             + d.q * d.d2q[a][b]);
-                    if value != 0.0 {
-                        out.push((columns[a], columns[b], weight * value));
-                    }
+                    // Kept when zero: IPOPT fixes the Hessian's pattern at
+                    // the start, so it must not depend on the point.
+                    out.push((columns[a], columns[b], weight * value));
                 }
             }
         }
@@ -696,7 +752,8 @@ impl NonlinearProblem for AcOpf {
     /// Nothing about correctness depends on it — a nonconvex solver's starting
     /// point selects *which* local optimum is found, not whether the answer is
     /// one — but on these cases it is the difference between converging and
-    /// not.
+    /// not. [`AcOpfStart::Flat`] takes the midpoints anyway, for a caller
+    /// comparing solvers from the start they share.
     fn initial_point(&self) -> Vec<f64> {
         let n = self.network.n_buses;
         let mut x = vec![0.0; self.n_vars];
@@ -731,7 +788,9 @@ impl NonlinearProblem for AcOpf {
 
         for (k, unit) in self.network.generators.iter().enumerate() {
             let low = unit.p_min.max(0.0);
-            x[self.pg + k] = if unit.p_max > low {
+            x[self.pg + k] = if self.options.start == AcOpfStart::Flat {
+                midpoint(unit.p_min, unit.p_max)
+            } else if unit.p_max > low {
                 low + share * (unit.p_max - low)
             } else {
                 midpoint(unit.p_min, unit.p_max)

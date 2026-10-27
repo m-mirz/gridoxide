@@ -3804,6 +3804,210 @@ fn ac_opf(
     })
 }
 
+/// Which nonlinear solver an [`OptimalPowerFlowModel`] runs.
+#[cfg(feature = "opf")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcOpfSolver {
+    Nlp,
+    #[cfg(feature = "opf-ipopt")]
+    Ipopt,
+}
+
+/// An AC optimal power flow on a MATPOWER case, built once and solved on
+/// demand.
+///
+/// The persistent counterpart of `ac_opf`, for a caller that times or repeats
+/// the solve apart from reading the case. Built by `from_matpower`.
+#[cfg(feature = "opf")]
+#[pyclass]
+struct OptimalPowerFlowModel {
+    opf: crate::opf::ac::AcOpf,
+    solver: AcOpfSolver,
+    tol: f64,
+    max_iter: usize,
+    bus_numbers: Vec<u64>,
+    reference_angle: f64,
+    notes: Vec<String>,
+    result: Option<crate::opf::ac::AcOpfResult>,
+}
+
+#[cfg(feature = "opf")]
+impl OptimalPowerFlowModel {
+    fn solved(&self) -> PyResult<&crate::opf::ac::AcOpfResult> {
+        self.result
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("no solution yet: call solve() first"))
+    }
+}
+
+#[cfg(feature = "opf")]
+#[pymethods]
+impl OptimalPowerFlowModel {
+    /// Reads a MATPOWER `.m` case with its `mpc.gencost` and builds the
+    /// AC-OPF `runopf` solves on it: polynomial (up to quadratic) or
+    /// piecewise-linear cost, bus voltage limits, generator P and Q limits,
+    /// `RATE_A` as an apparent-power limit at both branch ends (0 unlimited)
+    /// and the `ANGMIN`/`ANGMAX` angle-difference limits. Isolated buses and
+    /// out-of-service branches and generators are left out.
+    ///
+    /// `solver` is `"nlp"` (gridoxide's own interior point, the default) or
+    /// `"ipopt"`, which needs the extension built with the `opf-ipopt`
+    /// feature. `tol` and `max_iter` go to the solver as its own tolerance
+    /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
+    ///
+    /// Every solve starts from the point `solve(init=...)` names.
+    #[staticmethod]
+    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300))]
+    fn from_matpower(path: &str, solver: &str, tol: f64, max_iter: usize) -> PyResult<Self> {
+        use crate::matpower::MatpowerError;
+        let solver = match solver {
+            "nlp" => AcOpfSolver::Nlp,
+            #[cfg(feature = "opf-ipopt")]
+            "ipopt" => AcOpfSolver::Ipopt,
+            #[cfg(not(feature = "opf-ipopt"))]
+            "ipopt" => {
+                return Err(PyValueError::new_err(
+                    "solver='ipopt' needs the extension built with the opf-ipopt feature",
+                ));
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown solver {other:?}, expected 'nlp' or 'ipopt'"
+                )));
+            }
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+        let case = crate::matpower::parse(&text)
+            .and_then(|case| crate::matpower::ac_opf_network(&case))
+            .map_err(|e| match e {
+                MatpowerError::Io(e) => PyRuntimeError::new_err(format!("reading {path}: {e}")),
+                e => PyValueError::new_err(format!("{path}: {e}")),
+            })?;
+        let mut options = crate::opf::ac::AcOpfOptions::default();
+        options.nlp.tolerance = tol;
+        options.nlp.max_iterations = max_iter;
+        let opf = crate::opf::ac::AcOpf::build(case.network, options)
+            .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        Ok(Self {
+            opf,
+            solver,
+            tol,
+            max_iter,
+            bus_numbers: case.bus_numbers,
+            reference_angle: case.reference_angle,
+            notes: case.notes,
+            result: None,
+        })
+    }
+
+    /// Solves, starting every bus at 1 p.u. (clamped into its limits) and
+    /// zero angle and every generator's Q at the middle of its range, and
+    /// its P as `init` says:
+    ///
+    /// - `"proportional"` (default): the load plus 5%, spread over the
+    ///   generators in proportion to their ranges. On PGLib's cases the
+    ///   midpoints fall about 23% short of load, and `solver="nlp"` needs
+    ///   this start to converge on some of them.
+    /// - `"flat"`: at the middle of its range, MATPOWER's and PowerModels'
+    ///   flat start.
+    ///
+    /// Raises `RuntimeError` unless the solver reports a local optimum.
+    #[pyo3(signature = (init="proportional"))]
+    fn solve(&mut self, py: Python<'_>, init: &str) -> PyResult<()> {
+        use crate::opf::ac::AcOpfStart;
+        self.opf.set_start(match init {
+            "proportional" => AcOpfStart::Proportional,
+            "flat" => AcOpfStart::Flat,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown init {other:?}, expected 'proportional' or 'flat'"
+                )));
+            }
+        });
+        self.result = None;
+        let (opf, solver, tol, max_iter) = (&self.opf, self.solver, self.tol, self.max_iter);
+        let result = py.detach(|| match solver {
+            AcOpfSolver::Nlp => opf.solve(),
+            #[cfg(feature = "opf-ipopt")]
+            AcOpfSolver::Ipopt => {
+                let options = crate::opf::ipopt::IpoptOptions {
+                    tolerance: tol,
+                    max_iterations: max_iter.min(i32::MAX as usize) as i32,
+                    ..Default::default()
+                };
+                crate::opf::ipopt::solve(opf, &options).map(|s| opf.interpret(&s))
+            }
+        });
+        let _ = (tol, max_iter);
+        let result = result.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        if result.status != crate::opf::OptStatus::Optimal {
+            return Err(PyRuntimeError::new_err(format!(
+                "no optimal dispatch ({:?}) after {} iterations, largest constraint \
+                 violation {:.3e} pu",
+                result.status, result.iterations, result.violation
+            )));
+        }
+        self.result = Some(result);
+        Ok(())
+    }
+
+    /// Total cost, $/h, of the last solve: a local optimum.
+    #[getter]
+    fn objective(&self) -> PyResult<f64> {
+        Ok(self.solved()?.objective)
+    }
+
+    /// Iterations of the last solve.
+    #[getter]
+    fn iterations(&self) -> PyResult<usize> {
+        Ok(self.solved()?.iterations)
+    }
+
+    /// Largest constraint violation of the last solve, per unit.
+    #[getter]
+    fn violation(&self) -> PyResult<f64> {
+        Ok(self.solved()?.violation)
+    }
+
+    /// What the conversion decided on the case's behalf.
+    #[getter]
+    fn notes(&self) -> Vec<String> {
+        self.notes.clone()
+    }
+
+    /// `(bus number, bus index)` for every bus in the OPF, in index order.
+    /// Isolated buses are not in it.
+    fn nodes(&self) -> Vec<(u64, usize)> {
+        self.bus_numbers.iter().copied().zip(0..).collect()
+    }
+
+    /// Bus voltage magnitudes, per unit, by bus index.
+    fn voltage_mag(&self) -> PyResult<Vec<f64>> {
+        Ok(self.solved()?.magnitudes.clone())
+    }
+
+    /// Bus voltage angles, radians, by bus index, with the reference bus at
+    /// the case's `VA`.
+    fn voltage_ang(&self) -> PyResult<Vec<f64>> {
+        let offset = self.reference_angle;
+        Ok(self.solved()?.angles.iter().map(|a| a + offset).collect())
+    }
+
+    /// `(gen row, P MW, Q MVAr)` for every online generator, the row 0-based
+    /// in `mpc.gen`.
+    fn dispatch(&self) -> PyResult<Vec<(usize, f64, f64)>> {
+        let result = self.solved()?;
+        Ok(result
+            .generator_index
+            .iter()
+            .zip(&result.p_gen)
+            .zip(&result.q_gen)
+            .map(|((&row, &p), &q)| (row, p, q))
+            .collect())
+    }
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
@@ -3842,6 +4046,7 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<DcOpfResult>()?;
         m.add_class::<DcOpfBinding>()?;
         m.add_class::<AcOpfResult>()?;
+        m.add_class::<OptimalPowerFlowModel>()?;
         m.add_function(wrap_pyfunction!(dc_opf, m)?)?;
         m.add_function(wrap_pyfunction!(ac_opf, m)?)?;
     }
