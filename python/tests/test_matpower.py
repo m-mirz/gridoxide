@@ -109,6 +109,28 @@ def test_from_matpower_holds_the_case_setpoints():
 
 
 @needs_case14
+def test_a_batch_starts_from_the_solved_base_case():
+    """`start="last"` starts every scenario from the last `solve()`: the
+    voltages the linear start reaches, and no Newton step for a scenario
+    that is the base case itself."""
+    model = gridoxide.PowerFlowModel.from_matpower(str(CASE14), tol=1e-10)
+    _, p, q = model.bus_spec()
+    scenarios = [[(i, p[i] * f, q[i] * f) for i in range(len(p))] for f in (0.6, 0.8, 1.0)]
+    linear = model.solve_batch(scenarios, threads=2)
+
+    model.solve(init="flat")
+    model.set_scenarios(scenarios)
+    from_base = model.solve_batch(threads=2, start="last")
+    for a, b in zip(linear, from_base):
+        assert b.converged
+        assert b.voltage_mag == pytest.approx(a.voltage_mag, abs=1e-8)
+        assert b.voltage_ang == pytest.approx(a.voltage_ang, abs=1e-8)
+    assert from_base[2].iterations == 1   # one mismatch evaluation, no step
+    with pytest.raises(ValueError, match="unknown start"):
+        model.solve_batch(start="base")
+
+
+@needs_case14
 def test_from_matpower_refuses_a_case_that_edits_its_matrices():
     with pytest.raises(ValueError, match="modified by MATLAB code"):
         gridoxide.PowerFlowModel.from_matpower(str(CASE33BW))

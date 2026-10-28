@@ -324,6 +324,7 @@ pub fn newton_raphson_with_backend(
             max_iter,
             &mut SparseLu::new(backend.lu_backend()),
             &mut None,
+            &mut NewtonScratch::default(),
         ),
     };
 
@@ -385,6 +386,17 @@ pub struct PersistentSolver {
     /// The general sparse LU, for every backend but `Block`.
     lu: SparseLu,
     block: Option<BlockSymbolic>,
+    scratch: NewtonScratch,
+}
+
+/// The Newton loop's per-iteration arrays, kept between solves. On a large
+/// network each is over glibc's 128 kB mmap threshold, so allocating them
+/// per solve (per scenario, in a batch) mapped and faulted in fresh pages
+/// every time.
+#[derive(Default)]
+struct NewtonScratch {
+    values: Vec<f64>,
+    mismatch: Vec<f64>,
 }
 
 impl PersistentSolver {
@@ -395,6 +407,7 @@ impl PersistentSolver {
             components: None,
             lu: SparseLu::new(backend.lu_backend()),
             block: None,
+            scratch: NewtonScratch::default(),
         }
     }
 
@@ -446,9 +459,15 @@ impl PersistentSolver {
             JacobianBackend::Block => {
                 newton_raphson_block_cached(buses, ybus, tol, max_iter, &mut self.block)
             }
-            _ => {
-                newton_raphson_cached(buses, ybus, tol, max_iter, &mut self.lu, &mut self.jacobian)
-            }
+            _ => newton_raphson_cached(
+                buses,
+                ybus,
+                tol,
+                max_iter,
+                &mut self.lu,
+                &mut self.jacobian,
+                &mut self.scratch,
+            ),
         };
 
         let reports = finish_island_reports(classified, buses, ybus, stats.status, tol);
@@ -516,6 +535,7 @@ fn newton_raphson_cached(
     max_iter: usize,
     lu: &mut SparseLu,
     pattern: &mut Option<JacobianPattern>,
+    scratch: &mut NewtonScratch,
 ) -> SolveStats {
     // Every non-slack bus carries an angle unknown; PQ buses additionally
     // carry a voltage-magnitude unknown.
@@ -546,8 +566,9 @@ fn newton_raphson_cached(
     }
     let pattern = pattern.as_mut().expect("just populated above");
 
-    // Refilled in place every iteration — the allocation happens once.
-    let mut values: Vec<f64> = Vec::with_capacity(pattern.len());
+    // Refilled in place every iteration, and kept between solves.
+    let values = &mut scratch.values;
+    let mismatch = &mut scratch.mismatch;
     let mut history: Vec<f64> = Vec::with_capacity(max_iter);
 
     // The Jacobian's sparsity *pattern* is fixed across iterations (same
@@ -562,7 +583,8 @@ fn newton_raphson_cached(
         let (p_calc, q_calc) = power_injections_from(&voltages, ybus);
 
         // Build mismatch vector
-        let mut mismatch = vec![0.0; n_unknowns];
+        mismatch.clear();
+        mismatch.resize(n_unknowns, 0.0);
         let mut mis_idx = 0;
         for &i in &non_slack_idx {
             // P mismatch for PV and PQ buses
@@ -584,23 +606,23 @@ fn newton_raphson_cached(
         }
 
         // Refill the Jacobian's values at their precomputed offsets.
-        pattern.fill_with(&voltages, &p_calc, &q_calc, &mut values);
+        pattern.fill_with(&voltages, &p_calc, &q_calc, values);
 
         // The backend's symbolic analysis needs the `(row, col)` pairs, but
         // only once per topology — every subsequent iteration hands over
         // nothing but the values.
         if !lu.is_analyzed() {
-            if !lu.analyze(n_unknowns, &pattern.to_triplets(&values)) {
+            if !lu.analyze(n_unknowns, &pattern.to_triplets(values)) {
                 return SolveStats::from_loop(SolveStatus::Singular, history);
             }
             // Where the backend has one layout (both KLUs), fill straight into
             // it from here on rather than have it copy every iteration.
             if let Some(order) = lu.adopt_storage_order() {
                 pattern.permute(&order);
-                values = order.iter().map(|&i| values[i]).collect();
+                *values = order.iter().map(|&i| values[i]).collect();
             }
         }
-        let Some(dx) = lu.factor_and_solve_values(&values, &mismatch) else {
+        let Some(dx) = lu.factor_and_solve_values(values, mismatch) else {
             return SolveStats::from_loop(SolveStatus::Singular, history);
         };
 

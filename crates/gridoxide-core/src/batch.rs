@@ -32,8 +32,10 @@
 //! This is also the CPU baseline any future GPU work has to beat: beating a
 //! single-threaded CPU solver is not a result.
 
+use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::PowerFlowReport;
 use crate::network::{
@@ -41,7 +43,7 @@ use crate::network::{
     structural_component_count,
 };
 pub use crate::scenario::{BatchError, BusOverride, Scenario, uniform_load_scaling};
-use crate::solver::{JacobianBackend, PersistentSolver};
+use crate::solver::{IslandReport, JacobianBackend, PersistentSolver, SolveStats};
 use crate::types::{Bus, Line, Transformer};
 
 /// Solves many scenarios over one shared topology, in parallel.
@@ -66,6 +68,63 @@ pub struct BatchSolver {
     /// global pool, which is also what `faer` uses internally — sharing it
     /// is what prevents nested parallelism from oversubscribing the machine.
     pool: Option<rayon::ThreadPool>,
+    start: BatchStart,
+    /// Distinguishes this solver's cached worker solvers from another's.
+    id: u64,
+}
+
+/// One scenario's result from [`BatchSolver::solve_voltages`].
+#[derive(Clone, Debug)]
+pub struct ScenarioVoltages {
+    /// Per bus, per unit.
+    pub voltage_mag: Vec<f64>,
+    /// Per bus, radians.
+    pub voltage_ang: Vec<f64>,
+    pub stats: SolveStats,
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// A dedicated pool's worker solver, kept between [`BatchSolver::solve`]
+    /// calls with the key it was built for: `(BatchSolver::id, network
+    /// fingerprint)`. Setting a worker's solver up (the network's
+    /// components, the Jacobian's pattern, the symbolic factorization) costs
+    /// about three scenarios' solves on case1354pegase, and every call paid
+    /// it again on every worker. Thread-local, so a `!Send` backend never
+    /// crosses a thread; taken out while in use, so a task rayon runs on
+    /// this thread while one waits finds none and builds its own.
+    static WORKER_SOLVER: RefCell<Option<((u64, u64), PersistentSolver)>> =
+        const { RefCell::new(None) };
+}
+
+/// What a cached worker solver depends on: the Y-bus, structure and values
+/// (the Jacobian's recipe carries the admittances), and the bus types,
+/// which decide the Jacobian's unknowns.
+fn network_fingerprint(buses: &[Bus], ybus: &YBusSparse) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ybus.n().hash(&mut h);
+    for i in 0..ybus.n() {
+        for &(j, y) in ybus.row(i) {
+            (j, y.re.to_bits(), y.im.to_bits()).hash(&mut h);
+        }
+    }
+    for b in buses {
+        std::mem::discriminant(&b.bus_type).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Where every scenario of a batch starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BatchStart {
+    /// A fresh [`linear_initial_guess`] on the scenario's own buses.
+    #[default]
+    Linear,
+    /// The template's voltages as given, overrides applied: pass a solved
+    /// base case as the template to start every scenario from its solution,
+    /// as a sweep or N-1 study from a solved operating point is run.
+    Template,
 }
 
 impl BatchSolver {
@@ -74,7 +133,14 @@ impl BatchSolver {
         Self {
             backend,
             pool: None,
+            start: BatchStart::default(),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Sets where every scenario of later batches starts.
+    pub fn set_start(&mut self, start: BatchStart) {
+        self.start = start;
     }
 
     /// Uses a dedicated pool of exactly `threads` workers. Built once here
@@ -88,6 +154,8 @@ impl BatchSolver {
         Ok(Self {
             backend,
             pool: Some(pool),
+            start: BatchStart::default(),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         })
     }
 
@@ -103,10 +171,12 @@ impl BatchSolver {
     /// scenario order regardless of thread count**.
     ///
     /// Each scenario starts from `buses_template` with its overrides applied
-    /// and a fresh [`linear_initial_guess`], so scenarios never influence
-    /// each other's starting point — results are identical to a sequential
-    /// loop over `PersistentSolver::solve`, which `tests/batch_solver_test.rs`
-    /// asserts directly.
+    /// and, under [`BatchStart::Linear`], a fresh [`linear_initial_guess`];
+    /// under [`BatchStart::Template`], from the template's own voltages.
+    /// Either way scenarios never influence each other's starting point —
+    /// results are identical to a sequential loop over
+    /// `PersistentSolver::solve`, which `tests/batch_solver_test.rs` asserts
+    /// directly.
     ///
     /// A scenario that fails to converge is *not* an error: its report
     /// carries `SolveStatus::MaxIterationsReached`/`Singular` and the rest of
@@ -120,6 +190,64 @@ impl BatchSolver {
         tol: f64,
         max_iter: usize,
     ) -> Result<Vec<PowerFlowReport>, BatchError> {
+        self.solve_each(
+            buses_template,
+            ybus,
+            scenarios,
+            tol,
+            max_iter,
+            |buses, islands, stats| PowerFlowReport {
+                buses: std::mem::take(buses),
+                islands,
+                stats,
+                dc: None,
+                linear: None,
+                outer: None,
+            },
+        )
+    }
+
+    /// [`solve`](Self::solve), keeping only each scenario's voltages and
+    /// convergence: what a sweep reads.
+    ///
+    /// Each worker solves its scenarios in one reused bus buffer, where
+    /// `solve` hands every scenario's whole bus vector to its report. Those
+    /// are what a batch allocates most of (13.5 MB for 100 scenarios of
+    /// case1354pegase), which glibc returns to the system after each batch
+    /// and faults back in on the next: a tenth of a single-threaded sweep.
+    pub fn solve_voltages(
+        &self,
+        buses_template: &[Bus],
+        ybus: &YBusSparse,
+        scenarios: &[Scenario],
+        tol: f64,
+        max_iter: usize,
+    ) -> Result<Vec<ScenarioVoltages>, BatchError> {
+        self.solve_each(
+            buses_template,
+            ybus,
+            scenarios,
+            tol,
+            max_iter,
+            |buses, _, stats| ScenarioVoltages {
+                voltage_mag: buses.iter().map(|b| b.voltage_mag).collect(),
+                voltage_ang: buses.iter().map(|b| b.voltage_ang).collect(),
+                stats,
+            },
+        )
+    }
+
+    /// Every scenario, solved in a worker's bus buffer and handed to `keep`,
+    /// which makes the scenario's result; in scenario order.
+    fn solve_each<R: Send>(
+        &self,
+        buses_template: &[Bus],
+        ybus: &YBusSparse,
+        scenarios: &[Scenario],
+        tol: f64,
+        max_iter: usize,
+        keep: impl Fn(&mut Vec<Bus>, Vec<IslandReport>, SolveStats) -> R + Sync,
+    ) -> Result<Vec<R>, BatchError> {
         for (i, sc) in scenarios.iter().enumerate() {
             if !sc.branch_outages.is_empty() {
                 return Err(BatchError::OutagesUnsupported { scenario: i });
@@ -139,10 +267,16 @@ impl BatchSolver {
         }
 
         let next = AtomicUsize::new(0);
-        let collected: Mutex<Vec<(usize, PowerFlowReport)>> =
-            Mutex::new(Vec::with_capacity(scenarios.len()));
+        let collected: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(scenarios.len()));
         let n_workers = self.threads().max(1).min(scenarios.len());
         let backend = self.backend;
+        let start = self.start;
+        // Only a dedicated pool's threads keep a solver between calls: the
+        // global pool's are everyone's, and would hold it indefinitely.
+        let key = self
+            .pool
+            .is_some()
+            .then(|| (self.id, network_fingerprint(buses_template, ybus)));
 
         let run = || {
             rayon::scope(|s| {
@@ -160,7 +294,18 @@ impl BatchSolver {
                         // this local stays on one thread for its lifetime.
                         // (`rayon`'s `map_init` would demand `T: Send` and
                         // silently exclude those two backends.)
-                        let mut solver = PersistentSolver::new(backend);
+                        //
+                        // Or taken from this thread's cache, when it was
+                        // built for this solver and this network.
+                        let cached = key.and_then(|key| {
+                            WORKER_SOLVER
+                                .with(|slot| slot.borrow_mut().take())
+                                .filter(|(k, _)| *k == key)
+                        });
+                        let mut solver = cached
+                            .map(|(_, solver)| solver)
+                            .unwrap_or_else(|| PersistentSolver::new(backend));
+                        let mut buses: Vec<Bus> = Vec::with_capacity(buses_template.len());
 
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
@@ -168,7 +313,8 @@ impl BatchSolver {
                                 break;
                             }
 
-                            let mut buses = buses_template.to_vec();
+                            buses.clear();
+                            buses.extend_from_slice(buses_template);
                             for ov in &scenarios[i].bus_overrides {
                                 let b = &mut buses[ov.bus];
                                 if let Some(p) = ov.p_spec {
@@ -182,23 +328,19 @@ impl BatchSolver {
                                 }
                             }
 
-                            linear_initial_guess(&mut buses, ybus);
+                            if start == BatchStart::Linear {
+                                linear_initial_guess(&mut buses, ybus);
+                            }
                             let (islands, stats) =
                                 solver.solve_with_stats(&mut buses, ybus, tol, max_iter);
+                            let result = keep(&mut buses, islands, stats);
                             collected
                                 .lock()
                                 .expect("batch result mutex poisoned by a panicking worker")
-                                .push((
-                                    i,
-                                    PowerFlowReport {
-                                        buses,
-                                        islands,
-                                        stats,
-                                        dc: None,
-                                        linear: None,
-                                        outer: None,
-                                    },
-                                ));
+                                .push((i, result));
+                        }
+                        if let Some(key) = key {
+                            WORKER_SOLVER.with(|slot| *slot.borrow_mut() = Some((key, solver)));
                         }
                     });
                 }
@@ -313,6 +455,7 @@ impl BatchSolver {
             Mutex::new(Vec::with_capacity(scenarios.len()));
         let n_workers = self.threads().max(1).min(scenarios.len());
         let backend = self.backend;
+        let start = self.start;
 
         let run = || {
             rayon::scope(|s| {
@@ -371,7 +514,9 @@ impl BatchSolver {
                             stamp_shunts(&mut ybus, shunts);
                             let ybus = ybus.finish();
 
-                            linear_initial_guess(&mut buses, &ybus);
+                            if start == BatchStart::Linear {
+                                linear_initial_guess(&mut buses, &ybus);
+                            }
                             let (islands, stats) =
                                 solver.solve_with_stats(&mut buses, &ybus, tol, max_iter);
                             if *splits {
