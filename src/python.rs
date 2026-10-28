@@ -152,6 +152,47 @@ struct BatchResult {
     max_mismatch: f64,
 }
 
+/// One contingency's outcome from [`PowerFlowModel::solve_contingencies`].
+///
+/// It used to be a `(status, voltage_mag, voltage_ang)` tuple, and still
+/// unpacks and indexes as one. An object keeps the voltages in Rust until a
+/// caller reads them: building every scenario's Python lists inside the call
+/// held the interpreter lock for a sixth of an eight-thread N-1 sweep.
+#[pyclass]
+struct ContingencyResult {
+    #[pyo3(get)]
+    status: &'static str,
+    /// Newton iterations this contingency used.
+    #[pyo3(get)]
+    iterations: usize,
+    /// Per-bus voltage magnitude in per-unit, in node order.
+    #[pyo3(get)]
+    voltage_mag: Vec<f64>,
+    /// Per-bus voltage angle in radians, in node order.
+    #[pyo3(get)]
+    voltage_ang: Vec<f64>,
+}
+
+#[pymethods]
+impl ContingencyResult {
+    fn __len__(&self) -> usize {
+        3
+    }
+
+    /// `(status, voltage_mag, voltage_ang)`, as the tuple it replaced.
+    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObjectExt;
+        match if index < 0 { index + 3 } else { index } {
+            0 => self.status.into_py_any(py),
+            1 => self.voltage_mag.clone().into_py_any(py),
+            2 => self.voltage_ang.clone().into_py_any(py),
+            _ => Err(pyo3::exceptions::PyIndexError::new_err(
+                "a contingency result has three items",
+            )),
+        }
+    }
+}
+
 /// One scenario's outcome from [`StateEstimationModel::solve_batch`].
 #[pyclass]
 struct SeBatchOutcome {
@@ -255,6 +296,9 @@ struct PowerFlowModel {
     tn_bus_index: std::collections::HashMap<String, usize>,
     /// Bus index -> MATPOWER bus number, populated by `from_matpower` only.
     bus_numbers: Vec<u64>,
+    /// Flat branch index -> 0-based row of `mpc.branch`, populated by
+    /// `from_matpower` only.
+    branch_rows: Vec<usize>,
 }
 
 #[pymethods]
@@ -354,6 +398,7 @@ impl PowerFlowModel {
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: Vec::new(),
+            branch_rows: Vec::new(),
         })
     }
 
@@ -423,6 +468,7 @@ impl PowerFlowModel {
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: net.bus_numbers,
+            branch_rows: net.branch_rows,
         })
     }
 
@@ -430,6 +476,15 @@ impl PowerFlowModel {
     /// the model was built by `from_matpower`.
     fn bus_numbers(&self) -> Vec<u64> {
         self.bus_numbers.clone()
+    }
+
+    /// Each branch's 0-based row in `mpc.branch`, in the flat branch order
+    /// (lines, then transformers) that `solve_contingencies` and the
+    /// branch-indexed results use. Out-of-service branches have no flat
+    /// index and are absent. Empty unless the model was built by
+    /// `from_matpower`.
+    fn branch_rows(&self) -> Vec<usize> {
+        self.branch_rows.clone()
     }
 
     /// Loads a CGMES profile bundle (any number of EQ/EQBD/SSH/TP/SV files,
@@ -576,6 +631,7 @@ impl PowerFlowModel {
             max_iter,
             tn_bus_index,
             bus_numbers: Vec::new(),
+            branch_rows: Vec::new(),
         })
     }
 
@@ -1260,10 +1316,11 @@ impl PowerFlowModel {
     /// Runs an AC N-1/N-k contingency sweep: one entry in `contingencies` per
     /// scenario, each a list of flat branch indices to take out of service.
     ///
-    /// Returns `(status, voltage_mag, voltage_ang)` per scenario, in order.
-    /// `status` is `"converged"`, `"max_iterations"` or `"singular"` — a
-    /// contingency that leaves an unsolvable network is a screening result, not
-    /// an error, so it does not raise.
+    /// Returns a `ContingencyResult` per scenario, in order, which unpacks as
+    /// `(status, voltage_mag, voltage_ang)`. `status` is `"converged"`,
+    /// `"max_iterations"` or `"singular"` — a contingency that leaves an
+    /// unsolvable network is a screening result, not an error, so it does not
+    /// raise.
     ///
     /// The symbolic factorization is shared across every contingency that
     /// leaves the network connected; those that sever it fall back to a full
@@ -1277,7 +1334,7 @@ impl PowerFlowModel {
         contingencies: Vec<Vec<usize>>,
         threads: Option<usize>,
         start: &str,
-    ) -> PyResult<Vec<(String, Vec<f64>, Vec<f64>)>> {
+    ) -> PyResult<Vec<ContingencyResult>> {
         let (template, start) = self.batch_start(start)?;
         let scenarios: Vec<Scenario> = contingencies
             .into_iter()
@@ -1286,14 +1343,18 @@ impl PowerFlowModel {
                 branch_outages,
             })
             .collect();
-        let mut batch = match threads {
-            Some(t) => BatchSolver::with_threads(self.backend, t.max(1))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
-            None => BatchSolver::new(self.backend),
-        };
+        // The pool `solve_batch` keeps per thread count, so repeated sweeps
+        // never respawn workers.
+        let want = threads.unwrap_or_else(rayon::current_num_threads).max(1);
+        if self.batch.as_ref().map(|(n, _)| *n) != Some(want) {
+            let solver = BatchSolver::with_threads(self.backend, want)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.batch = Some((want, solver));
+        }
+        let (_, batch) = self.batch.as_mut().expect("just populated above");
         batch.set_start(start);
         let reports = batch
-            .solve_contingencies(
+            .solve_contingency_voltages(
                 &template,
                 &self.lines,
                 &self.transformers,
@@ -1305,15 +1366,15 @@ impl PowerFlowModel {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(reports
             .into_iter()
-            .map(|r| {
-                let status = match r.stats.status {
+            .map(|r| ContingencyResult {
+                status: match r.stats.status {
                     SolveStatus::Converged => "converged",
                     SolveStatus::MaxIterationsReached => "max_iterations",
                     SolveStatus::Singular => "singular",
-                };
-                let vm = r.buses.iter().map(|b| b.voltage_mag).collect();
-                let va = r.buses.iter().map(|b| b.voltage_ang).collect();
-                (status.to_string(), vm, va)
+                },
+                iterations: r.stats.iterations(),
+                voltage_mag: r.voltage_mag,
+                voltage_ang: r.voltage_ang,
             })
             .collect())
     }
@@ -4066,6 +4127,7 @@ impl OptimalPowerFlowModel {
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     m.add_class::<BatchResult>()?;
+    m.add_class::<ContingencyResult>()?;
     m.add_class::<StateEstimationModel>()?;
     m.add_class::<SeBatchOutcome>()?;
     m.add_class::<ShortCircuitResult>()?;

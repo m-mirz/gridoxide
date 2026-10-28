@@ -131,6 +131,25 @@ def test_a_batch_starts_from_the_solved_base_case():
 
 
 @needs_case14
+def test_branch_rows_join_an_outage_to_its_row():
+    """`branch_rows()` maps gridoxide's flat branch order back to
+    `mpc.branch`: every in-service row once, so an N-1 sweep named by row
+    reaches the right branch."""
+    model = gridoxide.PowerFlowModel.from_matpower(str(CASE14), tol=1e-10)
+    rows = model.branch_rows()
+    assert sorted(rows) == list(range(20))
+    assert len(rows) == model.n_branches
+    model.solve(init="flat")
+    flat = {row: k for k, row in enumerate(rows)}
+    # Row 0 (buses 1-2) is a plain line, row 7 (buses 4-7) a transformer;
+    # neither outage islands a bus.
+    results = model.solve_contingencies([[flat[0]], [flat[7]]], threads=2, start="last")
+    assert [status for status, _, _ in results] == ["converged", "converged"]
+    base = model.voltage_mag()
+    assert results[0][1] != pytest.approx(base, abs=1e-6)
+
+
+@needs_case14
 def test_from_matpower_refuses_a_case_that_edits_its_matrices():
     with pytest.raises(ValueError, match="modified by MATLAB code"):
         gridoxide.PowerFlowModel.from_matpower(str(CASE33BW))

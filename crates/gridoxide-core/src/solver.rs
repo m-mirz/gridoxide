@@ -502,6 +502,16 @@ impl PersistentSolver {
         self.jacobian = None;
     }
 
+    /// Takes a changed admittance `Y[i][k]` into the cached Jacobian, for a
+    /// Y-bus changed in place without a change of pattern (see
+    /// [`YBusSparse::set`]): what [`invalidate_admittances`](Self::invalidate_admittances)
+    /// does by re-deriving the whole pattern, for one entry.
+    pub fn set_admittance(&mut self, i: usize, k: usize, y: num_complex::Complex<f64>) {
+        if let Some(pattern) = self.jacobian.as_mut() {
+            pattern.set_admittance(i, k, y);
+        }
+    }
+
     pub fn reset(&mut self) {
         self.jacobian = None;
         self.components = None;

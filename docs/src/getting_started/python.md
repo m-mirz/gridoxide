@@ -307,15 +307,20 @@ for branch, (status, vm, va) in enumerate(results):
         print(f"outage of {branch}: {status}, min |V| = {min(vm):.3f}")
 ```
 
-- `model.solve_contingencies(contingencies, threads=None)` — one entry per scenario, each a list of
-  flat branch indices to take out. Returns `(status, voltage_mag, voltage_ang)` per scenario, in
-  order. `status` is `"converged"`, `"max_iterations"` or `"singular"`; a contingency that leaves an
-  unsolvable network is a screening *result*, so it does not raise.
+- `model.solve_contingencies(contingencies, threads=None, start="linear")` — one entry per
+  scenario, each a list of flat branch indices to take out. Returns a `ContingencyResult` per
+  scenario, in order, which unpacks as `(status, voltage_mag, voltage_ang)` and also has
+  `iterations`. `status` is `"converged"`, `"max_iterations"` or `"singular"`; a contingency that
+  leaves an unsolvable network is a screening *result*, so it does not raise. `start="last"` starts
+  every outage from the last `solve()`, the solved base case. A model read by `from_matpower` maps
+  its flat branch indices to `mpc.branch` rows with `branch_rows()`.
 
-The symbolic factorization is shared across every contingency that leaves the network connected —
-2.0–2.7x against independent solves before any parallelism. Contingencies that sever the network
-fall back to a full rebuild, and their orphaned buses come back pinned to zero rather than as a
-spurious singular solve.
+An outage that keeps the network connected is applied in place: each worker takes the outaged
+branches off its copy of the intact Y-bus, updates only the Jacobian entries they touch, solves,
+and restores both, so the symbolic factorization and the Jacobian's pattern are shared across the
+whole sweep, and kept between calls. Contingencies that sever the network fall back to a full
+rebuild, and their orphaned buses come back pinned to zero rather than as a spurious singular
+solve.
 
 ```python
 model = gridoxide.PowerFlowModel.from_pgm_json("grid.json", method="dc")
