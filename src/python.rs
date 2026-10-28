@@ -255,6 +255,9 @@ struct PowerFlowModel {
     tn_bus_index: std::collections::HashMap<String, usize>,
     /// Bus index -> MATPOWER bus number, populated by `from_matpower` only.
     bus_numbers: Vec<u64>,
+    /// Flat branch index -> 0-based row of `mpc.branch`, populated by
+    /// `from_matpower` only.
+    branch_rows: Vec<usize>,
 }
 
 #[pymethods]
@@ -354,6 +357,7 @@ impl PowerFlowModel {
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: Vec::new(),
+            branch_rows: Vec::new(),
         })
     }
 
@@ -423,6 +427,7 @@ impl PowerFlowModel {
             max_iter,
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: net.bus_numbers,
+            branch_rows: net.branch_rows,
         })
     }
 
@@ -430,6 +435,15 @@ impl PowerFlowModel {
     /// the model was built by `from_matpower`.
     fn bus_numbers(&self) -> Vec<u64> {
         self.bus_numbers.clone()
+    }
+
+    /// Each branch's 0-based row in `mpc.branch`, in the flat branch order
+    /// (lines, then transformers) that `solve_contingencies` and the
+    /// branch-indexed results use. Out-of-service branches have no flat
+    /// index and are absent. Empty unless the model was built by
+    /// `from_matpower`.
+    fn branch_rows(&self) -> Vec<usize> {
+        self.branch_rows.clone()
     }
 
     /// Loads a CGMES profile bundle (any number of EQ/EQBD/SSH/TP/SV files,
@@ -576,6 +590,7 @@ impl PowerFlowModel {
             max_iter,
             tn_bus_index,
             bus_numbers: Vec::new(),
+            branch_rows: Vec::new(),
         })
     }
 
