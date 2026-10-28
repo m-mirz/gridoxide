@@ -33,7 +33,7 @@ pub mod sensitivity;
 
 pub use batch::{DcBatchResult, DcBatchSolver};
 pub use btheta::{
-    DcBranch, DcIslandReport, DcIslandStatus, DcSolution, dc_branches, dc_power_flow,
+    DcBranch, DcIslandReport, DcIslandStatus, DcSolution, DcSolver, dc_branches, dc_power_flow,
 };
 pub use impedance::{LinearIslandReport, LinearIslandStatus, LinearReport, linear_power_flow};
 pub use sensitivity::{DcSensitivity, DenseMatrix};

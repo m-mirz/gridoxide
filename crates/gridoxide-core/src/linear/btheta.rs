@@ -431,154 +431,230 @@ pub fn dc_power_flow(
     transformers: &[Transformer],
     opts: DcOptions,
 ) -> DcSolution {
-    let n = buses.len();
-    let n_branches = lines.len() + transformers.len();
-    let branches = dc_branches(lines, transformers, opts);
+    DcSolver::new(buses, lines, transformers, opts).solve(buses)
+}
 
-    let Partition {
-        classified,
-        island_branches,
-    } = partition(buses, &branches);
-    mark_unreferenced_islands(buses, &classified);
+/// [`dc_power_flow`] split where the network's state stops mattering: `new`
+/// does everything the topology and the reference buses decide (the branch
+/// reduction, the islands, each island's unknowns and the factorization of
+/// its reduced `B`), and [`solve`](Self::solve) only what the injections do
+/// (the right-hand side, two triangular solves, the flows). Built once, it
+/// answers every later solve on the same network for the cost of the second
+/// half: on case9241pegase the first was nearly all of a 10 ms solve.
+///
+/// Valid for the bus types it was built with: `solve` must be given buses
+/// with the same references, as `dc_power_flow` gives it the same buses.
+pub struct DcSolver {
+    n: usize,
+    n_branches: usize,
+    branches: Vec<DcBranch>,
+    classified: Vec<Classified>,
+    island_branches: Vec<Vec<usize>>,
+    /// Per island, its unknown (non-reference) buses in reduced order and the
+    /// factorization of its reduced `B`: `None` if that is singular, or the
+    /// island has no reference bus or no unknown.
+    islands: Vec<(Vec<usize>, Option<RealFactorization>)>,
+    /// Each bus's row in its island's reduced system, or [`NOT_UNKNOWN`].
+    reduced_pos: Vec<usize>,
+    negative_reactance_branches: Vec<usize>,
+    ignored_branches: Vec<usize>,
+}
 
-    let mut contributing = vec![false; n_branches];
-    let mut negative_reactance_branches = Vec::new();
-    for br in &branches {
-        contributing[br.index] = true;
-        if br.b < 0.0 {
-            negative_reactance_branches.push(br.index);
+impl DcSolver {
+    pub fn new(
+        buses: &[Bus],
+        lines: &[Line],
+        transformers: &[Transformer],
+        opts: DcOptions,
+    ) -> Self {
+        let n = buses.len();
+        let n_branches = lines.len() + transformers.len();
+        let branches = dc_branches(lines, transformers, opts);
+
+        let Partition {
+            classified,
+            island_branches,
+        } = partition(buses, &branches);
+
+        let mut contributing = vec![false; n_branches];
+        let mut negative_reactance_branches = Vec::new();
+        for br in &branches {
+            contributing[br.index] = true;
+            if br.b < 0.0 {
+                negative_reactance_branches.push(br.index);
+            }
+        }
+        let ignored_branches: Vec<usize> = (0..n_branches).filter(|&i| !contributing[i]).collect();
+
+        let mut reduced_pos = vec![NOT_UNKNOWN; n];
+        let islands = classified
+            .iter()
+            .enumerate()
+            .map(|(ci, c)| {
+                if matches!(c.verdict, Verdict::NoReferenceBus) {
+                    return (Vec::new(), None);
+                }
+                let mut unknown: Vec<usize> = Vec::new();
+                for &i in &c.bus_indices {
+                    if buses[i].bus_type != BusType::Slack {
+                        reduced_pos[i] = unknown.len();
+                        unknown.push(i);
+                    }
+                }
+                let m = unknown.len();
+                let factor = (m > 0)
+                    .then(|| {
+                        let triplets =
+                            reduced_b_triplets(&branches, &island_branches[ci], &reduced_pos);
+                        RealFactorization::new(m, &triplets)
+                    })
+                    .flatten();
+                (unknown, factor)
+            })
+            .collect();
+
+        Self {
+            n,
+            n_branches,
+            branches,
+            classified,
+            island_branches,
+            islands,
+            reduced_pos,
+            negative_reactance_branches,
+            ignored_branches,
         }
     }
-    let ignored_branches: Vec<usize> = (0..n_branches).filter(|&i| !contributing[i]).collect();
 
-    let mut branch_p = vec![0.0; n_branches];
-    let mut max_residual: f64 = 0.0;
-    let mut islands = Vec::with_capacity(classified.len());
-    // Reused across islands so the reduced-index map costs one allocation
-    // rather than one per component; only each island's own members are read,
-    // and each writes its own entries before reading them.
-    let mut reduced_pos = vec![NOT_UNKNOWN; n];
+    /// Solves for `buses`' injections, writing angles back as
+    /// [`dc_power_flow`] does.
+    pub fn solve(&self, buses: &mut [Bus]) -> DcSolution {
+        assert_eq!(
+            buses.len(),
+            self.n,
+            "a DcSolver solves the network it was built for"
+        );
+        let branches = &self.branches;
+        let reduced_pos = &self.reduced_pos;
+        mark_unreferenced_islands(buses, &self.classified);
 
-    for (ci, c) in classified.iter().enumerate() {
-        if matches!(c.verdict, Verdict::NoReferenceBus) {
-            islands.push(DcIslandReport {
-                bus_indices: c.bus_indices.clone(),
-                slack_indices: c.slack_indices.clone(),
-                status: DcIslandStatus::NoReferenceBus,
-                slack_pickup: 0.0,
-            });
-            continue;
-        }
+        let mut branch_p = vec![0.0; self.n_branches];
+        let mut max_residual: f64 = 0.0;
+        let mut islands = Vec::with_capacity(self.classified.len());
 
-        let mut unknown: Vec<usize> = Vec::new();
-        for &i in &c.bus_indices {
-            if buses[i].bus_type != BusType::Slack {
-                reduced_pos[i] = unknown.len();
-                unknown.push(i);
+        for (ci, c) in self.classified.iter().enumerate() {
+            if matches!(c.verdict, Verdict::NoReferenceBus) {
+                islands.push(DcIslandReport {
+                    bus_indices: c.bus_indices.clone(),
+                    slack_indices: c.slack_indices.clone(),
+                    status: DcIslandStatus::NoReferenceBus,
+                    slack_pickup: 0.0,
+                });
+                continue;
             }
-        }
-        let m = unknown.len();
 
-        let mut solved = true;
-        if m > 0 {
-            let triplets = reduced_b_triplets(&branches, &island_branches[ci], &reduced_pos);
+            let (unknown, factor) = &self.islands[ci];
+            let m = unknown.len();
 
-            let mut rhs = vec![0.0; m];
-            for (r, &i) in unknown.iter().enumerate() {
-                rhs[r] = dc_injection(&buses[i]);
-            }
-            for &pos in &island_branches[ci] {
-                let br = &branches[pos];
-                let (rf, rt) = (reduced_pos[br.from], reduced_pos[br.to]);
-                // φ: the phase shift is constant, so it lives on the RHS and
-                // `B` stays symmetric. See the module doc.
-                let shift_p = br.b * br.shift;
-                if rf != NOT_UNKNOWN {
-                    rhs[rf] += shift_p;
-                    // A reference's known angle also moves to the RHS:
-                    // subtracting `B_ij θ_j = −b θ_j` adds `+b θ_j`.
-                    if rt == NOT_UNKNOWN {
-                        rhs[rf] += br.b * buses[br.to].voltage_ang;
-                    }
+            let mut solved = true;
+            if m > 0 {
+                let mut rhs = vec![0.0; m];
+                for (r, &i) in unknown.iter().enumerate() {
+                    rhs[r] = dc_injection(&buses[i]);
                 }
-                if rt != NOT_UNKNOWN {
-                    rhs[rt] -= shift_p;
-                    if rf == NOT_UNKNOWN {
-                        rhs[rt] += br.b * buses[br.from].voltage_ang;
+                for &pos in &self.island_branches[ci] {
+                    let br = &branches[pos];
+                    let (rf, rt) = (reduced_pos[br.from], reduced_pos[br.to]);
+                    // φ: the phase shift is constant, so it lives on the RHS and
+                    // `B` stays symmetric. See the module doc.
+                    let shift_p = br.b * br.shift;
+                    if rf != NOT_UNKNOWN {
+                        rhs[rf] += shift_p;
+                        // A reference's known angle also moves to the RHS:
+                        // subtracting `B_ij θ_j = −b θ_j` adds `+b θ_j`.
+                        if rt == NOT_UNKNOWN {
+                            rhs[rf] += br.b * buses[br.to].voltage_ang;
+                        }
                     }
-                }
-            }
-
-            match RealFactorization::new(m, &triplets).and_then(|sys| sys.solve(&rhs)) {
-                Some(theta) => {
-                    for (r, &i) in unknown.iter().enumerate() {
-                        buses[i].voltage_ang = theta[r];
-                        // Only `PQ` magnitudes are normalized to the DC model's
-                        // own |V| = 1 assumption. A `PV` bus's `voltage_mag` is
-                        // its *setpoint* — an input the AC solver holds fixed
-                        // (`jacobian` pins ΔVmag = 0 there and never updates
-                        // it), not a quantity DC computed. Overwriting it would
-                        // silently change the answer of any later AC solve, and
-                        // DC has nothing to say about it either way.
-                        if buses[i].bus_type == BusType::PQ {
-                            buses[i].voltage_mag = 1.0;
+                    if rt != NOT_UNKNOWN {
+                        rhs[rt] -= shift_p;
+                        if rf == NOT_UNKNOWN {
+                            rhs[rt] += br.b * buses[br.from].voltage_ang;
                         }
                     }
                 }
-                None => solved = false,
-            }
-        }
 
-        if !solved {
+                match factor.as_ref().and_then(|f| f.solve(&rhs)) {
+                    Some(theta) => {
+                        for (r, &i) in unknown.iter().enumerate() {
+                            buses[i].voltage_ang = theta[r];
+                            // Only `PQ` magnitudes are normalized to the DC model's
+                            // own |V| = 1 assumption. A `PV` bus's `voltage_mag` is
+                            // its *setpoint* — an input the AC solver holds fixed
+                            // (`jacobian` pins ΔVmag = 0 there and never updates
+                            // it), not a quantity DC computed. Overwriting it would
+                            // silently change the answer of any later AC solve, and
+                            // DC has nothing to say about it either way.
+                            if buses[i].bus_type == BusType::PQ {
+                                buses[i].voltage_mag = 1.0;
+                            }
+                        }
+                    }
+                    None => solved = false,
+                }
+            }
+
+            if !solved {
+                islands.push(DcIslandReport {
+                    bus_indices: c.bus_indices.clone(),
+                    slack_indices: c.slack_indices.clone(),
+                    status: DcIslandStatus::Singular,
+                    slack_pickup: 0.0,
+                });
+                continue;
+            }
+
+            // Flows, and from them the two derived quantities. Deriving the slack
+            // pickup and the residual from the *flows* rather than from `B θ`
+            // makes them an end-to-end check: a sign error in φ that happened to
+            // be consistent between assembly and solve would still show up here,
+            // because these formulas go through `br.shift` a second time.
+            let mut net_out = vec![0.0; self.n];
+            for &pos in &self.island_branches[ci] {
+                let br = &branches[pos];
+                let p = br.b * (buses[br.from].voltage_ang - buses[br.to].voltage_ang - br.shift);
+                branch_p[br.index] = p;
+                net_out[br.from] += p;
+                net_out[br.to] -= p;
+            }
+
+            for &i in &c.bus_indices {
+                if buses[i].bus_type != BusType::Slack {
+                    max_residual = max_residual.max((net_out[i] - dc_injection(&buses[i])).abs());
+                }
+            }
+            let slack_pickup: f64 = c.slack_indices.iter().map(|&s| net_out[s]).sum();
+
+            let status = if c.slack_indices.len() > 1 {
+                DcIslandStatus::SolvedMultipleReferences
+            } else {
+                DcIslandStatus::Solved
+            };
             islands.push(DcIslandReport {
                 bus_indices: c.bus_indices.clone(),
                 slack_indices: c.slack_indices.clone(),
-                status: DcIslandStatus::Singular,
-                slack_pickup: 0.0,
+                status,
+                slack_pickup,
             });
-            continue;
         }
 
-        // Flows, and from them the two derived quantities. Deriving the slack
-        // pickup and the residual from the *flows* rather than from `B θ`
-        // makes them an end-to-end check: a sign error in φ that happened to
-        // be consistent between assembly and solve would still show up here,
-        // because these formulas go through `br.shift` a second time.
-        let mut net_out = vec![0.0; n];
-        for &pos in &island_branches[ci] {
-            let br = &branches[pos];
-            let p = br.b * (buses[br.from].voltage_ang - buses[br.to].voltage_ang - br.shift);
-            branch_p[br.index] = p;
-            net_out[br.from] += p;
-            net_out[br.to] -= p;
+        DcSolution {
+            islands,
+            branch_p,
+            max_residual,
+            negative_reactance_branches: self.negative_reactance_branches.clone(),
+            ignored_branches: self.ignored_branches.clone(),
         }
-
-        for &i in &c.bus_indices {
-            if buses[i].bus_type != BusType::Slack {
-                max_residual = max_residual.max((net_out[i] - dc_injection(&buses[i])).abs());
-            }
-        }
-        let slack_pickup: f64 = c.slack_indices.iter().map(|&s| net_out[s]).sum();
-
-        let status = if c.slack_indices.len() > 1 {
-            DcIslandStatus::SolvedMultipleReferences
-        } else {
-            DcIslandStatus::Solved
-        };
-        islands.push(DcIslandReport {
-            bus_indices: c.bus_indices.clone(),
-            slack_indices: c.slack_indices.clone(),
-            status,
-            slack_pickup,
-        });
-    }
-
-    DcSolution {
-        islands,
-        branch_p,
-        max_residual,
-        negative_reactance_branches,
-        ignored_branches,
     }
 }
 
@@ -647,6 +723,57 @@ mod tests {
         assert!((sol.branch_p[1] - 0.5).abs() < 1e-12, "{}", sol.branch_p[1]);
         assert!((sol.islands[0].slack_pickup - 0.8).abs() < 1e-12);
         assert!(sol.max_residual < 1e-12, "{}", sol.max_residual);
+    }
+
+    /// One `DcSolver` serves every later solve on its network: each answers
+    /// to the bit what a fresh `dc_power_flow` does for the same injections,
+    /// with a phase shifter on the right-hand side and a sourceless island
+    /// pinned on every solve.
+    #[test]
+    fn a_kept_dc_solver_answers_as_a_fresh_solve() {
+        let template = vec![
+            bus(0, BusType::Slack, 0.0),
+            bus(1, BusType::PQ, -0.3),
+            bus(2, BusType::PQ, -0.5),
+            bus(3, BusType::PV, 0.2),
+            // An island of its own, with no reference.
+            bus(4, BusType::PQ, -0.1),
+            bus(5, BusType::PQ, 0.0),
+        ];
+        let lines = vec![
+            line(0, 1, 0.1),
+            line(1, 2, 0.2),
+            line(0, 2, 0.25),
+            line(4, 5, 0.1),
+        ];
+        let transformers = vec![pst(2, 3, 0.15, 0.05)];
+        let opts = DcOptions::default();
+        let solver = DcSolver::new(&template, &lines, &transformers, opts);
+
+        for scale in [1.0, 0.4, 1.7] {
+            let mut scaled = template.clone();
+            for b in &mut scaled {
+                b.p_spec *= scale;
+            }
+            let mut fresh = scaled.clone();
+            let want = dc_power_flow(&mut fresh, &lines, &transformers, opts);
+            let got = solver.solve(&mut scaled);
+
+            for (a, b) in fresh.iter().zip(&scaled) {
+                assert_eq!(a.voltage_ang.to_bits(), b.voltage_ang.to_bits());
+                assert_eq!(a.bus_type, b.bus_type);
+            }
+            assert_eq!(want.branch_p, got.branch_p);
+            assert_eq!(want.islands.len(), got.islands.len());
+            for (a, b) in want.islands.iter().zip(&got.islands) {
+                assert_eq!(a.status, b.status);
+                assert_eq!(a.slack_pickup.to_bits(), b.slack_pickup.to_bits());
+            }
+        }
+        assert_eq!(
+            solver.solve(&mut template.clone()).islands[1].status,
+            DcIslandStatus::NoReferenceBus
+        );
     }
 
     /// A mesh divides flow in inverse proportion to reactance. Two parallel

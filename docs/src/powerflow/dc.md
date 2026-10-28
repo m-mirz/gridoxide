@@ -99,6 +99,13 @@ The solver is `linear::btheta::dc_power_flow`, reached through
    is a factorization-quality check rather than a convergence check — there is nothing
    to converge.
 
+Steps 1 to 4 depend only on the topology and the reference buses, step 5 on the injections.
+`linear::btheta::DcSolver` keeps that split: `DcSolver::new` does the first four once,
+`DcSolver::solve` the last for any injections, and `dc_power_flow` is the two in one call. The
+Python `PowerFlowModel` keeps its `DcSolver` between solves and drops it with the rest of its
+topology caches (`reset()`, a switch). On case9241pegase a repeated DC solve takes 0.32 ms where
+building everything again took 10 ms, nearly all of it COLAMD ordering and LU factorization.
+
 Two details of gridoxide's own data model needed explicit handling.
 
 **Purely resistive branches.** `IgnoreR` asserts \\(r = 0\\), so a branch with \\(x = 0\\)
