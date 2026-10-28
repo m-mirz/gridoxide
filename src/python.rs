@@ -299,6 +299,9 @@ struct PowerFlowModel {
     /// Flat branch index -> 0-based row of `mpc.branch`, populated by
     /// `from_matpower` only.
     branch_rows: Vec<usize>,
+    /// Whether the DC solve counts each bus's shunt conductance as load, as
+    /// MATPOWER's DC model does (`rundcpf`); set by `from_matpower` only.
+    dc_shunt_conductance_as_load: bool,
 }
 
 #[pymethods]
@@ -399,6 +402,7 @@ impl PowerFlowModel {
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: Vec::new(),
             branch_rows: Vec::new(),
+            dc_shunt_conductance_as_load: false,
         })
     }
 
@@ -469,6 +473,7 @@ impl PowerFlowModel {
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: net.bus_numbers,
             branch_rows: net.branch_rows,
+            dc_shunt_conductance_as_load: true,
         })
     }
 
@@ -632,6 +637,7 @@ impl PowerFlowModel {
             tn_bus_index,
             bus_numbers: Vec::new(),
             branch_rows: Vec::new(),
+            dc_shunt_conductance_as_load: false,
         })
     }
 
@@ -1136,8 +1142,17 @@ impl PowerFlowModel {
     /// was singular. An island with no reference bus is *not* an error — its
     /// buses are pinned to zero, the same non-error treatment `solve()` gives
     /// a sourceless component.
+    ///
+    /// A model read by `from_matpower` solves MATPOWER's DC model: each bus's
+    /// shunt conductance is a constant load at 1 p.u. (`Gs` in `mpc.bus`), as
+    /// in `rundcpf`. Other models leave shunts out of DC entirely.
     fn solve_dc(&mut self) -> PyResult<()> {
         self.buses = self.buses_template.clone();
+        if self.dc_shunt_conductance_as_load {
+            for s in &self.shunts {
+                self.buses[s.at].p_spec -= s.y.re;
+            }
+        }
         let solution = dc_power_flow(
             &mut self.buses,
             &self.lines,
