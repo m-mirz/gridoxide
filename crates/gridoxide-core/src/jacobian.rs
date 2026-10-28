@@ -99,6 +99,17 @@ pub struct JacobianPattern {
     /// The array [`fill_with`](Self::fill_with) computes the slots into,
     /// kept so the Newton loop allocates it once.
     slots: Vec<f64>,
+    /// Where each Y-bus position's admittance is copied, for
+    /// [`set_admittance`](Self::set_admittance); built on first use.
+    admittance_index: Option<std::collections::HashMap<(u32, u32), AdmittanceCopies>>,
+}
+
+/// The places [`JacobianPattern`] holds one Y-bus admittance.
+#[derive(Default)]
+struct AdmittanceCopies {
+    diag: Option<u32>,
+    pair: Option<u32>,
+    entries: Vec<u32>,
 }
 
 impl JacobianPattern {
@@ -285,6 +296,45 @@ impl JacobianPattern {
             diag,
             pairs,
             slots: Vec::new(),
+            admittance_index: None,
+        }
+    }
+
+    /// Replaces the admittance `Y[i][k]` the pattern was analyzed against,
+    /// in every place it is held, for a Y-bus whose values changed but whose
+    /// pattern did not: a branch outage applied in place. Cheaper than
+    /// [`analyze`](Self::analyze) by the size of the network; a position
+    /// the pattern does not use (a slack row or column) is ignored.
+    pub fn set_admittance(&mut self, i: usize, k: usize, y: Complex<f64>) {
+        let index = self.admittance_index.get_or_insert_with(|| {
+            let mut index: std::collections::HashMap<(u32, u32), AdmittanceCopies> =
+                std::collections::HashMap::new();
+            for (d, &(bus, _)) in self.diag.iter().enumerate() {
+                index.entry((bus, bus)).or_default().diag = Some(d as u32);
+            }
+            for (p, &(a, b, _)) in self.pairs.iter().enumerate() {
+                index.entry((a, b)).or_default().pair = Some(p as u32);
+            }
+            for (e, entry) in self.entries.iter().enumerate() {
+                index
+                    .entry((entry.i, entry.k))
+                    .or_default()
+                    .entries
+                    .push(e as u32);
+            }
+            index
+        });
+        let Some(copies) = index.get(&(i as u32, k as u32)) else {
+            return;
+        };
+        if let Some(d) = copies.diag {
+            self.diag[d as usize].1 = y;
+        }
+        if let Some(p) = copies.pair {
+            self.pairs[p as usize].2 = y;
+        }
+        for &e in &copies.entries {
+            self.entries[e as usize].y = y;
         }
     }
 
@@ -314,6 +364,7 @@ impl JacobianPattern {
         self.cols = order.iter().map(|&i| self.cols[i]).collect();
         self.entries = order.iter().map(|&i| self.entries[i]).collect();
         self.src = order.iter().map(|&i| self.src[i]).collect();
+        self.admittance_index = None;
     }
 
     /// Number of Jacobian nonzeros — the length of `values` that
@@ -616,6 +667,39 @@ mod tests {
         let after = pattern.to_triplets(&values);
         let expected: Vec<_> = order.iter().map(|&i| before[i]).collect();
         assert_eq!(after, expected);
+    }
+
+    /// A pattern told of changed admittances with `set_admittance` fills
+    /// exactly what one analyzed on the changed Y-bus fills, permuted or
+    /// not: what lets a branch outage be applied in place.
+    #[test]
+    fn set_admittance_matches_a_fresh_analysis() {
+        let (buses, mut ybus) = mixed_network();
+        let mut pattern = JacobianPattern::analyze(&buses, &ybus);
+        let order: Vec<usize> = (0..pattern.len()).rev().collect();
+        pattern.permute(&order);
+
+        // Line 1-3 out: its four entries change, the pattern does not.
+        let y_line = Complex::new(1.0, 0.0) / Complex::new(0.06, 0.18);
+        let half = Complex::new(0.0, 0.01);
+        for (i, k, y) in [
+            (1, 1, y_line + half),
+            (3, 3, y_line + half),
+            (1, 3, -y_line),
+            (3, 1, -y_line),
+        ] {
+            let old = ybus.get(i, k);
+            ybus.set(i, k, old - y).unwrap();
+            pattern.set_admittance(i, k, old - y);
+        }
+        let mut fresh = JacobianPattern::analyze(&buses, &ybus);
+        fresh.permute(&order);
+
+        let (p_calc, q_calc) = power_injections(&buses, &ybus);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        pattern.fill(&buses, &p_calc, &q_calc, &mut a);
+        fresh.fill(&buses, &p_calc, &q_calc, &mut b);
+        assert_eq!(a, b);
     }
 
     /// `fill` must fully overwrite its buffer, so reusing one across

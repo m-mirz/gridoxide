@@ -91,6 +91,15 @@ impl SparseMatrix {
         Some(Self { n, mat })
     }
 
+    /// Sets the stored value at `(row, col)`, returning the old one; `None`,
+    /// changing nothing, if the pattern stores no entry there.
+    pub fn set(&mut self, row: usize, col: usize, value: Complex<f64>) -> Option<Complex<f64>> {
+        let symbolic = self.mat.symbolic();
+        let (start, end) = (symbolic.col_ptr()[col], symbolic.col_ptr()[col + 1]);
+        let at = start + symbolic.row_idx()[start..end].binary_search(&row).ok()?;
+        Some(std::mem::replace(&mut self.mat.val_mut()[at], value))
+    }
+
     pub fn mul_vec(&self, v: &[Complex<f64>]) -> Vec<Complex<f64>> {
         let vcol = Col::<Complex<f64>>::from_fn(self.n, |i| v[i]);
         let result = &self.mat * &vcol;

@@ -38,9 +38,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::PowerFlowReport;
+use num_complex::Complex;
+
 use crate::network::{
-    ShuntAdm, YBusSparse, build_ybus, build_ybus_with_outages, linear_initial_guess, stamp_shunts,
-    structural_component_count,
+    ShuntAdm, YBusSparse, branch_stamp, build_ybus, build_ybus_with_outages, linear_initial_guess,
+    stamp_shunts, structural_component_count,
 };
 pub use crate::scenario::{BatchError, BusOverride, Scenario, uniform_load_scaling};
 use crate::solver::{IslandReport, JacobianBackend, PersistentSolver, SolveStats};
@@ -367,24 +369,27 @@ impl BatchSolver {
     /// # Two paths, and why
     ///
     /// Most contingencies leave the network connected. Those take the fast
-    /// path: [`network::build_ybus_with_outages`](crate::network::build_ybus_with_outages)
-    /// rebuilds the Y-bus with the outaged branches contributing nothing but
-    /// **keeping their structural entries**, so the sparsity pattern — and
-    /// therefore `jacobian::JacobianPattern` and the symbolic factorization
-    /// behind it — is bit-for-bit the intact network's. A worker reuses one
+    /// path: each worker keeps a copy of the intact Y-bus, built by
+    /// [`network::build_ybus_with_outages`](crate::network::build_ybus_with_outages)
+    /// with every branch's structural entries, and takes the outaged
+    /// branches off it in place ([`YBusSparse::set`], their stamps from
+    /// [`branch_stamp`]), telling its solver's cached Jacobian of the entries
+    /// that changed ([`PersistentSolver::set_admittance`]) and restoring both
+    /// afterwards. The sparsity pattern — and therefore
+    /// `jacobian::JacobianPattern` and the symbolic factorization behind it —
+    /// stays the intact network's, so a worker reuses one
     /// [`PersistentSolver`] across every such scenario it handles, exactly as
-    /// [`solve`](Self::solve) does for injection-only batches. That is what
-    /// this method exists to make possible, and it is why the old
-    /// "an outage forces its own sparsity pattern" objection turns out to be
-    /// avoidable in the common case.
+    /// [`solve`](Self::solve) does for injection-only batches. Rebuilding the
+    /// Y-bus and re-deriving the Jacobian per outage instead was two thirds
+    /// of an N-1 sweep of case1354pegase.
     ///
     /// A contingency that *splits* the network cannot use that trick:
     /// [`connected_components`](crate::network::connected_components) reads the
     /// same structural entries and cannot tell a zero-valued one from a live
     /// one, so it would report the severed buses as still connected and their
     /// now-referenceless rows would come back as a singular solve instead of an
-    /// honest `NoReferenceBus`. Those scenarios are detected up front with
-    /// [`structural_component_count`]
+    /// honest `NoReferenceBus`. Those scenarios are detected, by the worker
+    /// that solves them, with [`structural_component_count`]
     /// — removing branches can only *increase* the component count, so a count
     /// above the intact network's is exactly the "something split" condition —
     /// and take a slow path: the outaged branches are dropped outright and the
@@ -406,6 +411,70 @@ impl BatchSolver {
         tol: f64,
         max_iter: usize,
     ) -> Result<Vec<PowerFlowReport>, BatchError> {
+        self.contingencies_each(
+            buses_template,
+            lines,
+            transformers,
+            shunts,
+            scenarios,
+            tol,
+            max_iter,
+            |buses, islands, stats| PowerFlowReport {
+                buses: std::mem::take(buses),
+                islands,
+                stats,
+                dc: None,
+                linear: None,
+                outer: None,
+            },
+        )
+    }
+
+    /// [`solve_contingencies`](Self::solve_contingencies), keeping only each
+    /// scenario's voltages and convergence, as
+    /// [`solve_voltages`](Self::solve_voltages) does for a batch: one reused
+    /// bus buffer per worker instead of a whole bus vector per scenario.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_contingency_voltages(
+        &self,
+        buses_template: &[Bus],
+        lines: &[Line],
+        transformers: &[Transformer],
+        shunts: &[ShuntAdm],
+        scenarios: &[Scenario],
+        tol: f64,
+        max_iter: usize,
+    ) -> Result<Vec<ScenarioVoltages>, BatchError> {
+        self.contingencies_each(
+            buses_template,
+            lines,
+            transformers,
+            shunts,
+            scenarios,
+            tol,
+            max_iter,
+            |buses, _, stats| ScenarioVoltages {
+                voltage_mag: buses.iter().map(|b| b.voltage_mag).collect(),
+                voltage_ang: buses.iter().map(|b| b.voltage_ang).collect(),
+                stats,
+            },
+        )
+    }
+
+    /// Every contingency, solved in a worker's bus buffer and handed to
+    /// `keep`; in scenario order.
+    #[allow(clippy::too_many_arguments)]
+    fn contingencies_each<R: Send>(
+        &self,
+        buses_template: &[Bus],
+        lines: &[Line],
+        transformers: &[Transformer],
+        shunts: &[ShuntAdm],
+        scenarios: &[Scenario],
+        tol: f64,
+        max_iter: usize,
+        keep: impl Fn(&mut Vec<Bus>, Vec<IslandReport>, SolveStats) -> R + Sync,
+    ) -> Result<Vec<R>, BatchError> {
         let n_branches = lines.len() + transformers.len();
         for (i, sc) in scenarios.iter().enumerate() {
             for &b in &sc.branch_outages {
@@ -434,25 +503,44 @@ impl BatchSolver {
         let n = buses_template.len();
         let intact_components = structural_component_count(n, lines, transformers, &[]);
 
-        // Decided once, up front, so workers never repeat the analysis: which
-        // branches are out, and whether taking them out split the network.
-        let plans: Vec<(Vec<bool>, bool)> = scenarios
-            .iter()
-            .map(|sc| {
-                let mut outaged = vec![false; n_branches];
-                for &b in &sc.branch_outages {
-                    outaged[b] = true;
-                }
-                let splits = !sc.branch_outages.is_empty()
-                    && structural_component_count(n, lines, transformers, &outaged)
-                        != intact_components;
-                (outaged, splits)
-            })
-            .collect();
+        // Each scenario's plan: which branches are out, whether taking them
+        // out splits the network, and what the outaged branches add to the
+        // Y-bus. Made by the worker that solves it: the connectivity check is
+        // a search of the whole network, and made up front for every scenario
+        // it was a serial share of the sweep that grew with its length.
+        let plan = |sc: &Scenario| {
+            let mut outaged = vec![false; n_branches];
+            for &b in &sc.branch_outages {
+                outaged[b] = true;
+            }
+            let splits = !sc.branch_outages.is_empty()
+                && structural_component_count(n, lines, transformers, &outaged)
+                    != intact_components;
+            let stamp: Vec<(usize, usize, Complex<f64>)> = sc
+                .branch_outages
+                .iter()
+                .flat_map(|&b| branch_stamp(lines, transformers, b).into_entries())
+                .collect();
+            (outaged, splits, stamp)
+        };
+
+        // The intact network, which every worker copies once and changes in
+        // place for each outage that keeps it connected.
+        let intact = {
+            let mut ybus = build_ybus_with_outages(n, lines, transformers, &[]);
+            stamp_shunts(&mut ybus, shunts);
+            ybus.finish()
+        };
+        // A dedicated pool's workers keep their solver between calls, as in
+        // `solve`: every outage is undone before the next, so a worker's
+        // solver ends each call holding the intact network's admittances.
+        let key = self
+            .pool
+            .is_some()
+            .then(|| (self.id, network_fingerprint(buses_template, &intact)));
 
         let next = AtomicUsize::new(0);
-        let collected: Mutex<Vec<(usize, PowerFlowReport)>> =
-            Mutex::new(Vec::with_capacity(scenarios.len()));
+        let collected: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(scenarios.len()));
         let n_workers = self.threads().max(1).min(scenarios.len());
         let backend = self.backend;
         let start = self.start;
@@ -464,16 +552,28 @@ impl BatchSolver {
                         // Inside the closure for the same reason as in
                         // `solve`: it is what keeps the `!Send` FFI backends
                         // usable here.
-                        let mut solver = PersistentSolver::new(backend);
+                        let cached = key.and_then(|key| {
+                            WORKER_SOLVER
+                                .with(|slot| slot.borrow_mut().take())
+                                .filter(|(k, _)| *k == key)
+                        });
+                        let mut solver = cached
+                            .map(|(_, solver)| solver)
+                            .unwrap_or_else(|| PersistentSolver::new(backend));
+                        let mut ybus = intact.clone();
+                        let mut undo: Vec<(usize, usize, Complex<f64>)> = Vec::new();
+                        let mut buses: Vec<Bus> = Vec::with_capacity(buses_template.len());
 
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
                             if i >= scenarios.len() {
                                 break;
                             }
-                            let (outaged, splits) = &plans[i];
+                            let (outaged, splits, stamp) = plan(&scenarios[i]);
+                            let (outaged, splits, stamp) = (&outaged, &splits, &stamp);
 
-                            let mut buses = buses_template.to_vec();
+                            buses.clear();
+                            buses.extend_from_slice(buses_template);
                             for ov in &scenarios[i].bus_overrides {
                                 let b = &mut buses[ov.bus];
                                 if let Some(p) = ov.p_spec {
@@ -487,7 +587,7 @@ impl BatchSolver {
                                 }
                             }
 
-                            let mut ybus = if *splits {
+                            let split_ybus = splits.then(|| {
                                 let keep_lines: Vec<Line> = lines
                                     .iter()
                                     .enumerate()
@@ -503,41 +603,55 @@ impl BatchSolver {
                                 // This scenario's pattern differs from the one
                                 // the worker has been reusing.
                                 solver.reset();
-                                build_ybus(n, &keep_lines, &keep_transformers)
-                            } else {
-                                // Same pattern, different values: the symbolic
-                                // factorization survives, the Jacobian's cached
-                                // admittances do not.
-                                solver.invalidate_admittances();
-                                build_ybus_with_outages(n, lines, transformers, outaged)
-                            };
-                            stamp_shunts(&mut ybus, shunts);
-                            let ybus = ybus.finish();
+                                let mut ybus = build_ybus(n, &keep_lines, &keep_transformers);
+                                stamp_shunts(&mut ybus, shunts);
+                                ybus.finish()
+                            });
+                            if !splits {
+                                // Same pattern, different values: the outaged
+                                // branches come off the intact Y-bus in place,
+                                // and only the entries they touch change in the
+                                // Jacobian the worker keeps. The values they
+                                // replace are restored exactly afterwards, so
+                                // no rounding carries into the next outage.
+                                undo.clear();
+                                for &(r, c, y) in stamp {
+                                    let old = ybus.get(r, c);
+                                    ybus.set(r, c, old - y)
+                                        .expect("the intact Y-bus stores every branch's entries");
+                                    undo.push((r, c, old));
+                                }
+                                for &(r, c, _) in stamp {
+                                    solver.set_admittance(r, c, ybus.get(r, c));
+                                }
+                            }
+                            let solve_on = split_ybus.as_ref().unwrap_or(&ybus);
 
                             if start == BatchStart::Linear {
-                                linear_initial_guess(&mut buses, &ybus);
+                                linear_initial_guess(&mut buses, solve_on);
                             }
                             let (islands, stats) =
-                                solver.solve_with_stats(&mut buses, &ybus, tol, max_iter);
+                                solver.solve_with_stats(&mut buses, solve_on, tol, max_iter);
                             if *splits {
                                 // ...and must not leak into the next one.
                                 solver.reset();
+                            } else {
+                                for &(r, c, old) in undo.iter().rev() {
+                                    ybus.set(r, c, old);
+                                }
+                                for &(r, c, _) in stamp {
+                                    solver.set_admittance(r, c, ybus.get(r, c));
+                                }
                             }
 
+                            let result = keep(&mut buses, islands, stats);
                             collected
                                 .lock()
                                 .expect("batch result mutex poisoned by a panicking worker")
-                                .push((
-                                    i,
-                                    PowerFlowReport {
-                                        buses,
-                                        islands,
-                                        stats,
-                                        dc: None,
-                                        linear: None,
-                                        outer: None,
-                                    },
-                                ));
+                                .push((i, result));
+                        }
+                        if let Some(key) = key {
+                            WORKER_SOLVER.with(|slot| *slot.borrow_mut() = Some((key, solver)));
                         }
                     });
                 }

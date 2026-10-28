@@ -464,3 +464,121 @@ fn malformed_input_is_rejected() {
         Err(BatchError::OutagesUnsupported { scenario: 0 })
     ));
 }
+
+/// Outages are applied to each worker's copy of the intact Y-bus, and to
+/// the Jacobian it keeps, and then undone. Both must come back exactly: on
+/// one worker, an outage solved again after another is solved to the same
+/// bits. (Dropping either restore fails this.)
+#[test]
+fn an_outage_undone_in_place_leaves_no_trace() {
+    let (buses, lines, transformers, shunts) = load("symmetric/transmission-case");
+    let n_branches = lines.len() + transformers.len();
+    let intact = structural_component_count(buses.len(), &lines, &transformers, &[]);
+    let connected: Vec<usize> = (0..n_branches)
+        .filter(|&b| {
+            let mut out = vec![false; n_branches];
+            out[b] = true;
+            structural_component_count(buses.len(), &lines, &transformers, &out) == intact
+        })
+        .take(3)
+        .collect();
+    assert_eq!(
+        connected.len(),
+        3,
+        "the fixture has three branches whose outage keeps it connected"
+    );
+    let outage = |b: usize| Scenario {
+        bus_overrides: Vec::new(),
+        branch_outages: vec![b],
+    };
+    let order = [
+        connected[0],
+        connected[1],
+        connected[2],
+        connected[0],
+        connected[1],
+    ];
+    let scenarios: Vec<Scenario> = order.iter().map(|&b| outage(b)).collect();
+
+    let reports = BatchSolver::with_threads(JacobianBackend::KluNative, 1)
+        .unwrap()
+        .solve_contingencies(
+            &buses,
+            &lines,
+            &transformers,
+            &shunts,
+            &scenarios,
+            TOL,
+            MAX_ITER,
+        )
+        .unwrap();
+    for (first, again) in [(0, 3), (1, 4)] {
+        assert_eq!(reports[first].stats, reports[again].stats);
+        for (a, b) in reports[first].buses.iter().zip(&reports[again].buses) {
+            assert_eq!(a.voltage_mag.to_bits(), b.voltage_mag.to_bits());
+            assert_eq!(a.voltage_ang.to_bits(), b.voltage_ang.to_bits());
+        }
+    }
+}
+
+/// A dedicated pool's workers keep their solver between calls, and a batch
+/// and a contingency sweep on one network share it. Every outage is undone
+/// before the next, so a sweep repeated after another, with a batch between
+/// them, is solved to the same bits.
+#[test]
+fn a_kept_worker_solver_serves_repeated_sweeps_unchanged() {
+    let (buses, lines, transformers, shunts) = load("symmetric/transmission-case");
+    let n_branches = lines.len() + transformers.len();
+    let intact = structural_component_count(buses.len(), &lines, &transformers, &[]);
+    let scenarios: Vec<Scenario> = (0..n_branches)
+        .filter(|&b| {
+            let mut out = vec![false; n_branches];
+            out[b] = true;
+            structural_component_count(buses.len(), &lines, &transformers, &out) == intact
+        })
+        .map(|b| Scenario {
+            bus_overrides: Vec::new(),
+            branch_outages: vec![b],
+        })
+        .collect();
+    let mut ybus = build_ybus(buses.len(), &lines, &transformers);
+    stamp_shunts(&mut ybus, &shunts);
+    let ybus = ybus.finish();
+
+    let batch = BatchSolver::with_threads(JacobianBackend::KluNative, 3).unwrap();
+    let sweep = || {
+        batch
+            .solve_contingencies(
+                &buses,
+                &lines,
+                &transformers,
+                &shunts,
+                &scenarios,
+                TOL,
+                MAX_ITER,
+            )
+            .unwrap()
+    };
+    let first = sweep();
+    let loads: Vec<Scenario> = (0..6)
+        .map(|k| {
+            Scenario::new(
+                buses
+                    .iter()
+                    .filter(|b| b.p_spec != 0.0)
+                    .map(|b| BusOverride::new(b.idx).p(b.p_spec * (0.7 + 0.05 * k as f64)))
+                    .collect(),
+            )
+        })
+        .collect();
+    batch.solve(&buses, &ybus, &loads, TOL, MAX_ITER).unwrap();
+    let again = sweep();
+
+    for (a, b) in first.iter().zip(&again) {
+        assert_eq!(a.stats, b.stats);
+        for (x, y) in a.buses.iter().zip(&b.buses) {
+            assert_eq!(x.voltage_mag.to_bits(), y.voltage_mag.to_bits());
+            assert_eq!(x.voltage_ang.to_bits(), y.voltage_ang.to_bits());
+        }
+    }
+}

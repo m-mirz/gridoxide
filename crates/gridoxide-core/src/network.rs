@@ -130,6 +130,33 @@ impl YBusSparse {
     pub fn mul_vec(&self, v: &[Complex<f64>]) -> Vec<Complex<f64>> {
         self.matrix.mul_vec(v)
     }
+
+    /// Sets the stored admittance at `(i, j)`, returning the old one; `None`,
+    /// changing nothing, if the pattern stores no entry there. The sparsity
+    /// pattern never changes, so what was analyzed against it stays valid.
+    pub fn set(&mut self, i: usize, j: usize, y: Complex<f64>) -> Option<Complex<f64>> {
+        let at = self.adjacency[i]
+            .binary_search_by_key(&j, |&(col, _)| col)
+            .ok()?;
+        self.matrix.set(i, j, y)?;
+        Some(std::mem::replace(&mut self.adjacency[i][at].1, y))
+    }
+}
+
+/// What one branch adds to the Y-bus, as `(i, j, y)` triplets: the stamp
+/// [`build_ybus`] gives it, so an outage can be applied to a finished Y-bus
+/// as the difference, by the same π-model and tap rules.
+pub fn branch_stamp(lines: &[Line], transformers: &[Transformer], branch: usize) -> YBus {
+    let n = 0;
+    if branch < lines.len() {
+        build_ybus(n, std::slice::from_ref(&lines[branch]), &[])
+    } else {
+        build_ybus(
+            n,
+            &[],
+            std::slice::from_ref(&transformers[branch - lines.len()]),
+        )
+    }
 }
 
 /// Groups buses into connected components via the Y-bus's actual admittance
