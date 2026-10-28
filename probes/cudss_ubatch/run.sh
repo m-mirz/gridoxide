@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Phase 0 of plans/GPU_BATCH_PLAN.md, on a machine with an NVIDIA GPU, the CUDA
+# toolkit and Rust. Fetches cuDSS (pinned, checksummed), builds the probe,
+# writes the Jacobian dumps from this checkout and runs the probe over batch
+# sizes. Results go to probes/cudss_ubatch/results/.
+#
+#   CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh [cudss_version]
+#
+# cudss_version: 0.8.0 (gpusim2grid's and grid-bench's, default) or 1.0.0.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+version=${1:-0.8.0}
+case "$version" in
+  0.8.0) archive=libcudss-linux-x86_64-0.8.0.10_cuda12-archive
+         sha=29716a05c64b28531309afcb7a9dd5044081a43197e72bdd0fbf29e9b4ee4707 ;;
+  1.0.0) archive=libcudss-linux-x86_64-1.0.0.35_cuda12-archive
+         sha=b8c882c3ebc8b319886f5a06e74311c5eea09846925ba5a19892de4921201746 ;;
+  *) echo "unknown cuDSS version $version" >&2; exit 2 ;;
+esac
+work="$here/work"; mkdir -p "$work" "$here/results"
+
+# cuDSS from NVIDIA's redistributable archive, as grid-bench's gpusim2grid image takes it.
+if [ ! -d "$work/$archive" ]; then
+  curl -fsSL -o "$work/$archive.tar.xz" \
+    "https://developer.download.nvidia.com/compute/cudss/redist/libcudss/linux-x86_64/$archive.tar.xz"
+  echo "$sha  $work/$archive.tar.xz" | sha256sum -c -
+  tar -xJf "$work/$archive.tar.xz" -C "$work"
+fi
+cudss="$work/$archive"
+
+g++ -std=c++17 -O2 -Wall -Wextra -o "$work/probe" "$here/probe.cpp" \
+  -I"$CUDA_HOME/include" -I"$cudss/include" \
+  -L"$CUDA_HOME/lib64" -L"$cudss/lib" -lcudss -lcudart \
+  -Wl,-rpath,"$cudss/lib" -Wl,-rpath,"$CUDA_HOME/lib64"
+
+(cd "$repo" && cargo build --release --example gpu_probe_dump --features matpower)
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv | tee "$here/results/gpu.txt"
+export CUDSS_THREADING_LIB="$cudss/lib/libcudss_mtlayer_gomp.so.0"
+[ -f "$CUDSS_THREADING_LIB" ] || CUDSS_THREADING_LIB=$(ls "$cudss"/lib/libcudss_mtlayer_gomp.so* | head -1)
+
+for case in case1354pegase case2869pegase case9241pegase; do
+  dump="$work/dump-$case"
+  [ -f "$dump/meta.txt" ] || "$repo/target/release/examples/gpu_probe_dump" \
+    "$repo/tests/data/benchmark-grids/matpower/$case.m" 64 "$dump"
+  for B in 64 256 1024 2048; do
+    out="$here/results/$case-B$B-cudss$version.txt"
+    echo "== $case B=$B"
+    # A run that fails to allocate at a large B is a result too: record and go on.
+    "$work/probe" "$dump" "$B" 7 2>&1 | tee "$out" | grep -E "^RESULT|^PASS|^FAIL|cuDSS " || true
+  done
+done

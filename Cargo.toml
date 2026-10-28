@@ -406,3 +406,8 @@ required-features = ["cgmes"]
 # session with `CARGO_PROFILE_DEV_DEBUG=true`.
 [profile.dev]
 debug = "line-tables-only"
+
+[[example]]
+name = "gpu_probe_dump"
+path = "examples/gpu_probe_dump.rs"
+required-features = ["matpower"]
