@@ -96,6 +96,9 @@ pub struct JacobianPattern {
     /// Off-diagonal `(i, k)` pairs with `i` a row bus, in Y-bus order; pair
     /// `p` owns slots `4 · diag.len() + 4p ..` (H, N, M, L).
     pairs: Vec<(u32, u32, Complex<f64>)>,
+    /// The array [`fill_with`](Self::fill_with) computes the slots into,
+    /// kept so the Newton loop allocates it once.
+    slots: Vec<f64>,
 }
 
 impl JacobianPattern {
@@ -281,6 +284,7 @@ impl JacobianPattern {
             src,
             diag,
             pairs,
+            slots: Vec::new(),
         }
     }
 
@@ -350,20 +354,23 @@ impl JacobianPattern {
     /// values to `values`. What lets `bde::BlockDiagonal` concatenate B
     /// scenarios' blocks into one flat array for a block-diagonal solve.
     pub fn fill_into(&self, buses: &[Bus], p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
-        self.fill_from(&BusVoltages::of(buses), p_calc, q_calc, values);
+        let mut slots = Vec::new();
+        self.fill_from(&BusVoltages::of(buses), p_calc, q_calc, values, &mut slots);
     }
 
     /// [`fill`](Self::fill) from voltages already taken, which the Newton
     /// loop shares with the power injections.
     pub fn fill_with(
-        &self,
+        &mut self,
         v: &BusVoltages,
         p_calc: &[f64],
         q_calc: &[f64],
         values: &mut Vec<f64>,
     ) {
         values.clear();
-        self.fill_from(v, p_calc, q_calc, values);
+        let mut slots = std::mem::take(&mut self.slots);
+        self.fill_from(v, p_calc, q_calc, values, &mut slots);
+        self.slots = slots;
     }
 
     /// Appends, as [`fill_into`](Self::fill_into).
@@ -382,9 +389,17 @@ impl JacobianPattern {
     /// ([`permute`](Self::permute)) the kinds interleave unpredictably, and
     /// a per-entry `match` cost more than the arithmetic: this fill is
     /// several times faster than one, on the same values.
-    fn fill_from(&self, v: &BusVoltages, p_calc: &[f64], q_calc: &[f64], values: &mut Vec<f64>) {
+    fn fill_from(
+        &self,
+        v: &BusVoltages,
+        p_calc: &[f64],
+        q_calc: &[f64],
+        values: &mut Vec<f64>,
+        slots: &mut Vec<f64>,
+    ) {
         let vm = &v.vm;
-        let mut slots = Vec::with_capacity(4 * (self.diag.len() + self.pairs.len()));
+        slots.clear();
+        slots.reserve(4 * (self.diag.len() + self.pairs.len()));
         for &(i, y) in &self.diag {
             let i = i as usize;
             let (vm_i, g, b) = (vm[i], y.re, y.im);
