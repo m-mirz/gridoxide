@@ -29,7 +29,7 @@ use crate::cgmes::{
 };
 use crate::linear::{
     DcApproximation, DcIslandStatus, DcOptions, DcSensitivity, DcSolution, LinearIslandStatus,
-    dc_branches, dc_power_flow, linear_power_flow,
+    dc_branches, linear_power_flow,
 };
 use crate::network::{ShuntAdm, YBusSparse, build_ybus, linear_initial_guess, stamp_shunts};
 use crate::pgm::PgmInput;
@@ -299,6 +299,13 @@ struct PowerFlowModel {
     /// Flat branch index -> 0-based row of `mpc.branch`, populated by
     /// `from_matpower` only.
     branch_rows: Vec<usize>,
+    /// Whether the DC solve counts each bus's shunt conductance as load, as
+    /// MATPOWER's DC model does (`rundcpf`); set by `from_matpower` only.
+    dc_shunt_conductance_as_load: bool,
+    /// The DC solve's topology-dependent half (islands, factorizations),
+    /// built on the first DC solve and dropped with `sensitivity`, which
+    /// depends on the same topology.
+    dc_solver: Option<crate::linear::DcSolver>,
 }
 
 #[pymethods]
@@ -399,6 +406,8 @@ impl PowerFlowModel {
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: Vec::new(),
             branch_rows: Vec::new(),
+            dc_shunt_conductance_as_load: false,
+            dc_solver: None,
         })
     }
 
@@ -469,6 +478,8 @@ impl PowerFlowModel {
             tn_bus_index: std::collections::HashMap::new(),
             bus_numbers: net.bus_numbers,
             branch_rows: net.branch_rows,
+            dc_shunt_conductance_as_load: true,
+            dc_solver: None,
         })
     }
 
@@ -632,6 +643,8 @@ impl PowerFlowModel {
             tn_bus_index,
             bus_numbers: Vec::new(),
             branch_rows: Vec::new(),
+            dc_shunt_conductance_as_load: false,
+            dc_solver: None,
         })
     }
 
@@ -779,6 +792,7 @@ impl PowerFlowModel {
             // exist — a `PV → PQ` switch changes the pattern outright.
             self.solver.reset();
             self.sensitivity = None;
+            self.dc_solver = None;
             report.islands
         } else {
             self.solver
@@ -1126,6 +1140,7 @@ impl PowerFlowModel {
     fn reset(&mut self) {
         self.solver.reset();
         self.sensitivity = None;
+        self.dc_solver = None;
     }
 
     /// Runs the DC (Bθ) solve. Reached through `solve()` when the model was
@@ -1136,14 +1151,28 @@ impl PowerFlowModel {
     /// was singular. An island with no reference bus is *not* an error — its
     /// buses are pinned to zero, the same non-error treatment `solve()` gives
     /// a sourceless component.
+    ///
+    /// A model read by `from_matpower` solves MATPOWER's DC model: each bus's
+    /// shunt conductance is a constant load at 1 p.u. (`Gs` in `mpc.bus`), as
+    /// in `rundcpf`. Other models leave shunts out of DC entirely.
     fn solve_dc(&mut self) -> PyResult<()> {
         self.buses = self.buses_template.clone();
-        let solution = dc_power_flow(
-            &mut self.buses,
-            &self.lines,
-            &self.transformers,
-            self.dc_opts,
-        );
+        if self.dc_shunt_conductance_as_load {
+            for s in &self.shunts {
+                self.buses[s.at].p_spec -= s.y.re;
+            }
+        }
+        // Built from the template, whose reference buses every DC solve
+        // starts from.
+        let solver = self.dc_solver.get_or_insert_with(|| {
+            crate::linear::DcSolver::new(
+                &self.buses_template,
+                &self.lines,
+                &self.transformers,
+                self.dc_opts,
+            )
+        });
+        let solution = solver.solve(&mut self.buses);
         let singular: Vec<&[usize]> = solution
             .islands
             .iter()
@@ -1486,6 +1515,7 @@ impl PowerFlowModel {
         // `invalidate_admittances`; this binding cannot know that.
         self.solver.reset();
         self.sensitivity = None;
+        self.dc_solver = None;
         self.dc_solution = None;
         Ok(())
     }

@@ -150,6 +150,27 @@ def test_branch_rows_join_an_outage_to_its_row():
 
 
 @needs_case14
+def test_dc_counts_shunt_conductance_as_load(tmp_path):
+    """MATPOWER's DC model (`rundcpf`) takes a bus's shunt conductance as a
+    constant load at 1 p.u.; so does a model read by `from_matpower`. DC is
+    lossless, so the slack picks up exactly the added conductance."""
+    text = CASE14.read_text()
+    # Bus 9's row: Gs is the fifth column, 0 in case14.
+    row = next(line for line in text.splitlines() if line.split()[:2] == ["9", "1"])
+    cols = row.split()
+    cols[4] = "5.0"
+    path = tmp_path / "case14_gs.m"
+    path.write_text(text.replace(row, "\t" + "\t".join(cols)))
+
+    def pickup(p):
+        model = gridoxide.PowerFlowModel.from_matpower(str(p), method="dc")
+        model.solve()
+        return sum(pick for _, pick in model.dc_slack_pickup())
+
+    assert pickup(path) - pickup(CASE14) == pytest.approx(0.05, abs=1e-12)
+
+
+@needs_case14
 def test_from_matpower_refuses_a_case_that_edits_its_matrices():
     with pytest.raises(ValueError, match="modified by MATLAB code"):
         gridoxide.PowerFlowModel.from_matpower(str(CASE33BW))
