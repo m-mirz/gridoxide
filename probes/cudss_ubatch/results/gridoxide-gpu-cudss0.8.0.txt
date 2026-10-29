@@ -1,0 +1,51 @@
+   Compiling gridoxide-gpu v0.1.0 (/home/ubuntu/gridoxide/crates/gridoxide-gpu)
+   Compiling gridoxide v0.1.0 (/home/ubuntu/gridoxide)
+    Finished `release` profile [optimized] target(s) in 3.69s
+     Running unittests src/lib.rs (target/release/deps/gridoxide_gpu-03c2d31e4d62c2ca)
+
+running 4 tests
+test uniform::tests::a_singular_system_solves_to_non_finite_values_alone ... ok
+test uniform::tests::a_solve_selecting_an_unfactored_system_is_refused ... ok
+test uniform::tests::the_08_stand_in_drops_unselected_factors ... ok
+test uniform::tests::masks_leave_unselected_systems_as_they_were ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/adaptive_test.rs (target/release/deps/adaptive_test-68e5d2012df5e9ed)
+
+running 5 tests
+test a_hopeless_scenario_does_not_disturb_the_rest ... ok
+test a_cpu_handoff_finishes_on_the_cpu ... ok
+test every_scenario_matches_the_cpu_batch_solver ... ok
+test factor_reuse_converges_with_fewer_factorizations ... ok
+test a_fixed_step_count_misses_what_the_adaptive_loop_converges ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/contingency_test.rs (target/release/deps/contingency_test-45c477bbb913bc5f)
+
+running 5 tests
+test solve_batch_refuses_outages ... ok
+test a_cpu_handoff_solves_each_outage_on_its_own_network ... ok
+test outages_need_uneven_step_counts ... ok
+test outages_combine_with_overrides_and_factor_reuse ... ok
+test every_outage_matches_the_cpu_contingency_solver ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/cudss_test.rs (target/release/deps/cudss_test-43c8fcda06ea4ba3)
+
+running 4 tests
+test a_solve_selecting_an_unfactored_system_is_refused ... ok
+test masks_leave_unselected_systems_as_they_were ... ok
+test n1_on_the_device_matches_the_stand_in ... ok
+test the_newton_loop_on_the_device_matches_the_stand_in ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+   Doc-tests gridoxide_gpu
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

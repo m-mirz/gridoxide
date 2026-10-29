@@ -11,20 +11,33 @@
 //! system, set to all ones before the analysis as the documentation requires
 //! and re-set only when it changes.
 //!
-//! Not yet run on a device. What phase 0's probe decides here:
+//! What phase 0's probe measured on an A100, with cuDSS 0.8.0 and 1.0.0:
 //!
-//! - whether `REFACTORIZATION` honours the mask (probe B); until it is known,
-//!   [`CudssUniformBatch::use_refactorization`] is off and every factorization
-//!   is a full `FACTORIZATION` of the selected systems;
-//! - what a singular system's solution looks like: cuDSS perturbs tiny pivots
-//!   by default, so it may come back finite but wrong rather than non-finite.
-//!   The Newton loop's divergence test catches either, a step later.
+//! - `REFACTORIZATION` honours the mask in both, so it is used whenever every
+//!   selected system has been factored since the analysis
+//!   ([`CudssUniformBatch::use_refactorization`] turns it off);
+//! - 0.8.0's masked solve writes every system's solution buffer, the
+//!   unselected ones from cuDSS's own copy, so only the selected systems are
+//!   copied out (1.0.0 leaves the others untouched);
+//! - 0.8.0 drops the factors of the systems a factorization does not select
+//!   (they solve to zeros), 1.0.0 keeps them, as documented; this follows the
+//!   version of the header the bindings were generated from;
+//! - 0.8.0 is not safe with two handles at work at once in one process, each
+//!   on its own stream: some solutions come back NaN. On 0.8.0 every
+//!   `cudssExecute` therefore holds a process-wide lock until its stream has
+//!   finished; 1.0.0 runs them concurrently.
+//!
+//! Still open: what a singular system's solution looks like. cuDSS perturbs
+//! tiny pivots by default, so it may come back finite but wrong rather than
+//! non-finite; the Newton loop's divergence test catches either, a step
+//! later.
 //!
 //! Host data crosses as plain pageable copies on the solver's stream; the
 //! device-resident loop of phase 2 replaces them with kernels.
 
 use std::ffi::{CStr, CString, c_void};
 use std::ptr;
+use std::sync::Mutex;
 
 use crate::uniform::{CsrPattern, LinearCounts, LinearError, UniformBatch};
 
@@ -168,18 +181,42 @@ pub struct CudssUniformBatch {
     /// The device solution, every system, before the selected ones are
     /// copied out: unselected systems' host `x` is left untouched.
     staging: Vec<f64>,
+    /// Which systems have factors now, and which have had any since the
+    /// analysis (and so may be refactored).
     factored: Vec<bool>,
+    ever_factored: Vec<bool>,
     refactorization: bool,
     counts: LinearCounts,
 }
 
+/// Whether the cuDSS these bindings were generated for keeps an unselected
+/// system's factors through a masked factorization: 1.0.0 does, 0.8.0 does
+/// not.
+const KEEPS_UNSELECTED_FACTORS: bool = ffi::CUDSS_VERSION_MAJOR >= 1;
+
+/// Whether concurrent handles must be serialized: 0.8.0 computes NaNs when
+/// two are at work at once (see the module documentation).
+const SERIALIZE_HANDLES: bool = ffi::CUDSS_VERSION_MAJOR < 1;
+
+static EXECUTE: Mutex<()> = Mutex::new(());
+
 impl CudssUniformBatch {
     /// Whether a factorization of systems that have all been factored before
     /// runs as cuDSS's `REFACTORIZATION` (same pivots, cheaper) instead of a
-    /// full `FACTORIZATION`. Off until phase 0's probe shows that
-    /// `REFACTORIZATION` honours the mask.
+    /// full `FACTORIZATION`. On by default: phase 0's probe showed it honours
+    /// the mask in 0.8.0 and 1.0.0.
     pub fn use_refactorization(&mut self, on: bool) {
         self.refactorization = on;
+    }
+
+    /// The cuDSS version the bindings were generated from, as
+    /// `(major, minor, patch)`.
+    pub fn version() -> (u32, u32, u32) {
+        (
+            ffi::CUDSS_VERSION_MAJOR,
+            ffi::CUDSS_VERSION_MINOR,
+            ffi::CUDSS_VERSION_PATCH,
+        )
     }
 
     fn check(&self, what: &str, len: usize, per_system: usize) -> Result<(), LinearError> {
@@ -194,6 +231,9 @@ impl CudssUniformBatch {
     }
 
     fn execute(&mut self, phase: ffi::cudssPhase_t, what: &str) -> Result<(), LinearError> {
+        // A poisoned lock guards nothing that a panic could have left half
+        // written: it only orders device work.
+        let _serial = SERIALIZE_HANDLES.then(|| EXECUTE.lock().unwrap_or_else(|e| e.into_inner()));
         // SAFETY: every handle and descriptor was created in `analyze` and
         // points at buffers this struct owns.
         cudss(
@@ -209,7 +249,15 @@ impl CudssUniformBatch {
                 )
             },
             what,
-        )
+        )?;
+        if SERIALIZE_HANDLES {
+            // SAFETY: the stream was created in `analyze`.
+            cuda(
+                unsafe { ffi::cudaStreamSynchronize(self.stream) },
+                "cudaStreamSynchronize",
+            )?;
+        }
+        Ok(())
     }
 
     fn set_mask(&mut self, mask: &[bool]) -> Result<(), LinearError> {
@@ -272,7 +320,8 @@ impl UniformBatch for CudssUniformBatch {
             mask: vec![1; batch],
             staging: vec![0.0; batch * n],
             factored: vec![false; batch],
-            refactorization: false,
+            ever_factored: vec![false; batch],
+            refactorization: true,
             counts: LinearCounts::default(),
         };
         let threading_lib = std::env::var("CUDSS_THREADING_LIB")
@@ -389,14 +438,20 @@ impl UniformBatch for CudssUniformBatch {
             "cudssMatrixSetValues",
         )?;
         self.set_mask(mask)?;
-        let again = mask.iter().zip(&self.factored).all(|(&m, &f)| !m || f);
+        let again = mask.iter().zip(&self.ever_factored).all(|(&m, &f)| !m || f);
         if self.refactorization && again {
             self.execute(ffi::CUDSS_PHASE_REFACTORIZATION, "REFACTORIZATION")?;
         } else {
             self.execute(ffi::CUDSS_PHASE_FACTORIZATION, "FACTORIZATION")?;
         }
-        for (f, &m) in self.factored.iter_mut().zip(mask) {
-            *f |= m;
+        for ((f, ever), &m) in self
+            .factored
+            .iter_mut()
+            .zip(&mut self.ever_factored)
+            .zip(mask)
+        {
+            *f = m || (*f && KEEPS_UNSELECTED_FACTORS);
+            *ever |= m;
         }
         self.counts.systems_factored += selected;
         Ok(())
@@ -424,6 +479,10 @@ impl UniformBatch for CudssUniformBatch {
         }
         self.counts.systems_solved += selected;
         Ok(())
+    }
+
+    fn keeps_unselected_factors(&self) -> bool {
+        KEEPS_UNSELECTED_FACTORS
     }
 
     fn counts(&self) -> LinearCounts {

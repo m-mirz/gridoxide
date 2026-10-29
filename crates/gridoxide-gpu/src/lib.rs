@@ -26,4 +26,7 @@ pub use newton::{
     BatchError, BatchOptions, BatchReport, Outcome, ScenarioResult, StepPolicy, solve_batch,
     solve_contingency_batch,
 };
-pub use uniform::{CpuUniformBatch, CsrPattern, LinearCounts, LinearError, UniformBatch};
+pub use uniform::{
+    CpuUniformBatch, CpuUniformBatch08, CpuUniformBatchWith, CsrPattern, LinearCounts, LinearError,
+    UniformBatch,
+};

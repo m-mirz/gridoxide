@@ -10,8 +10,8 @@ use gridoxide::scenario::{BusOverride, Scenario};
 use gridoxide::solver::{JacobianBackend, PersistentSolver, SolveStatus};
 use gridoxide::types::Bus;
 use gridoxide_gpu::{
-    BatchOptions, BatchReport, CpuUniformBatch, CsrPattern, CudssUniformBatch, LinearError,
-    Outcome, UniformBatch, solve_batch, solve_contingency_batch,
+    BatchError, BatchOptions, BatchReport, CpuUniformBatch, CpuUniformBatch08, CsrPattern,
+    CudssUniformBatch, LinearError, Outcome, UniformBatch, solve_batch, solve_contingency_batch,
 };
 
 /// `[[a, 1], [1, b]]`: a 2×2 pattern with every entry stored.
@@ -49,9 +49,11 @@ fn a_solve_selecting_an_unfactored_system_is_refused() {
 }
 
 /// Probe B's question on the smallest case, with each factorization kind: an
-/// unselected system keeps its factors and its solution.
+/// unselected system keeps its solution, and on cuDSS 1.0.0 its factors; on
+/// 0.8.0 a solve selecting it is refused.
 #[test]
 fn masks_leave_unselected_systems_as_they_were() {
+    let keeps = CudssUniformBatch::version().0 >= 1;
     for refactorization in [false, true] {
         let mut lin = CudssUniformBatch::analyze(&pattern(), 3).unwrap();
         lin.use_refactorization(refactorization);
@@ -65,8 +67,9 @@ fn masks_leave_unselected_systems_as_they_were() {
             &[true, false, false],
         )
         .unwrap();
+        assert_eq!(lin.keeps_unselected_factors(), keeps);
         let mut x = vec![12345.0; 6];
-        lin.solve(&[1.0, 0.0].repeat(3), &mut x, &[true, false, true])
+        lin.solve(&[1.0, 0.0].repeat(3), &mut x, &[true, false, false])
             .unwrap();
 
         let close =
@@ -75,11 +78,18 @@ fn masks_leave_unselected_systems_as_they_were() {
             close(&x[0..2], expected(8.0, 9.0)),
             "{refactorization}: {x:?}"
         );
-        assert_eq!(&x[2..4], &[12345.0, 12345.0]);
-        assert!(
-            close(&x[4..6], expected(6.0, 7.0)),
-            "{refactorization}: {x:?}"
-        );
+        assert_eq!(&x[2..6], &[12345.0; 4]);
+
+        let older = lin.solve(&[1.0, 0.0].repeat(3), &mut x, &[false, false, true]);
+        if keeps {
+            older.unwrap();
+            assert!(
+                close(&x[4..6], expected(6.0, 7.0)),
+                "{refactorization}: {x:?}"
+            );
+        } else {
+            assert_eq!(older, Err(LinearError::NotFactored { system: 2 }));
+        }
     }
 }
 
@@ -136,9 +146,11 @@ fn assert_same(gpu: &BatchReport, cpu: &BatchReport) {
 }
 
 /// The whole adaptive loop over the device gives the stand-in's answers, step
-/// for step, with and without factor reuse.
+/// for step, with and without factor reuse; on cuDSS 0.8.0, which drops
+/// unselected factors, factor reuse is refused.
 #[test]
 fn the_newton_loop_on_the_device_matches_the_stand_in() {
+    let keeps = CudssUniformBatch::version().0 >= 1;
     for case in ["matpower/case1354pegase.m", "generated/mvlv1004.m"] {
         let (base, ybus) = load(case);
         let scenarios = ramp(&base, 64);
@@ -148,9 +160,18 @@ fn the_newton_loop_on_the_device_matches_the_stand_in() {
                 reuse_below,
                 ..BatchOptions::default()
             };
-            let gpu = solve_batch::<CudssUniformBatch>(&base, &ybus, &scenarios, &opts).unwrap();
-            let cpu = solve_batch::<CpuUniformBatch>(&base, &ybus, &scenarios, &opts).unwrap();
-            assert_same(&gpu, &cpu);
+            let gpu = solve_batch::<CudssUniformBatch>(&base, &ybus, &scenarios, &opts);
+            let cpu = if keeps {
+                solve_batch::<CpuUniformBatch>(&base, &ybus, &scenarios, &opts)
+            } else {
+                solve_batch::<CpuUniformBatch08>(&base, &ybus, &scenarios, &opts)
+            };
+            if reuse_below.is_some() && !keeps {
+                assert_eq!(gpu.unwrap_err(), BatchError::ReuseUnsupported);
+                assert_eq!(cpu.unwrap_err(), BatchError::ReuseUnsupported);
+            } else {
+                assert_same(&gpu.unwrap(), &cpu.unwrap());
+            }
         }
     }
 }

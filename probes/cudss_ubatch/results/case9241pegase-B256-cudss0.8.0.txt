@@ -1,0 +1,52 @@
+cuDSS 0.8.0, n=17036 nnz=129412 B=256 (dump B=64), threading layer: /home/ubuntu/gridoxide/probes/cudss_ubatch/work/libcudss-linux-x86_64-0.8.0.10_cuda12-archive/lib/libcudss_mtlayer_gomp.so.0
+
+[A] uniform batch, no mask
+  analysis 64.06 ms (wall 64.10), factorization 110.64 ms, solve 53.40 ms
+  device memory used by cuDSS: 713.0 MB of 42405.9 MB
+  max |x - x_cpu| = 7.784e-13
+RESULT A uniform batch matches the CPU solutions (1e-8)           PASS
+  after REFACTORIZATION on step 1: max |x - x_cpu| = 5.968e-13
+RESULT A refactorization on new values matches the CPU (1e-8)     PASS
+
+[B] UBATCH_MASK semantics
+RESULT B all-ones mask: every system matches step 0 (1e-8)        PASS
+RESULT B the mask can change after a factorization                PASS
+RESULT B masked REFACTORIZATION is accepted                       PASS
+  even systems vs step 1: 4.260e-13; odd solutions untouched: no
+RESULT B masked systems refactor and solve correctly (1e-8)       PASS
+RESULT B unselected systems' solutions are left untouched         FAIL
+  odd systems vs step 0: 8.436e-01; even solutions untouched: no
+RESULT B unselected systems keep their earlier factors (1e-8)     FAIL
+
+[C] masked REFACTORIZATION + SOLVE time vs. systems selected (7 reps)
+  selected   layout      refactor ms     solve ms vs. full, per sys
+  256        contiguous       98.655       51.124           1.00
+RESULT C selected=256 layout=contiguous refactor_ms=98.6552 solve_ms=51.1242 per_system_vs_full=1.000
+  128        contiguous       93.950       47.324           1.89
+RESULT C selected=128 layout=contiguous refactor_ms=93.9500 solve_ms=47.3242 per_system_vs_full=1.886
+  128        strided          94.001       47.065           1.88
+RESULT C selected=128 layout=strided refactor_ms=94.0012 solve_ms=47.0651 per_system_vs_full=1.884
+  64         contiguous       93.063       46.092           3.72
+RESULT C selected=64 layout=contiguous refactor_ms=93.0632 solve_ms=46.0923 per_system_vs_full=3.716
+  64         strided          93.092       45.552           3.70
+RESULT C selected=64 layout=strided refactor_ms=93.0918 solve_ms=45.5516 per_system_vs_full=3.703
+  26         contiguous       88.949       42.895           8.67
+RESULT C selected=26 layout=contiguous refactor_ms=88.9487 solve_ms=42.8954 per_system_vs_full=8.667
+  26         strided          92.441       45.716           9.08
+RESULT C selected=26 layout=strided refactor_ms=92.4406 solve_ms=45.7165 per_system_vs_full=9.082
+  3          contiguous       81.975       39.605          69.27
+RESULT C selected=3 layout=contiguous refactor_ms=81.9753 solve_ms=39.6052 per_system_vs_full=69.268
+  3          strided          81.955       39.420          69.15
+RESULT C selected=3 layout=strided refactor_ms=81.9548 solve_ms=39.4199 per_system_vs_full=69.150
+  1          contiguous       82.144       39.223         207.44
+RESULT C selected=1 layout=contiguous refactor_ms=82.1443 solve_ms=39.2233 per_system_vs_full=207.439
+  1          strided          82.154       39.218         207.45
+RESULT C selected=1 layout=strided refactor_ms=82.1545 solve_ms=39.2182 per_system_vs_full=207.448
+  (per_system_vs_full near 1: masked work scales with the selection;
+   near B/selected: the mask saves nothing)
+
+[D] per-step mask update: D2H of 256 flags + stream sync + cudssDataSet
+  median 17.1 us per step (pageable host memory)
+RESULT D mask_update_us=17.07
+
+FAIL: 2 failure(s)

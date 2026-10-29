@@ -70,7 +70,9 @@ pub struct BatchOptions {
     /// Refactor a scenario only when its mismatch fell by less than this
     /// factor since its last step (0.1: less than tenfold); otherwise solve
     /// against its last factors. `None` refactors every active scenario
-    /// every step, as Newton-Raphson does.
+    /// every step, as Newton-Raphson does. Needs a backend whose unselected
+    /// systems keep their factors (cuDSS 1.0.0, not 0.8.0); otherwise the
+    /// batch is refused with [`BatchError::ReuseUnsupported`].
     pub reuse_below: Option<f64>,
     /// Once this few scenarios remain active, finish them on the CPU.
     pub cpu_handoff: Option<usize>,
@@ -148,6 +150,10 @@ pub enum BatchError {
         branch: usize,
         n_branches: usize,
     },
+    /// [`BatchOptions::reuse_below`] was set, but the backend drops an
+    /// unselected system's factors, so no scenario could be solved against
+    /// factors older than the latest factorization.
+    ReuseUnsupported,
     Linear(LinearError),
 }
 
@@ -174,6 +180,11 @@ impl std::fmt::Display for BatchError {
             } => write!(
                 f,
                 "scenario {scenario} takes out branch {branch}, but there are {n_branches} branches"
+            ),
+            BatchError::ReuseUnsupported => write!(
+                f,
+                "factor reuse needs a backend whose unselected systems keep their factors \
+                 (cuDSS 1.0.0, not 0.8.0)"
             ),
             BatchError::Linear(e) => write!(f, "{e}"),
         }
@@ -392,6 +403,9 @@ fn run<U: UniformBatch>(
         .collect();
 
     let mut lin = U::analyze(&csr, batch)?;
+    if opts.reuse_below.is_some() && !lin.keeps_unselected_factors() {
+        return Err(BatchError::ReuseUnsupported);
+    }
     let mut values = vec![0.0; batch * nnz];
     let mut rhs = vec![0.0; batch * n];
     let mut x = vec![0.0; batch * n];

@@ -1,0 +1,40 @@
+full solve: sys0 err 2.5e-14 sys1 err 2.4e-14
+1. even-masked SOLVE on step-0 factors, rhs1:
+  even sys 0: vs sentinel 7.8e+02, vs 0 6.8e-02, vs x0 5.2e-01, vs x1 1.6e-02, first -0.0272992
+  odd sys 1: vs sentinel 7.8e+02, vs 0 4.5e-01, vs x0 2.4e-14, vs x1 5.0e-01, first 0.200614
+  even sys 2: vs sentinel 7.8e+02, vs 0 6.4e-02, vs x0 5.0e-01, vs x1 1.5e-02, first -0.0255875
+  odd sys 3: vs sentinel 7.8e+02, vs 0 4.3e-01, vs x0 2.3e-14, vs x1 4.8e-01, first 0.194194
+2. even-masked REFACTOR (odd values unchanged), then unmasked SOLVE (even rhs1, odd rhs0):
+  even sys 0: vs sentinel 7.8e+02, vs 0 5.4e-02, vs x0 5.1e-01, vs x1 1.2e-15, first -0.0235527
+  odd sys 1: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.5e-01, vs x1 5.2e-02, first 0
+  even sys 2: vs sentinel 7.8e+02, vs 0 5.1e-02, vs x0 4.9e-01, vs x1 2.7e-15, first -0.0221706
+  odd sys 3: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.3e-01, vs x1 4.9e-02, first 0
+3. even-masked REFACTOR with odd values = 1e300, then unmasked SOLVE:
+  even sys 0: vs sentinel 7.8e+02, vs 0 5.4e-02, vs x0 5.1e-01, vs x1 1.2e-15, first -0.0235527
+  odd sys 1: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.5e-01, vs x1 5.2e-02, first 0
+  even sys 2: vs sentinel 7.8e+02, vs 0 5.1e-02, vs x0 4.9e-01, vs x1 2.7e-15, first -0.0221706
+  odd sys 3: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.3e-01, vs x1 4.9e-02, first 0
+4. even-masked FACTORIZATION with odd values = 1e300, then unmasked SOLVE:
+  even sys 0: vs sentinel 7.8e+02, vs 0 5.4e-02, vs x0 5.1e-01, vs x1 1.2e-15, first -0.0235527
+  odd sys 1: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.5e-01, vs x1 5.2e-02, first 0
+  even sys 2: vs sentinel 7.8e+02, vs 0 5.1e-02, vs x0 4.9e-01, vs x1 2.7e-15, first -0.0221706
+  odd sys 3: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.3e-01, vs x1 4.9e-02, first 0
+5. odd-masked SOLVE after (4):
+  even sys 0: vs sentinel 7.8e+02, vs 0 5.4e-02, vs x0 5.1e-01, vs x1 1.2e-15, first -0.0235527
+  odd sys 1: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.5e-01, vs x1 5.2e-02, first 0
+  even sys 2: vs sentinel 7.8e+02, vs 0 5.1e-02, vs x0 4.9e-01, vs x1 2.7e-15, first -0.0221706
+  odd sys 3: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.3e-01, vs x1 4.9e-02, first 0
+7. all REFACTOR, then odd-masked REFACTOR, then unmasked SOLVE:
+  even sys 0: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.5e-01, vs x1 5.4e-02, first -0
+  odd sys 1: vs sentinel 7.8e+02, vs 0 4.5e-01, vs x0 2.4e-14, vs x1 5.0e-01, first 0.200614
+  even sys 2: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.4e-01, vs x1 5.1e-02, first -0
+  odd sys 3: vs sentinel 7.8e+02, vs 0 4.3e-01, vs x0 2.3e-14, vs x1 4.8e-01, first 0.194194
+8. even-masked SOLVE after (7):
+  even sys 0: vs sentinel 7.8e+02, vs 0 0.0e+00, vs x0 4.5e-01, vs x1 5.4e-02, first -0
+  odd sys 1: vs sentinel 7.8e+02, vs 0 4.5e-01, vs x0 2.4e-14, vs x1 5.0e-01, first 0.200614
+9. unmasked REFACTOR after (7), unmasked SOLVE:
+  even sys 0: vs sentinel 7.8e+02, vs 0 5.4e-02, vs x0 5.1e-01, vs x1 1.2e-15, first -0.0235527
+  odd sys 1: vs sentinel 7.8e+02, vs 0 4.5e-01, vs x0 2.4e-14, vs x1 5.0e-01, first 0.200614
+  even sys 2: vs sentinel 7.8e+02, vs 0 5.1e-02, vs x0 4.9e-01, vs x1 2.7e-15, first -0.0221706
+  odd sys 3: vs sentinel 7.8e+02, vs 0 4.3e-01, vs x0 2.3e-14, vs x1 4.8e-01, first 0.194194
+6. DataGet(UBATCH_MASK) status 0 written 256: 1 1 1 1

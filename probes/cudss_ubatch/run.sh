@@ -12,6 +12,12 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+# A distribution's CUDA package (Ubuntu's nvidia-cuda-toolkit) puts the headers
+# in /usr/include, not under CUDA_HOME.
+if [ -z "${CUDA_INCLUDE_DIR:-}" ] && [ ! -f "$CUDA_HOME/include/cuda_runtime.h" ] \
+   && [ -f /usr/include/cuda_runtime.h ]; then
+  export CUDA_INCLUDE_DIR=/usr/include
+fi
 version=${1:-0.8.0}
 case "$version" in
   0.8.0) archive=libcudss-linux-x86_64-0.8.0.10_cuda12-archive
@@ -32,7 +38,7 @@ fi
 cudss="$work/$archive"
 
 g++ -std=c++17 -O2 -Wall -Wextra -o "$work/probe" "$here/probe.cpp" \
-  -I"$CUDA_HOME/include" -I"$cudss/include" \
+  -I"${CUDA_INCLUDE_DIR:-$CUDA_HOME/include}" -I"$cudss/include" \
   -L"$CUDA_HOME/lib64" -L"$cudss/lib" -lcudss -lcudart \
   -Wl,-rpath,"$cudss/lib" -Wl,-rpath,"$CUDA_HOME/lib64"
 
@@ -50,6 +56,25 @@ for case in case1354pegase case2869pegase case9241pegase; do
     echo "== $case B=$B"
     # A run that fails to allocate at a large B is a result too: record and go on.
     "$work/probe" "$dump" "$B" 7 2>&1 | tee "$out" | grep -E "^RESULT|^PASS|^FAIL|cuDSS " || true
+  done
+done
+
+# explore.cpp's follow-ups: what the mask does to unselected systems, and the
+# cost of a refactorization and solve against B (the cliff at B = 16 in 0.8.0).
+g++ -std=c++17 -O2 -o "$work/explore" "$here/explore.cpp" \
+  -I"${CUDA_INCLUDE_DIR:-$CUDA_HOME/include}" -I"$cudss/include" \
+  -L"$CUDA_HOME/lib64" -L"$cudss/lib" -lcudss -lcudart \
+  -Wl,-rpath,"$cudss/lib" -Wl,-rpath,"$CUDA_HOME/lib64"
+for B in 8 64; do
+  echo "== explore mask, case1354pegase B=$B"
+  "$work/explore" "$work/dump-case1354pegase" "$B" mask 2>&1 \
+    | tee "$here/results/explore-mask-B$B-cudss$version.txt" | grep -E "^[0-9]" || true
+done
+for case in case1354pegase case9241pegase; do
+  out="$here/results/explore-time-$case-cudss$version.txt"; : > "$out"
+  echo "== explore time, $case"
+  for B in 1 8 15 16 64 256 1024 2048; do
+    "$work/explore" "$work/dump-$case" "$B" time 0 0 0 2>&1 | tail -1 | tee -a "$out" || true
   done
 done
 

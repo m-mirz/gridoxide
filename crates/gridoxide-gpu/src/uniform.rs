@@ -4,13 +4,19 @@
 //! B systems share one sparsity pattern, analysed once; each has its own
 //! values, right-hand side and solution, in contiguous `B × nnz` and `B × n`
 //! buffers, system-major. A factorization and a solve each take a mask that
-//! selects the systems they process. The rules are cuDSS's documented ones,
-//! and [`CpuUniformBatch`] enforces them so the Newton loop is tested against
-//! the device's contract before the device exists:
+//! selects the systems they process. The rules are the ones phase 0's probe
+//! measured on an A100 (`plans/GPU_BATCH_PLAN.md`), and [`CpuUniformBatch`]
+//! enforces them so the Newton loop is tested against the device's contract
+//! on the CPU:
 //!
-//! - an unselected system's factors and solution are left exactly as they were;
+//! - an unselected system's solution is left exactly as it was;
 //! - a solve may only select systems some factorization has covered since the
 //!   analysis;
+//! - whether an unselected system keeps its factors through a factorization
+//!   depends on the backend
+//!   ([`keeps_unselected_factors`](UniformBatch::keeps_unselected_factors)):
+//!   cuDSS 1.0.0 keeps them, as NVIDIA documents; cuDSS 0.8.0 drops them, so
+//!   only the systems of the latest factorization can be solved;
 //! - a singular system is not an error of the call: its solution comes back
 //!   non-finite, which is all a batched device solve can say per system.
 
@@ -55,8 +61,9 @@ impl CsrPattern {
 pub enum LinearError {
     /// A buffer or mask whose length is not the batch's.
     Shape(String),
-    /// A solve selected a system no factorization has covered since the
-    /// analysis: cuDSS's `CUDSS_STATUS_NOT_SUPPORTED`.
+    /// A solve selected a system without factors: none since the analysis,
+    /// or, on a backend that drops unselected systems' factors, none in the
+    /// latest factorization.
     NotFactored { system: usize },
     /// Anything a backend reports that is not one of the above.
     Backend(String),
@@ -69,7 +76,7 @@ impl std::fmt::Display for LinearError {
             LinearError::NotFactored { system } => {
                 write!(
                     f,
-                    "system {system} was selected for a solve but never factored"
+                    "system {system} was selected for a solve but has no factors"
                 )
             }
             LinearError::Backend(what) => write!(f, "{what}"),
@@ -106,6 +113,11 @@ pub trait UniformBatch: Sized {
     /// untouched; a singular one's comes back non-finite.
     fn solve(&mut self, rhs: &[f64], x: &mut [f64], mask: &[bool]) -> Result<(), LinearError>;
 
+    /// Whether a system a factorization did not select keeps its earlier
+    /// factors, so that a later solve may select it. Solving against older
+    /// factors than the latest factorization's (factor reuse) needs this.
+    fn keeps_unselected_factors(&self) -> bool;
+
     fn counts(&self) -> LinearCounts;
 }
 
@@ -118,17 +130,30 @@ pub trait UniformBatch: Sized {
 /// always uses the values of its latest factorization, whatever has been
 /// written into the value buffer since — exactly the device's semantics, at
 /// the CPU cost of a refactorization per solve.
-pub struct CpuUniformBatch {
+///
+/// `KEEPS_FACTORS` picks which cuDSS it stands in for: `true` for 1.0.0
+/// ([`CpuUniformBatch`]), whose unselected systems keep their factors,
+/// `false` for 0.8.0 ([`CpuUniformBatch08`]), whose factorizations drop them.
+pub struct CpuUniformBatchWith<const KEEPS_FACTORS: bool> {
     n: usize,
     nnz: usize,
     batch: usize,
     lu: SparseLu,
-    /// Each system's values at its latest factorization; empty if never.
+    /// Each system's values at its latest factorization; empty if it has no
+    /// factors.
     factored: Vec<Vec<f64>>,
     counts: LinearCounts,
 }
 
-impl CpuUniformBatch {
+/// The stand-in for cuDSS 1.0.0 and its documentation: unselected systems
+/// keep their factors.
+pub type CpuUniformBatch = CpuUniformBatchWith<true>;
+
+/// The stand-in for cuDSS 0.8.0: a factorization drops the factors of the
+/// systems it does not select.
+pub type CpuUniformBatch08 = CpuUniformBatchWith<false>;
+
+impl<const KEEPS_FACTORS: bool> CpuUniformBatchWith<KEEPS_FACTORS> {
     fn check(&self, what: &str, len: usize, per_system: usize) -> Result<(), LinearError> {
         if len == self.batch * per_system {
             Ok(())
@@ -145,7 +170,7 @@ impl CpuUniformBatch {
     }
 }
 
-impl UniformBatch for CpuUniformBatch {
+impl<const KEEPS_FACTORS: bool> UniformBatch for CpuUniformBatchWith<KEEPS_FACTORS> {
     fn analyze(pattern: &CsrPattern, batch: usize) -> Result<Self, LinearError> {
         let rows = (0..pattern.n)
             .flat_map(|r| std::iter::repeat_n(r, pattern.row_ptr[r + 1] - pattern.row_ptr[r]));
@@ -174,10 +199,14 @@ impl UniformBatch for CpuUniformBatch {
         self.check("values", values.len(), self.nnz)?;
         self.check_mask(mask)?;
         self.counts.factor_calls += 1;
-        for (s, _) in mask.iter().enumerate().filter(|(_, m)| **m) {
-            self.factored[s].clear();
-            self.factored[s].extend_from_slice(&values[s * self.nnz..(s + 1) * self.nnz]);
-            self.counts.systems_factored += 1;
+        for (s, &selected) in mask.iter().enumerate() {
+            if selected {
+                self.factored[s].clear();
+                self.factored[s].extend_from_slice(&values[s * self.nnz..(s + 1) * self.nnz]);
+                self.counts.systems_factored += 1;
+            } else if !KEEPS_FACTORS {
+                self.factored[s].clear();
+            }
         }
         Ok(())
     }
@@ -203,6 +232,10 @@ impl UniformBatch for CpuUniformBatch {
             self.counts.systems_solved += 1;
         }
         Ok(())
+    }
+
+    fn keeps_unselected_factors(&self) -> bool {
+        KEEPS_FACTORS
     }
 
     fn counts(&self) -> LinearCounts {
@@ -284,6 +317,28 @@ mod tests {
                 systems_solved: 2,
             }
         );
+    }
+
+    /// cuDSS 0.8.0's rule: after a factorization, only the systems it
+    /// selected can be solved, and refactoring the others restores them.
+    #[test]
+    fn the_08_stand_in_drops_unselected_factors() {
+        let mut lin = CpuUniformBatch08::analyze(&pattern(), 2).unwrap();
+        assert!(!lin.keeps_unselected_factors());
+        let both = values(&[(2.0, 3.0), (4.0, 5.0)]);
+        lin.factor(&both, &[true, true]).unwrap();
+        lin.factor(&both, &[true, false]).unwrap();
+        let mut x = vec![12345.0; 4];
+        assert_eq!(
+            lin.solve(&[1.0, 0.0].repeat(2), &mut x, &[true, true]),
+            Err(LinearError::NotFactored { system: 1 })
+        );
+        lin.factor(&both, &[false, true]).unwrap();
+        lin.solve(&[1.0, 0.0].repeat(2), &mut x, &[false, true])
+            .unwrap();
+        assert_eq!(&x[0..2], &[12345.0, 12345.0]);
+        let want = expected(4.0, 5.0);
+        assert!((x[2] - want[0]).abs() < 1e-14 && (x[3] - want[1]).abs() < 1e-14);
     }
 
     #[test]

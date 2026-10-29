@@ -29,10 +29,27 @@ CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh 1.0.0    # and 1.0.0
 `run.sh` downloads cuDSS from NVIDIA's redistributable archive (pinned by SHA-256, as
 grid-bench's gpusim2grid image does), builds the probe with `g++`, writes dumps of 64
 scenarios for case1354pegase, case2869pegase and case9241pegase, and runs B = 64, 256,
-1024 and 2048 (systems tiled from the 64), with cuDSS's OpenMP threading layer on.
-Last, it runs `crates/gridoxide-gpu`'s tests with the `cuda` feature: the cuDSS backend's
-contract (masks, unfactored systems) and the adaptive Newton loop on the device against the
-CPU stand-in, step for step. Results go to `results/`.
+1024 and 2048 (systems tiled from the 64), with cuDSS's OpenMP threading layer on. Then
+`explore.cpp`, the follow-up written after the first run: what the mask does to the systems
+it leaves out (`explore <dump> <B> mask`) and the cost of a refactorization and solve
+against B (`explore <dump> <B> time ...`). Last, it runs `crates/gridoxide-gpu`'s tests
+with the `cuda` feature: the cuDSS backend's contract (masks, unfactored systems) and the
+adaptive Newton loop on the device against the CPU stand-in, step for step. Results go to
+`results/`.
+
+A distribution's CUDA package (Ubuntu's `nvidia-cuda-toolkit`) keeps its headers in
+`/usr/include`; `run.sh` then sets `CUDA_INCLUDE_DIR` itself.
+
+## Results
+
+Run on an A100-SXM4-40GB on 2026-10-29; `results/` holds the output, and
+[the plan](../../plans/GPU_BATCH_PLAN.md#phase-0-on-an-a100) says what it means. In short:
+(A) passes in both versions. (B) holds as documented in 1.0.0, but 0.8.0 drops the factors
+of the systems a factorization leaves out and overwrites their solutions, so two of probe
+B's lines fail there: that is the finding, not a broken probe. (C)
+1.0.0's masked work scales with the selection; 0.8.0's has a fixed cost per step from
+B = 16 on. (D) costs about 20 µs. And 0.8.0 computes NaNs when two handles work at once in
+one process.
 
 ## Checking it without a GPU
 

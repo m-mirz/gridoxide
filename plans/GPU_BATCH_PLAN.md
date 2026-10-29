@@ -1,6 +1,7 @@
 # Batched AC power flow on NVIDIA GPUs
 
-Status: **plan**, 2026-10-28, against `2b0c730`. Supersedes the `gpu-nvidia` branch's
+Status: **plan**, 2026-10-28, against `2b0c730`; phase 0 run and phase 1 tested on an A100,
+2026-10-29 ([Phase 0 on an A100](#phase-0-on-an-a100)). Supersedes the `gpu-nvidia` branch's
 `plans/GPU_PLAN.md`, whose lessons are in [What we know](#what-we-know).
 
 The goal: solve a batch of AC power flows (an operating-point sweep, N-1) on one NVIDIA GPU,
@@ -58,7 +59,93 @@ reorderings, hybrid or multi-GPU modes.
 
 Unverified, and the design depends on both: whether masked work **costs less** in
 proportion to the systems selected, and whether `REFACTORIZATION` (not only
-`FACTORIZATION`) honours the mask. Phase 0 measures them.
+`FACTORIZATION`) honours the mask. Phase 0 measured them, and found 0.8.0 departing from the
+documentation: [Phase 0 on an A100](#phase-0-on-an-a100).
+
+## Phase 0 on an A100
+
+Run on 2026-10-29 on an A100-SXM4-40GB (driver 580, CUDA 12.8), cuDSS 0.8.0 and 1.0.0, with
+`probes/cudss_ubatch/run.sh`; its follow-up `explore.cpp` answers what the probe's first run
+raised. The raw output is in `probes/cudss_ubatch/results/`.
+
+- **A, the uniform batch: passes.** Every system of case1354pegase, case2869pegase and
+  case9241pegase matches the CPU to 1e-12 at every B from 64 to 2048, after the
+  factorization and after a refactorization on new values, in both versions. The gate is
+  passed.
+- **B, the mask: as documented in 1.0.0, not in 0.8.0.** In both, a masked
+  `REFACTORIZATION` is accepted and refactors the selected systems correctly, without
+  reading the others' values (1e300 there does no harm). But in 0.8.0, at every B, a
+  factorization **drops the factors of the systems it does not select**: they solve to
+  zeros until refactored, and a `REFACTORIZATION` restores them. And 0.8.0's masked solve
+  writes every system's solution buffer, the unselected ones from cuDSS's own copy of their
+  last solution. 1.0.0 keeps the factors and leaves the unselected solutions untouched.
+- **C, masked cost: it depends on the version** (tables below). 0.8.0's mask saves only the
+  part of a step's cost above a large fixed cost: one selected system of 2048 still costs
+  half the full batch. 1.0.0's scales: one of 2048 costs 9-12% of the full batch.
+- **D, the mask's price: 16-22 µs per step** (B flags device to host, a synchronize,
+  `cudssDataSet`), at every B. Nothing next to a factorization.
+
+Refactorization and solve of all B systems, ms (median of 9, `explore time`):
+
+| B | case1354pegase 0.8.0 | 1.0.0 | case9241pegase 0.8.0 | 1.0.0 |
+|---|---|---|---|---|
+| 1 | 0.41 | 0.49 | 1.00 | 0.98 |
+| 15 | 1.17 | 1.44 | 5.54 | 4.28 |
+| 16 | 16.1 | 1.51 | 122 | 5.66 |
+| 64 | 15.4 | 5.21 | 134 | 20.0 |
+| 256 | 18.5 | 19.9 | 150 | 61.5 |
+| 1024 | 25.3 | 63.1 | 206 | 244 |
+| 2048 | 34.0 | 126 | 277 | 486 |
+
+The same at B = 2048 with 2048, 205 and 1 systems selected (probe C, contiguous):
+
+| | case1354pegase 0.8.0 | 1.0.0 | case9241pegase 0.8.0 | 1.0.0 |
+|---|---|---|---|---|
+| 2048 | 33.9 | 126 | 277 | 485 |
+| 205 | 18.2 | 22.2 | 148 | 100 |
+| 1 | 16.7 | 10.8 | 131 | 57.7 |
+
+- **0.8.0 has two regimes, switching at exactly B = 16** on both cases: up to 15 systems
+  cost little more than one; from 16 on, a step has a fixed cost of about 15 ms
+  (case1354pegase) or 120 ms (case9241pegase), above which it grows slowly, to 0.017 and
+  0.135 ms per system at B = 2048. None of the knobs tried moves the switch: reordering
+  (default, AMD), factorization algorithm, pivoting off, superpanels off, nested-dissection
+  levels, deterministic mode, cuDSS's threading layer.
+- **1.0.0 has no switch**: its cost is about linear in B, 0.06 and 0.24 ms per system, 3.7x
+  and 1.75x 0.8.0's at B = 2048. At B = 4096 case9241pegase runs out of the A100's 40 GB.
+- **0.8.0 is not safe with two handles at once in one process.** With the device tests run
+  in parallel threads, each with its own handle and stream, some outages' solutions come
+  back NaN; never with one thread, never with 1.0.0. `CudssUniformBatch` therefore holds a
+  process-wide lock around each 0.8.0 `cudssExecute` until its stream has finished.
+- The threading layer changes nothing for refactorization and solve. Analysis takes 30 ms
+  (case1354pegase) to 90 ms (case9241pegase) in 0.8.0 and about 100 ms in 1.0.0, worth keeping
+  per session (item 5 below).
+
+What it means:
+
+- **Per-scenario stopping works in both versions.** The active set only shrinks, and every
+  step refactors and solves the same set, which is all 0.8.0's mask supports.
+- **Factor reuse needs 1.0.0.** The trait says whether a backend keeps unselected factors
+  (`keeps_unselected_factors`), the stand-in models both versions (`CpuUniformBatch`,
+  `CpuUniformBatch08`), and the Newton loop refuses `reuse_below` on 0.8.0
+  (`BatchError::ReuseUnsupported`).
+- **Neither version wins outright.** Rough per-batch LU costs for 1000 connected outages of
+  N-1, from the costs above and the step profiles of [N-1](#n-1) (adaptive: about 2.2
+  factorizations per outage, all active for two steps; reuse: about 1.2 factorizations and
+  3.5 solves per outage). These are estimates, not runs:
+
+  | | 0.8.0 fixed 4 | 0.8.0 adaptive | 1.0.0 adaptive | 1.0.0 reuse < 0.1 |
+  |---|---|---|---|---|
+  | case1354pegase | ≈100 ms | ≈70 ms | ≈140 ms | ≈125 ms |
+  | case9241pegase | ≈820 ms | ≈535 ms | ≈600 ms | ≈515 ms |
+
+  0.8.0 with adaptive stopping is the best or close to it on both, and it is the version
+  grid-bench's gpusim2grid image runs, so the comparison stays like for like. It is the
+  default; 1.0.0 stays supported, and grid-bench decides in phase 5.
+- **On 0.8.0 the tail costs the fixed cost.** Once few scenarios remain active, a step still
+  costs 15-120 ms, so the CPU hand-off (item 4) matters more than the CPU counts suggest.
+  The device alternative would be a second analysis at B = 15 for the stragglers (1.2 and
+  5.5 ms per step).
 
 ## Beating a fixed step count
 
@@ -69,8 +156,9 @@ proportion to the systems selected, and whether `REFACTORIZATION` (not only
    `max_iter`; a scenario that did not converge is reported as such, never hidden. This
    alone fixes gpusim2grid's two oracle failures.
 2. **Stop paying for converged scenarios.** Jacobian, injection and update kernels run over
-   a compacted list of active scenarios; the masked cuDSS calls skip the rest, if phase 0
-   shows masking saves work. Honest expectation: on sweeps from a solved base case most
+   a compacted list of active scenarios; the masked cuDSS calls skip the rest. Phase 0: in
+   1.0.0 the saving scales with the selection; in 0.8.0 it is only the part of a step above
+   its fixed cost. Honest expectation: on sweeps from a solved base case most
    scenarios take 3-4 steps either way, so the gain there is correctness; it is in uneven
    batches (N-1, wide sweeps, heavily loaded feeders) that a fixed count must cover the
    worst scenario.
@@ -78,6 +166,8 @@ proportion to the systems selected, and whether `REFACTORIZATION` (not only
    contracting fast enough; solve every active one against its latest factors. The mask
    lets a refactorization and a solve select different sets. Fewer factorizations, the
    dominant cost, for possibly more steps; kept only if the oracle and grid-bench agree.
+   Phase 0: cuDSS 1.0.0 only, since 0.8.0 drops the factors of the systems a factorization
+   leaves out.
 4. **Hand the stragglers to the CPU.** When only a few scenarios remain active the GPU is
    idle; below a threshold, copy their states back and finish them on the CPU
    `BatchSolver`.
@@ -198,7 +288,9 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
    2048, cuDSS 0.8.0 and 1.0.0: (A) the uniform batch matches the CPU; (B) the mask's
    semantics; (C) whether masked work scales with the selection; (D) the per-step cost of
    driving the mask. **Gate:** if (A) fails, stop; if (C) shows no saving, drop items 2 and 3
-   above and keep per-scenario stopping and the CPU hand-off.
+   above and keep per-scenario stopping and the CPU hand-off. *Done* (2026-10-29): (A)
+   passes; (B) and (C) split by version, so item 3 needs 1.0.0, and item 2 saves more on
+   1.0.0 than on 0.8.0; see [Phase 0 on an A100](#phase-0-on-an-a100).
 1. **Crate skeleton:** bindgen, build script, a stub that builds without CUDA, workspace and
    feature wiring. *Done, untested on a device:* `crates/gridoxide-gpu` is a workspace
    member that `cargo publish --workspace` skips (`publish = false`), with the
@@ -210,7 +302,9 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
    (`use_refactorization`) until probe B shows it honours the mask. It type-checks against
    cuDSS 0.8.0 and 1.0.0 through the probe's stub headers; `run.sh` runs its device tests
    (`tests/cudss_test.rs`: the mask contract, and the Newton loop step for step against
-   the stand-in) after the probe.
+   the stand-in) after the probe. *Tested on the A100* with both versions: the backend
+   follows each version's mask rule, uses `REFACTORIZATION` by default, and serializes
+   0.8.0's calls; all device tests pass, in parallel test threads too.
 2. **Device data and kernels:** CSR pattern, batched buffers, injections, mismatch, Jacobian
    fill, update, each checked against the CPU on one Newton step.
 3. **Adaptive Newton loop:** flags, mask, all-converged exit, divergence handling, analysis
@@ -229,12 +323,17 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
 
 ## Risks
 
-- **Masked work may not shrink** with the selection, which removes the main speed-up
-  (phase 0, C).
+- **Masked work shrinks only partly on 0.8.0** (phase 0, C): about half of a step's cost
+  stays however few systems remain, so the adaptive loop's savings there are smaller than
+  its factorization counts.
 - **The host-side mask forces a sync per step.** Small next to a factorization (phase 0, D),
   but it gives up gpusim2grid's sync-free loop.
 - **cuDSS's licence** governs what an image may redistribute; grid-bench's gpusim2grid image
   already ships its runtime libraries.
-- **No NVIDIA GPU on the development machine:** every phase from 0 needs a rented one, and
-  the probe's local syntax check (`probes/cudss_ubatch/stub`) is what keeps signature
-  mistakes off that clock.
+- **0.8.0's undocumented behaviour:** its dropped factors and its unsafety with concurrent
+  handles were found by measurement, not documentation. A later cuDSS may change either:
+  the device tests check the mask rule of whichever version they run against, and the lock
+  stays keyed to 0.8.0 until a version is shown safe without it.
+- **GPU time is rented:** phase 0 ran on an A100 that may not stay available, and the
+  probe's local syntax check (`probes/cudss_ubatch/stub`) is what keeps signature mistakes
+  off that clock.
