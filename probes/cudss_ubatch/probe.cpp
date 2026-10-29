@@ -167,20 +167,31 @@ struct Solver {
     }
 };
 
-// Largest |x - ref| over the selected systems, and whether every unselected
-// system still holds `sentinel`.
+// Largest |x - ref| over the selected systems, NaN if any is NaN, and whether
+// every unselected system still holds `sentinel`. Prints how many selected
+// systems are off by more than 1e-8 (NaN included) and the first of them.
+// (`std::max` would drop a NaN: the first run of this probe reported 0.8.0's
+// NaN solutions as a pass that way.)
 std::pair<double, bool> compare(const std::vector<double>& x, const std::vector<double>& ref,
                                 const std::vector<int>& selected, int n, double sentinel) {
     double err = 0;
     bool untouched = true;
-    for (size_t s = 0; s < selected.size(); ++s)
+    size_t bad = 0, first_bad = 0;
+    for (size_t s = 0; s < selected.size(); ++s) {
+        bool off = false;
         for (int i = 0; i < n; ++i) {
             size_t k = s * static_cast<size_t>(n) + static_cast<size_t>(i);
-            if (selected[s])
-                err = std::max(err, std::fabs(x[k] - ref[k]));
-            else if (x[k] != sentinel)
+            if (selected[s]) {
+                double d = std::fabs(x[k] - ref[k]);
+                if (std::isnan(d) || d > err) err = std::isnan(err) ? err : d;
+                if (!(d <= 1e-8)) off = true;
+            } else if (x[k] != sentinel) {
                 untouched = false;
+            }
         }
+        if (off && bad++ == 0) first_bad = s;
+    }
+    if (bad) std::printf("  %zu systems off by more than 1e-8 or NaN, the first %zu\n", bad, first_bad);
     return {err, untouched};
 }
 

@@ -70,9 +70,7 @@ pub struct BatchOptions {
     /// Refactor a scenario only when its mismatch fell by less than this
     /// factor since its last step (0.1: less than tenfold); otherwise solve
     /// against its last factors. `None` refactors every active scenario
-    /// every step, as Newton-Raphson does. Needs a backend whose unselected
-    /// systems keep their factors (cuDSS 1.0.0, not 0.8.0); otherwise the
-    /// batch is refused with [`BatchError::ReuseUnsupported`].
+    /// every step, as Newton-Raphson does.
     pub reuse_below: Option<f64>,
     /// Once this few scenarios remain active, finish them on the CPU.
     pub cpu_handoff: Option<usize>,
@@ -150,10 +148,9 @@ pub enum BatchError {
         branch: usize,
         n_branches: usize,
     },
-    /// [`BatchOptions::reuse_below`] was set, but the backend drops an
-    /// unselected system's factors, so no scenario could be solved against
-    /// factors older than the latest factorization.
-    ReuseUnsupported,
+    /// N-1 was asked of a GPU session made without the network's branches
+    /// (`GpuBatchSolver::new` rather than `with_branches`).
+    BranchesUnknown,
     Linear(LinearError),
 }
 
@@ -181,10 +178,9 @@ impl std::fmt::Display for BatchError {
                 f,
                 "scenario {scenario} takes out branch {branch}, but there are {n_branches} branches"
             ),
-            BatchError::ReuseUnsupported => write!(
+            BatchError::BranchesUnknown => write!(
                 f,
-                "factor reuse needs a backend whose unselected systems keep their factors \
-                 (cuDSS 1.0.0, not 0.8.0)"
+                "N-1 needs the network's branches: make the session with `with_branches`"
             ),
             BatchError::Linear(e) => write!(f, "{e}"),
         }
@@ -300,11 +296,7 @@ pub(crate) fn contingencies(
     }
 
     let n = start.len();
-    let ybus = {
-        let mut ybus = build_ybus_with_outages(n, lines, transformers, &[]);
-        stamp_shunts(&mut ybus, shunts);
-        ybus.finish()
-    };
+    let ybus = intact_ybus(n, lines, transformers, shunts);
     let intact_components = structural_component_count(n, lines, transformers, &[]);
     let mut members = Vec::new();
     let mut deltas = Vec::new();
@@ -330,6 +322,18 @@ pub(crate) fn contingencies(
         members,
         deltas,
     })
+}
+
+/// The intact network's Y-bus that N-1's deltas apply to.
+pub(crate) fn intact_ybus(
+    n: usize,
+    lines: &[Line],
+    transformers: &[Transformer],
+    shunts: &[ShuntAdm],
+) -> YBusSparse {
+    let mut ybus = build_ybus_with_outages(n, lines, transformers, &[]);
+    stamp_shunts(&mut ybus, shunts);
+    ybus.finish()
 }
 
 pub(crate) fn check_buses(start: &[Bus], scenarios: &[Scenario]) -> Result<(), BatchError> {
@@ -381,10 +385,17 @@ impl Delta {
     /// Writes `values` at the delta's positions into the Y-bus and the
     /// Jacobian pattern's copies of it.
     fn write(&self, values: &[Complex<f64>], ybus: &mut YBusSparse, pattern: &mut JacobianPattern) {
+        self.write_ybus(values, ybus);
+        for (&(r, c), &y) in self.at.iter().zip(values) {
+            pattern.set_admittance(r, c, y);
+        }
+    }
+
+    /// [`write`](Self::write) into the Y-bus alone.
+    fn write_ybus(&self, values: &[Complex<f64>], ybus: &mut YBusSparse) {
         for (&(r, c), &y) in self.at.iter().zip(values) {
             ybus.set(r, c, y)
                 .expect("the intact Y-bus stores every branch's entries");
-            pattern.set_admittance(r, c, y);
         }
     }
 }
@@ -429,9 +440,6 @@ fn run<U: UniformBatch>(
         .collect();
 
     let mut lin = U::analyze(&csr, batch)?;
-    if opts.reuse_below.is_some() && !lin.keeps_unselected_factors() {
-        return Err(BatchError::ReuseUnsupported);
-    }
     let mut values = vec![0.0; batch * nnz];
     let mut rhs = vec![0.0; batch * n];
     let mut x = vec![0.0; batch * n];
@@ -476,31 +484,7 @@ fn run<U: UniformBatch>(
             });
             injections[s] = (p, q);
 
-            let done = match opts.policy {
-                StepPolicy::Adaptive => {
-                    if !(norm[s].is_finite()) || norm[s] > opts.diverge_above {
-                        Some(Outcome::Diverged)
-                    } else if norm[s] < opts.tol {
-                        Some(Outcome::Converged)
-                    } else if steps[s] >= opts.max_iter {
-                        Some(Outcome::NotConverged)
-                    } else {
-                        None
-                    }
-                }
-                StepPolicy::Fixed(k) => {
-                    if steps[s] < k {
-                        None
-                    } else if !norm[s].is_finite() || norm[s] > opts.diverge_above {
-                        Some(Outcome::Diverged)
-                    } else if norm[s] < opts.tol {
-                        Some(Outcome::Converged)
-                    } else {
-                        Some(Outcome::NotConverged)
-                    }
-                }
-            };
-            if let Some(o) = done {
+            if let Some(o) = decide(opts, norm[s], steps[s]) {
                 outcome[s] = Some(o);
                 active[s] = false;
             }
@@ -520,33 +504,18 @@ fn run<U: UniformBatch>(
                 if !active[s] {
                     continue;
                 }
-                let budget = opts.max_iter - steps[s];
-                // The solver analyses its Jacobian at its first solve and
-                // takes later deltas in place, as the CPU's N-1 does.
-                deltas[s].write(&deltas[s].outaged, ybus, &mut pattern);
-                for &(r, c) in &deltas[s].at {
-                    solver.set_admittance(r, c, ybus.get(r, c));
-                }
-                let (_, stats) = solver.solve_with_stats(&mut states[s], ybus, opts.tol, budget);
-                deltas[s].write(&deltas[s].intact, ybus, &mut pattern);
-                for &(r, c) in &deltas[s].at {
-                    solver.set_admittance(r, c, ybus.get(r, c));
-                }
-                // `iterations()` counts mismatch evaluations, the first at
-                // the state the batch left, so it is one more than the steps
-                // when the solve converged.
-                let taken = match stats.status {
-                    SolveStatus::Converged => stats.iterations().saturating_sub(1),
-                    _ => stats.iterations(),
-                };
+                let (taken, final_norm, o) = finish_on_cpu(
+                    &mut solver,
+                    &mut states[s],
+                    ybus,
+                    &deltas[s],
+                    opts,
+                    steps[s],
+                );
                 steps[s] += taken;
                 factorizations[s] += taken;
-                norm[s] = stats.final_mismatch();
-                outcome[s] = Some(match stats.status {
-                    SolveStatus::Converged => Outcome::Converged,
-                    _ if !norm[s].is_finite() => Outcome::Diverged,
-                    _ => Outcome::NotConverged,
-                });
+                norm[s] = final_norm;
+                outcome[s] = Some(o);
                 on_cpu[s] = true;
                 active[s] = false;
                 cpu_handoffs += 1;
@@ -556,13 +525,7 @@ fn run<U: UniformBatch>(
 
         // 2. Jacobians where new factors are needed, and one masked factorization.
         let refactor: Vec<bool> = (0..batch)
-            .map(|s| {
-                active[s]
-                    && match opts.reuse_below {
-                        None => true,
-                        Some(ratio) => factorizations[s] == 0 || norm[s] > ratio * last_norm[s],
-                    }
-            })
+            .map(|s| active[s] && needs_factors(opts, factorizations[s], norm[s], last_norm[s]))
             .collect();
         for s in (0..batch).filter(|&s| refactor[s]) {
             let (p, q) = &injections[s];
@@ -622,6 +585,90 @@ pub fn csr_jacobian(start: &[Bus], ybus: &YBusSparse) -> (JacobianPattern, CsrPa
     pattern.permute(&order);
     let csr = csr_of(&pattern, pattern.n_unknowns);
     (pattern, csr)
+}
+
+/// What a scenario's mismatch norm after `steps` Newton steps says about it:
+/// done with an outcome, or `None` to step on. The one rule the CPU loop and
+/// the device loop share.
+pub(crate) fn decide(opts: &BatchOptions, norm: f64, steps: usize) -> Option<Outcome> {
+    let diverged = !norm.is_finite() || norm > opts.diverge_above;
+    match opts.policy {
+        StepPolicy::Adaptive => {
+            if diverged {
+                Some(Outcome::Diverged)
+            } else if norm < opts.tol {
+                Some(Outcome::Converged)
+            } else if steps >= opts.max_iter {
+                Some(Outcome::NotConverged)
+            } else {
+                None
+            }
+        }
+        StepPolicy::Fixed(k) => {
+            if steps < k {
+                None
+            } else if diverged {
+                Some(Outcome::Diverged)
+            } else if norm < opts.tol {
+                Some(Outcome::Converged)
+            } else {
+                Some(Outcome::NotConverged)
+            }
+        }
+    }
+}
+
+/// Whether an active scenario gets new factors this step
+/// ([`BatchOptions::reuse_below`]).
+pub(crate) fn needs_factors(
+    opts: &BatchOptions,
+    factorizations: usize,
+    norm: f64,
+    last_norm: f64,
+) -> bool {
+    match opts.reuse_below {
+        None => true,
+        Some(ratio) => factorizations == 0 || norm > ratio * last_norm,
+    }
+}
+
+/// Finishes one scenario on the CPU ([`BatchOptions::cpu_handoff`]) from
+/// the state the batch left in `buses`, on `ybus` with its `delta` applied
+/// for the solve and restored after: the steps it took, its last mismatch
+/// and its outcome. `solver` is shared by the scenarios handed off together.
+pub(crate) fn finish_on_cpu(
+    solver: &mut PersistentSolver,
+    buses: &mut [Bus],
+    ybus: &mut YBusSparse,
+    delta: &Delta,
+    opts: &BatchOptions,
+    steps: usize,
+) -> (usize, f64, Outcome) {
+    let budget = opts.max_iter - steps;
+    // The solver analyses its Jacobian at its first solve and takes later
+    // deltas in place, as the CPU's N-1 does.
+    delta.write_ybus(&delta.outaged, ybus);
+    for &(r, c) in &delta.at {
+        solver.set_admittance(r, c, ybus.get(r, c));
+    }
+    let (_, stats) = solver.solve_with_stats(buses, ybus, opts.tol, budget);
+    delta.write_ybus(&delta.intact, ybus);
+    for &(r, c) in &delta.at {
+        solver.set_admittance(r, c, ybus.get(r, c));
+    }
+    // `iterations()` counts mismatch evaluations, the first at the state the
+    // batch left, so it is one more than the steps when the solve converged.
+    let taken = match stats.status {
+        SolveStatus::Converged => stats.iterations().saturating_sub(1),
+        _ => stats.iterations(),
+    };
+    let norm = stats.final_mismatch();
+    let outcome = match stats.status {
+        SolveStatus::Converged => Outcome::Converged,
+        _ if !norm.is_finite() => Outcome::Diverged,
+        _ => Outcome::NotConverged,
+    };
+    (taken, norm, outcome)
 }
 
 /// The pattern's entries, already in CSR order, as a [`CsrPattern`].

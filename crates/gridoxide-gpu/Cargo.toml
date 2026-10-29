@@ -34,3 +34,7 @@ default = []
 #   CUDSS_DIR=<cudss> CUDA_INCLUDE_DIR=$PWD/probes/cudss_ubatch/stub \
 #     GRIDOXIDE_GPU_NO_NVCC=1 cargo check -p gridoxide-gpu --features cuda --all-targets
 cuda = ["dep:bindgen", "dep:cc"]
+
+[[example]]
+name = "gpu_bench"
+required-features = ["cuda"]

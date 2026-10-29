@@ -22,8 +22,8 @@ On a machine with an NVIDIA GPU, the CUDA 12 toolkit and Rust:
 
 ```bash
 git submodule update --init tests/data/benchmark-grids
-CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh          # cuDSS 0.8.0
-CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh 1.0.0    # and 1.0.0
+CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh          # cuDSS 1.0.0
+CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh 0.8.0    # and 0.8.0, the probe alone
 ```
 
 `run.sh` downloads cuDSS from NVIDIA's redistributable archive (pinned by SHA-256, as
@@ -34,8 +34,8 @@ scenarios for case1354pegase, case2869pegase and case9241pegase, and runs B = 64
 it leaves out (`explore <dump> <B> mask`) and the cost of a refactorization and solve
 against B (`explore <dump> <B> time ...`). Last, it runs `crates/gridoxide-gpu`'s tests
 with the `cuda` feature: the cuDSS backend's contract (masks, unfactored systems) and the
-adaptive Newton loop on the device against the CPU stand-in, step for step. Results go to
-`results/`.
+adaptive Newton loop on the device against the CPU stand-in, step for step (1.0.0 only:
+gridoxide-gpu refuses 0.8.0). Results go to `results/`.
 
 A distribution's CUDA package (Ubuntu's `nvidia-cuda-toolkit`) keeps its headers in
 `/usr/include`; `run.sh` then sets `CUDA_INCLUDE_DIR` itself.
@@ -44,7 +44,8 @@ A distribution's CUDA package (Ubuntu's `nvidia-cuda-toolkit`) keeps its headers
 
 Run on an A100-SXM4-40GB on 2026-10-29; `results/` holds the output, and
 [the plan](../../plans/GPU_BATCH_PLAN.md#phase-0-on-an-a100) says what it means. In short:
-(A) passes in both versions. (B) holds as documented in 1.0.0, but 0.8.0 drops the factors
+(A) passes in 1.0.0 and **fails in 0.8.0**: some systems from index 216 on come back NaN,
+which the first run reported as a pass because its comparison was blind to NaN (fixed). (B) holds as documented in 1.0.0, but 0.8.0 drops the factors
 of the systems a factorization leaves out and overwrites their solutions, so two of probe
 B's lines fail there: that is the finding, not a broken probe. (C)
 1.0.0's masked work scales with the selection; 0.8.0's has a fixed cost per step from
@@ -75,7 +76,8 @@ launchers' bindings still come from `cuda/kernels.h`, so their signatures are ch
 too.)
 
 The old `gpu-nvidia` branch's three FFI bugs were all signature mismatches that only a
-GPU machine surfaced; these checks catch that class before any GPU time is spent. Both
-pass against cuDSS 0.8.0 and 1.0.0. (The Rust one already caught a difference between
-them: 1.0.0 turned `CUDSS_R_*` into macros over CUDA's `CUDA_R_*`, which bindgen cannot
-expand, so the backend uses the `CUDA_R_*` names, valid in both.)
+GPU machine surfaced; these checks catch that class before any GPU time is spent. The
+probe's passes against cuDSS 0.8.0 and 1.0.0, the Rust one against 1.0.0, the only version
+gridoxide-gpu builds against. (The Rust one caught a difference between the two: 1.0.0
+turned `CUDSS_R_*` into macros over CUDA's `CUDA_R_*`, which bindgen cannot expand, so the
+backend uses the `CUDA_R_*` names.)

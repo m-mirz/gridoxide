@@ -97,6 +97,13 @@ pub struct DeviceBatch {
     slots: DeviceBuffer<f64>,
     values: DeviceBuffer<f64>,
     dx: DeviceBuffer<f64>,
+
+    // On the host, for loading scenarios.
+    start: Vec<Bus>,
+    host_row_ptr: Vec<usize>,
+    host_col: Vec<usize>,
+    diag_owner: Vec<Option<usize>>,
+    pair_owner: HashMap<(u32, u32), usize>,
 }
 
 fn u32s(v: impl IntoIterator<Item = usize>, what: &str) -> Result<Vec<u32>, LinearError> {
@@ -131,8 +138,9 @@ impl DeviceBatch {
         {
             return Err(BatchError::OutagesUnsupported { scenario });
         }
-        let deltas = vec![Delta::default(); scenarios.len()];
-        Ok(Self::build(start, ybus, scenarios, &deltas)?)
+        let mut dev = Self::with_capacity(start, ybus, scenarios.len())?;
+        dev.load(scenarios, &vec![Delta::default(); scenarios.len()])?;
+        Ok(dev)
     }
 
     /// N-1 as [`solve_contingency_batch`](crate::newton::solve_contingency_batch)
@@ -153,17 +161,20 @@ impl DeviceBatch {
             deltas,
         } = contingencies(start, lines, transformers, shunts, scenarios)?;
         let batch: Vec<Scenario> = members.iter().map(|&s| scenarios[s].clone()).collect();
-        Ok((Self::build(start, &ybus, &batch, &deltas)?, members))
+        let mut dev = Self::with_capacity(start, &ybus, batch.len())?;
+        dev.load(&batch, &deltas)?;
+        Ok((dev, members))
     }
 
-    fn build(
+    /// The network of `start` and `ybus` and room for `capacity` scenarios,
+    /// none loaded: every scenario holds `start`'s state and is inactive.
+    pub(crate) fn with_capacity(
         start: &[Bus],
         ybus: &YBusSparse,
-        scenarios: &[Scenario],
-        deltas: &[Delta],
+        capacity: usize,
     ) -> Result<Self, LinearError> {
         let n_bus = start.len();
-        let batch = scenarios.len();
+        let batch = capacity;
         let (pattern, csr) = csr_jacobian(start, ybus);
         let non_slack: Vec<usize> = start
             .iter()
@@ -193,9 +204,6 @@ impl DeviceBatch {
             }
             y_row_ptr[i + 1] = y_col.len();
         }
-
-        // Each outage's changed values by Y-bus position, the rows they are
-        // in, and the fill-slot owners they change.
         let pair_owner: HashMap<(u32, u32), usize> = pattern
             .pair_slots()
             .iter()
@@ -206,35 +214,6 @@ impl DeviceBatch {
         for (d, &(i, _)) in pattern.diag_slots().iter().enumerate() {
             diag_owner[i as usize] = Some(d);
         }
-        let (mut ovr_ptr, mut ovr_pos, mut ovr_y) = (vec![0usize], Vec::new(), Vec::new());
-        let (mut row_scn, mut row_bus) = (Vec::new(), Vec::new());
-        let (mut slot_scn, mut slot_owner, mut slot_y) = (Vec::new(), Vec::new(), Vec::new());
-        for (s, delta) in deltas.iter().enumerate() {
-            let mut rows = BTreeSet::new();
-            for (&(r, c), &v) in delta.at.iter().zip(&delta.outaged) {
-                let at = ybus
-                    .row(r)
-                    .binary_search_by_key(&c, |&(k, _)| k)
-                    .expect("the intact Y-bus stores every branch's entries");
-                ovr_pos.push(y_row_ptr[r] + at);
-                ovr_y.extend([v.re, v.im]);
-                rows.insert(r);
-                let owner = if r == c {
-                    diag_owner[r]
-                } else {
-                    pair_owner.get(&(r as u32, c as u32)).copied()
-                };
-                if let Some(o) = owner {
-                    slot_scn.push(s);
-                    slot_owner.push(o);
-                    slot_y.extend([v.re, v.im]);
-                }
-            }
-            ovr_ptr.push(ovr_pos.len());
-            row_scn.extend(std::iter::repeat_n(s, rows.len()));
-            row_bus.extend(rows);
-        }
-
         let mut zip = vec![0.0; 6 * n_bus];
         for b in start {
             for zt in &b.zip_terms {
@@ -249,30 +228,15 @@ impl DeviceBatch {
             }
         }
 
-        let mut vm = Vec::with_capacity(n_bus * batch);
-        let mut va = Vec::with_capacity(n_bus * batch);
-        let mut p_spec = Vec::with_capacity(n_bus * batch);
-        let mut q_spec = Vec::with_capacity(n_bus * batch);
-        for sc in scenarios {
-            let first = vm.len();
-            for b in start {
-                vm.push(b.voltage_mag);
-                va.push(b.voltage_ang);
-                p_spec.push(b.p_spec);
-                q_spec.push(b.q_spec);
-            }
-            for ov in &sc.bus_overrides {
-                let at = first + ov.bus;
-                p_spec[at] = ov.p_spec.unwrap_or(p_spec[at]);
-                q_spec[at] = ov.q_spec.unwrap_or(q_spec[at]);
-                vm[at] = ov.voltage_mag.unwrap_or(vm[at]);
-            }
-        }
-
         let stream = Stream::new()?;
         let n = non_slack.len() + pq.len();
         let n_slots = 4 * (n_diag + n_pairs);
         let s = stream.0;
+        let state = |f: fn(&Bus) -> f64| -> Vec<f64> {
+            std::iter::repeat_n(start.iter().map(f), batch)
+                .flatten()
+                .collect()
+        };
         Ok(Self {
             n_bus,
             n_ns: non_slack.len(),
@@ -282,8 +246,8 @@ impl DeviceBatch {
             n_pairs,
             batch,
             stream,
-            y_row_ptr: upload(&u32s(y_row_ptr, "the Y-bus")?, s)?,
-            y_col: upload(&u32s(y_col, "the Y-bus")?, s)?,
+            y_row_ptr: upload(&u32s(y_row_ptr.iter().copied(), "the Y-bus")?, s)?,
+            y_col: upload(&u32s(y_col.iter().copied(), "the Y-bus")?, s)?,
             y: upload(&y, s)?,
             non_slack: upload(&u32s(non_slack, "a bus index")?, s)?,
             pq: upload(&u32s(pq, "a bus index")?, s)?,
@@ -321,23 +285,23 @@ impl DeviceBatch {
                 s,
             )?,
             src: upload(pattern.slot_sources(), s)?,
-            ovr_ptr: upload(&u32s(ovr_ptr, "N-1's changes")?, s)?,
-            ovr_pos: upload(&u32s(ovr_pos, "N-1's changes")?, s)?,
-            ovr_y: upload(&ovr_y, s)?,
-            n_rows: row_bus.len(),
-            row_scn: upload(&u32s(row_scn, "N-1's changes")?, s)?,
-            row_bus: upload(&u32s(row_bus, "N-1's changes")?, s)?,
-            n_slot_items: slot_owner.len(),
-            slot_scn: upload(&u32s(slot_scn, "N-1's changes")?, s)?,
-            slot_owner: upload(&u32s(slot_owner, "N-1's changes")?, s)?,
-            slot_y: upload(&slot_y, s)?,
-            active: upload(&vec![1; batch], s)?,
-            vm: upload(&vm, s)?,
-            va: upload(&va, s)?,
+            ovr_ptr: upload(&vec![0u32; batch + 1], s)?,
+            ovr_pos: DeviceBuffer::new(0)?,
+            ovr_y: DeviceBuffer::new(0)?,
+            n_rows: 0,
+            row_scn: DeviceBuffer::new(0)?,
+            row_bus: DeviceBuffer::new(0)?,
+            n_slot_items: 0,
+            slot_scn: DeviceBuffer::new(0)?,
+            slot_owner: DeviceBuffer::new(0)?,
+            slot_y: DeviceBuffer::new(0)?,
+            active: upload(&vec![0; batch], s)?,
+            vm: upload(&state(|b| b.voltage_mag), s)?,
+            va: upload(&state(|b| b.voltage_ang), s)?,
             sin_va: DeviceBuffer::new(n_bus * batch)?,
             cos_va: DeviceBuffer::new(n_bus * batch)?,
-            p_spec: upload(&p_spec, s)?,
-            q_spec: upload(&q_spec, s)?,
+            p_spec: upload(&state(|b| b.p_spec), s)?,
+            q_spec: upload(&state(|b| b.q_spec), s)?,
             p: DeviceBuffer::new(n_bus * batch)?,
             q: DeviceBuffer::new(n_bus * batch)?,
             rhs: DeviceBuffer::new(n * batch)?,
@@ -345,9 +309,104 @@ impl DeviceBatch {
             slots: DeviceBuffer::new(n_slots * batch)?,
             values: DeviceBuffer::new(nnz * batch)?,
             dx: DeviceBuffer::new(n * batch)?,
+            start: start.to_vec(),
+            host_row_ptr: y_row_ptr,
+            host_col: y_col,
+            diag_owner,
+            pair_owner,
             pattern,
             csr,
         })
+    }
+
+    /// Loads `scenarios` (at most the capacity) into the first slots, each
+    /// from `start`'s state with its overrides and, for N-1, its `delta` on
+    /// the shared Y-bus; they become the active ones. The slots after them
+    /// get `start`'s state back and stay inactive. The caller has checked
+    /// the scenarios.
+    pub(crate) fn load(
+        &mut self,
+        scenarios: &[Scenario],
+        deltas: &[Delta],
+    ) -> Result<(), LinearError> {
+        if scenarios.len() > self.batch || deltas.len() != scenarios.len() {
+            return Err(LinearError::Shape(format!(
+                "{} scenarios with {} deltas for a batch of {}",
+                scenarios.len(),
+                deltas.len(),
+                self.batch
+            )));
+        }
+        let (n_bus, batch, s) = (self.n_bus, self.batch, self.stream.0);
+        let mut vm = Vec::with_capacity(n_bus * batch);
+        let mut va = Vec::with_capacity(n_bus * batch);
+        let mut p_spec = Vec::with_capacity(n_bus * batch);
+        let mut q_spec = Vec::with_capacity(n_bus * batch);
+        for k in 0..batch {
+            let first = vm.len();
+            for b in &self.start {
+                vm.push(b.voltage_mag);
+                va.push(b.voltage_ang);
+                p_spec.push(b.p_spec);
+                q_spec.push(b.q_spec);
+            }
+            for ov in scenarios.get(k).map_or(&[][..], |sc| &sc.bus_overrides) {
+                let at = first + ov.bus;
+                p_spec[at] = ov.p_spec.unwrap_or(p_spec[at]);
+                q_spec[at] = ov.q_spec.unwrap_or(q_spec[at]);
+                vm[at] = ov.voltage_mag.unwrap_or(vm[at]);
+            }
+        }
+        self.vm.upload(&vm, s)?;
+        self.va.upload(&va, s)?;
+        self.p_spec.upload(&p_spec, s)?;
+        self.q_spec.upload(&q_spec, s)?;
+
+        // Each outage's changed values by Y-bus position, the rows they are
+        // in, and the fill-slot owners they change.
+        let (mut ovr_ptr, mut ovr_pos, mut ovr_y) = (vec![0usize], Vec::new(), Vec::new());
+        let (mut row_scn, mut row_bus) = (Vec::new(), Vec::new());
+        let (mut slot_scn, mut slot_owner, mut slot_y) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..batch {
+            let mut rows = BTreeSet::new();
+            if let Some(delta) = deltas.get(k) {
+                for (&(r, c), &v) in delta.at.iter().zip(&delta.outaged) {
+                    let row = self.host_row_ptr[r]..self.host_row_ptr[r + 1];
+                    let at = self.host_col[row.clone()]
+                        .binary_search(&c)
+                        .expect("the intact Y-bus stores every branch's entries");
+                    ovr_pos.push(row.start + at);
+                    ovr_y.extend([v.re, v.im]);
+                    rows.insert(r);
+                    let owner = if r == c {
+                        self.diag_owner[r]
+                    } else {
+                        self.pair_owner.get(&(r as u32, c as u32)).copied()
+                    };
+                    if let Some(o) = owner {
+                        slot_scn.push(k);
+                        slot_owner.push(o);
+                        slot_y.extend([v.re, v.im]);
+                    }
+                }
+            }
+            ovr_ptr.push(ovr_pos.len());
+            row_scn.extend(std::iter::repeat_n(k, rows.len()));
+            row_bus.extend(rows);
+        }
+        self.ovr_ptr.upload(&u32s(ovr_ptr, "N-1's changes")?, s)?;
+        self.ovr_pos = upload(&u32s(ovr_pos, "N-1's changes")?, s)?;
+        self.ovr_y = upload(&ovr_y, s)?;
+        self.n_rows = row_bus.len();
+        self.row_scn = upload(&u32s(row_scn, "N-1's changes")?, s)?;
+        self.row_bus = upload(&u32s(row_bus, "N-1's changes")?, s)?;
+        self.n_slot_items = slot_owner.len();
+        self.slot_scn = upload(&u32s(slot_scn, "N-1's changes")?, s)?;
+        self.slot_owner = upload(&u32s(slot_owner, "N-1's changes")?, s)?;
+        self.slot_y = upload(&slot_y, s)?;
+
+        let active: Vec<bool> = (0..batch).map(|k| k < scenarios.len()).collect();
+        self.set_active(&active)
     }
 
     pub fn batch(&self) -> usize {
@@ -529,6 +588,12 @@ impl DeviceBatch {
     pub fn update(&mut self, dx: &[f64]) -> Result<(), LinearError> {
         self.check("dx", dx.len(), self.n())?;
         self.dx.upload(dx, self.stream.0)?;
+        self.update_in_place()
+    }
+
+    /// The update from what the device's update buffer holds: the solution
+    /// cuDSS wrote there ([`linear_buffers`](Self::linear_buffers)).
+    pub(crate) fn update_in_place(&mut self) -> Result<(), LinearError> {
         // SAFETY: as in `mismatch`.
         unsafe {
             launched(
@@ -574,6 +639,17 @@ impl DeviceBatch {
     /// order.
     pub fn jacobian_values(&self) -> Result<Vec<f64>, LinearError> {
         self.get(&self.values)
+    }
+
+    /// The stream every kernel runs on, for cuDSS to run on too.
+    pub(crate) fn stream(&self) -> ffi::cudaStream_t {
+        self.stream.0
+    }
+
+    /// The Jacobian values (`batch × nnz`), the mismatch (`batch × n`) and
+    /// the update (`batch × n`): what cuDSS factors, solves and writes.
+    pub(crate) fn linear_buffers(&self) -> (*mut f64, *mut f64, *mut f64) {
+        (self.values.ptr, self.rhs.ptr, self.dx.ptr)
     }
 
     fn get(&self, buf: &DeviceBuffer<f64>) -> Result<Vec<f64>, LinearError> {

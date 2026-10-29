@@ -14,7 +14,9 @@
 //! crate builds and tests without CUDA:
 //! [`CudssUniformBatch`](cudss::CudssUniformBatch), the uniform batch on
 //! cuDSS, and [`DeviceBatch`](device::DeviceBatch), the network and every
-//! scenario's Newton state on the device with the step's kernels.
+//! scenario's Newton state on the device with the step's kernels, and
+//! [`GpuBatchSolver`](gpu::GpuBatchSolver), the adaptive loop over both: a
+//! session per network that keeps its cuDSS analysis.
 
 #[cfg(feature = "cuda")]
 mod cuda;
@@ -22,6 +24,8 @@ mod cuda;
 pub mod cudss;
 #[cfg(feature = "cuda")]
 pub mod device;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 pub mod newton;
 pub mod uniform;
 
@@ -29,12 +33,11 @@ pub mod uniform;
 pub use cudss::CudssUniformBatch;
 #[cfg(feature = "cuda")]
 pub use device::DeviceBatch;
+#[cfg(feature = "cuda")]
+pub use gpu::GpuBatchSolver;
 
 pub use newton::{
     BatchError, BatchOptions, BatchReport, Outcome, ScenarioResult, StepPolicy, csr_jacobian,
     solve_batch, solve_contingency_batch,
 };
-pub use uniform::{
-    CpuUniformBatch, CpuUniformBatch08, CpuUniformBatchWith, CsrPattern, LinearCounts, LinearError,
-    UniformBatch,
-};
+pub use uniform::{CpuUniformBatch, CsrPattern, LinearCounts, LinearError, UniformBatch};

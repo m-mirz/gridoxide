@@ -120,6 +120,32 @@ impl<T> DeviceBuffer<T> {
     }
 }
 
+/// Copies `src` to `dst` on the device, ordered on `stream`, as
+/// [`DeviceBuffer::upload`] does into memory it does not own.
+///
+/// # Safety
+///
+/// `dst` must be a device allocation of at least `src.len()` values.
+pub(crate) unsafe fn copy_to_device<T: Copy>(
+    dst: *mut T,
+    src: &[T],
+    stream: ffi::cudaStream_t,
+) -> Result<(), LinearError> {
+    // SAFETY: the caller's.
+    cuda(
+        unsafe {
+            ffi::cudaMemcpyAsync(
+                dst.cast(),
+                src.as_ptr().cast(),
+                std::mem::size_of_val(src),
+                ffi::cudaMemcpyHostToDevice,
+                stream,
+            )
+        },
+        "cudaMemcpyAsync (to device)",
+    )
+}
+
 /// A CUDA stream, synchronized and destroyed on drop. Declared before the
 /// buffers in a struct that owns both, it is dropped first, so no queued
 /// work outlives the memory it uses.

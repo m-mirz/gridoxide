@@ -7,7 +7,10 @@
 #
 #   CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh [cudss_version]
 #
-# cudss_version: 0.8.0 (gpusim2grid's and grid-bench's, default) or 1.0.0.
+# cudss_version: 1.0.0 (default; the one gridoxide-gpu builds against) or
+# 0.8.0 (gpusim2grid's), which phase 0 found computing NaN solutions in a
+# uniform batch: the probe still runs it, to reproduce that, but not
+# gridoxide-gpu's tests, whose build refuses it.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
@@ -18,7 +21,7 @@ if [ -z "${CUDA_INCLUDE_DIR:-}" ] && [ ! -f "$CUDA_HOME/include/cuda_runtime.h" 
    && [ -f /usr/include/cuda_runtime.h ]; then
   export CUDA_INCLUDE_DIR=/usr/include
 fi
-version=${1:-0.8.0}
+version=${1:-1.0.0}
 case "$version" in
   0.8.0) archive=libcudss-linux-x86_64-0.8.0.10_cuda12-archive
          sha=29716a05c64b28531309afcb7a9dd5044081a43197e72bdd0fbf29e9b4ee4707 ;;
@@ -80,6 +83,10 @@ done
 
 # gridoxide-gpu's cuDSS backend on the same device: its contract tests and the
 # adaptive Newton loop against the CPU stand-in. A failure is a result too.
+if [ "${version%%.*}" = 0 ]; then
+  echo "== gridoxide-gpu needs cuDSS 1.0 or later: its tests skipped for $version"
+  exit 0
+fi
 echo "== gridoxide-gpu --features cuda"
 (cd "$repo" && CUDSS_DIR="$cudss" CUDA_HOME="$CUDA_HOME" \
   cargo test --release -p gridoxide-gpu --features cuda 2>&1) \

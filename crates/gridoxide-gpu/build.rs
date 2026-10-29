@@ -60,6 +60,8 @@ mod cudss {
             }
         }
 
+        require_cudss_1(&cudss_include.join("cudss.h"));
+
         // Not checked for existence: `cargo check` against the stub headers
         // never links, and a missing library is the linker's clear error.
         for lib_dir in [cudss_dir.join("lib"), cuda_home.join("lib64")] {
@@ -88,6 +90,27 @@ mod cudss {
         println!("cargo:rerun-if-changed=cuda/kernels.h");
     }
 
+    /// cuDSS 0.8.0 computes wrong solutions in a uniform batch (NaN for some
+    /// systems from index 216 on, measured on an A100; `plans/GPU_BATCH_PLAN.md`),
+    /// so this crate needs 1.0 or later, read from the header's
+    /// `CUDSS_VERSION_MAJOR`.
+    fn require_cudss_1(header: &Path) {
+        let text = std::fs::read_to_string(header)
+            .unwrap_or_else(|e| panic!("couldn't read {}: {e}", header.display()));
+        let major = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("#define CUDSS_VERSION_MAJOR"))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or_else(|| panic!("{} has no CUDSS_VERSION_MAJOR", header.display()));
+        if major < 1 {
+            panic!(
+                "{} is cuDSS {major}.x: gridoxide-gpu needs cuDSS 1.0 or later, as 0.8.0 \
+                 computes wrong solutions in a uniform batch (see plans/GPU_BATCH_PLAN.md)",
+                header.display()
+            );
+        }
+    }
+
     fn compile_kernels(cuda_home: &Path, cuda_include: &Path) {
         // cc's CUDA mode finds nvcc through the NVCC variable (else `nvcc` on
         // the path) and takes `Build::compiler` for the *host* compiler nvcc
@@ -99,8 +122,11 @@ mod cudss {
             unsafe { env::set_var("NVCC", &nvcc) };
         }
         let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_80".to_string());
+        // The shared CUDA runtime, the one libcudss loads: cc's default, the
+        // static one, would put a second runtime into the process.
         cc::Build::new()
             .cuda(true)
+            .cudart("shared")
             .file("cuda/kernels.cu")
             .include(cuda_include)
             .flag(format!("-arch={arch}"))
@@ -124,9 +150,8 @@ mod cudss {
                 "cuda(Malloc|Free|Memcpy|MemcpyAsync|GetErrorString|Stream(Create|Destroy|Synchronize))",
             )
             .allowlist_type("cudss.*|cudaError.*|cudaDataType.*|cudaMemcpyKind|cudaStream_t")
-            // The value types are CUDA's `CUDA_R_*`: cuDSS 0.8.0's
-            // `CUDSS_R_*` enum equals them, and 1.0.0 makes `CUDSS_R_*`
-            // macros over them that bindgen cannot expand.
+            // The value types are CUDA's `CUDA_R_*`: cuDSS 1.0 makes
+            // `CUDSS_R_*` macros over them, which bindgen cannot expand.
             .allowlist_var("CUDSS_.*|CUDA_R_(32I|64F)")
             // Plain constants without the enum's name in front: the C names,
             // `CUDSS_STATUS_SUCCESS`, `cudaSuccess`.
