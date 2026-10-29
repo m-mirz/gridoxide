@@ -1,0 +1,25 @@
+[package]
+name = "gridoxide-gpu"
+description = "gridoxide's batched AC power flow for NVIDIA GPUs: an adaptive Newton loop over cuDSS's uniform batch"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+# Not published until the cuDSS backend exists and has been measured; see
+# plans/GPU_BATCH_PLAN.md.
+publish = false
+
+[dependencies]
+gridoxide-core = { path = "../gridoxide-core", version = "0.1.0" }
+gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.1.0" }
+
+[dev-dependencies]
+# The tests and the counting example read MATPOWER cases through gridoxide's
+# reader. A dev-dependency only: nothing in this library depends on gridoxide.
+gridoxide = { path = "../..", features = ["matpower"] }
+
+[features]
+default = []
+# The cuDSS backend (not yet written). Off by default so this crate, and the
+# workspace, build and test without CUDA; see plans/GPU_BATCH_PLAN.md.
+cuda = []

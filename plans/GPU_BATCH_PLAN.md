@@ -84,6 +84,39 @@ proportion to the systems selected, and whether `REFACTORIZATION` (not only
 5. **Analyse once per network**, not per call: the session keeps its cuDSS analysis, as
    `solve_batch` keeps its workers' solvers since #26.
 
+## Counts on the CPU, before any device
+
+`crates/gridoxide-gpu` already runs the loop above over a CPU stand-in for the uniform batch
+(`CpuUniformBatch`, which enforces the mask's documented rules), so the work each policy does
+can be counted now: `cargo run --release -p gridoxide-gpu --example batch_counts -- <case.m>`.
+Sweeps of grid-bench's kind (100 scenarios from the solved base case, a daily load curve
+between 0.6 and 1.0, 5% noise per bus), tolerance 1e-6 p.u.:
+
+| case | fixed 4: converged | adaptive: systems factored | reuse < 0.1: factored / solved / batch steps |
+|---|---|---|---|
+| case14 | 100 | 254 (−37%) | 100 / 379 / 5 |
+| case1354pegase | 100 | 337 (−16%) | 170 / 488 / 6 |
+| case2869pegase | 100 | 328 (−18%) | 164 / 479 / 7 |
+| case9241pegase | 100 | 357 (−11%) | 213 / 516 / 7 |
+| mvlv1004 | **60** | 401 (±0%, all 100 converge) | 282 / 479 / 7 |
+| mvlv10616 | 100 | 351 (−12%) | 246 / 451 / 6 |
+
+(The fixed policy factors and solves 400 systems in 4 batch steps.) What it means:
+
+- **Correctness is the sure gain.** Four fixed steps leave 40 of mvlv1004's 100 scenarios
+  short of the tolerance, the failure grid-bench shows for gpusim2grid; the adaptive loop
+  converges all, for the same work.
+- **Adaptive stopping saves 11-18% of factorizations on the transmission cases**, if masked
+  device work scales with the selection (phase 0, C).
+- **Factor reuse halves the factorizations against fixed steps** (−47 to −59%, −30% on
+  mvlv1004), for 20-30% more solves and 5-7 batch steps instead of 4, each with its mask
+  sync. gpusim2grid's own phase times put a refactorization at about 2.6 solves on
+  case9241pegase (5.8 against 2.2 ms per step), which would make reuse about 26% cheaper
+  than fixed steps there, adaptive stopping alone about 11%. Phase 0 replaces that estimate
+  with measurements.
+- **The CPU hand-off never triggered**: on these sweeps the scenarios converge together, with
+  no tail of a few stragglers. It stays an option for uneven batches (N-1).
+
 ## The crate
 
 - **`crates/gridoxide-gpu`**, depending on `gridoxide-core` (buses, Y-bus,
@@ -109,7 +142,10 @@ proportion to the systems selected, and whether `REFACTORIZATION` (not only
    driving the mask. **Gate:** if (A) fails, stop; if (C) shows no saving, drop items 2 and 3
    above and keep per-scenario stopping and the CPU hand-off.
 1. **Crate skeleton:** bindgen, build script, a stub that builds without CUDA, workspace and
-   feature wiring.
+   feature wiring. *Started:* `crates/gridoxide-gpu` exists, a workspace member that
+   `cargo publish --workspace` skips (`publish = false`), with the `UniformBatch` trait, the
+   CPU stand-in and the adaptive loop (phase 3's logic), tested against the CPU
+   `BatchSolver`; the bindgen and the cuDSS backend behind the `cuda` feature remain.
 2. **Device data and kernels:** CSR pattern, batched buffers, injections, mismatch, Jacobian
    fill, update, each checked against the CPU on one Newton step.
 3. **Adaptive Newton loop:** flags, mask, all-converged exit, divergence handling, analysis

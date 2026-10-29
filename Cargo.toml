@@ -1,5 +1,8 @@
 [workspace]
-members = ["crates/gridoxide-core", "crates/gridoxide-sparse", "crates/gridoxide-mcp"]
+# gridoxide-gpu is a member, not a dependency of gridoxide yet: a plain
+# `cargo build` here builds only this root package, and the GPU crate builds
+# without CUDA unless its `cuda` feature is on.
+members = ["crates/gridoxide-core", "crates/gridoxide-sparse", "crates/gridoxide-mcp", "crates/gridoxide-gpu"]
 
 # Shared by every crate in the workspace, so they release in lockstep.
 [workspace.package]
