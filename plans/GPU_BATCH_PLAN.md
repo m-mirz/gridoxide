@@ -306,7 +306,17 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
    follows each version's mask rule, uses `REFACTORIZATION` by default, and serializes
    0.8.0's calls; all device tests pass, in parallel test threads too.
 2. **Device data and kernels:** CSR pattern, batched buffers, injections, mismatch, Jacobian
-   fill, update, each checked against the CPU on one Newton step.
+   fill, update, each checked against the CPU on one Newton step. *Done* (2026-10-29):
+   `DeviceBatch` (`src/device.rs`, `cuda/kernels.cu`) holds the network and every
+   scenario's state on the device, with the fill in gridoxide-core's two passes (per-bus
+   and per-pair slots, then a gather into CSR order) and ‖F‖∞ reduced per scenario. N-1
+   keeps the shared Y-bus: each outage's changed values drive two fix-up kernels that
+   recompute only the rows' injections and the fill slots they touch. On case1354pegase
+   and mvlv1004 (sweeps with ZIP loads and PV setpoints) and 116 connected outages of
+   case1354pegase, every kernel matches the CPU to 6e-12 relative, the update is exact,
+   and after one step every scenario's mismatch is the CPU loop's to 1e-11
+   (`tests/device_test.rs`). The step's buffers still pass through the host to cuDSS;
+   phase 3 hands them over on the device.
 3. **Adaptive Newton loop:** flags, mask, all-converged exit, divergence handling, analysis
    kept per session.
 4. **Stragglers to the CPU,** then the factor-reuse experiment, each kept only if grid-bench

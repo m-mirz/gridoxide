@@ -66,9 +66,13 @@ The stub is valid C too, so gridoxide-gpu's bindgen runs against it and its cuDS
 can be type-checked the same way (from the repository root):
 
 ```bash
-CUDSS_DIR=<cudss> CUDA_INCLUDE_DIR=$PWD/probes/cudss_ubatch/stub \
+CUDSS_DIR=<cudss> CUDA_INCLUDE_DIR=$PWD/probes/cudss_ubatch/stub GRIDOXIDE_GPU_NO_NVCC=1 \
     cargo clippy -p gridoxide-gpu --features cuda --all-targets
 ```
+
+(`GRIDOXIDE_GPU_NO_NVCC` skips compiling the crate's kernels, which needs nvcc; their
+launchers' bindings still come from `cuda/kernels.h`, so their signatures are checked
+too.)
 
 The old `gpu-nvidia` branch's three FFI bugs were all signature mismatches that only a
 GPU machine surfaced; these checks catch that class before any GPU time is spent. Both

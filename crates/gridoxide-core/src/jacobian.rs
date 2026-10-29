@@ -389,6 +389,24 @@ impl JacobianPattern {
         &self.entries
     }
 
+    /// The fill's first pass, for a device that runs it itself: each
+    /// non-slack row bus with its `Y[i][i]`, owning slots `4d..4d + 4`
+    /// (H, N, M, L).
+    pub fn diag_slots(&self) -> &[(u32, Complex<f64>)] {
+        &self.diag
+    }
+
+    /// Each off-diagonal `(i, k)` pair with `Y[i][k]`, pair `p` owning slots
+    /// `4 · diag_slots().len() + 4p ..` (H, N, M, L).
+    pub fn pair_slots(&self) -> &[(u32, u32, Complex<f64>)] {
+        &self.pairs
+    }
+
+    /// The fill's second pass: the slot each entry copies, in entry order.
+    pub fn slot_sources(&self) -> &[u32] {
+        &self.src
+    }
+
     /// Writes this iteration's Jacobian values into `values`, which is
     /// resized to [`len`](Self::len) and otherwise fully overwritten.
     ///

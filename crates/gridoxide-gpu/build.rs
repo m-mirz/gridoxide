@@ -3,8 +3,9 @@ fn main() {
     cudss::build();
 }
 
-/// Links cuDSS and the CUDA runtime and generates their FFI bindings, only
-/// when the `cuda` feature is enabled — see `src/cudss.rs`.
+/// Links cuDSS and the CUDA runtime, compiles the Newton step's kernels
+/// (`cuda/kernels.cu`) with nvcc, and generates the FFI bindings of all
+/// three, only when the `cuda` feature is enabled — see `src/cuda.rs`.
 ///
 /// The same shape as gridoxide's `opf-ipopt` and `opf-highs` (in the root
 /// `build.rs`): nothing vendored, bindings generated against the install's own
@@ -19,7 +20,11 @@ fn main() {
 /// - `CUDA_INCLUDE_DIR` (default `$CUDA_HOME/include`): where
 ///   `cuda_runtime.h` is found. Pointing it at `probes/cudss_ubatch/stub`
 ///   lets `cargo check --features cuda` run on a machine without CUDA; only
-///   linking needs the real toolkit.
+///   linking needs the real toolkit. (Compiling the kernels needs nvcc,
+///   which a check without CUDA skips: set `GRIDOXIDE_GPU_NO_NVCC`.)
+/// - `CUDA_ARCH` (default `sm_80`, the A100): the architecture the kernels
+///   are compiled for; a mismatch is a runtime "no kernel image" error.
+/// - nvcc is `$CUDA_HOME/bin/nvcc` if it exists, else `nvcc` on the path.
 ///
 /// Both library directories also go on the run path of this crate's own
 /// tests and examples, so they run without `LD_LIBRARY_PATH`; a downstream
@@ -61,26 +66,60 @@ mod cudss {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
         }
+        if env::var_os("GRIDOXIDE_GPU_NO_NVCC").is_none() {
+            compile_kernels(&cuda_home, &cuda_include);
+        }
         println!("cargo:rustc-link-lib=dylib=cudss");
         println!("cargo:rustc-link-lib=dylib=cudart");
 
         generate_bindings(&cudss_include, &cuda_include);
 
-        for var in ["CUDSS_DIR", "CUDA_HOME", "CUDA_INCLUDE_DIR"] {
+        for var in [
+            "CUDSS_DIR",
+            "CUDA_HOME",
+            "CUDA_INCLUDE_DIR",
+            "CUDA_ARCH",
+            "GRIDOXIDE_GPU_NO_NVCC",
+        ] {
             println!("cargo:rerun-if-env-changed={var}");
         }
         println!("cargo:rerun-if-changed={}", cudss_include.display());
+        println!("cargo:rerun-if-changed=cuda/kernels.cu");
+        println!("cargo:rerun-if-changed=cuda/kernels.h");
+    }
+
+    fn compile_kernels(cuda_home: &Path, cuda_include: &Path) {
+        // cc's CUDA mode finds nvcc through the NVCC variable (else `nvcc` on
+        // the path) and takes `Build::compiler` for the *host* compiler nvcc
+        // wraps; setting nvcc there instead, as the old gpu-nvidia branch
+        // first did, drops cc's -Xcompiler wrapping of the host flags.
+        let nvcc = cuda_home.join("bin/nvcc");
+        if env::var_os("NVCC").is_none() && nvcc.is_file() {
+            // SAFETY: a build script is single-threaded.
+            unsafe { env::set_var("NVCC", &nvcc) };
+        }
+        let arch = env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_80".to_string());
+        cc::Build::new()
+            .cuda(true)
+            .file("cuda/kernels.cu")
+            .include(cuda_include)
+            .flag(format!("-arch={arch}"))
+            .compile("gridoxide_gpu_kernels");
     }
 
     fn generate_bindings(cudss_include: &Path, cuda_include: &Path) {
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let mut builder = bindgen::Builder::default()
-            .header_contents("cudss_wrapper.h", "#include <cudss.h>\n#include <cuda_runtime.h>\n")
+            .header_contents(
+                "cudss_wrapper.h",
+                "#include <cudss.h>\n#include <cuda_runtime.h>\n#include \"kernels.h\"\n",
+            )
             .clang_arg(format!("-I{}", cudss_include.display()))
             .clang_arg(format!("-I{}", cuda_include.display()))
-            // cuDSS's whole C API, and of the CUDA runtime only what
-            // `src/cudss.rs` calls.
-            .allowlist_function("cudss.*")
+            .clang_arg("-Icuda")
+            // cuDSS's whole C API, the kernels' launchers, and of the CUDA
+            // runtime only what `src/cuda.rs` and `src/cudss.rs` call.
+            .allowlist_function("cudss.*|go_.*")
             .allowlist_function(
                 "cuda(Malloc|Free|Memcpy|MemcpyAsync|GetErrorString|Stream(Create|Destroy|Synchronize))",
             )

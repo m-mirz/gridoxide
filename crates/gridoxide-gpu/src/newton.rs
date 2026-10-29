@@ -238,44 +238,11 @@ pub fn solve_contingency_batch<U: UniformBatch>(
     scenarios: &[Scenario],
     opts: &BatchOptions,
 ) -> Result<BatchReport, BatchError> {
-    check_buses(start, scenarios)?;
-    let n_branches = lines.len() + transformers.len();
-    for (scenario, sc) in scenarios.iter().enumerate() {
-        if let Some(&branch) = sc.branch_outages.iter().find(|&&b| b >= n_branches) {
-            return Err(BatchError::BranchOutOfRange {
-                scenario,
-                branch,
-                n_branches,
-            });
-        }
-    }
-
-    let n = start.len();
-    let mut ybus = {
-        let mut ybus = build_ybus_with_outages(n, lines, transformers, &[]);
-        stamp_shunts(&mut ybus, shunts);
-        ybus.finish()
-    };
-    let intact_components = structural_component_count(n, lines, transformers, &[]);
-    let mut members = Vec::new();
-    let mut deltas = Vec::new();
-    for (s, sc) in scenarios.iter().enumerate() {
-        let mut outaged = vec![false; n_branches];
-        for &b in &sc.branch_outages {
-            outaged[b] = true;
-        }
-        if structural_component_count(n, lines, transformers, &outaged) != intact_components {
-            continue;
-        }
-        members.push(s);
-        deltas.push(Delta::of_outage(
-            &ybus,
-            lines,
-            transformers,
-            &sc.branch_outages,
-        ));
-    }
-
+    let Contingencies {
+        mut ybus,
+        members,
+        deltas,
+    } = contingencies(start, lines, transformers, shunts, scenarios)?;
     let batch: Vec<Scenario> = members.iter().map(|&s| scenarios[s].clone()).collect();
     let solved = run::<U>(start, &mut ybus, &batch, &deltas, opts)?;
     let mut results: Vec<Option<ScenarioResult>> = vec![None; scenarios.len()];
@@ -301,7 +268,71 @@ pub fn solve_contingency_batch<U: UniformBatch>(
     })
 }
 
-fn check_buses(start: &[Bus], scenarios: &[Scenario]) -> Result<(), BatchError> {
+/// N-1's batch before it runs: the intact Y-bus, the scenarios whose
+/// outages keep the network connected, and each one's delta.
+pub(crate) struct Contingencies {
+    pub(crate) ybus: YBusSparse,
+    pub(crate) members: Vec<usize>,
+    pub(crate) deltas: Vec<Delta>,
+}
+
+/// Checks the scenarios and sorts out which outages split the network; what
+/// [`solve_contingency_batch`] and the device's
+/// [`DeviceBatch::contingencies`](crate::device::DeviceBatch::contingencies)
+/// share.
+pub(crate) fn contingencies(
+    start: &[Bus],
+    lines: &[Line],
+    transformers: &[Transformer],
+    shunts: &[ShuntAdm],
+    scenarios: &[Scenario],
+) -> Result<Contingencies, BatchError> {
+    check_buses(start, scenarios)?;
+    let n_branches = lines.len() + transformers.len();
+    for (scenario, sc) in scenarios.iter().enumerate() {
+        if let Some(&branch) = sc.branch_outages.iter().find(|&&b| b >= n_branches) {
+            return Err(BatchError::BranchOutOfRange {
+                scenario,
+                branch,
+                n_branches,
+            });
+        }
+    }
+
+    let n = start.len();
+    let ybus = {
+        let mut ybus = build_ybus_with_outages(n, lines, transformers, &[]);
+        stamp_shunts(&mut ybus, shunts);
+        ybus.finish()
+    };
+    let intact_components = structural_component_count(n, lines, transformers, &[]);
+    let mut members = Vec::new();
+    let mut deltas = Vec::new();
+    for (s, sc) in scenarios.iter().enumerate() {
+        let mut outaged = vec![false; n_branches];
+        for &b in &sc.branch_outages {
+            outaged[b] = true;
+        }
+        if structural_component_count(n, lines, transformers, &outaged) != intact_components {
+            continue;
+        }
+        members.push(s);
+        deltas.push(Delta::of_outage(
+            &ybus,
+            lines,
+            transformers,
+            &sc.branch_outages,
+        ));
+    }
+
+    Ok(Contingencies {
+        ybus,
+        members,
+        deltas,
+    })
+}
+
+pub(crate) fn check_buses(start: &[Bus], scenarios: &[Scenario]) -> Result<(), BatchError> {
     for (scenario, sc) in scenarios.iter().enumerate() {
         if let Some(ov) = sc.bus_overrides.iter().find(|ov| ov.bus >= start.len()) {
             return Err(BatchError::BusOutOfRange {
@@ -318,9 +349,9 @@ fn check_buses(start: &[Bus], scenarios: &[Scenario]) -> Result<(), BatchError> 
 /// the value with its outage and the intact one, to restore exactly. Empty
 /// for a scenario without outages.
 #[derive(Clone, Debug, Default)]
-struct Delta {
-    at: Vec<(usize, usize)>,
-    outaged: Vec<Complex<f64>>,
+pub(crate) struct Delta {
+    pub(crate) at: Vec<(usize, usize)>,
+    pub(crate) outaged: Vec<Complex<f64>>,
     intact: Vec<Complex<f64>>,
 }
 
@@ -368,13 +399,8 @@ fn run<U: UniformBatch>(
     opts: &BatchOptions,
 ) -> Result<BatchReport, BatchError> {
     let batch = scenarios.len();
-    let mut pattern = JacobianPattern::analyze(start, ybus);
+    let (mut pattern, csr) = csr_jacobian(start, ybus);
     let n = pattern.n_unknowns;
-    // CSR order, which cuDSS takes and the fill then writes directly.
-    let mut order: Vec<usize> = (0..pattern.len()).collect();
-    order.sort_by_key(|&k| (pattern.rows()[k], pattern.cols()[k]));
-    pattern.permute(&order);
-    let csr = csr_of(&pattern, n);
     let nnz = csr.nnz();
 
     let non_slack: Vec<usize> = start
@@ -439,10 +465,15 @@ fn run<U: UniformBatch>(
             for (k, &i) in pq.iter().enumerate() {
                 f[non_slack.len() + k] = effective_injection(&buses[i]).1 - q[i];
             }
-            norm[s] = f.iter().fold(
-                0.0f64,
-                |m, v| if v.is_nan() { f64::NAN } else { m.max(v.abs()) },
-            );
+            // NaN once any entry is NaN: `f64::max` would let a later
+            // finite entry replace it, and a NaN scenario pass as converged.
+            norm[s] = f.iter().fold(0.0f64, |m, v| {
+                if m.is_nan() || v.is_nan() {
+                    f64::NAN
+                } else {
+                    m.max(v.abs())
+                }
+            });
             injections[s] = (p, q);
 
             let done = match opts.policy {
@@ -579,6 +610,18 @@ fn run<U: UniformBatch>(
         linear: lin.counts(),
         cpu_handoffs,
     })
+}
+
+/// The Jacobian pattern of `start`'s bus types on `ybus`, its entries put in
+/// CSR order (which cuDSS takes and the fill then writes directly), and that
+/// order as a [`CsrPattern`]: what the CPU loop and the device share.
+pub fn csr_jacobian(start: &[Bus], ybus: &YBusSparse) -> (JacobianPattern, CsrPattern) {
+    let mut pattern = JacobianPattern::analyze(start, ybus);
+    let mut order: Vec<usize> = (0..pattern.len()).collect();
+    order.sort_by_key(|&k| (pattern.rows()[k], pattern.cols()[k]));
+    pattern.permute(&order);
+    let csr = csr_of(&pattern, pattern.n_unknowns);
+    (pattern, csr)
 }
 
 /// The pattern's entries, already in CSR order, as a [`CsrPattern`].

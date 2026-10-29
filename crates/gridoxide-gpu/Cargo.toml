@@ -21,14 +21,16 @@ gridoxide = { path = "../..", features = ["matpower"] }
 
 [build-dependencies]
 bindgen = { version = "0.72", optional = true }
+cc = { version = "1.2", optional = true }
 
 [features]
 default = []
-# The cuDSS backend, `CudssUniformBatch` (src/cudss.rs). Off by default so this
-# crate, and the workspace, build and test without CUDA. Needs libclang (for
-# bindgen), CUDSS_DIR and the CUDA 12 toolkit; build.rs says what each is.
-# On a machine without CUDA it can still be type-checked against the probe's
-# stub headers:
+# The cuDSS backend, `CudssUniformBatch` (src/cudss.rs), and the Newton step's
+# kernels, `DeviceBatch` (src/device.rs, cuda/kernels.cu). Off by default so
+# this crate, and the workspace, build and test without CUDA. Needs libclang
+# (for bindgen), CUDSS_DIR and the CUDA 12 toolkit with nvcc (CUDA_ARCH,
+# default sm_80); build.rs says what each is. On a machine without CUDA it can
+# still be type-checked against the probe's stub headers, nvcc skipped:
 #   CUDSS_DIR=<cudss> CUDA_INCLUDE_DIR=$PWD/probes/cudss_ubatch/stub \
-#     cargo check -p gridoxide-gpu --features cuda --all-targets
-cuda = ["dep:bindgen"]
+#     GRIDOXIDE_GPU_NO_NVCC=1 cargo check -p gridoxide-gpu --features cuda --all-targets
+cuda = ["dep:bindgen", "dep:cc"]

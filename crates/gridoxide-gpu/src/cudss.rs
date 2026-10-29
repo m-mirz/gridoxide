@@ -35,37 +35,12 @@
 //! Host data crosses as plain pageable copies on the solver's stream; the
 //! device-resident loop of phase 2 replaces them with kernels.
 
-use std::ffi::{CStr, CString, c_void};
+use std::ffi::CString;
 use std::ptr;
 use std::sync::Mutex;
 
+use crate::cuda::{DeviceBuffer, cuda, ffi};
 use crate::uniform::{CsrPattern, LinearCounts, LinearError, UniformBatch};
-
-#[allow(
-    non_upper_case_globals,
-    non_camel_case_types,
-    non_snake_case,
-    dead_code,
-    unused_imports,
-    unnecessary_transmutes,
-    clippy::all
-)]
-mod ffi {
-    include!(concat!(env!("OUT_DIR"), "/cudss_bindings.rs"));
-}
-
-fn cuda(err: ffi::cudaError_t, what: &str) -> Result<(), LinearError> {
-    if err == ffi::cudaSuccess {
-        return Ok(());
-    }
-    // SAFETY: cudaGetErrorString returns a static, NUL-terminated string for
-    // any error code, known or not.
-    let msg = unsafe { CStr::from_ptr(ffi::cudaGetErrorString(err)) };
-    Err(LinearError::Backend(format!(
-        "{what}: {}",
-        msg.to_string_lossy()
-    )))
-}
 
 fn cudss(status: ffi::cudssStatus_t, what: &str) -> Result<(), LinearError> {
     let name = match status {
@@ -80,79 +55,6 @@ fn cudss(status: ffi::cudssStatus_t, what: &str) -> Result<(), LinearError> {
         _ => "UNKNOWN",
     };
     Err(LinearError::Backend(format!("{what}: CUDSS_STATUS_{name}")))
-}
-
-/// A device allocation of `len` values of `T`, freed on drop.
-struct DeviceBuffer<T> {
-    ptr: *mut T,
-    len: usize,
-}
-
-impl<T: Copy> DeviceBuffer<T> {
-    fn new(len: usize) -> Result<Self, LinearError> {
-        let mut ptr: *mut c_void = ptr::null_mut();
-        // SAFETY: cudaMalloc writes a device pointer to `ptr` or fails.
-        cuda(
-            unsafe { ffi::cudaMalloc(&mut ptr, len * size_of::<T>()) },
-            "cudaMalloc",
-        )?;
-        Ok(Self {
-            ptr: ptr.cast(),
-            len,
-        })
-    }
-
-    /// Copies `src` to the device, ordered on `stream`. From pageable memory
-    /// the call returns once `src` has been staged, so `src` may be reused.
-    fn upload(&mut self, src: &[T], stream: ffi::cudaStream_t) -> Result<(), LinearError> {
-        assert_eq!(src.len(), self.len);
-        // SAFETY: both ranges are `len` values long.
-        cuda(
-            unsafe {
-                ffi::cudaMemcpyAsync(
-                    self.ptr.cast(),
-                    src.as_ptr().cast(),
-                    self.len * size_of::<T>(),
-                    ffi::cudaMemcpyHostToDevice,
-                    stream,
-                )
-            },
-            "cudaMemcpyAsync (to device)",
-        )
-    }
-
-    /// Copies the buffer into `dst` once everything queued on `stream`
-    /// before it has run.
-    fn download(&self, dst: &mut [T], stream: ffi::cudaStream_t) -> Result<(), LinearError> {
-        assert_eq!(dst.len(), self.len);
-        // SAFETY: both ranges are `len` values long; the synchronize makes
-        // the copy complete before `dst` is read.
-        cuda(
-            unsafe {
-                ffi::cudaMemcpyAsync(
-                    dst.as_mut_ptr().cast(),
-                    self.ptr.cast(),
-                    self.len * size_of::<T>(),
-                    ffi::cudaMemcpyDeviceToHost,
-                    stream,
-                )
-            },
-            "cudaMemcpyAsync (to host)",
-        )?;
-        cuda(
-            unsafe { ffi::cudaStreamSynchronize(stream) },
-            "cudaStreamSynchronize",
-        )
-    }
-}
-
-impl<T> Drop for DeviceBuffer<T> {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            // SAFETY: `ptr` came from cudaMalloc and is freed once.
-            unsafe { ffi::cudaFree(self.ptr.cast()) };
-        }
-    }
 }
 
 /// cuDSS's uniform batch; see the module documentation.
@@ -192,11 +94,11 @@ pub struct CudssUniformBatch {
 /// Whether the cuDSS these bindings were generated for keeps an unselected
 /// system's factors through a masked factorization: 1.0.0 does, 0.8.0 does
 /// not.
-const KEEPS_UNSELECTED_FACTORS: bool = ffi::CUDSS_VERSION_MAJOR >= 1;
+const KEEPS_UNSELECTED_FACTORS: bool = ffi::CUDSS_VERSION_MAJOR != 0;
 
 /// Whether concurrent handles must be serialized: 0.8.0 computes NaNs when
 /// two are at work at once (see the module documentation).
-const SERIALIZE_HANDLES: bool = ffi::CUDSS_VERSION_MAJOR < 1;
+const SERIALIZE_HANDLES: bool = ffi::CUDSS_VERSION_MAJOR == 0;
 
 static EXECUTE: Mutex<()> = Mutex::new(());
 
