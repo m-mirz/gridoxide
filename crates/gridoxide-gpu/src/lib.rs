@@ -22,5 +22,8 @@ pub mod uniform;
 #[cfg(feature = "cuda")]
 pub use cudss::CudssUniformBatch;
 
-pub use newton::{BatchOptions, BatchReport, Outcome, ScenarioResult, StepPolicy, solve_batch};
+pub use newton::{
+    BatchError, BatchOptions, BatchReport, Outcome, ScenarioResult, StepPolicy, solve_batch,
+    solve_contingency_batch,
+};
 pub use uniform::{CpuUniformBatch, CsrPattern, LinearCounts, LinearError, UniformBatch};

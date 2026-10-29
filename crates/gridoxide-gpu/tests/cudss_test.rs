@@ -11,7 +11,7 @@ use gridoxide::solver::{JacobianBackend, PersistentSolver, SolveStatus};
 use gridoxide::types::Bus;
 use gridoxide_gpu::{
     BatchOptions, BatchReport, CpuUniformBatch, CsrPattern, CudssUniformBatch, LinearError,
-    Outcome, UniformBatch, solve_batch,
+    Outcome, UniformBatch, solve_batch, solve_contingency_batch,
 };
 
 /// `[[a, 1], [1, b]]`: a 2×2 pattern with every entry stored.
@@ -153,4 +153,51 @@ fn the_newton_loop_on_the_device_matches_the_stand_in() {
             assert_same(&gpu, &cpu);
         }
     }
+}
+
+/// N-1 on the device: each outage's Jacobian values from its own Y-bus
+/// delta, the same steps and answers as the stand-in.
+#[test]
+fn n1_on_the_device_matches_the_stand_in() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/data/benchmark-grids/matpower/case1354pegase.m");
+    let net = gridoxide::matpower::read(&path).unwrap();
+    let (base, _) = load("matpower/case1354pegase.m");
+    let n_branches = net.lines.len() + net.transformers.len();
+    let scenarios: Vec<Scenario> = (0..64)
+        .map(|k| Scenario {
+            bus_overrides: Vec::new(),
+            branch_outages: vec![k * n_branches / 64],
+        })
+        .collect();
+    let opts = BatchOptions {
+        tol: 1e-10,
+        ..BatchOptions::default()
+    };
+    fn run<U: UniformBatch>(
+        net: &gridoxide::matpower::MatpowerNetwork,
+        base: &[Bus],
+        scenarios: &[Scenario],
+        opts: &BatchOptions,
+    ) -> BatchReport {
+        solve_contingency_batch::<U>(
+            base,
+            &net.lines,
+            &net.transformers,
+            &net.shunts,
+            scenarios,
+            opts,
+        )
+        .unwrap()
+    }
+    let gpu = run::<CudssUniformBatch>(&net, &base, &scenarios, &opts);
+    let cpu = run::<CpuUniformBatch>(&net, &base, &scenarios, &opts);
+    for (g, c) in gpu.scenarios.iter().zip(&cpu.scenarios) {
+        assert_eq!(g.outcome, c.outcome);
+        assert_eq!(g.newton_steps, c.newton_steps);
+        for (a, b) in g.voltage_mag.iter().zip(&c.voltage_mag) {
+            assert!((a - b).abs() < 1e-9, "|V| {a} against {b}");
+        }
+    }
+    assert_eq!(gpu.linear, cpu.linear);
 }

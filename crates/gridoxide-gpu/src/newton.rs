@@ -20,16 +20,31 @@
 //! the last few active scenarios on the CPU instead of running a nearly empty
 //! batch.
 //!
+//! N-1 ([`solve_contingency_batch`]) is the same loop: an outage that keeps
+//! the network connected leaves the Y-bus pattern, and so the Jacobian
+//! pattern, as it is and changes only the values at the outaged branches'
+//! few positions. Each scenario carries those values as a delta on the intact
+//! Y-bus, applied around its mismatch and Jacobian fill and restored exactly
+//! afterwards, as the CPU's `solve_contingencies` applies outages in place;
+//! the device keeps the same deltas per scenario. An outage that splits the
+//! network has another pattern and is not a member of the batch.
+//!
 //! Buffers are laid out as the device needs them: `B × nnz` Jacobian values in
 //! CSR order, `B × n` right-hand sides and updates, system-major. Bus state is
 //! still one `Vec<Bus>` per scenario here, the CPU's layout; the device keeps
 //! it in flat arrays.
 
+use std::collections::BTreeMap;
+
 use gridoxide_core::jacobian::JacobianPattern;
-use gridoxide_core::network::{YBusSparse, effective_injection, power_injections};
+use gridoxide_core::network::{
+    ShuntAdm, YBusSparse, branch_stamp, build_ybus_with_outages, effective_injection,
+    power_injections, stamp_shunts, structural_component_count,
+};
 use gridoxide_core::scenario::Scenario;
 use gridoxide_core::solver::{JacobianBackend, PersistentSolver, SolveStatus};
-use gridoxide_core::types::{Bus, BusType};
+use gridoxide_core::types::{Bus, BusType, Line, Transformer};
+use num_complex::Complex;
 
 use crate::uniform::{CsrPattern, LinearCounts, LinearError, UniformBatch};
 
@@ -81,6 +96,11 @@ pub enum Outcome {
     Diverged,
     /// Out of steps with the mismatch above `tol`.
     NotConverged,
+    /// The scenario's outage splits the network, so it is not solved here:
+    /// its pattern is not the batch's, and an island without a reference has
+    /// no solution to report. The CPU's `BatchSolver::solve_contingencies`
+    /// solves it island by island.
+    Splits,
 }
 
 #[derive(Clone, Debug)]
@@ -90,10 +110,11 @@ pub struct ScenarioResult {
     pub newton_steps: usize,
     /// Of those, the steps that refactored the Jacobian.
     pub factorizations: usize,
-    /// ‖F‖∞ at the last evaluation.
+    /// ‖F‖∞ at the last evaluation; NaN for [`Outcome::Splits`].
     pub final_mismatch: f64,
     /// Whether the CPU finished it (`cpu_handoff`).
     pub on_cpu: bool,
+    /// Empty for [`Outcome::Splits`].
     pub voltage_mag: Vec<f64>,
     pub voltage_ang: Vec<f64>,
 }
@@ -108,6 +129,65 @@ pub struct BatchReport {
     pub cpu_handoffs: usize,
 }
 
+/// Why a batch was refused before it ran.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BatchError {
+    /// [`solve_batch`] was given a scenario with branch outages, which a
+    /// finished Y-bus cannot honour; [`solve_contingency_batch`] takes the
+    /// branch lists.
+    OutagesUnsupported {
+        scenario: usize,
+    },
+    BusOutOfRange {
+        scenario: usize,
+        bus: usize,
+        n_buses: usize,
+    },
+    BranchOutOfRange {
+        scenario: usize,
+        branch: usize,
+        n_branches: usize,
+    },
+    Linear(LinearError),
+}
+
+impl std::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BatchError::OutagesUnsupported { scenario } => write!(
+                f,
+                "scenario {scenario} requests branch outages, which `solve_batch` cannot \
+                 honour from a finished Y-bus — use `solve_contingency_batch`"
+            ),
+            BatchError::BusOutOfRange {
+                scenario,
+                bus,
+                n_buses,
+            } => write!(
+                f,
+                "scenario {scenario} overrides bus {bus}, but there are {n_buses} buses"
+            ),
+            BatchError::BranchOutOfRange {
+                scenario,
+                branch,
+                n_branches,
+            } => write!(
+                f,
+                "scenario {scenario} takes out branch {branch}, but there are {n_branches} branches"
+            ),
+            BatchError::Linear(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for BatchError {}
+
+impl From<LinearError> for BatchError {
+    fn from(e: LinearError) -> Self {
+        BatchError::Linear(e)
+    }
+}
+
 /// Solves every scenario from `start`'s voltages: `start` carries the
 /// network's bus types and injections and the voltages every scenario starts
 /// from (a solved base case, for a sweep from one operating point), and each
@@ -115,13 +195,167 @@ pub struct BatchReport {
 ///
 /// Every scenario has `start`'s bus types, so they share one Jacobian
 /// pattern, which is what makes them a uniform batch. The network must be one
-/// component with its reference; islands are the CPU solver's business.
+/// component with its reference; islands are the CPU solver's business. A
+/// scenario with branch outages is refused, not ignored.
 pub fn solve_batch<U: UniformBatch>(
     start: &[Bus],
     ybus: &YBusSparse,
     scenarios: &[Scenario],
     opts: &BatchOptions,
-) -> Result<BatchReport, LinearError> {
+) -> Result<BatchReport, BatchError> {
+    check_buses(start, scenarios)?;
+    if let Some(scenario) = scenarios
+        .iter()
+        .position(|sc| !sc.branch_outages.is_empty())
+    {
+        return Err(BatchError::OutagesUnsupported { scenario });
+    }
+    let deltas = vec![Delta::default(); scenarios.len()];
+    run::<U>(start, &mut ybus.clone(), scenarios, &deltas, opts)
+}
+
+/// N-1 as one batch: each scenario's `branch_outages` taken off the intact
+/// network built from `lines`, `transformers` and `shunts`, on top of its bus
+/// overrides; see the module documentation. A scenario whose outage splits
+/// the network is reported as [`Outcome::Splits`] and costs the batch
+/// nothing.
+pub fn solve_contingency_batch<U: UniformBatch>(
+    start: &[Bus],
+    lines: &[Line],
+    transformers: &[Transformer],
+    shunts: &[ShuntAdm],
+    scenarios: &[Scenario],
+    opts: &BatchOptions,
+) -> Result<BatchReport, BatchError> {
+    check_buses(start, scenarios)?;
+    let n_branches = lines.len() + transformers.len();
+    for (scenario, sc) in scenarios.iter().enumerate() {
+        if let Some(&branch) = sc.branch_outages.iter().find(|&&b| b >= n_branches) {
+            return Err(BatchError::BranchOutOfRange {
+                scenario,
+                branch,
+                n_branches,
+            });
+        }
+    }
+
+    let n = start.len();
+    let mut ybus = {
+        let mut ybus = build_ybus_with_outages(n, lines, transformers, &[]);
+        stamp_shunts(&mut ybus, shunts);
+        ybus.finish()
+    };
+    let intact_components = structural_component_count(n, lines, transformers, &[]);
+    let mut members = Vec::new();
+    let mut deltas = Vec::new();
+    for (s, sc) in scenarios.iter().enumerate() {
+        let mut outaged = vec![false; n_branches];
+        for &b in &sc.branch_outages {
+            outaged[b] = true;
+        }
+        if structural_component_count(n, lines, transformers, &outaged) != intact_components {
+            continue;
+        }
+        members.push(s);
+        deltas.push(Delta::of_outage(
+            &ybus,
+            lines,
+            transformers,
+            &sc.branch_outages,
+        ));
+    }
+
+    let batch: Vec<Scenario> = members.iter().map(|&s| scenarios[s].clone()).collect();
+    let solved = run::<U>(start, &mut ybus, &batch, &deltas, opts)?;
+    let mut results: Vec<Option<ScenarioResult>> = vec![None; scenarios.len()];
+    for (&s, r) in members.iter().zip(solved.scenarios) {
+        results[s] = Some(r);
+    }
+    Ok(BatchReport {
+        scenarios: results
+            .into_iter()
+            .map(|r| {
+                r.unwrap_or(ScenarioResult {
+                    outcome: Outcome::Splits,
+                    newton_steps: 0,
+                    factorizations: 0,
+                    final_mismatch: f64::NAN,
+                    on_cpu: false,
+                    voltage_mag: Vec::new(),
+                    voltage_ang: Vec::new(),
+                })
+            })
+            .collect(),
+        ..solved
+    })
+}
+
+fn check_buses(start: &[Bus], scenarios: &[Scenario]) -> Result<(), BatchError> {
+    for (scenario, sc) in scenarios.iter().enumerate() {
+        if let Some(ov) = sc.bus_overrides.iter().find(|ov| ov.bus >= start.len()) {
+            return Err(BatchError::BusOutOfRange {
+                scenario,
+                bus: ov.bus,
+                n_buses: start.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One scenario's change to the shared Y-bus: at each position it touches,
+/// the value with its outage and the intact one, to restore exactly. Empty
+/// for a scenario without outages.
+#[derive(Clone, Debug, Default)]
+struct Delta {
+    at: Vec<(usize, usize)>,
+    outaged: Vec<Complex<f64>>,
+    intact: Vec<Complex<f64>>,
+}
+
+impl Delta {
+    /// The outaged branches' stamps subtracted from the intact values in
+    /// stamp order, as the CPU's `solve_contingencies` subtracts them, so
+    /// both see the same bits.
+    fn of_outage(
+        ybus: &YBusSparse,
+        lines: &[Line],
+        transformers: &[Transformer],
+        branches: &[usize],
+    ) -> Self {
+        let mut values: BTreeMap<(usize, usize), Complex<f64>> = BTreeMap::new();
+        for &b in branches {
+            for (r, c, y) in branch_stamp(lines, transformers, b).into_entries() {
+                *values.entry((r, c)).or_insert_with(|| ybus.get(r, c)) -= y;
+            }
+        }
+        Self {
+            at: values.keys().copied().collect(),
+            outaged: values.values().copied().collect(),
+            intact: values.keys().map(|&(r, c)| ybus.get(r, c)).collect(),
+        }
+    }
+
+    /// Writes `values` at the delta's positions into the Y-bus and the
+    /// Jacobian pattern's copies of it.
+    fn write(&self, values: &[Complex<f64>], ybus: &mut YBusSparse, pattern: &mut JacobianPattern) {
+        for (&(r, c), &y) in self.at.iter().zip(values) {
+            ybus.set(r, c, y)
+                .expect("the intact Y-bus stores every branch's entries");
+            pattern.set_admittance(r, c, y);
+        }
+    }
+}
+
+/// The batched loop over scenarios that share `start`'s pattern, each with
+/// its delta on `ybus`; `ybus` is left as it came.
+fn run<U: UniformBatch>(
+    start: &[Bus],
+    ybus: &mut YBusSparse,
+    scenarios: &[Scenario],
+    deltas: &[Delta],
+    opts: &BatchOptions,
+) -> Result<BatchReport, BatchError> {
     let batch = scenarios.len();
     let mut pattern = JacobianPattern::analyze(start, ybus);
     let n = pattern.n_unknowns;
@@ -180,8 +414,10 @@ pub fn solve_batch<U: UniformBatch>(
             if !active[s] {
                 continue;
             }
+            deltas[s].write(&deltas[s].outaged, ybus, &mut pattern);
             let buses = &states[s];
             let (p, q) = power_injections(buses, ybus);
+            deltas[s].write(&deltas[s].intact, ybus, &mut pattern);
             let f = &mut rhs[s * n..(s + 1) * n];
             for (k, &i) in non_slack.iter().enumerate() {
                 f[k] = effective_injection(&buses[i]).0 - p[i];
@@ -240,7 +476,17 @@ pub fn solve_batch<U: UniformBatch>(
                     continue;
                 }
                 let budget = opts.max_iter - steps[s];
+                // The solver analyses its Jacobian at its first solve and
+                // takes later deltas in place, as the CPU's N-1 does.
+                deltas[s].write(&deltas[s].outaged, ybus, &mut pattern);
+                for &(r, c) in &deltas[s].at {
+                    solver.set_admittance(r, c, ybus.get(r, c));
+                }
                 let (_, stats) = solver.solve_with_stats(&mut states[s], ybus, opts.tol, budget);
+                deltas[s].write(&deltas[s].intact, ybus, &mut pattern);
+                for &(r, c) in &deltas[s].at {
+                    solver.set_admittance(r, c, ybus.get(r, c));
+                }
                 // `iterations()` counts mismatch evaluations, the first at
                 // the state the batch left, so it is one more than the steps
                 // when the solve converged.
@@ -275,7 +521,9 @@ pub fn solve_batch<U: UniformBatch>(
             .collect();
         for s in (0..batch).filter(|&s| refactor[s]) {
             let (p, q) = &injections[s];
+            deltas[s].write(&deltas[s].outaged, ybus, &mut pattern);
             pattern.fill(&states[s], p, q, &mut fill);
+            deltas[s].write(&deltas[s].intact, ybus, &mut pattern);
             values[s * nnz..(s + 1) * nnz].copy_from_slice(&fill);
             factorizations[s] += 1;
         }

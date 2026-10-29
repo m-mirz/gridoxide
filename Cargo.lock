@@ -706,6 +706,7 @@ dependencies = [
  "gridoxide",
  "gridoxide-core",
  "gridoxide-sparse",
+ "num-complex",
 ]
 
 [[package]]

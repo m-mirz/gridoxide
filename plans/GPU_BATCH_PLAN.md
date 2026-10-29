@@ -117,6 +117,64 @@ between 0.6 and 1.0, 5% noise per bus), tolerance 1e-6 p.u.:
 - **The CPU hand-off never triggered**: on these sweeps the scenarios converge together, with
   no tail of a few stragglers. It stays an option for uneven batches (N-1).
 
+### N-1
+
+`solve_contingency_batch` runs the same loop over outages: one that keeps the network
+connected changes only the Y-bus values at the outaged branches' positions, not its pattern,
+so every such outage is a member of the same uniform batch. Each scenario carries its
+changed values as a delta on the intact Y-bus, applied around its mismatch and Jacobian
+fill and restored exactly afterwards, as the CPU's `solve_contingencies` applies outages in
+place; on the device the deltas (a few entries per outage) are what each scenario adds to the
+shared Y-bus. An outage that splits the network has another pattern and is reported as
+`Outcome::Splits`, for the CPU to solve island by island. Tested against the CPU's
+`solve_contingencies` on case1354pegase: same steps, voltages to 1e-9, the same outages
+split.
+
+`batch_counts -- <case.m> 100 1e-6 n1`, 100 single-branch outages spread over the branch
+list, from the solved base case:
+
+| case | split | fixed 4: systems factored | adaptive: factored, max steps | reuse < 0.1: factored / solved / batch steps |
+|---|---|---|---|---|
+| case14 | 5 | 380 | 265 (−30%), 4 | 130 / 380 / 5 |
+| case1354pegase | 22 | 312 | 202 (−35%), 3 | 94 / 295 / 6 |
+| case2869pegase | 17 | 332 | 210 (−37%), 4 | 100 / 302 / 6 |
+| case9241pegase | 8 | 368 | 217 (−41%), 3 | 106 / 302 / 5 |
+
+Every connected outage converges under every policy. Adaptive stopping saves 30-41% of
+factorizations here, against 11-18% on sweeps: most outages barely move the operating
+point and converge in two or three steps (2.4-2.8 on average), where a fixed count pays
+for the worst. Factor reuse cuts factorizations by 66-71% against fixed steps. The radial feeders (mvlv1004,
+mvlv10616) split on every outage, as radial networks must, so their N-1 is not a batch
+at all.
+
+Every branch's outage (`batch_counts -- <case.m> 0 1e-6 n1`, in batches of 1000: the
+stand-in keeps two copies of each scenario's Jacobian, so case9241pegase's 16049 outages in
+one batch would need about 40 GB, and a device batch is bounded the same way):
+
+| case | outages | split | fixed 4: short | factored: fixed 4 / adaptive / reuse < 0.1 | batch steps: adaptive / hand-off |
+|---|---|---|---|---|---|
+| case1354pegase | 1991 | 561 | 3 | 5720 / 3804 (−33%) / 1801 (−69%) | 20 / 3 (36 to the CPU) |
+| case2869pegase | 4582 | 778 | 1 | 15216 / 9547 (−37%) / 4488 (−71%) | 5 / 3 (64 to the CPU) |
+| case9241pegase | 16049 | 1665 | 30 | 57536 / 34953 (−39%) / 17344 (−70%) | 173 / 50 over 17 batches (312 to the CPU) |
+
+(Batch steps for one batch of the whole list on the first two; case9241pegase ran as 17
+batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
+
+- **Here fixed steps fail, and the full lists show it.** On case1354pegase four steps leave
+  three outages short: branch 1325 converges in 5 adaptive steps; branches 75 and 1754 do
+  not converge in 20, and neither does the CPU's `solve_contingencies` (mismatch 1.4e3 and
+  1.9 p.u. after 20 steps; the CPU ends at 7.9e3 and 0.52). They are reported as not
+  converged, where a fixed count reports nothing. On case9241pegase four steps leave 30
+  outages short; the adaptive loop converges 20 of them and reports 10 as not converged in
+  20 steps (not yet checked against the CPU one by one).
+- **Factor reuse can change a hard outage's outcome.** With reuse < 0.3, two of
+  case9241pegase's hard outages diverge instead of running out of steps; the converged
+  set is the same. Reuse stays an experiment, with < 0.1 the safer threshold.
+- **The CPU hand-off pays on N-1.** Unlike the sweeps, a few outages need many more steps
+  than the rest: on case1354pegase, the batch would run 20 steps for two hopeless
+  scenarios. Handing the last 5% to the CPU ends the batch after 3 steps, and cuts
+  case9241pegase's batch steps from 173 to 50.
+
 ## The crate
 
 - **`crates/gridoxide-gpu`**, depending on `gridoxide-core` (buses, Y-bus,
