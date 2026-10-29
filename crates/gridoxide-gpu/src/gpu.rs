@@ -22,13 +22,12 @@
 
 use gridoxide_core::network::{ShuntAdm, YBusSparse};
 use gridoxide_core::scenario::Scenario;
-use gridoxide_core::solver::{JacobianBackend, PersistentSolver};
 use gridoxide_core::types::{Bus, Line, Transformer};
 
 use crate::cudss::CudssBatch;
 use crate::device::DeviceBatch;
 use crate::newton::{
-    BatchError, BatchOptions, BatchReport, Contingencies, Delta, Outcome, ScenarioResult,
+    BatchError, BatchOptions, BatchReport, Contingencies, Delta, HandOff, Outcome, ScenarioResult,
     StepPolicy, check_buses, contingencies, decide, finish_on_cpu, intact_ybus, needs_factors,
 };
 use crate::uniform::LinearCounts;
@@ -253,34 +252,33 @@ impl GpuBatchSolver {
                 && n_active <= limit
             {
                 let (vm, va) = self.dev.voltages()?;
-                let mut solver = PersistentSolver::new(JacobianBackend::KluNative);
-                for s in 0..m {
-                    if !active[s] {
-                        continue;
-                    }
-                    let mut buses = self.start.clone();
-                    for ov in &scenarios[s].bus_overrides {
-                        let b = &mut buses[ov.bus];
-                        b.p_spec = ov.p_spec.unwrap_or(b.p_spec);
-                        b.q_spec = ov.q_spec.unwrap_or(b.q_spec);
-                    }
-                    for (i, b) in buses.iter_mut().enumerate() {
-                        b.voltage_mag = vm[s * n_bus + i];
-                        b.voltage_ang = va[s * n_bus + i];
-                    }
-                    let (taken, final_norm, o) = finish_on_cpu(
-                        &mut solver,
-                        &mut buses,
-                        &mut self.ybus,
-                        &deltas[s],
-                        opts,
-                        steps[s],
-                    );
+                let handed: Vec<HandOff> = (0..m)
+                    .filter(|&s| active[s])
+                    .map(|s| {
+                        let mut buses = self.start.clone();
+                        for ov in &scenarios[s].bus_overrides {
+                            let b = &mut buses[ov.bus];
+                            b.p_spec = ov.p_spec.unwrap_or(b.p_spec);
+                            b.q_spec = ov.q_spec.unwrap_or(b.q_spec);
+                        }
+                        for (i, b) in buses.iter_mut().enumerate() {
+                            b.voltage_mag = vm[s * n_bus + i];
+                            b.voltage_ang = va[s * n_bus + i];
+                        }
+                        HandOff {
+                            scenario: s,
+                            buses,
+                            steps: steps[s],
+                        }
+                    })
+                    .collect();
+                for (h, (taken, final_norm, o)) in finish_on_cpu(handed, &self.ybus, deltas, opts) {
+                    let s = h.scenario;
                     steps[s] += taken;
                     factorizations[s] += taken;
                     norm[s] = final_norm;
                     outcome[s] = Some(o);
-                    on_cpu[s] = Some(buses);
+                    on_cpu[s] = Some(h.buses);
                     active[s] = false;
                     report.cpu_handoffs += 1;
                 }

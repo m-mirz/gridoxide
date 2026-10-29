@@ -370,7 +370,35 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
    refactorization and solve, the LU is most of the GPU time; the GPU pays only on the
    larger cases.
 4. **Stragglers to the CPU,** then the factor-reuse experiment, each kept only if grid-bench
-   shows it pays.
+   shows it pays. *Measured* (2026-10-29, `gpu_bench`, cuDSS 1.0.0, tol 1e-6, GPU solve
+   time; the CPU `BatchSolver` on 30 threads in the last column). The hand-off now solves
+   its scenarios in parallel on rayon's pool, each on a fresh solver, in both loops; run one
+   by one it cost case9241pegase's N-1 3 s.
+
+   | case | adaptive | hand-off 50 | reuse < 0.1 | both | CPU |
+   |---|---|---|---|---|---|
+   | case1354pegase, 1000 sweep | 258 ms | 259 ms (never taken) | 216 ms | | 114 ms |
+   | case2869pegase, 1000 sweep | 410 ms | 410 ms (never taken) | 349 ms | | 267 ms |
+   | case9241pegase, 1000 sweep | 1335 ms | 1334 ms (never taken) | 1240 ms | | 1478 ms |
+   | case1354pegase, N-1 (1991) | 636 ms | 489 ms | 569 ms | 485 ms | 505-510 ms |
+   | case2869pegase, N-1 (4582) | 1793 ms | 1939 ms | 1588 ms | 1785 ms | 2100-2120 ms |
+   | case9241pegase, N-1 (16049) | 25.7 s | 25.4 s | 23.5 s | 23.7 s | 25.9-26.2 s |
+
+   - **Factor reuse pays everywhere**: 7-16% on sweeps, 9-11% on N-1, from half the
+     factorizations for about 45% more solves. It ends each scenario at a different
+     iterate within the tolerance (voltages 2e-7 to 7e-7 from the CPU's at tol 1e-6,
+     against 1e-12 without), and a hopeless outage's outcome can change: case9241pegase
+     reported 10 not converged in one run and 9 not converged and 1 diverged in another.
+     It stays an option, off by default; grid-bench's oracle decides whether it can be on.
+   - **The hand-off pays only where a few outages drag a chunk on**: 23% on
+     case1354pegase's N-1, 1% on case9241pegase's, 8% worse on case2869pegase's, never taken
+     on sweeps (their scenarios converge together). It stays an option, off by default, its
+     threshold to be set per case if at all.
+   - With either, the GPU is now at 0.75-0.98x the CPU's time on N-1 and on
+     case9241pegase's sweep, and still 1.3-2x it on the smaller sweeps. The LU is
+     0.24 ms per system on case9241pegase, so of 25 s for its N-1 about 8 s are
+     factorizations and solves: the rest, the chunks' tail steps and the per-step host
+     round trip, is where phase 5's profile has to look first.
 5. **Python API, tests, grid-bench:** every scenario against the CPU `BatchSolver` to 1e-8, a
    GPU Docker image, and the GPU tabs against gpusim2grid and ExaPF.jl on the same A100.
 

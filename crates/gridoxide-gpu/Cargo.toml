@@ -13,6 +13,9 @@ publish = false
 gridoxide-core = { path = "../gridoxide-core", version = "0.1.0" }
 gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.1.0" }
 num-complex = "0.4.6"
+# The CPU hand-off's scenarios in parallel, on the pool gridoxide's CPU
+# BatchSolver shares (already in the dependency tree).
+rayon = "1.12"
 
 [dev-dependencies]
 # The tests and the counting example read MATPOWER cases through gridoxide's

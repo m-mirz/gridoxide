@@ -499,19 +499,17 @@ fn run<U: UniformBatch>(
             && let Some(limit) = opts.cpu_handoff
             && n_active <= limit
         {
-            let mut solver = PersistentSolver::new(JacobianBackend::KluNative);
-            for s in 0..batch {
-                if !active[s] {
-                    continue;
-                }
-                let (taken, final_norm, o) = finish_on_cpu(
-                    &mut solver,
-                    &mut states[s],
-                    ybus,
-                    &deltas[s],
-                    opts,
-                    steps[s],
-                );
+            let handed: Vec<HandOff> = (0..batch)
+                .filter(|&s| active[s])
+                .map(|s| HandOff {
+                    scenario: s,
+                    buses: std::mem::take(&mut states[s]),
+                    steps: steps[s],
+                })
+                .collect();
+            for (h, (taken, final_norm, o)) in finish_on_cpu(handed, ybus, deltas, opts) {
+                let s = h.scenario;
+                states[s] = h.buses;
                 steps[s] += taken;
                 factorizations[s] += taken;
                 norm[s] = final_norm;
@@ -632,11 +630,52 @@ pub(crate) fn needs_factors(
     }
 }
 
-/// Finishes one scenario on the CPU ([`BatchOptions::cpu_handoff`]) from
-/// the state the batch left in `buses`, on `ybus` with its `delta` applied
-/// for the solve and restored after: the steps it took, its last mismatch
-/// and its outcome. `solver` is shared by the scenarios handed off together.
+/// A scenario the batch hands to the CPU: its index in the batch, the state
+/// the batch left it in, and the steps it has taken.
+pub(crate) struct HandOff {
+    pub(crate) scenario: usize,
+    pub(crate) buses: Vec<Bus>,
+    pub(crate) steps: usize,
+}
+
+/// Finishes the handed-off scenarios on the CPU ([`BatchOptions::cpu_handoff`]),
+/// in parallel on rayon's pool as the CPU `BatchSolver` runs, each on its own
+/// solver and on a copy of `ybus` with its delta (from `deltas`, by batch
+/// index) applied. Returns each with the steps it took, its last mismatch
+/// and its outcome, in the order given.
+///
+/// A fresh solver per scenario, rather than one per thread, keeps the result
+/// of every scenario independent of which others shared its thread.
 pub(crate) fn finish_on_cpu(
+    handed: Vec<HandOff>,
+    ybus: &YBusSparse,
+    deltas: &[Delta],
+    opts: &BatchOptions,
+) -> Vec<(HandOff, (usize, f64, Outcome))> {
+    use rayon::prelude::*;
+    handed
+        .into_par_iter()
+        .map_init(
+            || ybus.clone(),
+            |ybus, mut h| {
+                let mut solver = PersistentSolver::new(JacobianBackend::KluNative);
+                let done = finish_one(
+                    &mut solver,
+                    &mut h.buses,
+                    ybus,
+                    &deltas[h.scenario],
+                    opts,
+                    h.steps,
+                );
+                (h, done)
+            },
+        )
+        .collect()
+}
+
+/// One scenario of [`finish_on_cpu`], on `ybus` with `delta` applied for the
+/// solve and restored after.
+fn finish_one(
     solver: &mut PersistentSolver,
     buses: &mut [Bus],
     ybus: &mut YBusSparse,

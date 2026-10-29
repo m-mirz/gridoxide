@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! cargo run --release -p gridoxide-gpu --features cuda --example gpu_bench -- \
-//!     <case.m> [B] [sweep|n1] [capacity] [tol]
+//!     <case.m> [B] [sweep|n1] [capacity] [tol] [handoff=N] [reuse=R]
 //! ```
 //!
 //! The scenarios are `batch_counts`'s: a grid-bench sweep (a daily load curve
@@ -13,7 +13,10 @@
 //! every scenario from the solved base case; the device solves in chunks of
 //! `capacity` (default min(B, 1024)). The session's analysis is timed apart:
 //! a session keeps it for every later solve. Each solve is timed as the
-//! median of three, after one untimed run.
+//! median of three, after one untimed run. `handoff=N` finishes the last N
+//! active scenarios of each chunk on the CPU, `reuse=R` keeps a scenario on
+//! its factors while its mismatch falls more than R-fold
+//! (`BatchOptions::cpu_handoff`, `reuse_below`).
 
 use std::time::Instant;
 
@@ -101,10 +104,17 @@ fn main() {
     let capacity: usize = args
         .get(4)
         .map_or(scenarios.len().min(1024), |c| c.parse().unwrap());
-    let opts = BatchOptions {
+    let mut opts = BatchOptions {
         tol,
         ..BatchOptions::default()
     };
+    for arg in args.iter().skip(6) {
+        match arg.split_once('=') {
+            Some(("handoff", n)) => opts.cpu_handoff = Some(n.parse().unwrap()),
+            Some(("reuse", r)) => opts.reuse_below = Some(r.parse().unwrap()),
+            _ => panic!("unknown option {arg}: handoff=N or reuse=R"),
+        }
+    }
 
     let t = Instant::now();
     let mut gpu = if n1 {
@@ -162,16 +172,19 @@ fn main() {
     let steps: usize = report.scenarios.iter().map(|r| r.newton_steps).sum();
 
     println!(
-        "{path}: {} buses, {} {}, tol {tol:e}, capacity {capacity}, cuDSS {:?}",
+        "{path}: {} buses, {} {}, tol {tol:e}, capacity {capacity}, hand-off {:?}, \
+         reuse {:?}, cuDSS {:?}",
         net.buses.len(),
         scenarios.len(),
         if n1 { "outages" } else { "sweep scenarios" },
+        opts.cpu_handoff,
+        opts.reuse_below,
         gridoxide_gpu::cudss::version()
     );
     println!(
         "  gpu: open (analysis) {open_ms:.1} ms, solve {gpu_ms:.1} ms ({:.3} ms/scenario), \
          {} converged, {} not, {} diverged, {} split; {} batch steps, {:.2} steps/scenario, \
-         {} systems factored",
+         {} systems factored, {} solved, {} on the CPU",
         gpu_ms / scenarios.len() as f64,
         count(Outcome::Converged),
         count(Outcome::NotConverged),
@@ -179,7 +192,9 @@ fn main() {
         count(Outcome::Splits),
         report.batch_steps,
         steps as f64 / scenarios.len() as f64,
-        report.linear.systems_factored
+        report.linear.systems_factored,
+        report.linear.systems_solved,
+        report.cpu_handoffs
     );
     println!(
         "  cpu: {} threads, solve {cpu_ms:.1} ms ({:.3} ms/scenario), {cpu_converged} converged",
