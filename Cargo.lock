@@ -702,6 +702,7 @@ dependencies = [
 name = "gridoxide-gpu"
 version = "0.1.0"
 dependencies = [
+ "bindgen",
  "gridoxide",
  "gridoxide-core",
  "gridoxide-sparse",

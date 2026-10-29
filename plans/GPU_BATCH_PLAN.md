@@ -142,10 +142,17 @@ between 0.6 and 1.0, 5% noise per bus), tolerance 1e-6 p.u.:
    driving the mask. **Gate:** if (A) fails, stop; if (C) shows no saving, drop items 2 and 3
    above and keep per-scenario stopping and the CPU hand-off.
 1. **Crate skeleton:** bindgen, build script, a stub that builds without CUDA, workspace and
-   feature wiring. *Started:* `crates/gridoxide-gpu` exists, a workspace member that
-   `cargo publish --workspace` skips (`publish = false`), with the `UniformBatch` trait, the
-   CPU stand-in and the adaptive loop (phase 3's logic), tested against the CPU
-   `BatchSolver`; the bindgen and the cuDSS backend behind the `cuda` feature remain.
+   feature wiring. *Done, untested on a device:* `crates/gridoxide-gpu` is a workspace
+   member that `cargo publish --workspace` skips (`publish = false`), with the
+   `UniformBatch` trait, the CPU stand-in and the adaptive loop (phase 3's logic), tested
+   against the CPU `BatchSolver`. Behind the `cuda` feature, `build.rs` generates the
+   bindings from `cudss.h` (`CUDSS_DIR`, `CUDA_HOME`) and `CudssUniformBatch` implements
+   the trait in gpusim2grid's shape, with host copies of values, right-hand sides and
+   solutions per call (phase 2 moves them onto the device). `REFACTORIZATION` stays off
+   (`use_refactorization`) until probe B shows it honours the mask. It type-checks against
+   cuDSS 0.8.0 and 1.0.0 through the probe's stub headers; `run.sh` runs its device tests
+   (`tests/cudss_test.rs`: the mask contract, and the Newton loop step for step against
+   the stand-in) after the probe.
 2. **Device data and kernels:** CSR pattern, batched buffers, injections, mismatch, Jacobian
    fill, update, each checked against the CPU on one Newton step.
 3. **Adaptive Newton loop:** flags, mask, all-converged exit, divergence handling, analysis

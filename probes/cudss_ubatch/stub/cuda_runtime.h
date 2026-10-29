@@ -1,5 +1,6 @@
 // Syntax-check stand-in for the CUDA runtime header: the declarations probe.cpp uses,
-// with the real signatures (CUDA 12 runtime API).
+// with the real signatures (CUDA 12 runtime API). Valid C as well as C++, so that
+// crates/gridoxide-gpu's bindgen (which parses C) can be checked against it too.
 #pragma once
 #include <stddef.h>
 #include "library_types.h"
@@ -7,7 +8,9 @@ typedef struct CUstream_st* cudaStream_t;
 typedef struct CUevent_st* cudaEvent_t;
 typedef enum cudaError { cudaSuccess = 0 } cudaError_t;
 enum cudaMemcpyKind { cudaMemcpyHostToHost = 0, cudaMemcpyHostToDevice = 1, cudaMemcpyDeviceToHost = 2, cudaMemcpyDeviceToDevice = 3 };
+#ifdef __cplusplus
 extern "C" {
+#endif
 const char* cudaGetErrorString(cudaError_t error);
 cudaError_t cudaMalloc(void** devPtr, size_t size);
 cudaError_t cudaFree(void* devPtr);
@@ -22,5 +25,7 @@ cudaError_t cudaEventDestroy(cudaEvent_t event);
 cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
 cudaError_t cudaEventSynchronize(cudaEvent_t event);
 cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end);
+#ifdef __cplusplus
 }
 template <class T> cudaError_t cudaMalloc(T** devPtr, size_t size) { return cudaMalloc((void**)devPtr, size); }
+#endif

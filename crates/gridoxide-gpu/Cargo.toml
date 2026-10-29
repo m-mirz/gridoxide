@@ -18,8 +18,16 @@ gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.1.0" }
 # reader. A dev-dependency only: nothing in this library depends on gridoxide.
 gridoxide = { path = "../..", features = ["matpower"] }
 
+[build-dependencies]
+bindgen = { version = "0.72", optional = true }
+
 [features]
 default = []
-# The cuDSS backend (not yet written). Off by default so this crate, and the
-# workspace, build and test without CUDA; see plans/GPU_BATCH_PLAN.md.
-cuda = []
+# The cuDSS backend, `CudssUniformBatch` (src/cudss.rs). Off by default so this
+# crate, and the workspace, build and test without CUDA. Needs libclang (for
+# bindgen), CUDSS_DIR and the CUDA 12 toolkit; build.rs says what each is.
+# On a machine without CUDA it can still be type-checked against the probe's
+# stub headers:
+#   CUDSS_DIR=<cudss> CUDA_INCLUDE_DIR=$PWD/probes/cudss_ubatch/stub \
+#     cargo check -p gridoxide-gpu --features cuda --all-targets
+cuda = ["dep:bindgen"]

@@ -31,6 +31,24 @@ impl CsrPattern {
     pub fn nnz(&self) -> usize {
         self.col_idx.len()
     }
+
+    /// Values for the analysis, which is of the pattern alone but runs on
+    /// numbers (KLU's also factors once; cuDSS's reordering may read them):
+    /// a strictly diagonally dominant matrix, which cannot be singular for any
+    /// pattern that stores its diagonal, as a power-flow Jacobian does. A real
+    /// system that is singular then fails its own solve, not the batch's
+    /// analysis.
+    pub fn surrogate_values(&self) -> Vec<f64> {
+        let mut values = Vec::with_capacity(self.nnz());
+        for r in 0..self.n {
+            let row = &self.col_idx[self.row_ptr[r]..self.row_ptr[r + 1]];
+            values.extend(
+                row.iter()
+                    .map(|&c| if c == r { row.len() as f64 + 1.0 } else { 1.0 }),
+            );
+        }
+        values
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,23 +147,12 @@ impl CpuUniformBatch {
 
 impl UniformBatch for CpuUniformBatch {
     fn analyze(pattern: &CsrPattern, batch: usize) -> Result<Self, LinearError> {
-        let mut entries = Vec::with_capacity(pattern.nnz());
-        for r in 0..pattern.n {
-            for &c in &pattern.col_idx[pattern.row_ptr[r]..pattern.row_ptr[r + 1]] {
-                entries.push((r, c));
-            }
-        }
-        // The analysis is of the pattern alone, as cuDSS's is: KLU's also
-        // factors once, so it gets values that cannot be singular, a strictly
-        // diagonally dominant matrix (any pattern with its diagonal stored,
-        // which a power-flow Jacobian has). A real system that is singular
-        // then fails its own solve, not the batch's analysis.
-        let row_len: Vec<usize> = (0..pattern.n)
-            .map(|r| pattern.row_ptr[r + 1] - pattern.row_ptr[r])
-            .collect();
-        let surrogate: Vec<(usize, usize, f64)> = entries
-            .iter()
-            .map(|&(r, c)| (r, c, if r == c { row_len[r] as f64 + 1.0 } else { 1.0 }))
+        let rows = (0..pattern.n)
+            .flat_map(|r| std::iter::repeat_n(r, pattern.row_ptr[r + 1] - pattern.row_ptr[r]));
+        let surrogate: Vec<(usize, usize, f64)> = rows
+            .zip(&pattern.col_idx)
+            .zip(pattern.surrogate_values())
+            .map(|((r, &c), v)| (r, c, v))
             .collect();
         let mut lu = SparseLu::new(LuBackend::KluNative);
         if !lu.analyze(pattern.n, &surrogate) {

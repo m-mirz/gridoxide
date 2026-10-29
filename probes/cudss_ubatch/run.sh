@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Phase 0 of plans/GPU_BATCH_PLAN.md, on a machine with an NVIDIA GPU, the CUDA
 # toolkit and Rust. Fetches cuDSS (pinned, checksummed), builds the probe,
-# writes the Jacobian dumps from this checkout and runs the probe over batch
-# sizes. Results go to probes/cudss_ubatch/results/.
+# writes the Jacobian dumps from this checkout, runs the probe over batch
+# sizes, then gridoxide-gpu's cuDSS backend tests (`--features cuda`). Results
+# go to probes/cudss_ubatch/results/.
 #
 #   CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh [cudss_version]
 #
@@ -51,3 +52,10 @@ for case in case1354pegase case2869pegase case9241pegase; do
     "$work/probe" "$dump" "$B" 7 2>&1 | tee "$out" | grep -E "^RESULT|^PASS|^FAIL|cuDSS " || true
   done
 done
+
+# gridoxide-gpu's cuDSS backend on the same device: its contract tests and the
+# adaptive Newton loop against the CPU stand-in. A failure is a result too.
+echo "== gridoxide-gpu --features cuda"
+(cd "$repo" && CUDSS_DIR="$cudss" CUDA_HOME="$CUDA_HOME" \
+  cargo test --release -p gridoxide-gpu --features cuda 2>&1) \
+  | tee "$here/results/gridoxide-gpu-cudss$version.txt" | grep -E "^test |^test result" || true

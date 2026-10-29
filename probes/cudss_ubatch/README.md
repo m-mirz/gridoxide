@@ -30,7 +30,9 @@ CUDA_HOME=/usr/local/cuda probes/cudss_ubatch/run.sh 1.0.0    # and 1.0.0
 grid-bench's gpusim2grid image does), builds the probe with `g++`, writes dumps of 64
 scenarios for case1354pegase, case2869pegase and case9241pegase, and runs B = 64, 256,
 1024 and 2048 (systems tiled from the 64), with cuDSS's OpenMP threading layer on.
-Results go to `results/`.
+Last, it runs `crates/gridoxide-gpu`'s tests with the `cuda` feature: the cuDSS backend's
+contract (masks, unfactored systems) and the adaptive Newton loop on the device against the
+CPU stand-in, step for step. Results go to `results/`.
 
 ## Checking it without a GPU
 
@@ -43,6 +45,16 @@ g++ -std=c++17 -fsyntax-only -Wall -Wextra -Iprobes/cudss_ubatch/stub \
     -I<cudss>/include probes/cudss_ubatch/probe.cpp
 ```
 
+The stub is valid C too, so gridoxide-gpu's bindgen runs against it and its cuDSS backend
+can be type-checked the same way (from the repository root):
+
+```bash
+CUDSS_DIR=<cudss> CUDA_INCLUDE_DIR=$PWD/probes/cudss_ubatch/stub \
+    cargo clippy -p gridoxide-gpu --features cuda --all-targets
+```
+
 The old `gpu-nvidia` branch's three FFI bugs were all signature mismatches that only a
-GPU machine surfaced; this check catches that class before any GPU time is spent. It
-passes against cuDSS 0.8.0 and 1.0.0.
+GPU machine surfaced; these checks catch that class before any GPU time is spent. Both
+pass against cuDSS 0.8.0 and 1.0.0. (The Rust one already caught a difference between
+them: 1.0.0 turned `CUDSS_R_*` into macros over CUDA's `CUDA_R_*`, which bindgen cannot
+expand, so the backend uses the `CUDA_R_*` names, valid in both.)
