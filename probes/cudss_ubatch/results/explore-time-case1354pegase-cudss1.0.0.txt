@@ -1,8 +1,0 @@
-reorder=0 factor_alg=0 mt=0 B=1: analysis 83.8 factor 17.29 refactor 0.31 solve 0.18 ms (per system 0.310 / 0.179), lu_nnz 25475, err 3.2e-14
-reorder=0 factor_alg=0 mt=0 B=8: analysis 79.0 factor 17.23 refactor 0.67 solve 0.27 ms (per system 0.084 / 0.034), lu_nnz 25475, err 2.8e-14
-reorder=0 factor_alg=0 mt=0 B=15: analysis 79.8 factor 18.18 refactor 1.05 solve 0.39 ms (per system 0.070 / 0.026), lu_nnz 25475, err 3.7e-14
-reorder=0 factor_alg=0 mt=0 B=16: analysis 77.8 factor 17.37 refactor 1.10 solve 0.41 ms (per system 0.069 / 0.025), lu_nnz 25475, err 3.8e-14
-reorder=0 factor_alg=0 mt=0 B=64: analysis 80.2 factor 20.52 refactor 3.96 solve 1.25 ms (per system 0.062 / 0.019), lu_nnz 25475, err 3.9e-14
-reorder=0 factor_alg=0 mt=0 B=256: analysis 79.4 factor 32.05 refactor 15.30 solve 4.64 ms (per system 0.060 / 0.018), lu_nnz 25475, err 3.7e-14
-reorder=0 factor_alg=0 mt=0 B=1024: analysis 77.0 factor 65.04 refactor 48.44 solve 14.68 ms (per system 0.047 / 0.014), lu_nnz 25475, err 4.5e-14
-reorder=0 factor_alg=0 mt=0 B=2048: analysis 77.1 factor 113.39 refactor 96.70 solve 29.22 ms (per system 0.047 / 0.014), lu_nnz 25475, err 4.5e-14

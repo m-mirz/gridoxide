@@ -71,7 +71,8 @@ documentation: [Phase 0 on an A100](#phase-0-on-an-a100).
 
 Run on 2026-10-29 on an A100-SXM4-40GB (driver 580, CUDA 12.8), cuDSS 0.8.0 and 1.0.0, with
 `probes/cudss_ubatch/run.sh`; its follow-up `explore.cpp` answers what the probe's first run
-raised. The raw output is in `probes/cudss_ubatch/results/`.
+raised. Its raw output goes to `probes/cudss_ubatch/results/`, which is not tracked; the
+numbers that matter are in the tables below.
 
 - **A, the uniform batch: passes in 1.0.0, fails in 0.8.0** (as first reported here: passes
   in both; see the correction below). In 1.0.0 every system of case1354pegase,

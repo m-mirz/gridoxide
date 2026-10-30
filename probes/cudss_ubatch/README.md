@@ -42,8 +42,9 @@ A distribution's CUDA package (Ubuntu's `nvidia-cuda-toolkit`) keeps its headers
 
 ## Results
 
-Run on an A100-SXM4-40GB on 2026-10-29; `results/` holds the output, and
-[the plan](../../plans/GPU_BATCH_PLAN.md#phase-0-on-an-a100) says what it means. In short:
+Run on an A100-SXM4-40GB on 2026-10-29; `run.sh` writes the raw output to `results/`
+(not tracked), and [the plan](../../plans/GPU_BATCH_PLAN.md#phase-0-on-an-a100) records
+the numbers and what they mean. In short:
 (A) passes in 1.0.0 and **fails in 0.8.0**: some systems from index 216 on come back NaN,
 which the first run reported as a pass because its comparison was blind to NaN (fixed). (B) holds as documented in 1.0.0, but 0.8.0 drops the factors
 of the systems a factorization leaves out and overwrites their solutions, so two of probe

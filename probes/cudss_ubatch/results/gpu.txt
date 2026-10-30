@@ -1,2 +1,0 @@
-name, driver_version, memory.total [MiB]
-NVIDIA A100-SXM4-40GB, 580.105.08, 40960 MiB
