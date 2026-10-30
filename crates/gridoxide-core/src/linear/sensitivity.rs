@@ -49,7 +49,7 @@
 //! limitation, as a `TODO PTDF: distributed slack` in the equivalent place.
 
 use crate::types::{Bus, BusType};
-use gridoxide_sparse::sparse::RealFactorization;
+use gridoxide_sparse::klu_native::KluNativeSystem;
 
 use super::btheta::{DcBranch, NOT_UNKNOWN, Partition, partition, reduced_b_triplets};
 use crate::network::Verdict;
@@ -86,10 +86,58 @@ impl DenseMatrix {
     }
 }
 
+/// Angles and flows after each outage of
+/// [`DcSensitivity::contingencies`], outage after outage.
+#[derive(Clone, Debug)]
+pub struct DcContingencies {
+    n_buses: usize,
+    n_branches: usize,
+    /// Per outage, one angle per bus (radians), outage-major.
+    pub angles: Vec<f64>,
+    /// Per outage, one from-end flow per flat branch (per unit), outage-major.
+    pub flows: Vec<f64>,
+    /// Per outage, whether it has a post-outage state; an unsolved outage's
+    /// rows are NaN.
+    pub solved: Vec<bool>,
+}
+
+impl DcContingencies {
+    /// From buffers computed elsewhere (gridoxide-gpu's device solver), in
+    /// this layout: `angles` and `flows` outage-major, NaN rows where
+    /// `solved` is false.
+    pub fn from_parts(
+        n_buses: usize,
+        n_branches: usize,
+        angles: Vec<f64>,
+        flows: Vec<f64>,
+        solved: Vec<bool>,
+    ) -> Self {
+        assert_eq!(angles.len(), solved.len() * n_buses);
+        assert_eq!(flows.len(), solved.len() * n_branches);
+        Self {
+            n_buses,
+            n_branches,
+            angles,
+            flows,
+            solved,
+        }
+    }
+
+    /// Outage `k`'s bus angles.
+    pub fn angles(&self, k: usize) -> &[f64] {
+        &self.angles[k * self.n_buses..(k + 1) * self.n_buses]
+    }
+
+    /// Outage `k`'s branch flows.
+    pub fn flows(&self, k: usize) -> &[f64] {
+        &self.flows[k * self.n_branches..(k + 1) * self.n_branches]
+    }
+}
+
 /// One island's factorized reduced system, plus the bookkeeping to map
 /// between global bus indices and its own rows.
 struct Island {
-    factorization: RealFactorization,
+    factorization: KluNativeSystem,
     /// Reduced row -> global bus index.
     unknown: Vec<usize>,
     /// Positions into `DcSensitivity::branches` for this island's branches.
@@ -99,10 +147,11 @@ struct Island {
 /// Precomputed DC sensitivity factors for one network.
 ///
 /// Holds one factorization per island, computed once. Every accessor below is
-/// a solve against those, never a refactorization — which is the entire reason
-/// [`sparse::RealFactorization`](gridoxide_sparse::sparse::RealFactorization) exists
-/// rather than reusing the Newton path's
-/// [`solver::LinearSolver`](crate::solver::LinearSolver).
+/// a solve against those, never a refactorization: gridoxide's KLU port
+/// ([`KluNativeSystem::solve`]), which solves one right-hand side about twice
+/// as fast as faer's sparse LU on these matrices (290 against 585 µs on
+/// case9241pegase's reduced B) and, unlike faer's solve, never parallelises
+/// on its own, so [`contingencies`](Self::contingencies) owns the threads.
 pub struct DcSensitivity {
     n_buses: usize,
     /// Total flat branch count (lines + transformers), the index space every
@@ -189,7 +238,7 @@ impl DcSensitivity {
             }
 
             let triplets = reduced_b_triplets(branches, &island_branches[ci], &reduced_pos);
-            let factorization = RealFactorization::new(m, &triplets)?;
+            let factorization = KluNativeSystem::new(m, &triplets)?;
 
             let idx = islands.len();
             for &i in &c.bus_indices {
@@ -394,6 +443,110 @@ impl DcSensitivity {
             out[l] = 0.0;
         }
         Some(out)
+    }
+
+    /// Every single-branch outage of `outages`, each on its own: the bus
+    /// angles and the branch flows after it.
+    ///
+    /// [`outage_flows`](Self::outage_flows) gives the flows; this adds the
+    /// angles, from the same solve. The outage is the transfer
+    /// `c = f_l / (1 − d_l)` across the branch's terminals that the removed
+    /// branch would have carried, so with `θ⁽ˡ⁾` the angle response to a unit
+    /// transfer (the solve `outage_flows` already makes):
+    ///
+    /// \\[ \theta^{new} = \theta + c\,\theta^{(l)}, \qquad
+    ///     f^{new} = f + c\,\psi[:, l], \quad f^{new}_l = 0 \\]
+    ///
+    /// Reference buses keep their angles, and so does every bus outside the
+    /// outaged branch's island. `base_angles` and `base_flows` are the base
+    /// case's (`Bus::voltage_ang` after a DC solve, per bus, and
+    /// [`DcSolution::branch_p`](super::btheta::DcSolution::branch_p)).
+    ///
+    /// The outages run in parallel on the current rayon pool, one triangular
+    /// solve each against the factorization computed once in
+    /// [`new`](Self::new); install a pool around the call to choose the
+    /// thread count. An outage with no post-outage state (a radial branch,
+    /// one out of range or carrying no DC flow) is marked unsolved and its
+    /// rows are NaN. `None` only if the base vectors have the wrong length.
+    pub fn contingencies(
+        &self,
+        base_angles: &[f64],
+        base_flows: &[f64],
+        outages: &[usize],
+    ) -> Option<DcContingencies> {
+        use rayon::prelude::*;
+        if base_angles.len() != self.n_buses || base_flows.len() != self.n_branches {
+            return None;
+        }
+        let (n, m) = (self.n_buses, self.n_branches);
+        // Zeroed, not NaN-filled: a zeroed allocation is mapped lazily, so the
+        // workers touch its pages in parallel, where filling 2.9 GB first
+        // (case9241pegase's full N-1) took a second on one thread.
+        let mut out = DcContingencies {
+            n_buses: n,
+            n_branches: m,
+            angles: vec![0.0; outages.len() * n],
+            flows: vec![0.0; outages.len() * m],
+            solved: vec![false; outages.len()],
+        };
+        out.angles
+            .par_chunks_mut(n.max(1))
+            .zip(out.flows.par_chunks_mut(m.max(1)))
+            .zip(out.solved.par_iter_mut())
+            .zip(outages.par_iter())
+            .for_each(|(((angles, flows), solved), &l)| {
+                *solved = self.one_contingency(base_angles, base_flows, l, angles, flows);
+                if !*solved {
+                    angles.fill(f64::NAN);
+                    flows.fill(f64::NAN);
+                }
+            });
+        Some(out)
+    }
+
+    /// One outage of [`contingencies`](Self::contingencies) into its rows;
+    /// `false` (rows untouched) if it has no post-outage state.
+    fn one_contingency(
+        &self,
+        base_angles: &[f64],
+        base_flows: &[f64],
+        l: usize,
+        angles: &mut [f64],
+        flows: &mut [f64],
+    ) -> bool {
+        let Some((br, island)) = self.branch_and_island(l) else {
+            return false;
+        };
+        let mut rhs = vec![0.0; island.unknown.len()];
+        if self.reduced_pos[br.from] != NOT_UNKNOWN {
+            rhs[self.reduced_pos[br.from]] += 1.0;
+        }
+        if self.reduced_pos[br.to] != NOT_UNKNOWN {
+            rhs[self.reduced_pos[br.to]] -= 1.0;
+        }
+        let Some(theta) = island.factorization.solve(&rhs) else {
+            return false;
+        };
+        let angle = |bus: usize| match self.reduced_pos[bus] {
+            NOT_UNKNOWN => 0.0,
+            r => theta[r],
+        };
+        let d = br.b * (angle(br.from) - angle(br.to));
+        if (1.0 - d).abs() < LODF_BRIDGE_TOL {
+            return false;
+        }
+        let c = base_flows[l] / (1.0 - d);
+        angles.copy_from_slice(base_angles);
+        for (r, &bus) in island.unknown.iter().enumerate() {
+            angles[bus] += c * theta[r];
+        }
+        flows.copy_from_slice(base_flows);
+        for &pos in &island.branch_positions {
+            let b = &self.branches[pos];
+            flows[b.index] += c * b.b * (angle(b.from) - angle(b.to));
+        }
+        flows[l] = 0.0;
+        true
     }
 
     /// Whether removing every branch in `branches` at once would disconnect the

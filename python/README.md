@@ -136,6 +136,24 @@ feature to use them:
 - `"klu"` — links vendored SuiteSparse C directly (`--features python,klu`).
 - `"pardiso"` — Intel oneMKL's PARDISO solver (`--features python,pardiso`, needs `MKLROOT` set).
 
+### Batched power flow on an NVIDIA GPU
+
+Not in the published wheel either: `GpuBatchSolver` needs a build with `--features python,gpu`, with
+cuDSS 1.0 or later (`CUDSS_DIR`) and the CUDA 12 toolkit, or the image `docker/gpu/Dockerfile` builds. It
+solves `solve_batch`'s scenarios and `solve_contingencies`' outage lists on the GPU, every scenario to
+its own convergence, from the model's last `solve()`:
+
+```python
+model = gridoxide.PowerFlowModel.from_matpower("case9241pegase.m")
+model.solve()
+gpu = gridoxide.GpuBatchSolver(model, capacity=1024)  # keeps its analysis for every later call
+results = gpu.solve_batch(scenarios)                 # one BatchResult per scenario, as on the CPU
+outages = gpu.solve_contingencies([[b] for b in range(model.n_branches)])
+```
+
+Outages that split the network are solved on the CPU. On an A100 the GPU pays only on large networks and
+large batches; the CPU's `solve_batch` on all cores is faster on most cases.
+
 ## State estimation
 
 `StateEstimationModel` recovers the most likely grid state from measurements, rather than computing

@@ -254,6 +254,9 @@ struct PowerFlowModel {
     /// Built on first use and reused, since it holds one factorization per
     /// island. Invalidated by `reset()` along with the Newton factorization.
     sensitivity: Option<DcSensitivity>,
+    /// Thread count paired with the pool `dc_contingencies` runs on, kept so
+    /// repeated calls at one setting never respawn workers.
+    dc_pool: Option<(usize, rayon::ThreadPool)>,
     /// Thread count paired with the `BatchSolver` built for it. Cached so
     /// repeated `solve_batch` calls at one thread count reuse a single rayon
     /// pool instead of respawning workers per call.
@@ -394,6 +397,7 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            dc_pool: None,
             #[cfg(feature = "cgmes")]
             node_breaker: None,
             batch: None,
@@ -466,6 +470,7 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            dc_pool: None,
             #[cfg(feature = "cgmes")]
             node_breaker: None,
             batch: None,
@@ -632,6 +637,7 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            dc_pool: None,
             node_breaker,
             batch: None,
             stored_scenarios: Vec::new(),
@@ -1304,6 +1310,53 @@ impl PowerFlowModel {
             )));
         }
         Ok(self.require_sensitivity()?.outage_flows(&base, branch))
+    }
+
+    /// Every single-branch outage of `branches` at once, each on its own:
+    /// `(angles, flows, solved)`, the bus angles (radians) and the from-end
+    /// branch flows (per unit) after each outage, as read-only float64
+    /// buffers (`Float64Buffer`), one outage after another — `numpy.frombuffer(angles).reshape(
+    /// len(branches), -1)` reads them without a copy — and per outage whether
+    /// it has a post-outage state (a radial branch has none; its rows are
+    /// NaN). From the last DC solve, which must exist.
+    ///
+    /// `outage_flows` gives the same flows one outage at a time; this adds the
+    /// angles, from the same solve, and runs the outages in parallel on
+    /// `threads` workers (default: rayon's global thread count), one
+    /// triangular solve each against one factorization.
+    #[pyo3(signature = (branches, threads=None))]
+    fn dc_contingencies(
+        &mut self,
+        branches: Vec<usize>,
+        threads: Option<usize>,
+    ) -> PyResult<(Float64Buffer, Float64Buffer, Vec<bool>)> {
+        for &b in &branches {
+            self.check_branch(b)?;
+        }
+        let flows = self.require_dc()?.branch_p.clone();
+        let angles: Vec<f64> = self.buses.iter().map(|b| b.voltage_ang).collect();
+        if let Some(t) = threads
+            && self.dc_pool.as_ref().map(|(n, _)| *n) != Some(t.max(1))
+        {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(t.max(1))
+                .build()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.dc_pool = Some((t.max(1), pool));
+        }
+        self.require_sensitivity()?;
+        let sensitivity = self.sensitivity.as_ref().expect("just populated");
+        let run = || sensitivity.contingencies(&angles, &flows, &branches);
+        let out = match (threads, &self.dc_pool) {
+            (Some(_), Some((_, pool))) => pool.install(run),
+            _ => run(),
+        }
+        .expect("base vectors sized from this model");
+        Ok((
+            Float64Buffer::new(out.angles),
+            Float64Buffer::new(out.flows),
+            out.solved,
+        ))
     }
 
     /// Branch flows after **every** branch in `branches` trips at once — the
@@ -4153,11 +4206,413 @@ impl OptimalPowerFlowModel {
     }
 }
 
+/// Batched power flows on an NVIDIA GPU: a session for one
+/// `PowerFlowModel`'s network. See `gridoxide::gpu::GpuBatchSolver`.
+///
+/// `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None)`
+/// takes what it needs from `model` once: its network, `tol` and `max_iter`,
+/// and the voltages of its last `solve()`, which every scenario starts from
+/// (`solve_batch`'s `start="last"`; the CPU's `"linear"`, a linear solve per
+/// scenario, has no device counterpart). Later changes to the model do not
+/// reach it; make a new session for them. The session keeps cuDSS's analysis
+/// and the device buffers for `capacity` scenarios, so every solve after the
+/// first costs no analysis; more scenarios than that are solved in chunks of
+/// it.
+///
+/// Every scenario stops at its own convergence. `reuse_below` (for example
+/// 0.1) keeps a scenario on its last factors while its mismatch falls more
+/// than that factor per step: fewer factorizations, an end point anywhere
+/// within the tolerance rather than the CPU's. `cpu_handoff` finishes the
+/// last few active scenarios of each chunk on the CPU. Both are off by
+/// default.
+#[cfg(feature = "gpu")]
+#[pyclass(unsendable)]
+struct GpuBatchSolver {
+    session: crate::gpu::GpuBatchSolver,
+    opts: crate::gpu::BatchOptions,
+    /// For the outages that split the network, which the device does not
+    /// solve: the same start, on the CPU.
+    template: Vec<Bus>,
+    lines: Vec<Line>,
+    transformers: Vec<Transformer>,
+    shunts: Vec<ShuntAdm>,
+    cpu: BatchSolver,
+    /// What `set_scenarios` stored, for a `solve_batch()` called without
+    /// scenarios.
+    stored_scenarios: Vec<Scenario>,
+    /// The last call's voltages, scenario after scenario, for `voltages()`.
+    last_vm: Vec<f64>,
+    last_va: Vec<f64>,
+}
+
+/// A read-only float64 array handed to Python without a copy: it owns the
+/// Rust vector and exposes it through the buffer protocol, so
+/// `numpy.frombuffer(buffer)` (or `memoryview(buffer)`) reads it in place.
+/// What `dc_contingencies` and `GpuBatchSolver.voltages` return: a DC N-1 of
+/// case9241pegase is 2.9 GB, which copying into `bytes` (zeroed, then filled)
+/// took longer than computing.
+#[pyclass(frozen, module = "gridoxide")]
+struct Float64Buffer {
+    data: Vec<f64>,
+    /// The buffer's one dimension and stride, which `Py_buffer` points at.
+    shape: [isize; 1],
+    strides: [isize; 1],
+}
+
+impl Float64Buffer {
+    fn new(data: Vec<f64>) -> Self {
+        let shape = [data.len() as isize];
+        Self {
+            data,
+            shape,
+            strides: [8],
+        }
+    }
+}
+
+#[pymethods]
+impl Float64Buffer {
+    fn __len__(&self) -> usize {
+        self.data.len()
+    }
+
+    /// # Safety
+    ///
+    /// Called by CPython with a valid `view`; the pointers it fills in point
+    /// into this object, which the view keeps alive (`view.obj`), and the
+    /// object is frozen, so they stay valid.
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        use pyo3::exceptions::PyBufferError;
+        use pyo3::ffi;
+        if view.is_null() {
+            return Err(PyBufferError::new_err("null view"));
+        }
+        if flags & ffi::PyBUF_WRITABLE == ffi::PyBUF_WRITABLE {
+            return Err(PyBufferError::new_err("the buffer is read-only"));
+        }
+        let this = slf.get();
+        let (buf, len) = (this.data.as_ptr(), this.data.len());
+        let (shape, strides) = (this.shape.as_ptr(), this.strides.as_ptr());
+        // SAFETY: `view` is valid (checked non-null, from CPython); every
+        // pointer stored points into `this`, kept alive by `obj`.
+        unsafe {
+            (*view).buf = buf as *mut std::os::raw::c_void;
+            (*view).len = (len * 8) as isize;
+            (*view).readonly = 1;
+            (*view).itemsize = 8;
+            (*view).format = if flags & ffi::PyBUF_FORMAT == ffi::PyBUF_FORMAT {
+                c"d".as_ptr() as *mut std::os::raw::c_char
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).ndim = 1;
+            (*view).shape = if flags & ffi::PyBUF_ND == ffi::PyBUF_ND {
+                shape as *mut isize
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).strides = if flags & ffi::PyBUF_STRIDES == ffi::PyBUF_STRIDES {
+                strides as *mut isize
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).suboffsets = std::ptr::null_mut();
+            (*view).internal = std::ptr::null_mut();
+            (*view).obj = slf.into_any().into_ptr();
+        }
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
+}
+
+#[cfg(feature = "gpu")]
+impl GpuBatchSolver {
+    fn keep_voltages<'a>(&mut self, rows: impl Iterator<Item = (&'a [f64], &'a [f64])>) {
+        self.last_vm.clear();
+        self.last_va.clear();
+        for (vm, va) in rows {
+            self.last_vm.extend_from_slice(vm);
+            self.last_va.extend_from_slice(va);
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+#[pymethods]
+impl GpuBatchSolver {
+    #[new]
+    #[pyo3(signature = (model, capacity=1024, reuse_below=None, cpu_handoff=None))]
+    fn new(
+        model: PyRef<'_, PowerFlowModel>,
+        capacity: usize,
+        reuse_below: Option<f64>,
+        cpu_handoff: Option<usize>,
+    ) -> PyResult<Self> {
+        let (template, _) = model.batch_start("last")?;
+        let session = crate::gpu::GpuBatchSolver::with_branches(
+            &template,
+            &model.lines,
+            &model.transformers,
+            &model.shunts,
+            capacity,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let opts = crate::gpu::BatchOptions {
+            tol: model.tol,
+            max_iter: model.max_iter,
+            reuse_below,
+            cpu_handoff,
+            ..crate::gpu::BatchOptions::default()
+        };
+        let mut cpu = BatchSolver::new(model.backend);
+        cpu.set_start(BatchStart::Template);
+        Ok(Self {
+            session,
+            opts,
+            template,
+            lines: model.lines.clone(),
+            transformers: model.transformers.clone(),
+            shunts: model.shunts.clone(),
+            cpu,
+            stored_scenarios: Vec::new(),
+            last_vm: Vec::new(),
+            last_va: Vec::new(),
+        })
+    }
+
+    /// Scenarios per chunk.
+    #[getter]
+    fn capacity(&self) -> usize {
+        self.session.capacity()
+    }
+
+    /// As `PowerFlowModel.solve_batch`, on the device: `scenarios` in its
+    /// format, one `BatchResult` per scenario in order. `None` solves the
+    /// scenarios `set_scenarios` stored, which keeps their conversion out of
+    /// the call. A scenario that does not converge is reported, not raised.
+    #[pyo3(signature = (scenarios=None))]
+    fn solve_batch(
+        &mut self,
+        scenarios: Option<Vec<Vec<(usize, f64, f64)>>>,
+    ) -> PyResult<Vec<BatchResult>> {
+        let given = scenarios.map(overrides_to_scenarios);
+        let scenarios = given.as_deref().unwrap_or(&self.stored_scenarios);
+        let report = self
+            .session
+            .solve(scenarios, &self.opts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let results: Vec<BatchResult> = report
+            .scenarios
+            .into_iter()
+            .map(|r| BatchResult {
+                converged: r.outcome == crate::gpu::Outcome::Converged,
+                // Mismatch evaluations, as the CPU counts them: one per step
+                // and the one that ended the scenario.
+                iterations: r.newton_steps + 1,
+                max_mismatch: r.final_mismatch,
+                voltage_mag: r.voltage_mag,
+                voltage_ang: r.voltage_ang,
+            })
+            .collect();
+        self.keep_voltages(
+            results
+                .iter()
+                .map(|r| (r.voltage_mag.as_slice(), r.voltage_ang.as_slice())),
+        );
+        Ok(results)
+    }
+
+    /// The last `solve_batch` or `solve_contingencies` call's voltages,
+    /// `(voltage_mag, voltage_ang)`, every scenario's buses after the
+    /// previous scenario's, as read-only float64 buffers (`Float64Buffer`;
+    /// p.u. and radians): `numpy.frombuffer(vm).reshape(len(results), -1)` reads them
+    /// without a copy. Reading a whole batch through each result's lists
+    /// makes a Python float per bus and scenario, which on a large batch
+    /// takes as long as the solve.
+    fn voltages(&self) -> (Float64Buffer, Float64Buffer) {
+        (
+            Float64Buffer::new(self.last_vm.clone()),
+            Float64Buffer::new(self.last_va.clone()),
+        )
+    }
+
+    /// Stores scenarios, in `solve_batch`'s format, for later
+    /// `solve_batch()` calls without them.
+    fn set_scenarios(&mut self, scenarios: Vec<Vec<(usize, f64, f64)>>) {
+        self.stored_scenarios = overrides_to_scenarios(scenarios);
+    }
+
+    /// As `PowerFlowModel.solve_contingencies`, on the device: one list of
+    /// flat branch indices per contingency, one `ContingencyResult` per
+    /// contingency in order. `status` is `"converged"`, `"max_iterations"` or
+    /// `"diverged"` (a non-finite or exploding mismatch). A contingency that
+    /// splits the network has another sparsity pattern than the batch's and
+    /// is solved on the CPU, as `PowerFlowModel.solve_contingencies` solves
+    /// it, with the CPU's statuses.
+    fn solve_contingencies(
+        &mut self,
+        contingencies: Vec<Vec<usize>>,
+    ) -> PyResult<Vec<ContingencyResult>> {
+        use crate::gpu::Outcome;
+        let scenarios: Vec<Scenario> = contingencies
+            .into_iter()
+            .map(|branch_outages| Scenario {
+                bus_overrides: Vec::new(),
+                branch_outages,
+            })
+            .collect();
+        let report = self
+            .session
+            .solve_contingencies(&scenarios, &self.opts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let splits: Vec<usize> = (0..scenarios.len())
+            .filter(|&s| report.scenarios[s].outcome == Outcome::Splits)
+            .collect();
+        let split_scenarios: Vec<Scenario> = splits.iter().map(|&s| scenarios[s].clone()).collect();
+        let mut on_cpu = self
+            .cpu
+            .solve_contingency_voltages(
+                &self.template,
+                &self.lines,
+                &self.transformers,
+                &self.shunts,
+                &split_scenarios,
+                self.opts.tol,
+                self.opts.max_iter,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_iter();
+        let results: Vec<ContingencyResult> = report
+            .scenarios
+            .into_iter()
+            .map(|r| match r.outcome {
+                Outcome::Splits => {
+                    let r = on_cpu.next().expect("one CPU result per split");
+                    ContingencyResult {
+                        status: match r.stats.status {
+                            SolveStatus::Converged => "converged",
+                            SolveStatus::MaxIterationsReached => "max_iterations",
+                            SolveStatus::Singular => "singular",
+                        },
+                        iterations: r.stats.iterations(),
+                        voltage_mag: r.voltage_mag,
+                        voltage_ang: r.voltage_ang,
+                    }
+                }
+                outcome => ContingencyResult {
+                    status: match outcome {
+                        Outcome::Converged => "converged",
+                        Outcome::NotConverged => "max_iterations",
+                        _ => "diverged",
+                    },
+                    iterations: r.newton_steps + 1,
+                    voltage_mag: r.voltage_mag,
+                    voltage_ang: r.voltage_ang,
+                },
+            })
+            .collect();
+        self.keep_voltages(
+            results
+                .iter()
+                .map(|r| (r.voltage_mag.as_slice(), r.voltage_ang.as_slice())),
+        );
+        Ok(results)
+    }
+}
+
+/// DC N-1 on an NVIDIA GPU: a session for one `PowerFlowModel`'s DC
+/// network. See `gridoxide::gpu::GpuDcSolver`.
+///
+/// `GpuDcSolver(model, capacity=1024)` takes the model's DC network once:
+/// its branches, DC options, reference buses and injections (shunt
+/// conductance as load where the model's DC solve takes it so). Later
+/// changes to the model do not reach it. The session keeps cuDSS's
+/// factorization of the reduced susceptance matrix and the device buffers
+/// for `capacity` outages at a time.
+#[cfg(feature = "gpu")]
+#[pyclass(unsendable)]
+struct GpuDcSolver {
+    session: crate::gpu::GpuDcSolver,
+    buses: Vec<Bus>,
+    n_branches: usize,
+}
+
+#[cfg(feature = "gpu")]
+#[pymethods]
+impl GpuDcSolver {
+    #[new]
+    #[pyo3(signature = (model, capacity=1024))]
+    fn new(model: PyRef<'_, PowerFlowModel>, capacity: usize) -> PyResult<Self> {
+        let mut buses = model.buses_template.clone();
+        if model.dc_shunt_conductance_as_load {
+            for s in &model.shunts {
+                buses[s.at].p_spec -= s.y.re;
+            }
+        }
+        let session = crate::gpu::GpuDcSolver::new(
+            &model.buses_template,
+            &model.lines,
+            &model.transformers,
+            model.dc_opts,
+            capacity,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self {
+            session,
+            buses,
+            n_branches: model.lines.len() + model.transformers.len(),
+        })
+    }
+
+    /// Outages per chunk.
+    #[getter]
+    fn capacity(&self) -> usize {
+        self.session.capacity()
+    }
+
+    /// The base case's DC power flow (on the CPU), then every single-branch
+    /// outage of `branches` on the device: `(angles, flows, solved)` as
+    /// `PowerFlowModel.dc_contingencies` returns them, read-only float64
+    /// buffers of every outage's bus angles (radians) and from-end branch
+    /// flows (per unit), one outage after another, and per outage whether it
+    /// has a post-outage state (a radial branch has none; its rows are NaN).
+    fn solve_contingencies(
+        &mut self,
+        branches: Vec<usize>,
+    ) -> PyResult<(Float64Buffer, Float64Buffer, Vec<bool>)> {
+        if let Some(&b) = branches.iter().find(|&&b| b >= self.n_branches) {
+            return Err(PyValueError::new_err(format!(
+                "branch {b} is out of range (0..{})",
+                self.n_branches
+            )));
+        }
+        let out = self
+            .session
+            .solve_contingencies(&self.buses, &branches)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok((
+            Float64Buffer::new(out.angles),
+            Float64Buffer::new(out.flows),
+            out.solved,
+        ))
+    }
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     m.add_class::<BatchResult>()?;
     m.add_class::<ContingencyResult>()?;
+    m.add_class::<Float64Buffer>()?;
+    #[cfg(feature = "gpu")]
+    m.add_class::<GpuBatchSolver>()?;
+    #[cfg(feature = "gpu")]
+    m.add_class::<GpuDcSolver>()?;
     m.add_class::<StateEstimationModel>()?;
     m.add_class::<SeBatchOutcome>()?;
     m.add_class::<ShortCircuitResult>()?;

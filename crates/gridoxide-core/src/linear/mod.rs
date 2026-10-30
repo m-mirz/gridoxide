@@ -36,7 +36,7 @@ pub use btheta::{
     DcBranch, DcIslandReport, DcIslandStatus, DcSolution, DcSolver, dc_branches, dc_power_flow,
 };
 pub use impedance::{LinearIslandReport, LinearIslandStatus, LinearReport, linear_power_flow};
-pub use sensitivity::{DcSensitivity, DenseMatrix};
+pub use sensitivity::{DcContingencies, DcSensitivity, DenseMatrix};
 
 /// Which terms the DC susceptance keeps.
 ///

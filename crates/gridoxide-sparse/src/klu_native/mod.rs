@@ -187,6 +187,34 @@ impl KluNativeSystem {
         Self::with_scale(n, entries, types::Options::default().scale)
     }
 
+    /// The last factorization's size and work: the nonzeros of L and U
+    /// (the diagonal once, BTF's off-diagonal blocks included) and its
+    /// floating-point operations, counted as KLU's `klu_flops` does: per
+    /// pivot column k of a block, nnz(L_k) divisions and two operations
+    /// for each entry of L_k times each entry of row k of U.
+    pub fn factor_stats(&self) -> (usize, f64) {
+        let mut nnz = self.num.off_i.len();
+        let mut flops = 0.0;
+        for block in &self.num.blocks {
+            let cols = block.l.len();
+            nnz += cols;
+            let mut u_row = vec![0usize; cols];
+            for k in 0..cols {
+                let (rows, _) = block.u.col(k);
+                nnz += rows.len();
+                for &r in rows {
+                    u_row[r as usize] += 1;
+                }
+            }
+            for (k, &urow) in u_row.iter().enumerate() {
+                let lk = block.l.col(k).0.len();
+                nnz += lk;
+                flops += (lk * (1 + 2 * urow)) as f64;
+            }
+        }
+        (nnz, flops)
+    }
+
     /// [`new`](Self::new) with KLU's row scaling: `scale` is
     /// `Common->scale` (2 divides each row by its largest magnitude, KLU's
     /// default; 1 by its sum; 0 does not scale). As in `klu_factor.c` and
@@ -336,6 +364,13 @@ impl KluNativeSystem {
         // The scatter targets follow the pivot order, which just changed.
         self.scratch.forget_targets();
         self.permute_scale();
+        self.solve_factored(rhs)
+    }
+
+    /// Solves `A x = rhs` with the factorization as it stands (the last
+    /// `new` or `factor_and_solve`), without refactoring: for many right-hand
+    /// sides against one matrix. `None` if the result is not finite.
+    pub fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
         self.solve_factored(rhs)
     }
 

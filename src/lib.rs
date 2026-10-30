@@ -40,6 +40,9 @@ pub mod matpower;
 #[cfg(feature = "opf")]
 pub mod opf;
 pub mod pgm;
+/// Batched AC power flow on an NVIDIA GPU: the `gridoxide-gpu` crate.
+#[cfg(feature = "gpu")]
+pub use gridoxide_gpu as gpu;
 #[cfg(feature = "python")]
 mod python;
 #[cfg(feature = "rao")]

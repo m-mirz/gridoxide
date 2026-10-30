@@ -1,0 +1,10 @@
+# The build context of docker/gpu/Dockerfile: the sources cargo needs, not the
+# build output, local environments or test data (the tests mount the checkout).
+target/
+.venv/
+.git/
+probes/cudss_ubatch/work/
+tests/data/
+docs/book/
+editors/
+scripts/bench/.case-cache/

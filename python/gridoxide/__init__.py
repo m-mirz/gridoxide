@@ -74,3 +74,13 @@ else:
         "dynamics",
         "small_signal",
     ]
+
+# Batched power flows on an NVIDIA GPU need the `gpu` feature compiled in, and
+# cuDSS and a GPU at run time, so `GpuBatchSolver` is in some builds and not
+# others. `hasattr(gridoxide, "GpuBatchSolver")` is the check.
+try:
+    from ._gridoxide import GpuBatchSolver, GpuDcSolver  # noqa: F401
+except ImportError:  # pragma: no cover - depends on build features
+    pass
+else:
+    __all__ += ["GpuBatchSolver", "GpuDcSolver"]

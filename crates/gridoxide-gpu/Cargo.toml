@@ -1,0 +1,56 @@
+[package]
+name = "gridoxide-gpu"
+description = "gridoxide's batched AC power flow for NVIDIA GPUs: an adaptive Newton loop over cuDSS's uniform batch"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+# Links cuDSS (with the `cuda` feature), and hands its library directories to
+# dependents as DEP_CUDSS_LIB_DIRS; see build.rs.
+links = "cudss"
+# The tests and examples need gridoxide, a dev-dependency the published crate
+# cannot carry (see below), so they stay out of the package.
+exclude = ["tests/", "examples/"]
+
+[dependencies]
+gridoxide-core = { path = "../gridoxide-core", version = "0.2.0" }
+gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.2.0" }
+num-complex = "0.4.6"
+# The CPU hand-off's scenarios in parallel, on the pool gridoxide's CPU
+# BatchSolver shares (already in the dependency tree).
+rayon = "1.12"
+
+[dev-dependencies]
+# The tests and the counting example read MATPOWER cases through gridoxide's
+# reader. A dev-dependency only, and without a version on purpose: gridoxide
+# depends on this crate (its `gpu` feature), so the cycle must not reach the
+# registry, and `cargo publish` drops a dev-dependency that has no version.
+gridoxide = { path = "../..", features = ["matpower"] }
+
+[build-dependencies]
+bindgen = { version = "0.72", optional = true }
+cc = { version = "1.2", optional = true }
+
+[features]
+default = []
+# The cuDSS backend, `CudssUniformBatch` (src/cudss.rs), and the Newton step's
+# kernels, `DeviceBatch` (src/device.rs, cuda/kernels.cu). Off by default so
+# this crate, and the workspace, build and test without CUDA. Needs libclang
+# (for bindgen), CUDSS_DIR and the CUDA 12 toolkit with nvcc (CUDA_ARCH,
+# default sm_80); build.rs says what each is. On a machine without CUDA it can
+# still be type-checked against the probe's stub headers, nvcc skipped:
+#   CUDSS_DIR=<cudss> CUDA_INCLUDE_DIR=$PWD/probes/cudss_ubatch/stub \
+#     GRIDOXIDE_GPU_NO_NVCC=1 cargo check -p gridoxide-gpu --features cuda --all-targets
+cuda = ["dep:bindgen", "dep:cc"]
+
+[[example]]
+name = "gpu_bench"
+required-features = ["cuda"]
+
+[[example]]
+name = "gpu_dc_bench"
+required-features = ["cuda"]
+
+[[example]]
+name = "lu_counts"
+required-features = ["cuda"]

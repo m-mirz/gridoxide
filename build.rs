@@ -12,6 +12,25 @@ fn main() {
     arpack::build();
     #[cfg(feature = "capi")]
     capi::build();
+    #[cfg(feature = "gpu")]
+    gpu::build();
+}
+
+/// Puts cuDSS's and the CUDA runtime's library directories on the run path
+/// of this package's artifacts, the Python extension among them, when the
+/// `gpu` feature is enabled. gridoxide-gpu links them, but its run path
+/// reaches only its own tests and examples; it hands the directories on as
+/// `DEP_CUDSS_LIB_DIRS` (see crates/gridoxide-gpu/build.rs). An image that
+/// moves the libraries elsewhere sets `LD_LIBRARY_PATH` instead.
+#[cfg(feature = "gpu")]
+mod gpu {
+    pub fn build() {
+        let dirs = std::env::var("DEP_CUDSS_LIB_DIRS")
+            .expect("gridoxide-gpu's build script sets DEP_CUDSS_LIB_DIRS with its `cuda` feature");
+        for dir in dirs.split(':') {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+        }
+    }
 }
 
 /// Generates `include/gridoxide.h` from the C ABI in `src/capi/`, only when
