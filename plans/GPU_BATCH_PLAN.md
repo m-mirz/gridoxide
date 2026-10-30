@@ -408,7 +408,9 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
      0.84-0.90x, and still 1.3-2x it on the smaller sweeps. The LU is
      0.24 ms per system on case9241pegase, so of 25 s for its N-1 about 8 s are
      factorizations and solves: the rest, the chunks' tail steps and the per-step host
-     round trip, is where phase 5's profile has to look first.
+     round trip, is where phase 5's profile has to look first. (Phase 5 profiled a full
+     sweep step, not N-1's tail: there the round trip costs about 0.1 ms per step, and
+     cuDSS is 89-95% of the step.)
 5. **Python API, tests, grid-bench:** every scenario against the CPU `BatchSolver` to 1e-8, a
    GPU Docker image, and the GPU tabs against gpusim2grid and ExaPF.jl on the same A100.
    *Done in part* (2026-10-30), grid-bench's tabs not yet (it is another repository):
@@ -445,6 +447,36 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
      From Python, scenario conversion adds about 240 ms per 1000 scenarios of
      case9241pegase (6.3 million tuples); `set_scenarios` keeps it out of the timed call,
      as on the CPU.
+   - **One batch step under Nsight Systems** (2024.6.2, `--trace=cuda`; `gpu_bench`, a
+     1024-scenario sweep in one chunk, the first step of the last timed solve, all 1024
+     active):
+
+     | | case1354pegase | case9241pegase |
+     |---|---|---|
+     | step | 65.3 ms | 253.6 ms |
+     | GPU busy | 99.8% | 99.9% |
+     | kernel launches | 20 | 20 |
+     | largest launch | 2.3M blocks | 11.2M blocks |
+     | factorization (`factorize_v3_ker`, `factorize_ker`) | 67% | 77% |
+     | triangular solves (`fwd_ker`, `bwd_ker`) | 22% | 18% |
+     | our kernels (Jacobian, injections, mismatch) | 1.1% | 2.6% |
+
+     The GPU is full at B = 1024 on both cases: cuDSS factors the whole batch in one launch,
+     and the gaps between work add up to about 0.1 ms per step. So a larger batch cannot
+     help (it is more such steps in a row), a small grid does not underuse the GPU, and
+     our own kernels cannot change the outcome.
+   - **What grid size changes is the CPU's cost.** The CPU `BatchSolver`'s speedup from 1
+     to 30 threads is 23.6x on case1354pegase, 24.4x on case2869pegase and 20.8x on
+     case9241pegase, so shared memory bandwidth costs it little. On one core, its time per
+     scenario grows 11.8x from case1354pegase to case9241pegase (2.5 to 29.4 ms) for 6.8x
+     the buses; the GPU's time per system and step grows 3.9x (64 to 248 µs). Per step,
+     the A100 is worth about 12 cores on case1354pegase and about 33 on case9241pegase; at
+     21-24x on 30 threads, it wins once it is worth more than that, between
+     case2869pegase and case9241pegase. Why the costs grow so differently is not
+     measured yet: presumably fill-in and caches for KLU on one core, while cuDSS's launch
+     grows with the matrix (about 2300 against 11000 blocks per system) and its time grows
+     more slowly than its work. Counting the LU factors' nonzeros for both cases against
+     their factorization times would test it.
 
 ## Targets
 
