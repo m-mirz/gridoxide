@@ -628,3 +628,154 @@ fn chaining_single_outages_is_not_a_substitute() {
         worst(&chained)
     );
 }
+
+/// Every outage's angles and flows against removing the branch and solving
+/// again, and against `outage_flows`; a radial branch comes back unsolved.
+#[test]
+fn contingencies_match_an_actual_outage_resolve() {
+    let (buses, lines, transformers) = load("symmetric/transmission-case");
+    let opts = DcOptions::default();
+    let n_branches = lines.len() + transformers.len();
+    let mut base_buses = buses.clone();
+    let base = dc_power_flow(&mut base_buses, &lines, &transformers, opts);
+    let base_angles: Vec<f64> = base_buses.iter().map(|b| b.voltage_ang).collect();
+    let branches = dc_branches(&lines, &transformers, opts);
+    let sensitivity = DcSensitivity::new(&base_buses, &branches, n_branches).unwrap();
+
+    let outages: Vec<usize> = (0..lines.len()).collect();
+    let got = sensitivity
+        .contingencies(&base_angles, &base.branch_p, &outages)
+        .unwrap();
+    let (mut solved, mut radial) = (0, 0);
+    for (k, &l) in outages.iter().enumerate() {
+        if sensitivity.is_radial(l) {
+            assert!(!got.solved[k], "outage {l} is radial");
+            assert!(got.flows(k).iter().all(|f| f.is_nan()));
+            radial += 1;
+            continue;
+        }
+        assert!(got.solved[k], "outage {l}");
+        // The same arithmetic in another order (outage_flows goes through a
+        // 1 × 1 Woodbury solve), so equal to round-off, not to the bit.
+        let lodf = sensitivity.outage_flows(&base.branch_p, l).unwrap();
+        for (a, b) in got.flows(k).iter().zip(&lodf) {
+            assert!((a - b).abs() < 1e-12, "outage {l}: {a} against {b}");
+        }
+        let mut opened = lines.clone();
+        opened[l].to = opened[l].from;
+        let mut scratch = buses.clone();
+        let actual = dc_power_flow(&mut scratch, &opened, &transformers, opts);
+        for (i, b) in scratch.iter().enumerate() {
+            assert!(
+                (got.angles(k)[i] - b.voltage_ang).abs() < 1e-9,
+                "outage {l}: bus {i} angle {} but re-solve gives {}",
+                got.angles(k)[i],
+                b.voltage_ang
+            );
+        }
+        for (j, f) in actual.branch_p.iter().enumerate() {
+            assert!((got.flows(k)[j] - f).abs() < 1e-9, "outage {l}: branch {j}");
+        }
+        solved += 1;
+    }
+    assert!(solved > 0 && radial > 0, "{solved} solved, {radial} radial");
+    // Base vectors of the wrong length are rejected.
+    assert!(
+        sensitivity
+            .contingencies(&[0.0], &base.branch_p, &outages)
+            .is_none()
+    );
+}
+
+/// The thread count does not change a bit of the answer.
+#[test]
+fn contingencies_are_thread_count_independent() {
+    let (buses, lines, transformers) = load("symmetric/transmission-case");
+    let opts = DcOptions::default();
+    let n_branches = lines.len() + transformers.len();
+    let mut base_buses = buses.clone();
+    let base = dc_power_flow(&mut base_buses, &lines, &transformers, opts);
+    let angles: Vec<f64> = base_buses.iter().map(|b| b.voltage_ang).collect();
+    let branches = dc_branches(&lines, &transformers, opts);
+    let sensitivity = DcSensitivity::new(&base_buses, &branches, n_branches).unwrap();
+    let outages: Vec<usize> = (0..n_branches).collect();
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| sensitivity.contingencies(&angles, &base.branch_p, &outages))
+            .unwrap()
+    };
+    let (one, four) = (run(1), run(4));
+    assert_eq!(one.solved, four.solved);
+    for (a, b) in one.angles.iter().zip(&four.angles) {
+        assert!(a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()));
+    }
+    for (a, b) in one.flows.iter().zip(&four.flows) {
+        assert!(a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()));
+    }
+}
+
+/// case1354pegase, every branch, its six phase shifters among them: an
+/// outaged phase shifter takes its shift with it, which the transfer `c`
+/// accounts for since the shift is part of the branch's base flow.
+#[cfg(feature = "matpower")]
+#[test]
+fn contingencies_match_a_resolve_on_case1354pegase() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/benchmark-grids/matpower/case1354pegase.m");
+    if !path.exists() {
+        eprintln!("skipping: benchmark-grids submodule not checked out");
+        return;
+    }
+    let net = gridoxide::matpower::read(&path).unwrap();
+    let opts = DcOptions::default();
+    let (lines, transformers) = (&net.lines, &net.transformers);
+    let n_branches = lines.len() + transformers.len();
+    let mut base_buses = net.buses.clone();
+    let base = dc_power_flow(&mut base_buses, lines, transformers, opts);
+    let angles: Vec<f64> = base_buses.iter().map(|b| b.voltage_ang).collect();
+    let branches = dc_branches(lines, transformers, opts);
+    let sensitivity = DcSensitivity::new(&base_buses, &branches, n_branches).unwrap();
+    let outages: Vec<usize> = (0..n_branches).collect();
+    let got = sensitivity
+        .contingencies(&angles, &base.branch_p, &outages)
+        .unwrap();
+    let mut shifters = 0;
+    for (k, &l) in outages.iter().enumerate() {
+        if !got.solved[k] {
+            assert!(
+                sensitivity.is_radial(l),
+                "outage {l} unsolved but not radial"
+            );
+            continue;
+        }
+        let (mut opened_lines, mut opened_tx) = (lines.clone(), transformers.clone());
+        if l < lines.len() {
+            opened_lines[l].to = opened_lines[l].from;
+        } else {
+            let t = &mut opened_tx[l - lines.len()];
+            shifters += usize::from(t.tap.im != 0.0);
+            t.from_status = 0;
+        }
+        let mut scratch = net.buses.clone();
+        let actual = dc_power_flow(&mut scratch, &opened_lines, &opened_tx, opts);
+        let worst_angle = scratch
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (got.angles(k)[i] - b.voltage_ang).abs())
+            .fold(0.0, f64::max);
+        let worst_flow = actual
+            .branch_p
+            .iter()
+            .enumerate()
+            .map(|(j, f)| (got.flows(k)[j] - f).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            worst_angle < 1e-9 && worst_flow < 1e-9,
+            "outage {l}: angle {worst_angle:e}, flow {worst_flow:e}"
+        );
+    }
+    assert!(shifters > 0, "no phase shifter was outaged");
+}

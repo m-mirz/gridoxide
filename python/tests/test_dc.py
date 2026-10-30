@@ -298,3 +298,39 @@ def test_contingency_sweep_validates_branch_indices():
     model = gridoxide.PowerFlowModel.from_pgm_json(str(TRANSMISSION))
     with pytest.raises(ValueError):
         model.solve_contingencies([[model.n_branches]])
+
+
+def test_dc_contingencies_are_outage_flows_with_angles():
+    """Every outage at once: its flows are `outage_flows`', a radial branch
+    comes back unsolved, and the thread count changes nothing."""
+    np = pytest.importorskip("numpy")
+    model = dc_model(TRANSMISSION)
+    with pytest.raises(RuntimeError, match="no DC result"):
+        model.dc_contingencies([0])
+    model.solve()
+    n = model.n_branches
+    angles, flows, solved = model.dc_contingencies(list(range(n)), threads=2)
+    angles = np.frombuffer(angles).reshape(n, -1)
+    flows = np.frombuffer(flows).reshape(n, -1)
+    assert angles.shape == (n, model.n_nodes)
+    for b in range(n):
+        expected = model.outage_flows(b)
+        assert solved[b] == (expected is not None)
+        if expected is None:
+            assert np.isnan(flows[b]).all() and np.isnan(angles[b]).all()
+        else:
+            assert flows[b].tolist() == pytest.approx(expected, abs=1e-12)
+    assert not all(solved) and any(solved)
+    again = model.dc_contingencies(list(range(n)), threads=1)
+    assert np.array_equal(np.frombuffer(again[0]), angles.ravel(), equal_nan=True)
+    with pytest.raises(ValueError):
+        model.dc_contingencies([n])
+
+
+def test_dc_contingency_buffers_are_read_only_float64():
+    model = dc_model(TRANSMISSION)
+    model.solve()
+    angles, _, _ = model.dc_contingencies([0, 1])
+    view = memoryview(angles)
+    assert view.format == "d" and view.itemsize == 8 and view.readonly
+    assert len(angles) == 2 * model.n_nodes == view.shape[0]

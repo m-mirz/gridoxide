@@ -254,6 +254,9 @@ struct PowerFlowModel {
     /// Built on first use and reused, since it holds one factorization per
     /// island. Invalidated by `reset()` along with the Newton factorization.
     sensitivity: Option<DcSensitivity>,
+    /// Thread count paired with the pool `dc_contingencies` runs on, kept so
+    /// repeated calls at one setting never respawn workers.
+    dc_pool: Option<(usize, rayon::ThreadPool)>,
     /// Thread count paired with the `BatchSolver` built for it. Cached so
     /// repeated `solve_batch` calls at one thread count reuse a single rayon
     /// pool instead of respawning workers per call.
@@ -394,6 +397,7 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            dc_pool: None,
             #[cfg(feature = "cgmes")]
             node_breaker: None,
             batch: None,
@@ -466,6 +470,7 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            dc_pool: None,
             #[cfg(feature = "cgmes")]
             node_breaker: None,
             batch: None,
@@ -632,6 +637,7 @@ impl PowerFlowModel {
             },
             dc_solution: None,
             sensitivity: None,
+            dc_pool: None,
             node_breaker,
             batch: None,
             stored_scenarios: Vec::new(),
@@ -1304,6 +1310,53 @@ impl PowerFlowModel {
             )));
         }
         Ok(self.require_sensitivity()?.outage_flows(&base, branch))
+    }
+
+    /// Every single-branch outage of `branches` at once, each on its own:
+    /// `(angles, flows, solved)`, the bus angles (radians) and the from-end
+    /// branch flows (per unit) after each outage, as read-only float64
+    /// buffers (`Float64Buffer`), one outage after another — `numpy.frombuffer(angles).reshape(
+    /// len(branches), -1)` reads them without a copy — and per outage whether
+    /// it has a post-outage state (a radial branch has none; its rows are
+    /// NaN). From the last DC solve, which must exist.
+    ///
+    /// `outage_flows` gives the same flows one outage at a time; this adds the
+    /// angles, from the same solve, and runs the outages in parallel on
+    /// `threads` workers (default: rayon's global thread count), one
+    /// triangular solve each against one factorization.
+    #[pyo3(signature = (branches, threads=None))]
+    fn dc_contingencies(
+        &mut self,
+        branches: Vec<usize>,
+        threads: Option<usize>,
+    ) -> PyResult<(Float64Buffer, Float64Buffer, Vec<bool>)> {
+        for &b in &branches {
+            self.check_branch(b)?;
+        }
+        let flows = self.require_dc()?.branch_p.clone();
+        let angles: Vec<f64> = self.buses.iter().map(|b| b.voltage_ang).collect();
+        if let Some(t) = threads
+            && self.dc_pool.as_ref().map(|(n, _)| *n) != Some(t.max(1))
+        {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(t.max(1))
+                .build()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.dc_pool = Some((t.max(1), pool));
+        }
+        self.require_sensitivity()?;
+        let sensitivity = self.sensitivity.as_ref().expect("just populated");
+        let run = || sensitivity.contingencies(&angles, &flows, &branches);
+        let out = match (threads, &self.dc_pool) {
+            (Some(_), Some((_, pool))) => pool.install(run),
+            _ => run(),
+        }
+        .expect("base vectors sized from this model");
+        Ok((
+            Float64Buffer::new(out.angles),
+            Float64Buffer::new(out.flows),
+            out.solved,
+        ))
     }
 
     /// Branch flows after **every** branch in `branches` trips at once — the
@@ -4193,15 +4246,89 @@ struct GpuBatchSolver {
     last_va: Vec<f64>,
 }
 
-/// `values` as one `bytes` of native-endian float64s.
-#[cfg(feature = "gpu")]
-fn f64_bytes<'py>(py: Python<'py>, values: &[f64]) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-    pyo3::types::PyBytes::new_with(py, values.len() * 8, |buf| {
-        for (chunk, v) in buf.chunks_exact_mut(8).zip(values) {
-            chunk.copy_from_slice(&v.to_ne_bytes());
+/// A read-only float64 array handed to Python without a copy: it owns the
+/// Rust vector and exposes it through the buffer protocol, so
+/// `numpy.frombuffer(buffer)` (or `memoryview(buffer)`) reads it in place.
+/// What `dc_contingencies` and `GpuBatchSolver.voltages` return: a DC N-1 of
+/// case9241pegase is 2.9 GB, which copying into `bytes` (zeroed, then filled)
+/// took longer than computing.
+#[pyclass(frozen, module = "gridoxide")]
+struct Float64Buffer {
+    data: Vec<f64>,
+    /// The buffer's one dimension and stride, which `Py_buffer` points at.
+    shape: [isize; 1],
+    strides: [isize; 1],
+}
+
+impl Float64Buffer {
+    fn new(data: Vec<f64>) -> Self {
+        let shape = [data.len() as isize];
+        Self {
+            data,
+            shape,
+            strides: [8],
+        }
+    }
+}
+
+#[pymethods]
+impl Float64Buffer {
+    fn __len__(&self) -> usize {
+        self.data.len()
+    }
+
+    /// # Safety
+    ///
+    /// Called by CPython with a valid `view`; the pointers it fills in point
+    /// into this object, which the view keeps alive (`view.obj`), and the
+    /// object is frozen, so they stay valid.
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        use pyo3::exceptions::PyBufferError;
+        use pyo3::ffi;
+        if view.is_null() {
+            return Err(PyBufferError::new_err("null view"));
+        }
+        if flags & ffi::PyBUF_WRITABLE == ffi::PyBUF_WRITABLE {
+            return Err(PyBufferError::new_err("the buffer is read-only"));
+        }
+        let this = slf.get();
+        let (buf, len) = (this.data.as_ptr(), this.data.len());
+        let (shape, strides) = (this.shape.as_ptr(), this.strides.as_ptr());
+        // SAFETY: `view` is valid (checked non-null, from CPython); every
+        // pointer stored points into `this`, kept alive by `obj`.
+        unsafe {
+            (*view).buf = buf as *mut std::os::raw::c_void;
+            (*view).len = (len * 8) as isize;
+            (*view).readonly = 1;
+            (*view).itemsize = 8;
+            (*view).format = if flags & ffi::PyBUF_FORMAT == ffi::PyBUF_FORMAT {
+                c"d".as_ptr() as *mut std::os::raw::c_char
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).ndim = 1;
+            (*view).shape = if flags & ffi::PyBUF_ND == ffi::PyBUF_ND {
+                shape as *mut isize
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).strides = if flags & ffi::PyBUF_STRIDES == ffi::PyBUF_STRIDES {
+                strides as *mut isize
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).suboffsets = std::ptr::null_mut();
+            (*view).internal = std::ptr::null_mut();
+            (*view).obj = slf.into_any().into_ptr();
         }
         Ok(())
-    })
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
 #[cfg(feature = "gpu")]
@@ -4303,19 +4430,16 @@ impl GpuBatchSolver {
 
     /// The last `solve_batch` or `solve_contingencies` call's voltages,
     /// `(voltage_mag, voltage_ang)`, every scenario's buses after the
-    /// previous scenario's, as `bytes` of native-endian float64 (p.u. and
-    /// radians): `numpy.frombuffer(vm).reshape(len(results), -1)` reads them
+    /// previous scenario's, as read-only float64 buffers (`Float64Buffer`;
+    /// p.u. and radians): `numpy.frombuffer(vm).reshape(len(results), -1)` reads them
     /// without a copy. Reading a whole batch through each result's lists
     /// makes a Python float per bus and scenario, which on a large batch
     /// takes as long as the solve.
-    fn voltages<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<(
-        Bound<'py, pyo3::types::PyBytes>,
-        Bound<'py, pyo3::types::PyBytes>,
-    )> {
-        Ok((f64_bytes(py, &self.last_vm)?, f64_bytes(py, &self.last_va)?))
+    fn voltages(&self) -> (Float64Buffer, Float64Buffer) {
+        (
+            Float64Buffer::new(self.last_vm.clone()),
+            Float64Buffer::new(self.last_va.clone()),
+        )
     }
 
     /// Stores scenarios, in `solve_batch`'s format, for later
@@ -4407,6 +4531,7 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     m.add_class::<BatchResult>()?;
     m.add_class::<ContingencyResult>()?;
+    m.add_class::<Float64Buffer>()?;
     #[cfg(feature = "gpu")]
     m.add_class::<GpuBatchSolver>()?;
     m.add_class::<StateEstimationModel>()?;

@@ -1,7 +1,10 @@
 # DC power flow and DC N-1 on NVIDIA GPUs
 
 Status: **plan**, 2026-10-30, against `924737c`. Phase 0 is done by grid-bench's
-PR #28 (CPU gridoxide in every benchmark, DC included); nothing else built yet.
+PR #28 (CPU gridoxide in every benchmark, DC included). **Phase 1 is done, and
+its gate stops the GPU work for DC N-1:** on 30 threads the CPU solves
+case9241pegase#dcn1-full with every outage's angles in 581 ms from Python,
+against ToOp's 893 ms on the A100 for flows alone ([phase 1](#phases)).
 
 The goal: DC power flow and DC N-1 for gridoxide-gpu, beside the AC batch of
 [GPU_BATCH_PLAN.md](GPU_BATCH_PLAN.md), measured in grid-bench's DC tabs against
@@ -143,11 +146,49 @@ phase 1 answers it before any device code.
    `GridoxideDcN1`: one call over the outage list in place of the Python loop,
    angles reported so the oracle grades them, a thread count so the adapter
    becomes `threaded`). Measure `#dcn1-full` at 1 thread and 30, the output
-   copy apart from the solves. **Gate:** if 30 threads are within about
+   copy apart from the solves. *Done* (2026-10-30), but for PR #28's adapter:
+   - `DcSensitivity::contingencies(base_angles, base_flows, outages)` (into
+     `DcContingencies`, outage-major angles and flows, a radial outage marked
+     unsolved with NaN rows), in parallel on the current rayon pool; Python
+     `PowerFlowModel.dc_contingencies(branches, threads=None)` on a solved DC
+     model, returning `(angles, flows, solved)` as `Float64Buffer`s, read-only
+     float64 arrays through the buffer protocol that `numpy.frombuffer` reads
+     without a copy (`GpuBatchSolver.voltages()` returns the same now).
+   - Tested against a re-solve with the branch removed, angles and flows to
+     1e-9, on the PGM transmission fixture and every branch of case1354pegase,
+     its six phase shifters included; against `outage_flows` to 1e-12; the
+     thread count changes no bit.
+   - Three things made it fast, each measured (case9241pegase, 14384 outages):
+     1. `DcSensitivity` factors with gridoxide's KLU port instead of faer's
+        sparse LU: one solve of the reduced B takes 290 against 585 µs, and
+        faer's solve parallelises on its own (global `Par::rayon`), which
+        fights the outer loop. faer with blocks of right-hand sides helped
+        only up to 8 columns (157 µs per column) and got worse beyond.
+     2. The output allocated zeroed rather than NaN-filled: filling 2.9 GB
+        first ran on one thread and took about a second; zeroed pages are
+        faulted in by the workers.
+     3. No copy into Python: `bytes` zero-fills, then is filled, 2.9 GB each
+        time; a buffer-protocol object hands over the vector itself.
+   - Measured (A100 machine, AMD EPYC 7J13), every connected outage, from
+     Python with the base solve and the readout into numpy, ms:
+
+     | case | outages | 1 thread | 8 threads | 30 threads | ToOp (GPU, flows only) |
+     |---|---|---|---|---|---|
+     | case1354pegase | 1430 | 78 | 13 | **5** | 55 |
+     | case2869pegase | 3804 | 639 | 109 | **53** | 112 |
+     | case9241pegase | 14384 | 8494 | 1340 | **581** | 893 |
+
+     The core alone (`examples/dc_contingencies_bench.rs`) is 280 ms on 30
+     threads for case9241pegase, 29x its one thread; the rest is the new
+     buffers' pages and freeing the last call's.
+
+   **Gate:** if 30 threads are within about
    1.5x of ToOp on case9241pegase#dcn1-full (that is, under ~1.3 s) and the
    output fill is most of it, the GPU can win little beyond the copy: stop
    here, report, and keep the GPU plan for DC sweeps only if someone needs
-   them.
+   them. *Result:* the CPU is ahead of ToOp on all three, 1.5-11x, so phases
+   2-4 are not started; the left-over is PR #28's DC N-1 adapter on
+   `dc_contingencies` (angles graded, threads), and a grid-bench run here.
 2. **The device path** (`GpuDcSolver`): cuDSS multi-RHS solve, ψ and scaling
    kernels, each checked against phase 1 to 1e-12 on case1354pegase and
    case9241pegase, islanding outages and phase shifters included; device

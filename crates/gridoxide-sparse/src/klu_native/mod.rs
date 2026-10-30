@@ -367,6 +367,13 @@ impl KluNativeSystem {
         self.solve_factored(rhs)
     }
 
+    /// Solves `A x = rhs` with the factorization as it stands (the last
+    /// `new` or `factor_and_solve`), without refactoring: for many right-hand
+    /// sides against one matrix. `None` if the result is not finite.
+    pub fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        self.solve_factored(rhs)
+    }
+
     /// Solves with the current factorization; `None` if the result is not
     /// finite.
     fn solve_factored(&self, rhs: &[f64]) -> Option<Vec<f64>> {
