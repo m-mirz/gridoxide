@@ -1,7 +1,7 @@
 //! The adaptive Newton loop on the device: [`GpuBatchSolver`].
 //!
-//! Phase 3 of `plans/GPU_BATCH_PLAN.md`: the loop of [`newton`](crate::newton)
-//! with its state and work on the device. The kernels of
+//! The loop of [`newton`](crate::newton) with its state and work on the
+//! device. The kernels of
 //! [`DeviceBatch`](crate::device::DeviceBatch) fill the Jacobians and
 //! mismatches in place, and cuDSS factors and solves those same buffers on
 //! the same stream, writing the update where the update kernel reads it.

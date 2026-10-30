@@ -1,7 +1,7 @@
 //! A batch's network and Newton state on the device: [`DeviceBatch`].
 //!
-//! Phase 2 of `plans/GPU_BATCH_PLAN.md`. Everything the Newton loop computes
-//! per scenario between two linear solves runs here in kernels
+//! Everything the Newton loop computes per scenario between two linear
+//! solves runs here in kernels
 //! (`cuda/kernels.cu`): the voltages' sines and cosines, the power
 //! injections, the mismatch and its ‖F‖∞, the Jacobian fill in its two
 //! passes, and the update. Each transliterates the CPU code the stand-in loop

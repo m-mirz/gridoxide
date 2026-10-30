@@ -1,10 +1,9 @@
 //! DC N-1 on the device: [`GpuDcSolver`].
 //!
-//! Phase 2 of `plans/GPU_DC_PLAN.md`: gridoxide-core's
-//! `DcSensitivity::contingencies` with its solves and its arithmetic on the
-//! device. The reduced susceptance matrix `B` (every non-reference bus of
-//! every island with a reference, one block per island) is analysed and
-//! factored by cuDSS once per session. For each outage `l` of branch `f → t`,
+//! gridoxide-core's `DcSensitivity::contingencies` with its solves and its
+//! arithmetic on the device. The reduced susceptance matrix `B` (every
+//! non-reference bus of every island with a reference, one block per
+//! island) is analysed and factored by cuDSS once per session. For each outage `l` of branch `f → t`,
 //! the angle response to a unit transfer from `f` to `t`, `θ⁽ˡ⁾ = B⁻¹(e_f −
 //! e_t)`, is one column of a single multi-column solve; from it
 //! `d = b_l (θ⁽ˡ⁾_f − θ⁽ˡ⁾_t)`, the transfer `c = p_l / (1 − d)` the removed

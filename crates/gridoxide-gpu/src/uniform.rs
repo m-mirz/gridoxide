@@ -5,7 +5,7 @@
 //! values, right-hand side and solution, in contiguous `B × nnz` and `B × n`
 //! buffers, system-major. A factorization and a solve each take a mask that
 //! selects the systems they process. The rules are the ones phase 0's probe
-//! measured on an A100 (`plans/GPU_BATCH_PLAN.md`), and [`CpuUniformBatch`]
+//! measured on an A100 (`probes/cudss_ubatch/README.md`), and [`CpuUniformBatch`]
 //! enforces them so the Newton loop is tested against the device's contract
 //! on the CPU:
 //!

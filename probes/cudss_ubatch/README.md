@@ -1,7 +1,7 @@
 # cuDSS uniform-batch and mask probe
 
-Phase 0 of [`plans/GPU_BATCH_PLAN.md`](../../plans/GPU_BATCH_PLAN.md): before any GPU code is
-written for gridoxide, measure on real hardware what the design depends on.
+Before any GPU code was written for gridoxide-gpu: measure on real hardware what the
+design depends on.
 
 `probe.cpp` runs four experiments on real Newton-Raphson Jacobians, written with CPU
 reference solutions by [`examples/gpu_probe_dump.rs`](../../examples/gpu_probe_dump.rs):
@@ -43,8 +43,7 @@ A distribution's CUDA package (Ubuntu's `nvidia-cuda-toolkit`) keeps its headers
 ## Results
 
 Run on an A100-SXM4-40GB on 2026-10-29; `run.sh` writes the raw output to `results/`
-(not tracked), and [the plan](../../plans/GPU_BATCH_PLAN.md#phase-0-on-an-a100) records
-the numbers and what they mean. In short:
+(not tracked). In short:
 (A) passes in 1.0.0 and **fails in 0.8.0**: some systems from index 216 on come back NaN,
 which the first run reported as a pass because its comparison was blind to NaN (fixed). (B) holds as documented in 1.0.0, but 0.8.0 drops the factors
 of the systems a factorization leaves out and overwrites their solutions, so two of probe

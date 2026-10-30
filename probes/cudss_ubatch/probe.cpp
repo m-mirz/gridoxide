@@ -1,4 +1,4 @@
-// cuDSS uniform-batch and UBATCH_MASK probe, phase 0 of plans/GPU_BATCH_PLAN.md.
+// cuDSS uniform-batch and UBATCH_MASK probe; see README.md.
 //
 // Answers, on real Newton-Raphson Jacobians written by
 // `examples/gpu_probe_dump.rs`, the questions the GPU batch design depends on:

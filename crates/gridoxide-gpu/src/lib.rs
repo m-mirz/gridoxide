@@ -1,4 +1,5 @@
-//! Batched AC power flow for NVIDIA GPUs, after `plans/GPU_BATCH_PLAN.md`.
+//! Batched AC power flow for NVIDIA GPUs; what is left to make it faster is
+//! in `plans/GPU_BATCH_TODO.md`.
 //!
 //! Two layers, the second written against the first so that it is built and
 //! tested on the CPU before any device code exists:

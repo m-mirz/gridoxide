@@ -1,7 +1,7 @@
 // Follow-up to probe.cpp, written after its first run on an A100: what
 // UBATCH_MASK does to the systems it leaves out, and what a refactorization and
 // solve cost against the batch size. Its findings are in
-// plans/GPU_BATCH_PLAN.md ("Phase 0 on an A100").
+// README.md ("Results").
 //
 //   explore <dump> <B> mask
 //       Numbered experiments, each printing how systems 0-3 compare with

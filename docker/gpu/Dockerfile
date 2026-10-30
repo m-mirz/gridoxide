@@ -1,5 +1,5 @@
 # gridoxide's Python bindings with the `gpu` feature: `GpuBatchSolver`, the
-# batched power flow on an NVIDIA GPU (plans/GPU_BATCH_PLAN.md, phase 5), for
+# batched power flow on an NVIDIA GPU, for
 # grid-bench's GPU tabs. From the repository root:
 #
 #   docker build -f docker/gpu/Dockerfile -t gridoxide-gpu .

@@ -1,6 +1,6 @@
 //! The uniform batch on an NVIDIA GPU, through cuDSS: [`CudssUniformBatch`].
 //!
-//! gpusim2grid's shape, the one that works (`plans/GPU_BATCH_PLAN.md`): one
+//! gpusim2grid's shape, the one that works (`probes/cudss_ubatch/README.md`): one
 //! plain `cudssMatrixCreateCsr` whose value buffer holds all B systems
 //! (`B × nnz`), the right-hand side and solution as `n × 1` column-major dense
 //! descriptors over `B × n` buffers, `CUDSS_CONFIG_UBATCH_SIZE = B` before the
@@ -15,7 +15,7 @@
 //! found 0.8.0 returning NaN solutions for some systems of a uniform batch
 //! (from index 216 on, case1354pegase, an A100) and when other GPU work runs
 //! alongside it, besides dropping the factors of systems a masked
-//! factorization leaves out; see `plans/GPU_BATCH_PLAN.md`. In 1.0.0 the
+//! factorization leaves out; see `probes/cudss_ubatch/README.md`. In 1.0.0 the
 //! mask works as documented: an unselected system keeps its factors and its
 //! solution, and `REFACTORIZATION` honours the mask, so it is used whenever
 //! every selected system has been factored since the analysis

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 0 of plans/GPU_BATCH_PLAN.md, on a machine with an NVIDIA GPU, the CUDA
+# The cuDSS probe (README.md), on a machine with an NVIDIA GPU, the CUDA
 # toolkit and Rust. Fetches cuDSS (pinned, checksummed), builds the probe,
 # writes the Jacobian dumps from this checkout, runs the probe over batch
 # sizes, then gridoxide-gpu's cuDSS backend tests (`--features cuda`). Results

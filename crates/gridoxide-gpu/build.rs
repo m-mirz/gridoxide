@@ -98,7 +98,7 @@ mod cudss {
     }
 
     /// cuDSS 0.8.0 computes wrong solutions in a uniform batch (NaN for some
-    /// systems from index 216 on, measured on an A100; `plans/GPU_BATCH_PLAN.md`),
+    /// systems from index 216 on, measured on an A100; `probes/cudss_ubatch/README.md`),
     /// so this crate needs 1.0 or later, read from the header's
     /// `CUDSS_VERSION_MAJOR`.
     fn require_cudss_1(header: &Path) {
@@ -112,7 +112,7 @@ mod cudss {
         if major < 1 {
             panic!(
                 "{} is cuDSS {major}.x: gridoxide-gpu needs cuDSS 1.0 or later, as 0.8.0 \
-                 computes wrong solutions in a uniform batch (see plans/GPU_BATCH_PLAN.md)",
+                 computes wrong solutions in a uniform batch (see probes/cudss_ubatch/README.md)",
                 header.display()
             );
         }

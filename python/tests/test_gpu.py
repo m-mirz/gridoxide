@@ -3,8 +3,7 @@
 
 Skipped unless the extension was built with the `gpu` feature
 (`maturin develop --release --features python,gpu`, with `CUDSS_DIR` set);
-it then needs a GPU. Phase 5 of plans/GPU_BATCH_PLAN.md: every scenario agrees
-with the CPU to 1e-8.
+it then needs a GPU. Every scenario agrees with the CPU to 1e-8.
 """
 import math
 import random

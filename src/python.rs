@@ -4207,8 +4207,7 @@ impl OptimalPowerFlowModel {
 }
 
 /// Batched power flows on an NVIDIA GPU: a session for one
-/// `PowerFlowModel`'s network, after `plans/GPU_BATCH_PLAN.md`. See
-/// `gridoxide::gpu::GpuBatchSolver`.
+/// `PowerFlowModel`'s network. See `gridoxide::gpu::GpuBatchSolver`.
 ///
 /// `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None)`
 /// takes what it needs from `model` once: its network, `tol` and `max_iter`,
@@ -4527,7 +4526,7 @@ impl GpuBatchSolver {
 }
 
 /// DC N-1 on an NVIDIA GPU: a session for one `PowerFlowModel`'s DC
-/// network, after `plans/GPU_DC_PLAN.md`. See `gridoxide::gpu::GpuDcSolver`.
+/// network. See `gridoxide::gpu::GpuDcSolver`.
 ///
 /// `GpuDcSolver(model, capacity=1024)` takes the model's DC network once:
 /// its branches, DC options, reference buses and injections (shunt
