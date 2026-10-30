@@ -13,8 +13,8 @@ links = "cudss"
 exclude = ["tests/", "examples/"]
 
 [dependencies]
-gridoxide-core = { path = "../gridoxide-core", version = "0.2.0" }
-gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.2.0" }
+gridoxide-core = { path = "../gridoxide-core", version = "0.3.0" }
+gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.3.0" }
 num-complex = "0.4.6"
 # The CPU hand-off's scenarios in parallel, on the pool gridoxide's CPU
 # BatchSolver shares (already in the dependency tree).

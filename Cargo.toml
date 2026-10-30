@@ -6,7 +6,7 @@ members = ["crates/gridoxide-core", "crates/gridoxide-sparse", "crates/gridoxide
 
 # Shared by every crate in the workspace, so they release in lockstep.
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 repository = "https://github.com/m-mirz/gridoxide"
 
@@ -79,13 +79,13 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 # The sparse LU backends and the vendored SuiteSparse they build on — see
 # crates/gridoxide-sparse. Its modules are re-exported under their old names
 # in src/lib.rs, so `gridoxide::sparse` and the rest resolve as before.
-gridoxide-sparse = { path = "crates/gridoxide-sparse", version = "0.2.0" }
+gridoxide-sparse = { path = "crates/gridoxide-sparse", version = "0.3.0" }
 # The solvers — network model, power flow, state estimation, short circuit —
 # re-exported the same way; see crates/gridoxide-core.
-gridoxide-core = { path = "crates/gridoxide-core", version = "0.2.0" }
+gridoxide-core = { path = "crates/gridoxide-core", version = "0.3.0" }
 # Batched AC power flow on an NVIDIA GPU, re-exported as `gridoxide::gpu`; see
 # the `gpu` feature.
-gridoxide-gpu = { path = "crates/gridoxide-gpu", version = "0.2.0", optional = true }
+gridoxide-gpu = { path = "crates/gridoxide-gpu", version = "0.3.0", optional = true }
 faer = "0.24.4"
 num-complex = { version = "0.4.6", features = ["serde"] }
 # Powers `crates/gridoxide-core/src/batch.rs`'s across-scenario parallelism. Not a new build cost:

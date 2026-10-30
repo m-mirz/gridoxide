@@ -12,7 +12,7 @@ categories = ["science", "simulation"]
 license = "Apache-2.0"
 
 [dependencies]
-gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.2.0" }
+gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.3.0" }
 faer = "0.24.4"
 num-complex = { version = "0.4.6", features = ["serde"] }
 # The batch solvers — power flow's and state estimation's — run scenarios
