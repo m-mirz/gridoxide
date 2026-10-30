@@ -55,3 +55,22 @@ voltages back to the host.
   device tests, and adopt the release if it is correct and cheaper.
 - [ ] **Mixed precision.** Factor in FP32 and keep the mismatch in FP64.
   This is an experiment, kept only if the oracle accepts it.
+
+## Beyond batch power flows
+
+The device solves AC sweeps (`GpuBatchSolver.solve_batch`), AC N-1
+(`GpuBatchSolver.solve_contingencies`) and DC N-1
+(`GpuDcSolver.solve_contingencies`). Everything else is CPU only.
+
+- [ ] **DC sweeps.** `GpuDcSolver` already keeps one factorization; a sweep
+  of injection scenarios is one multi-column solve over their right-hand
+  sides. The cheapest addition.
+- [ ] **A linear start for AC.** The CPU's `start="linear"` has no device
+  counterpart; every scenario starts from the last `solve()`. A DC solve per
+  scenario on the device would give it one.
+- [ ] **Single AC or DC power flow.** One system is cuDSS's worst case (a
+  roughly fixed cost per system), so this is worth it only on grids large
+  enough to fill the device. Measure before building.
+- [ ] **State estimation, OPF.** Batched SE over measurement sets, or the
+  KKT solves inside Ipopt, on the device. Large work; only after the
+  batch is competitive.
