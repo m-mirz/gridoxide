@@ -1,6 +1,7 @@
 # DC power flow and DC N-1 on NVIDIA GPUs
 
-Status: **plan**, 2026-10-30, against `924737c`. Nothing built yet.
+Status: **plan**, 2026-10-30, against `924737c`. Phase 0 is done by grid-bench's
+PR #28 (CPU gridoxide in every benchmark, DC included); nothing else built yet.
 
 The goal: DC power flow and DC N-1 for gridoxide-gpu, beside the AC batch of
 [GPU_BATCH_PLAN.md](GPU_BATCH_PLAN.md), measured in grid-bench's DC tabs against
@@ -28,6 +29,14 @@ unnecessary.
   `ptdf_*`, `lodf_column`.
 - Missing for grid-bench: **angles after an outage** (only flows are returned),
   and an N-1 call over a list (Python loops one outage per call).
+- In grid-bench already, through PR #28 (`gridoxide-opf`, open): a CPU tool
+  `gridoxide` with DC power flow (`solve()` on a `method="dc"` model) and DC
+  N-1 (`outage_flows` per outage, one thread, flows only, so graded on flows
+  alone like ToOp and `lightsim2grid_lodf`). Exact on all 14 DC cases to 1e-9
+  MW, phase shifters and shunt conductance included. On an AMD Ryzen 7 250:
+  `#dc` 1.2-1.6x faster than lightsim2grid (case9241pegase 0.34 against
+  0.44 ms); `#dcn1` within 25 % of it; on `#dcn1-full` lightsim2grid's
+  whole-matrix LODF is 2.3-3x faster. Not yet run on the A100 machine.
 - Measured today (A100 machine, one thread, from Python): `solve()` 0.1 ms on
   case1354pegase, 1.1 ms on case9241pegase; every connected outage through
   `outage_flows` 174 ms (1430 outages, 0.12 ms each) and 15.0 s (14384, 1.04 ms
@@ -126,15 +135,15 @@ phase 1 answers it before any device code.
 
 ## Phases
 
-0. **Check the model on grid-bench's DC cases (CPU).** Before anything new:
-   gridoxide's existing `solve()` against `oracle.dc` on every `#dc` case, as a
-   new grid-bench tool `gridoxide` (DC adapters only, from the gridoxide_gpu
-   image, which has the CPU path too). Watch phase shifters (case2848rte by
-   name, which ToOp passes) and the reference angle. **Gate:** every `#dc` case
-   accepted; a residual is a model difference to fix in gridoxide first.
-1. **Threaded CPU DC N-1 with angles** (gridoxide-core, Python, grid-bench's
-   `gridoxide` DC N-1 adapter). Measure `#dcn1-full` at 1 thread and 30, the
-   output copy apart from the solves. **Gate:** if 30 threads are within about
+0. **The model on grid-bench's DC cases (CPU).** *Done* by grid-bench's PR #28:
+   every `#dc` and `#dcn1(-full)` case exact to 1e-9 MW. Left to do: run its
+   `gridoxide` tool on the A100 machine, so its DC numbers sit beside ToOp's
+   and lightsim2grid's measured there.
+1. **Threaded CPU DC N-1 with angles** (gridoxide-core, Python, then PR #28's
+   `GridoxideDcN1`: one call over the outage list in place of the Python loop,
+   angles reported so the oracle grades them, a thread count so the adapter
+   becomes `threaded`). Measure `#dcn1-full` at 1 thread and 30, the output
+   copy apart from the solves. **Gate:** if 30 threads are within about
    1.5x of ToOp on case9241pegase#dcn1-full (that is, under ~1.3 s) and the
    output fill is most of it, the GPU can win little beyond the copy: stop
    here, report, and keep the GPU plan for DC sweeps only if someone needs
@@ -176,8 +185,12 @@ phase 1 answers it before any device code.
 
 ## Open questions
 
-- A CPU tool `gridoxide` in grid-bench (phases 0-1) is new: gridoxide has no
-  grid-bench adapter on the CPU, for AC or DC. Adding its AC power flow, batch
-  and N-1 at the same time would put gridoxide's CPU `BatchSolver` beside the
-  GPU tabs' baseline, which today is lightsim2grid alone.
+- PR #28's `gridoxide` also brings AC power flow, batch and N-1 on the CPU.
+  Run with `GRID_BENCH_RESULTS=gpu` on the A100 machine, it would put
+  gridoxide's CPU `BatchSolver` beside lightsim2grid as a baseline of the GPU
+  tabs, next to `gridoxide_gpu` (grid-bench branch `gridoxide-gpu`).
+- PR #28's palette entry for `gridoxide` (`#8b3201`, dark `#e4a064`) fails the
+  dataviz validator in dark mode next to the C++ yellow (normal-vision ΔE 9.8,
+  floor 15), which shares its batch and N-1 charts; `gridoxide_gpu` moved to
+  `#8b3202` with dark `#9e5220` for the same reason.
 - Whether DC sweeps (phase 4) are worth a grid-bench problem of their own.
