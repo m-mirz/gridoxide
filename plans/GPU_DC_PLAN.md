@@ -2,9 +2,11 @@
 
 Status: **plan**, 2026-10-30, against `924737c`. Phase 0 is done by grid-bench's
 PR #28 (CPU gridoxide in every benchmark, DC included). **Phase 1 is done, and
-its gate stops the GPU work for DC N-1:** on 30 threads the CPU solves
-case9241pegase#dcn1-full with every outage's angles in 581 ms from Python,
-against ToOp's 893 ms on the A100 for flows alone ([phase 1](#phases)).
+its gate would have stopped the GPU work for DC N-1:** on 30 threads the CPU
+solves case9241pegase#dcn1-full with every outage's angles in 581 ms from
+Python, against ToOp's 893 ms on the A100 for flows alone. **Phases 2 and 3
+were built anyway** (2026-10-30): `GpuDcSolver` takes 234 against the CPU's
+324 ms on it, and 529 ms in grid-bench's call ([phases](#phases)).
 
 The goal: DC power flow and DC N-1 for gridoxide-gpu, beside the AC batch of
 [GPU_BATCH_PLAN.md](GPU_BATCH_PLAN.md), measured in grid-bench's DC tabs against
@@ -238,7 +240,23 @@ phase 1 answers it before any device code.
      the device's compute is a third of the time.
 3. **grid-bench** `gridoxide_gpu` DC N-1 adapter (and `#dc`, for completeness,
    expected to lose to every CPU tool), against ToOp and lightsim2grid in the
-   DC tab, angles graded.
+   DC tab, angles graded. *Done* for DC N-1 (grid-bench branch `gridoxide-gpu`,
+   `f04665e`; `#dc` left out, one sparse solve being the CPU's): every case
+   accepted, angles graded, within 8.2e-10 MW. ms per call, the call freeing
+   the previous result as grid-bench's adapters do:
+
+   | case | gridoxide (GPU) | gridoxide (CPU, 30 threads) | ToOp (GPU, flows only) |
+   |---|---|---|---|
+   | case9241pegase#dcn1 | 9.8 | 74 | 51, rejected |
+   | case1354pegase#dcn1-full | 7.3 | 17 | 55 |
+   | case2869pegase#dcn1-full | 53 | 65 | 112, rejected |
+   | case9241pegase#dcn1-full | 529 | 617 | 893, rejected |
+
+   The fastest tool on every DC N-1 case of the tab, and the only GPU tool
+   accepted beyond case1354pegase. The CPU adapter rebuilds its factorization in
+   the call (about 35 ms on case9241pegase), which the GPU session keeps.
+   Measured from a local build of `5d14426`; the image's pin follows it to
+   GitHub.
 4. **DC sweeps** (`solve_batch`), only if phase 3 shows the device pays: the
    same kernels with ΔP columns, against `DcBatchSolver` on 30 threads.
 
