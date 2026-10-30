@@ -361,3 +361,123 @@ extern "C" int go_update(const unsigned* non_slack, const unsigned* pq, unsigned
                                                                      active);
     return launched();
 }
+
+// DC N-1 (src/dc.rs): gridoxide-core's `DcSensitivity::contingencies`, one
+// column per outage. See kernels.h for the layout.
+namespace {
+
+// The angle response at a bus: theta's row, or 0 at a reference bus.
+__device__ double response(const double* theta_col, const int* pos, unsigned bus) {
+    int r = pos[bus];
+    return r < 0 ? 0.0 : theta_col[r];
+}
+
+__global__ void k_dc_unit_rhs(const unsigned* __restrict__ out_br,
+                              const unsigned* __restrict__ br_from,
+                              const unsigned* __restrict__ br_to, const int* __restrict__ pos,
+                              double* __restrict__ rhs, unsigned n, size_t total) {
+    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < total;
+         t += (size_t)blockDim.x * gridDim.x) {
+        size_t col = t / n;
+        int r = (int)(t % n);
+        unsigned l = out_br[col];
+        rhs[t] = (pos[br_from[l]] == r ? 1.0 : 0.0) - (pos[br_to[l]] == r ? 1.0 : 0.0);
+    }
+}
+
+__global__ void k_dc_transfer(const double* __restrict__ theta, const unsigned* __restrict__ out_br,
+                              const unsigned* __restrict__ br_from,
+                              const unsigned* __restrict__ br_to, const double* __restrict__ br_b,
+                              const int* __restrict__ pos, const double* __restrict__ base_flows,
+                              double tol, double* __restrict__ c, int* __restrict__ solved,
+                              unsigned n, unsigned k) {
+    for (unsigned col = blockIdx.x * blockDim.x + threadIdx.x; col < k;
+         col += blockDim.x * gridDim.x) {
+        unsigned l = out_br[col];
+        unsigned f = br_from[l], to = br_to[l];
+        const double* th = theta + (size_t)col * n;
+        double d = br_b[l] * (response(th, pos, f) - response(th, pos, to));
+        bool ok = br_b[l] != 0.0 && (pos[f] >= 0 || pos[to] >= 0) && fabs(1.0 - d) >= tol;
+        solved[col] = ok ? 1 : 0;
+        c[col] = ok ? base_flows[l] / (1.0 - d) : 0.0;
+    }
+}
+
+__global__ void k_dc_angles(const double* __restrict__ theta, const int* __restrict__ pos,
+                            const double* __restrict__ base_angles, const double* __restrict__ c,
+                            const int* __restrict__ solved, double* __restrict__ angles,
+                            unsigned n, unsigned n_bus, size_t total) {
+    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < total;
+         t += (size_t)blockDim.x * gridDim.x) {
+        size_t col = t / n_bus;
+        unsigned bus = (unsigned)(t % n_bus);
+        angles[t] = solved[col]
+                        ? base_angles[bus] + c[col] * response(theta + col * n, pos, bus)
+                        : NAN;
+    }
+}
+
+__global__ void k_dc_flows(const double* __restrict__ theta, const unsigned* __restrict__ out_br,
+                           const unsigned* __restrict__ br_from,
+                           const unsigned* __restrict__ br_to, const double* __restrict__ br_b,
+                           const int* __restrict__ pos, const double* __restrict__ base_flows,
+                           const double* __restrict__ c, const int* __restrict__ solved,
+                           double* __restrict__ flows, unsigned n, unsigned n_br, size_t total) {
+    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < total;
+         t += (size_t)blockDim.x * gridDim.x) {
+        size_t col = t / n_br;
+        unsigned j = (unsigned)(t % n_br);
+        if (!solved[col]) {
+            flows[t] = NAN;
+        } else if (j == out_br[col]) {
+            flows[t] = 0.0;
+        } else {
+            const double* th = theta + col * n;
+            double psi = br_b[j] * (response(th, pos, br_from[j]) - response(th, pos, br_to[j]));
+            flows[t] = base_flows[j] + c[col] * psi;
+        }
+    }
+}
+
+}  // namespace
+
+extern "C" int go_dc_unit_rhs(const unsigned* out_br, const unsigned* br_from,
+                              const unsigned* br_to, const int* pos, double* rhs, unsigned n,
+                              unsigned k, void* stream) {
+    size_t total = (size_t)n * k;
+    if (total == 0) return 0;
+    k_dc_unit_rhs<<<grid_for(total), kThreads, 0, (cudaStream_t)stream>>>(out_br, br_from, br_to,
+                                                                         pos, rhs, n, total);
+    return launched();
+}
+
+extern "C" int go_dc_transfer(const double* theta, const unsigned* out_br, const unsigned* br_from,
+                              const unsigned* br_to, const double* br_b, const int* pos,
+                              const double* base_flows, double tol, double* c, int* solved,
+                              unsigned n, unsigned k, void* stream) {
+    if (k == 0) return 0;
+    k_dc_transfer<<<grid_for(k), kThreads, 0, (cudaStream_t)stream>>>(
+        theta, out_br, br_from, br_to, br_b, pos, base_flows, tol, c, solved, n, k);
+    return launched();
+}
+
+extern "C" int go_dc_angles(const double* theta, const int* pos, const double* base_angles,
+                            const double* c, const int* solved, double* angles, unsigned n,
+                            unsigned n_bus, unsigned k, void* stream) {
+    size_t total = (size_t)n_bus * k;
+    if (total == 0) return 0;
+    k_dc_angles<<<grid_for(total), kThreads, 0, (cudaStream_t)stream>>>(
+        theta, pos, base_angles, c, solved, angles, n, n_bus, total);
+    return launched();
+}
+
+extern "C" int go_dc_flows(const double* theta, const unsigned* out_br, const unsigned* br_from,
+                           const unsigned* br_to, const double* br_b, const int* pos,
+                           const double* base_flows, const double* c, const int* solved,
+                           double* flows, unsigned n, unsigned n_br, unsigned k, void* stream) {
+    size_t total = (size_t)n_br * k;
+    if (total == 0) return 0;
+    k_dc_flows<<<grid_for(total), kThreads, 0, (cudaStream_t)stream>>>(
+        theta, out_br, br_from, br_to, br_b, pos, base_flows, c, solved, flows, n, n_br, total);
+    return launched();
+}

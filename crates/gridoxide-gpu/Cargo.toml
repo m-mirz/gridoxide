@@ -48,5 +48,9 @@ name = "gpu_bench"
 required-features = ["cuda"]
 
 [[example]]
+name = "gpu_dc_bench"
+required-features = ["cuda"]
+
+[[example]]
 name = "lu_counts"
 required-features = ["cuda"]

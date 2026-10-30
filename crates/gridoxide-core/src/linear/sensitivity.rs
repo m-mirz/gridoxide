@@ -102,6 +102,27 @@ pub struct DcContingencies {
 }
 
 impl DcContingencies {
+    /// From buffers computed elsewhere (gridoxide-gpu's device solver), in
+    /// this layout: `angles` and `flows` outage-major, NaN rows where
+    /// `solved` is false.
+    pub fn from_parts(
+        n_buses: usize,
+        n_branches: usize,
+        angles: Vec<f64>,
+        flows: Vec<f64>,
+        solved: Vec<bool>,
+    ) -> Self {
+        assert_eq!(angles.len(), solved.len() * n_buses);
+        assert_eq!(flows.len(), solved.len() * n_branches);
+        Self {
+            n_buses,
+            n_branches,
+            angles,
+            flows,
+            solved,
+        }
+    }
+
     /// Outage `k`'s bus angles.
     pub fn angles(&self, k: usize) -> &[f64] {
         &self.angles[k * self.n_buses..(k + 1) * self.n_buses]

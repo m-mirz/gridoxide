@@ -146,6 +146,56 @@ pub(crate) unsafe fn copy_to_device<T: Copy>(
     )
 }
 
+/// Page-locked host memory for `len` values of `T`, freed on drop: what a
+/// device-to-host copy can run into at the bus's speed, where a copy into
+/// pageable memory is staged by the driver (1.3 GB/s measured on the A100
+/// machine, into freshly allocated memory).
+pub(crate) struct PinnedBuffer<T> {
+    ptr: *mut T,
+    len: usize,
+}
+
+impl<T: Copy> PinnedBuffer<T> {
+    pub(crate) fn new(len: usize) -> Result<Self, LinearError> {
+        let mut ptr: *mut c_void = ptr::null_mut();
+        // SAFETY: cudaMallocHost writes a host pointer to `ptr` or fails.
+        cuda(
+            unsafe { ffi::cudaMallocHost(&mut ptr, len.max(1) * size_of::<T>()) },
+            "cudaMallocHost",
+        )?;
+        Ok(Self {
+            ptr: ptr.cast(),
+            len,
+        })
+    }
+
+    /// The allocation, for a copy to write into. Through `&self`: a session
+    /// writes one staging buffer by DMA while a host thread reads the other.
+    pub(crate) fn as_mut_ptr(&self) -> *mut T {
+        self.ptr
+    }
+
+    /// The first `len` values. Only once a copy into them has completed.
+    pub(crate) fn prefix(&self, len: usize) -> &[T] {
+        assert!(len <= self.len);
+        // SAFETY: `ptr` holds `self.len` values of `T`, allocated in `new`;
+        // the caller reads them after the copy that wrote them.
+        unsafe { std::slice::from_raw_parts(self.ptr, len) }
+    }
+}
+
+impl<T> Drop for PinnedBuffer<T> {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` came from cudaMallocHost and is freed once.
+        unsafe { ffi::cudaFreeHost(self.ptr.cast()) };
+    }
+}
+
+// SAFETY: plain host memory, owned. Shared, it is read through `prefix`
+// and written only by copies the owner orders against those reads.
+unsafe impl<T: Send> Send for PinnedBuffer<T> {}
+unsafe impl<T: Sync> Sync for PinnedBuffer<T> {}
+
 /// A CUDA stream, synchronized and destroyed on drop. Declared before the
 /// buffers in a struct that owns both, it is dropped first, so no queued
 /// work outlives the memory it uses.
@@ -172,3 +222,30 @@ impl Drop for Stream {
         }
     }
 }
+
+/// A CUDA event without timing, for ordering one stream after another;
+/// destroyed on drop.
+pub(crate) struct Event(pub(crate) ffi::cudaEvent_t);
+
+impl Event {
+    pub(crate) fn new() -> Result<Self, LinearError> {
+        let mut event: ffi::cudaEvent_t = ptr::null_mut();
+        // SAFETY: cudaEventCreateWithFlags writes an event handle or fails.
+        cuda(
+            unsafe { ffi::cudaEventCreateWithFlags(&mut event, ffi::cudaEventDisableTiming) },
+            "cudaEventCreateWithFlags",
+        )?;
+        Ok(Self(event))
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // SAFETY: created in `new`, destroyed once.
+        unsafe { ffi::cudaEventDestroy(self.0) };
+    }
+}
+
+// SAFETY: a CUDA event handle may be used from any host thread.
+unsafe impl Send for Event {}
+unsafe impl Sync for Event {}

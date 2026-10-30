@@ -16,12 +16,16 @@
 //! cuDSS, and [`DeviceBatch`](device::DeviceBatch), the network and every
 //! scenario's Newton state on the device with the step's kernels, and
 //! [`GpuBatchSolver`](gpu::GpuBatchSolver), the adaptive loop over both: a
-//! session per network that keeps its cuDSS analysis.
+//! session per network that keeps its cuDSS analysis. And
+//! [`GpuDcSolver`](dc::GpuDcSolver), DC N-1: one factorization, every
+//! outage's angles and flows from one multi-column solve.
 
 #[cfg(feature = "cuda")]
 mod cuda;
 #[cfg(feature = "cuda")]
 pub mod cudss;
+#[cfg(feature = "cuda")]
+pub mod dc;
 #[cfg(feature = "cuda")]
 pub mod device;
 #[cfg(feature = "cuda")]
@@ -31,6 +35,8 @@ pub mod uniform;
 
 #[cfg(feature = "cuda")]
 pub use cudss::CudssUniformBatch;
+#[cfg(feature = "cuda")]
+pub use dc::GpuDcSolver;
 #[cfg(feature = "cuda")]
 pub use device::DeviceBatch;
 #[cfg(feature = "cuda")]

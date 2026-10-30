@@ -79,8 +79,8 @@ else:
 # cuDSS and a GPU at run time, so `GpuBatchSolver` is in some builds and not
 # others. `hasattr(gridoxide, "GpuBatchSolver")` is the check.
 try:
-    from ._gridoxide import GpuBatchSolver  # noqa: F401
+    from ._gridoxide import GpuBatchSolver, GpuDcSolver  # noqa: F401
 except ImportError:  # pragma: no cover - depends on build features
     pass
 else:
-    __all__ += ["GpuBatchSolver"]
+    __all__ += ["GpuBatchSolver", "GpuDcSolver"]

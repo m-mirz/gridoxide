@@ -166,3 +166,26 @@ def test_bad_input_raises():
         session.solve_batch([[(10**6, 0.0, 0.0)]])
     with pytest.raises(ValueError):
         session.solve_contingencies([[model.n_branches]])
+
+
+@needs_case1354
+def test_dc_n1_on_the_device_matches_the_cpu():
+    """`GpuDcSolver` against `dc_contingencies` on every branch of
+    case1354pegase: the same outages solved, angles and flows to 1e-10, in
+    one chunk and in several."""
+    np = pytest.importorskip("numpy")
+    model = gridoxide.PowerFlowModel.from_matpower(str(CASE1354), method="dc")
+    model.solve()
+    branches = list(range(model.n_branches))
+    n, nb, nn = len(branches), model.n_branches, model.n_nodes
+    a, f, s = model.dc_contingencies(branches)
+    want_a, want_f = np.frombuffer(a).reshape(n, nn), np.frombuffer(f).reshape(n, nb)
+    for capacity in (1024, 100):
+        gpu = gridoxide.GpuDcSolver(model, capacity=capacity)
+        ga, gf, gs = gpu.solve_contingencies(branches)
+        assert gs == s and not all(s)
+        ga, gf = np.frombuffer(ga).reshape(n, nn), np.frombuffer(gf).reshape(n, nb)
+        np.testing.assert_allclose(ga, want_a, atol=1e-10, rtol=0)
+        np.testing.assert_allclose(gf, want_f, atol=1e-10, rtol=0)
+    with pytest.raises(ValueError):
+        gpu.solve_contingencies([nb])

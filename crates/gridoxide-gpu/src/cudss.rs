@@ -39,7 +39,7 @@ use std::ptr;
 use crate::cuda::{DeviceBuffer, Stream, copy_to_device, ffi};
 use crate::uniform::{CsrPattern, LinearCounts, LinearError, UniformBatch};
 
-fn cudss(status: ffi::cudssStatus_t, what: &str) -> Result<(), LinearError> {
+pub(crate) fn cudss(status: ffi::cudssStatus_t, what: &str) -> Result<(), LinearError> {
     let name = match status {
         ffi::CUDSS_STATUS_SUCCESS => return Ok(()),
         ffi::CUDSS_STATUS_NOT_INITIALIZED => "NOT_INITIALIZED",

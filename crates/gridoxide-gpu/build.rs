@@ -154,12 +154,12 @@ mod cudss {
             // runtime only what `src/cuda.rs` and `src/cudss.rs` call.
             .allowlist_function("cudss.*|go_.*")
             .allowlist_function(
-                "cuda(Malloc|Free|Memcpy|MemcpyAsync|GetErrorString|Stream(Create|Destroy|Synchronize))",
+                "cuda(Malloc|Free|MallocHost|FreeHost|Memcpy|MemcpyAsync|GetErrorString|Stream(Create|Destroy|Synchronize|WaitEvent)|Event(CreateWithFlags|Record|Synchronize|Destroy))",
             )
-            .allowlist_type("cudss.*|cudaError.*|cudaDataType.*|cudaMemcpyKind|cudaStream_t")
+            .allowlist_type("cudss.*|cudaError.*|cudaDataType.*|cudaMemcpyKind|cudaStream_t|cudaEvent_t")
             // The value types are CUDA's `CUDA_R_*`: cuDSS 1.0 makes
             // `CUDSS_R_*` macros over them, which bindgen cannot expand.
-            .allowlist_var("CUDSS_.*|CUDA_R_(32I|64F)")
+            .allowlist_var("CUDSS_.*|CUDA_R_(32I|64F)|cudaEventDisableTiming")
             // Plain constants without the enum's name in front: the C names,
             // `CUDSS_STATUS_SUCCESS`, `cudaSuccess`.
             .default_enum_style(bindgen::EnumVariation::Consts)

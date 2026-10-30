@@ -84,6 +84,43 @@ int go_update(const unsigned* non_slack, const unsigned* pq, unsigned n_ns, unsi
               const double* dx, double* vm, double* va, unsigned n_bus, unsigned batch,
               const int* active, void* stream);
 
+/* DC N-1 (src/dc.rs), for k outages at a time on a network of n_bus buses,
+ * n_br flat branches and n unknowns (the reduced B's rows: every non-reference
+ * bus of a referenced island). `pos[bus]` is the bus's row, or -1 for a
+ * reference bus or one outside every referenced island; per flat branch,
+ * `br_from`, `br_to` its buses and `br_b` its susceptance (0 for a branch
+ * that carries no DC flow). `out_br[col]` is column col's outaged branch.
+ *
+ * Layout: the unit-transfer right-hand sides and the angle responses
+ * `theta` are column-major n x k (column col at col * n), the outages'
+ * angles and flows outage-major (row col at col * n_bus, col * n_br). */
+
+/* rhs[:, col] = e_from - e_to of the outaged branch, reference rows left out. */
+int go_dc_unit_rhs(const unsigned* out_br, const unsigned* br_from, const unsigned* br_to,
+                   const int* pos, double* rhs, unsigned n, unsigned k, void* stream);
+
+/* Per column: d = b (theta[from] - theta[to]), the transfer
+ * c = base_flows[l] / (1 - d), and solved[col] = 0 where there is no
+ * post-outage state (no DC flow on the branch, no unknown at either end, or
+ * |1 - d| < tol: the branch is radial). */
+int go_dc_transfer(const double* theta, const unsigned* out_br, const unsigned* br_from,
+                   const unsigned* br_to, const double* br_b, const int* pos,
+                   const double* base_flows, double tol, double* c, int* solved, unsigned n,
+                   unsigned k, void* stream);
+
+/* angles[col, bus] = base_angles[bus] + c[col] theta[pos[bus], col]; NaN rows
+ * where unsolved. */
+int go_dc_angles(const double* theta, const int* pos, const double* base_angles,
+                 const double* c, const int* solved, double* angles, unsigned n,
+                 unsigned n_bus, unsigned k, void* stream);
+
+/* flows[col, j] = base_flows[j] + c[col] b_j (theta[from_j] - theta[to_j]),
+ * 0 at the outaged branch; NaN rows where unsolved. */
+int go_dc_flows(const double* theta, const unsigned* out_br, const unsigned* br_from,
+                const unsigned* br_to, const double* br_b, const int* pos,
+                const double* base_flows, const double* c, const int* solved, double* flows,
+                unsigned n, unsigned n_br, unsigned k, void* stream);
+
 #ifdef __cplusplus
 }
 #endif

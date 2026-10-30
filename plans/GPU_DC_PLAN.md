@@ -198,7 +198,44 @@ phase 1 answers it before any device code.
 2. **The device path** (`GpuDcSolver`): cuDSS multi-RHS solve, ψ and scaling
    kernels, each checked against phase 1 to 1e-12 on case1354pegase and
    case9241pegase, islanding outages and phase shifters included; device
-   memory per column and the chunk size measured on the A100.
+   memory per column and the chunk size measured on the A100. *Built anyway*
+   (2026-10-30, against the gate, on the view that a GPU suits DC N-1):
+   - `gridoxide_gpu::GpuDcSolver` (`src/dc.rs`, four kernels in
+     `cuda/kernels.cu`): the reduced B of every referenced island analysed and
+     factored by cuDSS once per session; per chunk of `capacity` outages, the
+     unit-transfer right-hand sides written on the device, one cuDSS solve with
+     a column per outage, then the transfers and the angle and flow rows. The
+     base case is the CPU's `DcSolver`, in the call. Python:
+     `GpuDcSolver(model, capacity=1024).solve_contingencies(branches)`, the
+     `dc_contingencies` triple.
+   - Against `DcSensitivity::contingencies` (`tests/dc_test.rs`,
+     `python/tests/test_gpu.py`): every branch of case1354pegase and a seventh
+     of case9241pegase's, the same outages solved, angles to 4e-13 rad and
+     flows to 1.1e-12 p.u., in one chunk and several.
+   - The device's work is small: on case9241pegase cuDSS's triangular solves
+     are about 150 ms for all 14384 columns and the kernels 12 ms. **The
+     output is the cost**: 2.9 GB of angles and flows to bring to the host.
+     The first version took 2.66 s, its copies running at 1.3 GB/s (from the
+     device into pageable, freshly allocated memory). Then, measured each:
+     page-locked staging and a parallel copy out of it (742 ms); two slots, so
+     a host thread empties one chunk while the next one runs (590 ms); a second
+     stream, so a chunk's copy to the host overlaps the next one's compute
+     (234 ms, the previous result's freeing outside the clock).
+   - Measured (`examples/gpu_dc_bench.rs`, A100, capacity 1024, every
+     connected outage, ms; the previous result freed outside the clock):
+
+     | case | outages | GPU | CPU, 30 threads | GPU / CPU |
+     |---|---|---|---|---|
+     | case1354pegase | 1430 | 7.7 | 9.6 | 0.80x |
+     | case2869pegase | 3804 | 28.7 | 29.4 | 0.98x |
+     | case9241pegase | 14384 | 234 | 324 | **0.72x** |
+
+     From Python (base solve, call and numpy views, five runs): 7.5 against
+     6.3, 27 against 24, and 243 against 298 ms: ahead on case9241pegase,
+     slightly behind on the smaller two, where the call's fixed costs weigh.
+     Capacity 512 and 2048 are both slower on case9241pegase (274 and 271
+     ms). Both sides are bound by writing the output into fresh host memory;
+     the device's compute is a third of the time.
 3. **grid-bench** `gridoxide_gpu` DC N-1 adapter (and `#dc`, for completeness,
    expected to lose to every CPU tool), against ToOp and lightsim2grid in the
    DC tab, angles graded.

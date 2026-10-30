@@ -4526,6 +4526,84 @@ impl GpuBatchSolver {
     }
 }
 
+/// DC N-1 on an NVIDIA GPU: a session for one `PowerFlowModel`'s DC
+/// network, after `plans/GPU_DC_PLAN.md`. See `gridoxide::gpu::GpuDcSolver`.
+///
+/// `GpuDcSolver(model, capacity=1024)` takes the model's DC network once:
+/// its branches, DC options, reference buses and injections (shunt
+/// conductance as load where the model's DC solve takes it so). Later
+/// changes to the model do not reach it. The session keeps cuDSS's
+/// factorization of the reduced susceptance matrix and the device buffers
+/// for `capacity` outages at a time.
+#[cfg(feature = "gpu")]
+#[pyclass(unsendable)]
+struct GpuDcSolver {
+    session: crate::gpu::GpuDcSolver,
+    buses: Vec<Bus>,
+    n_branches: usize,
+}
+
+#[cfg(feature = "gpu")]
+#[pymethods]
+impl GpuDcSolver {
+    #[new]
+    #[pyo3(signature = (model, capacity=1024))]
+    fn new(model: PyRef<'_, PowerFlowModel>, capacity: usize) -> PyResult<Self> {
+        let mut buses = model.buses_template.clone();
+        if model.dc_shunt_conductance_as_load {
+            for s in &model.shunts {
+                buses[s.at].p_spec -= s.y.re;
+            }
+        }
+        let session = crate::gpu::GpuDcSolver::new(
+            &model.buses_template,
+            &model.lines,
+            &model.transformers,
+            model.dc_opts,
+            capacity,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self {
+            session,
+            buses,
+            n_branches: model.lines.len() + model.transformers.len(),
+        })
+    }
+
+    /// Outages per chunk.
+    #[getter]
+    fn capacity(&self) -> usize {
+        self.session.capacity()
+    }
+
+    /// The base case's DC power flow (on the CPU), then every single-branch
+    /// outage of `branches` on the device: `(angles, flows, solved)` as
+    /// `PowerFlowModel.dc_contingencies` returns them, read-only float64
+    /// buffers of every outage's bus angles (radians) and from-end branch
+    /// flows (per unit), one outage after another, and per outage whether it
+    /// has a post-outage state (a radial branch has none; its rows are NaN).
+    fn solve_contingencies(
+        &mut self,
+        branches: Vec<usize>,
+    ) -> PyResult<(Float64Buffer, Float64Buffer, Vec<bool>)> {
+        if let Some(&b) = branches.iter().find(|&&b| b >= self.n_branches) {
+            return Err(PyValueError::new_err(format!(
+                "branch {b} is out of range (0..{})",
+                self.n_branches
+            )));
+        }
+        let out = self
+            .session
+            .solve_contingencies(&self.buses, &branches)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok((
+            Float64Buffer::new(out.angles),
+            Float64Buffer::new(out.flows),
+            out.solved,
+        ))
+    }
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
@@ -4534,6 +4612,8 @@ fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Float64Buffer>()?;
     #[cfg(feature = "gpu")]
     m.add_class::<GpuBatchSolver>()?;
+    #[cfg(feature = "gpu")]
+    m.add_class::<GpuDcSolver>()?;
     m.add_class::<StateEstimationModel>()?;
     m.add_class::<SeBatchOutcome>()?;
     m.add_class::<ShortCircuitResult>()?;
