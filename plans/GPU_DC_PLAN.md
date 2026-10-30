@@ -187,8 +187,14 @@ phase 1 answers it before any device code.
    output fill is most of it, the GPU can win little beyond the copy: stop
    here, report, and keep the GPU plan for DC sweeps only if someone needs
    them. *Result:* the CPU is ahead of ToOp on all three, 1.5-11x, so phases
-   2-4 are not started; the left-over is PR #28's DC N-1 adapter on
-   `dc_contingencies` (angles graded, threads), and a grid-bench run here.
+   2-4 are not started. In grid-bench (branch `gridoxide-dc-n1`, on PR #28,
+   `e487064`): its DC N-1 adapter on `dc_contingencies`, angles graded and
+   threaded, run on the A100 machine; every DC and DC N-1 case accepted, and
+   on 30 threads case1354pegase, case2869pegase and case9241pegase#dcn1-full
+   in 17, 65 and 617 ms. ToOp's stored results there are rejected on
+   case9241pegase (13-17 MW off, `#dc` included) and on
+   case2869pegase#dcn1-full (3 MW, its shunt conductance), so the only GPU tool
+   of the DC tab is accepted on case1354pegase alone.
 2. **The device path** (`GpuDcSolver`): cuDSS multi-RHS solve, ψ and scaling
    kernels, each checked against phase 1 to 1e-12 on case1354pegase and
    case9241pegase, islanding outages and phase shifters included; device
