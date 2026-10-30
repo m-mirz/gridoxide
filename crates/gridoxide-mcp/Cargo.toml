@@ -20,6 +20,6 @@ path = "src/main.rs"
 # Every importer: the server reads whatever network it finds. All four are pure
 # Rust (cgmes pulls cimoxide-model from crates.io), so the binary needs no
 # system library on any platform.
-gridoxide = { path = "../..", version = "0.1.0", features = ["cgmes", "ucte", "iidm", "matpower"] }
+gridoxide = { path = "../..", version = "0.2.0", features = ["cgmes", "ucte", "iidm", "matpower"] }
 num-complex = "0.4.6"
 serde_json = "1.0"
