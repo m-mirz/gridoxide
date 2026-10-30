@@ -4188,6 +4188,32 @@ struct GpuBatchSolver {
     /// What `set_scenarios` stored, for a `solve_batch()` called without
     /// scenarios.
     stored_scenarios: Vec<Scenario>,
+    /// The last call's voltages, scenario after scenario, for `voltages()`.
+    last_vm: Vec<f64>,
+    last_va: Vec<f64>,
+}
+
+/// `values` as one `bytes` of native-endian float64s.
+#[cfg(feature = "gpu")]
+fn f64_bytes<'py>(py: Python<'py>, values: &[f64]) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    pyo3::types::PyBytes::new_with(py, values.len() * 8, |buf| {
+        for (chunk, v) in buf.chunks_exact_mut(8).zip(values) {
+            chunk.copy_from_slice(&v.to_ne_bytes());
+        }
+        Ok(())
+    })
+}
+
+#[cfg(feature = "gpu")]
+impl GpuBatchSolver {
+    fn keep_voltages<'a>(&mut self, rows: impl Iterator<Item = (&'a [f64], &'a [f64])>) {
+        self.last_vm.clear();
+        self.last_va.clear();
+        for (vm, va) in rows {
+            self.last_vm.extend_from_slice(vm);
+            self.last_va.extend_from_slice(va);
+        }
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -4228,6 +4254,8 @@ impl GpuBatchSolver {
             shunts: model.shunts.clone(),
             cpu,
             stored_scenarios: Vec::new(),
+            last_vm: Vec::new(),
+            last_va: Vec::new(),
         })
     }
 
@@ -4252,7 +4280,7 @@ impl GpuBatchSolver {
             .session
             .solve(scenarios, &self.opts)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(report
+        let results: Vec<BatchResult> = report
             .scenarios
             .into_iter()
             .map(|r| BatchResult {
@@ -4264,7 +4292,30 @@ impl GpuBatchSolver {
                 voltage_mag: r.voltage_mag,
                 voltage_ang: r.voltage_ang,
             })
-            .collect())
+            .collect();
+        self.keep_voltages(
+            results
+                .iter()
+                .map(|r| (r.voltage_mag.as_slice(), r.voltage_ang.as_slice())),
+        );
+        Ok(results)
+    }
+
+    /// The last `solve_batch` or `solve_contingencies` call's voltages,
+    /// `(voltage_mag, voltage_ang)`, every scenario's buses after the
+    /// previous scenario's, as `bytes` of native-endian float64 (p.u. and
+    /// radians): `numpy.frombuffer(vm).reshape(len(results), -1)` reads them
+    /// without a copy. Reading a whole batch through each result's lists
+    /// makes a Python float per bus and scenario, which on a large batch
+    /// takes as long as the solve.
+    fn voltages<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, pyo3::types::PyBytes>,
+        Bound<'py, pyo3::types::PyBytes>,
+    )> {
+        Ok((f64_bytes(py, &self.last_vm)?, f64_bytes(py, &self.last_va)?))
     }
 
     /// Stores scenarios, in `solve_batch`'s format, for later
@@ -4313,7 +4364,7 @@ impl GpuBatchSolver {
             )
             .map_err(|e| PyValueError::new_err(e.to_string()))?
             .into_iter();
-        Ok(report
+        let results: Vec<ContingencyResult> = report
             .scenarios
             .into_iter()
             .map(|r| match r.outcome {
@@ -4341,7 +4392,13 @@ impl GpuBatchSolver {
                     voltage_ang: r.voltage_ang,
                 },
             })
-            .collect())
+            .collect();
+        self.keep_voltages(
+            results
+                .iter()
+                .map(|r| (r.voltage_mag.as_slice(), r.voltage_ang.as_slice())),
+        );
+        Ok(results)
     }
 }
 

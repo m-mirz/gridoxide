@@ -74,6 +74,20 @@ def test_a_sweep_matches_the_cpu_scenario_for_scenario():
 
 
 @needs_case1354
+def test_voltages_come_back_whole():
+    """`voltages()` is every result's voltages, scenario after scenario."""
+    np = pytest.importorskip("numpy")
+    model = solved(CASE1354)
+    session = gridoxide.GpuBatchSolver(model, capacity=8)
+    for solve in (lambda: session.solve_batch(sweep(model, 20)),
+                  lambda: session.solve_contingencies([[3], [10], [40]])):
+        results = solve()
+        vm, va = (np.frombuffer(b).reshape(len(results), -1) for b in session.voltages())
+        assert vm.tolist() == [r.voltage_mag for r in results]
+        assert va.tolist() == [r.voltage_ang for r in results]
+
+
+@needs_case1354
 def test_a_session_solves_in_chunks_and_again():
     """More scenarios than the capacity are solved in chunks of it, the last
     one short; a second call on the same session reuses its analysis and
