@@ -524,8 +524,12 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
      gridoxide is accepted on every scenario of all 22 cases, the only GPU tool there of
      which that holds: the correctness target is met. The speed target is not. On
      100 scenarios it is the fastest GPU tool (1.4-1.6x gpusim2grid), but on the large
-     batches gpusim2grid is 1.2-2.6x faster where it is accepted: cuDSS 0.8.0's lower
+     sweeps gpusim2grid is 1.2-2.3x faster where it is accepted: cuDSS 0.8.0's lower
      cost per system (phase 0) and four fixed steps against every scenario to 1e-8.
+     (A first version of this said 1.2-2.6x, counting the `#n1-full` cases, on which
+     gpusim2grid is not accepted; on N-1 it is accepted only on case1354pegase#n1 and
+     case9241pegase#n1, 1.1-1.3x faster.) What closing the gap could take:
+     [GPU_BATCH_TODO.md](GPU_BATCH_TODO.md).
      Against 30 CPU threads gridoxide is ahead only on case9241pegase's large sweeps
      (1.1-1.2x). gpusim2grid and ExaPF.jl, both on cuDSS 0.8.0, fail case2869pegase#n1,
      which gridoxide on 1.0.0 solves whole.
