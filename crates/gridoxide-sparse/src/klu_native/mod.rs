@@ -187,14 +187,6 @@ impl KluNativeSystem {
         Self::with_scale(n, entries, types::Options::default().scale)
     }
 
-    /// [`new`](Self::new) with KLU's row scaling: `scale` is
-    /// `Common->scale` (2 divides each row by its largest magnitude, KLU's
-    /// default; 1 by its sum; 0 does not scale). As in `klu_factor.c` and
-    /// `klu_refactor.c`, the factors are recomputed from every new set of
-    /// values, each value is divided by its row's, and the solve divides the
-    /// right-hand side by the same, so the solution is unchanged: scaling
-    /// only decides which pivots partial pivoting sees as large, and how the
-    /// arithmetic rounds.
     /// The last factorization's size and work: the nonzeros of L and U
     /// (the diagonal once, BTF's off-diagonal blocks included) and its
     /// floating-point operations, counted as KLU's `klu_flops` does: per
@@ -223,6 +215,14 @@ impl KluNativeSystem {
         (nnz, flops)
     }
 
+    /// [`new`](Self::new) with KLU's row scaling: `scale` is
+    /// `Common->scale` (2 divides each row by its largest magnitude, KLU's
+    /// default; 1 by its sum; 0 does not scale). As in `klu_factor.c` and
+    /// `klu_refactor.c`, the factors are recomputed from every new set of
+    /// values, each value is divided by its row's, and the solve divides the
+    /// right-hand side by the same, so the solution is unchanged: scaling
+    /// only decides which pivots partial pivoting sees as large, and how the
+    /// arithmetic rounds.
     pub fn with_scale(n: usize, entries: &[(usize, usize, f64)], scale: i32) -> Option<Self> {
         let pairs: Vec<(usize, usize)> = entries.iter().map(|&(r, c, _)| (r, c)).collect();
         let (col_ptr, row_idx, groups) = build_csc_structure(n, &pairs);
