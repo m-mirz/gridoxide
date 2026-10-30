@@ -195,6 +195,34 @@ impl KluNativeSystem {
     /// right-hand side by the same, so the solution is unchanged: scaling
     /// only decides which pivots partial pivoting sees as large, and how the
     /// arithmetic rounds.
+    /// The last factorization's size and work: the nonzeros of L and U
+    /// (the diagonal once, BTF's off-diagonal blocks included) and its
+    /// floating-point operations, counted as KLU's `klu_flops` does: per
+    /// pivot column k of a block, nnz(L_k) divisions and two operations
+    /// for each entry of L_k times each entry of row k of U.
+    pub fn factor_stats(&self) -> (usize, f64) {
+        let mut nnz = self.num.off_i.len();
+        let mut flops = 0.0;
+        for block in &self.num.blocks {
+            let cols = block.l.len();
+            nnz += cols;
+            let mut u_row = vec![0usize; cols];
+            for k in 0..cols {
+                let (rows, _) = block.u.col(k);
+                nnz += rows.len();
+                for &r in rows {
+                    u_row[r as usize] += 1;
+                }
+            }
+            for (k, &urow) in u_row.iter().enumerate() {
+                let lk = block.l.col(k).0.len();
+                nnz += lk;
+                flops += (lk * (1 + 2 * urow)) as f64;
+            }
+        }
+        (nnz, flops)
+    }
+
     pub fn with_scale(n: usize, entries: &[(usize, usize, f64)], scale: i32) -> Option<Self> {
         let pairs: Vec<(usize, usize)> = entries.iter().map(|&(r, c, _)| (r, c)).collect();
         let (col_ptr, row_idx, groups) = build_csc_structure(n, &pairs);

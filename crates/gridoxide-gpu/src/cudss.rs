@@ -286,6 +286,28 @@ impl CudssBatch {
         self.counts
     }
 
+    /// `CUDSS_DATA_LU_NNZ`: the nonzeros of the factors cuDSS's analysis
+    /// planned.
+    pub(crate) fn lu_nnz(&self) -> Result<i64, LinearError> {
+        let mut nnz: i64 = 0;
+        let mut written = 0usize;
+        // SAFETY: an int64 out-parameter of the size given.
+        cudss(
+            unsafe {
+                ffi::cudssDataGet(
+                    self.handle,
+                    self.data,
+                    ffi::CUDSS_DATA_LU_NNZ,
+                    (&mut nnz as *mut i64).cast(),
+                    size_of::<i64>(),
+                    &mut written,
+                )
+            },
+            "cudssDataGet(LU_NNZ)",
+        )?;
+        Ok(nnz)
+    }
+
     fn check_mask(&self, mask: &[bool]) -> Result<(), LinearError> {
         if mask.len() == self.batch {
             Ok(())
@@ -400,6 +422,12 @@ impl CudssUniformBatch {
     /// `(major, minor, patch)`.
     pub fn version() -> (u32, u32, u32) {
         version()
+    }
+
+    /// The nonzeros of the factors cuDSS's analysis planned
+    /// (`CUDSS_DATA_LU_NNZ`).
+    pub fn lu_nnz(&self) -> Result<i64, LinearError> {
+        self.lin.lu_nnz()
     }
 
     fn check(&self, what: &str, len: usize, per_system: usize) -> Result<(), LinearError> {

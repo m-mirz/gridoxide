@@ -46,3 +46,7 @@ cuda = ["dep:bindgen", "dep:cc"]
 [[example]]
 name = "gpu_bench"
 required-features = ["cuda"]
+
+[[example]]
+name = "lu_counts"
+required-features = ["cuda"]

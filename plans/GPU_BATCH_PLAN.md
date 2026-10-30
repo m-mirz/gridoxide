@@ -477,6 +477,26 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
      grows with the matrix (about 2300 against 11000 blocks per system) and its time grows
      more slowly than its work. Counting the LU factors' nonzeros for both cases against
      their factorization times would test it.
+   - **The LU factors** (`examples/lu_counts.rs`; the solved base case's Jacobian; KLU's
+     count from `KluNativeSystem::factor_stats`, cuDSS's `CUDSS_DATA_LU_NNZ`, per system):
+
+     | | case1354pegase | case2869pegase | case9241pegase | growth |
+     |---|---|---|---|---|
+     | Jacobian nnz | 15803 | 36591 | 129412 | 8.2x |
+     | KLU nnz(L+U) | 22005 (1.39x) | 55019 (1.50x) | 215298 (1.66x) | 9.8x |
+     | cuDSS LU_NNZ | 25475 (1.61x) | 64987 (1.78x) | 247494 (1.91x) | 9.7x |
+     | KLU factorization | 0.128 Mflop | 0.378 Mflop | 2.405 Mflop | 18.8x |
+     | CPU, one core, per scenario | 2.5 ms | 6.1 ms | 29.4 ms | 11.8x |
+     | cuDSS factorization, per system | 42.6 µs | | 189.6 µs | 4.5x |
+
+     Fill-in stays small, but the work per factorization grows 18.8x for 6.8x the buses,
+     and the CPU follows it part of the way. cuDSS does not follow it at all: over the
+     batch its factorization runs at 3 and 13 GFLOP/s, 0.03-0.1% of the A100's FP64 peak,
+     and moving its factors once would take 0.3-0.7% of the time at the A100's bandwidth.
+     So its cost is a fixed overhead per system, presumably the sequential steps of each
+     sparse elimination, and a small grid pays it for little arithmetic: the GPU wins once
+     a factorization has enough work. (Not confirmed with Nsight Compute; the flop counts
+     are KLU's ordering, and cuDSS's factors are 16% larger.)
 
 ## Targets
 
