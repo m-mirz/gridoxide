@@ -1,7 +1,8 @@
 # Batched AC power flow on NVIDIA GPUs
 
 Status: **plan**, 2026-10-28, against `2b0c730`; phases 0-4 done on an A100, 2026-10-29,
-phase 5 in part on 2026-10-30 ([Phase 0 on an A100](#phase-0-on-an-a100), [phases](#phases)).
+phase 5 on 2026-10-30, grid-bench's GPU tabs included ([Phase 0 on an A100](#phase-0-on-an-a100),
+[phases](#phases)).
 **The GPU beats 30 CPU threads only on case9241pegase's sweeps** (0.85-0.90x the time);
 everywhere else, N-1 included, it takes 1.9-5x the CPU's time ([phase 5](#phases)). **cuDSS 0.8.0 computes wrong
 solutions** in a uniform batch (see [the correction](#correction-a-fails-on-080)); only
@@ -413,7 +414,7 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
      cuDSS is 89-95% of the step.)
 5. **Python API, tests, grid-bench:** every scenario against the CPU `BatchSolver` to 1e-8, a
    GPU Docker image, and the GPU tabs against gpusim2grid and ExaPF.jl on the same A100.
-   *Done in part* (2026-10-30), grid-bench's tabs not yet (it is another repository):
+   *Done* (2026-10-30):
    - `gridoxide` has a `gpu` feature (re-exporting the crate as `gridoxide::gpu`), and
      `gridoxide-gpu` is now published with the workspace; its dev-dependency on gridoxide
      carries no version, so the cycle stays out of the registry, and its tests and examples
@@ -497,6 +498,37 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
      sparse elimination, and a small grid pays it for little arithmetic: the GPU wins once
      a factorization has enough work. (Not confirmed with Nsight Compute; the flop counts
      are KLU's ordering, and cuDSS's factors are 16% larger.)
+
+   - **grid-bench** (2026-10-30, its branch `gridoxide-gpu`, `e35773e`): gridoxide's GPU
+     batch and N-1 as the tool `gridoxide_gpu`, from `d105bf4`, against gpusim2grid and
+     ExaPF.jl's GPU batch rerun the same day on the same A100, grid-bench's protocol
+     (base case from flat start in the timed call, voltages copied back, tol 1e-8 p.u.)
+     and oracle. ms per scenario; lightsim2grid on 30 threads of the machine in
+     parentheses:
+
+     | case | gridoxide | gpusim2grid | ExaPF (GPU) | (lightsim2grid) |
+     |---|---|---|---|---|
+     | case1354pegase#sweep | 0.70 | 0.96 | 0.86 | (0.15) |
+     | case9241pegase#sweep | 4.43 | 6.94 | 10.2 | (2.04) |
+     | mvlv1004#sweep | 0.57 | 25 rejected | 0.81 | (0.10) |
+     | case1354pegase#sweep-1k | 0.27 | 0.15, 507 NaN | 0.22 | (0.12) |
+     | case9241pegase#sweep-1k | 1.63 | 1.37 | out of memory | (1.79) |
+     | case1354pegase#sweep-10k | 0.30 | 0.13 | out of memory | (0.13) |
+     | case2869pegase#sweep-10k | 0.51 | 0.28 | out of memory | (0.33) |
+     | case9241pegase#sweep-10k | 1.52 | 0.95 | out of memory | (1.84) |
+     | case2869pegase#n1 | 1.37 | 160 NaN | 167 not converged | (0.25) |
+     | case1354pegase#n1-full | 0.31 | 0.11, 148 failed | 0.24 | (0.091) |
+     | case2869pegase#n1-full | 0.61 | 0.26, 1 failed | out of memory | (0.27) |
+     | case9241pegase#n1-full | 2.24 | 0.86, 16 failed | out of memory | (1.26) |
+
+     gridoxide is accepted on every scenario of all 22 cases, the only GPU tool there of
+     which that holds: the correctness target is met. The speed target is not. On
+     100 scenarios it is the fastest GPU tool (1.4-1.6x gpusim2grid), but on the large
+     batches gpusim2grid is 1.2-2.6x faster where it is accepted: cuDSS 0.8.0's lower
+     cost per system (phase 0) and four fixed steps against every scenario to 1e-8.
+     Against 30 CPU threads gridoxide is ahead only on case9241pegase's large sweeps
+     (1.1-1.2x). gpusim2grid and ExaPF.jl, both on cuDSS 0.8.0, fail case2869pegase#n1,
+     which gridoxide on 1.0.0 solves whole.
 
 ## Targets
 
