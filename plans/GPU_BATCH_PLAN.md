@@ -1,7 +1,9 @@
 # Batched AC power flow on NVIDIA GPUs
 
-Status: **plan**, 2026-10-28, against `2b0c730`; phases 0-3 done on an A100, 2026-10-29
-([Phase 0 on an A100](#phase-0-on-an-a100), [phases](#phases)). **cuDSS 0.8.0 computes wrong
+Status: **plan**, 2026-10-28, against `2b0c730`; phases 0-4 done on an A100, 2026-10-29,
+phase 5 in part on 2026-10-30 ([Phase 0 on an A100](#phase-0-on-an-a100), [phases](#phases)).
+**The GPU beats 30 CPU threads only on case9241pegase's sweeps** (0.85-0.90x the time);
+everywhere else, N-1 included, it takes 1.9-5x the CPU's time ([phase 5](#phases)). **cuDSS 0.8.0 computes wrong
 solutions** in a uniform batch (see [the correction](#correction-a-fails-on-080)); only
 1.0.0 is fit to use. Supersedes the `gpu-nvidia` branch's
 `plans/GPU_PLAN.md`, whose lessons are in [What we know](#what-we-know).
@@ -363,26 +365,32 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
    | case1354pegase | 1000 sweep | 258 ms | 114 ms | 2.27x | 3373 |
    | case2869pegase | 1000 sweep | 411 ms | 267 ms | 1.54x | 3287 |
    | case9241pegase | 1000 sweep | 1334 ms | 1478 ms | 0.90x | 3568 |
-   | case1354pegase | 1991 outages (N-1) | 639 ms | 511 ms | 1.25x | 3804 |
-   | case2869pegase | 4582 outages (N-1) | 1803 ms | 2120 ms | 0.85x | 9547 |
+   | case1354pegase | 1430 connected outages (N-1) | 634 ms | 125 ms | **5.06x** | 3804 |
+   | case2869pegase | 3804 connected outages (N-1) | 1782 ms | 744 ms | **2.40x** | 9547 |
 
    The systems factored are the CPU stand-in's counts exactly. At 1.0.0's 0.06-0.24 ms per
    refactorization and solve, the LU is most of the GPU time; the GPU pays only on the
-   larger cases.
+   larger cases, and on N-1 not even there.
+
+   **Corrected in phase 5** (2026-10-30): the N-1 rows first read 1.25x and 0.85x, because
+   the CPU column also solved the outages that split the network (561 and 778), which the
+   GPU reports as `Outcome::Splits` without solving. Those are the CPU's expensive part:
+   229 and 783 ms on 30 threads, a full rebuild each. `gpu_bench` now times the CPU on
+   the outages the GPU solved and the splits apart; the rows above are its numbers.
 4. **Stragglers to the CPU,** then the factor-reuse experiment, each kept only if grid-bench
    shows it pays. *Measured* (2026-10-29, `gpu_bench`, cuDSS 1.0.0, tol 1e-6, GPU solve
    time; the CPU `BatchSolver` on 30 threads in the last column). The hand-off now solves
    its scenarios in parallel on rayon's pool, each on a fresh solver, in both loops; run one
    by one it cost case9241pegase's N-1 3 s.
 
-   | case | adaptive | hand-off 50 | reuse < 0.1 | both | CPU |
+   | case | adaptive | hand-off 50 | reuse < 0.1 | both | CPU, same outages |
    |---|---|---|---|---|---|
    | case1354pegase, 1000 sweep | 258 ms | 259 ms (never taken) | 216 ms | | 114 ms |
    | case2869pegase, 1000 sweep | 410 ms | 410 ms (never taken) | 349 ms | | 267 ms |
    | case9241pegase, 1000 sweep | 1335 ms | 1334 ms (never taken) | 1240 ms | | 1478 ms |
-   | case1354pegase, N-1 (1991) | 636 ms | 489 ms | 569 ms | 485 ms | 505-510 ms |
-   | case2869pegase, N-1 (4582) | 1793 ms | 1939 ms | 1588 ms | 1785 ms | 2100-2120 ms |
-   | case9241pegase, N-1 (16049) | 25.7 s | 25.4 s | 23.5 s | 23.7 s | 25.9-26.2 s |
+   | case1354pegase, N-1 (1430 connected) | 636 ms | 489 ms | 569 ms | 485 ms | 125 ms |
+   | case2869pegase, N-1 (3804 connected) | 1793 ms | 1939 ms | 1588 ms | 1785 ms | 744 ms |
+   | case9241pegase, N-1 (14384 connected) | 25.7 s | 25.4 s | 23.5 s | 23.7 s | 13.5 s |
 
    - **Factor reuse pays everywhere**: 7-16% on sweeps, 9-11% on N-1, from half the
      factorizations for about 45% more solves. It ends each scenario at a different
@@ -394,13 +402,49 @@ batches of up to 1000, 3.4 GB peak, and its steps add up over them.)
      case1354pegase's N-1, 1% on case9241pegase's, 8% worse on case2869pegase's, never taken
      on sweeps (their scenarios converge together). It stays an option, off by default, its
      threshold to be set per case if at all.
-   - With either, the GPU is now at 0.75-0.98x the CPU's time on N-1 and on
-     case9241pegase's sweep, and still 1.3-2x it on the smaller sweeps. The LU is
+   - ~~With either, the GPU is now at 0.75-0.98x the CPU's time on N-1~~ (corrected in
+     phase 5: the CPU column then included the splitting outages; on the same outages the
+     GPU's best is 1.7-3.9x the CPU's time on N-1). On case9241pegase's sweep it is at
+     0.84-0.90x, and still 1.3-2x it on the smaller sweeps. The LU is
      0.24 ms per system on case9241pegase, so of 25 s for its N-1 about 8 s are
      factorizations and solves: the rest, the chunks' tail steps and the per-step host
      round trip, is where phase 5's profile has to look first.
 5. **Python API, tests, grid-bench:** every scenario against the CPU `BatchSolver` to 1e-8, a
    GPU Docker image, and the GPU tabs against gpusim2grid and ExaPF.jl on the same A100.
+   *Done in part* (2026-10-30), grid-bench's tabs not yet (it is another repository):
+   - `gridoxide` has a `gpu` feature (re-exporting the crate as `gridoxide::gpu`), and
+     `gridoxide-gpu` is now published with the workspace; its dev-dependency on gridoxide
+     carries no version, so the cycle stays out of the registry, and its tests and examples
+     stay out of the package. It `links = "cudss"` and hands its library directories on as
+     `DEP_CUDSS_LIB_DIRS`, which gridoxide's build script puts on the extension's run path.
+   - Python: `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None)`,
+     a session from the model's last `solve()` (`start="last"`), with `solve_batch` (and
+     `set_scenarios`) in `solve_batch`'s format and `solve_contingencies` in its format,
+     returning the CPU's `BatchResult` and `ContingencyResult`. Outages that split the
+     network are solved on the CPU, so every outage gets a result; the device's own
+     statuses are `converged`, `max_iterations` and `diverged`.
+   - `python/tests/test_gpu.py`: a 300-scenario sweep and every outage of case1354pegase
+     against the CPU, outcome, iteration count and voltages to 1e-8, in one chunk and in
+     several; hand-off and factor reuse. cuDSS is not deterministic by default: the same
+     call twice differs by up to 1e-13.
+   - `docker/gpu/Dockerfile`: CUDA 12.8.1, cuDSS 1.0.0 pinned, the wheel built with
+     `python,gpu`; the tests pass in it on the A100 (`--gpus all`).
+   - **The N-1 comparison was lopsided** (see phase 3's correction). Like for like,
+     the GPU loses every N-1 case: 5.1x, 2.4x and 1.9x the CPU's time on case1354pegase,
+     case2869pegase and case9241pegase.
+   - **10k sweeps change nothing**: the session solves in chunks of its capacity, so the
+     time per scenario is the 1k sweep's (`gpu_bench`, 10000 scenarios, tol 1e-6):
+
+     | case | GPU | CPU, 30 threads | GPU / CPU |
+     |---|---|---|---|
+     | case1354pegase | 2.79 s | 1.07 s | 2.61x |
+     | case2869pegase | 4.49 s | 2.40 s | 1.87x |
+     | case9241pegase, capacity 1024 | 11.5 s | 13.6 s | 0.85x |
+     | case9241pegase, capacity 2048 | 11.7 s | 13.5 s | 0.87x |
+
+     From Python, scenario conversion adds about 240 ms per 1000 scenarios of
+     case9241pegase (6.3 million tuples); `set_scenarios` keeps it out of the timed call,
+     as on the CPU.
 
 ## Targets
 

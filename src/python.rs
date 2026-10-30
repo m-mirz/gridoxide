@@ -4153,11 +4153,205 @@ impl OptimalPowerFlowModel {
     }
 }
 
+/// Batched power flows on an NVIDIA GPU: a session for one
+/// `PowerFlowModel`'s network, after `plans/GPU_BATCH_PLAN.md`. See
+/// `gridoxide::gpu::GpuBatchSolver`.
+///
+/// `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None)`
+/// takes what it needs from `model` once: its network, `tol` and `max_iter`,
+/// and the voltages of its last `solve()`, which every scenario starts from
+/// (`solve_batch`'s `start="last"`; the CPU's `"linear"`, a linear solve per
+/// scenario, has no device counterpart). Later changes to the model do not
+/// reach it; make a new session for them. The session keeps cuDSS's analysis
+/// and the device buffers for `capacity` scenarios, so every solve after the
+/// first costs no analysis; more scenarios than that are solved in chunks of
+/// it.
+///
+/// Every scenario stops at its own convergence. `reuse_below` (for example
+/// 0.1) keeps a scenario on its last factors while its mismatch falls more
+/// than that factor per step: fewer factorizations, an end point anywhere
+/// within the tolerance rather than the CPU's. `cpu_handoff` finishes the
+/// last few active scenarios of each chunk on the CPU. Both are off by
+/// default.
+#[cfg(feature = "gpu")]
+#[pyclass(unsendable)]
+struct GpuBatchSolver {
+    session: crate::gpu::GpuBatchSolver,
+    opts: crate::gpu::BatchOptions,
+    /// For the outages that split the network, which the device does not
+    /// solve: the same start, on the CPU.
+    template: Vec<Bus>,
+    lines: Vec<Line>,
+    transformers: Vec<Transformer>,
+    shunts: Vec<ShuntAdm>,
+    cpu: BatchSolver,
+    /// What `set_scenarios` stored, for a `solve_batch()` called without
+    /// scenarios.
+    stored_scenarios: Vec<Scenario>,
+}
+
+#[cfg(feature = "gpu")]
+#[pymethods]
+impl GpuBatchSolver {
+    #[new]
+    #[pyo3(signature = (model, capacity=1024, reuse_below=None, cpu_handoff=None))]
+    fn new(
+        model: PyRef<'_, PowerFlowModel>,
+        capacity: usize,
+        reuse_below: Option<f64>,
+        cpu_handoff: Option<usize>,
+    ) -> PyResult<Self> {
+        let (template, _) = model.batch_start("last")?;
+        let session = crate::gpu::GpuBatchSolver::with_branches(
+            &template,
+            &model.lines,
+            &model.transformers,
+            &model.shunts,
+            capacity,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let opts = crate::gpu::BatchOptions {
+            tol: model.tol,
+            max_iter: model.max_iter,
+            reuse_below,
+            cpu_handoff,
+            ..crate::gpu::BatchOptions::default()
+        };
+        let mut cpu = BatchSolver::new(model.backend);
+        cpu.set_start(BatchStart::Template);
+        Ok(Self {
+            session,
+            opts,
+            template,
+            lines: model.lines.clone(),
+            transformers: model.transformers.clone(),
+            shunts: model.shunts.clone(),
+            cpu,
+            stored_scenarios: Vec::new(),
+        })
+    }
+
+    /// Scenarios per chunk.
+    #[getter]
+    fn capacity(&self) -> usize {
+        self.session.capacity()
+    }
+
+    /// As `PowerFlowModel.solve_batch`, on the device: `scenarios` in its
+    /// format, one `BatchResult` per scenario in order. `None` solves the
+    /// scenarios `set_scenarios` stored, which keeps their conversion out of
+    /// the call. A scenario that does not converge is reported, not raised.
+    #[pyo3(signature = (scenarios=None))]
+    fn solve_batch(
+        &mut self,
+        scenarios: Option<Vec<Vec<(usize, f64, f64)>>>,
+    ) -> PyResult<Vec<BatchResult>> {
+        let given = scenarios.map(overrides_to_scenarios);
+        let scenarios = given.as_deref().unwrap_or(&self.stored_scenarios);
+        let report = self
+            .session
+            .solve(scenarios, &self.opts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(report
+            .scenarios
+            .into_iter()
+            .map(|r| BatchResult {
+                converged: r.outcome == crate::gpu::Outcome::Converged,
+                // Mismatch evaluations, as the CPU counts them: one per step
+                // and the one that ended the scenario.
+                iterations: r.newton_steps + 1,
+                max_mismatch: r.final_mismatch,
+                voltage_mag: r.voltage_mag,
+                voltage_ang: r.voltage_ang,
+            })
+            .collect())
+    }
+
+    /// Stores scenarios, in `solve_batch`'s format, for later
+    /// `solve_batch()` calls without them.
+    fn set_scenarios(&mut self, scenarios: Vec<Vec<(usize, f64, f64)>>) {
+        self.stored_scenarios = overrides_to_scenarios(scenarios);
+    }
+
+    /// As `PowerFlowModel.solve_contingencies`, on the device: one list of
+    /// flat branch indices per contingency, one `ContingencyResult` per
+    /// contingency in order. `status` is `"converged"`, `"max_iterations"` or
+    /// `"diverged"` (a non-finite or exploding mismatch). A contingency that
+    /// splits the network has another sparsity pattern than the batch's and
+    /// is solved on the CPU, as `PowerFlowModel.solve_contingencies` solves
+    /// it, with the CPU's statuses.
+    fn solve_contingencies(
+        &mut self,
+        contingencies: Vec<Vec<usize>>,
+    ) -> PyResult<Vec<ContingencyResult>> {
+        use crate::gpu::Outcome;
+        let scenarios: Vec<Scenario> = contingencies
+            .into_iter()
+            .map(|branch_outages| Scenario {
+                bus_overrides: Vec::new(),
+                branch_outages,
+            })
+            .collect();
+        let report = self
+            .session
+            .solve_contingencies(&scenarios, &self.opts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let splits: Vec<usize> = (0..scenarios.len())
+            .filter(|&s| report.scenarios[s].outcome == Outcome::Splits)
+            .collect();
+        let split_scenarios: Vec<Scenario> = splits.iter().map(|&s| scenarios[s].clone()).collect();
+        let mut on_cpu = self
+            .cpu
+            .solve_contingency_voltages(
+                &self.template,
+                &self.lines,
+                &self.transformers,
+                &self.shunts,
+                &split_scenarios,
+                self.opts.tol,
+                self.opts.max_iter,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_iter();
+        Ok(report
+            .scenarios
+            .into_iter()
+            .map(|r| match r.outcome {
+                Outcome::Splits => {
+                    let r = on_cpu.next().expect("one CPU result per split");
+                    ContingencyResult {
+                        status: match r.stats.status {
+                            SolveStatus::Converged => "converged",
+                            SolveStatus::MaxIterationsReached => "max_iterations",
+                            SolveStatus::Singular => "singular",
+                        },
+                        iterations: r.stats.iterations(),
+                        voltage_mag: r.voltage_mag,
+                        voltage_ang: r.voltage_ang,
+                    }
+                }
+                outcome => ContingencyResult {
+                    status: match outcome {
+                        Outcome::Converged => "converged",
+                        Outcome::NotConverged => "max_iterations",
+                        _ => "diverged",
+                    },
+                    iterations: r.newton_steps + 1,
+                    voltage_mag: r.voltage_mag,
+                    voltage_ang: r.voltage_ang,
+                },
+            })
+            .collect())
+    }
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
     m.add_class::<BatchResult>()?;
     m.add_class::<ContingencyResult>()?;
+    #[cfg(feature = "gpu")]
+    m.add_class::<GpuBatchSolver>()?;
     m.add_class::<StateEstimationModel>()?;
     m.add_class::<SeBatchOutcome>()?;
     m.add_class::<ShortCircuitResult>()?;

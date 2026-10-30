@@ -1,7 +1,7 @@
 [workspace]
-# gridoxide-gpu is a member, not a dependency of gridoxide yet: a plain
-# `cargo build` here builds only this root package, and the GPU crate builds
-# without CUDA unless its `cuda` feature is on.
+# gridoxide-gpu is an optional dependency of gridoxide (the `gpu` feature): a
+# plain `cargo build` here builds only this root package, and the GPU crate
+# builds without CUDA unless its `cuda` feature is on.
 members = ["crates/gridoxide-core", "crates/gridoxide-sparse", "crates/gridoxide-mcp", "crates/gridoxide-gpu"]
 
 # Shared by every crate in the workspace, so they release in lockstep.
@@ -83,6 +83,9 @@ gridoxide-sparse = { path = "crates/gridoxide-sparse", version = "0.2.0" }
 # The solvers — network model, power flow, state estimation, short circuit —
 # re-exported the same way; see crates/gridoxide-core.
 gridoxide-core = { path = "crates/gridoxide-core", version = "0.2.0" }
+# Batched AC power flow on an NVIDIA GPU, re-exported as `gridoxide::gpu`; see
+# the `gpu` feature.
+gridoxide-gpu = { path = "crates/gridoxide-gpu", version = "0.2.0", optional = true }
 faer = "0.24.4"
 num-complex = { version = "0.4.6", features = ["serde"] }
 # Powers `crates/gridoxide-core/src/batch.rs`'s across-scenario parallelism. Not a new build cost:
@@ -282,6 +285,18 @@ opf-ipopt = ["opf", "dep:bindgen"]
 # runner has ARPACK installed — the same local/manual-verification-only position
 # `pardiso`, `opf-highs` and `opf-ipopt` are in.
 smallsignal-arpack = ["dynamics"]
+# Batched AC power flow on one NVIDIA GPU (crates/gridoxide-gpu, re-exported
+# as `gridoxide::gpu`): sweeps and N-1 over cuDSS's uniform batch, every
+# scenario stopped at its own convergence. With `python`, the bindings gain
+# `GpuBatchSolver`. Needs cuDSS 1.0 or later (`CUDSS_DIR`), the CUDA 12
+# toolkit with nvcc and libclang at build time — see
+# crates/gridoxide-gpu/build.rs — and an NVIDIA GPU at run time. Not built or
+# tested in CI, which has no GPU; the published wheel does not ship it.
+#
+# cuDSS is NVIDIA's proprietary library, linked dynamically from the user's
+# install like oneMKL for `pardiso`: nothing of it is redistributed by this
+# crate.
+gpu = ["dep:gridoxide-gpu", "gridoxide-gpu/cuda"]
 # Exports a C ABI (src/capi/) so a C++ project can embed gridoxide, plus the
 # `cbindgen`-generated `include/gridoxide.h` that describes it.
 #

@@ -27,8 +27,9 @@ fn main() {
 /// - nvcc is `$CUDA_HOME/bin/nvcc` if it exists, else `nvcc` on the path.
 ///
 /// Both library directories also go on the run path of this crate's own
-/// tests and examples, so they run without `LD_LIBRARY_PATH`; a downstream
-/// binary sets its own.
+/// tests and examples, so they run without `LD_LIBRARY_PATH`. A link
+/// argument does not reach a dependent, so they are also handed on as
+/// `DEP_CUDSS_LIB_DIRS`, for a dependent's build script to put on its own.
 #[cfg(feature = "cuda")]
 mod cudss {
     use std::env;
@@ -64,10 +65,16 @@ mod cudss {
 
         // Not checked for existence: `cargo check` against the stub headers
         // never links, and a missing library is the linker's clear error.
-        for lib_dir in [cudss_dir.join("lib"), cuda_home.join("lib64")] {
+        let lib_dirs = [cudss_dir.join("lib"), cuda_home.join("lib64")];
+        for lib_dir in &lib_dirs {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
         }
+        // For a dependent's own run path, as `DEP_CUDSS_LIB_DIRS` (this
+        // package `links = "cudss"`): gridoxide's `gpu` feature puts them on
+        // the Python extension's.
+        let joined: Vec<String> = lib_dirs.iter().map(|d| d.display().to_string()).collect();
+        println!("cargo:lib_dirs={}", joined.join(":"));
         if env::var_os("GRIDOXIDE_GPU_NO_NVCC").is_none() {
             compile_kernels(&cuda_home, &cuda_include);
         }

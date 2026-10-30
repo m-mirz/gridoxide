@@ -17,6 +17,10 @@
 //! active scenarios of each chunk on the CPU, `reuse=R` keeps a scenario on
 //! its factors while its mismatch falls more than R-fold
 //! (`BatchOptions::cpu_handoff`, `reuse_below`).
+//!
+//! For N-1 the CPU is timed on the outages the device solves, those that keep
+//! the network connected, so that both columns do the same work; the outages
+//! that split it, which the device leaves to the CPU, are timed apart.
 
 use std::time::Instant;
 
@@ -134,33 +138,46 @@ fn main() {
     });
     let mut cpu = BatchSolver::new(JacobianBackend::KluNative);
     cpu.set_start(BatchStart::Template);
-    let (cpu_ms, cpu_reports) = timed(|| {
+    // The scenarios the device solved, and those it left to the CPU.
+    let (solved, splits): (Vec<usize>, Vec<usize>) =
+        (0..scenarios.len()).partition(|&s| report.scenarios[s].outcome != Outcome::Splits);
+    let pick =
+        |set: &[usize]| -> Vec<Scenario> { set.iter().map(|&s| scenarios[s].clone()).collect() };
+    let cpu_solve = |set: &[Scenario]| {
         if n1 {
             cpu.solve_contingencies(
                 &base,
                 &net.lines,
                 &net.transformers,
                 &net.shunts,
-                &scenarios,
+                set,
                 tol,
                 opts.max_iter,
             )
         } else {
-            cpu.solve(&base, &ybus, &scenarios, tol, opts.max_iter)
+            cpu.solve(&base, &ybus, set, tol, opts.max_iter)
         }
         .unwrap()
-    });
+    };
+    let (cpu_ms, cpu_reports) = timed(|| cpu_solve(&pick(&solved)));
+    let split_ms = if splits.is_empty() {
+        0.0
+    } else {
+        timed(|| cpu_solve(&pick(&splits))).0
+    };
 
     let count = |o: Outcome| report.scenarios.iter().filter(|r| r.outcome == o).count();
     let cpu_converged = cpu_reports
         .iter()
         .filter(|r| r.stats.status == SolveStatus::Converged)
         .count();
-    // Largest voltage difference over the scenarios both converged, where
-    // both report the whole network (an outage that splits it is the CPU's
-    // alone).
+    // Largest voltage difference over the scenarios both converged.
     let mut dv = 0.0f64;
-    for (g, c) in report.scenarios.iter().zip(&cpu_reports) {
+    for (g, c) in solved
+        .iter()
+        .map(|&s| &report.scenarios[s])
+        .zip(&cpu_reports)
+    {
         if g.outcome == Outcome::Converged && c.stats.status == SolveStatus::Converged {
             for (i, b) in c.buses.iter().enumerate() {
                 dv = dv
@@ -197,9 +214,12 @@ fn main() {
         report.cpu_handoffs
     );
     println!(
-        "  cpu: {} threads, solve {cpu_ms:.1} ms ({:.3} ms/scenario), {cpu_converged} converged",
+        "  cpu: {} threads, solve {cpu_ms:.1} ms ({:.3} ms/scenario) of the {} the gpu solved, \
+         {cpu_converged} converged; the {} that split the network {split_ms:.1} ms",
         cpu.threads(),
-        cpu_ms / scenarios.len() as f64
+        cpu_ms / solved.len() as f64,
+        solved.len(),
+        splits.len()
     );
     println!(
         "  gpu / cpu: {:.2}x the time; max |dV| where both converged: {dv:.1e}",

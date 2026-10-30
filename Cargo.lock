@@ -677,6 +677,7 @@ dependencies = [
  "cimoxide-model",
  "faer",
  "gridoxide-core",
+ "gridoxide-gpu",
  "gridoxide-sparse",
  "num-complex",
  "pyo3",
@@ -700,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "gridoxide-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bindgen",
  "cc",
