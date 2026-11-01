@@ -158,14 +158,35 @@ impl LowerPattern {
     /// values are those of `D K D`.
     pub fn assemble(&self, entries: &[(usize, usize, f64)]) -> (Vec<f64>, Vec<f64>) {
         debug_assert_eq!(entries.len(), self.keys.len());
+        self.assemble_by(entries.iter().map(|e| e.2))
+    }
+
+    /// [`assemble`](Self::assemble) from the values alone, in the order of
+    /// the pattern's keys.
+    pub fn assemble_values(&self, values: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        debug_assert_eq!(values.len(), self.keys.len());
+        self.assemble_by(values.iter().copied())
+    }
+
+    fn assemble_by(&self, entries: impl Iterator<Item = f64>) -> (Vec<f64>, Vec<f64>) {
         let mut values = vec![0.0; self.row_idx.len()];
-        for (&(_, _, v), slot) in entries.iter().zip(&self.slot) {
+        for (v, slot) in entries.zip(&self.slot) {
             if let Some(s) = *slot {
                 values[s] += v;
             }
         }
         let scale = self.equilibrate(&mut values);
         (values, scale)
+    }
+
+    /// The number of keys the pattern was built from: the length of the
+    /// value lists [`assemble_values`](Self::assemble_values) takes.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 
     /// A symmetric equilibration `D` (Ruiz's iteration, five passes), applied
@@ -273,8 +294,23 @@ impl SymmetricPattern {
     /// slots, equilibrated, and factorized numerically. `None` on a zero
     /// pivot (see the module docs).
     pub fn factorize(&self, entries: &[(usize, usize, f64)]) -> Option<SymmetricFactorization> {
+        self.factorize_assembled(self.lower.assemble(entries))
+    }
+
+    /// [`factorize`](Self::factorize) from the values alone, in the order of
+    /// the pattern's keys.
+    pub fn factorize_values(&self, values: &[f64]) -> Option<SymmetricFactorization> {
+        if values.len() != self.lower.len() {
+            return None;
+        }
+        self.factorize_assembled(self.lower.assemble_values(values))
+    }
+
+    fn factorize_assembled(
+        &self,
+        (values, scale): (Vec<f64>, Vec<f64>),
+    ) -> Option<SymmetricFactorization> {
         let n = self.n;
-        let (values, scale) = self.lower.assemble(entries);
         let structure = SymbolicSparseColMatRef::new_checked(
             n,
             n,
@@ -334,6 +370,15 @@ pub trait SymmetricSolver {
     /// or the result is not finite.
     fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>>;
 
+    /// [`factorize`](Self::factorize) from the values alone, in the order of
+    /// the keys the solver was made for: what a caller whose pattern is fixed
+    /// sends, without building, sending and comparing the triplets every
+    /// time. `None` if the solver does not take values (the caller then
+    /// passes triplets), else whether the factorization succeeded.
+    fn factorize_values(&mut self, _values: &[f64]) -> Option<bool> {
+        None
+    }
+
     /// `K x` with the matrix of the last successful factorization, where the
     /// solver keeps that matrix and multiplies faster than its caller could
     /// (a GPU solver, whose matrix is on the device). `None` by default: the
@@ -370,6 +415,11 @@ impl SymmetricSolver for LdltSolver {
         self.factor.is_some()
     }
 
+    fn factorize_values(&mut self, values: &[f64]) -> Option<bool> {
+        self.factor = self.pattern.factorize_values(values);
+        Some(self.factor.is_some())
+    }
+
     fn inertia(&self) -> Inertia {
         self.factor
             .as_ref()
@@ -401,17 +451,10 @@ impl LltSolver {
             factor: None,
         })
     }
-}
 
-impl SymmetricSolver for LltSolver {
-    fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
-        self.pattern.matches(n, entries)
-    }
-
-    fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
+    fn factorize_assembled(&mut self, (values, scale): (Vec<f64>, Vec<f64>)) -> bool {
         let pattern = &self.pattern;
         let n = pattern.n;
-        let (values, scale) = pattern.lower.assemble(entries);
         let structure = SymbolicSparseColMatRef::new_checked(
             n,
             n,
@@ -440,6 +483,25 @@ impl SymmetricSolver for LltSolver {
             .is_ok();
         self.factor = ok.then_some((factor, scale));
         ok
+    }
+}
+
+impl SymmetricSolver for LltSolver {
+    fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        self.pattern.matches(n, entries)
+    }
+
+    fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
+        let assembled = self.pattern.lower.assemble(entries);
+        self.factorize_assembled(assembled)
+    }
+
+    fn factorize_values(&mut self, values: &[f64]) -> Option<bool> {
+        if values.len() != self.pattern.lower.len() {
+            return Some(false);
+        }
+        let assembled = self.pattern.lower.assemble_values(values);
+        Some(self.factorize_assembled(assembled))
     }
 
     fn inertia(&self) -> Inertia {
@@ -687,6 +749,42 @@ mod tests {
         let zero: Vec<(usize, usize, f64)> = e.iter().map(|&(r, c, _)| (r, c, 0.0)).collect();
         assert!(!solver.factorize(&zero));
         assert!(solver.solve(&b).is_none());
+    }
+
+    /// From the values alone, in the keys' order, both solvers factorize
+    /// what they do from the triplets: the same inertia and solution, to the
+    /// bit.
+    #[test]
+    fn values_alone_factorize_as_the_triplets_do() {
+        let (dim, e) = kkt(300, 120, 6.0, 3);
+        let keys: Vec<(usize, usize)> = e.iter().map(|&(r, c, _)| (r, c)).collect();
+        let values: Vec<f64> = e.iter().map(|t| t.2).collect();
+        let b: Vec<f64> = (0..dim).map(|i| (i as f64).sin()).collect();
+        let (mut a, mut b_) = (
+            LdltSolver::new(dim, &keys).unwrap(),
+            LdltSolver::new(dim, &keys).unwrap(),
+        );
+        assert!(a.factorize(&e));
+        assert_eq!(b_.factorize_values(&values), Some(true));
+        assert_eq!(a.inertia(), b_.inertia());
+        assert_eq!(a.solve(&b), b_.solve(&b));
+        assert_eq!(b_.factorize_values(&values[1..]), Some(false));
+
+        let block: Vec<(usize, usize, f64)> = e
+            .iter()
+            .copied()
+            .filter(|&(r, c, _)| r < 300 && c < 300)
+            .collect();
+        let keys: Vec<(usize, usize)> = block.iter().map(|&(r, c, _)| (r, c)).collect();
+        let values: Vec<f64> = block.iter().map(|t| t.2).collect();
+        let (mut a, mut b_) = (
+            LltSolver::new(300, &keys).unwrap(),
+            LltSolver::new(300, &keys).unwrap(),
+        );
+        assert!(a.factorize(&block));
+        assert_eq!(b_.factorize_values(&values), Some(true));
+        let rhs = vec![1.0; 300];
+        assert_eq!(a.solve(&rhs), b_.solve(&rhs));
     }
 
     /// Cholesky succeeds exactly on a positive definite matrix, and then

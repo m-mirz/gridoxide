@@ -214,12 +214,12 @@ impl Assembly {
     /// non-finite result sets `bad`.
     fn run(
         &mut self,
-        entries: &[(usize, usize, f64)],
+        source: Source<'_>,
         values: &mut DeviceBuffer<f64>,
         n: usize,
         stream: ffi::cudaStream_t,
     ) -> Result<(), LinearError> {
-        debug_assert_eq!(entries.len(), self.n_trip);
+        use rayon::prelude::*;
         let nnz = self.nnz as u32;
         let n = n as u32;
         if self.n_trip > 0 {
@@ -227,8 +227,17 @@ impl Assembly {
             // of it is in flight: the last factorization synchronized.
             let host =
                 unsafe { std::slice::from_raw_parts_mut(self.host_trip.as_mut_ptr(), self.n_trip) };
-            for (h, &(_, _, v)) in host.iter_mut().zip(entries) {
-                *h = v;
+            // In parallel: 1.2M values on case24464_goc.
+            const CHUNK: usize = 1 << 15;
+            match source {
+                Source::Triplets(entries) => host
+                    .par_chunks_mut(CHUNK)
+                    .zip(entries.par_chunks(CHUNK))
+                    .for_each(|(h, e)| h.iter_mut().zip(e).for_each(|(h, e)| *h = e.2)),
+                Source::Values(v) => host
+                    .par_chunks_mut(CHUNK)
+                    .zip(v.par_chunks(CHUNK))
+                    .for_each(|(h, v)| h.copy_from_slice(v)),
             }
             // SAFETY: `trip` holds n_trip values.
             unsafe { copy_to_device(self.trip.ptr, &*host, stream)? };
@@ -294,6 +303,14 @@ impl Assembly {
         }
         Ok(())
     }
+}
+
+/// What a factorization's values come from: the triplets, or the values
+/// alone in the order of the pattern's keys.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Triplets(&'a [(usize, usize, f64)]),
+    Values(&'a [f64]),
 }
 
 fn launched(err: i32, what: &str) -> Result<(), LinearError> {
@@ -553,8 +570,12 @@ impl CudssSolver {
         entries: &[(usize, usize, f64)],
     ) -> Result<(Vec<f64>, Vec<f64>), LinearError> {
         let n = self.pattern.n();
-        self.assembly
-            .run(entries, &mut self.values, n, self.stream.0)?;
+        self.assembly.run(
+            Source::Triplets(entries),
+            &mut self.values,
+            n,
+            self.stream.0,
+        )?;
         let mut values = vec![0.0; self.values.len()];
         self.values.download(&mut values, self.stream.0)?;
         let mut scale = vec![0.0; n];
@@ -567,13 +588,10 @@ impl CudssSolver {
 
     /// Factorizes; `Ok(None)` when the matrix has no factorization of this
     /// kind (a zero pivot, or not positive definite for Cholesky).
-    fn try_factorize(
-        &mut self,
-        entries: &[(usize, usize, f64)],
-    ) -> Result<Option<Inertia>, LinearError> {
+    fn try_factorize(&mut self, source: Source<'_>) -> Result<Option<Inertia>, LinearError> {
         let n = self.pattern.n();
         self.assembly
-            .run(entries, &mut self.values, n, self.stream.0)?;
+            .run(source, &mut self.values, n, self.stream.0)?;
         if !self.analysed {
             self.sys.execute(ffi::CUDSS_PHASE_ANALYSIS, "ANALYSIS")?;
             self.analysed = true;
@@ -706,8 +724,17 @@ impl SymmetricSolver for CudssSolver {
     /// A device error counts as a failed factorization: the interior point
     /// then regularizes, and gives up once that stops helping.
     fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
-        self.inertia = self.try_factorize(entries).ok().flatten();
+        self.inertia = (entries.len() == self.assembly.n_trip)
+            .then(|| self.try_factorize(Source::Triplets(entries)).ok().flatten())
+            .flatten();
         self.inertia.is_some()
+    }
+
+    fn factorize_values(&mut self, values: &[f64]) -> Option<bool> {
+        self.inertia = (values.len() == self.assembly.n_trip)
+            .then(|| self.try_factorize(Source::Values(values)).ok().flatten())
+            .flatten();
+        Some(self.inertia.is_some())
     }
 
     fn inertia(&self) -> Inertia {

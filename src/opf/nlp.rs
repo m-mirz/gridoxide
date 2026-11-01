@@ -862,6 +862,9 @@ fn run(
     // holds (`Kkt::new`): only the values change from one iteration to the
     // next.
     let mut solver: Option<Box<dyn SymmetricSolver>> = None;
+    // Where the augmented matrix's values come from while its pattern holds
+    // (`AugmentedPlan`): the solver is then sent values, not triplets.
+    let mut plan: Option<AugmentedPlan> = None;
     let mut acceptable_streak = 0usize;
     let mut error = f64::INFINITY;
     let mut first = true;
@@ -1013,6 +1016,7 @@ fn run(
                     floor,
                     &mut delta_last,
                     &mut solver,
+                    &mut plan,
                 ) else {
                     break;
                 };
@@ -1530,6 +1534,7 @@ fn factorize_with_inertia(
     floor: f64,
     delta_last: &mut f64,
     solver: &mut Option<Box<dyn SymmetricSolver>>,
+    plan: &mut Option<AugmentedPlan>,
 ) -> Option<(Kkt, f64)> {
     let mut factor = |dw: f64| {
         let diagonal: Vec<f64> = sigma.iter().map(|s| s + dw).collect();
@@ -1542,6 +1547,7 @@ fn factorize_with_inertia(
                 options.dual_regularization,
                 options.kkt_solver,
                 solver,
+                plan,
             )?),
             KktForm::Hybrid { gamma } => Kkt::Hybrid(Hybrid::new(
                 hessian,
@@ -1609,6 +1615,7 @@ impl Augmented {
     /// `make` when there is none yet or the pattern changed. `None` when a
     /// slack's `d_k` is not positive (a row without bounds and δw = 0) or
     /// the factorization meets a zero pivot.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         hessian: &[(usize, usize, f64)],
         a: &[(usize, usize, f64)],
@@ -1617,6 +1624,7 @@ impl Augmented {
         delta_c: f64,
         make: MakeSolver,
         solver: &mut Option<Box<dyn SymmetricSolver>>,
+        plan: &mut Option<AugmentedPlan>,
     ) -> Option<Self> {
         let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
         let slacks: Vec<(usize, usize, f64)> = p
@@ -1636,6 +1644,15 @@ impl Augmented {
         let mut row_diag = vec![-delta_c; m];
         for &(r, _, d) in &slacks {
             row_diag[r] = -1.0 / d;
+        }
+        // The pattern held since the plan was made: values only.
+        if let (Some(s), Some(p)) = (solver.as_mut(), plan.as_ref())
+            && p.fits(hessian, a, n_x, m)
+        {
+            let values = p.values(hessian, a, diagonal, &row_diag);
+            if let Some(ok) = s.factorize_values(&values) {
+                return ok.then_some(Self { n_x, n, m, slacks });
+            }
         }
         // Sized once: grown from empty, most of 24 ms a factorization on
         // case24464_goc went to copying it as it doubled.
@@ -1660,10 +1677,13 @@ impl Augmented {
             let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
             *solver = Some(make(n_x + m, &keys)?);
         }
-        solver
-            .as_mut()?
-            .factorize(&kkt)
-            .then_some(Self { n_x, n, m, slacks })
+        let ok = solver.as_mut()?.factorize(&kkt);
+        // Next time, values only, if the solver takes them; the triplets
+        // above are in the plan's order.
+        if plan.as_ref().is_none_or(|p| !p.fits(hessian, a, n_x, m)) {
+            *plan = Some(AugmentedPlan::new(hessian, a, n_x, m));
+        }
+        ok.then_some(Self { n_x, n, m, slacks })
     }
 
     /// Whether `solver`'s factorization has the inertia of a step that
@@ -1731,6 +1751,89 @@ impl Augmented {
             out[k] = (rhs[k] + sol[n_x + r]) / d;
         }
         out.iter().all(|v| v.is_finite()).then_some(out)
+    }
+}
+
+/// Where the augmented matrix's values come from, for one pattern of the
+/// Hessian and the Jacobian: the triplet list `Augmented::new` builds, in
+/// its order, is the kept Hessian entries (lower triangle, rows of `x`), the
+/// `x` diagonal, the kept Jacobian entries (columns of `x`) and the rows'
+/// diagonal. While the patterns hold, the values are gathered in that order
+/// and sent alone (`SymmetricSolver::factorize_values`): on case24464_goc
+/// the triplet list's build, comparison and copy were 12 ms a factorization.
+struct AugmentedPlan {
+    n_x: usize,
+    m: usize,
+    hessian_keys: Vec<(usize, usize)>,
+    a_keys: Vec<(usize, usize)>,
+    hessian_kept: Vec<usize>,
+    a_kept: Vec<usize>,
+}
+
+impl AugmentedPlan {
+    fn new(
+        hessian: &[(usize, usize, f64)],
+        a: &[(usize, usize, f64)],
+        n_x: usize,
+        m: usize,
+    ) -> Self {
+        Self {
+            n_x,
+            m,
+            hessian_keys: hessian.iter().map(|&(i, j, _)| (i, j)).collect(),
+            a_keys: a.iter().map(|&(r, k, _)| (r, k)).collect(),
+            hessian_kept: (0..hessian.len())
+                .filter(|&e| hessian[e].0 >= hessian[e].1 && hessian[e].0 < n_x)
+                .collect(),
+            a_kept: (0..a.len()).filter(|&e| a[e].1 < n_x).collect(),
+        }
+    }
+
+    /// Whether `hessian` and `a` have the patterns the plan was made for.
+    fn fits(
+        &self,
+        hessian: &[(usize, usize, f64)],
+        a: &[(usize, usize, f64)],
+        n_x: usize,
+        m: usize,
+    ) -> bool {
+        use rayon::prelude::*;
+        let same = |list: &[(usize, usize, f64)], keys: &[(usize, usize)]| {
+            list.len() == keys.len()
+                && list
+                    .par_iter()
+                    .zip(keys)
+                    .with_min_len(1 << 14)
+                    .all(|(&(r, c, _), &k)| (r, c) == k)
+        };
+        n_x == self.n_x && m == self.m && same(hessian, &self.hessian_keys) && same(a, &self.a_keys)
+    }
+
+    /// The matrix's values in the triplet list's order.
+    fn values(
+        &self,
+        hessian: &[(usize, usize, f64)],
+        a: &[(usize, usize, f64)],
+        diagonal: &[f64],
+        row_diag: &[f64],
+    ) -> Vec<f64> {
+        use rayon::prelude::*;
+        let (nh, na) = (self.hessian_kept.len(), self.a_kept.len());
+        let mut out = vec![0.0; nh + self.n_x + na + self.m];
+        let (h, rest) = out.split_at_mut(nh);
+        let (d, rest) = rest.split_at_mut(self.n_x);
+        let (av, r) = rest.split_at_mut(na);
+        h.par_iter_mut()
+            .zip(&self.hessian_kept)
+            .with_min_len(1 << 14)
+            .for_each(|(v, &e)| *v = hessian[e].2);
+        d.copy_from_slice(&diagonal[..self.n_x]);
+        av.par_iter_mut()
+            .zip(&self.a_kept)
+            .with_min_len(1 << 14)
+            .for_each(|(v, &e)| *v = a[e].2);
+        r.copy_from_slice(row_diag);
+        out
     }
 }
 

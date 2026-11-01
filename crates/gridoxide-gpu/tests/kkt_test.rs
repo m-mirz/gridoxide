@@ -234,3 +234,19 @@ fn multiply_is_the_matrix_product() {
         assert!(worst < 1e-13 * size, "n {n}: {worst:e} of {size:e}");
     }
 }
+
+/// From the values alone, in the keys' order, cuDSS factorizes what it does
+/// from the triplets: the same inertia and solution, to the bit.
+#[test]
+fn values_alone_factorize_as_the_triplets_do() {
+    let (dim, e) = kkt(300, 120, 6.0, 3);
+    let values: Vec<f64> = e.iter().map(|t| t.2).collect();
+    let mut a = CudssSolver::new(dim, &keys(&e), Factorization::Ldlt, true).unwrap();
+    let mut b = CudssSolver::new(dim, &keys(&e), Factorization::Ldlt, true).unwrap();
+    assert!(a.factorize(&e));
+    assert_eq!(b.factorize_values(&values), Some(true));
+    assert_eq!(a.inertia(), b.inertia());
+    let rhs: Vec<f64> = (0..dim).map(|i| (i as f64).sin()).collect();
+    assert_eq!(a.solve(&rhs), b.solve(&rhs));
+    assert_eq!(b.factorize_values(&values[1..]), Some(false));
+}
