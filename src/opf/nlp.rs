@@ -65,9 +65,17 @@
 //! at 1e-8 instead of 10 machine epsilons, the noise floor of an unpivoted
 //! factorization near an optimum.
 //!
-//! Not (yet) IPOPT's: the least-squares start of the multipliers (tried; it
-//! changed nothing on case9241_pegase and broke the piecewise-cost case5_pjm),
-//! the adaptive barrier and pivoting in the factorization.
+//! Traced against IPOPT 3.14.19 on case1354_pegase and case10000_goc, three
+//! more of IPOPT's made the paths its own, step for step: the
+//! **least-squares start of the constraint multipliers**
+//! (`least_squares_multipliers`; an earlier try had broken case5_pjm, this
+//! one passes it), the **fast monotone decrease** of the barrier (μ lowered
+//! again while the current point meets the next subproblem's test), and the
+//! **bound multipliers' band** with no floor of its own (a floor of 1e-14
+//! held a far-from-bound pair's complementarity at 2.5e-8, above the
+//! tolerance, for 13 iterations of case1354_pegase).
+//!
+//! Not (yet) IPOPT's: the adaptive barrier and pivoting in the factorization.
 //! Algorithm NCL (`NlpOptions::ncl`) is an opt-in outer loop for degenerate
 //! problems.
 //!
@@ -985,6 +993,29 @@ fn run(
             let mut grad = vec![0.0; n_total];
             grad[..n_x].copy_from_slice(&grad_x);
 
+            // IPOPT's start of the constraint multipliers: the least-squares
+            // fit of the dual residual at the starting point, where it is
+            // within `constr_mult_init_max` (see `least_squares_multipliers`).
+            if iterations == 1
+                && matches!(barrier, Barrier::Schedule)
+                && control.restoration
+                && options.kkt == KktForm::Augmented
+                && let Some(y0) = least_squares_multipliers(
+                    problem,
+                    p,
+                    x,
+                    &a,
+                    &grad,
+                    &z_l,
+                    &z_u,
+                    options,
+                    &mut solver,
+                    &mut plan,
+                )
+            {
+                y = y0;
+            }
+
             let g: Vec<f64> = (0..n_total)
                 .map(|k| if has_lower[k] { u[k] - p.lower[k] } else { 1.0 })
                 .collect();
@@ -1051,10 +1082,29 @@ fn run(
                     // Decrease the barrier once the current subproblem is solved
                     // loosely. Solving each one tightly would waste iterations on
                     // a barrier parameter that is about to change.
-                    if sub_error <= 10.0 * mu {
-                        mu = (0.2 * mu).min(mu.powf(1.5)).max(options.tolerance * 0.1);
-                        // A new barrier problem: the old filter does not apply.
+                    //
+                    // And again while the current point meets the new
+                    // barrier problem's test too (IPOPT's
+                    // `mu_allow_fast_monotone_decrease`, on by default): a
+                    // barrier problem already solved is skipped, not
+                    // iterated on. Without it, case1354_pegase followed
+                    // IPOPT's path for 21 steps and then iterated at
+                    // μ = 10^-2.55 where IPOPT had gone on to 10^-3.8,
+                    // and took 56 iterations to IPOPT's 41. The floor is
+                    // IPOPT's, tol/(κε + 1).
+                    let mut error_at = sub_error;
+                    while error_at <= 10.0 * mu {
+                        let next = (0.2 * mu).min(mu.powf(1.5)).max(options.tolerance / 11.0);
+                        if next == mu {
+                            break;
+                        }
+                        mu = next;
+                        // A new barrier problem: the old filter does not
+                        // apply.
                         filter.reset();
+                        error_at = (norm_inf(&r_d) / s_d)
+                            .max(norm_inf(&r_p))
+                            .max(complementarity(mu) / s_c);
                     }
                 }
                 Barrier::Fixed { tolerance, .. } => {
@@ -1545,11 +1595,11 @@ fn run(
             for k in 0..n_total {
                 if has_lower[k] {
                     let center = mu / (u[k] - p.lower[k]);
-                    z_l[k] = z_l[k].clamp(center / 1e10, center * 1e10).max(1e-14);
+                    z_l[k] = z_l[k].clamp(center / 1e10, center * 1e10);
                 }
                 if has_upper[k] {
                     let center = mu / (p.upper[k] - u[k]);
-                    z_u[k] = z_u[k].clamp(center / 1e10, center * 1e10).max(1e-14);
+                    z_u[k] = z_u[k].clamp(center / 1e10, center * 1e10);
                 }
             }
             if let Some(stop) = control.stop
@@ -1925,6 +1975,57 @@ impl AugmentedPlan {
         r.copy_from_slice(row_diag);
         out
     }
+}
+
+/// IPOPT's least-squares constraint multipliers (`constr_mult_init_max` =
+/// 1000): the `y` minimizing `‖∇f − z_L + z_U − Aᵀy‖` at the starting
+/// point, from the augmented system with the identity in the Hessian's
+/// place, `[I Aᵀ; A 0][w; y] = [∇f − z_L + z_U; 0]`; `None` (the caller
+/// keeps `y = 0`) if any of it exceeds the cap or the solve fails. The
+/// Hessian block takes the Hessian's own pattern with zero values, so the
+/// solver, and a GPU solver's analysis, serve the iterations after.
+///
+/// Without it, case10000_goc's path was IPOPT's step for step with IPOPT's
+/// `constr_mult_init_max` at 0 (101 iterations against our 103), and 82
+/// with IPOPT's default, which starts here.
+#[allow(clippy::too_many_arguments)]
+fn least_squares_multipliers(
+    problem: &dyn NonlinearProblem,
+    p: &Internal,
+    x: &[f64],
+    a: &[(usize, usize, f64)],
+    grad: &[f64],
+    z_l: &[f64],
+    z_u: &[f64],
+    options: &NlpOptions,
+    solver: &mut Option<Box<dyn SymmetricSolver>>,
+    plan: &mut Option<AugmentedPlan>,
+) -> Option<Vec<f64>> {
+    const CONSTR_MULT_INIT_MAX: f64 = 1000.0;
+    let (n_total, m_eq) = (p.n_total, p.m_eq);
+    let hessian: Vec<(usize, usize, f64)> = problem
+        .lagrangian_hessian(x, &vec![0.0; problem.n_constraints()])
+        .into_iter()
+        .map(|(i, j, _)| (i, j, 0.0))
+        .collect();
+    let identity = vec![1.0; n_total];
+    let kkt = Augmented::new(
+        &hessian,
+        a,
+        &identity,
+        p,
+        options.dual_regularization,
+        options.kkt_solver,
+        solver,
+        plan,
+    )?;
+    let mut rhs = vec![0.0; n_total + m_eq];
+    for k in 0..n_total {
+        rhs[k] = grad[k] - z_l[k] + z_u[k];
+    }
+    let d = kkt.solve(solver.as_deref()?, &rhs)?;
+    let y = d[n_total..].to_vec();
+    (norm_inf(&y) <= CONSTR_MULT_INIT_MAX).then_some(y)
 }
 
 /// The KKT system as formed for [`NlpOptions::kkt`], factorized in the
