@@ -994,16 +994,19 @@ fn run(
 
                 // A solve with iterative refinement against the system as
                 // regularized by δw (δc is only there to make it factorizable).
-                // IPOPT's residual ratio, ‖r‖∞ / (‖K‖∞ ‖d‖∞ + ‖rhs‖∞), with ‖K‖∞
-                // taken as the largest entry: refinement stops below 1e-10.
-                let k_norm = hessian
-                    .iter()
-                    .chain(a.iter())
-                    .map(|e| e.2.abs())
-                    .chain(sigma.iter().map(|s| s + gamma))
-                    .fold(0.0f64, f64::max);
+                //
+                // It stops when the residual is below 1e-12 of the right-hand
+                // side, or when a round no longer halves it (refinement has
+                // stalled), and never before one round (IPOPT's
+                // `min_refinement_steps`). Not IPOPT's ratio test, ‖r‖ /
+                // (‖K‖‖d‖ + ‖rhs‖): near an optimum ‖K‖ carries barrier terms
+                // of 1e11, and that test passed while the multipliers' part of
+                // the step was still wrong (case2869_pegase, branch flows: x
+                // as IPOPT's to 1e-8, y apart by 0.6% from iteration 24).
                 let solve = |rhs: &[f64]| -> Option<Vec<f64>> {
                     let mut d = factorization.solve(rhs)?;
+                    let target = 1e-12 * norm_inf(rhs);
+                    let mut last = f64::INFINITY;
                     for round in 0..options.refinement_rounds {
                         let mut residual = rhs.to_vec();
                         let du = &d[..n_total];
@@ -1019,15 +1022,11 @@ fn run(
                         for r in 0..m_eq {
                             residual[n_total + r] -= adu[r];
                         }
-                        let ratio = norm_inf(&residual)
-                            / (k_norm * norm_inf(&d) + norm_inf(rhs)).max(f64::MIN_POSITIVE);
-                        // IPOPT's `min_refinement_steps` = 1: at least one
-                        // round, whatever the first ratio. A first solve at
-                        // 9e-11 passed the test unrefined on
-                        // case13659_pegase, and its path left IPOPT's there.
-                        if ratio < 1e-10 && round > 0 {
+                        let size = norm_inf(&residual);
+                        if round > 0 && (size <= target || size > 0.5 * last) {
                             break;
                         }
+                        last = size;
                         let Some(correction) = factorization.solve(&residual) else {
                             break;
                         };
