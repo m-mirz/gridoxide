@@ -210,9 +210,26 @@ fn a_sweep_and_n1_share_a_session() {
     let n1 = gpu.solve_contingencies(&net.buses, &outages).unwrap();
     let (da, df) = compare(&n1, &cpu(&net, &outages));
     assert!(da < 1e-11 && df < 1e-10, "angles {da:e}, flows {df:e}");
+    // The same sweep again, to rounding: cuDSS runs without its deterministic
+    // mode, so a repeat is not bit-identical (6e-16 in angles, 1e-12 in flows
+    // on an A100, two sweeps in a row the same), but N-1 leaves nothing
+    // behind.
     let again = gpu.solve_sweep(&net.buses, &scenarios).unwrap();
-    assert_eq!(again.angles, first.angles);
-    assert_eq!(again.flows, first.flows);
+    let gap = |a: &[f64], b: &[f64]| {
+        a.iter()
+            .zip(b)
+            .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()))
+    };
+    assert_eq!(again.angles.len(), first.angles.len());
+    assert_eq!(again.flows.len(), first.flows.len());
+    let (da, df) = (
+        gap(&again.angles, &first.angles),
+        gap(&again.flows, &first.flows),
+    );
+    assert!(
+        da < 1e-11 && df < 1e-10,
+        "repeat: angles {da:e}, flows {df:e}"
+    );
 }
 
 #[test]

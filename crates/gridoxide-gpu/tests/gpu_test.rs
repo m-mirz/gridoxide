@@ -357,7 +357,14 @@ fn a_single_power_flow_matches_the_cpu() {
             .map(|b| (b.voltage_mag, b.voltage_ang))
             .collect()
     };
-    assert_eq!(state(&again), state(&got));
+    // To rounding: cuDSS runs without its deterministic mode, so a repeat is
+    // not bit-identical (about 1e-13 on an A100).
+    let repeat = state(&again)
+        .iter()
+        .zip(&state(&got))
+        .map(|(a, b)| (a.0 - b.0).abs().max((a.1 - b.1).abs()))
+        .fold(0.0, f64::max);
+    assert!(repeat < 1e-10, "repeat: max |dV| {repeat:e}");
     let batch = gpu.solve(&[Scenario::default()], &opts).unwrap();
     assert_eq!(batch.scenarios[0].newton_steps, 0);
 
