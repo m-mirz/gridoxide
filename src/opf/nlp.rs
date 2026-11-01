@@ -1058,7 +1058,10 @@ fn run(
                 // δw) does not help here: δw does not reach the constraint
                 // block the inaccuracy comes from, and on the bus-injection
                 // model of the same case every δw up to 1e24 was rejected.
-                let solve = |rhs: &[f64]| -> Option<Vec<f64>> {
+                //
+                // Returns the solution and its residual relative to the
+                // right-hand side.
+                let solve = |rhs: &[f64]| -> Option<(Vec<f64>, f64)> {
                     let mut d = factorization.solve(rhs)?;
                     let target = 1e-12 * norm_inf(rhs);
                     let mut last = f64::INFINITY;
@@ -1093,10 +1096,11 @@ fn run(
                             d[i] += correction[i];
                         }
                     }
-                    let d = best.1;
-                    d.iter().all(|v| v.is_finite()).then_some(d)
+                    let (size, d) = best;
+                    let relative = size / norm_inf(rhs).max(f64::MIN_POSITIVE);
+                    d.iter().all(|v| v.is_finite()).then_some((d, relative))
                 };
-                let Some(d) = solve(&rhs) else {
+                let Some((d, _)) = solve(&rhs) else {
                     floor = (100.0 * gamma).max(options.regularization);
                     continue;
                 };
@@ -1198,7 +1202,22 @@ fn run(
                                     c_soc[r] = alpha_soc * c_soc[r] + rp_trial[r];
                                     rhs[n_total + r] = -c_soc[r];
                                 }
-                                let Some(d_soc) = solve(&rhs) else { break };
+                                // A correction is only worth its solve if
+                                // the solve is accurate: abandoned above
+                                // 1e-5 of its right-hand side (IPOPT's
+                                // `residual_ratio_singular`), and the search
+                                // backtracks along the main step instead. On
+                                // case2869_pegase (branch flows) a correction
+                                // at 7e-2 was accepted at α = 0.95 and put a
+                                // circulation of 37 GW into two flow
+                                // variables at one bus, which the balance
+                                // rows cannot see; the run never recovered.
+                                let Some((d_soc, residual)) = solve(&rhs) else {
+                                    break;
+                                };
+                                if residual > 1e-5 {
+                                    break;
+                                }
                                 let du_soc: Vec<f64> = d_soc[..n_total].to_vec();
                                 alpha_soc = fraction_to_boundary(
                                     n_total, &has_lower, &has_upper, &g, &t, &du_soc, tau,
@@ -2152,7 +2171,11 @@ fn restoration(
     let mut state = State::start(&resto, &rp, &r_options);
 
     // The original problem's iterate at a restoration point's x: its slacks
-    // set from c(x), pushed inside their bounds as at the start.
+    // set from c(x), kept just inside their bounds. Not the starting point's
+    // bound push (1e-2 of the bound's size): a binding row with a large
+    // bound came back violated by that push, case13659_pegase's limit rows
+    // (bounds 1e5 scaled) by hundreds, and the restored point was rejected
+    // with θ = 22 against 6.4 before the restoration.
     let original = |x: &[f64]| -> Vec<f64> {
         let mut u = start.to_vec();
         u[..n].copy_from_slice(&x[..n]);
@@ -2163,10 +2186,10 @@ fn restoration(
                 let width = hi - lo;
                 let mut s = c[r];
                 if has_lower[k] {
-                    s = s.max(lo + (1e-2 * lo.abs().max(1.0)).min(1e-2 * width));
+                    s = s.max(lo + (1e-8 * lo.abs().max(1.0)).min(0.5 * width));
                 }
                 if has_upper[k] {
-                    s = s.min(hi - (1e-2 * hi.abs().max(1.0)).min(1e-2 * width));
+                    s = s.min(hi - (1e-8 * hi.abs().max(1.0)).min(0.5 * width));
                 }
                 u[k] = s;
             }
