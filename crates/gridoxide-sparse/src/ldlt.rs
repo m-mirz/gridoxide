@@ -34,6 +34,13 @@
 //!
 //! The symbolic analysis is done once per pattern ([`SymmetricPattern`]);
 //! [`SymmetricFactorization::new`] is the one-off shortcut.
+//!
+//! # The solver contract
+//!
+//! [`SymmetricSolver`] is what an interior point needs from its linear
+//! solver, independent of where the factor lives: analysis once, then numeric
+//! factorization, inertia and solves as the values change. [`LdltSolver`] is
+//! this module's implementation; a GPU one (cuDSS) implements the same trait.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
@@ -220,6 +227,69 @@ impl SymmetricPattern {
             }
         }
         scale
+    }
+}
+
+/// A sparse symmetric linear solver for the matrices of one pattern: analysed
+/// when made, factorized numerically as often as the values change, and
+/// asked for the inertia and for solves in between.
+///
+/// Stateful (the factorization stays inside) because a GPU backend keeps its
+/// factor on the device: the caller passes values in and gets solutions out,
+/// and never holds the factor itself.
+pub trait SymmetricSolver {
+    /// Whether `entries` has the pattern this solver was made for, so that
+    /// [`factorize`](Self::factorize) may take it.
+    fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool;
+
+    /// Factorizes the matrix of `entries` (duplicates summed, entries above
+    /// the diagonal ignored), replacing the previous factorization. `false`
+    /// on a zero pivot; no solve is valid until a factorization succeeds.
+    fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool;
+
+    /// The inertia of the last factorization.
+    fn inertia(&self) -> Inertia;
+
+    /// Solves `K x = b` with the last factorization. `None` if there is none
+    /// or the result is not finite.
+    fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>>;
+}
+
+/// [`SymmetricSolver`] on `faer`'s unpivoted `LDLᵀ`: a [`SymmetricPattern`]
+/// and the latest [`SymmetricFactorization`] of it.
+pub struct LdltSolver {
+    pattern: SymmetricPattern,
+    factor: Option<SymmetricFactorization>,
+}
+
+impl LdltSolver {
+    /// Analyses the `n × n` pattern of `keys` (see [`SymmetricPattern::new`]).
+    pub fn new(n: usize, keys: &[(usize, usize)]) -> Option<Self> {
+        Some(Self {
+            pattern: SymmetricPattern::new(n, keys)?,
+            factor: None,
+        })
+    }
+}
+
+impl SymmetricSolver for LdltSolver {
+    fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        self.pattern.matches(n, entries)
+    }
+
+    fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
+        self.factor = self.pattern.factorize(entries);
+        self.factor.is_some()
+    }
+
+    fn inertia(&self) -> Inertia {
+        self.factor
+            .as_ref()
+            .map_or_else(Inertia::default, SymmetricFactorization::inertia)
+    }
+
+    fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        self.factor.as_ref()?.solve(rhs)
     }
 }
 
@@ -414,6 +484,29 @@ mod tests {
             worst < 1e-14 * scale,
             "residual {worst:.1e}, scale {scale:.1e}"
         );
+    }
+
+    /// Through the trait: refactorized at new values, the solver gives what a
+    /// fresh factorization of those values gives, and a factorization that
+    /// fails leaves nothing to solve with.
+    #[test]
+    fn the_solver_refactorizes_on_its_pattern() {
+        let (dim, e) = kkt(40, 15, 10.0, 7);
+        let keys: Vec<(usize, usize)> = e.iter().map(|&(r, c, _)| (r, c)).collect();
+        let mut solver = LdltSolver::new(dim, &keys).unwrap();
+        let b: Vec<f64> = (0..dim).map(|i| (i as f64).cos()).collect();
+        for shift in [10.0, 3.0] {
+            let (_, values) = kkt(40, 15, shift, 7);
+            assert!(solver.matches(dim, &values));
+            assert!(solver.factorize(&values));
+            let fresh = SymmetricFactorization::new(dim, &values).unwrap();
+            assert_eq!(solver.inertia(), fresh.inertia());
+            assert_eq!(solver.solve(&b).unwrap(), fresh.solve(&b).unwrap());
+        }
+        assert!(!solver.matches(dim, &e[1..]));
+        let zero: Vec<(usize, usize, f64)> = e.iter().map(|&(r, c, _)| (r, c, 0.0)).collect();
+        assert!(!solver.factorize(&zero));
+        assert!(solver.solve(&b).is_none());
     }
 
     /// Large enough for `faer` to choose its supernodal layout, where `D` is

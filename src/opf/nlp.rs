@@ -23,7 +23,7 @@
 //!   eleven PGLib cases stalled for that alone.
 //! - **Inertia correction** (`factorize_with_inertia`): the KKT matrix is
 //!   factorized by an `LDLᵀ` that reports its inertia
-//!   ([`SymmetricFactorization`]), and the Hessian block regularized by the
+//!   ([`SymmetricSolver`], [`LdltSolver`] by default), and the Hessian block regularized by the
 //!   smallest δw that gives it `n` positive and `m` negative eigenvalues,
 //!   the condition for the step to minimize the barrier model.
 //! - **A filter line search** (`Filter`) on the violation θ and the
@@ -59,7 +59,7 @@
 //! start IPOPT fails on it too), whose path matched IPOPT's to eight digits
 //! once the solves were refined at least once (IPOPT's
 //! `min_refinement_steps`), it took IPOPT's restoration phase and an
-//! **equilibrated KKT matrix** (`SymmetricFactorization`, as IPOPT's MUMPS
+//! **equilibrated KKT matrix** (`ldlt::SymmetricPattern`, as IPOPT's MUMPS
 //! scales it) to solve. One departure from IPOPT is deliberate: its
 //! tiny-step rule (a negligible step is taken in full, near feasibility)
 //! at 1e-8 instead of 10 machine epsilons, the noise floor of an unpivoted
@@ -77,7 +77,7 @@
 //! that module for the derivations, which are not repeated here. A slack per
 //! inequality row, fixed columns rewritten as equality rows, and the
 //! symmetric KKT matrix carry over unchanged; the factorization does not
-//! ([`SymmetricFactorization`] in place of `ipm`'s LU, for the inertia).
+//! ([`SymmetricSolver`] in place of `ipm`'s LU, for the inertia).
 //!
 //! Unlike `ipm`, the primal step and the bound multipliers' step differ:
 //! the multipliers set the barrier curvature, and tied to a primal step cut
@@ -93,7 +93,7 @@
 //! conditions", which is what every AC-OPF tool reports and what published
 //! objectives are compared against.
 
-use crate::ldlt::{Inertia, SymmetricFactorization, SymmetricPattern};
+use crate::ldlt::{Inertia, LdltSolver, SymmetricSolver};
 use crate::opf::{OpfError, OptStatus};
 
 /// A twice-differentiable problem.
@@ -145,6 +145,10 @@ pub trait NonlinearProblem {
     fn initial_point(&self) -> Vec<f64>;
 }
 
+/// Makes a [`SymmetricSolver`] for an `n × n` pattern from the `(row,
+/// column)` of its entries; see [`NlpOptions::kkt_solver`].
+pub type MakeSolver = fn(usize, &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>>;
+
 #[derive(Clone, Copy, Debug)]
 pub struct NlpOptions {
     /// Convergence tolerance on the scaled KKT error.
@@ -176,8 +180,12 @@ pub struct NlpOptions {
     pub regularization: f64,
     pub dual_regularization: f64,
     /// The most rounds of iterative refinement per solve; it stops earlier
-    /// once IPOPT's residual ratio is below 1e-10.
+    /// once the residual is 1e-12 of the right-hand side, or stalls.
     pub refinement_rounds: usize,
+    /// Makes the KKT system's linear solver for an `n × n` pattern, from the
+    /// `(row, column)` of its entries: [`ldlt_solver`], `faer`'s `LDLᵀ` on
+    /// the CPU, by default. Where another backend (a GPU one) plugs in.
+    pub kkt_solver: MakeSolver,
     /// Solve by Algorithm NCL around the interior point (see `ncl`): a
     /// residual on every constraint row, removed by multiplier updates over
     /// a sequence of subproblems. For problems whose active constraints are
@@ -208,6 +216,7 @@ impl Default for NlpOptions {
             regularization: 1e-4,
             dual_regularization: 1e-8,
             refinement_rounds: 10,
+            kkt_solver: ldlt_solver,
             scaling: true,
             ncl: false,
             log: false,
@@ -828,9 +837,10 @@ fn run(
         Barrier::Schedule => state.mu,
     };
     let mut filter = Filter::default();
-    // The KKT matrix's pattern, analysed once and reused while it holds
-    // (`Kkt::new`): only its values change from one iteration to the next.
-    let mut pattern: Option<SymmetricPattern> = None;
+    // The KKT matrix's solver, its pattern analysed once and reused while it
+    // holds (`Kkt::new`): only the values change from one iteration to the
+    // next.
+    let mut solver: Option<Box<dyn SymmetricSolver>> = None;
     let mut acceptable_streak = 0usize;
     let mut error = f64::INFINITY;
     let mut first = true;
@@ -973,7 +983,7 @@ fn run(
             let mut restore = false;
             let mut revert: Option<Watchdog> = None;
             for _ in 0..12 {
-                let Some((factorization, delta)) = factorize_with_inertia(
+                let Some((kkt, delta)) = factorize_with_inertia(
                     &hessian,
                     &a,
                     &sigma,
@@ -981,11 +991,12 @@ fn run(
                     options,
                     floor,
                     &mut delta_last,
-                    &mut pattern,
+                    &mut solver,
                 ) else {
                     break;
                 };
                 gamma = delta;
+                let factorization = kkt.with(solver.as_deref().expect("factorized"));
 
                 // Barrier-perturbed right-hand side. No Mehrotra corrector: the
                 // predictor's premise is that the model is exact, which is what
@@ -1434,9 +1445,15 @@ fn run(
 /// first, and otherwise with δw from `options.regularization` (1e-4), or a
 /// third of the last iteration's δw, raised ×100 (no δw before) or ×8 until
 /// the inertia is right; `None` past 1e40. δc (`dual_regularization`) is
-/// always on: [`SymmetricFactorization`] does not pivot, and a zero diagonal
+/// always on: [`LdltSolver`] does not pivot, and a zero diagonal
 /// in the constraint block would stop it. `floor` is a lower bound on δw from
 /// the caller.
+/// The default [`NlpOptions::kkt_solver`]: [`LdltSolver`], `faer`'s
+/// unpivoted `LDLᵀ`.
+pub fn ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
+    Some(Box::new(LdltSolver::new(n, keys)?))
+}
+
 /// The point the watchdog saved, and its merit for judging the steps after it.
 struct Watchdog {
     u: Vec<f64>,
@@ -1459,19 +1476,20 @@ fn factorize_with_inertia(
     options: &NlpOptions,
     floor: f64,
     delta_last: &mut f64,
-    pattern: &mut Option<SymmetricPattern>,
+    solver: &mut Option<Box<dyn SymmetricSolver>>,
 ) -> Option<(Kkt, f64)> {
     let mut factor = |dw: f64| {
         let diagonal: Vec<f64> = sigma.iter().map(|s| s + dw).collect();
-        Kkt::new(
+        let kkt = Kkt::new(
             hessian,
             a,
             &diagonal,
             p,
             options.dual_regularization,
-            pattern,
-        )
-        .filter(Kkt::is_minimizing)
+            options.kkt_solver,
+            solver,
+        )?;
+        kkt.is_minimizing(solver.as_deref()?).then_some(kkt)
     };
     if floor == 0.0
         && let Some(f) = factor(0.0)
@@ -1511,8 +1529,10 @@ fn factorize_with_inertia(
 /// such slack for 250 iterations). Condensed, it is a −1e-16 on the
 /// constraint diagonal, next to δc. This is the first of the condensed KKT
 /// forms the GPU path builds on.
+///
+/// The factorization itself stays in the [`SymmetricSolver`]; this holds
+/// what is needed to expand a condensed solution.
 struct Kkt {
-    factorization: SymmetricFactorization,
     n_x: usize,
     n: usize,
     m: usize,
@@ -1521,15 +1541,18 @@ struct Kkt {
 }
 
 impl Kkt {
-    /// `None` when a slack's `d_k` is not positive (a row without bounds and
-    /// δw = 0) or the factorization meets a zero pivot.
+    /// Assembles the condensed matrix and factorizes it in `solver`, made by
+    /// `make` when there is none yet or the pattern changed. `None` when a
+    /// slack's `d_k` is not positive (a row without bounds and δw = 0) or
+    /// the factorization meets a zero pivot.
     fn new(
         hessian: &[(usize, usize, f64)],
         a: &[(usize, usize, f64)],
         diagonal: &[f64],
         p: &Internal,
         delta_c: f64,
-        pattern: &mut Option<SymmetricPattern>,
+        make: MakeSolver,
+        solver: &mut Option<Box<dyn SymmetricSolver>>,
     ) -> Option<Self> {
         let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
         let slacks: Vec<(usize, usize, f64)> = p
@@ -1562,26 +1585,22 @@ impl Kkt {
                 .map(|&(r, k, v)| (n_x + r, k, v)),
         );
         kkt.extend((0..m).map(|r| (n_x + r, n_x + r, row_diag[r])));
-        Some(Self {
-            factorization: {
-                // Reanalysed only when the entries' positions change, which a
-                // problem with a fixed sparsity never does.
-                if !pattern.as_ref().is_some_and(|q| q.matches(n_x + m, &kkt)) {
-                    let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
-                    *pattern = Some(SymmetricPattern::new(n_x + m, &keys)?);
-                }
-                pattern.as_ref()?.factorize(&kkt)?
-            },
-            n_x,
-            n,
-            m,
-            slacks,
-        })
+        // Reanalysed only when the entries' positions change, which a
+        // problem with a fixed sparsity never does.
+        if !solver.as_ref().is_some_and(|s| s.matches(n_x + m, &kkt)) {
+            let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
+            *solver = Some(make(n_x + m, &keys)?);
+        }
+        solver
+            .as_mut()?
+            .factorize(&kkt)
+            .then_some(Self { n_x, n, m, slacks })
     }
 
-    /// The inertia of a step that minimizes the barrier model.
-    fn is_minimizing(&self) -> bool {
-        self.factorization.inertia()
+    /// Whether `solver`'s factorization has the inertia of a step that
+    /// minimizes the barrier model.
+    fn is_minimizing(&self, solver: &dyn SymmetricSolver) -> bool {
+        solver.inertia()
             == Inertia {
                 positive: self.n_x,
                 negative: self.m,
@@ -1589,21 +1608,35 @@ impl Kkt {
             }
     }
 
+    /// This system with the solver holding its factorization, for solves.
+    fn with<'a>(&'a self, solver: &'a dyn SymmetricSolver) -> Factorized<'a> {
+        Factorized { kkt: self, solver }
+    }
+}
+
+/// A [`Kkt`] and the solver holding its factorization.
+struct Factorized<'a> {
+    kkt: &'a Kkt,
+    solver: &'a dyn SymmetricSolver,
+}
+
+impl Factorized<'_> {
     /// Solves the full system (`n` variables then `m` rows) through the
     /// condensed one.
     fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
-        let (n_x, n, m) = (self.n_x, self.n, self.m);
+        let kkt = self.kkt;
+        let (n_x, n, m) = (kkt.n_x, kkt.n, kkt.m);
         let mut reduced = vec![0.0; n_x + m];
         reduced[..n_x].copy_from_slice(&rhs[..n_x]);
         reduced[n_x..].copy_from_slice(&rhs[n..n + m]);
-        for &(r, k, d) in &self.slacks {
+        for &(r, k, d) in &kkt.slacks {
             reduced[n_x + r] += rhs[k] / d;
         }
-        let sol = self.factorization.solve(&reduced)?;
+        let sol = self.solver.solve(&reduced)?;
         let mut out = vec![0.0; n + m];
         out[..n_x].copy_from_slice(&sol[..n_x]);
         out[n..].copy_from_slice(&sol[n_x..]);
-        for &(r, k, d) in &self.slacks {
+        for &(r, k, d) in &kkt.slacks {
             out[k] = (rhs[k] + sol[n_x + r]) / d;
         }
         out.iter().all(|v| v.is_finite()).then_some(out)
