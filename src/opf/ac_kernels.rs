@@ -192,6 +192,10 @@ struct Merge {
     unique: Vec<(usize, usize)>,
     /// Per slot, its unique entry.
     slot: Vec<usize>,
+    /// Per unique entry, its slots in ascending order:
+    /// `sources[start[u]..start[u + 1]]`, for `apply`'s gather.
+    start: Vec<usize>,
+    sources: Vec<usize>,
 }
 
 impl Merge {
@@ -206,21 +210,45 @@ impl Merge {
                     unique.len() - 1
                 })
             })
-            .collect();
-        Self { unique, slot }
+            .collect::<Vec<usize>>();
+        let mut start = vec![0usize; unique.len() + 1];
+        for &u in &slot {
+            start[u + 1] += 1;
+        }
+        for u in 0..unique.len() {
+            start[u + 1] += start[u];
+        }
+        let mut next = start[..unique.len()].to_vec();
+        let mut sources = vec![0usize; slot.len()];
+        for (s, &u) in slot.iter().enumerate() {
+            sources[next[u]] = s;
+            next[u] += 1;
+        }
+        Self {
+            unique,
+            slot,
+            start,
+            sources,
+        }
     }
 
-    /// The slots' values summed into their unique entries, as triplets.
+    /// The slots' values summed into their unique entries, as triplets: a
+    /// gather per entry over its slots in ascending order, in parallel, so
+    /// the sums are those of a sequential pass over the slots.
     fn apply(&self, slots: &[(usize, usize, f64)]) -> Vec<(usize, usize, f64)> {
+        use rayon::prelude::*;
         debug_assert_eq!(slots.len(), self.slot.len());
-        let mut values = vec![0.0; self.unique.len()];
-        for (&(_, _, v), &u) in slots.iter().zip(&self.slot) {
-            values[u] += v;
-        }
         self.unique
-            .iter()
-            .zip(values)
-            .map(|(&(r, c), v)| (r, c, v))
+            .par_iter()
+            .enumerate()
+            .with_min_len(4096)
+            .map(|(u, &(r, c))| {
+                let mut v = 0.0;
+                for &s in &self.sources[self.start[u]..self.start[u + 1]] {
+                    v += slots[s].2;
+                }
+                (r, c, v)
+            })
             .collect()
     }
 }
@@ -487,37 +515,46 @@ impl AcKernels {
         self.jacobian_merge.apply(&self.jacobian_slots(x))
     }
 
-    /// The Jacobian's slots, element block by element block.
+    /// The Jacobian's slots, element block by element block, each block
+    /// written by its own element: in parallel on the host, as one thread
+    /// an element would on a GPU.
     fn jacobian_slots(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
-        let mut out = Vec::new();
-        let branch_flows = self.flow.is_some();
-        for t in 0..self.terminal_count() {
-            if branch_flows {
-                out.extend(self.jacobian_terminal_flow(t, x));
-            } else {
-                out.extend(self.jacobian_terminal(t, x));
-            }
-        }
-        for i in 0..self.n {
-            out.extend(self.jacobian_shunt(i, x));
-        }
-        for k in 0..self.gen_bus.len() {
-            out.extend(self.jacobian_generator(k));
-        }
-        for r in 0..self.limit_terminal.len() {
-            if branch_flows {
-                out.extend(self.jacobian_limit_flow(r, x));
-            } else {
-                out.extend(self.jacobian_limit(r, x));
-            }
-        }
-        for r in 0..self.angle.len() {
-            out.extend(self.jacobian_angle(r));
-        }
-        for r in 0..self.cost.len() {
-            out.extend(self.jacobian_cost(r));
-        }
+        let mut out = vec![(0, 0, 0.0); self.jacobian_len()];
+        let rest = if self.flow.is_some() {
+            fill(&mut out, self.terminal_count(), |t| {
+                self.jacobian_terminal_flow(t, x)
+            })
+        } else {
+            fill(&mut out, self.terminal_count(), |t| {
+                self.jacobian_terminal(t, x)
+            })
+        };
+        let rest = fill(rest, self.n, |i| self.jacobian_shunt(i, x));
+        let rest = fill(rest, self.gen_bus.len(), |k| self.jacobian_generator(k));
+        let rest = if self.flow.is_some() {
+            fill(rest, self.limit_terminal.len(), |r| {
+                self.jacobian_limit_flow(r, x)
+            })
+        } else {
+            fill(rest, self.limit_terminal.len(), |r| {
+                self.jacobian_limit(r, x)
+            })
+        };
+        let rest = fill(rest, self.angle.len(), |r| self.jacobian_angle(r));
+        let rest = fill(rest, self.cost.len(), |r| self.jacobian_cost(r));
+        debug_assert!(rest.is_empty());
         out
+    }
+
+    /// The Jacobian's slot count: the blocks' sizes above.
+    fn jacobian_len(&self) -> usize {
+        let flows = self.flow.is_some();
+        self.terminal_count() * if flows { 12 } else { 8 }
+            + self.n * 2
+            + self.gen_bus.len() * 2
+            + self.limit_terminal.len() * if flows { 2 } else { 4 }
+            + self.angle.len() * 2
+            + self.cost.len() * 2
     }
 
     // ---- Hessian of the constraints, −Σ y ∇²c, by element -----------------
@@ -580,31 +617,59 @@ impl AcKernels {
         self.hessian_merge.apply(&self.hessian_slots(x, y))
     }
 
-    /// The Hessian's slots, element block by element block.
+    /// The Hessian's slots, element block by element block, each written
+    /// by its own element, in parallel (see `jacobian_slots`). On
+    /// case24464_goc the blocks took 44 ms an iteration on one core.
     fn hessian_slots(&self, x: &[f64], y: &[f64]) -> Vec<(usize, usize, f64)> {
-        let mut out: Vec<(usize, usize, f64)> = self
-            .quadratic
-            .iter()
-            .map(|&(column, h)| (column, column, h))
-            .collect();
-        let branch_flows = self.flow.is_some();
-        for t in 0..self.terminal_count() {
-            if branch_flows {
-                out.extend(self.hessian_terminal_flow(t, x, y));
-            } else {
-                out.extend(self.hessian_terminal(t, x, y));
-            }
-        }
-        for i in 0..self.n {
-            out.extend(self.hessian_shunt(i, y));
-        }
-        for r in 0..self.limit_terminal.len() {
-            if branch_flows {
-                out.extend(self.hessian_limit_flow(r, y));
-            } else {
-                out.extend(self.hessian_limit(r, x, y));
-            }
-        }
+        let flows = self.flow.is_some();
+        let len = self.quadratic.len()
+            + self.terminal_count() * 16
+            + self.n
+            + self.limit_terminal.len() * if flows { 2 } else { 16 };
+        let mut out = vec![(0, 0, 0.0); len];
+        let rest = fill(&mut out, self.quadratic.len(), |k| {
+            let (column, h) = self.quadratic[k];
+            [(column, column, h)]
+        });
+        let rest = if flows {
+            fill(rest, self.terminal_count(), |t| {
+                self.hessian_terminal_flow(t, x, y)
+            })
+        } else {
+            fill(rest, self.terminal_count(), |t| {
+                self.hessian_terminal(t, x, y)
+            })
+        };
+        let rest = fill(rest, self.n, |i| self.hessian_shunt(i, y));
+        let rest = if flows {
+            fill(rest, self.limit_terminal.len(), |r| {
+                self.hessian_limit_flow(r, y)
+            })
+        } else {
+            fill(rest, self.limit_terminal.len(), |r| {
+                self.hessian_limit(r, x, y)
+            })
+        };
+        debug_assert!(rest.is_empty());
         out
     }
+}
+
+/// Writes `count` elements' blocks of `K` entries, element `e`'s from
+/// `block(e)`, at the front of `out`, and returns the rest. In parallel
+/// above a few thousand elements, where it pays (case14's whole Hessian is
+/// a few microseconds); every block is computed alone, so the values are
+/// those of a sequential pass.
+fn fill<'a, const K: usize>(
+    out: &'a mut [(usize, usize, f64)],
+    count: usize,
+    block: impl Fn(usize) -> [(usize, usize, f64); K] + Sync,
+) -> &'a mut [(usize, usize, f64)] {
+    use rayon::prelude::*;
+    let (head, rest) = out.split_at_mut(count * K);
+    head.par_chunks_mut(K.max(1))
+        .enumerate()
+        .with_min_len(2048)
+        .for_each(|(e, chunk)| chunk.copy_from_slice(&block(e)));
+    rest
 }

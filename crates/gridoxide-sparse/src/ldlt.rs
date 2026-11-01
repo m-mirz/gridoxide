@@ -139,13 +139,17 @@ impl LowerPattern {
         &self.slot
     }
 
-    /// Whether `entries` has exactly this pattern's triplets, in order.
+    /// Whether `entries` has exactly this pattern's triplets, in order. In
+    /// parallel: an interior point asks every factorization, and on
+    /// case24464_goc's 1.5M entries one core took 5 ms.
     pub fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        use rayon::prelude::*;
         n == self.n
             && entries.len() == self.keys.len()
             && entries
-                .iter()
+                .par_iter()
                 .zip(&self.keys)
+                .with_min_len(1 << 14)
                 .all(|(&(r, c, _), &k)| (r, c) == k)
     }
 

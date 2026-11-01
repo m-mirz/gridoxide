@@ -729,6 +729,7 @@ dependencies = [
  "cc",
  "faer",
  "num-complex",
+ "rayon",
 ]
 
 [[package]]

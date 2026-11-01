@@ -455,11 +455,24 @@ impl CudssSolver {
             Factorization::Ldlt => ffi::CUDSS_MTYPE_SYMMETRIC,
             Factorization::Llt => ffi::CUDSS_MTYPE_SPD,
         };
+        let threading_lib = std::env::var("CUDSS_THREADING_LIB")
+            .ok()
+            .filter(|lib| !lib.is_empty())
+            .and_then(|lib| std::ffi::CString::new(lib).ok());
         // SAFETY: each call gets valid out-pointers; the descriptors point at
         // the buffers above, which the solver keeps.
         unsafe {
             cudss(ffi::cudssCreate(&mut sys.handle), "cudssCreate")?;
             cudss(ffi::cudssSetStream(sys.handle, stream.0), "cudssSetStream")?;
+            // cuDSS's OpenMP host threading for the analysis, as the batch
+            // solver's (`cudss.rs`): on when CUDSS_THREADING_LIB names its
+            // layer library.
+            if let Some(lib) = &threading_lib {
+                cudss(
+                    ffi::cudssSetThreadingLayer(sys.handle, lib.as_ptr()),
+                    "cudssSetThreadingLayer",
+                )?;
+            }
             cudss(ffi::cudssConfigCreate(&mut sys.config), "cudssConfigCreate")?;
             if deterministic {
                 let on: i32 = 1;

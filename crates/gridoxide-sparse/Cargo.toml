@@ -24,6 +24,9 @@ features = []
 
 [dependencies]
 faer = "0.24.4"
+# LowerPattern::matches compares a KKT pattern's million keys every
+# factorization; in parallel on rayon's pool (already gridoxide-core's).
+rayon = "1.12"
 num-complex = "0.4.6"
 
 [build-dependencies]

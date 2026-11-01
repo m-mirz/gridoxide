@@ -1602,9 +1602,6 @@ struct Augmented {
     m: usize,
     /// `(row, slack column, d_k)`.
     slacks: Vec<(usize, usize, f64)>,
-    /// The constraint rows' diagonal in the condensed matrix: `−δc`, or
-    /// `−1/d_k` where a slack was eliminated.
-    row_diag: Vec<f64>,
 }
 
 impl Augmented {
@@ -1640,11 +1637,16 @@ impl Augmented {
         for &(r, _, d) in &slacks {
             row_diag[r] = -1.0 / d;
         }
-        let mut kkt: Vec<(usize, usize, f64)> = hessian
-            .iter()
-            .copied()
-            .filter(|&(i, j, _)| i >= j && i < n_x)
-            .collect();
+        // Sized once: grown from empty, most of 24 ms a factorization on
+        // case24464_goc went to copying it as it doubled.
+        let mut kkt: Vec<(usize, usize, f64)> =
+            Vec::with_capacity(hessian.len() + n_x + a.len() + m);
+        kkt.extend(
+            hessian
+                .iter()
+                .copied()
+                .filter(|&(i, j, _)| i >= j && i < n_x),
+        );
         kkt.extend((0..n_x).map(|k| (k, k, diagonal[k])));
         kkt.extend(
             a.iter()
@@ -1658,13 +1660,10 @@ impl Augmented {
             let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
             *solver = Some(make(n_x + m, &keys)?);
         }
-        solver.as_mut()?.factorize(&kkt).then_some(Self {
-            n_x,
-            n,
-            m,
-            slacks,
-            row_diag,
-        })
+        solver
+            .as_mut()?
+            .factorize(&kkt)
+            .then_some(Self { n_x, n, m, slacks })
     }
 
     /// Whether `solver`'s factorization has the inertia of a step that
@@ -1679,25 +1678,32 @@ impl Augmented {
     }
 
     /// `rhs − K d` for the full system as refinement takes it (δw, no δc),
-    /// from the condensed matrix's product in `solver`
-    /// ([`SymmetricSolver::multiply`]): its rows of `x` are the full
-    /// system's, and a slack's elimination is undone row by row. A slack's
-    /// column holds `d_k` and the −1 in its row, so the slack's row is
-    /// `d_k du_k − w_r` and the constraint row gains `−du_k`; the condensed
-    /// diagonal `−δc` or `−1/d_k` is taken out. `None` if the solver does
-    /// not multiply.
+    /// from products with the condensed matrix in `solver`
+    /// ([`SymmetricSolver::multiply`]), its slacks' elimination undone row by
+    /// row: a slack's column holds `d_k` and the −1 in its row, so the
+    /// slack's row is `d_k du_k − w_r` and the constraint row gains `−du_k`.
+    /// `None` if the solver does not multiply.
+    ///
+    /// Two products, `[du_x, 0]` and `[0, w]`, so the constraint rows never
+    /// hold their condensed diagonal: one product of `[du_x, w]` had to take
+    /// `−w_r/d_k` back out, and for a slack far from its bound `1/d_k`
+    /// reaches 1e8 and the subtraction cancels. case2869_pegase (bus
+    /// injection, flat start) took 794 iterations that way, 160 with the
+    /// host's products.
     fn residual(&self, solver: &dyn SymmetricSolver, rhs: &[f64], d: &[f64]) -> Option<Vec<f64>> {
         let (n_x, n, m) = (self.n_x, self.n, self.m);
         let mut v = vec![0.0; n_x + m];
         v[..n_x].copy_from_slice(&d[..n_x]);
+        let primal = solver.multiply(&v)?;
+        v[..n_x].fill(0.0);
         v[n_x..].copy_from_slice(&d[n..n + m]);
-        let kv = solver.multiply(&v)?;
+        let dual = solver.multiply(&v)?;
         let mut r = rhs.to_vec();
         for k in 0..n_x {
-            r[k] -= kv[k];
+            r[k] -= primal[k] + dual[k];
         }
         for row in 0..m {
-            r[n + row] -= kv[n_x + row] - self.row_diag[row] * d[n + row];
+            r[n + row] -= primal[n_x + row];
         }
         for &(row, k, dk) in &self.slacks {
             r[k] -= dk * d[k] - d[n + row];
@@ -1867,11 +1873,16 @@ impl Hybrid {
                 rows[r].push((k, v));
             }
         }
-        let mut kkt: Vec<(usize, usize, f64)> = hessian
-            .iter()
-            .copied()
-            .filter(|&(i, j, _)| i >= j && i < n_x)
-            .collect();
+        // Sized once: grown from empty, most of 24 ms a factorization on
+        // case24464_goc went to copying it as it doubled.
+        let mut kkt: Vec<(usize, usize, f64)> =
+            Vec::with_capacity(hessian.len() + n_x + a.len() + m);
+        kkt.extend(
+            hessian
+                .iter()
+                .copied()
+                .filter(|&(i, j, _)| i >= j && i < n_x),
+        );
         kkt.extend((0..n_x).map(|k| (k, k, diagonal[k])));
         for (r, row) in rows.iter().enumerate() {
             for &(i, a_i) in row {

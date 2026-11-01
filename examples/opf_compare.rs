@@ -24,7 +24,8 @@
 //! `OPF_REPEAT=n` times the median of `n` solves after an untimed warm-up,
 //! as grid-bench does. With `--features gpu`, `OPF_LINEAR=cudss` factorizes the KKT system on
 //! the GPU: cuDSS's `LDLᵀ` for the augmented system, its Cholesky for
-//! HyKKT's.
+//! HyKKT's. `CUDSS_THREADING_LIB` (cuDSS's `libcudss_mtlayer_gomp.so`)
+//! runs its analysis on every core.
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
