@@ -207,30 +207,42 @@ impl SymmetricPattern {
     /// factorizing it. `D K D` is congruent to `K`, so the inertia is
     /// unchanged. Returns `D`.
     fn equilibrate(&self, values: &mut [f64]) -> Vec<f64> {
+        const PASSES: usize = 5;
         let n = self.n;
         let mut scale = vec![1.0f64; n];
-        for _ in 0..5 {
-            let mut row_max = vec![0.0f64; n];
-            for c in 0..n {
-                for s in self.col_ptr[c]..self.col_ptr[c + 1] {
-                    let a = values[s].abs();
-                    let r = self.row_idx[s];
-                    row_max[r] = row_max[r].max(a);
-                    row_max[c] = row_max[c].max(a);
-                }
+        // Each pass scales by the row maxima, and the sweep that scales also
+        // collects the next pass's maxima: six sweeps over the values instead
+        // of ten, the same arithmetic in the same order.
+        let mut row_max = vec![0.0f64; n];
+        for c in 0..n {
+            let column = self.col_ptr[c]..self.col_ptr[c + 1];
+            for (v, &r) in values[column.clone()].iter().zip(&self.row_idx[column]) {
+                let a = v.abs();
+                row_max[r] = row_max[r].max(a);
+                row_max[c] = row_max[c].max(a);
             }
+        }
+        let mut factor = vec![1.0f64; n];
+        for pass in 0..PASSES {
             for i in 0..n {
-                let f = if row_max[i] > 0.0 && row_max[i].is_finite() {
+                factor[i] = if row_max[i] > 0.0 && row_max[i].is_finite() {
                     1.0 / row_max[i].sqrt()
                 } else {
                     1.0
                 };
-                scale[i] *= f;
-                row_max[i] = f; // reused as this pass's factor
+                scale[i] *= factor[i];
+                row_max[i] = 0.0;
             }
+            let last = pass + 1 == PASSES;
             for c in 0..n {
                 for s in self.col_ptr[c]..self.col_ptr[c + 1] {
-                    values[s] *= row_max[self.row_idx[s]] * row_max[c];
+                    let r = self.row_idx[s];
+                    values[s] *= factor[r] * factor[c];
+                    if !last {
+                        let a = values[s].abs();
+                        row_max[r] = row_max[r].max(a);
+                        row_max[c] = row_max[c].max(a);
+                    }
                 }
             }
         }

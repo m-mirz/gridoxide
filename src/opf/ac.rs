@@ -47,27 +47,30 @@
 //!
 //! # Where the derivatives come from
 //!
-//! The balance rows' first and second derivatives are exactly
-//! [`injection_hessian`](crate::injection_hessian)'s — that module exists for
-//! this. The branch limits need their own, and the structure turns out to be
-//! the same: a terminal flow
+//! From one kernel, a branch terminal's flow
 //!
 //! \\[ P_{ft} = |V_f|^2 g_{self} + |V_f||V_t| (g_{mut}\cos\theta_{ft}
 //!     + b_{mut}\sin\theta_{ft}) \\]
 //!
-//! is algebraically **a bus injection with exactly one neighbour**, with
-//! \\(y_{ff}\\) playing the role of the self-admittance and \\(y_{ft}\\) the
-//! mutual one. So the same \\(c\\)/\\(s\\) pair and the same derivative
-//! rotations apply, which is why [`branch_flow`](crate::branch_flow) and
-//! `injection_hessian` share their shape.
+//! and its `Q`, with their first and second derivatives in the four
+//! variables they touch. A terminal flow is **a bus injection with exactly
+//! one neighbour**, and a bus injection is the sum of its terminals' flows
+//! plus its shunt's, so the balance rows (in either formulation), the
+//! branch limits and the flow definitions all come from it. The evaluation
+//! goes element by element over flat arrays (`ac_kernels.rs`), each element
+//! writing its own entries: the shape a GPU kernel needs. It equals the
+//! Y-bus formulas of [`injection_hessian`](crate::injection_hessian) to
+//! rounding (`opf_ac_test.rs` holds it to them).
 
 use std::collections::HashMap;
 
 use num_complex::Complex;
 
 use crate::branch_flow::{BranchParams, Terminal, branch_params};
-use crate::injection_hessian::{injection_jacobian, weighted_injection_hessian};
-use crate::network::{YBusSparse, power_injections};
+
+#[path = "ac_kernels.rs"]
+mod kernels;
+use crate::network::YBusSparse;
 use crate::opf::model::CostCurve;
 use crate::opf::nlp::{NlpOptions, NlpSolution, NonlinearProblem};
 use crate::opf::{OpfError, OptStatus};
@@ -190,98 +193,6 @@ pub enum AcOpfStart {
     Flat,
 }
 
-/// Value, gradient and Hessian of one terminal's `(P, Q)`, in the four local
-/// state variables `[θ_near, θ_far, |V|_near, |V|_far]`.
-///
-/// A terminal flow is a one-neighbour bus injection — see the module docs — so
-/// these are the injection formulas with the sum over neighbours removed.
-#[derive(Clone, Copy, Debug, Default)]
-struct TerminalDerivatives {
-    p: f64,
-    q: f64,
-    dp: [f64; 4],
-    dq: [f64; 4],
-    /// Full symmetric 4×4 blocks.
-    d2p: [[f64; 4]; 4],
-    d2q: [[f64; 4]; 4],
-}
-
-const TH_NEAR: usize = 0;
-const TH_FAR: usize = 1;
-const V_NEAR: usize = 2;
-const V_FAR: usize = 3;
-
-fn terminal_derivatives(
-    branch: &BranchParams,
-    terminal: Terminal,
-    theta: &[f64],
-    vm: &[f64],
-) -> TerminalDerivatives {
-    let (near, far) = match terminal {
-        Terminal::From => (branch.from, branch.to),
-        Terminal::To => (branch.to, branch.from),
-    };
-    let (y_self, y_mut) = match terminal {
-        Terminal::From => (branch.y[0], branch.y[1]),
-        Terminal::To => (branch.y[3], branch.y[2]),
-    };
-    let (v_n, v_f) = (vm[near], vm[far]);
-    let (sin, cos) = (theta[near] - theta[far]).sin_cos();
-    let c = y_mut.re * cos + y_mut.im * sin;
-    let s = y_mut.re * sin - y_mut.im * cos;
-
-    let mut d = TerminalDerivatives {
-        p: v_n * v_n * y_self.re + v_n * v_f * c,
-        q: -v_n * v_n * y_self.im + v_n * v_f * s,
-        ..Default::default()
-    };
-
-    d.dp[TH_NEAR] = -v_n * v_f * s;
-    d.dp[TH_FAR] = v_n * v_f * s;
-    d.dp[V_NEAR] = 2.0 * v_n * y_self.re + v_f * c;
-    d.dp[V_FAR] = v_n * c;
-
-    d.dq[TH_NEAR] = v_n * v_f * c;
-    d.dq[TH_FAR] = -v_n * v_f * c;
-    d.dq[V_NEAR] = -2.0 * v_n * y_self.im + v_f * s;
-    d.dq[V_FAR] = v_n * s;
-
-    // θθ: both flows depend on the angle *difference*, so the 2×2 angle block
-    // is one value with alternating sign.
-    let pc = v_n * v_f * c;
-    let ps = v_n * v_f * s;
-    d.d2p[TH_NEAR][TH_NEAR] = -pc;
-    d.d2p[TH_NEAR][TH_FAR] = pc;
-    d.d2p[TH_FAR][TH_NEAR] = pc;
-    d.d2p[TH_FAR][TH_FAR] = -pc;
-    d.d2q[TH_NEAR][TH_NEAR] = -ps;
-    d.d2q[TH_NEAR][TH_FAR] = ps;
-    d.d2q[TH_FAR][TH_NEAR] = ps;
-    d.d2q[TH_FAR][TH_FAR] = -ps;
-
-    // |V||V|: quadratic in the near magnitude, bilinear across the pair.
-    d.d2p[V_NEAR][V_NEAR] = 2.0 * y_self.re;
-    d.d2p[V_NEAR][V_FAR] = c;
-    d.d2p[V_FAR][V_NEAR] = c;
-    d.d2q[V_NEAR][V_NEAR] = -2.0 * y_self.im;
-    d.d2q[V_NEAR][V_FAR] = s;
-    d.d2q[V_FAR][V_NEAR] = s;
-
-    // Mixed, emitted in both orderings since mixed partials commute.
-    for (v_index, scale) in [(V_NEAR, v_f), (V_FAR, v_n)] {
-        d.d2p[v_index][TH_NEAR] = -scale * s;
-        d.d2p[TH_NEAR][v_index] = -scale * s;
-        d.d2p[v_index][TH_FAR] = scale * s;
-        d.d2p[TH_FAR][v_index] = scale * s;
-        d.d2q[v_index][TH_NEAR] = scale * c;
-        d.d2q[TH_NEAR][v_index] = scale * c;
-        d.d2q[v_index][TH_FAR] = -scale * c;
-        d.d2q[TH_FAR][v_index] = -scale * c;
-    }
-
-    d
-}
-
 /// One enforced branch limit.
 #[derive(Clone, Copy, Debug)]
 struct LimitRow {
@@ -316,11 +227,10 @@ pub struct AcOpf {
     /// p_t, q_t` per branch, in `params` order) and the first flow-definition
     /// row (four per branch, after every other row).
     flow: Option<(usize, usize)>,
-    /// Per bus, its shunt admittance (the Y-bus's diagonal less the
-    /// branches'), which the branch-flow balances evaluate on their own.
-    shunt: Vec<Complex<f64>>,
     /// Per branch (`params` order), its rating, if any.
     rating: Vec<Option<f64>>,
+    /// The constraints, Jacobian and Hessian, evaluated element by element.
+    kernels: kernels::AcKernels,
 }
 
 impl AcOpf {
@@ -422,6 +332,48 @@ impl AcOpf {
             (base_vars, rows)
         });
         let n_vars = base_vars + if flow.is_some() { 4 * params.len() } else { 0 };
+        let kernels = kernels::AcKernels::new(
+            &params,
+            kernels::Layout {
+                n,
+                theta: 0,
+                vm: n,
+                pg: 2 * n,
+                qg: 2 * n + g,
+                shunt,
+                p_load: network.p_load.clone(),
+                q_load: network.q_load.clone(),
+                gen_bus: network.generators.iter().map(|u| u.bus).collect(),
+                quadratic: network
+                    .generators
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, unit)| match &unit.cost {
+                        Some(CostCurve::Polynomial { coefficients }) if coefficients.len() > 2 => {
+                            Some((2 * n + k, 2.0 * coefficients[2]))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                limits: limit_rows
+                    .iter()
+                    .map(|l| (l.branch, l.terminal == Terminal::From))
+                    .collect(),
+                angle: network
+                    .angle_limits
+                    .iter()
+                    .map(|a| (a.from, a.to))
+                    .collect(),
+                cost: cost_rows.iter().map(|&(e, c, s, _)| (e, c, s)).collect(),
+                flow,
+                n_vars,
+                n_rows: 2 * n
+                    + limit_rows.len()
+                    + network.angle_limits.len()
+                    + cost_rows.len()
+                    + if flow.is_some() { 4 * params.len() } else { 0 },
+            },
+        );
 
         Ok(Self {
             options,
@@ -430,8 +382,8 @@ impl AcOpf {
             limit_rows,
             template,
             flow,
-            shunt,
             rating,
+            kernels,
             n_vars,
             theta: 0,
             vm: n,
@@ -468,16 +420,6 @@ impl AcOpf {
     #[doc(hidden)]
     pub fn ybus_for_test(&self) -> &YBusSparse {
         &self.ybus
-    }
-
-    fn buses_at(&self, x: &[f64]) -> Vec<Bus> {
-        let n = self.network.n_buses;
-        let mut buses = self.template.clone();
-        for i in 0..n {
-            buses[i].voltage_ang = x[self.theta + i];
-            buses[i].voltage_mag = x[self.vm + i];
-        }
-        buses
     }
 
     /// Solves, and interprets the result in physical units.
@@ -686,141 +628,17 @@ impl NonlinearProblem for AcOpf {
     }
 
     fn constraints(&self, x: &[f64]) -> Vec<f64> {
-        if let Some(flow) = self.flow {
-            return self.branch_flow_constraints(x, flow);
-        }
-        let n = self.network.n_buses;
-        let buses = self.buses_at(x);
-        let (p_inj, q_inj) = power_injections(&buses, &self.ybus);
-
         let mut out = vec![0.0; self.n_constraints()];
-        for i in 0..n {
-            out[i] = p_inj[i] + self.network.p_load[i];
-            out[n + i] = q_inj[i] + self.network.q_load[i];
-        }
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            out[unit.bus] -= x[self.pg + k];
-            out[n + unit.bus] -= x[self.qg + k];
-        }
-
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let d = terminal_derivatives(&self.params[limit.branch], limit.terminal, &theta, &vm);
-            out[2 * n + r] = d.p * d.p + d.q * d.q;
-        }
-        let base = 2 * n + self.limit_rows.len();
-        for (r, angle) in self.network.angle_limits.iter().enumerate() {
-            out[base + r] = x[self.theta + angle.from] - x[self.theta + angle.to];
-        }
-        let base = base + self.network.angle_limits.len();
-        for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
-            out[base + r] = x[epigraph] - slope * x[column];
-        }
+        self.kernels.constraints(x, &mut out);
         out
     }
 
     fn jacobian(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
-        if let Some(flow) = self.flow {
-            return self.branch_flow_jacobian(x, flow);
-        }
-        let n = self.network.n_buses;
-        let buses = self.buses_at(x);
-        let mut out = injection_jacobian(&buses, &self.ybus);
-
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            out.push((unit.bus, self.pg + k, -1.0));
-            out.push((n + unit.bus, self.qg + k, -1.0));
-        }
-
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let branch = &self.params[limit.branch];
-            let d = terminal_derivatives(branch, limit.terminal, &theta, &vm);
-            let columns = self.limit_columns(branch, limit.terminal);
-            // ∇(P² + Q²) = 2P∇P + 2Q∇Q
-            for local in 0..4 {
-                out.push((
-                    2 * n + r,
-                    columns[local],
-                    2.0 * (d.p * d.dp[local] + d.q * d.dq[local]),
-                ));
-            }
-        }
-        // The angle and epigraph rows are linear, so their Jacobian is
-        // constant — and for the same reason they contribute nothing to the
-        // Hessian.
-        let base = 2 * n + self.limit_rows.len();
-        for (r, angle) in self.network.angle_limits.iter().enumerate() {
-            out.push((base + r, self.theta + angle.from, 1.0));
-            out.push((base + r, self.theta + angle.to, -1.0));
-        }
-        let base = base + self.network.angle_limits.len();
-        for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
-            out.push((base + r, epigraph, 1.0));
-            out.push((base + r, column, -slope));
-        }
-        out
+        self.kernels.jacobian(x)
     }
 
     fn lagrangian_hessian(&self, x: &[f64], y: &[f64]) -> Vec<(usize, usize, f64)> {
-        let n = self.network.n_buses;
-
-        // The objective's own curvature: quadratic cost curves only, so the
-        // block is diagonal on the P_g columns.
-        let mut out = Vec::new();
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            if let Some(CostCurve::Polynomial { coefficients }) = &unit.cost {
-                if coefficients.len() > 2 {
-                    out.push((self.pg + k, self.pg + k, 2.0 * coefficients[2]));
-                }
-            }
-        }
-
-        if let Some(flow) = self.flow {
-            self.branch_flow_hessian(x, y, flow, &mut out);
-            return out;
-        }
-
-        // −Σ yᵢ ∇²cᵢ for the balance rows. The sign is the module's
-        // convention (L = f − yᵀc), so the multipliers are negated on the way
-        // in rather than the result negated on the way out.
-        let buses = self.buses_at(x);
-        let lambda: Vec<f64> = (0..n).map(|i| -y[i]).collect();
-        let mu: Vec<f64> = (0..n).map(|i| -y[n + i]).collect();
-        out.extend(weighted_injection_hessian(&buses, &self.ybus, &lambda, &mu));
-
-        // −Σ y_r ∇²(P² + Q²) for the limit rows, where
-        //   ∇²(P² + Q²) = 2(∇P∇Pᵀ + P∇²P + ∇Q∇Qᵀ + Q∇²Q).
-        // The outer products are what a limit contributes beyond the
-        // injections, and they stay inside the branch's own 2-bus block — so
-        // limits add no fill either.
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let weight = -y[2 * n + r];
-            if weight == 0.0 {
-                continue;
-            }
-            let branch = &self.params[limit.branch];
-            let d = terminal_derivatives(branch, limit.terminal, &theta, &vm);
-            let columns = self.limit_columns(branch, limit.terminal);
-            for a in 0..4 {
-                for b in 0..4 {
-                    let value = 2.0
-                        * (d.dp[a] * d.dp[b]
-                            + d.p * d.d2p[a][b]
-                            + d.dq[a] * d.dq[b]
-                            + d.q * d.d2q[a][b]);
-                    // Kept when zero: IPOPT fixes the Hessian's pattern at
-                    // the start, so it must not depend on the point.
-                    out.push((columns[a], columns[b], weight * value));
-                }
-            }
-        }
-
-        out
+        self.kernels.lagrangian_hessian(x, y)
     }
 
     /// A flat voltage profile with the dispatch already roughly meeting
@@ -897,172 +715,6 @@ impl NonlinearProblem for AcOpf {
             }
         }
         x
-    }
-}
-
-impl AcOpf {
-    /// The flow-variable columns `(p, q)` of a branch terminal.
-    fn flow_columns(&self, column: usize, branch: usize, terminal: Terminal) -> (usize, usize) {
-        let at = column + 4 * branch + if terminal == Terminal::From { 0 } else { 2 };
-        (at, at + 1)
-    }
-
-    /// The bus a branch terminal sits at.
-    fn terminal_bus(branch: &BranchParams, terminal: Terminal) -> usize {
-        match terminal {
-            Terminal::From => branch.from,
-            Terminal::To => branch.to,
-        }
-    }
-
-    /// [`AcOpfFormulation::BranchFlow`]'s rows: the balances from the shunts
-    /// and the flow variables, the thermal limits on the flow variables, the
-    /// linear rows as in the other formulation, then `flow − flow(V)`.
-    fn branch_flow_constraints(&self, x: &[f64], (column, row): (usize, usize)) -> Vec<f64> {
-        let n = self.network.n_buses;
-        let mut out = vec![0.0; self.n_constraints()];
-        for i in 0..n {
-            let v2 = x[self.vm + i] * x[self.vm + i];
-            // S = V conj(y V) = |V|² conj(y) for a shunt.
-            out[i] = v2 * self.shunt[i].re + self.network.p_load[i];
-            out[n + i] = -v2 * self.shunt[i].im + self.network.q_load[i];
-        }
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            out[unit.bus] -= x[self.pg + k];
-            out[n + unit.bus] -= x[self.qg + k];
-        }
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (b, branch) in self.params.iter().enumerate() {
-            for (k, terminal) in [Terminal::From, Terminal::To].into_iter().enumerate() {
-                let (pc, qc) = self.flow_columns(column, b, terminal);
-                let at = Self::terminal_bus(branch, terminal);
-                out[at] += x[pc];
-                out[n + at] += x[qc];
-                let d = terminal_derivatives(branch, terminal, &theta, &vm);
-                out[row + 4 * b + 2 * k] = x[pc] - d.p;
-                out[row + 4 * b + 2 * k + 1] = x[qc] - d.q;
-            }
-        }
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let (pc, qc) = self.flow_columns(column, limit.branch, limit.terminal);
-            out[2 * n + r] = x[pc] * x[pc] + x[qc] * x[qc];
-        }
-        let base = 2 * n + self.limit_rows.len();
-        for (r, angle) in self.network.angle_limits.iter().enumerate() {
-            out[base + r] = x[self.theta + angle.from] - x[self.theta + angle.to];
-        }
-        let base = base + self.network.angle_limits.len();
-        for (r, &(epigraph, gen_column, slope, _)) in self.cost_rows.iter().enumerate() {
-            out[base + r] = x[epigraph] - slope * x[gen_column];
-        }
-        out
-    }
-
-    fn branch_flow_jacobian(
-        &self,
-        x: &[f64],
-        (column, row): (usize, usize),
-    ) -> Vec<(usize, usize, f64)> {
-        let n = self.network.n_buses;
-        let mut out = Vec::new();
-        for i in 0..n {
-            let v = x[self.vm + i];
-            out.push((i, self.vm + i, 2.0 * v * self.shunt[i].re));
-            out.push((n + i, self.vm + i, -2.0 * v * self.shunt[i].im));
-        }
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            out.push((unit.bus, self.pg + k, -1.0));
-            out.push((n + unit.bus, self.qg + k, -1.0));
-        }
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (b, branch) in self.params.iter().enumerate() {
-            for (k, terminal) in [Terminal::From, Terminal::To].into_iter().enumerate() {
-                let (pc, qc) = self.flow_columns(column, b, terminal);
-                let at = Self::terminal_bus(branch, terminal);
-                out.push((at, pc, 1.0));
-                out.push((n + at, qc, 1.0));
-                let d = terminal_derivatives(branch, terminal, &theta, &vm);
-                let columns = self.limit_columns(branch, terminal);
-                let (rp, rq) = (row + 4 * b + 2 * k, row + 4 * b + 2 * k + 1);
-                out.push((rp, pc, 1.0));
-                out.push((rq, qc, 1.0));
-                for local in 0..4 {
-                    out.push((rp, columns[local], -d.dp[local]));
-                    out.push((rq, columns[local], -d.dq[local]));
-                }
-            }
-        }
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let (pc, qc) = self.flow_columns(column, limit.branch, limit.terminal);
-            out.push((2 * n + r, pc, 2.0 * x[pc]));
-            out.push((2 * n + r, qc, 2.0 * x[qc]));
-        }
-        let base = 2 * n + self.limit_rows.len();
-        for (r, angle) in self.network.angle_limits.iter().enumerate() {
-            out.push((base + r, self.theta + angle.from, 1.0));
-            out.push((base + r, self.theta + angle.to, -1.0));
-        }
-        let base = base + self.network.angle_limits.len();
-        for (r, &(epigraph, gen_column, slope, _)) in self.cost_rows.iter().enumerate() {
-            out.push((base + r, epigraph, 1.0));
-            out.push((base + r, gen_column, -slope));
-        }
-        out
-    }
-
-    /// The constraints' part of the Lagrangian Hessian, `−Σ y ∇²c`, in the
-    /// branch-flow formulation. Every entry is emitted at every point, zero
-    /// or not, so the pattern does not depend on it.
-    fn branch_flow_hessian(
-        &self,
-        x: &[f64],
-        y: &[f64],
-        (column, row): (usize, usize),
-        out: &mut Vec<(usize, usize, f64)>,
-    ) {
-        let n = self.network.n_buses;
-        // Shunt injections: ∂²(|V|² g)/∂|V|² = 2g, and −2b for Q.
-        for i in 0..n {
-            let value = -y[i] * 2.0 * self.shunt[i].re + y[n + i] * 2.0 * self.shunt[i].im;
-            out.push((self.vm + i, self.vm + i, value));
-        }
-        // Thermal limits: ∇²(p² + q²) = 2 on each flow variable.
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let (pc, qc) = self.flow_columns(column, limit.branch, limit.terminal);
-            out.push((pc, pc, -2.0 * y[2 * n + r]));
-            out.push((qc, qc, -2.0 * y[2 * n + r]));
-        }
-        // Flow definitions, c = flow − P(V): −y ∇²c = +y ∇²P(V).
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (b, branch) in self.params.iter().enumerate() {
-            for (k, terminal) in [Terminal::From, Terminal::To].into_iter().enumerate() {
-                let d = terminal_derivatives(branch, terminal, &theta, &vm);
-                let columns = self.limit_columns(branch, terminal);
-                let (yp, yq) = (y[row + 4 * b + 2 * k], y[row + 4 * b + 2 * k + 1]);
-                for a in 0..4 {
-                    for c in 0..4 {
-                        out.push((columns[a], columns[c], yp * d.d2p[a][c] + yq * d.d2q[a][c]));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Global column indices for a terminal's four local state variables.
-    fn limit_columns(&self, branch: &BranchParams, terminal: Terminal) -> [usize; 4] {
-        let (near, far) = match terminal {
-            Terminal::From => (branch.from, branch.to),
-            Terminal::To => (branch.to, branch.from),
-        };
-        [
-            self.theta + near,
-            self.theta + far,
-            self.vm + near,
-            self.vm + far,
-        ]
     }
 }
 
