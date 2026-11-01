@@ -32,7 +32,8 @@
 //! options; IPOPT's MUMPS and MA27 pivot instead. Accuracy is recovered by the
 //! caller's iterative refinement.
 //!
-//! The symbolic analysis is redone on every [`SymmetricFactorization::new`].
+//! The symbolic analysis is done once per pattern ([`SymmetricPattern`]);
+//! [`SymmetricFactorization::new`] is the one-off shortcut.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
@@ -40,8 +41,9 @@ use faer::sparse::linalg::cholesky::{
     CholeskySymbolicParams, LdltRef, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
     factorize_symbolic_cholesky, supernodal::SupernodalLdltRef,
 };
-use faer::sparse::{SparseColMat, Triplet};
+use faer::sparse::{SparseColMatRef, SymbolicSparseColMat, SymbolicSparseColMatRef};
 use faer::{Conj, Mat, Par, Side};
+use std::rc::Rc;
 
 /// Counts of positive, negative and zero eigenvalues.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,10 +53,180 @@ pub struct Inertia {
     pub zero: usize,
 }
 
+/// The structure of a sparse symmetric matrix, analysed once: its lower
+/// triangle in compressed columns, the symbolic `LDLᵀ` (AMD ordering,
+/// elimination tree, supernodes), and where each entry of the triplet list
+/// it was built from lands. Factorizing a matrix of the same pattern again
+/// ([`factorize`](Self::factorize)) is then numeric only, as an interior
+/// point's KKT matrix is every iteration: its values change, its pattern does
+/// not. That split is also what a GPU factorization (cuDSS) is built
+/// around: analysis once, refactorization per iteration.
+pub struct SymmetricPattern {
+    n: usize,
+    /// The `(row, col)` of every triplet the pattern was built from, in
+    /// order: a matrix matches if its triplets have exactly these.
+    keys: Vec<(usize, usize)>,
+    /// Per triplet, its slot in `row_idx`, or `None` above the diagonal.
+    slot: Vec<Option<usize>>,
+    col_ptr: Vec<usize>,
+    row_idx: Vec<usize>,
+    symbolic: Rc<SymbolicCholesky<usize>>,
+}
+
+impl SymmetricPattern {
+    /// Analyses the `n × n` pattern of `keys` (row, column), entries above the
+    /// diagonal ignored, duplicates sharing a slot. `None` if the symbolic
+    /// analysis fails.
+    pub fn new(n: usize, keys: &[(usize, usize)]) -> Option<Self> {
+        let mut lower: Vec<(usize, usize)> = keys
+            .iter()
+            .copied()
+            .filter(|&(r, c)| r >= c)
+            .chain((0..n).map(|k| (k, k)))
+            .collect();
+        lower.sort_unstable_by_key(|&(r, c)| (c, r));
+        lower.dedup();
+        let mut col_ptr = vec![0usize; n + 1];
+        for &(_, c) in &lower {
+            col_ptr[c + 1] += 1;
+        }
+        for c in 0..n {
+            col_ptr[c + 1] += col_ptr[c];
+        }
+        let row_idx: Vec<usize> = lower.iter().map(|&(r, _)| r).collect();
+        let position = |r: usize, c: usize| -> usize {
+            let column = &row_idx[col_ptr[c]..col_ptr[c + 1]];
+            col_ptr[c] + column.binary_search(&r).expect("entry in the pattern")
+        };
+        let slot = keys
+            .iter()
+            .map(|&(r, c)| (r >= c).then(|| position(r, c)))
+            .collect();
+        let structure = SymbolicSparseColMat::<usize>::new_checked(
+            n,
+            n,
+            col_ptr.clone(),
+            None,
+            row_idx.clone(),
+        );
+        let symbolic = factorize_symbolic_cholesky(
+            structure.as_ref(),
+            Side::Lower,
+            SymmetricOrdering::Amd,
+            CholeskySymbolicParams::default(),
+        )
+        .ok()?;
+        Some(Self {
+            n,
+            keys: keys.to_vec(),
+            slot,
+            col_ptr,
+            row_idx,
+            symbolic: Rc::new(symbolic),
+        })
+    }
+
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Whether `entries` has exactly this pattern's triplets, in order.
+    pub fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        n == self.n
+            && entries.len() == self.keys.len()
+            && entries
+                .iter()
+                .zip(&self.keys)
+                .all(|(&(r, c, _), &k)| (r, c) == k)
+    }
+
+    /// Factorizes the matrix of `entries`, which must match this pattern
+    /// (see [`matches`](Self::matches)): the values are summed into their
+    /// slots, equilibrated, and factorized numerically. `None` on a zero
+    /// pivot (see the module docs).
+    pub fn factorize(&self, entries: &[(usize, usize, f64)]) -> Option<SymmetricFactorization> {
+        debug_assert_eq!(entries.len(), self.keys.len());
+        let n = self.n;
+        let mut values = vec![0.0; self.row_idx.len()];
+        for (&(_, _, v), slot) in entries.iter().zip(&self.slot) {
+            if let Some(s) = *slot {
+                values[s] += v;
+            }
+        }
+        let scale = self.equilibrate(&mut values);
+        let structure =
+            SymbolicSparseColMatRef::new_checked(n, n, &self.col_ptr, None, &self.row_idx);
+        let matrix = SparseColMatRef::new(structure, &values);
+        let mut factor = vec![0.0; self.symbolic.len_val()];
+        let mut mem = MemBuffer::new(
+            self.symbolic
+                .factorize_numeric_ldlt_scratch::<f64>(Par::Seq, Default::default()),
+        );
+        self.symbolic
+            .factorize_numeric_ldlt(
+                &mut factor,
+                matrix,
+                Side::Lower,
+                LdltRegularization::default(),
+                Par::Seq,
+                MemStack::new(&mut mem),
+                Default::default(),
+            )
+            .ok()?;
+        let inertia = count(&diagonal(&self.symbolic, &factor));
+        Some(SymmetricFactorization {
+            n,
+            symbolic: Rc::clone(&self.symbolic),
+            values: factor,
+            inertia,
+            scale,
+        })
+    }
+
+    /// A symmetric equilibration `D` (Ruiz's iteration, five passes), applied
+    /// to `values` in place: every row and column of `D K D` has its largest
+    /// entry close to 1. An interior point's KKT matrix spans many orders of
+    /// magnitude on one diagonal (the barrier's Σ runs from 1e-8 to 1e11 near
+    /// a solution), which costs an unpivoted factorization the accuracy of
+    /// the small components; IPOPT's MUMPS scales the same matrix before
+    /// factorizing it. `D K D` is congruent to `K`, so the inertia is
+    /// unchanged. Returns `D`.
+    fn equilibrate(&self, values: &mut [f64]) -> Vec<f64> {
+        let n = self.n;
+        let mut scale = vec![1.0f64; n];
+        for _ in 0..5 {
+            let mut row_max = vec![0.0f64; n];
+            for c in 0..n {
+                for s in self.col_ptr[c]..self.col_ptr[c + 1] {
+                    let a = values[s].abs();
+                    let r = self.row_idx[s];
+                    row_max[r] = row_max[r].max(a);
+                    row_max[c] = row_max[c].max(a);
+                }
+            }
+            for i in 0..n {
+                let f = if row_max[i] > 0.0 && row_max[i].is_finite() {
+                    1.0 / row_max[i].sqrt()
+                } else {
+                    1.0
+                };
+                scale[i] *= f;
+                row_max[i] = f; // reused as this pass's factor
+            }
+            for c in 0..n {
+                for s in self.col_ptr[c]..self.col_ptr[c + 1] {
+                    values[s] *= row_max[self.row_idx[s]] * row_max[c];
+                }
+            }
+        }
+        scale
+    }
+}
+
 /// `LDLᵀ` of a sparse symmetric matrix, and its inertia.
 pub struct SymmetricFactorization {
     n: usize,
-    symbolic: SymbolicCholesky<usize>,
+    symbolic: Rc<SymbolicCholesky<usize>>,
     values: Vec<f64>,
     inertia: Inertia,
     /// The equilibration `D`: the factorized matrix is `D K D`.
@@ -66,53 +238,12 @@ impl SymmetricFactorization {
     /// above the diagonal are ignored, so either a full symmetric list or its
     /// lower triangle may be passed; duplicates sum. `None` when the
     /// factorization hits a zero pivot (the matrix is singular, or needs
-    /// pivoting this does not do; see the module docs).
+    /// pivoting this does not do; see the module docs). The analysis is
+    /// redone; to reuse it across matrices of one pattern, keep a
+    /// [`SymmetricPattern`].
     pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
-        let mut lower: Vec<(usize, usize, f64)> = entries
-            .iter()
-            .copied()
-            .filter(|&(r, c, _)| r >= c)
-            .collect();
-        // Every diagonal present, so an empty row still has a pivot slot.
-        lower.extend((0..n).map(|k| (k, k, 0.0)));
-        let scale = equilibrate(n, &lower);
-        let scaled: Vec<Triplet<usize, usize, f64>> = lower
-            .iter()
-            .map(|&(r, c, v)| Triplet::new(r, c, v * scale[r] * scale[c]))
-            .collect();
-        let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &scaled).ok()?;
-
-        let symbolic = factorize_symbolic_cholesky(
-            mat.symbolic(),
-            Side::Lower,
-            SymmetricOrdering::Amd,
-            CholeskySymbolicParams::default(),
-        )
-        .ok()?;
-        let mut values = vec![0.0; symbolic.len_val()];
-        let mut mem = MemBuffer::new(
-            symbolic.factorize_numeric_ldlt_scratch::<f64>(Par::Seq, Default::default()),
-        );
-        symbolic
-            .factorize_numeric_ldlt(
-                &mut values,
-                mat.as_ref(),
-                Side::Lower,
-                LdltRegularization::default(),
-                Par::Seq,
-                MemStack::new(&mut mem),
-                Default::default(),
-            )
-            .ok()?;
-
-        let inertia = count(&diagonal(&symbolic, &values));
-        Some(Self {
-            n,
-            symbolic,
-            values,
-            inertia,
-            scale,
-        })
+        let keys: Vec<(usize, usize)> = entries.iter().map(|&(r, c, _)| (r, c)).collect();
+        SymmetricPattern::new(n, &keys)?.factorize(entries)
     }
 
     pub fn n(&self) -> usize {
@@ -137,39 +268,6 @@ impl SymmetricFactorization {
         let out: Vec<f64> = (0..self.n).map(|i| x[(i, 0)] * self.scale[i]).collect();
         out.iter().all(|v| v.is_finite()).then_some(out)
     }
-}
-
-/// A symmetric equilibration `D` (Ruiz's iteration, a few passes): every
-/// row and column of `D K D` has its largest entry close to 1. An interior
-/// point's KKT matrix spans many orders of magnitude on one diagonal (the
-/// barrier's Σ runs from 1e-8 to 1e11 near a solution), which costs an
-/// unpivoted factorization the accuracy of the small components; IPOPT's
-/// MUMPS scales the same matrix before factorizing it. `D K D` is congruent
-/// to `K`, so the inertia is unchanged. `entries` is the lower triangle,
-/// duplicates summing.
-fn equilibrate(n: usize, entries: &[(usize, usize, f64)]) -> Vec<f64> {
-    // Duplicates summed first: a row's largest entry is of the matrix, not
-    // of the triplets that add up to it.
-    let mut summed: std::collections::HashMap<(usize, usize), f64> =
-        std::collections::HashMap::new();
-    for &(r, c, v) in entries {
-        *summed.entry((r, c)).or_insert(0.0) += v;
-    }
-    let mut scale = vec![1.0f64; n];
-    for _ in 0..5 {
-        let mut row_max = vec![0.0f64; n];
-        for (&(r, c), &v) in &summed {
-            let a = (v * scale[r] * scale[c]).abs();
-            row_max[r] = row_max[r].max(a);
-            row_max[c] = row_max[c].max(a);
-        }
-        for i in 0..n {
-            if row_max[i] > 0.0 && row_max[i].is_finite() {
-                scale[i] /= row_max[i].sqrt();
-            }
-        }
-    }
-    scale
 }
 
 /// `D`'s entries, in factorization order (the order does not matter for the

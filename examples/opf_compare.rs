@@ -16,13 +16,14 @@
 //! display sockets at load and can block there for good (seen with a second
 //! display that accepts no connection). `HWLOC_COMPONENTS=-gl` skips that
 //! probe. `IPOPT_PRINT=5` prints IPOPT's own log. `OPF_START=proportional`
-//! starts from `AcOpfStart::Proportional` instead of the flat start.
+//! starts from `AcOpfStart::Proportional` instead of the flat start, and
+//! `OPF_FORM=branch-flow` solves `AcOpfFormulation::BranchFlow`.
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gridoxide::matpower;
 use gridoxide::opf::OptStatus;
-use gridoxide::opf::ac::{AcOpf, AcOpfOptions, AcOpfResult, AcOpfStart};
+use gridoxide::opf::ac::{AcOpf, AcOpfFormulation, AcOpfOptions, AcOpfResult, AcOpfStart};
 
 /// PGLib v23.07's AC objectives (`pglib/BASELINE.md`), five significant digits.
 const PUBLISHED: &[(&str, f64)] = &[
@@ -70,8 +71,13 @@ fn build(name: &str, log: bool) -> AcOpf {
         Ok("proportional") => AcOpfStart::Proportional,
         _ => AcOpfStart::Flat,
     };
+    let formulation = match std::env::var("OPF_FORM").as_deref() {
+        Ok("branch-flow") => AcOpfFormulation::BranchFlow,
+        _ => AcOpfFormulation::BusInjection,
+    };
     let mut options = AcOpfOptions {
         start,
+        formulation,
         ..AcOpfOptions::default()
     };
     options.nlp.log = log;

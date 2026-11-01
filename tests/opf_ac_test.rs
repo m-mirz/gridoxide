@@ -27,7 +27,7 @@
 
 use gridoxide::network::power_injections;
 use gridoxide::opf::OptStatus;
-use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
+use gridoxide::opf::ac::{AcOpf, AcOpfFormulation, AcOpfOptions};
 use gridoxide::opf::model::OpfData;
 use gridoxide::opf::nlp::NonlinearProblem;
 use gridoxide::pgm::PgmInput;
@@ -231,9 +231,68 @@ fn branch_limits_are_enforced_and_actually_bind() {
 /// derivatives here not already covered by `injection_hessian_test.rs`.
 #[test]
 fn the_models_derivatives_match_finite_differences() {
+    derivatives_match_finite_differences(AcOpfFormulation::BusInjection);
+}
+
+/// The same check on the branch-flow formulation: its flow-definition rows,
+/// shunt-only balances and limits on the flow variables.
+#[test]
+fn the_branch_flow_models_derivatives_match_finite_differences() {
+    derivatives_match_finite_differences(AcOpfFormulation::BranchFlow);
+}
+
+/// The two formulations are one problem: with the flow variables set to the
+/// flows the voltages imply, the branch-flow model's balances and limits
+/// equal the bus-injection model's, its flow-definition rows are zero, and
+/// the objectives agree.
+#[test]
+fn the_branch_flow_formulation_describes_the_same_problem() {
+    let injection = build("pglib_opf_case14_ieee", AcOpfOptions::default());
+    let flows = build(
+        "pglib_opf_case14_ieee",
+        AcOpfOptions {
+            formulation: AcOpfFormulation::BranchFlow,
+            ..AcOpfOptions::default()
+        },
+    );
+    let mut x = injection.initial_point();
+    for (k, value) in x.iter_mut().enumerate() {
+        *value += 0.05 * ((k as f64 * 0.7).sin());
+    }
+    // The flow variables at their definitions: solve for them from the rows
+    // themselves (each is `flow − flow(V)`, so evaluating with zeros gives
+    // `−flow(V)`).
+    let mut z = x.clone();
+    z.resize(flows.n_vars(), 0.0);
+    let c0 = flows.constraints(&z);
+    let rows = injection.n_constraints();
+    for (k, v) in c0[rows..].iter().enumerate() {
+        z[x.len() + k] = -v;
+    }
+    let a = injection.constraints(&x);
+    let b = flows.constraints(&z);
+    for r in 0..rows {
+        assert!(
+            (a[r] - b[r]).abs() < 1e-12 * (1.0 + a[r].abs()),
+            "row {r}: {} vs {}",
+            a[r],
+            b[r]
+        );
+    }
+    assert!(b[rows..].iter().all(|v| v.abs() < 1e-14));
+    assert_eq!(injection.objective(&x), flows.objective(&z));
+}
+
+fn derivatives_match_finite_differences(formulation: AcOpfFormulation) {
     // Small enough to difference every column, and carries a transformer, a
     // shunt and rated branches, so all three constraint kinds are exercised.
-    let opf = build("pglib_opf_case14_ieee", AcOpfOptions::default());
+    let opf = build(
+        "pglib_opf_case14_ieee",
+        AcOpfOptions {
+            formulation,
+            ..AcOpfOptions::default()
+        },
+    );
     let n_vars = opf.n_vars();
     let m = opf.n_constraints();
 

@@ -93,7 +93,7 @@
 //! conditions", which is what every AC-OPF tool reports and what published
 //! objectives are compared against.
 
-use crate::ldlt::{Inertia, SymmetricFactorization};
+use crate::ldlt::{Inertia, SymmetricFactorization, SymmetricPattern};
 use crate::opf::{OpfError, OptStatus};
 
 /// A twice-differentiable problem.
@@ -826,6 +826,9 @@ fn run(
         Barrier::Schedule => state.mu,
     };
     let mut filter = Filter::default();
+    // The KKT matrix's pattern, analysed once and reused while it holds
+    // (`Kkt::new`): only its values change from one iteration to the next.
+    let mut pattern: Option<SymmetricPattern> = None;
     let mut acceptable_streak = 0usize;
     let mut error = f64::INFINITY;
     let mut first = true;
@@ -965,6 +968,7 @@ fn run(
                     options,
                     floor,
                     &mut delta_last,
+                    &mut pattern,
                 ) else {
                     break;
                 };
@@ -1351,6 +1355,7 @@ fn run(
 /// always on: [`SymmetricFactorization`] does not pivot, and a zero diagonal
 /// in the constraint block would stop it. `floor` is a lower bound on δw from
 /// the caller.
+#[allow(clippy::too_many_arguments)]
 fn factorize_with_inertia(
     hessian: &[(usize, usize, f64)],
     a: &[(usize, usize, f64)],
@@ -1359,10 +1364,19 @@ fn factorize_with_inertia(
     options: &NlpOptions,
     floor: f64,
     delta_last: &mut f64,
+    pattern: &mut Option<SymmetricPattern>,
 ) -> Option<(Kkt, f64)> {
-    let factor = |dw: f64| {
+    let mut factor = |dw: f64| {
         let diagonal: Vec<f64> = sigma.iter().map(|s| s + dw).collect();
-        Kkt::new(hessian, a, &diagonal, p, options.dual_regularization).filter(Kkt::is_minimizing)
+        Kkt::new(
+            hessian,
+            a,
+            &diagonal,
+            p,
+            options.dual_regularization,
+            pattern,
+        )
+        .filter(Kkt::is_minimizing)
     };
     if floor == 0.0
         && let Some(f) = factor(0.0)
@@ -1420,6 +1434,7 @@ impl Kkt {
         diagonal: &[f64],
         p: &Internal,
         delta_c: f64,
+        pattern: &mut Option<SymmetricPattern>,
     ) -> Option<Self> {
         let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
         let slacks: Vec<(usize, usize, f64)> = p
@@ -1453,7 +1468,15 @@ impl Kkt {
         );
         kkt.extend((0..m).map(|r| (n_x + r, n_x + r, row_diag[r])));
         Some(Self {
-            factorization: SymmetricFactorization::new(n_x + m, &kkt)?,
+            factorization: {
+                // Reanalysed only when the entries' positions change, which a
+                // problem with a fixed sparsity never does.
+                if !pattern.as_ref().is_some_and(|q| q.matches(n_x + m, &kkt)) {
+                    let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
+                    *pattern = Some(SymmetricPattern::new(n_x + m, &keys)?);
+                }
+                pattern.as_ref()?.factorize(&kkt)?
+            },
             n_x,
             n,
             m,

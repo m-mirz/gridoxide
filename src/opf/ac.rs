@@ -131,7 +131,35 @@ pub struct AcOpfOptions {
     pub enforce_limits: bool,
     /// Where every solve starts; see [`AcOpfStart`].
     pub start: AcOpfStart,
+    /// How branch flows enter the model; see [`AcOpfFormulation`].
+    pub formulation: AcOpfFormulation,
     pub nlp: NlpOptions,
+}
+
+/// How the AC-OPF writes branch flows. Both describe the same problem (same
+/// feasible set in the voltages and dispatch, same optimum); they differ in
+/// what the solver sees.
+///
+/// - [`BusInjection`](Self::BusInjection): the flows are expressions of the
+///   voltages. The balances are the Y-bus injections, and a thermal limit
+///   is \\(P(V)^2 + Q(V)^2 \\le \\text{rate}^2\\). The smallest model.
+/// - [`BranchFlow`](Self::BranchFlow): `p`, `q` at both ends of every branch
+///   are variables of their own (bounded by ±rate where rated), tied to the
+///   voltages by four equality rows per branch; the balances sum them, and
+///   a thermal limit is \\(p^2 + q^2 \\le \\text{rate}^2\\) on them. PowerModels'
+///   `ACPPowerModel` and ExaModelsPower's polar model write it so.
+///
+/// Why both: from a flat start the flows are 0 and the voltages flat, which
+/// the branch-flow model lets be inconsistent for a while, as it lets the
+/// balances be; the bus-injection model ties every flow and limit to every
+/// voltage step from the first iteration. On case13659_pegase from flat,
+/// PowerModels (67 iterations) and ExaModelsPower (62) solve the branch-flow
+/// model, and IPOPT fails on the bus-injection one, as JuliaGrid's does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcOpfFormulation {
+    #[default]
+    BusInjection,
+    BranchFlow,
 }
 
 impl Default for AcOpfOptions {
@@ -141,6 +169,7 @@ impl Default for AcOpfOptions {
             default_v_max: 1.1,
             enforce_limits: true,
             start: AcOpfStart::default(),
+            formulation: AcOpfFormulation::default(),
             nlp: NlpOptions::default(),
         }
     }
@@ -283,6 +312,15 @@ pub struct AcOpf {
     /// `(epigraph column, generator column, slope, intercept)` per segment,
     /// one constraint row each.
     cost_rows: Vec<(usize, usize, f64, f64)>,
+    /// [`AcOpfFormulation::BranchFlow`]: the first flow column (`p_f, q_f,
+    /// p_t, q_t` per branch, in `params` order) and the first flow-definition
+    /// row (four per branch, after every other row).
+    flow: Option<(usize, usize)>,
+    /// Per bus, its shunt admittance (the Y-bus's diagonal less the
+    /// branches'), which the branch-flow balances evaluate on their own.
+    shunt: Vec<Complex<f64>>,
+    /// Per branch (`params` order), its rating, if any.
+    rating: Vec<Option<f64>>,
 }
 
 impl AcOpf {
@@ -371,13 +409,30 @@ impl AcOpf {
             }
         }
 
+        let mut shunt = vec![Complex::new(0.0, 0.0); n];
+        for &(at, y) in &network.shunts {
+            shunt[at] += y;
+        }
+        let rating: Vec<Option<f64>> = (0..params.len())
+            .map(|b| network.limits.get(&b).copied().flatten())
+            .collect();
+        let base_vars = 2 * n + 2 * g + n_cost;
+        let flow = (options.formulation == AcOpfFormulation::BranchFlow).then(|| {
+            let rows = 2 * n + limit_rows.len() + network.angle_limits.len() + cost_rows.len();
+            (base_vars, rows)
+        });
+        let n_vars = base_vars + if flow.is_some() { 4 * params.len() } else { 0 };
+
         Ok(Self {
             options,
             ybus,
             params,
             limit_rows,
             template,
-            n_vars: 2 * n + 2 * g + n_cost,
+            flow,
+            shunt,
+            rating,
+            n_vars,
             theta: 0,
             vm: n,
             pg: 2 * n,
@@ -522,6 +577,11 @@ impl NonlinearProblem for AcOpf {
             + self.limit_rows.len()
             + self.network.angle_limits.len()
             + self.cost_rows.len()
+            + if self.flow.is_some() {
+                4 * self.params.len()
+            } else {
+                0
+            }
     }
 
     fn var_bounds(&self) -> (Vec<f64>, Vec<f64>) {
@@ -551,6 +611,19 @@ impl NonlinearProblem for AcOpf {
             lower[*column] = f64::NEG_INFINITY;
             upper[*column] = f64::INFINITY;
         }
+        // Branch flows within ±rate where rated, as PowerModels and
+        // ExaModelsPower bound them: implied by the thermal limit, and a box
+        // the barrier keeps the flows inside from the start.
+        if let Some((column, _)) = self.flow {
+            for (b, rate) in self.rating.iter().enumerate() {
+                if let (Some(rate), true) = (rate, self.options.enforce_limits) {
+                    for k in 0..4 {
+                        lower[column + 4 * b + k] = -rate;
+                        upper[column + 4 * b + k] = *rate;
+                    }
+                }
+            }
+        }
         let _ = g;
         (lower, upper)
     }
@@ -571,6 +644,11 @@ impl NonlinearProblem for AcOpf {
         for &(_, _, _, intercept) in &self.cost_rows {
             lower.push(intercept);
             upper.push(f64::INFINITY);
+        }
+        // `flow − flow(V) = 0`, four per branch.
+        if self.flow.is_some() {
+            lower.extend(std::iter::repeat_n(0.0, 4 * self.params.len()));
+            upper.extend(std::iter::repeat_n(0.0, 4 * self.params.len()));
         }
         (lower, upper)
     }
@@ -608,6 +686,9 @@ impl NonlinearProblem for AcOpf {
     }
 
     fn constraints(&self, x: &[f64]) -> Vec<f64> {
+        if let Some(flow) = self.flow {
+            return self.branch_flow_constraints(x, flow);
+        }
         let n = self.network.n_buses;
         let buses = self.buses_at(x);
         let (p_inj, q_inj) = power_injections(&buses, &self.ybus);
@@ -640,6 +721,9 @@ impl NonlinearProblem for AcOpf {
     }
 
     fn jacobian(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
+        if let Some(flow) = self.flow {
+            return self.branch_flow_jacobian(x, flow);
+        }
         let n = self.network.n_buses;
         let buses = self.buses_at(x);
         let mut out = injection_jacobian(&buses, &self.ybus);
@@ -692,6 +776,11 @@ impl NonlinearProblem for AcOpf {
                     out.push((self.pg + k, self.pg + k, 2.0 * coefficients[2]));
                 }
             }
+        }
+
+        if let Some(flow) = self.flow {
+            self.branch_flow_hessian(x, y, flow, &mut out);
+            return out;
         }
 
         // −Σ yᵢ ∇²cᵢ for the balance rows. The sign is the module's
@@ -812,6 +901,156 @@ impl NonlinearProblem for AcOpf {
 }
 
 impl AcOpf {
+    /// The flow-variable columns `(p, q)` of a branch terminal.
+    fn flow_columns(&self, column: usize, branch: usize, terminal: Terminal) -> (usize, usize) {
+        let at = column + 4 * branch + if terminal == Terminal::From { 0 } else { 2 };
+        (at, at + 1)
+    }
+
+    /// The bus a branch terminal sits at.
+    fn terminal_bus(branch: &BranchParams, terminal: Terminal) -> usize {
+        match terminal {
+            Terminal::From => branch.from,
+            Terminal::To => branch.to,
+        }
+    }
+
+    /// [`AcOpfFormulation::BranchFlow`]'s rows: the balances from the shunts
+    /// and the flow variables, the thermal limits on the flow variables, the
+    /// linear rows as in the other formulation, then `flow − flow(V)`.
+    fn branch_flow_constraints(&self, x: &[f64], (column, row): (usize, usize)) -> Vec<f64> {
+        let n = self.network.n_buses;
+        let mut out = vec![0.0; self.n_constraints()];
+        for i in 0..n {
+            let v2 = x[self.vm + i] * x[self.vm + i];
+            // S = V conj(y V) = |V|² conj(y) for a shunt.
+            out[i] = v2 * self.shunt[i].re + self.network.p_load[i];
+            out[n + i] = -v2 * self.shunt[i].im + self.network.q_load[i];
+        }
+        for (k, unit) in self.network.generators.iter().enumerate() {
+            out[unit.bus] -= x[self.pg + k];
+            out[n + unit.bus] -= x[self.qg + k];
+        }
+        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
+        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
+        for (b, branch) in self.params.iter().enumerate() {
+            for (k, terminal) in [Terminal::From, Terminal::To].into_iter().enumerate() {
+                let (pc, qc) = self.flow_columns(column, b, terminal);
+                let at = Self::terminal_bus(branch, terminal);
+                out[at] += x[pc];
+                out[n + at] += x[qc];
+                let d = terminal_derivatives(branch, terminal, &theta, &vm);
+                out[row + 4 * b + 2 * k] = x[pc] - d.p;
+                out[row + 4 * b + 2 * k + 1] = x[qc] - d.q;
+            }
+        }
+        for (r, limit) in self.limit_rows.iter().enumerate() {
+            let (pc, qc) = self.flow_columns(column, limit.branch, limit.terminal);
+            out[2 * n + r] = x[pc] * x[pc] + x[qc] * x[qc];
+        }
+        let base = 2 * n + self.limit_rows.len();
+        for (r, angle) in self.network.angle_limits.iter().enumerate() {
+            out[base + r] = x[self.theta + angle.from] - x[self.theta + angle.to];
+        }
+        let base = base + self.network.angle_limits.len();
+        for (r, &(epigraph, gen_column, slope, _)) in self.cost_rows.iter().enumerate() {
+            out[base + r] = x[epigraph] - slope * x[gen_column];
+        }
+        out
+    }
+
+    fn branch_flow_jacobian(
+        &self,
+        x: &[f64],
+        (column, row): (usize, usize),
+    ) -> Vec<(usize, usize, f64)> {
+        let n = self.network.n_buses;
+        let mut out = Vec::new();
+        for i in 0..n {
+            let v = x[self.vm + i];
+            out.push((i, self.vm + i, 2.0 * v * self.shunt[i].re));
+            out.push((n + i, self.vm + i, -2.0 * v * self.shunt[i].im));
+        }
+        for (k, unit) in self.network.generators.iter().enumerate() {
+            out.push((unit.bus, self.pg + k, -1.0));
+            out.push((n + unit.bus, self.qg + k, -1.0));
+        }
+        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
+        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
+        for (b, branch) in self.params.iter().enumerate() {
+            for (k, terminal) in [Terminal::From, Terminal::To].into_iter().enumerate() {
+                let (pc, qc) = self.flow_columns(column, b, terminal);
+                let at = Self::terminal_bus(branch, terminal);
+                out.push((at, pc, 1.0));
+                out.push((n + at, qc, 1.0));
+                let d = terminal_derivatives(branch, terminal, &theta, &vm);
+                let columns = self.limit_columns(branch, terminal);
+                let (rp, rq) = (row + 4 * b + 2 * k, row + 4 * b + 2 * k + 1);
+                out.push((rp, pc, 1.0));
+                out.push((rq, qc, 1.0));
+                for local in 0..4 {
+                    out.push((rp, columns[local], -d.dp[local]));
+                    out.push((rq, columns[local], -d.dq[local]));
+                }
+            }
+        }
+        for (r, limit) in self.limit_rows.iter().enumerate() {
+            let (pc, qc) = self.flow_columns(column, limit.branch, limit.terminal);
+            out.push((2 * n + r, pc, 2.0 * x[pc]));
+            out.push((2 * n + r, qc, 2.0 * x[qc]));
+        }
+        let base = 2 * n + self.limit_rows.len();
+        for (r, angle) in self.network.angle_limits.iter().enumerate() {
+            out.push((base + r, self.theta + angle.from, 1.0));
+            out.push((base + r, self.theta + angle.to, -1.0));
+        }
+        let base = base + self.network.angle_limits.len();
+        for (r, &(epigraph, gen_column, slope, _)) in self.cost_rows.iter().enumerate() {
+            out.push((base + r, epigraph, 1.0));
+            out.push((base + r, gen_column, -slope));
+        }
+        out
+    }
+
+    /// The constraints' part of the Lagrangian Hessian, `−Σ y ∇²c`, in the
+    /// branch-flow formulation. Every entry is emitted at every point, zero
+    /// or not, so the pattern does not depend on it.
+    fn branch_flow_hessian(
+        &self,
+        x: &[f64],
+        y: &[f64],
+        (column, row): (usize, usize),
+        out: &mut Vec<(usize, usize, f64)>,
+    ) {
+        let n = self.network.n_buses;
+        // Shunt injections: ∂²(|V|² g)/∂|V|² = 2g, and −2b for Q.
+        for i in 0..n {
+            let value = -y[i] * 2.0 * self.shunt[i].re + y[n + i] * 2.0 * self.shunt[i].im;
+            out.push((self.vm + i, self.vm + i, value));
+        }
+        // Thermal limits: ∇²(p² + q²) = 2 on each flow variable.
+        for (r, limit) in self.limit_rows.iter().enumerate() {
+            let (pc, qc) = self.flow_columns(column, limit.branch, limit.terminal);
+            out.push((pc, pc, -2.0 * y[2 * n + r]));
+            out.push((qc, qc, -2.0 * y[2 * n + r]));
+        }
+        // Flow definitions, c = flow − P(V): −y ∇²c = +y ∇²P(V).
+        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
+        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
+        for (b, branch) in self.params.iter().enumerate() {
+            for (k, terminal) in [Terminal::From, Terminal::To].into_iter().enumerate() {
+                let d = terminal_derivatives(branch, terminal, &theta, &vm);
+                let columns = self.limit_columns(branch, terminal);
+                let (yp, yq) = (y[row + 4 * b + 2 * k], y[row + 4 * b + 2 * k + 1]);
+                for a in 0..4 {
+                    for c in 0..4 {
+                        out.push((columns[a], columns[c], yp * d.d2p[a][c] + yq * d.d2q[a][c]));
+                    }
+                }
+            }
+        }
+    }
+
     /// Global column indices for a terminal's four local state variables.
     fn limit_columns(&self, branch: &BranchParams, terminal: Terminal) -> [usize; 4] {
         let (near, far) = match terminal {
