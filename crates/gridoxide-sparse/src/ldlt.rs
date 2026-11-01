@@ -61,15 +61,12 @@ pub struct Inertia {
     pub zero: usize,
 }
 
-/// The structure of a sparse symmetric matrix, analysed once: its lower
-/// triangle in compressed columns, the symbolic `LDLᵀ` (AMD ordering,
-/// elimination tree, supernodes), and where each entry of the triplet list
-/// it was built from lands. Factorizing a matrix of the same pattern again
-/// ([`factorize`](Self::factorize)) is then numeric only, as an interior
-/// point's KKT matrix is every iteration: its values change, its pattern does
-/// not. That split is also what a GPU factorization (cuDSS) is built
-/// around: analysis once, refactorization per iteration.
-pub struct SymmetricPattern {
+/// The lower triangle of a sparse symmetric pattern in compressed columns,
+/// and where each entry of the triplet list it was built from lands: the
+/// assembly and equilibration every [`SymmetricSolver`] here shares, CPU or
+/// GPU. Compressed lower columns are compressed upper rows, which is how a
+/// GPU solver (cuDSS, `CUDSS_MVIEW_UPPER`) takes the same arrays.
+pub struct LowerPattern {
     n: usize,
     /// The `(row, col)` of every triplet the pattern was built from, in
     /// order: a matrix matches if its triplets have exactly these.
@@ -78,14 +75,12 @@ pub struct SymmetricPattern {
     slot: Vec<Option<usize>>,
     col_ptr: Vec<usize>,
     row_idx: Vec<usize>,
-    symbolic: Rc<SymbolicCholesky<usize>>,
 }
 
-impl SymmetricPattern {
-    /// Analyses the `n × n` pattern of `keys` (row, column), entries above the
-    /// diagonal ignored, duplicates sharing a slot. `None` if the symbolic
-    /// analysis fails.
-    pub fn new(n: usize, keys: &[(usize, usize)]) -> Option<Self> {
+impl LowerPattern {
+    /// The `n × n` pattern of `keys` (row, column), entries above the
+    /// diagonal ignored, duplicates sharing a slot, the diagonal always in.
+    pub fn new(n: usize, keys: &[(usize, usize)]) -> Self {
         let mut lower: Vec<(usize, usize)> = keys
             .iter()
             .copied()
@@ -110,32 +105,27 @@ impl SymmetricPattern {
             .iter()
             .map(|&(r, c)| (r >= c).then(|| position(r, c)))
             .collect();
-        let structure = SymbolicSparseColMat::<usize>::new_checked(
-            n,
-            n,
-            col_ptr.clone(),
-            None,
-            row_idx.clone(),
-        );
-        let symbolic = factorize_symbolic_cholesky(
-            structure.as_ref(),
-            Side::Lower,
-            SymmetricOrdering::Amd,
-            CholeskySymbolicParams::default(),
-        )
-        .ok()?;
-        Some(Self {
+        Self {
             n,
             keys: keys.to_vec(),
             slot,
             col_ptr,
             row_idx,
-            symbolic: Rc::new(symbolic),
-        })
+        }
     }
 
     pub fn n(&self) -> usize {
         self.n
+    }
+
+    /// Column pointers of the compressed lower triangle (`n + 1`).
+    pub fn col_ptr(&self) -> &[usize] {
+        &self.col_ptr
+    }
+
+    /// Row indices of the compressed lower triangle, sorted per column.
+    pub fn row_idx(&self) -> &[usize] {
+        &self.row_idx
     }
 
     /// Whether `entries` has exactly this pattern's triplets, in order.
@@ -148,45 +138,10 @@ impl SymmetricPattern {
                 .all(|(&(r, c, _), &k)| (r, c) == k)
     }
 
-    /// Factorizes the matrix of `entries`, which must match this pattern
-    /// (see [`matches`](Self::matches)): the values are summed into their
-    /// slots, equilibrated, and factorized numerically. `None` on a zero
-    /// pivot (see the module docs).
-    pub fn factorize(&self, entries: &[(usize, usize, f64)]) -> Option<SymmetricFactorization> {
-        let n = self.n;
-        let (values, scale) = self.assemble(entries);
-        let structure =
-            SymbolicSparseColMatRef::new_checked(n, n, &self.col_ptr, None, &self.row_idx);
-        let matrix = SparseColMatRef::new(structure, &values);
-        let mut factor = vec![0.0; self.symbolic.len_val()];
-        let mut mem = MemBuffer::new(
-            self.symbolic
-                .factorize_numeric_ldlt_scratch::<f64>(Par::Seq, Default::default()),
-        );
-        self.symbolic
-            .factorize_numeric_ldlt(
-                &mut factor,
-                matrix,
-                Side::Lower,
-                LdltRegularization::default(),
-                Par::Seq,
-                MemStack::new(&mut mem),
-                Default::default(),
-            )
-            .ok()?;
-        let inertia = count(&diagonal(&self.symbolic, &factor));
-        Some(SymmetricFactorization {
-            n,
-            symbolic: Rc::clone(&self.symbolic),
-            values: factor,
-            inertia,
-            scale,
-        })
-    }
-
     /// The compressed lower triangle of `entries` (which must match this
-    /// pattern), equilibrated, and the equilibration's scale.
-    fn assemble(&self, entries: &[(usize, usize, f64)]) -> (Vec<f64>, Vec<f64>) {
+    /// pattern), equilibrated, and the equilibration's scale `D`: the
+    /// values are those of `D K D`.
+    pub fn assemble(&self, entries: &[(usize, usize, f64)]) -> (Vec<f64>, Vec<f64>) {
         debug_assert_eq!(entries.len(), self.keys.len());
         let mut values = vec![0.0; self.row_idx.len()];
         for (&(_, _, v), slot) in entries.iter().zip(&self.slot) {
@@ -247,6 +202,96 @@ impl SymmetricPattern {
             }
         }
         scale
+    }
+}
+
+/// A [`LowerPattern`] with its symbolic `LDLᵀ` (AMD ordering, elimination
+/// tree, supernodes), analysed once. Factorizing a matrix of the same
+/// pattern again ([`factorize`](Self::factorize)) is then numeric only, as
+/// an interior point's KKT matrix is every iteration: its values change, its
+/// pattern does not. That split is also what a GPU factorization (cuDSS) is
+/// built around: analysis once, refactorization per iteration.
+pub struct SymmetricPattern {
+    n: usize,
+    lower: LowerPattern,
+    symbolic: Rc<SymbolicCholesky<usize>>,
+}
+
+impl SymmetricPattern {
+    /// Analyses the `n × n` pattern of `keys` (row, column), entries above the
+    /// diagonal ignored, duplicates sharing a slot. `None` if the symbolic
+    /// analysis fails.
+    pub fn new(n: usize, keys: &[(usize, usize)]) -> Option<Self> {
+        let lower = LowerPattern::new(n, keys);
+        let structure = SymbolicSparseColMat::<usize>::new_checked(
+            n,
+            n,
+            lower.col_ptr.clone(),
+            None,
+            lower.row_idx.clone(),
+        );
+        let symbolic = factorize_symbolic_cholesky(
+            structure.as_ref(),
+            Side::Lower,
+            SymmetricOrdering::Amd,
+            CholeskySymbolicParams::default(),
+        )
+        .ok()?;
+        Some(Self {
+            n,
+            lower,
+            symbolic: Rc::new(symbolic),
+        })
+    }
+
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Whether `entries` has exactly this pattern's triplets, in order.
+    pub fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        self.lower.matches(n, entries)
+    }
+
+    /// Factorizes the matrix of `entries`, which must match this pattern
+    /// (see [`matches`](Self::matches)): the values are summed into their
+    /// slots, equilibrated, and factorized numerically. `None` on a zero
+    /// pivot (see the module docs).
+    pub fn factorize(&self, entries: &[(usize, usize, f64)]) -> Option<SymmetricFactorization> {
+        let n = self.n;
+        let (values, scale) = self.lower.assemble(entries);
+        let structure = SymbolicSparseColMatRef::new_checked(
+            n,
+            n,
+            &self.lower.col_ptr,
+            None,
+            &self.lower.row_idx,
+        );
+        let matrix = SparseColMatRef::new(structure, &values);
+        let mut factor = vec![0.0; self.symbolic.len_val()];
+        let mut mem = MemBuffer::new(
+            self.symbolic
+                .factorize_numeric_ldlt_scratch::<f64>(Par::Seq, Default::default()),
+        );
+        self.symbolic
+            .factorize_numeric_ldlt(
+                &mut factor,
+                matrix,
+                Side::Lower,
+                LdltRegularization::default(),
+                Par::Seq,
+                MemStack::new(&mut mem),
+                Default::default(),
+            )
+            .ok()?;
+        let inertia = count(&diagonal(&self.symbolic, &factor));
+        Some(SymmetricFactorization {
+            n,
+            symbolic: Rc::clone(&self.symbolic),
+            values: factor,
+            inertia,
+            scale,
+        })
     }
 }
 
@@ -343,9 +388,14 @@ impl SymmetricSolver for LltSolver {
     fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
         let pattern = &self.pattern;
         let n = pattern.n;
-        let (values, scale) = pattern.assemble(entries);
-        let structure =
-            SymbolicSparseColMatRef::new_checked(n, n, &pattern.col_ptr, None, &pattern.row_idx);
+        let (values, scale) = pattern.lower.assemble(entries);
+        let structure = SymbolicSparseColMatRef::new_checked(
+            n,
+            n,
+            &pattern.lower.col_ptr,
+            None,
+            &pattern.lower.row_idx,
+        );
         let matrix = SparseColMatRef::new(structure, &values);
         let mut factor = vec![0.0; pattern.symbolic.len_val()];
         let mut mem = MemBuffer::new(

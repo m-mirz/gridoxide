@@ -425,6 +425,32 @@ rather than read out of the solver; and prices checked against a numerical
 \\(\partial\text{cost}/\partial\text{load}\\) — which caught a sign error that produced
 prices of exactly the right magnitude, negated, on every bus of every case.
 
+### On the GPU
+
+`opf::nlp` factorizes its KKT system through a trait (`ldlt::SymmetricSolver`), and with the
+`gpu` feature cuDSS implements it (`gridoxide::gpu::kkt`): `cudss_ldlt_solver` for the augmented
+system, its inertia read from cuDSS, and `cudss_llt_solver` for HyKKT's condensed positive
+definite one (`KktForm::Hybrid`). The assembly and equilibration are the CPU solvers' own, so
+cuDSS factorizes the same matrix faer does. From Python, `OptimalPowerFlowModel.from_matpower(...,
+solver="nlp-gpu")`.
+
+```rust
+options.nlp.kkt_solver = gridoxide::gpu::cudss_ldlt_solver;
+```
+
+Only the factorization and the solves run on the device; the model, its derivatives and the
+KKT assembly stay on the host, and the matrix crosses the bus every iteration. On an A100 it
+solves what the CPU solves (the 88 runs of the default set, the 16 of case9241_pegase), and is
+faster per iteration from case1354_pegase up: 1.3–1.5× there and on case2869_pegase, 1.5–2.8×
+on case9241_pegase. Against ExaModelsPower.jl on the same GPU (MadNLP and cuDSS, model and
+KKT system on the device) at grid-bench's settings it is faster up to case300 and solves the
+three cases that one does not (case9241_pegase, case13659_pegase, case30000_goc), but is 1.3×
+slower on case1354_pegase, 2.5× on case2869_pegase and 4.7–6.3× on the GOC cases, 4–5.5× of
+that per iteration: the cost of the host side.
+
+cuDSS runs in its deterministic mode: without it, four runs of case2869_pegase took 60 to 107
+iterations, as rounding steered the regularization differently each time.
+
 ### IPOPT as a reference
 
 `opf::nlp` has a reference backend the same way `opf::ipm` has HiGHS: **IPOPT**, behind the
@@ -508,8 +534,8 @@ voltages = {bus: model.voltage_mag()[i] for bus, i in model.nodes()}
 `solver="ipopt"` needs the extension built with `opf-ipopt`. On the eleven PGLib cases
 [grid-bench](https://github.com/m-mirz/grid-bench) runs (case14 to case2869_pegase, with the
 `__api` and `__sad` variants of the IEEE cases), IPOPT at `tol=1e-6` reaches PGLib's published
-objective on every one, within 5e-5, in 14 to 51 iterations. `opf::nlp` reaches it on seven within
-200 iterations; it stalls on case300, case300__sad, case118__api and case1354_pegase.
+objective on every one, within 5e-5, in 14 to 51 iterations. `opf::nlp` reaches it on all eleven,
+from the flat and the proportional start, with either formulation and either KKT form.
 
 ### Reading the answer
 

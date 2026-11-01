@@ -71,6 +71,12 @@ The device solves AC sweeps (`GpuBatchSolver.solve_batch`), AC N-1
 - [ ] **Single AC or DC power flow.** One system is cuDSS's worst case (a
   roughly fixed cost per system), so this is worth it only on grids large
   enough to fill the device. Measure before building.
-- [ ] **State estimation, OPF.** Batched SE over measurement sets, or the
-  KKT solves inside Ipopt, on the device. Large work; only after the
-  batch is competitive.
+- [x] **AC-OPF's KKT solves** on the device: `kkt::CudssSolver` behind
+  `opf::nlp`'s `SymmetricSolver` (cuDSS `LDLᵀ` with inertia, and Cholesky
+  for HyKKT). See docs/src/opf/index.md, "On the GPU".
+- [ ] **AC-OPF's model and KKT assembly on the device.** Against
+  ExaModelsPower.jl on the same A100, 4–5.5× slower per iteration on the
+  GOC cases, where only the factorization is on the device; profile the
+  host side first, then port `opf::ac_kernels`.
+- [ ] **State estimation.** Batched SE over measurement sets. Large work;
+  only after the batch is competitive.

@@ -20,6 +20,11 @@
 //! `OPF_FORM=branch-flow` solves `AcOpfFormulation::BranchFlow`.
 //! `OPF_KKT=hybrid[:γ]` forms HyKKT's condensed system (`KktForm::Hybrid`,
 //! γ = 1e8 by default), and `OPF_LINEAR=llt` factorizes it by Cholesky.
+//! `OPF_TOL` sets the tolerance (1e-8 by default; grid-bench runs 1e-6), and
+//! `OPF_REPEAT=n` times the median of `n` solves after an untimed warm-up,
+//! as grid-bench does. With `--features gpu`, `OPF_LINEAR=cudss` factorizes the KKT system on
+//! the GPU: cuDSS's `LDLᵀ` for the augmented system, its Cholesky for
+//! HyKKT's.
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -84,6 +89,9 @@ fn build(name: &str, log: bool) -> AcOpf {
         ..AcOpfOptions::default()
     };
     options.nlp.log = log;
+    if let Ok(tol) = std::env::var("OPF_TOL") {
+        options.nlp.tolerance = tol.parse().expect("OPF_TOL");
+    }
     if let Ok(kkt) = std::env::var("OPF_KKT")
         && let Some(rest) = kkt.strip_prefix("hybrid")
     {
@@ -92,8 +100,17 @@ fn build(name: &str, log: bool) -> AcOpf {
             .map_or(1e8, |g| g.parse().expect("gamma"));
         options.nlp.kkt = KktForm::Hybrid { gamma };
     }
-    if std::env::var("OPF_LINEAR").as_deref() == Ok("llt") {
-        options.nlp.kkt_solver = nlp::llt_solver;
+    match std::env::var("OPF_LINEAR").as_deref() {
+        Ok("llt") => options.nlp.kkt_solver = nlp::llt_solver,
+        #[cfg(feature = "gpu")]
+        Ok("cudss") => {
+            options.nlp.kkt_solver = match options.nlp.kkt {
+                KktForm::Augmented => gridoxide::gpu::cudss_ldlt_solver,
+                KktForm::Hybrid { .. } => gridoxide::gpu::cudss_llt_solver,
+            }
+        }
+        Ok(other) if !other.is_empty() => panic!("unknown OPF_LINEAR {other}"),
+        _ => {}
     }
     options.nlp.ncl = std::env::var_os("NLP_NCL").is_some();
     AcOpf::build(opf.network, options).unwrap()
@@ -144,9 +161,22 @@ fn main() {
     let (mut nlp_ok, mut ipopt_ok) = (0, 0);
     for (name, published) in &cases {
         let opf = build(name, log);
-        let t0 = Instant::now();
-        let result = opf.solve().unwrap();
-        nlp_ok += row("nlp", name, *published, &result, t0.elapsed().as_secs_f64()) as usize;
+        let repeat: usize = std::env::var("OPF_REPEAT")
+            .ok()
+            .map_or(0, |n| n.parse().expect("OPF_REPEAT"));
+        if repeat > 0 {
+            opf.solve().unwrap();
+        }
+        let mut times = Vec::new();
+        let mut result = None;
+        for _ in 0..repeat.max(1) {
+            let t0 = Instant::now();
+            result = Some(opf.solve().unwrap());
+            times.push(t0.elapsed().as_secs_f64());
+        }
+        times.sort_by(f64::total_cmp);
+        let seconds = times[times.len() / 2];
+        nlp_ok += row("nlp", name, *published, &result.unwrap(), seconds) as usize;
 
         #[cfg(feature = "opf-ipopt")]
         {

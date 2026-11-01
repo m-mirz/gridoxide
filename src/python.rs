@@ -4048,8 +4048,10 @@ impl OptimalPowerFlowModel {
     /// and the `ANGMIN`/`ANGMAX` angle-difference limits. Isolated buses and
     /// out-of-service branches and generators are left out.
     ///
-    /// `solver` is `"nlp"` (gridoxide's own interior point, the default) or
-    /// `"ipopt"`, which needs the extension built with the `opf-ipopt`
+    /// `solver` is `"nlp"` (gridoxide's own interior point, the default),
+    /// `"nlp-gpu"`, the same interior point with its KKT system factorized on
+    /// an NVIDIA GPU by cuDSS (the extension built with the `gpu` feature),
+    /// or `"ipopt"`, which needs the extension built with the `opf-ipopt`
     /// feature. `tol` and `max_iter` go to the solver as its own tolerance
     /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
     ///
@@ -4058,8 +4060,17 @@ impl OptimalPowerFlowModel {
     #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300))]
     fn from_matpower(path: &str, solver: &str, tol: f64, max_iter: usize) -> PyResult<Self> {
         use crate::matpower::MatpowerError;
+        let gpu = solver == "nlp-gpu";
         let solver = match solver {
             "nlp" => AcOpfSolver::Nlp,
+            #[cfg(feature = "gpu")]
+            "nlp-gpu" => AcOpfSolver::Nlp,
+            #[cfg(not(feature = "gpu"))]
+            "nlp-gpu" => {
+                return Err(PyValueError::new_err(
+                    "solver='nlp-gpu' needs the extension built with the gpu feature",
+                ));
+            }
             #[cfg(feature = "opf-ipopt")]
             "ipopt" => AcOpfSolver::Ipopt,
             #[cfg(not(feature = "opf-ipopt"))]
@@ -4070,7 +4081,7 @@ impl OptimalPowerFlowModel {
             }
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "unknown solver {other:?}, expected 'nlp' or 'ipopt'"
+                    "unknown solver {other:?}, expected 'nlp', 'nlp-gpu' or 'ipopt'"
                 )));
             }
         };
@@ -4085,6 +4096,11 @@ impl OptimalPowerFlowModel {
         let mut options = crate::opf::ac::AcOpfOptions::default();
         options.nlp.tolerance = tol;
         options.nlp.max_iterations = max_iter;
+        #[cfg(feature = "gpu")]
+        if gpu {
+            options.nlp.kkt_solver = crate::gpu::cudss_ldlt_solver;
+        }
+        let _ = gpu;
         let opf = crate::opf::ac::AcOpf::build(case.network, options)
             .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
         Ok(Self {

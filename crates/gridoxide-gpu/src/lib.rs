@@ -19,7 +19,9 @@
 //! [`GpuBatchSolver`](gpu::GpuBatchSolver), the adaptive loop over both: a
 //! session per network that keeps its cuDSS analysis. And
 //! [`GpuDcSolver`](dc::GpuDcSolver), DC N-1: one factorization, every
-//! outage's angles and flows from one multi-column solve.
+//! outage's angles and flows from one multi-column solve. And
+//! [`CudssSolver`](kkt::CudssSolver), the KKT system of `opf::nlp`'s
+//! interior point on cuDSS.
 
 #[cfg(feature = "cuda")]
 mod cuda;
@@ -31,6 +33,8 @@ pub mod dc;
 pub mod device;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+#[cfg(feature = "cuda")]
+pub mod kkt;
 pub mod newton;
 pub mod uniform;
 
@@ -42,6 +46,8 @@ pub use dc::GpuDcSolver;
 pub use device::DeviceBatch;
 #[cfg(feature = "cuda")]
 pub use gpu::GpuBatchSolver;
+#[cfg(feature = "cuda")]
+pub use kkt::{CudssSolver, cudss_ldlt_solver, cudss_llt_solver};
 
 pub use newton::{
     BatchError, BatchOptions, BatchReport, Outcome, ScenarioResult, StepPolicy, csr_jacobian,
