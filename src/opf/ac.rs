@@ -231,6 +231,32 @@ pub struct AcOpf {
     rating: Vec<Option<f64>>,
     /// The constraints, Jacobian and Hessian, evaluated element by element.
     kernels: kernels::AcKernels,
+    /// The same kernels on the GPU, once [`evaluate_on_device`]
+    /// (`AcOpf::evaluate_on_device`) has made them; then the model's
+    /// evaluations run there.
+    #[cfg(feature = "gpu")]
+    device: Option<std::sync::Mutex<DeviceEvaluation>>,
+}
+
+/// The model on the device, and the patterns its values fill.
+#[cfg(feature = "gpu")]
+struct DeviceEvaluation {
+    model: gridoxide_gpu::ac::DeviceAcModel,
+    jacobian: Vec<(usize, usize)>,
+    hessian: Vec<(usize, usize)>,
+}
+
+/// `(row, column)` beside each value, in parallel: the triplets the CPU's
+/// evaluation returns.
+#[cfg(feature = "gpu")]
+fn triplets(pattern: &[(usize, usize)], values: Vec<f64>) -> Vec<(usize, usize, f64)> {
+    use rayon::prelude::*;
+    pattern
+        .par_iter()
+        .zip(values)
+        .with_min_len(4096)
+        .map(|(&(r, c), v)| (r, c, v))
+        .collect()
 }
 
 impl AcOpf {
@@ -384,6 +410,8 @@ impl AcOpf {
             flow,
             rating,
             kernels,
+            #[cfg(feature = "gpu")]
+            device: None,
             n_vars,
             theta: 0,
             vm: n,
@@ -431,6 +459,23 @@ impl AcOpf {
         &self,
     ) -> Result<gridoxide_gpu::ac::DeviceAcModel, gridoxide_gpu::LinearError> {
         gridoxide_gpu::ac::DeviceAcModel::new(&self.kernels.device_data(self.n_vars))
+    }
+
+    /// Evaluates the model's constraints, Jacobian and Lagrangian Hessian on
+    /// the GPU from now on ([`device_model`](Self::device_model)): the
+    /// interior point then gets the same triplets, to rounding (the device's
+    /// sines and cosines round differently), at a fraction of the host's
+    /// time (case24464_goc: the Hessian 14.4 -> 0.5 ms, with the copies).
+    /// Pair it with a GPU KKT solver, `gridoxide::gpu::cudss_ldlt_solver`.
+    #[cfg(feature = "gpu")]
+    pub fn evaluate_on_device(&mut self) -> Result<(), gridoxide_gpu::LinearError> {
+        let model = self.device_model()?;
+        self.device = Some(std::sync::Mutex::new(DeviceEvaluation {
+            model,
+            jacobian: self.kernels.jacobian_pattern(),
+            hessian: self.kernels.hessian_pattern(),
+        }));
+        Ok(())
     }
 
     /// Solves, and interprets the result in physical units.
@@ -638,17 +683,40 @@ impl NonlinearProblem for AcOpf {
         out
     }
 
+    // On the device once `evaluate_on_device` has made it, the CPU's
+    // kernels otherwise, or if the device fails.
+
     fn constraints(&self, x: &[f64]) -> Vec<f64> {
+        #[cfg(feature = "gpu")]
+        if let Some(device) = &self.device
+            && let Ok(out) = device.lock().unwrap().model.constraints(x)
+        {
+            return out;
+        }
         let mut out = vec![0.0; self.n_constraints()];
         self.kernels.constraints(x, &mut out);
         out
     }
 
     fn jacobian(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
+        #[cfg(feature = "gpu")]
+        if let Some(device) = &self.device {
+            let mut d = device.lock().unwrap();
+            if let Ok(values) = d.model.jacobian_values(x) {
+                return triplets(&d.jacobian, values);
+            }
+        }
         self.kernels.jacobian(x)
     }
 
     fn lagrangian_hessian(&self, x: &[f64], y: &[f64]) -> Vec<(usize, usize, f64)> {
+        #[cfg(feature = "gpu")]
+        if let Some(device) = &self.device {
+            let mut d = device.lock().unwrap();
+            if let Ok(values) = d.model.hessian_values(x, y) {
+                return triplets(&d.hessian, values);
+            }
+        }
         self.kernels.lagrangian_hessian(x, y)
     }
 

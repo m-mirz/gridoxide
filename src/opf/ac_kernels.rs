@@ -510,6 +510,19 @@ impl AcKernels {
         [(row, epigraph, 1.0), (row, column, -slope)]
     }
 
+    /// The Jacobian's `(row, column)` entries, in the order `jacobian`
+    /// returns them.
+    #[cfg(feature = "gpu")]
+    pub fn jacobian_pattern(&self) -> Vec<(usize, usize)> {
+        self.jacobian_merge.unique.clone()
+    }
+
+    /// The Hessian's, likewise.
+    #[cfg(feature = "gpu")]
+    pub fn hessian_pattern(&self) -> Vec<(usize, usize)> {
+        self.hessian_merge.unique.clone()
+    }
+
     /// The Jacobian, duplicates summed.
     pub fn jacobian(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
         self.jacobian_merge.apply(&self.jacobian_slots(x))

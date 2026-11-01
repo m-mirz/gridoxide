@@ -4049,8 +4049,9 @@ impl OptimalPowerFlowModel {
     /// out-of-service branches and generators are left out.
     ///
     /// `solver` is `"nlp"` (gridoxide's own interior point, the default),
-    /// `"nlp-gpu"`, the same interior point with its KKT system factorized on
-    /// an NVIDIA GPU by cuDSS (the extension built with the `gpu` feature),
+    /// `"nlp-gpu"`, the same interior point with its model evaluated and its
+    /// KKT system factorized on an NVIDIA GPU, by cuDSS (the extension built
+    /// with the `gpu` feature),
     /// or `"ipopt"`, which needs the extension built with the `opf-ipopt`
     /// feature. `tol` and `max_iter` go to the solver as its own tolerance
     /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
@@ -4101,8 +4102,14 @@ impl OptimalPowerFlowModel {
             options.nlp.kkt_solver = crate::gpu::cudss_ldlt_solver;
         }
         let _ = gpu;
-        let opf = crate::opf::ac::AcOpf::build(case.network, options)
+        #[allow(unused_mut)]
+        let mut opf = crate::opf::ac::AcOpf::build(case.network, options)
             .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        #[cfg(feature = "gpu")]
+        if gpu {
+            opf.evaluate_on_device()
+                .map_err(|e| PyRuntimeError::new_err(format!("the GPU model: {e}")))?;
+        }
         Ok(Self {
             opf,
             solver,

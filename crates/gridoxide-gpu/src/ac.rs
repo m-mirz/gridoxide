@@ -73,6 +73,11 @@ pub struct DeviceAcModel {
     hessian: Merged,
 }
 
+// SAFETY: the model owns its device buffers and stream; CUDA's device
+// pointers and streams may be used from any host thread of the process.
+// `&mut self` on every evaluation keeps them to one thread at a time.
+unsafe impl Send for DeviceAcModel {}
+
 /// A merged list on the device: its slot values, the gather, the values.
 struct Merged {
     unique: usize,

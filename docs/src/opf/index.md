@@ -439,8 +439,10 @@ options.nlp.kkt_solver = gridoxide::gpu::cudss_ldlt_solver;
 ```
 
 The KKT matrix's assembly and equilibration (to the bit the CPU's), its factorization and
-solves, and refinement's products with it run on the device; the model and its derivatives stay
-on the host, and their values cross the bus every iteration. On an A100 it
+solves, and refinement's products with it run on the device. `AcOpf::evaluate_on_device` puts
+the model there too: its constraints, Jacobian and Hessian from the same element kernels in
+CUDA, to rounding the CPU's (only the sines and cosines differ). The interior point itself stays
+on the host, and the values cross the bus every iteration; `solver="nlp-gpu"` does both. On an A100 it
 solves what the CPU solves (the 88 runs of the default set, the 16 of case9241_pegase), and is
 faster per iteration from case1354_pegase up: 1.3–1.5× there and on case2869_pegase, 1.5–2.8×
 on case9241_pegase. Against ExaModelsPower.jl on the same GPU (MadNLP and cuDSS, model and

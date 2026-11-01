@@ -25,7 +25,8 @@
 //! as grid-bench does. With `--features gpu`, `OPF_LINEAR=cudss` factorizes the KKT system on
 //! the GPU: cuDSS's `LDLᵀ` for the augmented system, its Cholesky for
 //! HyKKT's. `CUDSS_THREADING_LIB` (cuDSS's `libcudss_mtlayer_gomp.so`)
-//! runs its analysis on every core.
+//! runs its analysis on every core. `OPF_MODEL=gpu` evaluates the model
+//! there too (`AcOpf::evaluate_on_device`).
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -114,7 +115,13 @@ fn build(name: &str, log: bool) -> AcOpf {
         _ => {}
     }
     options.nlp.ncl = std::env::var_os("NLP_NCL").is_some();
-    AcOpf::build(opf.network, options).unwrap()
+    #[allow(unused_mut)]
+    let mut opf = AcOpf::build(opf.network, options).unwrap();
+    #[cfg(feature = "gpu")]
+    if std::env::var("OPF_MODEL").as_deref() == Ok("gpu") {
+        opf.evaluate_on_device().unwrap();
+    }
+    opf
 }
 
 fn verdict(result: &AcOpfResult, published: f64) -> (bool, f64) {
