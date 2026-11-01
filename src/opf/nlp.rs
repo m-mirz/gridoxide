@@ -67,7 +67,7 @@
 //!
 //! Not (yet) IPOPT's: the least-squares start of the multipliers (tried; it
 //! changed nothing on case9241_pegase and broke the piecewise-cost case5_pjm),
-//! the adaptive barrier, the watchdog, and pivoting in the factorization.
+//! the adaptive barrier and pivoting in the factorization.
 //! Algorithm NCL (`NlpOptions::ncl`) is an opt-in outer loop for degenerate
 //! problems.
 //!
@@ -157,6 +157,8 @@ pub struct NlpOptions {
     /// rounding noise above `tolerance`.
     pub acceptable_tolerance: f64,
     pub acceptable_iterations: usize,
+    /// IPOPT's `max_iter`, 3000. At 300, case13659_pegase (bus injection,
+    /// proportional start) stopped 22 iterations short of its optimum.
     pub max_iterations: usize,
     /// Starting barrier parameter.
     pub initial_barrier: f64,
@@ -198,7 +200,7 @@ impl Default for NlpOptions {
             tolerance: 1e-8,
             acceptable_tolerance: 1e-6,
             acceptable_iterations: 15,
-            max_iterations: 300,
+            max_iterations: 3000,
             initial_barrier: 0.1,
             tau: 0.99,
             armijo: 1e-4,
@@ -832,6 +834,16 @@ fn run(
     let mut acceptable_streak = 0usize;
     let mut error = f64::INFINITY;
     let mut first = true;
+    // IPOPT's watchdog (`watchdog_shortened_iter_trigger` = 10,
+    // `watchdog_trial_iter_max` = 3): after ten steps in a row cut short by
+    // the line search, the point is saved and up to three full steps are
+    // taken unchecked. One that the filter accepts against the saved point
+    // ends the watchdog; if none does, the run goes back to the saved point
+    // and searches as usual. On case24464_goc (branch flows, proportional
+    // start), steps of 1e-3 after ten halvings each, for 240 iterations,
+    // with the objective at the optimum and the violation at 2e-4.
+    let mut shortened = 0usize;
+    let mut watchdog: Option<Watchdog> = None;
 
     let status = 'solve: {
         for _ in 0..options.max_iterations {
@@ -959,6 +971,7 @@ fn run(
             let mut accepted = None;
             let mut trials = 0usize;
             let mut restore = false;
+            let mut revert: Option<Watchdog> = None;
             for _ in 0..12 {
                 let Some((factorization, delta)) = factorize_with_inertia(
                     &hessian,
@@ -1003,10 +1016,21 @@ fn run(
                 // of 1e11, and that test passed while the multipliers' part of
                 // the step was still wrong (case2869_pegase, branch flows: x
                 // as IPOPT's to 1e-8, y apart by 0.6% from iteration 24).
+                //
+                // The best solution seen is kept, not the last: a diverging
+                // refinement makes it worse. On case13659_pegase (branch
+                // flows, proportional start) a solve at 2.5e-2 of the
+                // right-hand side diverged to 0.7 and a step of 3.6e5, which
+                // was taken; the run never recovered. Rejecting inaccurate
+                // solves instead (IPOPT's `residual_ratio_singular`, raising
+                // δw) does not help here: δw does not reach the constraint
+                // block the inaccuracy comes from, and on the bus-injection
+                // model of the same case every δw up to 1e24 was rejected.
                 let solve = |rhs: &[f64]| -> Option<Vec<f64>> {
                     let mut d = factorization.solve(rhs)?;
                     let target = 1e-12 * norm_inf(rhs);
                     let mut last = f64::INFINITY;
+                    let mut best = (f64::INFINITY, d.clone());
                     for round in 0..options.refinement_rounds {
                         let mut residual = rhs.to_vec();
                         let du = &d[..n_total];
@@ -1023,6 +1047,9 @@ fn run(
                             residual[n_total + r] -= adu[r];
                         }
                         let size = norm_inf(&residual);
+                        if size < best.0 {
+                            best = (size, d.clone());
+                        }
                         if round > 0 && (size <= target || size > 0.5 * last) {
                             break;
                         }
@@ -1034,6 +1061,7 @@ fn run(
                             d[i] += correction[i];
                         }
                     }
+                    let d = best.1;
                     d.iter().all(|v| v.is_finite()).then_some(d)
                 };
                 let Some(d) = solve(&rhs) else {
@@ -1068,9 +1096,53 @@ fn run(
                 };
 
                 let mut found: Option<(Vec<f64>, Vec<f64>, f64, bool)> = None;
+                if watchdog.as_ref().is_some_and(|w| w.mu != mu) {
+                    // A new barrier problem: the saved point's merit no longer
+                    // compares.
+                    watchdog = None;
+                }
+                if watchdog.is_none() && shortened >= 10 {
+                    watchdog = Some(Watchdog {
+                        u: u.clone(),
+                        y: y.clone(),
+                        z_l: z_l.clone(),
+                        z_u: z_u.clone(),
+                        theta,
+                        phi,
+                        dphi,
+                        mu,
+                        trials: 0,
+                    });
+                    shortened = 0;
+                }
+                let watching = watchdog.is_some();
+                if let Some(w) = watchdog.as_mut() {
+                    let judged = evaluate(
+                        problem,
+                        p,
+                        &trial_at(&du, alpha_max),
+                        mu,
+                        &has_lower,
+                        &has_upper,
+                    )
+                    .and_then(|(th, ph, _)| {
+                        filter.accepts(alpha_max, w.theta, w.phi, w.dphi, th, ph)
+                    });
+                    if let Some(f_type) = judged {
+                        found = Some((du.clone(), dy.clone(), alpha_max, f_type));
+                        watchdog = None;
+                    } else if w.trials < 3 {
+                        w.trials += 1;
+                        // Taken unchecked; the filter is left as it is.
+                        found = Some((du.clone(), dy.clone(), alpha_max, true));
+                    } else {
+                        revert = watchdog.take();
+                        break;
+                    }
+                }
                 let mut alpha = alpha_max;
                 let mut first = true;
-                while alpha >= alpha_min {
+                while !watching && alpha >= alpha_min {
                     if let Some((th, ph, rp)) = evaluate(
                         problem,
                         p,
@@ -1174,6 +1246,9 @@ fn run(
                 if !f_type {
                     filter.add(theta, phi);
                 }
+                if !watching {
+                    shortened = if alpha < alpha_max { shortened + 1 } else { 0 };
+                }
 
                 let dz_l: Vec<f64> = (0..n_total)
                     .map(|k| {
@@ -1197,7 +1272,15 @@ fn run(
                 break;
             }
 
+            if let Some(w) = revert {
+                // No full step was accepted against the saved point: back to
+                // it, for an ordinary line search there.
+                (u, y, z_l, z_u) = (w.u, w.y, w.z_l, w.z_u);
+                continue;
+            }
             if restore {
+                shortened = 0;
+                watchdog = None;
                 if !control.restoration {
                     break 'solve OptStatus::Other("no acceptable step in the restoration phase");
                 }
@@ -1354,6 +1437,19 @@ fn run(
 /// always on: [`SymmetricFactorization`] does not pivot, and a zero diagonal
 /// in the constraint block would stop it. `floor` is a lower bound on δw from
 /// the caller.
+/// The point the watchdog saved, and its merit for judging the steps after it.
+struct Watchdog {
+    u: Vec<f64>,
+    y: Vec<f64>,
+    z_l: Vec<f64>,
+    z_u: Vec<f64>,
+    theta: f64,
+    phi: f64,
+    dphi: f64,
+    mu: f64,
+    trials: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn factorize_with_inertia(
     hessian: &[(usize, usize, f64)],
