@@ -349,7 +349,12 @@ impl Internal {
     /// `∇ĉ(u)` in the internal space: the caller's Jacobian, plus `−1` in each
     /// inequality row's slack column, plus the pinning rows.
     fn jacobian(&self, base: &[(usize, usize, f64)]) -> Vec<(usize, usize, f64)> {
-        let mut out: Vec<(usize, usize, f64)> = base.to_vec();
+        // Sized once: copied from `base` and then grown by its slack and
+        // pinning entries, the list was copied again as it doubled (8.6 ms
+        // an iteration on case24464_goc).
+        let mut out: Vec<(usize, usize, f64)> =
+            Vec::with_capacity(base.len() + self.slack_of.len() + self.pinned.len());
+        out.extend_from_slice(base);
         for r in 0..self.slack_of.len() {
             if let Some(slack) = self.slack_of[r] {
                 out.push((r, slack, -1.0));
@@ -372,6 +377,89 @@ fn mat_vec(triplets: &[(usize, usize, f64)], x: &[f64], rows: usize) -> Vec<f64>
         out[r] += v * x[c];
     }
     out
+}
+
+/// `Aᵀy` for a Jacobian whose pattern holds from one iteration to the next:
+/// a gather per column over its entries in ascending order, in parallel, so
+/// the sums are [`mat_transpose_vec`]'s, a scatter over the entries in
+/// order. On case24464_goc's million entries the scatter was most of 5 ms
+/// an iteration.
+struct Transpose {
+    cols: usize,
+    keys: Vec<(usize, usize)>,
+    /// Column `c`'s entries: `entries[start[c]..start[c + 1]]`, ascending.
+    start: Vec<usize>,
+    entries: Vec<usize>,
+}
+
+impl Transpose {
+    /// Below this many entries the scatter is cheaper than the plan.
+    const MIN_ENTRIES: usize = 1 << 16;
+
+    fn new(a: &[(usize, usize, f64)], cols: usize) -> Self {
+        let mut start = vec![0usize; cols + 1];
+        for &(_, c, _) in a {
+            start[c + 1] += 1;
+        }
+        for c in 0..cols {
+            start[c + 1] += start[c];
+        }
+        let mut next = start[..cols].to_vec();
+        let mut entries = vec![0usize; a.len()];
+        for (e, &(_, c, _)) in a.iter().enumerate() {
+            entries[next[c]] = e;
+            next[c] += 1;
+        }
+        Self {
+            cols,
+            keys: a.iter().map(|&(r, c, _)| (r, c)).collect(),
+            start,
+            entries,
+        }
+    }
+
+    fn fits(&self, a: &[(usize, usize, f64)], cols: usize) -> bool {
+        use rayon::prelude::*;
+        cols == self.cols
+            && a.len() == self.keys.len()
+            && a.par_iter()
+                .zip(&self.keys)
+                .with_min_len(1 << 14)
+                .all(|(&(r, c, _), &k)| (r, c) == k)
+    }
+
+    fn apply(&self, a: &[(usize, usize, f64)], y: &[f64]) -> Vec<f64> {
+        use rayon::prelude::*;
+        (0..self.cols)
+            .into_par_iter()
+            .with_min_len(1 << 12)
+            .map(|c| {
+                let mut v = 0.0;
+                for &e in &self.entries[self.start[c]..self.start[c + 1]] {
+                    let (r, _, value) = a[e];
+                    v += value * y[r];
+                }
+                v
+            })
+            .collect()
+    }
+}
+
+/// `Aᵀy`, through `plan` (made or remade here when `a`'s pattern changed)
+/// for a large `a`: the same sums either way.
+fn transpose_vec(
+    plan: &mut Option<Transpose>,
+    a: &[(usize, usize, f64)],
+    y: &[f64],
+    cols: usize,
+) -> Vec<f64> {
+    if a.len() < Transpose::MIN_ENTRIES {
+        return mat_transpose_vec(a, y, cols);
+    }
+    if !plan.as_ref().is_some_and(|t| t.fits(a, cols)) {
+        *plan = Some(Transpose::new(a, cols));
+    }
+    plan.as_ref().expect("made above").apply(a, y)
 }
 
 fn mat_transpose_vec(triplets: &[(usize, usize, f64)], y: &[f64], cols: usize) -> Vec<f64> {
@@ -865,6 +953,8 @@ fn run(
     // Where the augmented matrix's values come from while its pattern holds
     // (`AugmentedPlan`): the solver is then sent values, not triplets.
     let mut plan: Option<AugmentedPlan> = None;
+    // `Aᵀy`'s gather while the Jacobian's pattern holds (`Transpose`).
+    let mut transpose: Option<Transpose> = None;
     let mut acceptable_streak = 0usize;
     let mut error = f64::INFINITY;
     let mut first = true;
@@ -902,7 +992,7 @@ fn run(
                 .map(|k| if has_upper[k] { p.upper[k] - u[k] } else { 1.0 })
                 .collect();
 
-            let aty = mat_transpose_vec(&a, &y, n_total);
+            let aty = transpose_vec(&mut transpose, &a, &y, n_total);
             let r_d: Vec<f64> = (0..n_total)
                 .map(|k| grad[k] - aty[k] - z_l[k] + z_u[k])
                 .collect();
