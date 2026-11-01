@@ -447,3 +447,83 @@ fn the_condensed_kkt_system_finds_what_the_augmented_one_does() {
         }
     }
 }
+
+/// `LDLᵀ` that also multiplies by the matrix it factorized, on the host: the
+/// shape of a GPU solver, whose product refinement takes its residual from
+/// instead of the triplets (`SymmetricSolver::multiply`).
+struct MultiplyingLdlt {
+    inner: gridoxide::ldlt::LdltSolver,
+    n: usize,
+    lower: Vec<(usize, usize, f64)>,
+}
+
+impl gridoxide::ldlt::SymmetricSolver for MultiplyingLdlt {
+    fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        self.inner.matches(n, entries)
+    }
+    fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
+        self.lower = entries
+            .iter()
+            .copied()
+            .filter(|&(r, c, _)| r >= c)
+            .collect();
+        self.inner.factorize(entries)
+    }
+    fn inertia(&self) -> gridoxide::ldlt::Inertia {
+        self.inner.inertia()
+    }
+    fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        self.inner.solve(rhs)
+    }
+    fn multiply(&self, x: &[f64]) -> Option<Vec<f64>> {
+        let mut y = vec![0.0; self.n];
+        for &(r, c, v) in &self.lower {
+            y[r] += v * x[c];
+            if r != c {
+                y[c] += v * x[r];
+            }
+        }
+        Some(y)
+    }
+}
+
+fn multiplying_ldlt(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Option<Box<dyn gridoxide::ldlt::SymmetricSolver>> {
+    Some(Box::new(MultiplyingLdlt {
+        inner: gridoxide::ldlt::LdltSolver::new(n, keys)?,
+        n,
+        lower: Vec::new(),
+    }))
+}
+
+/// Refinement's residual from the solver's product with the condensed
+/// matrix, its slacks' elimination undone row by row, is the residual the
+/// triplets give: every problem above reaches the same point either way
+/// (the problems cover equality, inequality, pinning and free rows).
+#[test]
+fn refinement_from_the_solvers_product_finds_what_the_triplets_do() {
+    let multiplying = NlpOptions {
+        kkt_solver: multiplying_ldlt,
+        ..NlpOptions::default()
+    };
+    let problems: [&dyn NonlinearProblem; 7] = [
+        &OnACircle,
+        &IndefiniteProduct,
+        &InsideADisc,
+        &TwoWells { start: 2.0 },
+        &TwoWells { start: -2.0 },
+        &BoundedQuadratic,
+        &WithAFixedVariable,
+    ];
+    for (k, problem) in problems.into_iter().enumerate() {
+        let want = solve(problem, &NlpOptions::default()).unwrap();
+        let got = solve(problem, &multiplying).unwrap();
+        assert_eq!(got.status, OptStatus::Optimal, "problem {k}: {got:?}");
+        assert_eq!(got.iterations, want.iterations, "problem {k}");
+        for (i, (a, b)) in got.x.iter().zip(&want.x).enumerate() {
+            assert!((a - b).abs() < 1e-9, "problem {k}, x{i}: {a} vs {b}");
+        }
+    }
+}

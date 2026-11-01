@@ -438,8 +438,9 @@ solver="nlp-gpu")`.
 options.nlp.kkt_solver = gridoxide::gpu::cudss_ldlt_solver;
 ```
 
-Only the factorization and the solves run on the device; the model, its derivatives and the
-KKT assembly stay on the host, and the matrix crosses the bus every iteration. On an A100 it
+The KKT matrix's assembly and equilibration (to the bit the CPU's), its factorization and
+solves, and refinement's products with it run on the device; the model and its derivatives stay
+on the host, and their values cross the bus every iteration. On an A100 it
 solves what the CPU solves (the 88 runs of the default set, the 16 of case9241_pegase), and is
 faster per iteration from case1354_pegase up: 1.3–1.5× there and on case2869_pegase, 1.5–2.8×
 on case9241_pegase. Against ExaModelsPower.jl on the same GPU (MadNLP and cuDSS, model and

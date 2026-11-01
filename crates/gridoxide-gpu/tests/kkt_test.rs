@@ -176,3 +176,61 @@ fn deterministic_to_the_bit() {
     assert_eq!(first, run(&mut one));
     assert_eq!(first, run(&mut two));
 }
+
+/// The device's assembly and equilibration are the host's to the bit, on
+/// unsorted triplets with duplicates and entries above the diagonal, as the
+/// interior point passes them.
+#[test]
+fn device_assembly_is_the_hosts() {
+    use gridoxide_sparse::ldlt::LowerPattern;
+    for &(n, m, shift, seed) in &[(12, 5, 0.0, 1), (300, 120, 6.0, 3), (40, 15, -1.0, 9)] {
+        let (dim, mut e) = kkt(n, m, shift, seed);
+        // Duplicates, spread across the list, and a large spread of scales.
+        let extra: Vec<(usize, usize, f64)> = e
+            .iter()
+            .step_by(7)
+            .map(|&(r, c, v)| (r, c, v * 1e6 + 0.25))
+            .collect();
+        e.extend(extra);
+        e.reverse();
+        let pattern = LowerPattern::new(dim, &keys(&e));
+        let (host_values, host_scale) = pattern.assemble(&e);
+        let mut gpu = CudssSolver::new(dim, &keys(&e), Factorization::Ldlt, true).unwrap();
+        let (values, scale) = gpu.assemble_on_device(&e).unwrap();
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&values), bits(&host_values), "values, n {n}");
+        assert_eq!(bits(&scale), bits(&host_scale), "scale, n {n}");
+    }
+}
+
+/// `multiply` is `K x` for the matrix of the last factorization, recovered
+/// from the equilibrated one on the device, to rounding; and there is none
+/// without a factorization.
+#[test]
+fn multiply_is_the_matrix_product() {
+    for &(n, m, shift, seed) in &[(12, 5, 10.0, 1), (300, 120, 6.0, 3)] {
+        let (dim, mut e) = kkt(n, m, shift, seed);
+        let dup: Vec<(usize, usize, f64)> = e.iter().step_by(5).copied().collect();
+        e.extend(dup);
+        let mut gpu = CudssSolver::new(dim, &keys(&e), Factorization::Ldlt, true).unwrap();
+        let x: Vec<f64> = (0..dim).map(|i| (0.3 * i as f64).cos()).collect();
+        assert!(gpu.multiply(&x).is_none());
+        assert!(gpu.factorize(&e));
+        let y = gpu.multiply(&x).unwrap();
+        // K as the solver reads the list: its lower triangle, duplicates
+        // summed, mirrored; entries above the diagonal ignored.
+        let mut want = vec![0.0; dim];
+        for &(r, c, v) in e.iter().filter(|&&(r, c, _)| r >= c) {
+            want[r] += v * x[c];
+            if r != c {
+                want[c] += v * x[r];
+            }
+        }
+        let size = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let worst = y
+            .iter()
+            .zip(&want)
+            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(worst < 1e-13 * size, "n {n}: {worst:e} of {size:e}");
+    }
+}

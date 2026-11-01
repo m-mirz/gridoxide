@@ -1067,20 +1067,28 @@ fn run(
                     let mut last = f64::INFINITY;
                     let mut best = (f64::INFINITY, d.clone());
                     for round in 0..options.refinement_rounds {
-                        let mut residual = rhs.to_vec();
-                        let du = &d[..n_total];
-                        let w = &d[n_total..];
-                        let hdu = mat_vec_symmetric(&hessian, du, n_total);
-                        let atw = mat_transpose_vec(&a, w, n_total);
-                        let adu = mat_vec(&a, du, m_eq);
-                        for k in 0..n_total {
-                            residual[k] -= hdu[k] + (sigma[k] + gamma) * du[k] + atw[k];
-                        }
-                        // Against IPOPT's system, δc = 0: `Kkt` puts δc only
-                        // on equality rows, where refinement removes it.
-                        for r in 0..m_eq {
-                            residual[n_total + r] -= adu[r];
-                        }
+                        // On a GPU solver, from its product with the matrix
+                        // it holds (`Factorized::residual`): the host's three
+                        // products over the triplets were 12% of an
+                        // iteration on case10000_goc.
+                        let residual = factorization.residual(rhs, &d).unwrap_or_else(|| {
+                            let mut residual = rhs.to_vec();
+                            let du = &d[..n_total];
+                            let w = &d[n_total..];
+                            let hdu = mat_vec_symmetric(&hessian, du, n_total);
+                            let atw = mat_transpose_vec(&a, w, n_total);
+                            let adu = mat_vec(&a, du, m_eq);
+                            for k in 0..n_total {
+                                residual[k] -= hdu[k] + (sigma[k] + gamma) * du[k] + atw[k];
+                            }
+                            // Against IPOPT's system, δc = 0: `Kkt` puts δc
+                            // only on equality rows, where refinement removes
+                            // it.
+                            for r in 0..m_eq {
+                                residual[n_total + r] -= adu[r];
+                            }
+                            residual
+                        });
                         let size = norm_inf(&residual);
                         if size < best.0 {
                             best = (size, d.clone());
@@ -1594,6 +1602,9 @@ struct Augmented {
     m: usize,
     /// `(row, slack column, d_k)`.
     slacks: Vec<(usize, usize, f64)>,
+    /// The constraint rows' diagonal in the condensed matrix: `−δc`, or
+    /// `−1/d_k` where a slack was eliminated.
+    row_diag: Vec<f64>,
 }
 
 impl Augmented {
@@ -1647,10 +1658,13 @@ impl Augmented {
             let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
             *solver = Some(make(n_x + m, &keys)?);
         }
-        solver
-            .as_mut()?
-            .factorize(&kkt)
-            .then_some(Self { n_x, n, m, slacks })
+        solver.as_mut()?.factorize(&kkt).then_some(Self {
+            n_x,
+            n,
+            m,
+            slacks,
+            row_diag,
+        })
     }
 
     /// Whether `solver`'s factorization has the inertia of a step that
@@ -1662,6 +1676,34 @@ impl Augmented {
                 negative: self.m,
                 zero: 0,
             }
+    }
+
+    /// `rhs − K d` for the full system as refinement takes it (δw, no δc),
+    /// from the condensed matrix's product in `solver`
+    /// ([`SymmetricSolver::multiply`]): its rows of `x` are the full
+    /// system's, and a slack's elimination is undone row by row. A slack's
+    /// column holds `d_k` and the −1 in its row, so the slack's row is
+    /// `d_k du_k − w_r` and the constraint row gains `−du_k`; the condensed
+    /// diagonal `−δc` or `−1/d_k` is taken out. `None` if the solver does
+    /// not multiply.
+    fn residual(&self, solver: &dyn SymmetricSolver, rhs: &[f64], d: &[f64]) -> Option<Vec<f64>> {
+        let (n_x, n, m) = (self.n_x, self.n, self.m);
+        let mut v = vec![0.0; n_x + m];
+        v[..n_x].copy_from_slice(&d[..n_x]);
+        v[n_x..].copy_from_slice(&d[n..n + m]);
+        let kv = solver.multiply(&v)?;
+        let mut r = rhs.to_vec();
+        for k in 0..n_x {
+            r[k] -= kv[k];
+        }
+        for row in 0..m {
+            r[n + row] -= kv[n_x + row] - self.row_diag[row] * d[n + row];
+        }
+        for &(row, k, dk) in &self.slacks {
+            r[k] -= dk * d[k] - d[n + row];
+            r[n + row] += d[k];
+        }
+        Some(r)
     }
 
     /// Solves the full system (`n` variables then `m` rows) through the
@@ -1719,6 +1761,16 @@ impl Factorized<'_> {
         match self.kkt {
             Kkt::Augmented(k) => k.solve(self.solver, rhs),
             Kkt::Hybrid(k) => k.solve(self.solver, rhs),
+        }
+    }
+
+    /// `rhs − K d` against the full system, where the solver multiplies
+    /// (the augmented system on a GPU solver); `None` for the caller to
+    /// compute it.
+    fn residual(&self, rhs: &[f64], d: &[f64]) -> Option<Vec<f64>> {
+        match self.kkt {
+            Kkt::Augmented(k) => k.residual(self.solver, rhs, d),
+            Kkt::Hybrid(_) => None,
         }
     }
 }

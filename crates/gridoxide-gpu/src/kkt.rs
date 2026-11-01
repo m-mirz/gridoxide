@@ -9,21 +9,31 @@
 //! - Cholesky (`CUDSS_MTYPE_SPD`) for HyKKT's condensed positive definite
 //!   one, its success the inertia test (`CUDSS_DATA_INFO`).
 //!
-//! The assembly and equilibration are the CPU solvers' own
-//! ([`LowerPattern`]), so the factorized matrix is the same `D K D` to the
-//! last bit: the lower triangle in compressed columns, which cuDSS takes as
-//! the upper triangle in compressed rows (`CUDSS_MVIEW_UPPER`). The analysis
-//! runs once, at the first factorization, on its values; every later one is
-//! numeric only.
+//! The assembly and the Ruiz equilibration are the CPU solvers' own
+//! ([`LowerPattern`]), run on the device by kernels (`go_kkt_*` in
+//! `cuda/kernels.cu`) in the same arithmetic and order, so the factorized
+//! matrix is the same `D K D` to the last bit: the lower triangle in
+//! compressed columns, which cuDSS takes as the upper triangle in compressed
+//! rows (`CUDSS_MVIEW_UPPER`). The host only copies the triplets' values
+//! into a pinned buffer, in triplet order; summing duplicates is a gather
+//! per slot and every row's maximum a gather over the slots it touches, so
+//! no kernel needs an atomic. The analysis runs once, at the first
+//! factorization, on its values; every later one is numeric only.
 //!
-//! The matrix and the right-hand side cross the bus every factorization and
-//! solve (the triplets arrive on the host); the factor never does.
+//! On case10000_goc the host's assembly and equilibration took 11 ms a
+//! factorization, more than cuDSS's factorization (3.2 ms).
+//!
+//! The triplets' values and the right-hand side cross the bus every
+//! factorization and solve; the matrix, its scale and the factor stay on the
+//! device.
 
 use std::ptr;
 
 use gridoxide_sparse::ldlt::{Inertia, LowerPattern, SymmetricSolver};
 
-use crate::cuda::{DeviceBuffer, Stream, cuda, ffi};
+use gridoxide_sparse::ldlt::RUIZ_PASSES;
+
+use crate::cuda::{DeviceBuffer, PinnedBuffer, Stream, copy_to_device, cuda, ffi};
 use crate::cudss::cudss;
 use crate::uniform::LinearError;
 
@@ -44,17 +54,250 @@ pub struct CudssSolver {
     stream: Stream,
     pattern: LowerPattern,
     kind: Factorization,
-    _row_ptr: DeviceBuffer<i32>,
-    _col: DeviceBuffer<i32>,
+    row_ptr: DeviceBuffer<i32>,
+    col: DeviceBuffer<i32>,
     values: DeviceBuffer<f64>,
     rhs: DeviceBuffer<f64>,
     solution: DeviceBuffer<f64>,
-    /// The equilibration of the last factorization: it factorized `D K D`.
-    scale: Vec<f64>,
+    /// The device's half of the assembly and equilibration; see [`Assembly`].
+    assembly: Assembly,
     analysed: bool,
     /// The inertia of the last factorization, `None` if it failed or there
     /// was none.
     inertia: Option<Inertia>,
+}
+
+/// What the device assembles and equilibrates the matrix from: the
+/// triplets' values (staged in pinned memory), where each slot sums them
+/// from, the slots' rows and columns, and per row or column the slots in it.
+struct Assembly {
+    nnz: usize,
+    n_trip: usize,
+    host_trip: PinnedBuffer<f64>,
+    trip: DeviceBuffer<f64>,
+    /// Slot `s` sums `trip[src[t]]` for `t` in `slot_ptr[s]..slot_ptr[s+1]`.
+    slot_ptr: DeviceBuffer<u32>,
+    src: DeviceBuffer<u32>,
+    row: DeviceBuffer<u32>,
+    col: DeviceBuffer<u32>,
+    /// The slots in row or column `i`: `inc[inc_ptr[i]..inc_ptr[i+1]]`.
+    inc_ptr: DeviceBuffer<u32>,
+    inc: DeviceBuffer<u32>,
+    row_max: DeviceBuffer<f64>,
+    factor: DeviceBuffer<f64>,
+    /// The equilibration of the last factorization: it factorized `D K D`.
+    scale: DeviceBuffer<f64>,
+    bad: DeviceBuffer<i32>,
+    /// The strictly lower part as rows, for the mat-vec: row `r` has columns
+    /// `lo_col[k]` and values `values[lo_src[k]]`, `k` in `lo_ptr[r]..`.
+    lo_ptr: DeviceBuffer<u32>,
+    lo_col: DeviceBuffer<u32>,
+    lo_src: DeviceBuffer<u32>,
+    /// The mat-vec's vectors.
+    mv_x: DeviceBuffer<f64>,
+    mv_y: DeviceBuffer<f64>,
+}
+
+impl Assembly {
+    fn new(pattern: &LowerPattern, stream: ffi::cudaStream_t) -> Result<Self, LinearError> {
+        let n = pattern.n();
+        let nnz = pattern.row_idx().len();
+        let slots = pattern.slots();
+        let index = |i: usize| -> Result<u32, LinearError> {
+            u32::try_from(i).map_err(|_| LinearError::Shape(format!("index {i} beyond 32 bits")))
+        };
+        // Per slot, its triplets in triplet order (the CPU's summation order).
+        let mut slot_ptr = vec![0u32; nnz + 1];
+        for s in slots.iter().flatten() {
+            slot_ptr[s + 1] += 1;
+        }
+        for s in 0..nnz {
+            slot_ptr[s + 1] += slot_ptr[s];
+        }
+        let mut next: Vec<u32> = slot_ptr[..nnz].to_vec();
+        let mut src = vec![0u32; slot_ptr[nnz] as usize];
+        for (t, s) in slots.iter().enumerate() {
+            if let Some(s) = *s {
+                src[next[s] as usize] = index(t)?;
+                next[s] += 1;
+            }
+        }
+        let row: Vec<u32> = pattern
+            .row_idx()
+            .iter()
+            .map(|&r| index(r))
+            .collect::<Result<_, _>>()?;
+        let mut col = vec![0u32; nnz];
+        let col_ptr = pattern.col_ptr();
+        for c in 0..n {
+            for slot in &mut col[col_ptr[c]..col_ptr[c + 1]] {
+                *slot = index(c)?;
+            }
+        }
+        // Per row or column, the slots in it (a diagonal slot once).
+        let mut inc_ptr = vec![0u32; n + 1];
+        for s in 0..nnz {
+            inc_ptr[row[s] as usize + 1] += 1;
+            if col[s] != row[s] {
+                inc_ptr[col[s] as usize + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            inc_ptr[i + 1] += inc_ptr[i];
+        }
+        let mut next: Vec<u32> = inc_ptr[..n].to_vec();
+        let mut inc = vec![0u32; inc_ptr[n] as usize];
+        for s in 0..nnz {
+            let (r, c) = (row[s] as usize, col[s] as usize);
+            inc[next[r] as usize] = index(s)?;
+            next[r] += 1;
+            if c != r {
+                inc[next[c] as usize] = index(s)?;
+                next[c] += 1;
+            }
+        }
+        // The strictly lower part by rows (the transpose of the upper rows
+        // cuDSS reads), columns ascending within a row.
+        let mut lo_ptr = vec![0u32; n + 1];
+        for s in 0..nnz {
+            if row[s] != col[s] {
+                lo_ptr[row[s] as usize + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            lo_ptr[i + 1] += lo_ptr[i];
+        }
+        let mut next: Vec<u32> = lo_ptr[..n].to_vec();
+        let mut lo_col = vec![0u32; lo_ptr[n] as usize];
+        let mut lo_src = vec![0u32; lo_ptr[n] as usize];
+        for s in 0..nnz {
+            let r = row[s] as usize;
+            if r != col[s] as usize {
+                lo_col[next[r] as usize] = col[s];
+                lo_src[next[r] as usize] = index(s)?;
+                next[r] += 1;
+            }
+        }
+        let up = |v: &[u32]| -> Result<DeviceBuffer<u32>, LinearError> {
+            let mut d = DeviceBuffer::new(v.len().max(1))?;
+            if !v.is_empty() {
+                d.upload(v, stream)?;
+            }
+            Ok(d)
+        };
+        let n_trip = slots.len();
+        Ok(Self {
+            nnz,
+            n_trip,
+            host_trip: PinnedBuffer::new(n_trip.max(1))?,
+            trip: DeviceBuffer::new(n_trip.max(1))?,
+            slot_ptr: up(&slot_ptr)?,
+            src: up(&src)?,
+            row: up(&row)?,
+            col: up(&col)?,
+            inc_ptr: up(&inc_ptr)?,
+            inc: up(&inc)?,
+            row_max: DeviceBuffer::new(n.max(1))?,
+            factor: DeviceBuffer::new(n.max(1))?,
+            scale: DeviceBuffer::new(n.max(1))?,
+            bad: DeviceBuffer::new(1)?,
+            lo_ptr: up(&lo_ptr)?,
+            lo_col: up(&lo_col)?,
+            lo_src: up(&lo_src)?,
+            mv_x: DeviceBuffer::new(n.max(1))?,
+            mv_y: DeviceBuffer::new(n.max(1))?,
+        })
+    }
+
+    /// Queues the assembly and equilibration of `entries` into `values` on
+    /// `stream`: LowerPattern::assemble's arithmetic, on the device. A
+    /// non-finite result sets `bad`.
+    fn run(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+        values: &mut DeviceBuffer<f64>,
+        n: usize,
+        stream: ffi::cudaStream_t,
+    ) -> Result<(), LinearError> {
+        debug_assert_eq!(entries.len(), self.n_trip);
+        let nnz = self.nnz as u32;
+        let n = n as u32;
+        if self.n_trip > 0 {
+            // SAFETY: the pinned buffer holds n_trip values, and no copy out
+            // of it is in flight: the last factorization synchronized.
+            let host =
+                unsafe { std::slice::from_raw_parts_mut(self.host_trip.as_mut_ptr(), self.n_trip) };
+            for (h, &(_, _, v)) in host.iter_mut().zip(entries) {
+                *h = v;
+            }
+            // SAFETY: `trip` holds n_trip values.
+            unsafe { copy_to_device(self.trip.ptr, &*host, stream)? };
+        }
+        // SAFETY: every pointer is a device buffer of the length the kernel
+        // reads (made in `new` for this pattern).
+        unsafe {
+            copy_to_device(self.bad.ptr, &[0i32], stream)?;
+            launched(
+                ffi::go_kkt_gather(
+                    self.slot_ptr.ptr,
+                    self.src.ptr,
+                    self.trip.ptr,
+                    values.ptr,
+                    nnz,
+                    stream.cast(),
+                ),
+                "go_kkt_gather",
+            )?;
+            let row_max = |values: &DeviceBuffer<f64>| {
+                launched(
+                    ffi::go_kkt_row_max(
+                        self.inc_ptr.ptr,
+                        self.inc.ptr,
+                        values.ptr,
+                        self.row_max.ptr,
+                        n,
+                        stream.cast(),
+                    ),
+                    "go_kkt_row_max",
+                )
+            };
+            row_max(values)?;
+            for pass in 0..RUIZ_PASSES {
+                launched(
+                    ffi::go_kkt_factor(
+                        self.row_max.ptr,
+                        self.factor.ptr,
+                        self.scale.ptr,
+                        (pass == 0) as i32,
+                        n,
+                        stream.cast(),
+                    ),
+                    "go_kkt_factor",
+                )?;
+                let last = pass + 1 == RUIZ_PASSES;
+                launched(
+                    ffi::go_kkt_scale(
+                        self.row.ptr,
+                        self.col.ptr,
+                        self.factor.ptr,
+                        values.ptr,
+                        if last { self.bad.ptr } else { ptr::null_mut() },
+                        nnz,
+                        stream.cast(),
+                    ),
+                    "go_kkt_scale",
+                )?;
+                if !last {
+                    row_max(values)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn launched(err: i32, what: &str) -> Result<(), LinearError> {
+    cuda(err as ffi::cudaError_t, what)
 }
 
 /// cuDSS's handles for the system: matrix, solution and right-hand side
@@ -196,6 +439,7 @@ impl CudssSolver {
             col.upload(&to_i32(pattern.row_idx())?, stream.0)?;
         }
         let values = DeviceBuffer::<f64>::new(nnz.max(1))?;
+        let assembly = Assembly::new(&pattern, stream.0)?;
         let rhs = DeviceBuffer::<f64>::new(n.max(1))?;
         let solution = DeviceBuffer::<f64>::new(n.max(1))?;
         let mut sys = System {
@@ -272,12 +516,12 @@ impl CudssSolver {
             stream,
             pattern,
             kind,
-            _row_ptr: row_ptr,
-            _col: col,
+            row_ptr,
+            col,
             values,
             rhs,
             solution,
-            scale: Vec::new(),
+            assembly,
             analysed: false,
             inertia: None,
         })
@@ -287,6 +531,27 @@ impl CudssSolver {
         self.kind
     }
 
+    /// The matrix of `entries` assembled and equilibrated on the device, as
+    /// it would be factorized, and its scale, copied back: what
+    /// [`LowerPattern::assemble`] computes on the host, for comparing the
+    /// two.
+    pub fn assemble_on_device(
+        &mut self,
+        entries: &[(usize, usize, f64)],
+    ) -> Result<(Vec<f64>, Vec<f64>), LinearError> {
+        let n = self.pattern.n();
+        self.assembly
+            .run(entries, &mut self.values, n, self.stream.0)?;
+        let mut values = vec![0.0; self.values.len()];
+        self.values.download(&mut values, self.stream.0)?;
+        let mut scale = vec![0.0; n];
+        if n > 0 {
+            self.assembly.scale.download(&mut scale, self.stream.0)?;
+        }
+        values.truncate(self.pattern.row_idx().len());
+        Ok((values, scale))
+    }
+
     /// Factorizes; `Ok(None)` when the matrix has no factorization of this
     /// kind (a zero pivot, or not positive definite for Cholesky).
     fn try_factorize(
@@ -294,14 +559,8 @@ impl CudssSolver {
         entries: &[(usize, usize, f64)],
     ) -> Result<Option<Inertia>, LinearError> {
         let n = self.pattern.n();
-        let (values, scale) = self.pattern.assemble(entries);
-        if values.iter().any(|v| !v.is_finite()) {
-            return Ok(None);
-        }
-        self.scale = scale;
-        if !values.is_empty() {
-            self.values.upload(&values, self.stream.0)?;
-        }
+        self.assembly
+            .run(entries, &mut self.values, n, self.stream.0)?;
         if !self.analysed {
             self.sys.execute(ffi::CUDSS_PHASE_ANALYSIS, "ANALYSIS")?;
             self.analysed = true;
@@ -320,6 +579,11 @@ impl CudssSolver {
             unsafe { ffi::cudaStreamSynchronize(self.stream.0) },
             "cudaStreamSynchronize",
         )?;
+        let mut bad = [0i32];
+        self.assembly.bad.download(&mut bad, self.stream.0)?;
+        if bad[0] != 0 {
+            return Ok(None);
+        }
         let mut info = [0i32];
         self.sys.get(ffi::CUDSS_DATA_INFO, &mut info, "INFO")?;
         if info[0] != 0 {
@@ -351,17 +615,73 @@ impl CudssSolver {
         if self.inertia.is_none() || rhs.len() != n {
             return Ok(None);
         }
-        let scaled: Vec<f64> = rhs.iter().zip(&self.scale).map(|(b, d)| b * d).collect();
-        // SAFETY: `rhs` is the solver's own buffer of n values; the upload
-        // goes through a raw pointer because `solve` takes `&self`.
-        unsafe { crate::cuda::copy_to_device(self.rhs.ptr, &scaled, self.stream.0)? };
+        let scale = self.assembly.scale.ptr;
+        // SAFETY: `rhs`, `solution` and `scale` are the solver's own buffers
+        // of n values; the upload goes through a raw pointer because `solve`
+        // takes `&self`.
+        unsafe {
+            copy_to_device(self.rhs.ptr, rhs, self.stream.0)?;
+            launched(
+                ffi::go_scale_vec(self.rhs.ptr, scale, n as u32, self.stream.0.cast()),
+                "go_scale_vec",
+            )?;
+        }
         self.sys.execute(ffi::CUDSS_PHASE_SOLVE, "SOLVE")?;
+        // SAFETY: as above.
+        unsafe {
+            launched(
+                ffi::go_scale_vec(self.solution.ptr, scale, n as u32, self.stream.0.cast()),
+                "go_scale_vec",
+            )?;
+        }
         let mut x = vec![0.0; n];
         self.solution.download(&mut x, self.stream.0)?;
-        for (xi, d) in x.iter_mut().zip(&self.scale) {
-            *xi *= d;
-        }
         Ok(x.iter().all(|v| v.is_finite()).then_some(x))
+    }
+}
+
+impl CudssSolver {
+    /// `K x` on the device: the equilibrated `D K D` it factorized, as
+    /// `D⁻¹ (D K D) (D⁻¹ x)`.
+    fn try_multiply(&self, x: &[f64]) -> Result<Option<Vec<f64>>, LinearError> {
+        let n = self.pattern.n();
+        if self.inertia.is_none() || x.len() != n || n == 0 {
+            return Ok(None);
+        }
+        let a = &self.assembly;
+        let stream = self.stream.0;
+        // SAFETY: every buffer is the solver's own, of n values (the vectors
+        // and the scale) or of the pattern's sizes; the upload goes through
+        // a raw pointer because `multiply` takes `&self`.
+        unsafe {
+            copy_to_device(a.mv_x.ptr, x, stream)?;
+            launched(
+                ffi::go_unscale_vec(a.mv_x.ptr, a.scale.ptr, a.mv_y.ptr, n as u32, stream.cast()),
+                "go_unscale_vec",
+            )?;
+            launched(
+                ffi::go_kkt_symv(
+                    self.row_ptr.ptr,
+                    self.col.ptr,
+                    a.lo_ptr.ptr,
+                    a.lo_col.ptr,
+                    a.lo_src.ptr,
+                    self.values.ptr,
+                    a.mv_y.ptr,
+                    a.mv_x.ptr,
+                    n as u32,
+                    stream.cast(),
+                ),
+                "go_kkt_symv",
+            )?;
+            launched(
+                ffi::go_unscale_vec(a.mv_x.ptr, a.scale.ptr, a.mv_y.ptr, n as u32, stream.cast()),
+                "go_unscale_vec",
+            )?;
+        }
+        let mut y = vec![0.0; n];
+        a.mv_y.download(&mut y, stream)?;
+        Ok(y.iter().all(|v| v.is_finite()).then_some(y))
     }
 }
 
@@ -383,6 +703,10 @@ impl SymmetricSolver for CudssSolver {
 
     fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
         self.try_solve(rhs).ok().flatten()
+    }
+
+    fn multiply(&self, x: &[f64]) -> Option<Vec<f64>> {
+        self.try_multiply(x).ok().flatten()
     }
 }
 

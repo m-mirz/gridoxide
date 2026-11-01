@@ -76,7 +76,9 @@ The device solves AC sweeps (`GpuBatchSolver.solve_batch`), AC N-1
   for HyKKT). See docs/src/opf/index.md, "On the GPU".
 - [ ] **AC-OPF's model and KKT assembly on the device.** Against
   ExaModelsPower.jl on the same A100, 4–5.5× slower per iteration on the
-  GOC cases, where only the factorization is on the device; profile the
-  host side first, then port `opf::ac_kernels`.
+  GOC cases. The KKT assembly, equilibration and refinement products are
+  on the device now; what is left on the host is the model (`opf::ac_kernels`,
+  the Hessian 64 ms an iteration on case24464_goc), the KKT triplets (29 ms
+  there) and cuDSS's analysis (2.2 s a solve there).
 - [ ] **State estimation.** Batched SE over measurement sets. Large work;
   only after the batch is competitive.

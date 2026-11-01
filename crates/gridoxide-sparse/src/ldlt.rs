@@ -61,6 +61,10 @@ pub struct Inertia {
     pub zero: usize,
 }
 
+/// The passes of [`LowerPattern::assemble`]'s Ruiz equilibration; a GPU
+/// solver that equilibrates on the device runs as many.
+pub const RUIZ_PASSES: usize = 5;
+
 /// The lower triangle of a sparse symmetric pattern in compressed columns,
 /// and where each entry of the triplet list it was built from lands: the
 /// assembly and equilibration every [`SymmetricSolver`] here shares, CPU or
@@ -128,6 +132,13 @@ impl LowerPattern {
         &self.row_idx
     }
 
+    /// Per triplet of the pattern, in order, its slot in
+    /// [`row_idx`](Self::row_idx), or `None` above the diagonal: where
+    /// [`assemble`](Self::assemble) sums it.
+    pub fn slots(&self) -> &[Option<usize>] {
+        &self.slot
+    }
+
     /// Whether `entries` has exactly this pattern's triplets, in order.
     pub fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
         n == self.n
@@ -162,7 +173,7 @@ impl LowerPattern {
     /// factorizing it. `D K D` is congruent to `K`, so the inertia is
     /// unchanged. Returns `D`.
     fn equilibrate(&self, values: &mut [f64]) -> Vec<f64> {
-        const PASSES: usize = 5;
+        const PASSES: usize = RUIZ_PASSES;
         let n = self.n;
         let mut scale = vec![1.0f64; n];
         // Each pass scales by the row maxima, and the sweep that scales also
@@ -318,6 +329,14 @@ pub trait SymmetricSolver {
     /// Solves `K x = b` with the last factorization. `None` if there is none
     /// or the result is not finite.
     fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>>;
+
+    /// `K x` with the matrix of the last successful factorization, where the
+    /// solver keeps that matrix and multiplies faster than its caller could
+    /// (a GPU solver, whose matrix is on the device). `None` by default: the
+    /// caller then multiplies on its own.
+    fn multiply(&self, _x: &[f64]) -> Option<Vec<f64>> {
+        None
+    }
 }
 
 /// [`SymmetricSolver`] on `faer`'s unpivoted `LDLᵀ`: a [`SymmetricPattern`]
