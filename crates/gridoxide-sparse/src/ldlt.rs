@@ -57,6 +57,8 @@ pub struct SymmetricFactorization {
     symbolic: SymbolicCholesky<usize>,
     values: Vec<f64>,
     inertia: Inertia,
+    /// The equilibration `D`: the factorized matrix is `D K D`.
+    scale: Vec<f64>,
 }
 
 impl SymmetricFactorization {
@@ -66,14 +68,19 @@ impl SymmetricFactorization {
     /// factorization hits a zero pivot (the matrix is singular, or needs
     /// pivoting this does not do; see the module docs).
     pub fn new(n: usize, entries: &[(usize, usize, f64)]) -> Option<Self> {
-        let mut lower: Vec<Triplet<usize, usize, f64>> = entries
+        let mut lower: Vec<(usize, usize, f64)> = entries
             .iter()
-            .filter(|&&(r, c, _)| r >= c)
-            .map(|&(r, c, v)| Triplet::new(r, c, v))
+            .copied()
+            .filter(|&(r, c, _)| r >= c)
             .collect();
         // Every diagonal present, so an empty row still has a pivot slot.
-        lower.extend((0..n).map(|k| Triplet::new(k, k, 0.0)));
-        let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &lower).ok()?;
+        lower.extend((0..n).map(|k| (k, k, 0.0)));
+        let scale = equilibrate(n, &lower);
+        let scaled: Vec<Triplet<usize, usize, f64>> = lower
+            .iter()
+            .map(|&(r, c, v)| Triplet::new(r, c, v * scale[r] * scale[c]))
+            .collect();
+        let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &scaled).ok()?;
 
         let symbolic = factorize_symbolic_cholesky(
             mat.symbolic(),
@@ -104,6 +111,7 @@ impl SymmetricFactorization {
             symbolic,
             values,
             inertia,
+            scale,
         })
     }
 
@@ -118,7 +126,7 @@ impl SymmetricFactorization {
     /// Solves `K x = b`. `None` if the result is not finite.
     pub fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
         debug_assert_eq!(rhs.len(), self.n);
-        let mut x = Mat::<f64>::from_fn(self.n, 1, |i, _| rhs[i]);
+        let mut x = Mat::<f64>::from_fn(self.n, 1, |i, _| rhs[i] * self.scale[i]);
         let mut mem = MemBuffer::new(self.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq));
         LdltRef::new(&self.symbolic, &self.values).solve_in_place_with_conj(
             Conj::No,
@@ -126,9 +134,42 @@ impl SymmetricFactorization {
             Par::Seq,
             MemStack::new(&mut mem),
         );
-        let out: Vec<f64> = (0..self.n).map(|i| x[(i, 0)]).collect();
+        let out: Vec<f64> = (0..self.n).map(|i| x[(i, 0)] * self.scale[i]).collect();
         out.iter().all(|v| v.is_finite()).then_some(out)
     }
+}
+
+/// A symmetric equilibration `D` (Ruiz's iteration, a few passes): every
+/// row and column of `D K D` has its largest entry close to 1. An interior
+/// point's KKT matrix spans many orders of magnitude on one diagonal (the
+/// barrier's Σ runs from 1e-8 to 1e11 near a solution), which costs an
+/// unpivoted factorization the accuracy of the small components; IPOPT's
+/// MUMPS scales the same matrix before factorizing it. `D K D` is congruent
+/// to `K`, so the inertia is unchanged. `entries` is the lower triangle,
+/// duplicates summing.
+fn equilibrate(n: usize, entries: &[(usize, usize, f64)]) -> Vec<f64> {
+    // Duplicates summed first: a row's largest entry is of the matrix, not
+    // of the triplets that add up to it.
+    let mut summed: std::collections::HashMap<(usize, usize), f64> =
+        std::collections::HashMap::new();
+    for &(r, c, v) in entries {
+        *summed.entry((r, c)).or_insert(0.0) += v;
+    }
+    let mut scale = vec![1.0f64; n];
+    for _ in 0..5 {
+        let mut row_max = vec![0.0f64; n];
+        for (&(r, c), &v) in &summed {
+            let a = (v * scale[r] * scale[c]).abs();
+            row_max[r] = row_max[r].max(a);
+            row_max[c] = row_max[c].max(a);
+        }
+        for i in 0..n {
+            if row_max[i] > 0.0 && row_max[i].is_finite() {
+                scale[i] /= row_max[i].sqrt();
+            }
+        }
+    }
+    scale
 }
 
 /// `D`'s entries, in factorization order (the order does not matter for the

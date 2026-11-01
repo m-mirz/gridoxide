@@ -15,7 +15,8 @@
 //! Debian's IPOPT links MUMPS against OpenMPI, whose hwloc probes the X11
 //! display sockets at load and can block there for good (seen with a second
 //! display that accepts no connection). `HWLOC_COMPONENTS=-gl` skips that
-//! probe. `IPOPT_PRINT=5` prints IPOPT's own log.
+//! probe. `IPOPT_PRINT=5` prints IPOPT's own log. `OPF_START=proportional`
+//! starts from `AcOpfStart::Proportional` instead of the flat start.
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -65,8 +66,12 @@ fn case_path(name: &str) -> PathBuf {
 fn build(name: &str, log: bool) -> AcOpf {
     let text = std::fs::read_to_string(case_path(name)).expect("case file");
     let opf = matpower::ac_opf_network(&matpower::parse(&text).unwrap()).unwrap();
+    let start = match std::env::var("OPF_START").as_deref() {
+        Ok("proportional") => AcOpfStart::Proportional,
+        _ => AcOpfStart::Flat,
+    };
     let mut options = AcOpfOptions {
-        start: AcOpfStart::Flat,
+        start,
         ..AcOpfOptions::default()
     };
     options.nlp.log = log;

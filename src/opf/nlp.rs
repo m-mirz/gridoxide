@@ -31,8 +31,10 @@
 //!   full step does not reduce θ. A merit function's penalty weight rejected
 //!   good Newton steps on the PEGASE cases (the Maratos effect).
 //! - **Feasibility restoration** (`restoration`) when the line search
-//!   finds no step: Gauss–Newton steps toward feasibility until the filter
-//!   accepts a point.
+//!   finds no step: IPOPT's elastic ℓ1 problem, solved by this interior
+//!   point, until the filter accepts a point; then IPOPT's reset of the
+//!   multipliers. A Gauss–Newton restoration, the first version, was cut to
+//!   nothing by the bounds on case13659_pegase.
 //! - **A separate step for the bound multipliers**, the largest keeping them
 //!   positive, while the constraint multipliers follow the primal step.
 //! - **A monotone barrier**: μ is held while its subproblem is solved to a
@@ -53,11 +55,21 @@
 //! - an **acceptable** stop when the line search fails near feasibility at
 //!   an acceptable point, as IPOPT's restoration ends there.
 //!
+//! And on case13659_pegase (from the proportional start; from the flat
+//! start IPOPT fails on it too), whose path matched IPOPT's to eight digits
+//! once the solves were refined at least once (IPOPT's
+//! `min_refinement_steps`), it took IPOPT's restoration phase and an
+//! **equilibrated KKT matrix** (`SymmetricFactorization`, as IPOPT's MUMPS
+//! scales it) to solve. One departure from IPOPT is deliberate: its
+//! tiny-step rule (a negligible step is taken in full, near feasibility)
+//! at 1e-8 instead of 10 machine epsilons, the noise floor of an unpivoted
+//! factorization near an optimum.
+//!
 //! Not (yet) IPOPT's: the least-squares start of the multipliers (tried; it
 //! changed nothing on case9241_pegase and broke the piecewise-cost case5_pjm),
-//! the adaptive barrier, the watchdog, and a restoration phase that is an
-//! interior point of its own. Algorithm NCL (`NlpOptions::ncl`) is an
-//! opt-in outer loop for degenerate problems.
+//! the adaptive barrier, the watchdog, and pivoting in the factorization.
+//! Algorithm NCL (`NlpOptions::ncl`) is an opt-in outer loop for degenerate
+//! problems.
 //!
 //! # What it shares
 //!
@@ -440,6 +452,7 @@ fn ncl(problem: &dyn NonlinearProblem, options: &NlpOptions) -> Result<NlpSoluti
             &mut state,
             options,
             Barrier::Fixed { mu, tolerance },
+            &Control::SOLVE,
         )?;
         let converged = s.status == OptStatus::Optimal;
         let residual = norm_inf(&state.u[n..n + m]);
@@ -665,7 +678,30 @@ fn solve_scaled(
 ) -> Result<NlpSolution, OpfError> {
     let p = Internal::build(problem);
     let mut state = State::start(problem, &p, options);
-    run(problem, &p, &mut state, options, Barrier::Schedule)
+    run(
+        problem,
+        &p,
+        &mut state,
+        options,
+        Barrier::Schedule,
+        &Control::SOLVE,
+    )
+}
+
+/// What else may end or divert [`run`]: a test on each new iterate (its
+/// variables, as the problem orders them) that ends the run as solved, and
+/// whether a failed line search may enter the restoration phase (not inside
+/// the restoration phase itself, as in IPOPT).
+struct Control<'a> {
+    stop: Option<&'a dyn Fn(&[f64]) -> bool>,
+    restoration: bool,
+}
+
+impl Control<'_> {
+    const SOLVE: Control<'static> = Control {
+        stop: None,
+        restoration: true,
+    };
 }
 
 /// Where the barrier parameter comes from in [`run`].
@@ -770,6 +806,7 @@ fn run(
     state: &mut State,
     options: &NlpOptions,
     barrier: Barrier,
+    control: &Control,
 ) -> Result<NlpSolution, OpfError> {
     let (n_x, n_total, m_eq) = (p.n_x, p.n_total, p.m_eq);
     let dim = n_total + m_eq;
@@ -963,7 +1000,7 @@ fn run(
                     .fold(0.0f64, f64::max);
                 let solve = |rhs: &[f64]| -> Option<Vec<f64>> {
                     let mut d = factorization.solve(rhs)?;
-                    for _ in 0..options.refinement_rounds {
+                    for round in 0..options.refinement_rounds {
                         let mut residual = rhs.to_vec();
                         let du = &d[..n_total];
                         let w = &d[n_total..];
@@ -980,7 +1017,11 @@ fn run(
                         }
                         let ratio = norm_inf(&residual)
                             / (k_norm * norm_inf(&d) + norm_inf(rhs)).max(f64::MIN_POSITIVE);
-                        if ratio < 1e-10 {
+                        // IPOPT's `min_refinement_steps` = 1: at least one
+                        // round, whatever the first ratio. A first solve at
+                        // 9e-11 passed the test unrefined on
+                        // case13659_pegase, and its path left IPOPT's there.
+                        if ratio < 1e-10 && round > 0 {
                             break;
                         }
                         let Some(correction) = factorization.solve(&residual) else {
@@ -1093,6 +1134,22 @@ fn run(
                 // No acceptable step. Away from feasibility, the restoration
                 // phase takes over; near it, a larger δw turns the direction
                 // toward steepest descent and the search runs again.
+                // IPOPT's tiny-step rule: a step too small to matter
+                // numerically is taken in full, without a line search,
+                // near feasibility. IPOPT's threshold is 10 machine epsilons
+                // relative to the iterate; ours is 1e-8, the noise floor of
+                // an unpivoted factorization near an optimum. Without it,
+                // case2869_pegase (from the proportional start) took 0.1% of
+                // each step at the optimum, its constraint multipliers moved
+                // as little, and its dual error never fell below 2e-5.
+                let found = match found {
+                    None if theta <= filter.theta_min
+                        && norm_inf(&du) <= 1e-8 * (1.0 + norm_inf(&u)) =>
+                    {
+                        Some((du.clone(), dy.clone(), alpha_max, true))
+                    }
+                    found => found,
+                };
                 let Some((du, dy, alpha, f_type)) = found else {
                     if theta > filter.theta_min {
                         filter.add(theta, phi);
@@ -1138,6 +1195,9 @@ fn run(
             }
 
             if restore {
+                if !control.restoration {
+                    break 'solve OptStatus::Other("no acceptable step in the restoration phase");
+                }
                 let theta = norm_1(&r_p);
                 match restoration(
                     problem, p, &u, mu, theta, &filter, &has_lower, &has_upper, options,
@@ -1153,6 +1213,21 @@ fn run(
                             );
                         }
                         u = restored;
+                        // IPOPT's multipliers after restoration: the
+                        // constraint multipliers to zero
+                        // (`constr_mult_reset_threshold` = 0), the bound
+                        // multipliers to one if any exceeds 1000
+                        // (`bound_mult_reset_threshold`). Kept, the multipliers
+                        // that stalled the line search stall it again: on
+                        // case13659_pegase IPOPT's dual error fell from 3e7 to
+                        // 98 at this reset, and its steps from 1e-3 to 0.06.
+                        y.iter_mut().for_each(|v| *v = 0.0);
+                        if norm_inf(&z_l).max(norm_inf(&z_u)) > 1e3 {
+                            for k in 0..n_total {
+                                z_l[k] = if has_lower[k] { 1.0 } else { 0.0 };
+                                z_u[k] = if has_upper[k] { 1.0 } else { 0.0 };
+                            }
+                        }
                         continue;
                     }
                     None => {
@@ -1173,29 +1248,6 @@ fn run(
                 );
             };
 
-            if options.log {
-                if iterations == 1 {
-                    eprintln!(
-                        "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha    ls"
-                    );
-                }
-                eprintln!(
-                    "{:4} {:+.7e} {:.2e} {:.2e} {:6.2} {:.2e} {:6.2} {:.2e} {:3}",
-                    iterations,
-                    f,
-                    norm_inf(&r_p),
-                    norm_inf(&r_d) / s_d,
-                    mu.log10(),
-                    norm_inf(&du),
-                    if gamma > 0.0 {
-                        gamma.log10()
-                    } else {
-                        f64::NEG_INFINITY
-                    },
-                    alpha,
-                    trials,
-                );
-            }
             // The bound multipliers take their own step, the largest that keeps
             // them positive (IPOPT's default; the constraint multipliers follow
             // the primal step). Tied to a primal step cut short by a bound, they
@@ -1213,6 +1265,30 @@ fn run(
                 }
                 a
             };
+            if options.log {
+                if iterations == 1 {
+                    eprintln!(
+                        "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr ls"
+                    );
+                }
+                eprintln!(
+                    "{:4} {:+.7e} {:.2e} {:.2e} {:6.2} {:.2e} {:6.2} {:.2e} {:.2e} {:3}",
+                    iterations,
+                    f,
+                    norm_inf(&r_p),
+                    norm_inf(&r_d) / s_d,
+                    mu.log10(),
+                    norm_inf(&du),
+                    if gamma > 0.0 {
+                        gamma.log10()
+                    } else {
+                        f64::NEG_INFINITY
+                    },
+                    alpha_z,
+                    alpha,
+                    trials,
+                );
+            }
             for k in 0..n_total {
                 u[k] += alpha * du[k];
                 z_l[k] += alpha_z * dz_l[k];
@@ -1236,6 +1312,11 @@ fn run(
                     let center = mu / (p.upper[k] - u[k]);
                     z_u[k] = z_u[k].clamp(center / 1e10, center * 1e10).max(1e-14);
                 }
+            }
+            if let Some(stop) = control.stop
+                && stop(&u[..n_x])
+            {
+                break 'solve OptStatus::Optimal;
             }
         }
 
@@ -1532,24 +1613,26 @@ fn evaluate(
     theta.is_finite().then_some((theta, phi, r))
 }
 
-/// The feasibility restoration phase, simplified from IPOPT's (Wächter &
-/// Biegler 2006, §3.3): entered when the filter line search finds no step,
-/// left at the first point that reduces the violation θ by the filter's
-/// margin and that the filter (already holding the point restoration started
-/// from) accepts. Returns that point and the number of steps, or `None`.
+/// IPOPT's feasibility restoration phase (Wächter & Biegler 2006, §3.3):
+/// entered when the filter line search finds no step, it minimizes the
+/// violation of the problem's constraints, elastically,
 ///
-/// Each step is the minimum-norm Gauss–Newton step toward feasibility,
-/// \\(\min \tfrac12 \lVert D\,d \rVert^2\\) s.t. \\(A d = -\hat c\\), with
-/// \\(D^2 = \Sigma + \zeta I\\): \\(\Sigma = \mu/s^2\\) the barrier's
-/// curvature on every bound slack, which keeps the step away from the
-/// bounds, and \\(\zeta = \sqrt\mu\\) a proximity weight, as in IPOPT's
-/// restoration objective. Its KKT matrix is quasi-definite, so it always
-/// factorizes. The step is cut to the bounds and halved until θ falls by
-/// the filter's margin.
+/// \\[ \min_{x,p,n}\ \rho \sum_i (p_i + n_i) + \tfrac{\zeta}{2} \lVert D_R (x - x_R) \rVert^2
+///    \quad\text{s.t.}\quad c_L \le c(x) - p + n \le c_U,\ x_L \le x \le x_U,\ p, n \ge 0, \\]
 ///
-/// IPOPT instead solves a whole ℓ1 penalty problem by its own interior
-/// point; this keeps the part that matters here, moving to a point the
-/// filter accepts, without a second barrier problem.
+/// by this interior point itself ([`run`], on [`Resto`]), from the barrier
+/// `max(μ, ‖violation‖∞)`, and returns at the first iterate whose `x` the
+/// original problem's filter accepts with its violation reduced to 0.9 of
+/// where restoration began (`required_infeasibility_reduction`). IPOPT's
+/// values: ρ = 1000, ζ = √μ, `D_R = diag(min(1, 1/|x_R|))`, and `p`, `n`
+/// started at the closed-form minimizer of the barrier problem in them.
+///
+/// The elastic variables are what a Gauss–Newton step lacks: it must meet
+/// every linearized constraint at once within the bounds, and on a crawling
+/// iterate (case13659_pegase) the bounds cut it to nothing; here a row may
+/// stay violated while the others improve. Returns the original problem's
+/// iterate (its slacks set from `c(x)`, pushed inside their bounds) and the
+/// restoration's iterations, or `None`.
 #[allow(clippy::too_many_arguments)]
 fn restoration(
     problem: &dyn NonlinearProblem,
@@ -1562,78 +1645,170 @@ fn restoration(
     has_upper: &[bool],
     options: &NlpOptions,
 ) -> Option<(Vec<f64>, usize)> {
-    const MAX_STEPS: usize = 100;
-    let (n, m) = (p.n_total, p.m_eq);
-    let zeta = mu.sqrt();
-    let mut u = start.to_vec();
-    for step in 1..=MAX_STEPS {
-        let x = &u[..p.n_x];
-        let r = p.residual(&problem.constraints(x), &u);
-        let theta = norm_1(&r);
-        let a = p.jacobian(&problem.jacobian(x));
-        let g: Vec<f64> = (0..n)
-            .map(|k| if has_lower[k] { u[k] - p.lower[k] } else { 1.0 })
-            .collect();
-        let t: Vec<f64> = (0..n)
-            .map(|k| if has_upper[k] { p.upper[k] - u[k] } else { 1.0 })
-            .collect();
-        let d2: Vec<f64> = (0..n)
-            .map(|k| {
-                zeta + (if has_lower[k] {
-                    mu / (g[k] * g[k])
-                } else {
-                    0.0
-                }) + (if has_upper[k] {
-                    mu / (t[k] * t[k])
-                } else {
-                    0.0
-                })
-            })
-            .collect();
-        let factorization = Kkt::new(&[], &a, &d2, p, options.dual_regularization)?;
-        let mut rhs = vec![0.0; n + m];
-        for row in 0..m {
-            rhs[n + row] = -r[row];
-        }
-        let mut d = factorization.solve(&rhs)?;
-        for _ in 0..options.refinement_rounds {
-            let du = &d[..n];
-            let atw = mat_transpose_vec(&a, &d[n..], n);
-            let adu = mat_vec(&a, du, m);
-            let mut residual = rhs.clone();
-            for k in 0..n {
-                residual[k] -= d2[k] * du[k] + atw[k];
+    const RHO: f64 = 1e3;
+    let (n, m) = (p.n_x, problem.n_constraints());
+    let x_r = start[..n].to_vec();
+    let c = problem.constraints(&x_r);
+    let (c_lo, c_hi) = problem.constraint_bounds();
+    let violation: Vec<f64> = (0..m)
+        .map(|r| {
+            if c[r] > c_hi[r] {
+                c[r] - c_hi[r]
+            } else if c[r] < c_lo[r] {
+                c[r] - c_lo[r]
+            } else {
+                0.0
             }
-            for row in 0..m {
-                residual[n + row] -= adu[row];
-            }
-            let correction = factorization.solve(&residual)?;
-            d.iter_mut().zip(&correction).for_each(|(di, ci)| *di += ci);
-        }
-        let du = &d[..n];
+        })
+        .collect();
+    let mu_r = mu.max(norm_inf(&violation));
+    // The minimizer of ρ(p + n) − μ ln p − μ ln n subject to p − n = v.
+    let elastic = |v: f64| {
+        let a = (mu_r - RHO * v) / (2.0 * RHO);
+        let n_r = a + (a * a + mu_r * v / (2.0 * RHO)).sqrt();
+        (v + n_r, n_r)
+    };
+    let mut start_r = x_r.clone();
+    let (ps, ns): (Vec<f64>, Vec<f64>) = violation.iter().map(|&v| elastic(v)).unzip();
+    start_r.extend(&ps);
+    start_r.extend(&ns);
+    let resto = Resto {
+        inner: problem,
+        d: x_r.iter().map(|v| (1.0 / v.abs()).min(1.0)).collect(),
+        x_r,
+        zeta: mu.sqrt(),
+        rho: RHO,
+        start: start_r,
+    };
+    let rp = Internal::build(&resto);
+    let r_options = NlpOptions {
+        initial_barrier: mu_r,
+        ncl: false,
+        ..*options
+    };
+    let mut state = State::start(&resto, &rp, &r_options);
 
-        let mut alpha = fraction_to_boundary(n, has_lower, has_upper, &g, &t, du, options.tau);
-        let next = loop {
-            if alpha < options.min_step {
-                return None;
+    // The original problem's iterate at a restoration point's x: its slacks
+    // set from c(x), pushed inside their bounds as at the start.
+    let original = |x: &[f64]| -> Vec<f64> {
+        let mut u = start.to_vec();
+        u[..n].copy_from_slice(&x[..n]);
+        let c = problem.constraints(&u[..n]);
+        for (r, slack) in p.slack_of.iter().enumerate() {
+            if let Some(k) = *slack {
+                let (lo, hi) = (p.lower[k], p.upper[k]);
+                let width = hi - lo;
+                let mut s = c[r];
+                if has_lower[k] {
+                    s = s.max(lo + (1e-2 * lo.abs().max(1.0)).min(1e-2 * width));
+                }
+                if has_upper[k] {
+                    s = s.min(hi - (1e-2 * hi.abs().max(1.0)).min(1e-2 * width));
+                }
+                u[k] = s;
             }
-            let trial: Vec<f64> = (0..n).map(|k| u[k] + alpha * du[k]).collect();
-            if let Some((th, _, _)) = evaluate(problem, p, &trial, mu, has_lower, has_upper)
-                && th <= (1.0 - Filter::GAMMA_THETA) * theta
-            {
-                break trial;
-            }
-            alpha *= 0.5;
-        };
-        u = next;
-        if let Some((th, ph, _)) = evaluate(problem, p, &u, mu, has_lower, has_upper)
-            && th <= (1.0 - Filter::GAMMA_THETA) * theta_start
-            && filter.admits(th, ph)
-        {
-            return Some((u, step));
         }
+        u
+    };
+    let acceptable = |x: &[f64]| {
+        let u = original(x);
+        evaluate(problem, p, &u, mu, has_lower, has_upper)
+            .is_some_and(|(th, ph, _)| th <= 0.9 * theta_start && filter.admits(th, ph))
+    };
+    let control = Control {
+        stop: Some(&acceptable),
+        restoration: false,
+    };
+    let solved = run(
+        &resto,
+        &rp,
+        &mut state,
+        &r_options,
+        Barrier::Schedule,
+        &control,
+    )
+    .ok()?;
+    (solved.status == OptStatus::Optimal && acceptable(&solved.x))
+        .then(|| (original(&solved.x), state.iterations))
+}
+
+/// IPOPT's restoration problem (see [`restoration`]): the original variables,
+/// then `p` and `n` per constraint row.
+struct Resto<'a> {
+    inner: &'a dyn NonlinearProblem,
+    x_r: Vec<f64>,
+    d: Vec<f64>,
+    zeta: f64,
+    rho: f64,
+    start: Vec<f64>,
+}
+
+impl NonlinearProblem for Resto<'_> {
+    fn n_vars(&self) -> usize {
+        self.inner.n_vars() + 2 * self.inner.n_constraints()
     }
-    None
+    fn n_constraints(&self) -> usize {
+        self.inner.n_constraints()
+    }
+    fn var_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        let m = self.inner.n_constraints();
+        let (mut lo, mut hi) = self.inner.var_bounds();
+        lo.extend(std::iter::repeat_n(0.0, 2 * m));
+        hi.extend(std::iter::repeat_n(f64::INFINITY, 2 * m));
+        (lo, hi)
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        self.inner.constraint_bounds()
+    }
+    fn objective(&self, x: &[f64]) -> f64 {
+        let n = self.inner.n_vars();
+        let proximity: f64 = (0..n)
+            .map(|i| (self.d[i] * (x[i] - self.x_r[i])).powi(2))
+            .sum();
+        self.rho * x[n..].iter().sum::<f64>() + 0.5 * self.zeta * proximity
+    }
+    fn gradient(&self, x: &[f64]) -> Vec<f64> {
+        let n = self.inner.n_vars();
+        let mut g: Vec<f64> = (0..n)
+            .map(|i| self.zeta * self.d[i] * self.d[i] * (x[i] - self.x_r[i]))
+            .collect();
+        g.extend(std::iter::repeat_n(self.rho, x.len() - n));
+        g
+    }
+    fn constraints(&self, x: &[f64]) -> Vec<f64> {
+        let (n, m) = (self.inner.n_vars(), self.inner.n_constraints());
+        let mut c = self.inner.constraints(&x[..n]);
+        for r in 0..m {
+            c[r] += x[n + m + r] - x[n + r];
+        }
+        c
+    }
+    fn jacobian(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
+        let (n, m) = (self.inner.n_vars(), self.inner.n_constraints());
+        let mut j = self.inner.jacobian(&x[..n]);
+        j.extend((0..m).map(|r| (r, n + r, -1.0)));
+        j.extend((0..m).map(|r| (r, n + m + r, 1.0)));
+        j
+    }
+    /// The constraints' curvature alone: the problem's Hessian with these
+    /// multipliers, less its Hessian with none (the objective's), plus the
+    /// proximity term's.
+    fn lagrangian_hessian(&self, x: &[f64], y: &[f64]) -> Vec<(usize, usize, f64)> {
+        let n = self.inner.n_vars();
+        let mut h = self.inner.lagrangian_hessian(&x[..n], y);
+        let zero = vec![0.0; y.len()];
+        h.extend(
+            self.inner
+                .lagrangian_hessian(&x[..n], &zero)
+                .into_iter()
+                .map(|(i, j, v)| (i, j, -v)),
+        );
+        h.extend((0..n).map(|i| (i, i, self.zeta * self.d[i] * self.d[i])));
+        h
+    }
+    fn initial_point(&self) -> Vec<f64> {
+        self.start.clone()
+    }
 }
 
 /// IPOPT's filter (Wächter & Biegler 2006, §2.3–2.4, and IPOPT's defaults).
