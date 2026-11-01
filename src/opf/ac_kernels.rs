@@ -655,6 +655,64 @@ impl AcKernels {
     }
 }
 
+#[cfg(feature = "gpu")]
+impl Merge {
+    fn gather(&self) -> gridoxide_gpu::ac::Gather {
+        gridoxide_gpu::ac::Gather {
+            slots: self.slot.len(),
+            start: self.start.clone(),
+            sources: self.sources.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl AcKernels {
+    /// The model's arrays and merge maps for the device
+    /// (`gridoxide_gpu::ac::DeviceAcModel`), whose kernels are this
+    /// module's functions in CUDA.
+    pub fn device_data(&self, n_vars: usize) -> gridoxide_gpu::ac::AcModelData {
+        let pair = |c: &Complex<f64>| [c.re, c.im];
+        let n_rows = 2 * self.n
+            + self.limit_terminal.len()
+            + self.angle.len()
+            + self.cost.len()
+            + if self.flow.is_some() {
+                2 * self.terminal_count()
+            } else {
+                0
+            };
+        gridoxide_gpu::ac::AcModelData {
+            n: self.n,
+            theta: self.theta,
+            vm: self.vm,
+            pg: self.pg,
+            qg: self.qg,
+            near: self.near.clone(),
+            far: self.far.clone(),
+            y_self: self.y_self.iter().map(pair).collect(),
+            y_mut: self.y_mut.iter().map(pair).collect(),
+            shunt: self.shunt.iter().map(pair).collect(),
+            p_load: self.p_load.clone(),
+            q_load: self.q_load.clone(),
+            term_ptr: self.terminals_at.ptr.clone(),
+            term_idx: self.terminals_at.idx.clone(),
+            gen_ptr: self.generators_at.ptr.clone(),
+            gen_idx: self.generators_at.idx.clone(),
+            gen_bus: self.gen_bus.clone(),
+            quadratic: self.quadratic.clone(),
+            limit_terminal: self.limit_terminal.clone(),
+            angle: self.angle.clone(),
+            cost: self.cost.clone(),
+            flow: self.flow,
+            n_vars,
+            n_rows,
+            jacobian: self.jacobian_merge.gather(),
+            hessian: self.hessian_merge.gather(),
+        }
+    }
+}
+
 /// Writes `count` elements' blocks of `K` entries, element `e`'s from
 /// `block(e)`, at the front of `out`, and returns the rest. In parallel
 /// above a few thousand elements, where it pays (case14's whole Hessian is

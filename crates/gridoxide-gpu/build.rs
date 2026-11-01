@@ -95,6 +95,8 @@ mod cudss {
         println!("cargo:rerun-if-changed={}", cudss_include.display());
         println!("cargo:rerun-if-changed=cuda/kernels.cu");
         println!("cargo:rerun-if-changed=cuda/kernels.h");
+        println!("cargo:rerun-if-changed=cuda/opf.cu");
+        println!("cargo:rerun-if-changed=cuda/opf.h");
     }
 
     /// cuDSS 0.8.0 computes wrong solutions in a uniform batch (NaN for some
@@ -138,6 +140,17 @@ mod cudss {
             .include(cuda_include)
             .flag(format!("-arch={arch}"))
             .compile("gridoxide_gpu_kernels");
+        // The AC-OPF model (cuda/opf.cu) without FMA contraction: every value
+        // that involves no sine or cosine then rounds as the CPU's
+        // `opf::ac_kernels` does, which its tests hold it to.
+        cc::Build::new()
+            .cuda(true)
+            .cudart("shared")
+            .file("cuda/opf.cu")
+            .include(cuda_include)
+            .flag(format!("-arch={arch}"))
+            .flag("-fmad=false")
+            .compile("gridoxide_gpu_opf");
     }
 
     fn generate_bindings(cudss_include: &Path, cuda_include: &Path) {
@@ -145,7 +158,7 @@ mod cudss {
         let mut builder = bindgen::Builder::default()
             .header_contents(
                 "cudss_wrapper.h",
-                "#include <cudss.h>\n#include <cuda_runtime.h>\n#include \"kernels.h\"\n",
+                "#include <cudss.h>\n#include <cuda_runtime.h>\n#include \"kernels.h\"\n#include \"opf.h\"\n",
             )
             .clang_arg(format!("-I{}", cudss_include.display()))
             .clang_arg(format!("-I{}", cuda_include.display()))
@@ -156,7 +169,9 @@ mod cudss {
             .allowlist_function(
                 "cuda(Malloc|Free|MallocHost|FreeHost|Memcpy|MemcpyAsync|GetErrorString|Stream(Create|Destroy|Synchronize|WaitEvent)|Event(CreateWithFlags|Record|Synchronize|Destroy))",
             )
-            .allowlist_type("cudss.*|cudaError.*|cudaDataType.*|cudaMemcpyKind|cudaStream_t|cudaEvent_t")
+            .allowlist_type(
+                "cudss.*|cudaError.*|cudaDataType.*|cudaMemcpyKind|cudaStream_t|cudaEvent_t|go_.*",
+            )
             // The value types are CUDA's `CUDA_R_*`: cuDSS 1.0 makes
             // `CUDSS_R_*` macros over them, which bindgen cannot expand.
             .allowlist_var("CUDSS_.*|CUDA_R_(32I|64F)|cudaEventDisableTiming")

@@ -21,8 +21,11 @@
 //! [`GpuDcSolver`](dc::GpuDcSolver), DC N-1: one factorization, every
 //! outage's angles and flows from one multi-column solve. And
 //! [`CudssSolver`](kkt::CudssSolver), the KKT system of `opf::nlp`'s
-//! interior point on cuDSS.
+//! interior point on cuDSS, and [`DeviceAcModel`](ac::DeviceAcModel), the
+//! AC-OPF model it solves, evaluated on the device.
 
+#[cfg(feature = "cuda")]
+pub mod ac;
 #[cfg(feature = "cuda")]
 mod cuda;
 #[cfg(feature = "cuda")]

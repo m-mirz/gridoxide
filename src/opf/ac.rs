@@ -422,6 +422,17 @@ impl AcOpf {
         &self.ybus
     }
 
+    /// The model's constraints, Jacobian and Lagrangian Hessian on the GPU:
+    /// the same kernels as this model's own, one thread per element. The
+    /// values come in the order of this model's triplets
+    /// ([`NonlinearProblem::jacobian`], `lagrangian_hessian`).
+    #[cfg(feature = "gpu")]
+    pub fn device_model(
+        &self,
+    ) -> Result<gridoxide_gpu::ac::DeviceAcModel, gridoxide_gpu::LinearError> {
+        gridoxide_gpu::ac::DeviceAcModel::new(&self.kernels.device_data(self.n_vars))
+    }
+
     /// Solves, and interprets the result in physical units.
     pub fn solve(&self) -> Result<AcOpfResult, OpfError> {
         let solution = crate::opf::nlp::solve(self, &self.options.nlp)?;

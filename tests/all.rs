@@ -217,6 +217,9 @@ mod opf_data_test;
 #[cfg(feature = "opf")]
 #[path = "opf_dc_test.rs"]
 mod opf_dc_test;
+#[cfg(all(feature = "gpu", feature = "opf", feature = "matpower"))]
+#[path = "opf_gpu_test.rs"]
+mod opf_gpu_test;
 #[cfg(feature = "opf-highs")]
 #[path = "opf_highs_test.rs"]
 mod opf_highs_test;
