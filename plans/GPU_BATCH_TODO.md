@@ -59,18 +59,30 @@ voltages back to the host.
 ## Beyond batch power flows
 
 The device solves AC sweeps (`GpuBatchSolver.solve_batch`), AC N-1
-(`GpuBatchSolver.solve_contingencies`) and DC N-1
-(`GpuDcSolver.solve_contingencies`). Everything else is CPU only.
+(`GpuBatchSolver.solve_contingencies`), DC N-1
+(`GpuDcSolver.solve_contingencies`), DC sweeps
+(`GpuDcSolver.solve_sweep`) and single AC and DC power flows
+(`GpuBatchSolver.solve_single`, `GpuDcSolver.solve`). Everything else is CPU
+only.
 
-- [ ] **DC sweeps.** `GpuDcSolver` already keeps one factorization; a sweep
-  of injection scenarios is one multi-column solve over their right-hand
-  sides. The cheapest addition.
+- [ ] **DC sweeps.** Built: `GpuDcSolver::solve_sweep`, one multi-column
+  solve per chunk on the session's factorization, through N-1's two-slot
+  pipeline. Written and type-checked without a GPU. Still to do on the
+  A100: run `tests/dc_test.rs` and the sweep test in
+  `python/tests/test_gpu.py`, then time it against the CPU's
+  `DcBatchSolver` (`examples/gpu_dc_sweep_bench.rs`).
 - [ ] **A linear start for AC.** The CPU's `start="linear"` has no device
   counterpart; every scenario starts from the last `solve()`. A DC solve per
   scenario on the device would give it one.
-- [ ] **Single AC or DC power flow.** One system is cuDSS's worst case (a
-  roughly fixed cost per system), so this is worth it only on grids large
-  enough to fill the device. Measure before building.
+- [ ] **Single AC or DC power flow.** Built ahead of the measurement:
+  `GpuBatchSolver::solve_single` (a batch of one from the given buses) and
+  `GpuDcSolver::solve` (the CPU's `DcSolver` with its reduced solve on the
+  device, through `DcSolver::solve_with`), in Python as
+  `GpuBatchSolver.solve_single` and `GpuDcSolver.solve`. Written and
+  type-checked without a GPU. Still to do on the A100: run the tests, then
+  `examples/gpu_single_bench.rs` (cold and warm against the CPU) on the
+  largest cases. One system is cuDSS's worst case (a roughly fixed cost per
+  system), so expect a win only on grids large enough to fill the device.
 - [x] **AC-OPF's KKT solves** on the device: `kkt::CudssSolver` behind
   `opf::nlp`'s `SymmetricSolver` (cuDSS `LDLᵀ` with inertia, and Cholesky
   for HyKKT). See docs/src/opf/index.md, "On the GPU".
@@ -79,9 +91,10 @@ The device solves AC sweeps (`GpuBatchSolver.solve_batch`), AC N-1
   GOC cases. The KKT assembly, equilibration and refinement products are
   on the device now, and the model with `AcOpf::evaluate_on_device`
   (case24464_goc: 93 ms an iteration, from 208). Left on the host: the KKT
-  triplets (12 ms there), the interior point's vector work around the
-  solves (about 30 ms), and cuDSS's 4.75 solves an iteration (18.5 ms).
-  Next: the KKT values built from the model's on the device, without the
-  host's triplets.
+  triplets (sent as values since, stage 2b), the interior point's vector
+  work around the solves (about 30 ms), and cuDSS's 4.75 solves an
+  iteration (18.5 ms). Against ExaModelsPower now (benchmark mode):
+  faster to case2869_pegase, 1.2-2.2x slower on the GOC cases, mostly
+  iteration counts (case10000_goc: 99 against 63).
 - [ ] **State estimation.** Batched SE over measurement sets. Large work;
   only after the batch is competitive.

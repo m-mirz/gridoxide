@@ -159,6 +159,24 @@ int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned* lo_ptr,
                 const unsigned* lo_col, const unsigned* lo_src, const double* values,
                 const double* x, double* y, unsigned n, void* stream);
 
+/* DC sweeps (src/dc.rs), for k injection scenarios at a time, on the same
+ * network tables and layout as DC N-1 above. */
+
+/* rhs = 0 (n x k), then rhs[rows[e], cols[e]] = vals[e] for each of the
+ * `count` entries: each scenario's injection change at its unknowns, at most
+ * one entry per row and column. */
+int go_dc_injection_rhs(const unsigned* cols, const unsigned* rows, const double* vals,
+                        unsigned count, double* rhs, unsigned n, unsigned k, void* stream);
+
+/* angles[col, bus] = base_angles[bus] + theta[pos[bus], col]. */
+int go_dc_sweep_angles(const double* theta, const int* pos, const double* base_angles,
+                       double* angles, unsigned n, unsigned n_bus, unsigned k, void* stream);
+
+/* flows[col, j] = base_flows[j] + b_j (theta[from_j, col] - theta[to_j, col]). */
+int go_dc_sweep_flows(const double* theta, const unsigned* br_from, const unsigned* br_to,
+                      const double* br_b, const int* pos, const double* base_flows,
+                      double* flows, unsigned n, unsigned n_br, unsigned k, void* stream);
+
 #ifdef __cplusplus
 }
 #endif

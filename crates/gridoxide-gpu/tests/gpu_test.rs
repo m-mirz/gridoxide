@@ -303,3 +303,78 @@ fn a_session_solves_again() {
         BatchError::BranchesUnknown
     );
 }
+
+/// A single power flow (`solve_single`) from the linear start: the CPU
+/// stand-in's steps and outcome for a batch of one, the CPU's
+/// `PersistentSolver` voltages to 1e-8, written back into the buses. The
+/// session's own start is unchanged for later batches, and buses of another
+/// network are refused.
+#[test]
+fn a_single_power_flow_matches_the_cpu() {
+    let (net, base, ybus) = load("matpower/case1354pegase.m");
+    let mut start = net.buses.clone();
+    linear_initial_guess(&mut start, &ybus);
+    let opts = BatchOptions {
+        tol: 1e-8,
+        ..BatchOptions::default()
+    };
+    let mut gpu = GpuBatchSolver::new(&base, &ybus, 1).unwrap();
+
+    let mut got = start.clone();
+    let r = gpu.solve_single(&mut got, &opts).unwrap();
+    let stand_in = cpu(&start, &ybus, &[Scenario::default()], &opts).unwrap();
+    assert_eq!(r.outcome, Outcome::Converged);
+    assert_eq!(r.outcome, stand_in.scenarios[0].outcome);
+    assert_eq!(r.newton_steps, stand_in.scenarios[0].newton_steps);
+    assert!(r.final_mismatch <= opts.tol);
+
+    let mut want = start.clone();
+    let (_, stats) = PersistentSolver::new(JacobianBackend::KluNative).solve_with_stats(
+        &mut want,
+        &ybus,
+        opts.tol,
+        opts.max_iter,
+    );
+    assert_eq!(stats.status, SolveStatus::Converged);
+    let dv = got
+        .iter()
+        .zip(&want)
+        .map(|(g, w)| {
+            (g.voltage_mag - w.voltage_mag)
+                .abs()
+                .max((g.voltage_ang - w.voltage_ang).abs())
+        })
+        .fold(0.0, f64::max);
+    assert!(dv < 1e-8, "max |dV| {dv:e}");
+
+    // Again on the same session, and a batch afterwards from the session's
+    // own (solved) start: no step to take.
+    let mut again = start.clone();
+    gpu.solve_single(&mut again, &opts).unwrap();
+    let state = |buses: &[Bus]| -> Vec<(f64, f64)> {
+        buses
+            .iter()
+            .map(|b| (b.voltage_mag, b.voltage_ang))
+            .collect()
+    };
+    assert_eq!(state(&again), state(&got));
+    let batch = gpu.solve(&[Scenario::default()], &opts).unwrap();
+    assert_eq!(batch.scenarios[0].newton_steps, 0);
+
+    assert!(matches!(
+        gpu.solve_single(&mut start[..10].to_vec(), &opts),
+        Err(BatchError::NotTheSessionsBuses { bus: None, .. })
+    ));
+    let slack = start
+        .iter()
+        .position(|b| b.bus_type == gridoxide::types::BusType::Slack)
+        .unwrap();
+    let mut retyped = start.clone();
+    retyped[slack].bus_type = gridoxide::types::BusType::PV;
+    assert!(matches!(
+        gpu.solve_single(&mut retyped, &opts),
+        Err(BatchError::NotTheSessionsBuses {
+            bus: Some(b), ..
+        }) if b == slack
+    ));
+}

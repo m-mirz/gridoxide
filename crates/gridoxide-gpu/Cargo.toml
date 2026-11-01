@@ -52,5 +52,13 @@ name = "gpu_dc_bench"
 required-features = ["cuda"]
 
 [[example]]
+name = "gpu_dc_sweep_bench"
+required-features = ["cuda"]
+
+[[example]]
+name = "gpu_single_bench"
+required-features = ["cuda"]
+
+[[example]]
 name = "lu_counts"
 required-features = ["cuda"]

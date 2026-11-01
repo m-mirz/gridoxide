@@ -1,12 +1,14 @@
-// Syntax-check stand-in for the CUDA runtime header: the declarations probe.cpp uses,
-// with the real signatures (CUDA 12 runtime API). Valid C as well as C++, so that
-// crates/gridoxide-gpu's bindgen (which parses C) can be checked against it too.
+// Syntax-check stand-in for the CUDA runtime header: the declarations probe.cpp and
+// crates/gridoxide-gpu use, with the real signatures (CUDA 12 runtime API). Valid C as
+// well as C++, so that crates/gridoxide-gpu's bindgen (which parses C) can be checked
+// against it too.
 #pragma once
 #include <stddef.h>
 #include "library_types.h"
 typedef struct CUstream_st* cudaStream_t;
 typedef struct CUevent_st* cudaEvent_t;
 typedef enum cudaError { cudaSuccess = 0 } cudaError_t;
+#define cudaEventDisableTiming 0x02
 enum cudaMemcpyKind { cudaMemcpyHostToHost = 0, cudaMemcpyHostToDevice = 1, cudaMemcpyDeviceToHost = 2, cudaMemcpyDeviceToDevice = 3 };
 #ifdef __cplusplus
 extern "C" {
@@ -14,13 +16,17 @@ extern "C" {
 const char* cudaGetErrorString(cudaError_t error);
 cudaError_t cudaMalloc(void** devPtr, size_t size);
 cudaError_t cudaFree(void* devPtr);
+cudaError_t cudaMallocHost(void** ptr, size_t size);
+cudaError_t cudaFreeHost(void* ptr);
 cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, enum cudaMemcpyKind kind);
 cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, enum cudaMemcpyKind kind, cudaStream_t stream);
 cudaError_t cudaMemGetInfo(size_t* free, size_t* total);
 cudaError_t cudaStreamCreate(cudaStream_t* pStream);
 cudaError_t cudaStreamDestroy(cudaStream_t stream);
 cudaError_t cudaStreamSynchronize(cudaStream_t stream);
+cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags);
 cudaError_t cudaEventCreate(cudaEvent_t* event);
+cudaError_t cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags);
 cudaError_t cudaEventDestroy(cudaEvent_t event);
 cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
 cudaError_t cudaEventSynchronize(cudaEvent_t event);

@@ -413,6 +413,15 @@ impl DeviceBatch {
         self.batch
     }
 
+    /// The state later [`load`](Self::load)s start every scenario from:
+    /// `start`'s voltages and injections. Its bus types and ZIP terms must
+    /// be the network's, which the caller has checked or accepts: the
+    /// pattern and the ZIP terms were taken when the batch was made.
+    pub(crate) fn set_start(&mut self, start: &[Bus]) {
+        assert_eq!(start.len(), self.n_bus, "one state per bus");
+        self.start = start.to_vec();
+    }
+
     /// Unknowns per scenario: the length of its mismatch and update.
     pub fn n(&self) -> usize {
         self.n_ns + self.n_pq

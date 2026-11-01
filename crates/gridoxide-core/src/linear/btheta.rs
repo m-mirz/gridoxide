@@ -434,6 +434,20 @@ pub fn dc_power_flow(
     DcSolver::new(buses, lines, transformers, opts).solve(buses)
 }
 
+/// One island's reduced system `B θ = rhs`, handed to
+/// [`DcSolver::solve_with`]'s solver.
+#[derive(Clone, Debug)]
+pub struct DcSystem<'a> {
+    /// The island's index in [`DcSolution::islands`].
+    pub island: usize,
+    /// Its unknowns (the non-reference buses), the rows of `rhs` in order.
+    pub unknown: &'a [usize],
+    pub rhs: Vec<f64>,
+    /// Whether `DcSolver` could factor its `B`; one it could not is
+    /// singular, and `solve` reports it so.
+    pub factored: bool,
+}
+
 /// [`dc_power_flow`] split where the network's state stops mattering: `new`
 /// does everything the topology and the reference buses decide (the branch
 /// reduction, the islands, each island's unknowns and the factorization of
@@ -529,14 +543,67 @@ impl DcSolver {
     /// Solves for `buses`' injections, writing angles back as
     /// [`dc_power_flow`] does.
     pub fn solve(&self, buses: &mut [Bus]) -> DcSolution {
+        self.solve_with(buses, |systems| {
+            systems
+                .iter()
+                .map(|sys| {
+                    self.islands[sys.island]
+                        .1
+                        .as_ref()
+                        .and_then(|f| f.solve(&sys.rhs))
+                })
+                .collect()
+        })
+    }
+
+    /// As [`solve`](Self::solve), with the reduced systems solved by
+    /// `solve_all` rather than by this solver's own factorizations: given
+    /// every island's [`DcSystem`] (those with a reference bus and at least
+    /// one unknown), it returns each one's angles in the same order, `None`
+    /// for one it could not solve (reported as
+    /// [`Singular`](DcIslandStatus::Singular)). Everything else, the
+    /// right-hand sides and the flows, residual and pickups from the angles,
+    /// is `solve`'s. gridoxide-gpu solves all of them in one device solve.
+    pub fn solve_with(
+        &self,
+        buses: &mut [Bus],
+        solve_all: impl FnOnce(&[DcSystem<'_>]) -> Vec<Option<Vec<f64>>>,
+    ) -> DcSolution {
         assert_eq!(
             buses.len(),
             self.n,
             "a DcSolver solves the network it was built for"
         );
         let branches = &self.branches;
-        let reduced_pos = &self.reduced_pos;
         mark_unreferenced_islands(buses, &self.classified);
+
+        let mut systems = Vec::new();
+        for (ci, c) in self.classified.iter().enumerate() {
+            let unknown = &self.islands[ci].0;
+            if matches!(c.verdict, Verdict::NoReferenceBus) || unknown.is_empty() {
+                continue;
+            }
+            systems.push(DcSystem {
+                island: ci,
+                unknown,
+                rhs: self.rhs(ci, buses),
+                factored: self.islands[ci].1.is_some(),
+            });
+        }
+        let solutions = solve_all(&systems);
+        assert_eq!(
+            solutions.len(),
+            systems.len(),
+            "one solution per reduced system"
+        );
+        let mut theta_of: Vec<Option<Vec<f64>>> = vec![None; self.classified.len()];
+        for (sys, theta) in systems.iter().zip(solutions) {
+            assert!(
+                theta.as_ref().is_none_or(|t| t.len() == sys.unknown.len()),
+                "one angle per unknown"
+            );
+            theta_of[sys.island] = theta;
+        }
 
         let mut branch_p = vec![0.0; self.n_branches];
         let mut max_residual: f64 = 0.0;
@@ -553,38 +620,12 @@ impl DcSolver {
                 continue;
             }
 
-            let (unknown, factor) = &self.islands[ci];
+            let unknown = &self.islands[ci].0;
             let m = unknown.len();
 
             let mut solved = true;
             if m > 0 {
-                let mut rhs = vec![0.0; m];
-                for (r, &i) in unknown.iter().enumerate() {
-                    rhs[r] = dc_injection(&buses[i]);
-                }
-                for &pos in &self.island_branches[ci] {
-                    let br = &branches[pos];
-                    let (rf, rt) = (reduced_pos[br.from], reduced_pos[br.to]);
-                    // φ: the phase shift is constant, so it lives on the RHS and
-                    // `B` stays symmetric. See the module doc.
-                    let shift_p = br.b * br.shift;
-                    if rf != NOT_UNKNOWN {
-                        rhs[rf] += shift_p;
-                        // A reference's known angle also moves to the RHS:
-                        // subtracting `B_ij θ_j = −b θ_j` adds `+b θ_j`.
-                        if rt == NOT_UNKNOWN {
-                            rhs[rf] += br.b * buses[br.to].voltage_ang;
-                        }
-                    }
-                    if rt != NOT_UNKNOWN {
-                        rhs[rt] -= shift_p;
-                        if rf == NOT_UNKNOWN {
-                            rhs[rt] += br.b * buses[br.from].voltage_ang;
-                        }
-                    }
-                }
-
-                match factor.as_ref().and_then(|f| f.solve(&rhs)) {
+                match theta_of[ci].take() {
                     Some(theta) => {
                         for (r, &i) in unknown.iter().enumerate() {
                             buses[i].voltage_ang = theta[r];
@@ -655,6 +696,39 @@ impl DcSolver {
             negative_reactance_branches: self.negative_reactance_branches.clone(),
             ignored_branches: self.ignored_branches.clone(),
         }
+    }
+
+    /// Island `ci`'s right-hand side: its unknowns' injections, with each
+    /// phase shift and each reference's known angle moved over.
+    fn rhs(&self, ci: usize, buses: &[Bus]) -> Vec<f64> {
+        let (branches, reduced_pos) = (&self.branches, &self.reduced_pos);
+        let unknown = &self.islands[ci].0;
+        let mut rhs = vec![0.0; unknown.len()];
+        for (r, &i) in unknown.iter().enumerate() {
+            rhs[r] = dc_injection(&buses[i]);
+        }
+        for &pos in &self.island_branches[ci] {
+            let br = &branches[pos];
+            let (rf, rt) = (reduced_pos[br.from], reduced_pos[br.to]);
+            // φ: the phase shift is constant, so it lives on the RHS and
+            // `B` stays symmetric. See the module doc.
+            let shift_p = br.b * br.shift;
+            if rf != NOT_UNKNOWN {
+                rhs[rf] += shift_p;
+                // A reference's known angle also moves to the RHS:
+                // subtracting `B_ij θ_j = −b θ_j` adds `+b θ_j`.
+                if rt == NOT_UNKNOWN {
+                    rhs[rf] += br.b * buses[br.to].voltage_ang;
+                }
+            }
+            if rt != NOT_UNKNOWN {
+                rhs[rt] -= shift_p;
+                if rf == NOT_UNKNOWN {
+                    rhs[rt] += br.b * buses[br.from].voltage_ang;
+                }
+            }
+        }
+        rhs
     }
 }
 

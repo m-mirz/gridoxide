@@ -151,6 +151,13 @@ pub enum BatchError {
     /// N-1 was asked of a GPU session made without the network's branches
     /// (`GpuBatchSolver::new` rather than `with_branches`).
     BranchesUnknown,
+    /// A single power flow was given buses that are not the session's: a
+    /// different count, or a different type at `bus`.
+    NotTheSessionsBuses {
+        n_buses: usize,
+        given: usize,
+        bus: Option<usize>,
+    },
     Linear(LinearError),
 }
 
@@ -181,6 +188,18 @@ impl std::fmt::Display for BatchError {
             BatchError::BranchesUnknown => write!(
                 f,
                 "N-1 needs the network's branches: make the session with `with_branches`"
+            ),
+            BatchError::NotTheSessionsBuses {
+                n_buses,
+                given,
+                bus: None,
+            } => write!(
+                f,
+                "the session's network has {n_buses} buses, but {given} were given"
+            ),
+            BatchError::NotTheSessionsBuses { bus: Some(bus), .. } => write!(
+                f,
+                "bus {bus} has another type than in the session's network; a session keeps                  its bus types (they fix the Jacobian's pattern), so make a new one"
             ),
             BatchError::Linear(e) => write!(f, "{e}"),
         }

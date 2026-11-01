@@ -188,3 +188,66 @@ def test_dc_n1_on_the_device_matches_the_cpu():
         np.testing.assert_allclose(gf, want_f, atol=1e-10, rtol=0)
     with pytest.raises(ValueError):
         gpu.solve_contingencies([nb])
+
+
+@needs_case1354
+def test_a_dc_sweep_on_the_device_matches_the_cpu():
+    """`GpuDcSolver.solve_sweep` against the CPU's DC solve and PTDF
+    columns: an empty scenario is the base case, and a change of `d` at one
+    bus moves every flow by `d` times its PTDF column and the reference's
+    pickup by `-d`. In one chunk and in several."""
+    np = pytest.importorskip("numpy")
+    model = gridoxide.PowerFlowModel.from_matpower(str(CASE1354), method="dc")
+    model.solve()
+    nb, nn = model.n_branches, model.n_nodes
+    base_a = np.array(model.voltage_ang())
+    base_f = np.array(model.branch_flow_p())
+    base_pickup = np.array([p for _, p in model.dc_slack_pickup()])
+    kinds, p, _ = model.bus_spec()
+    buses = [i for i in range(nn) if kinds[i] != 0][:: nn // 40]
+    scenarios = [[]] + [[(i, p[i] - 0.25, 0.0)] for i in buses]
+    n = len(scenarios)
+    for capacity in (1024, 7):
+        gpu = gridoxide.GpuDcSolver(model, capacity=capacity)
+        a, f, s = gpu.solve_sweep(scenarios)
+        a, f = np.frombuffer(a).reshape(n, nn), np.frombuffer(f).reshape(n, nb)
+        s = np.frombuffer(s).reshape(n, -1)
+        np.testing.assert_allclose(a[0], base_a, atol=1e-12, rtol=0)
+        np.testing.assert_allclose(f[0], base_f, atol=1e-10, rtol=0)
+        np.testing.assert_allclose(s[0], base_pickup, atol=1e-10, rtol=0)
+        for k, i in enumerate(buses, start=1):
+            ptdf = np.array(model.ptdf_column(i))
+            np.testing.assert_allclose(f[k], base_f - 0.25 * ptdf, atol=1e-10, rtol=0)
+            np.testing.assert_allclose(s[k], base_pickup + 0.25, atol=1e-10, rtol=0)
+    with pytest.raises(ValueError):
+        gpu.solve_sweep([[(nn, 0.0, 0.0)]])
+
+
+@needs_case1354
+def test_a_single_power_flow_on_the_device_matches_the_cpu():
+    """`GpuBatchSolver.solve_single` from the linear start against
+    `model.solve()`, which starts there too: converged, voltages to
+    1e-8."""
+    model = gridoxide.PowerFlowModel.from_matpower(str(CASE1354), tol=TOL)
+    gpu = gridoxide.GpuBatchSolver(model, capacity=1)
+    got = gpu.solve_single(model, start="linear")
+    model.solve()
+    assert got.converged
+    assert got.max_mismatch <= TOL
+    assert got.voltage_mag == pytest.approx(model.voltage_mag(), abs=1e-8)
+    assert got.voltage_ang == pytest.approx(model.voltage_ang(), abs=1e-8)
+    # From the solved state there is nothing left to do.
+    assert gpu.solve_single(model).iterations == 1
+    with pytest.raises(ValueError):
+        gpu.solve_single(model, start="flat")
+
+
+@needs_case1354
+def test_a_single_dc_power_flow_on_the_device_matches_the_cpu():
+    """`GpuDcSolver.solve` against `solve_dc`: angles, flows and pickups."""
+    model = gridoxide.PowerFlowModel.from_matpower(str(CASE1354), method="dc")
+    model.solve()
+    angles, flows, pickups = gridoxide.GpuDcSolver(model, capacity=1).solve()
+    assert angles == pytest.approx(model.voltage_ang(), abs=1e-11)
+    assert flows == pytest.approx(model.branch_flow_p(), abs=1e-9)
+    assert pickups == pytest.approx([p for _, p in model.dc_slack_pickup()], abs=1e-9)
