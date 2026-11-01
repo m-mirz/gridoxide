@@ -765,3 +765,26 @@ pub fn cudss_llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn Sym
     let solver = CudssSolver::new(n, keys, Factorization::Llt, true).ok()?;
     Some(Box::new(solver))
 }
+
+/// [`cudss_ldlt_solver`] without cuDSS's deterministic mode, for benchmarks:
+/// its solves take half the time (case24464_goc: 1.65 against 3.45 ms
+/// each, 12 ms an iteration), as MadNLP's cuDSS runs by default, but the
+/// path is no longer reproducible from run to run (case2869_pegase took 60
+/// to 107 iterations in four).
+pub fn cudss_ldlt_solver_fast(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Option<Box<dyn SymmetricSolver>> {
+    let solver = CudssSolver::new(n, keys, Factorization::Ldlt, false).ok()?;
+    Some(Box::new(solver))
+}
+
+/// [`cudss_llt_solver`] without cuDSS's deterministic mode; see
+/// [`cudss_ldlt_solver_fast`].
+pub fn cudss_llt_solver_fast(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Option<Box<dyn SymmetricSolver>> {
+    let solver = CudssSolver::new(n, keys, Factorization::Llt, false).ok()?;
+    Some(Box::new(solver))
+}

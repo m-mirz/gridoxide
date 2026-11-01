@@ -24,7 +24,8 @@
 //! `OPF_REPEAT=n` times the median of `n` solves after an untimed warm-up,
 //! as grid-bench does. With `--features gpu`, `OPF_LINEAR=cudss` factorizes the KKT system on
 //! the GPU: cuDSS's `LDLᵀ` for the augmented system, its Cholesky for
-//! HyKKT's. `CUDSS_THREADING_LIB` (cuDSS's `libcudss_mtlayer_gomp.so`)
+//! HyKKT's; `OPF_LINEAR=cudss-fast` without cuDSS's deterministic mode,
+//! as benchmarks run it. `CUDSS_THREADING_LIB` (cuDSS's `libcudss_mtlayer_gomp.so`)
 //! runs its analysis on every core. `OPF_MODEL=gpu` evaluates the model
 //! there too (`AcOpf::evaluate_on_device`).
 use std::path::{Path, PathBuf};
@@ -109,6 +110,13 @@ fn build(name: &str, log: bool) -> AcOpf {
             options.nlp.kkt_solver = match options.nlp.kkt {
                 KktForm::Augmented => gridoxide::gpu::cudss_ldlt_solver,
                 KktForm::Hybrid { .. } => gridoxide::gpu::cudss_llt_solver,
+            }
+        }
+        #[cfg(feature = "gpu")]
+        Ok("cudss-fast") => {
+            options.nlp.kkt_solver = match options.nlp.kkt {
+                KktForm::Augmented => gridoxide::gpu::cudss_ldlt_solver_fast,
+                KktForm::Hybrid { .. } => gridoxide::gpu::cudss_llt_solver_fast,
             }
         }
         Ok(other) if !other.is_empty() => panic!("unknown OPF_LINEAR {other}"),

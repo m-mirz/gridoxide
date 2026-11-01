@@ -50,7 +50,9 @@ pub use device::DeviceBatch;
 #[cfg(feature = "cuda")]
 pub use gpu::GpuBatchSolver;
 #[cfg(feature = "cuda")]
-pub use kkt::{CudssSolver, cudss_ldlt_solver, cudss_llt_solver};
+pub use kkt::{
+    CudssSolver, cudss_ldlt_solver, cudss_ldlt_solver_fast, cudss_llt_solver, cudss_llt_solver_fast,
+};
 
 pub use newton::{
     BatchError, BatchOptions, BatchReport, Outcome, ScenarioResult, StepPolicy, csr_jacobian,

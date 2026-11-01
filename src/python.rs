@@ -4056,12 +4056,28 @@ impl OptimalPowerFlowModel {
     /// feature. `tol` and `max_iter` go to the solver as its own tolerance
     /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
     ///
+    /// `deterministic` (`"nlp-gpu"` only) keeps cuDSS in its deterministic
+    /// mode, so a solve takes the same path every time. `False` halves its
+    /// solves' time (as MadNLP's cuDSS runs by default), for benchmarks; the
+    /// iteration count may then vary from run to run.
+    ///
     /// Every solve starts from the point `solve(init=...)` names.
     #[staticmethod]
-    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300))]
-    fn from_matpower(path: &str, solver: &str, tol: f64, max_iter: usize) -> PyResult<Self> {
+    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300, deterministic=true))]
+    fn from_matpower(
+        path: &str,
+        solver: &str,
+        tol: f64,
+        max_iter: usize,
+        deterministic: bool,
+    ) -> PyResult<Self> {
         use crate::matpower::MatpowerError;
         let gpu = solver == "nlp-gpu";
+        if !deterministic && !gpu {
+            return Err(PyValueError::new_err(
+                "deterministic=False applies to solver='nlp-gpu' only",
+            ));
+        }
         let solver = match solver {
             "nlp" => AcOpfSolver::Nlp,
             #[cfg(feature = "gpu")]
@@ -4099,7 +4115,11 @@ impl OptimalPowerFlowModel {
         options.nlp.max_iterations = max_iter;
         #[cfg(feature = "gpu")]
         if gpu {
-            options.nlp.kkt_solver = crate::gpu::cudss_ldlt_solver;
+            options.nlp.kkt_solver = if deterministic {
+                crate::gpu::cudss_ldlt_solver
+            } else {
+                crate::gpu::cudss_ldlt_solver_fast
+            };
         }
         let _ = gpu;
         #[allow(unused_mut)]

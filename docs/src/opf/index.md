@@ -451,8 +451,11 @@ three cases that one does not (case9241_pegase, case13659_pegase, case30000_goc)
 slower on case1354_pegase, 2.5× on case2869_pegase and 4.7–6.3× on the GOC cases, 4–5.5× of
 that per iteration: the cost of the host side.
 
-cuDSS runs in its deterministic mode: without it, four runs of case2869_pegase took 60 to 107
-iterations, as rounding steered the regularization differently each time. Its analysis, once
+cuDSS runs in its deterministic mode by default: without it, four runs of case2869_pegase took
+60 to 107 iterations, as rounding steered the regularization differently each time. It costs
+cuDSS's solves half their speed (case24464_goc: 3.45 against 1.65 ms each, 12 ms an
+iteration), so benchmarks turn it off, as MadNLP's cuDSS runs: `cudss_ldlt_solver_fast` in
+Rust, `from_matpower(..., solver="nlp-gpu", deterministic=False)` in Python. Its analysis, once
 a solve, runs on the host; pointing `CUDSS_THREADING_LIB` at cuDSS's `libcudss_mtlayer_gomp.so`
 spreads it over the cores (2.2 to 0.7 s on case24464_goc), with the same result.
 
