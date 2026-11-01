@@ -2674,19 +2674,25 @@ fn finish(
             .max((c[r] - p.c_upper[r]).max(0.0));
     }
 
+    // Each original row's internal one, by inverting `source_row` once. A
+    // search of `source_row` per row was quadratic: 6.2 s of an 11 s solve
+    // of case24464_goc, after 60 iterations that took 4.9.
+    let mut multiplier = vec![0.0; m];
+    let mut seen = vec![false; m];
+    for (i, source) in p.source_row.iter().enumerate() {
+        if let Some(r) = *source
+            && !seen[r]
+        {
+            seen[r] = true;
+            multiplier[r] = y[i];
+        }
+    }
+
     NlpSolution {
         status,
         objective,
         x: u[..n_x].to_vec(),
-        y: (0..m)
-            .map(|r| {
-                p.source_row
-                    .iter()
-                    .position(|s| *s == Some(r))
-                    .map(|i| y[i])
-                    .unwrap_or(0.0)
-            })
-            .collect(),
+        y: multiplier,
         z: (0..n_x).map(|k| z_l[k] - z_u[k]).collect(),
         iterations,
         violation,
