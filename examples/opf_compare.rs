@@ -18,12 +18,15 @@
 //! probe. `IPOPT_PRINT=5` prints IPOPT's own log. `OPF_START=proportional`
 //! starts from `AcOpfStart::Proportional` instead of the flat start, and
 //! `OPF_FORM=branch-flow` solves `AcOpfFormulation::BranchFlow`.
+//! `OPF_KKT=hybrid[:γ]` forms HyKKT's condensed system (`KktForm::Hybrid`,
+//! γ = 1e8 by default), and `OPF_LINEAR=llt` factorizes it by Cholesky.
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gridoxide::matpower;
 use gridoxide::opf::OptStatus;
 use gridoxide::opf::ac::{AcOpf, AcOpfFormulation, AcOpfOptions, AcOpfResult, AcOpfStart};
+use gridoxide::opf::nlp::{self, KktForm};
 
 /// PGLib v23.07's AC objectives (`pglib/BASELINE.md`), five significant digits.
 const PUBLISHED: &[(&str, f64)] = &[
@@ -81,6 +84,17 @@ fn build(name: &str, log: bool) -> AcOpf {
         ..AcOpfOptions::default()
     };
     options.nlp.log = log;
+    if let Ok(kkt) = std::env::var("OPF_KKT")
+        && let Some(rest) = kkt.strip_prefix("hybrid")
+    {
+        let gamma = rest
+            .strip_prefix(':')
+            .map_or(1e8, |g| g.parse().expect("gamma"));
+        options.nlp.kkt = KktForm::Hybrid { gamma };
+    }
+    if std::env::var("OPF_LINEAR").as_deref() == Ok("llt") {
+        options.nlp.kkt_solver = nlp::llt_solver;
+    }
     options.nlp.ncl = std::env::var_os("NLP_NCL").is_some();
     AcOpf::build(opf.network, options).unwrap()
 }

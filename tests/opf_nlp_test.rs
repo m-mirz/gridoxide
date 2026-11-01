@@ -16,7 +16,7 @@
 #![cfg(feature = "opf")]
 
 use gridoxide::opf::OptStatus;
-use gridoxide::opf::nlp::{NlpOptions, NonlinearProblem, solve};
+use gridoxide::opf::nlp::{KktForm, NlpOptions, NonlinearProblem, llt_solver, solve};
 
 const TOL: f64 = 1e-6;
 
@@ -416,4 +416,34 @@ fn a_fixed_variable_is_pinned_without_a_barrier_term() {
     close(solution.x[0], 0.75, "the fixed variable holds");
     close(solution.x[1], 1.25, "the free variable takes the remainder");
     close(solution.objective, 0.5625 + 1.5625, "objective");
+}
+
+/// HyKKT's condensed system (`KktForm::Hybrid`), factorized by Cholesky,
+/// reaches every problem above at the point the augmented system does: an
+/// equality, an inequality, a saddle to escape, both basins of a nonconvex
+/// problem, binding bounds and a fixed variable.
+#[test]
+fn the_condensed_kkt_system_finds_what_the_augmented_one_does() {
+    let hybrid = NlpOptions {
+        kkt: KktForm::Hybrid { gamma: 1e8 },
+        kkt_solver: llt_solver,
+        ..NlpOptions::default()
+    };
+    let problems: [&dyn NonlinearProblem; 7] = [
+        &OnACircle,
+        &IndefiniteProduct,
+        &InsideADisc,
+        &TwoWells { start: 2.0 },
+        &TwoWells { start: -2.0 },
+        &BoundedQuadratic,
+        &WithAFixedVariable,
+    ];
+    for (k, problem) in problems.into_iter().enumerate() {
+        let want = solve(problem, &NlpOptions::default()).unwrap();
+        let got = solve(problem, &hybrid).unwrap();
+        assert_eq!(got.status, OptStatus::Optimal, "problem {k}: {got:?}");
+        for (i, (a, b)) in got.x.iter().zip(&want.x).enumerate() {
+            assert!((a - b).abs() < 1e-7, "problem {k}, x{i}: {a} vs {b}");
+        }
+    }
 }

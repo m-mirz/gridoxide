@@ -93,7 +93,7 @@
 //! conditions", which is what every AC-OPF tool reports and what published
 //! objectives are compared against.
 
-use crate::ldlt::{Inertia, LdltSolver, SymmetricSolver};
+use crate::ldlt::{Inertia, LdltSolver, LltSolver, SymmetricSolver};
 use crate::opf::{OpfError, OptStatus};
 
 /// A twice-differentiable problem.
@@ -145,6 +145,22 @@ pub trait NonlinearProblem {
     fn initial_point(&self) -> Vec<f64>;
 }
 
+/// How the interior point forms its KKT system; see
+/// [`NlpOptions::kkt`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum KktForm {
+    /// The augmented system, indefinite, with the inequality slacks
+    /// eliminated; its solver's inertia decides the regularization.
+    Augmented,
+    /// HyKKT's condensed positive definite system, with `γ` the weight of
+    /// the equality rows (see `Hybrid`): Cholesky's success decides the
+    /// regularization, and no inertia is needed, which is what a GPU solver
+    /// can offer. γ = 1e8 suits the PGLib cases (case2869_pegase: CG needs
+    /// 4 iterations a solve at 1e8, 137 at 1e4, and at 1e10 the interior
+    /// point needs 152 iterations instead of 64).
+    Hybrid { gamma: f64 },
+}
+
 /// Makes a [`SymmetricSolver`] for an `n × n` pattern from the `(row,
 /// column)` of its entries; see [`NlpOptions::kkt_solver`].
 pub type MakeSolver = fn(usize, &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>>;
@@ -186,6 +202,10 @@ pub struct NlpOptions {
     /// `(row, column)` of its entries: [`ldlt_solver`], `faer`'s `LDLᵀ` on
     /// the CPU, by default. Where another backend (a GPU one) plugs in.
     pub kkt_solver: MakeSolver,
+    /// How the KKT system is formed: the indefinite augmented system, whose
+    /// solver must report the inertia, or HyKKT's condensed positive
+    /// definite one, which a Cholesky solver ([`llt_solver`]) factorizes.
+    pub kkt: KktForm,
     /// Solve by Algorithm NCL around the interior point (see `ncl`): a
     /// residual on every constraint row, removed by multiplier updates over
     /// a sequence of subproblems. For problems whose active constraints are
@@ -217,6 +237,7 @@ impl Default for NlpOptions {
             dual_regularization: 1e-8,
             refinement_rounds: 10,
             kkt_solver: ldlt_solver,
+            kkt: KktForm::Augmented,
             scaling: true,
             ncl: false,
             log: false,
@@ -1454,6 +1475,11 @@ pub fn ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn Symmetri
     Some(Box::new(LdltSolver::new(n, keys)?))
 }
 
+/// [`LltSolver`], `faer`'s Cholesky, for [`KktForm::Hybrid`].
+pub fn llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
+    Some(Box::new(LltSolver::new(n, keys)?))
+}
+
 /// The point the watchdog saved, and its merit for judging the steps after it.
 struct Watchdog {
     u: Vec<f64>,
@@ -1480,15 +1506,26 @@ fn factorize_with_inertia(
 ) -> Option<(Kkt, f64)> {
     let mut factor = |dw: f64| {
         let diagonal: Vec<f64> = sigma.iter().map(|s| s + dw).collect();
-        let kkt = Kkt::new(
-            hessian,
-            a,
-            &diagonal,
-            p,
-            options.dual_regularization,
-            options.kkt_solver,
-            solver,
-        )?;
+        let kkt = match options.kkt {
+            KktForm::Augmented => Kkt::Augmented(Augmented::new(
+                hessian,
+                a,
+                &diagonal,
+                p,
+                options.dual_regularization,
+                options.kkt_solver,
+                solver,
+            )?),
+            KktForm::Hybrid { gamma } => Kkt::Hybrid(Hybrid::new(
+                hessian,
+                a,
+                &diagonal,
+                p,
+                gamma,
+                options.kkt_solver,
+                solver,
+            )?),
+        };
         kkt.is_minimizing(solver.as_deref()?).then_some(kkt)
     };
     if floor == 0.0
@@ -1532,7 +1569,7 @@ fn factorize_with_inertia(
 ///
 /// The factorization itself stays in the [`SymmetricSolver`]; this holds
 /// what is needed to expand a condensed solution.
-struct Kkt {
+struct Augmented {
     n_x: usize,
     n: usize,
     m: usize,
@@ -1540,7 +1577,7 @@ struct Kkt {
     slacks: Vec<(usize, usize, f64)>,
 }
 
-impl Kkt {
+impl Augmented {
     /// Assembles the condensed matrix and factorizes it in `solver`, made by
     /// `make` when there is none yet or the pattern changed. `None` when a
     /// slack's `d_k` is not positive (a row without bounds and δw = 0) or
@@ -1608,6 +1645,43 @@ impl Kkt {
             }
     }
 
+    /// Solves the full system (`n` variables then `m` rows) through the
+    /// condensed one.
+    fn solve(&self, solver: &dyn SymmetricSolver, rhs: &[f64]) -> Option<Vec<f64>> {
+        let kkt = self;
+        let (n_x, n, m) = (kkt.n_x, kkt.n, kkt.m);
+        let mut reduced = vec![0.0; n_x + m];
+        reduced[..n_x].copy_from_slice(&rhs[..n_x]);
+        reduced[n_x..].copy_from_slice(&rhs[n..n + m]);
+        for &(r, k, d) in &kkt.slacks {
+            reduced[n_x + r] += rhs[k] / d;
+        }
+        let sol = solver.solve(&reduced)?;
+        let mut out = vec![0.0; n + m];
+        out[..n_x].copy_from_slice(&sol[..n_x]);
+        out[n..].copy_from_slice(&sol[n_x..]);
+        for &(r, k, d) in &kkt.slacks {
+            out[k] = (rhs[k] + sol[n_x + r]) / d;
+        }
+        out.iter().all(|v| v.is_finite()).then_some(out)
+    }
+}
+
+/// The KKT system as formed for [`NlpOptions::kkt`], factorized in the
+/// caller's [`SymmetricSolver`].
+enum Kkt {
+    Augmented(Augmented),
+    Hybrid(Hybrid),
+}
+
+impl Kkt {
+    fn is_minimizing(&self, solver: &dyn SymmetricSolver) -> bool {
+        match self {
+            Kkt::Augmented(k) => k.is_minimizing(solver),
+            Kkt::Hybrid(k) => k.is_minimizing(solver),
+        }
+    }
+
     /// This system with the solver holding its factorization, for solves.
     fn with<'a>(&'a self, solver: &'a dyn SymmetricSolver) -> Factorized<'a> {
         Factorized { kkt: self, solver }
@@ -1621,26 +1695,264 @@ struct Factorized<'a> {
 }
 
 impl Factorized<'_> {
-    /// Solves the full system (`n` variables then `m` rows) through the
-    /// condensed one.
+    /// Solves the full system: `n` variables, then `m` rows.
     fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
-        let kkt = self.kkt;
-        let (n_x, n, m) = (kkt.n_x, kkt.n, kkt.m);
-        let mut reduced = vec![0.0; n_x + m];
-        reduced[..n_x].copy_from_slice(&rhs[..n_x]);
-        reduced[n_x..].copy_from_slice(&rhs[n..n + m]);
-        for &(r, k, d) in &kkt.slacks {
-            reduced[n_x + r] += rhs[k] / d;
+        match self.kkt {
+            Kkt::Augmented(k) => k.solve(self.solver, rhs),
+            Kkt::Hybrid(k) => k.solve(self.solver, rhs),
         }
-        let sol = self.solver.solve(&reduced)?;
+    }
+}
+
+/// [`KktForm::Hybrid`]: the KKT system condensed to one positive definite
+/// matrix, HyKKT's (Regev et al. 2023), the form MadNLP solves on GPUs.
+///
+/// Both kinds of row leave the matrix. An inequality row's multiplier is
+/// eliminated with its slack, \\(w_r = d_k (J_r \Delta x - b_r)\\), which adds
+/// \\(d_k J_r^\mathsf{T} J_r\\) to the Hessian block; an equality row is
+/// kept as a constraint, with \\(\gamma J_r^\mathsf{T} J_r\\) added (which
+/// leaves the solution unchanged, the row being satisfied). So
+///
+/// \\[ K_\gamma = H + \Sigma_x + \delta_w I + J_I^\mathsf{T} D J_I
+///                + \gamma J_E^\mathsf{T} J_E, \\]
+///
+/// positive definite exactly when the full system has the inertia of a
+/// minimizing step (for γ large enough, and `J_E` of full rank): a
+/// successful Cholesky factorization is the inertia test. The equality
+/// multipliers solve \\(J_E K_\gamma^{-1} J_E^\mathsf{T} w_E =
+/// J_E K_\gamma^{-1} b_\gamma - b_E\\) by conjugate gradients, one solve with
+/// the factor per iteration; for large γ that matrix's eigenvalues cluster
+/// near 1/γ and CG needs few. Then
+/// \\(\Delta x = K_\gamma^{-1} (b_\gamma - J_E^\mathsf{T} w_E)\\).
+///
+/// An inequality row whose \(d_k\) exceeds 10γ goes with the equality
+/// rows instead. Binding near the optimum, its \(d_k\) reaches 1e16, and
+/// \(d_k J_r^\mathsf{T} J_r\) in \(K_\gamma\) then makes the matrix
+/// numerically indefinite for any reasonable δw (case13659_pegase: δw went
+/// to 4e20 at μ = 2.5e-9, and CG stopped converging). As a row
+/// \(J_r \Delta x - c_r w_r = b_r\) with \(c_r = 1/d_k\), it adds γ to
+/// \(K_\gamma\) like an equality row and \(c_r / (1 - \gamma c_r)\) to the
+/// CG operator's diagonal, in the variable \(w'_r = (1 - \gamma c_r) w_r\):
+/// exact, and no weight in \(K_\gamma\) exceeds 10γ.
+///
+/// No δc: the equality rows never meet the factorization.
+struct Hybrid {
+    n_x: usize,
+    n: usize,
+    m: usize,
+    /// `(row, slack column, d_k)`.
+    slacks: Vec<(usize, usize, f64)>,
+    /// Each row's entries in the `x` columns, `(column, value)`.
+    rows: Vec<Vec<(usize, f64)>>,
+    /// Per row, the weight of `J_rᵀ J_r` in `K_γ`: `d_k` for an inequality
+    /// row, γ for an equality row.
+    weight: Vec<f64>,
+    /// Rows solved by CG: the equalities, and inequalities with `d_k > 10γ`.
+    equality: Vec<bool>,
+    /// Per CG row, `c/(1 − γc)` on the operator's diagonal (0 for an
+    /// equality row), and `1/(1 − γc)`, which takes `w'` back to `w`.
+    shift: Vec<f64>,
+    unscale: Vec<f64>,
+}
+
+impl Hybrid {
+    /// As [`Augmented::new`], forming `K_γ` instead.
+    fn new(
+        hessian: &[(usize, usize, f64)],
+        a: &[(usize, usize, f64)],
+        diagonal: &[f64],
+        p: &Internal,
+        gamma: f64,
+        make: MakeSolver,
+        solver: &mut Option<Box<dyn SymmetricSolver>>,
+    ) -> Option<Self> {
+        let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
+        let slacks: Vec<(usize, usize, f64)> = p
+            .slack_of
+            .iter()
+            .enumerate()
+            .filter_map(|(r, s)| s.map(|k| (r, k, diagonal[k])))
+            .collect();
+        if slacks.iter().any(|&(_, _, d)| d.is_nan() || d <= 0.0) {
+            return None;
+        }
+        let mut weight = vec![gamma; m];
+        let mut equality = vec![true; m];
+        let mut shift = vec![0.0; m];
+        let mut unscale = vec![1.0; m];
+        for &(r, _, d) in &slacks {
+            if d > 10.0 * gamma {
+                let c = 1.0 / d;
+                shift[r] = c / (1.0 - gamma * c);
+                unscale[r] = 1.0 / (1.0 - gamma * c);
+            } else {
+                weight[r] = d;
+                equality[r] = false;
+            }
+        }
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        for &(r, k, v) in a {
+            if k < n_x {
+                rows[r].push((k, v));
+            }
+        }
+        let mut kkt: Vec<(usize, usize, f64)> = hessian
+            .iter()
+            .copied()
+            .filter(|&(i, j, _)| i >= j && i < n_x)
+            .collect();
+        kkt.extend((0..n_x).map(|k| (k, k, diagonal[k])));
+        for (r, row) in rows.iter().enumerate() {
+            for &(i, a_i) in row {
+                for &(j, a_j) in row {
+                    if i >= j {
+                        kkt.push((i, j, weight[r] * a_i * a_j));
+                    }
+                }
+            }
+        }
+        if !solver.as_ref().is_some_and(|s| s.matches(n_x, &kkt)) {
+            let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
+            *solver = Some(make(n_x, &keys)?);
+        }
+        let ok = solver.as_mut()?.factorize(&kkt);
+        ok.then_some(Self {
+            n_x,
+            n,
+            m,
+            slacks,
+            rows,
+            weight,
+            equality,
+            shift,
+            unscale,
+        })
+    }
+
+    /// Whether `K_γ` is positive definite.
+    fn is_minimizing(&self, solver: &dyn SymmetricSolver) -> bool {
+        solver.inertia()
+            == Inertia {
+                positive: self.n_x,
+                negative: 0,
+                zero: 0,
+            }
+    }
+
+    /// `Σ_r scale_r J_rᵀ v_r` over the rows `keep` selects.
+    fn transpose(&self, v: &[f64], keep: impl Fn(usize) -> Option<f64>) -> Vec<f64> {
+        let mut out = vec![0.0; self.n_x];
+        for (r, row) in self.rows.iter().enumerate() {
+            if let Some(scale) = keep(r) {
+                for &(c, a) in row {
+                    out[c] += scale * a * v[r];
+                }
+            }
+        }
+        out
+    }
+
+    fn row_dot(&self, r: usize, x: &[f64]) -> f64 {
+        self.rows[r].iter().map(|&(c, a)| a * x[c]).sum()
+    }
+
+    fn solve(&self, solver: &dyn SymmetricSolver, rhs: &[f64]) -> Option<Vec<f64>> {
+        let (n_x, n, m) = (self.n_x, self.n, self.m);
+        // The rows' right-hand sides with the slacks eliminated, as in
+        // `Augmented`.
+        let mut b = rhs[n..n + m].to_vec();
+        for &(r, k, d) in &self.slacks {
+            b[r] += rhs[k] / d;
+        }
+        // b_γ = b_x + Σ_r weight_r J_rᵀ b_r.
+        let mut b_gamma = rhs[..n_x].to_vec();
+        for (o, v) in b_gamma
+            .iter_mut()
+            .zip(self.transpose(&b, |r| Some(self.weight[r])))
+        {
+            *o += v;
+        }
+        let k_b = solver.solve(&b_gamma)?;
+        let equality = |r: usize| self.equality[r].then_some(1.0);
+        // S w = J_E K⁻¹ b_γ − b_E by conjugate gradients, on the equality
+        // rows (the other entries stay zero).
+        let apply = |v: &[f64]| -> Option<Vec<f64>> {
+            let u = solver.solve(&self.transpose(v, equality))?;
+            Some(
+                (0..m)
+                    .map(|r| {
+                        if self.equality[r] {
+                            self.row_dot(r, &u) + self.shift[r] * v[r]
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect(),
+            )
+        };
+        let target: Vec<f64> = (0..m)
+            .map(|r| {
+                if self.equality[r] {
+                    self.row_dot(r, &k_b) - b[r]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let w_e = conjugate_gradients(apply, &target)?;
+        // Δx = K⁻¹ (b_γ − J_Eᵀ w_E), then the inequality multipliers.
+        let k_w = solver.solve(&self.transpose(&w_e, equality))?;
+        let dx: Vec<f64> = (0..n_x).map(|i| k_b[i] - k_w[i]).collect();
         let mut out = vec![0.0; n + m];
-        out[..n_x].copy_from_slice(&sol[..n_x]);
-        out[n..].copy_from_slice(&sol[n_x..]);
-        for &(r, k, d) in &kkt.slacks {
-            out[k] = (rhs[k] + sol[n_x + r]) / d;
+        out[..n_x].copy_from_slice(&dx);
+        for r in 0..m {
+            out[n + r] = w_e[r] * self.unscale[r];
+        }
+        for &(r, k, d) in &self.slacks {
+            let w = if self.equality[r] {
+                out[n + r]
+            } else {
+                d * (self.row_dot(r, &dx) - b[r])
+            };
+            out[n + r] = w;
+            out[k] = (rhs[k] + w) / d;
         }
         out.iter().all(|v| v.is_finite()).then_some(out)
     }
+}
+
+/// Conjugate gradients on a symmetric positive (semi)definite operator,
+/// from zero, to a residual of 1e-12 of the right-hand side or 500
+/// iterations, whichever comes first. The caller's iterative refinement
+/// takes it from there.
+fn conjugate_gradients(
+    apply: impl Fn(&[f64]) -> Option<Vec<f64>>,
+    rhs: &[f64],
+) -> Option<Vec<f64>> {
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let mut x = vec![0.0; rhs.len()];
+    let mut r = rhs.to_vec();
+    let mut d = r.clone();
+    let mut rr = dot(&r, &r);
+    let stop = 1e-24 * rr;
+    for _ in 0..500 {
+        if rr <= stop || rr == 0.0 {
+            break;
+        }
+        let q = apply(&d)?;
+        let alpha = rr / dot(&d, &q);
+        for i in 0..x.len() {
+            x[i] += alpha * d[i];
+            r[i] -= alpha * q[i];
+        }
+        let next = dot(&r, &r);
+        let beta = next / rr;
+        rr = next;
+        for i in 0..d.len() {
+            d[i] = r[i] + beta * d[i];
+        }
+    }
+    Some(x)
 }
 
 /// `H x` for a full symmetric triplet list.

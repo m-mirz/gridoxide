@@ -44,9 +44,10 @@
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
+use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::sparse::linalg::cholesky::{
-    CholeskySymbolicParams, LdltRef, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
-    factorize_symbolic_cholesky, supernodal::SupernodalLdltRef,
+    CholeskySymbolicParams, LdltRef, LltRef, SymbolicCholesky, SymbolicCholeskyRaw,
+    SymmetricOrdering, factorize_symbolic_cholesky, supernodal::SupernodalLdltRef,
 };
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMat, SymbolicSparseColMatRef};
 use faer::{Conj, Mat, Par, Side};
@@ -152,15 +153,8 @@ impl SymmetricPattern {
     /// slots, equilibrated, and factorized numerically. `None` on a zero
     /// pivot (see the module docs).
     pub fn factorize(&self, entries: &[(usize, usize, f64)]) -> Option<SymmetricFactorization> {
-        debug_assert_eq!(entries.len(), self.keys.len());
         let n = self.n;
-        let mut values = vec![0.0; self.row_idx.len()];
-        for (&(_, _, v), slot) in entries.iter().zip(&self.slot) {
-            if let Some(s) = *slot {
-                values[s] += v;
-            }
-        }
-        let scale = self.equilibrate(&mut values);
+        let (values, scale) = self.assemble(entries);
         let structure =
             SymbolicSparseColMatRef::new_checked(n, n, &self.col_ptr, None, &self.row_idx);
         let matrix = SparseColMatRef::new(structure, &values);
@@ -188,6 +182,20 @@ impl SymmetricPattern {
             inertia,
             scale,
         })
+    }
+
+    /// The compressed lower triangle of `entries` (which must match this
+    /// pattern), equilibrated, and the equilibration's scale.
+    fn assemble(&self, entries: &[(usize, usize, f64)]) -> (Vec<f64>, Vec<f64>) {
+        debug_assert_eq!(entries.len(), self.keys.len());
+        let mut values = vec![0.0; self.row_idx.len()];
+        for (&(_, _, v), slot) in entries.iter().zip(&self.slot) {
+            if let Some(s) = *slot {
+                values[s] += v;
+            }
+        }
+        let scale = self.equilibrate(&mut values);
+        (values, scale)
     }
 
     /// A symmetric equilibration `D` (Ruiz's iteration, five passes), applied
@@ -290,6 +298,93 @@ impl SymmetricSolver for LdltSolver {
 
     fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
         self.factor.as_ref()?.solve(rhs)
+    }
+}
+
+/// [`SymmetricSolver`] on `faer`'s sparse Cholesky `LLᵀ`, for positive
+/// definite matrices: a factorization exists exactly when the matrix is
+/// positive definite, so success is the inertia `(n, 0, 0)`, and failure
+/// says the matrix is not, which is all an interior point on a condensed,
+/// positive definite KKT system needs to know. Cheaper than `LDLᵀ` and what
+/// GPU solvers do best.
+pub struct LltSolver {
+    pattern: SymmetricPattern,
+    /// The factor's values and the equilibration's scale.
+    factor: Option<(Vec<f64>, Vec<f64>)>,
+}
+
+impl LltSolver {
+    /// Analyses the `n × n` pattern of `keys` (see [`SymmetricPattern::new`]).
+    pub fn new(n: usize, keys: &[(usize, usize)]) -> Option<Self> {
+        Some(Self {
+            pattern: SymmetricPattern::new(n, keys)?,
+            factor: None,
+        })
+    }
+}
+
+impl SymmetricSolver for LltSolver {
+    fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        self.pattern.matches(n, entries)
+    }
+
+    fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
+        let pattern = &self.pattern;
+        let n = pattern.n;
+        let (values, scale) = pattern.assemble(entries);
+        let structure =
+            SymbolicSparseColMatRef::new_checked(n, n, &pattern.col_ptr, None, &pattern.row_idx);
+        let matrix = SparseColMatRef::new(structure, &values);
+        let mut factor = vec![0.0; pattern.symbolic.len_val()];
+        let mut mem = MemBuffer::new(
+            pattern
+                .symbolic
+                .factorize_numeric_llt_scratch::<f64>(Par::Seq, Default::default()),
+        );
+        let ok = pattern
+            .symbolic
+            .factorize_numeric_llt(
+                &mut factor,
+                matrix,
+                Side::Lower,
+                LltRegularization::default(),
+                Par::Seq,
+                MemStack::new(&mut mem),
+                Default::default(),
+            )
+            .is_ok();
+        self.factor = ok.then_some((factor, scale));
+        ok
+    }
+
+    fn inertia(&self) -> Inertia {
+        match self.factor {
+            Some(_) => Inertia {
+                positive: self.pattern.n,
+                negative: 0,
+                zero: 0,
+            },
+            None => Inertia::default(),
+        }
+    }
+
+    fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        let (values, scale) = self.factor.as_ref()?;
+        let n = self.pattern.n;
+        let mut x = Mat::<f64>::from_fn(n, 1, |i, _| rhs[i] * scale[i]);
+        let mut mem = MemBuffer::new(
+            self.pattern
+                .symbolic
+                .solve_in_place_scratch::<f64>(1, Par::Seq),
+        );
+        LltRef::new(&self.pattern.symbolic, values).solve_in_place_with_conj(
+            Conj::No,
+            x.as_mut(),
+            Par::Seq,
+            MemStack::new(&mut mem),
+        );
+        let out: Vec<f64> = (0..n).map(|i| x[(i, 0)] * scale[i]).collect();
+        out.iter().all(|v| v.is_finite()).then_some(out)
     }
 }
 
@@ -507,6 +602,41 @@ mod tests {
         let zero: Vec<(usize, usize, f64)> = e.iter().map(|&(r, c, _)| (r, c, 0.0)).collect();
         assert!(!solver.factorize(&zero));
         assert!(solver.solve(&b).is_none());
+    }
+
+    /// Cholesky succeeds exactly on a positive definite matrix, and then
+    /// solves as `LDLᵀ` does; on an indefinite one it fails. Both layouts.
+    #[test]
+    fn cholesky_tells_positive_definite_from_not() {
+        for (n_x, size) in [(40, 10.0), (300, 6.0)] {
+            // The KKT matrix's Hessian block alone is positive definite.
+            let (dim, e) = kkt(n_x, 15, size, 5);
+            let block: Vec<(usize, usize, f64)> = e
+                .iter()
+                .copied()
+                .filter(|&(r, c, _)| r < n_x && c < n_x)
+                .collect();
+            let keys: Vec<(usize, usize)> = block.iter().map(|&(r, c, _)| (r, c)).collect();
+            let mut llt = LltSolver::new(n_x, &keys).unwrap();
+            assert!(llt.factorize(&block));
+            assert_eq!(llt.inertia().positive, n_x);
+            let b: Vec<f64> = (0..n_x).map(|i| (i as f64).sin()).collect();
+            let x = llt.solve(&b).unwrap();
+            let y = SymmetricFactorization::new(n_x, &block)
+                .unwrap()
+                .solve(&b)
+                .unwrap();
+            let worst = x
+                .iter()
+                .zip(&y)
+                .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+            assert!(worst < 1e-10, "{worst:e}");
+            // The whole KKT matrix is not.
+            let keys: Vec<(usize, usize)> = e.iter().map(|&(r, c, _)| (r, c)).collect();
+            let mut llt = LltSolver::new(dim, &keys).unwrap();
+            assert!(!llt.factorize(&e));
+            assert!(llt.solve(&vec![1.0; dim]).is_none());
+        }
     }
 
     /// Large enough for `faer` to choose its supernodal layout, where `D` is
