@@ -481,3 +481,133 @@ extern "C" int go_dc_flows(const double* theta, const unsigned* out_br, const un
         theta, out_br, br_from, br_to, br_b, pos, base_flows, c, solved, flows, n, n_br, total);
     return launched();
 }
+
+// The interior point's KKT matrix: see kernels.h. One thread per slot or per
+// row; the arithmetic is LowerPattern's on the CPU, in the same order.
+namespace {
+
+__global__ void k_kkt_gather(const unsigned* __restrict__ slot_ptr,
+                             const unsigned* __restrict__ src, const double* __restrict__ trip,
+                             double* __restrict__ values, unsigned nnz) {
+    for (size_t s = blockIdx.x * (size_t)blockDim.x + threadIdx.x; s < nnz;
+         s += (size_t)blockDim.x * gridDim.x) {
+        double v = 0.0;
+        for (unsigned t = slot_ptr[s]; t < slot_ptr[s + 1]; ++t) v += trip[src[t]];
+        values[s] = v;
+    }
+}
+
+__global__ void k_kkt_row_max(const unsigned* __restrict__ inc_ptr,
+                              const unsigned* __restrict__ inc, const double* __restrict__ values,
+                              double* __restrict__ row_max, unsigned n) {
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)blockDim.x * gridDim.x) {
+        double m = 0.0;
+        for (unsigned k = inc_ptr[i]; k < inc_ptr[i + 1]; ++k) m = fmax(m, fabs(values[inc[k]]));
+        row_max[i] = m;
+    }
+}
+
+__global__ void k_kkt_factor(const double* __restrict__ row_max, double* __restrict__ factor,
+                             double* __restrict__ scale, int first, unsigned n) {
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)blockDim.x * gridDim.x) {
+        double m = row_max[i];
+        double f = (m > 0.0 && isfinite(m)) ? 1.0 / sqrt(m) : 1.0;
+        factor[i] = f;
+        scale[i] = first ? f : scale[i] * f;
+    }
+}
+
+__global__ void k_kkt_scale(const unsigned* __restrict__ row, const unsigned* __restrict__ col,
+                            const double* __restrict__ factor, double* __restrict__ values,
+                            int* __restrict__ bad, unsigned nnz) {
+    for (size_t s = blockIdx.x * (size_t)blockDim.x + threadIdx.x; s < nnz;
+         s += (size_t)blockDim.x * gridDim.x) {
+        double v = values[s] * (factor[row[s]] * factor[col[s]]);
+        values[s] = v;
+        if (bad && !isfinite(v)) *bad = 1;
+    }
+}
+
+__global__ void k_scale_vec(double* __restrict__ x, const double* __restrict__ d, unsigned n) {
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)blockDim.x * gridDim.x)
+        x[i] *= d[i];
+}
+
+__global__ void k_unscale_vec(const double* __restrict__ x, const double* __restrict__ d,
+                              double* __restrict__ y, unsigned n) {
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)blockDim.x * gridDim.x)
+        y[i] = x[i] / d[i];
+}
+
+__global__ void k_kkt_symv(const int* __restrict__ up_ptr, const int* __restrict__ up_col,
+                           const unsigned* __restrict__ lo_ptr, const unsigned* __restrict__ lo_col,
+                           const unsigned* __restrict__ lo_src, const double* __restrict__ values,
+                           const double* __restrict__ x, double* __restrict__ y, unsigned n) {
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)blockDim.x * gridDim.x) {
+        double s = 0.0;
+        for (unsigned k = lo_ptr[i]; k < lo_ptr[i + 1]; ++k) s += values[lo_src[k]] * x[lo_col[k]];
+        for (int k = up_ptr[i]; k < up_ptr[i + 1]; ++k) s += values[k] * x[up_col[k]];
+        y[i] = s;
+    }
+}
+
+}  // namespace
+
+extern "C" int go_kkt_gather(const unsigned* slot_ptr, const unsigned* src, const double* trip,
+                             double* values, unsigned nnz, void* stream) {
+    if (nnz == 0) return 0;
+    k_kkt_gather<<<grid_for(nnz), kThreads, 0, (cudaStream_t)stream>>>(slot_ptr, src, trip,
+                                                                       values, nnz);
+    return launched();
+}
+
+extern "C" int go_kkt_row_max(const unsigned* inc_ptr, const unsigned* inc, const double* values,
+                              double* row_max, unsigned n, void* stream) {
+    if (n == 0) return 0;
+    k_kkt_row_max<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(inc_ptr, inc, values,
+                                                                      row_max, n);
+    return launched();
+}
+
+extern "C" int go_kkt_factor(const double* row_max, double* factor, double* scale, int first,
+                             unsigned n, void* stream) {
+    if (n == 0) return 0;
+    k_kkt_factor<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(row_max, factor, scale,
+                                                                     first, n);
+    return launched();
+}
+
+extern "C" int go_kkt_scale(const unsigned* row, const unsigned* col, const double* factor,
+                            double* values, int* bad, unsigned nnz, void* stream) {
+    if (nnz == 0) return 0;
+    k_kkt_scale<<<grid_for(nnz), kThreads, 0, (cudaStream_t)stream>>>(row, col, factor, values,
+                                                                      bad, nnz);
+    return launched();
+}
+
+extern "C" int go_scale_vec(double* x, const double* d, unsigned n, void* stream) {
+    if (n == 0) return 0;
+    k_scale_vec<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(x, d, n);
+    return launched();
+}
+
+extern "C" int go_unscale_vec(const double* x, const double* d, double* y, unsigned n,
+                              void* stream) {
+    if (n == 0) return 0;
+    k_unscale_vec<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(x, d, y, n);
+    return launched();
+}
+
+extern "C" int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned* lo_ptr,
+                           const unsigned* lo_col, const unsigned* lo_src, const double* values,
+                           const double* x, double* y, unsigned n, void* stream) {
+    if (n == 0) return 0;
+    k_kkt_symv<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(up_ptr, up_col, lo_ptr, lo_col,
+                                                                   lo_src, values, x, y, n);
+    return launched();
+}

@@ -47,27 +47,30 @@
 //!
 //! # Where the derivatives come from
 //!
-//! The balance rows' first and second derivatives are exactly
-//! [`injection_hessian`](crate::injection_hessian)'s — that module exists for
-//! this. The branch limits need their own, and the structure turns out to be
-//! the same: a terminal flow
+//! From one kernel, a branch terminal's flow
 //!
 //! \\[ P_{ft} = |V_f|^2 g_{self} + |V_f||V_t| (g_{mut}\cos\theta_{ft}
 //!     + b_{mut}\sin\theta_{ft}) \\]
 //!
-//! is algebraically **a bus injection with exactly one neighbour**, with
-//! \\(y_{ff}\\) playing the role of the self-admittance and \\(y_{ft}\\) the
-//! mutual one. So the same \\(c\\)/\\(s\\) pair and the same derivative
-//! rotations apply, which is why [`branch_flow`](crate::branch_flow) and
-//! `injection_hessian` share their shape.
+//! and its `Q`, with their first and second derivatives in the four
+//! variables they touch. A terminal flow is **a bus injection with exactly
+//! one neighbour**, and a bus injection is the sum of its terminals' flows
+//! plus its shunt's, so the balance rows (in either formulation), the
+//! branch limits and the flow definitions all come from it. The evaluation
+//! goes element by element over flat arrays (`ac_kernels.rs`), each element
+//! writing its own entries: the shape a GPU kernel needs. It equals the
+//! Y-bus formulas of [`injection_hessian`](crate::injection_hessian) to
+//! rounding (`opf_ac_test.rs` holds it to them).
 
 use std::collections::HashMap;
 
 use num_complex::Complex;
 
 use crate::branch_flow::{BranchParams, Terminal, branch_params};
-use crate::injection_hessian::{injection_jacobian, weighted_injection_hessian};
-use crate::network::{YBusSparse, power_injections};
+
+#[path = "ac_kernels.rs"]
+mod kernels;
+use crate::network::YBusSparse;
 use crate::opf::model::CostCurve;
 use crate::opf::nlp::{NlpOptions, NlpSolution, NonlinearProblem};
 use crate::opf::{OpfError, OptStatus};
@@ -131,7 +134,35 @@ pub struct AcOpfOptions {
     pub enforce_limits: bool,
     /// Where every solve starts; see [`AcOpfStart`].
     pub start: AcOpfStart,
+    /// How branch flows enter the model; see [`AcOpfFormulation`].
+    pub formulation: AcOpfFormulation,
     pub nlp: NlpOptions,
+}
+
+/// How the AC-OPF writes branch flows. Both describe the same problem (same
+/// feasible set in the voltages and dispatch, same optimum); they differ in
+/// what the solver sees.
+///
+/// - [`BusInjection`](Self::BusInjection): the flows are expressions of the
+///   voltages. The balances are the Y-bus injections, and a thermal limit
+///   is \\(P(V)^2 + Q(V)^2 \\le \\text{rate}^2\\). The smallest model.
+/// - [`BranchFlow`](Self::BranchFlow): `p`, `q` at both ends of every branch
+///   are variables of their own (bounded by ±rate where rated), tied to the
+///   voltages by four equality rows per branch; the balances sum them, and
+///   a thermal limit is \\(p^2 + q^2 \\le \\text{rate}^2\\) on them. PowerModels'
+///   `ACPPowerModel` and ExaModelsPower's polar model write it so.
+///
+/// Why both: from a flat start the flows are 0 and the voltages flat, which
+/// the branch-flow model lets be inconsistent for a while, as it lets the
+/// balances be; the bus-injection model ties every flow and limit to every
+/// voltage step from the first iteration. On case13659_pegase from flat,
+/// PowerModels (67 iterations) and ExaModelsPower (62) solve the branch-flow
+/// model, and IPOPT fails on the bus-injection one, as JuliaGrid's does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcOpfFormulation {
+    #[default]
+    BusInjection,
+    BranchFlow,
 }
 
 impl Default for AcOpfOptions {
@@ -141,6 +172,7 @@ impl Default for AcOpfOptions {
             default_v_max: 1.1,
             enforce_limits: true,
             start: AcOpfStart::default(),
+            formulation: AcOpfFormulation::default(),
             nlp: NlpOptions::default(),
         }
     }
@@ -159,98 +191,6 @@ pub enum AcOpfStart {
     /// Every generator at the middle of its active-power range: MATPOWER's
     /// and PowerModels' flat start, for comparing solvers from one point.
     Flat,
-}
-
-/// Value, gradient and Hessian of one terminal's `(P, Q)`, in the four local
-/// state variables `[θ_near, θ_far, |V|_near, |V|_far]`.
-///
-/// A terminal flow is a one-neighbour bus injection — see the module docs — so
-/// these are the injection formulas with the sum over neighbours removed.
-#[derive(Clone, Copy, Debug, Default)]
-struct TerminalDerivatives {
-    p: f64,
-    q: f64,
-    dp: [f64; 4],
-    dq: [f64; 4],
-    /// Full symmetric 4×4 blocks.
-    d2p: [[f64; 4]; 4],
-    d2q: [[f64; 4]; 4],
-}
-
-const TH_NEAR: usize = 0;
-const TH_FAR: usize = 1;
-const V_NEAR: usize = 2;
-const V_FAR: usize = 3;
-
-fn terminal_derivatives(
-    branch: &BranchParams,
-    terminal: Terminal,
-    theta: &[f64],
-    vm: &[f64],
-) -> TerminalDerivatives {
-    let (near, far) = match terminal {
-        Terminal::From => (branch.from, branch.to),
-        Terminal::To => (branch.to, branch.from),
-    };
-    let (y_self, y_mut) = match terminal {
-        Terminal::From => (branch.y[0], branch.y[1]),
-        Terminal::To => (branch.y[3], branch.y[2]),
-    };
-    let (v_n, v_f) = (vm[near], vm[far]);
-    let (sin, cos) = (theta[near] - theta[far]).sin_cos();
-    let c = y_mut.re * cos + y_mut.im * sin;
-    let s = y_mut.re * sin - y_mut.im * cos;
-
-    let mut d = TerminalDerivatives {
-        p: v_n * v_n * y_self.re + v_n * v_f * c,
-        q: -v_n * v_n * y_self.im + v_n * v_f * s,
-        ..Default::default()
-    };
-
-    d.dp[TH_NEAR] = -v_n * v_f * s;
-    d.dp[TH_FAR] = v_n * v_f * s;
-    d.dp[V_NEAR] = 2.0 * v_n * y_self.re + v_f * c;
-    d.dp[V_FAR] = v_n * c;
-
-    d.dq[TH_NEAR] = v_n * v_f * c;
-    d.dq[TH_FAR] = -v_n * v_f * c;
-    d.dq[V_NEAR] = -2.0 * v_n * y_self.im + v_f * s;
-    d.dq[V_FAR] = v_n * s;
-
-    // θθ: both flows depend on the angle *difference*, so the 2×2 angle block
-    // is one value with alternating sign.
-    let pc = v_n * v_f * c;
-    let ps = v_n * v_f * s;
-    d.d2p[TH_NEAR][TH_NEAR] = -pc;
-    d.d2p[TH_NEAR][TH_FAR] = pc;
-    d.d2p[TH_FAR][TH_NEAR] = pc;
-    d.d2p[TH_FAR][TH_FAR] = -pc;
-    d.d2q[TH_NEAR][TH_NEAR] = -ps;
-    d.d2q[TH_NEAR][TH_FAR] = ps;
-    d.d2q[TH_FAR][TH_NEAR] = ps;
-    d.d2q[TH_FAR][TH_FAR] = -ps;
-
-    // |V||V|: quadratic in the near magnitude, bilinear across the pair.
-    d.d2p[V_NEAR][V_NEAR] = 2.0 * y_self.re;
-    d.d2p[V_NEAR][V_FAR] = c;
-    d.d2p[V_FAR][V_NEAR] = c;
-    d.d2q[V_NEAR][V_NEAR] = -2.0 * y_self.im;
-    d.d2q[V_NEAR][V_FAR] = s;
-    d.d2q[V_FAR][V_NEAR] = s;
-
-    // Mixed, emitted in both orderings since mixed partials commute.
-    for (v_index, scale) in [(V_NEAR, v_f), (V_FAR, v_n)] {
-        d.d2p[v_index][TH_NEAR] = -scale * s;
-        d.d2p[TH_NEAR][v_index] = -scale * s;
-        d.d2p[v_index][TH_FAR] = scale * s;
-        d.d2p[TH_FAR][v_index] = scale * s;
-        d.d2q[v_index][TH_NEAR] = scale * c;
-        d.d2q[TH_NEAR][v_index] = scale * c;
-        d.d2q[v_index][TH_FAR] = -scale * c;
-        d.d2q[TH_FAR][v_index] = -scale * c;
-    }
-
-    d
 }
 
 /// One enforced branch limit.
@@ -283,6 +223,40 @@ pub struct AcOpf {
     /// `(epigraph column, generator column, slope, intercept)` per segment,
     /// one constraint row each.
     cost_rows: Vec<(usize, usize, f64, f64)>,
+    /// [`AcOpfFormulation::BranchFlow`]: the first flow column (`p_f, q_f,
+    /// p_t, q_t` per branch, in `params` order) and the first flow-definition
+    /// row (four per branch, after every other row).
+    flow: Option<(usize, usize)>,
+    /// Per branch (`params` order), its rating, if any.
+    rating: Vec<Option<f64>>,
+    /// The constraints, Jacobian and Hessian, evaluated element by element.
+    kernels: kernels::AcKernels,
+    /// The same kernels on the GPU, once [`evaluate_on_device`]
+    /// (`AcOpf::evaluate_on_device`) has made them; then the model's
+    /// evaluations run there.
+    #[cfg(feature = "gpu")]
+    device: Option<std::sync::Mutex<DeviceEvaluation>>,
+}
+
+/// The model on the device, and the patterns its values fill.
+#[cfg(feature = "gpu")]
+struct DeviceEvaluation {
+    model: gridoxide_gpu::ac::DeviceAcModel,
+    jacobian: Vec<(usize, usize)>,
+    hessian: Vec<(usize, usize)>,
+}
+
+/// `(row, column)` beside each value, in parallel: the triplets the CPU's
+/// evaluation returns.
+#[cfg(feature = "gpu")]
+fn triplets(pattern: &[(usize, usize)], values: Vec<f64>) -> Vec<(usize, usize, f64)> {
+    use rayon::prelude::*;
+    pattern
+        .par_iter()
+        .zip(values)
+        .with_min_len(4096)
+        .map(|(&(r, c), v)| (r, c, v))
+        .collect()
 }
 
 impl AcOpf {
@@ -371,13 +345,74 @@ impl AcOpf {
             }
         }
 
+        let mut shunt = vec![Complex::new(0.0, 0.0); n];
+        for &(at, y) in &network.shunts {
+            shunt[at] += y;
+        }
+        let rating: Vec<Option<f64>> = (0..params.len())
+            .map(|b| network.limits.get(&b).copied().flatten())
+            .collect();
+        let base_vars = 2 * n + 2 * g + n_cost;
+        let flow = (options.formulation == AcOpfFormulation::BranchFlow).then(|| {
+            let rows = 2 * n + limit_rows.len() + network.angle_limits.len() + cost_rows.len();
+            (base_vars, rows)
+        });
+        let n_vars = base_vars + if flow.is_some() { 4 * params.len() } else { 0 };
+        let kernels = kernels::AcKernels::new(
+            &params,
+            kernels::Layout {
+                n,
+                theta: 0,
+                vm: n,
+                pg: 2 * n,
+                qg: 2 * n + g,
+                shunt,
+                p_load: network.p_load.clone(),
+                q_load: network.q_load.clone(),
+                gen_bus: network.generators.iter().map(|u| u.bus).collect(),
+                quadratic: network
+                    .generators
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, unit)| match &unit.cost {
+                        Some(CostCurve::Polynomial { coefficients }) if coefficients.len() > 2 => {
+                            Some((2 * n + k, 2.0 * coefficients[2]))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                limits: limit_rows
+                    .iter()
+                    .map(|l| (l.branch, l.terminal == Terminal::From))
+                    .collect(),
+                angle: network
+                    .angle_limits
+                    .iter()
+                    .map(|a| (a.from, a.to))
+                    .collect(),
+                cost: cost_rows.iter().map(|&(e, c, s, _)| (e, c, s)).collect(),
+                flow,
+                n_vars,
+                n_rows: 2 * n
+                    + limit_rows.len()
+                    + network.angle_limits.len()
+                    + cost_rows.len()
+                    + if flow.is_some() { 4 * params.len() } else { 0 },
+            },
+        );
+
         Ok(Self {
             options,
             ybus,
             params,
             limit_rows,
             template,
-            n_vars: 2 * n + 2 * g + n_cost,
+            flow,
+            rating,
+            kernels,
+            #[cfg(feature = "gpu")]
+            device: None,
+            n_vars,
             theta: 0,
             vm: n,
             pg: 2 * n,
@@ -415,14 +450,32 @@ impl AcOpf {
         &self.ybus
     }
 
-    fn buses_at(&self, x: &[f64]) -> Vec<Bus> {
-        let n = self.network.n_buses;
-        let mut buses = self.template.clone();
-        for i in 0..n {
-            buses[i].voltage_ang = x[self.theta + i];
-            buses[i].voltage_mag = x[self.vm + i];
-        }
-        buses
+    /// The model's constraints, Jacobian and Lagrangian Hessian on the GPU:
+    /// the same kernels as this model's own, one thread per element. The
+    /// values come in the order of this model's triplets
+    /// ([`NonlinearProblem::jacobian`], `lagrangian_hessian`).
+    #[cfg(feature = "gpu")]
+    pub fn device_model(
+        &self,
+    ) -> Result<gridoxide_gpu::ac::DeviceAcModel, gridoxide_gpu::LinearError> {
+        gridoxide_gpu::ac::DeviceAcModel::new(&self.kernels.device_data(self.n_vars))
+    }
+
+    /// Evaluates the model's constraints, Jacobian and Lagrangian Hessian on
+    /// the GPU from now on ([`device_model`](Self::device_model)): the
+    /// interior point then gets the same triplets, to rounding (the device's
+    /// sines and cosines round differently), at a fraction of the host's
+    /// time (case24464_goc: the Hessian 14.4 -> 0.5 ms, with the copies).
+    /// Pair it with a GPU KKT solver, `gridoxide::gpu::cudss_ldlt_solver`.
+    #[cfg(feature = "gpu")]
+    pub fn evaluate_on_device(&mut self) -> Result<(), gridoxide_gpu::LinearError> {
+        let model = self.device_model()?;
+        self.device = Some(std::sync::Mutex::new(DeviceEvaluation {
+            model,
+            jacobian: self.kernels.jacobian_pattern(),
+            hessian: self.kernels.hessian_pattern(),
+        }));
+        Ok(())
     }
 
     /// Solves, and interprets the result in physical units.
@@ -522,6 +575,11 @@ impl NonlinearProblem for AcOpf {
             + self.limit_rows.len()
             + self.network.angle_limits.len()
             + self.cost_rows.len()
+            + if self.flow.is_some() {
+                4 * self.params.len()
+            } else {
+                0
+            }
     }
 
     fn var_bounds(&self) -> (Vec<f64>, Vec<f64>) {
@@ -551,6 +609,19 @@ impl NonlinearProblem for AcOpf {
             lower[*column] = f64::NEG_INFINITY;
             upper[*column] = f64::INFINITY;
         }
+        // Branch flows within ±rate where rated, as PowerModels and
+        // ExaModelsPower bound them: implied by the thermal limit, and a box
+        // the barrier keeps the flows inside from the start.
+        if let Some((column, _)) = self.flow {
+            for (b, rate) in self.rating.iter().enumerate() {
+                if let (Some(rate), true) = (rate, self.options.enforce_limits) {
+                    for k in 0..4 {
+                        lower[column + 4 * b + k] = -rate;
+                        upper[column + 4 * b + k] = *rate;
+                    }
+                }
+            }
+        }
         let _ = g;
         (lower, upper)
     }
@@ -571,6 +642,11 @@ impl NonlinearProblem for AcOpf {
         for &(_, _, _, intercept) in &self.cost_rows {
             lower.push(intercept);
             upper.push(f64::INFINITY);
+        }
+        // `flow − flow(V) = 0`, four per branch.
+        if self.flow.is_some() {
+            lower.extend(std::iter::repeat_n(0.0, 4 * self.params.len()));
+            upper.extend(std::iter::repeat_n(0.0, 4 * self.params.len()));
         }
         (lower, upper)
     }
@@ -607,131 +683,41 @@ impl NonlinearProblem for AcOpf {
         out
     }
 
+    // On the device once `evaluate_on_device` has made it, the CPU's
+    // kernels otherwise, or if the device fails.
+
     fn constraints(&self, x: &[f64]) -> Vec<f64> {
-        let n = self.network.n_buses;
-        let buses = self.buses_at(x);
-        let (p_inj, q_inj) = power_injections(&buses, &self.ybus);
-
+        #[cfg(feature = "gpu")]
+        if let Some(device) = &self.device
+            && let Ok(out) = device.lock().unwrap().model.constraints(x)
+        {
+            return out;
+        }
         let mut out = vec![0.0; self.n_constraints()];
-        for i in 0..n {
-            out[i] = p_inj[i] + self.network.p_load[i];
-            out[n + i] = q_inj[i] + self.network.q_load[i];
-        }
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            out[unit.bus] -= x[self.pg + k];
-            out[n + unit.bus] -= x[self.qg + k];
-        }
-
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let d = terminal_derivatives(&self.params[limit.branch], limit.terminal, &theta, &vm);
-            out[2 * n + r] = d.p * d.p + d.q * d.q;
-        }
-        let base = 2 * n + self.limit_rows.len();
-        for (r, angle) in self.network.angle_limits.iter().enumerate() {
-            out[base + r] = x[self.theta + angle.from] - x[self.theta + angle.to];
-        }
-        let base = base + self.network.angle_limits.len();
-        for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
-            out[base + r] = x[epigraph] - slope * x[column];
-        }
+        self.kernels.constraints(x, &mut out);
         out
     }
 
     fn jacobian(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
-        let n = self.network.n_buses;
-        let buses = self.buses_at(x);
-        let mut out = injection_jacobian(&buses, &self.ybus);
-
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            out.push((unit.bus, self.pg + k, -1.0));
-            out.push((n + unit.bus, self.qg + k, -1.0));
-        }
-
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let branch = &self.params[limit.branch];
-            let d = terminal_derivatives(branch, limit.terminal, &theta, &vm);
-            let columns = self.limit_columns(branch, limit.terminal);
-            // ∇(P² + Q²) = 2P∇P + 2Q∇Q
-            for local in 0..4 {
-                out.push((
-                    2 * n + r,
-                    columns[local],
-                    2.0 * (d.p * d.dp[local] + d.q * d.dq[local]),
-                ));
+        #[cfg(feature = "gpu")]
+        if let Some(device) = &self.device {
+            let mut d = device.lock().unwrap();
+            if let Ok(values) = d.model.jacobian_values(x) {
+                return triplets(&d.jacobian, values);
             }
         }
-        // The angle and epigraph rows are linear, so their Jacobian is
-        // constant — and for the same reason they contribute nothing to the
-        // Hessian.
-        let base = 2 * n + self.limit_rows.len();
-        for (r, angle) in self.network.angle_limits.iter().enumerate() {
-            out.push((base + r, self.theta + angle.from, 1.0));
-            out.push((base + r, self.theta + angle.to, -1.0));
-        }
-        let base = base + self.network.angle_limits.len();
-        for (r, &(epigraph, column, slope, _)) in self.cost_rows.iter().enumerate() {
-            out.push((base + r, epigraph, 1.0));
-            out.push((base + r, column, -slope));
-        }
-        out
+        self.kernels.jacobian(x)
     }
 
     fn lagrangian_hessian(&self, x: &[f64], y: &[f64]) -> Vec<(usize, usize, f64)> {
-        let n = self.network.n_buses;
-
-        // The objective's own curvature: quadratic cost curves only, so the
-        // block is diagonal on the P_g columns.
-        let mut out = Vec::new();
-        for (k, unit) in self.network.generators.iter().enumerate() {
-            if let Some(CostCurve::Polynomial { coefficients }) = &unit.cost {
-                if coefficients.len() > 2 {
-                    out.push((self.pg + k, self.pg + k, 2.0 * coefficients[2]));
-                }
+        #[cfg(feature = "gpu")]
+        if let Some(device) = &self.device {
+            let mut d = device.lock().unwrap();
+            if let Ok(values) = d.model.hessian_values(x, y) {
+                return triplets(&d.hessian, values);
             }
         }
-
-        // −Σ yᵢ ∇²cᵢ for the balance rows. The sign is the module's
-        // convention (L = f − yᵀc), so the multipliers are negated on the way
-        // in rather than the result negated on the way out.
-        let buses = self.buses_at(x);
-        let lambda: Vec<f64> = (0..n).map(|i| -y[i]).collect();
-        let mu: Vec<f64> = (0..n).map(|i| -y[n + i]).collect();
-        out.extend(weighted_injection_hessian(&buses, &self.ybus, &lambda, &mu));
-
-        // −Σ y_r ∇²(P² + Q²) for the limit rows, where
-        //   ∇²(P² + Q²) = 2(∇P∇Pᵀ + P∇²P + ∇Q∇Qᵀ + Q∇²Q).
-        // The outer products are what a limit contributes beyond the
-        // injections, and they stay inside the branch's own 2-bus block — so
-        // limits add no fill either.
-        let theta: Vec<f64> = (0..n).map(|i| x[self.theta + i]).collect();
-        let vm: Vec<f64> = (0..n).map(|i| x[self.vm + i]).collect();
-        for (r, limit) in self.limit_rows.iter().enumerate() {
-            let weight = -y[2 * n + r];
-            if weight == 0.0 {
-                continue;
-            }
-            let branch = &self.params[limit.branch];
-            let d = terminal_derivatives(branch, limit.terminal, &theta, &vm);
-            let columns = self.limit_columns(branch, limit.terminal);
-            for a in 0..4 {
-                for b in 0..4 {
-                    let value = 2.0
-                        * (d.dp[a] * d.dp[b]
-                            + d.p * d.d2p[a][b]
-                            + d.dq[a] * d.dq[b]
-                            + d.q * d.d2q[a][b]);
-                    // Kept when zero: IPOPT fixes the Hessian's pattern at
-                    // the start, so it must not depend on the point.
-                    out.push((columns[a], columns[b], weight * value));
-                }
-            }
-        }
-
-        out
+        self.kernels.lagrangian_hessian(x, y)
     }
 
     /// A flat voltage profile with the dispatch already roughly meeting
@@ -808,22 +794,6 @@ impl NonlinearProblem for AcOpf {
             }
         }
         x
-    }
-}
-
-impl AcOpf {
-    /// Global column indices for a terminal's four local state variables.
-    fn limit_columns(&self, branch: &BranchParams, terminal: Terminal) -> [usize; 4] {
-        let (near, far) = match terminal {
-            Terminal::From => (branch.from, branch.to),
-            Terminal::To => (branch.to, branch.from),
-        };
-        [
-            self.theta + near,
-            self.theta + far,
-            self.vm + near,
-            self.vm + far,
-        ]
     }
 }
 

@@ -4048,18 +4048,46 @@ impl OptimalPowerFlowModel {
     /// and the `ANGMIN`/`ANGMAX` angle-difference limits. Isolated buses and
     /// out-of-service branches and generators are left out.
     ///
-    /// `solver` is `"nlp"` (gridoxide's own interior point, the default) or
-    /// `"ipopt"`, which needs the extension built with the `opf-ipopt`
+    /// `solver` is `"nlp"` (gridoxide's own interior point, the default),
+    /// `"nlp-gpu"`, the same interior point with its model evaluated and its
+    /// KKT system factorized on an NVIDIA GPU, by cuDSS (the extension built
+    /// with the `gpu` feature),
+    /// or `"ipopt"`, which needs the extension built with the `opf-ipopt`
     /// feature. `tol` and `max_iter` go to the solver as its own tolerance
     /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
     ///
+    /// `deterministic` (`"nlp-gpu"` only) keeps cuDSS in its deterministic
+    /// mode, so a solve takes the same path every time. `False` halves its
+    /// solves' time (as MadNLP's cuDSS runs by default), for benchmarks; the
+    /// iteration count may then vary from run to run.
+    ///
     /// Every solve starts from the point `solve(init=...)` names.
     #[staticmethod]
-    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300))]
-    fn from_matpower(path: &str, solver: &str, tol: f64, max_iter: usize) -> PyResult<Self> {
+    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300, deterministic=true))]
+    fn from_matpower(
+        path: &str,
+        solver: &str,
+        tol: f64,
+        max_iter: usize,
+        deterministic: bool,
+    ) -> PyResult<Self> {
         use crate::matpower::MatpowerError;
+        let gpu = solver == "nlp-gpu";
+        if !deterministic && !gpu {
+            return Err(PyValueError::new_err(
+                "deterministic=False applies to solver='nlp-gpu' only",
+            ));
+        }
         let solver = match solver {
             "nlp" => AcOpfSolver::Nlp,
+            #[cfg(feature = "gpu")]
+            "nlp-gpu" => AcOpfSolver::Nlp,
+            #[cfg(not(feature = "gpu"))]
+            "nlp-gpu" => {
+                return Err(PyValueError::new_err(
+                    "solver='nlp-gpu' needs the extension built with the gpu feature",
+                ));
+            }
             #[cfg(feature = "opf-ipopt")]
             "ipopt" => AcOpfSolver::Ipopt,
             #[cfg(not(feature = "opf-ipopt"))]
@@ -4070,7 +4098,7 @@ impl OptimalPowerFlowModel {
             }
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "unknown solver {other:?}, expected 'nlp' or 'ipopt'"
+                    "unknown solver {other:?}, expected 'nlp', 'nlp-gpu' or 'ipopt'"
                 )));
             }
         };
@@ -4085,8 +4113,23 @@ impl OptimalPowerFlowModel {
         let mut options = crate::opf::ac::AcOpfOptions::default();
         options.nlp.tolerance = tol;
         options.nlp.max_iterations = max_iter;
-        let opf = crate::opf::ac::AcOpf::build(case.network, options)
+        #[cfg(feature = "gpu")]
+        if gpu {
+            options.nlp.kkt_solver = if deterministic {
+                crate::gpu::cudss_ldlt_solver
+            } else {
+                crate::gpu::cudss_ldlt_solver_fast
+            };
+        }
+        let _ = gpu;
+        #[allow(unused_mut)]
+        let mut opf = crate::opf::ac::AcOpf::build(case.network, options)
             .map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        #[cfg(feature = "gpu")]
+        if gpu {
+            opf.evaluate_on_device()
+                .map_err(|e| PyRuntimeError::new_err(format!("the GPU model: {e}")))?;
+        }
         Ok(Self {
             opf,
             solver,

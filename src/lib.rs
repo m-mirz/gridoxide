@@ -5,7 +5,7 @@
 pub use gridoxide_sparse::sparse_klu;
 #[cfg(feature = "pardiso")]
 pub use gridoxide_sparse::sparse_pardiso;
-pub use gridoxide_sparse::{block_sparse, klu_native, lu, sparse};
+pub use gridoxide_sparse::{block_sparse, klu_native, ldlt, lu, sparse};
 // Likewise the solvers: the network model, power flow and the analyses built
 // on it, state estimation and short circuit, plus `run_power_flow` and its
 // types at the crate root.

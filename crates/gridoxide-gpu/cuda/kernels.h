@@ -121,6 +121,44 @@ int go_dc_flows(const double* theta, const unsigned* out_br, const unsigned* br_
                 const double* base_flows, const double* c, const int* solved, double* flows,
                 unsigned n, unsigned n_br, unsigned k, void* stream);
 
+/* The interior point's KKT matrix (src/kkt.rs), as gridoxide-sparse's
+ * LowerPattern assembles and equilibrates it on the CPU, to the same bits.
+ *
+ * Assembly: values[s] = sum of trip[src[t]] for t in slot_ptr[s] ..
+ * slot_ptr[s+1], in triplet order, from 0.0. */
+int go_kkt_gather(const unsigned* slot_ptr, const unsigned* src, const double* trip,
+                  double* values, unsigned nnz, void* stream);
+
+/* Ruiz, the maxima: row_max[i] = max |values[inc[k]]| over k in inc_ptr[i]
+ * .. inc_ptr[i+1], the slots in row or column i. */
+int go_kkt_row_max(const unsigned* inc_ptr, const unsigned* inc, const double* values,
+                   double* row_max, unsigned n, void* stream);
+
+/* Ruiz, the factors: factor[i] = 1/sqrt(row_max[i]) (1 where it is 0 or not
+ * finite), scale[i] *= factor[i], or = factor[i] in the `first` pass. */
+int go_kkt_factor(const double* row_max, double* factor, double* scale, int first, unsigned n,
+                  void* stream);
+
+/* Ruiz, the scaling: values[s] *= factor[row[s]] * factor[col[s]]; with
+ * `bad` not null, *bad = 1 where the result is not finite. */
+int go_kkt_scale(const unsigned* row, const unsigned* col, const double* factor,
+                 double* values, int* bad, unsigned nnz, void* stream);
+
+/* x[i] *= d[i]. */
+int go_scale_vec(double* x, const double* d, unsigned n, void* stream);
+
+/* y[i] = x[i] / d[i]. */
+int go_unscale_vec(const double* x, const double* d, double* y, unsigned n, void* stream);
+
+/* y = A x, A symmetric with its upper triangle in CSR (up_ptr, up_col,
+ * values; the diagonal first in each row, as LowerPattern's columns have it)
+ * and its strictly lower part as a CSR of positions into `values` (lo_ptr,
+ * lo_col, lo_src). One thread per row, no atomics: the same sums every
+ * time. */
+int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned* lo_ptr,
+                const unsigned* lo_col, const unsigned* lo_src, const double* values,
+                const double* x, double* y, unsigned n, void* stream);
+
 #ifdef __cplusplus
 }
 #endif

@@ -25,9 +25,10 @@
 
 #![cfg(feature = "opf")]
 
+use gridoxide::injection_hessian::{injection_jacobian, weighted_injection_hessian};
 use gridoxide::network::power_injections;
 use gridoxide::opf::OptStatus;
-use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
+use gridoxide::opf::ac::{AcOpf, AcOpfFormulation, AcOpfOptions};
 use gridoxide::opf::model::OpfData;
 use gridoxide::opf::nlp::NonlinearProblem;
 use gridoxide::pgm::PgmInput;
@@ -231,9 +232,154 @@ fn branch_limits_are_enforced_and_actually_bind() {
 /// derivatives here not already covered by `injection_hessian_test.rs`.
 #[test]
 fn the_models_derivatives_match_finite_differences() {
+    derivatives_match_finite_differences(AcOpfFormulation::BusInjection);
+}
+
+/// The same check on the branch-flow formulation: its flow-definition rows,
+/// shunt-only balances and limits on the flow variables.
+#[test]
+fn the_branch_flow_models_derivatives_match_finite_differences() {
+    derivatives_match_finite_differences(AcOpfFormulation::BranchFlow);
+}
+
+/// The two formulations are one problem: with the flow variables set to the
+/// flows the voltages imply, the branch-flow model's balances and limits
+/// equal the bus-injection model's, its flow-definition rows are zero, and
+/// the objectives agree.
+#[test]
+fn the_branch_flow_formulation_describes_the_same_problem() {
+    let injection = build("pglib_opf_case14_ieee", AcOpfOptions::default());
+    let flows = build(
+        "pglib_opf_case14_ieee",
+        AcOpfOptions {
+            formulation: AcOpfFormulation::BranchFlow,
+            ..AcOpfOptions::default()
+        },
+    );
+    let mut x = injection.initial_point();
+    for (k, value) in x.iter_mut().enumerate() {
+        *value += 0.05 * ((k as f64 * 0.7).sin());
+    }
+    // The flow variables at their definitions: solve for them from the rows
+    // themselves (each is `flow − flow(V)`, so evaluating with zeros gives
+    // `−flow(V)`).
+    let mut z = x.clone();
+    z.resize(flows.n_vars(), 0.0);
+    let c0 = flows.constraints(&z);
+    let rows = injection.n_constraints();
+    for (k, v) in c0[rows..].iter().enumerate() {
+        z[x.len() + k] = -v;
+    }
+    let a = injection.constraints(&x);
+    let b = flows.constraints(&z);
+    for r in 0..rows {
+        assert!(
+            (a[r] - b[r]).abs() < 1e-12 * (1.0 + a[r].abs()),
+            "row {r}: {} vs {}",
+            a[r],
+            b[r]
+        );
+    }
+    assert!(b[rows..].iter().all(|v| v.abs() < 1e-14));
+    assert_eq!(injection.objective(&x), flows.objective(&z));
+}
+
+/// The balance rows, evaluated element by element (each terminal's flow,
+/// gathered per bus, plus the bus's shunt), against the Y-bus formulas they
+/// replaced: values, Jacobian and the Hessian's balance part at a point away
+/// from the flat start, on a case with transformers and shunts. Equal to
+/// rounding.
+#[test]
+fn the_elementwise_balances_match_the_ybus() {
+    use std::collections::HashMap;
+    let opf = build("pglib_opf_case118_ieee", AcOpfOptions::default());
+    let network = opf.network();
+    let n = network.n_buses;
+    let mut x = opf.initial_point();
+    for (k, value) in x.iter_mut().enumerate().take(2 * n) {
+        *value += 0.05 * ((k as f64 * 0.7).sin());
+    }
+    let buses = opf.buses_for_test(&x[..n], &x[n..2 * n]);
+    let ybus = opf.ybus_for_test();
+
+    let close = |a: f64, b: f64, what: &str| {
+        assert!(
+            (a - b).abs() < 1e-11 * (1.0 + b.abs()),
+            "{what}: {a} vs {b}"
+        );
+    };
+    let summed = |entries: Vec<(usize, usize, f64)>, keep: &dyn Fn(usize, usize) -> bool| {
+        let mut out: HashMap<(usize, usize), f64> = HashMap::new();
+        for (r, c, v) in entries {
+            if keep(r, c) {
+                *out.entry((r, c)).or_default() += v;
+            }
+        }
+        out
+    };
+
+    let (p_inj, q_inj) = power_injections(&buses, ybus);
+    let c = opf.constraints(&x);
+    let mut generation = vec![(0.0, 0.0); n];
+    for (k, unit) in network.generators.iter().enumerate() {
+        let g = network.generators.len();
+        generation[unit.bus].0 += x[2 * n + k];
+        generation[unit.bus].1 += x[2 * n + g + k];
+    }
+    for i in 0..n {
+        close(
+            c[i],
+            p_inj[i] + network.p_load[i] - generation[i].0,
+            "P balance",
+        );
+        close(
+            c[n + i],
+            q_inj[i] + network.q_load[i] - generation[i].1,
+            "Q balance",
+        );
+    }
+
+    let state = |r: usize, col: usize| r < 2 * n && col < 2 * n;
+    let ours = summed(opf.jacobian(&x), &state);
+    let theirs = summed(injection_jacobian(&buses, ybus), &state);
+    for (key, &want) in &theirs {
+        close(*ours.get(key).unwrap_or(&0.0), want, &format!("J{key:?}"));
+    }
+    for (key, &got) in &ours {
+        close(got, *theirs.get(key).unwrap_or(&0.0), &format!("J{key:?}"));
+    }
+
+    // Multipliers on the balance rows only, so the Hessian is theirs alone
+    // (the cost's curvature sits on P_g columns, outside the state block).
+    let mut y = vec![0.0; opf.n_constraints()];
+    for (r, value) in y.iter_mut().enumerate().take(2 * n) {
+        *value = 0.8 * ((r as f64 * 0.9).cos()) - 0.3;
+    }
+    let ours = summed(opf.lagrangian_hessian(&x, &y), &|r, col| state(r, col));
+    let lambda: Vec<f64> = (0..n).map(|i| -y[i]).collect();
+    let mu: Vec<f64> = (0..n).map(|i| -y[n + i]).collect();
+    let theirs = summed(
+        weighted_injection_hessian(&buses, ybus, &lambda, &mu),
+        &state,
+    );
+    for (key, &want) in &theirs {
+        close(*ours.get(key).unwrap_or(&0.0), want, &format!("H{key:?}"));
+    }
+    for (key, &got) in &ours {
+        close(got, *theirs.get(key).unwrap_or(&0.0), &format!("H{key:?}"));
+    }
+}
+
+fn derivatives_match_finite_differences(formulation: AcOpfFormulation) {
     // Small enough to difference every column, and carries a transformer, a
     // shunt and rated branches, so all three constraint kinds are exercised.
-    let opf = build("pglib_opf_case14_ieee", AcOpfOptions::default());
+    let opf = build(
+        "pglib_opf_case14_ieee",
+        AcOpfOptions {
+            formulation,
+            ..AcOpfOptions::default()
+        },
+    );
     let n_vars = opf.n_vars();
     let m = opf.n_constraints();
 

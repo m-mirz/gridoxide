@@ -320,6 +320,16 @@ name = "all"
 path = "tests/all.rs"
 
 [[example]]
+name = "opf_point_probe"
+path = "examples/opf_point_probe.rs"
+required-features = ["opf", "matpower"]
+
+[[example]]
+name = "opf_compare"
+path = "examples/opf_compare.rs"
+required-features = ["opf", "matpower"]
+
+[[example]]
 name = "smallsignal_scale"
 path = "examples/smallsignal_scale.rs"
 required-features = ["dynamics"]

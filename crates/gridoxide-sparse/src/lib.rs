@@ -15,6 +15,7 @@
 
 pub mod block_sparse;
 pub mod klu_native;
+pub mod ldlt;
 pub mod lu;
 pub mod sparse;
 #[cfg(feature = "klu")]

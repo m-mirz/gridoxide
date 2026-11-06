@@ -23,10 +23,11 @@ const PUBLISHED: &[(&str, f64)] = &[
     ("pglib_opf_case118_ieee__api", 2.4961e+05),
     ("pglib_opf_case118_ieee__sad", 1.0516e+05),
     ("pglib_opf_case300_ieee", 5.6522e+05),
+    ("pglib_opf_case300_ieee__api", 6.8604e+05),
+    ("pglib_opf_case300_ieee__sad", 5.6570e+05),
+    ("pglib_opf_case1354_pegase", 1.2588e+06),
+    ("pglib_opf_case2869_pegase", 2.4628e+06),
 ];
-
-/// Not reached by `opf::nlp` within its iteration limit; IPOPT solves it.
-const NLP_UNSOLVED: &[&str] = &["pglib_opf_case300_ieee"];
 
 /// Five significant digits leave half a unit of the fifth: 5e-5 relative.
 const GAP: f64 = 1e-4;
@@ -72,9 +73,7 @@ fn check(name: &str, published: f64, result: &AcOpfResult) {
 #[test]
 fn the_in_house_solver_reaches_pglibs_objectives() {
     for &(name, published) in PUBLISHED {
-        if !NLP_UNSOLVED.contains(&name) {
-            check(name, published, &build(name).solve().unwrap());
-        }
+        check(name, published, &build(name).solve().unwrap());
     }
 }
 

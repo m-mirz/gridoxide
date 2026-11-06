@@ -16,7 +16,7 @@
 #![cfg(feature = "opf")]
 
 use gridoxide::opf::OptStatus;
-use gridoxide::opf::nlp::{NlpOptions, NonlinearProblem, solve};
+use gridoxide::opf::nlp::{KktForm, NlpOptions, NonlinearProblem, llt_solver, solve};
 
 const TOL: f64 = 1e-6;
 
@@ -416,4 +416,114 @@ fn a_fixed_variable_is_pinned_without_a_barrier_term() {
     close(solution.x[0], 0.75, "the fixed variable holds");
     close(solution.x[1], 1.25, "the free variable takes the remainder");
     close(solution.objective, 0.5625 + 1.5625, "objective");
+}
+
+/// HyKKT's condensed system (`KktForm::Hybrid`), factorized by Cholesky,
+/// reaches every problem above at the point the augmented system does: an
+/// equality, an inequality, a saddle to escape, both basins of a nonconvex
+/// problem, binding bounds and a fixed variable.
+#[test]
+fn the_condensed_kkt_system_finds_what_the_augmented_one_does() {
+    let hybrid = NlpOptions {
+        kkt: KktForm::Hybrid { gamma: 1e8 },
+        kkt_solver: llt_solver,
+        ..NlpOptions::default()
+    };
+    let problems: [&dyn NonlinearProblem; 7] = [
+        &OnACircle,
+        &IndefiniteProduct,
+        &InsideADisc,
+        &TwoWells { start: 2.0 },
+        &TwoWells { start: -2.0 },
+        &BoundedQuadratic,
+        &WithAFixedVariable,
+    ];
+    for (k, problem) in problems.into_iter().enumerate() {
+        let want = solve(problem, &NlpOptions::default()).unwrap();
+        let got = solve(problem, &hybrid).unwrap();
+        assert_eq!(got.status, OptStatus::Optimal, "problem {k}: {got:?}");
+        for (i, (a, b)) in got.x.iter().zip(&want.x).enumerate() {
+            assert!((a - b).abs() < 1e-7, "problem {k}, x{i}: {a} vs {b}");
+        }
+    }
+}
+
+/// `LDLᵀ` that also multiplies by the matrix it factorized, on the host: the
+/// shape of a GPU solver, whose product refinement takes its residual from
+/// instead of the triplets (`SymmetricSolver::multiply`).
+struct MultiplyingLdlt {
+    inner: gridoxide::ldlt::LdltSolver,
+    n: usize,
+    lower: Vec<(usize, usize, f64)>,
+}
+
+impl gridoxide::ldlt::SymmetricSolver for MultiplyingLdlt {
+    fn matches(&self, n: usize, entries: &[(usize, usize, f64)]) -> bool {
+        self.inner.matches(n, entries)
+    }
+    fn factorize(&mut self, entries: &[(usize, usize, f64)]) -> bool {
+        self.lower = entries
+            .iter()
+            .copied()
+            .filter(|&(r, c, _)| r >= c)
+            .collect();
+        self.inner.factorize(entries)
+    }
+    fn inertia(&self) -> gridoxide::ldlt::Inertia {
+        self.inner.inertia()
+    }
+    fn solve(&self, rhs: &[f64]) -> Option<Vec<f64>> {
+        self.inner.solve(rhs)
+    }
+    fn multiply(&self, x: &[f64]) -> Option<Vec<f64>> {
+        let mut y = vec![0.0; self.n];
+        for &(r, c, v) in &self.lower {
+            y[r] += v * x[c];
+            if r != c {
+                y[c] += v * x[r];
+            }
+        }
+        Some(y)
+    }
+}
+
+fn multiplying_ldlt(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Option<Box<dyn gridoxide::ldlt::SymmetricSolver>> {
+    Some(Box::new(MultiplyingLdlt {
+        inner: gridoxide::ldlt::LdltSolver::new(n, keys)?,
+        n,
+        lower: Vec::new(),
+    }))
+}
+
+/// Refinement's residual from the solver's product with the condensed
+/// matrix, its slacks' elimination undone row by row, is the residual the
+/// triplets give: every problem above reaches the same point either way
+/// (the problems cover equality, inequality, pinning and free rows).
+#[test]
+fn refinement_from_the_solvers_product_finds_what_the_triplets_do() {
+    let multiplying = NlpOptions {
+        kkt_solver: multiplying_ldlt,
+        ..NlpOptions::default()
+    };
+    let problems: [&dyn NonlinearProblem; 7] = [
+        &OnACircle,
+        &IndefiniteProduct,
+        &InsideADisc,
+        &TwoWells { start: 2.0 },
+        &TwoWells { start: -2.0 },
+        &BoundedQuadratic,
+        &WithAFixedVariable,
+    ];
+    for (k, problem) in problems.into_iter().enumerate() {
+        let want = solve(problem, &NlpOptions::default()).unwrap();
+        let got = solve(problem, &multiplying).unwrap();
+        assert_eq!(got.status, OptStatus::Optimal, "problem {k}: {got:?}");
+        assert_eq!(got.iterations, want.iterations, "problem {k}");
+        for (i, (a, b)) in got.x.iter().zip(&want.x).enumerate() {
+            assert!((a - b).abs() < 1e-9, "problem {k}, x{i}: {a} vs {b}");
+        }
+    }
 }
