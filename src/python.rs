@@ -3933,7 +3933,7 @@ fn dc_opf(
 #[cfg(feature = "opf")]
 #[pyfunction]
 #[pyo3(signature = (path, data_path = None, enforce_limits = true,
-                    max_iterations = 300, tolerance = 1e-8, freq_hz = 50.0))]
+                    max_iterations = 3000, tolerance = 1e-8, freq_hz = 50.0))]
 fn ac_opf(
     py: Python<'_>,
     path: &str,
@@ -4063,7 +4063,7 @@ impl OptimalPowerFlowModel {
     ///
     /// Every solve starts from the point `solve(init=...)` names.
     #[staticmethod]
-    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300, deterministic=true))]
+    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=3000, deterministic=true))]
     fn from_matpower(
         path: &str,
         solver: &str,

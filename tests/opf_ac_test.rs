@@ -114,7 +114,7 @@ fn the_solution_satisfies_the_power_flow_equations() {
 
         let buses = opf.buses_for_test(&result.angles, &result.magnitudes);
         let ybus = opf.ybus_for_test();
-        let (p_inj, q_inj) = power_injections(&buses, ybus);
+        let (p_inj, q_inj) = power_injections(&buses, &ybus);
 
         let base = network.base_mva;
         let mut p_from_generators = vec![0.0; n];
@@ -318,7 +318,7 @@ fn the_elementwise_balances_match_the_ybus() {
         out
     };
 
-    let (p_inj, q_inj) = power_injections(&buses, ybus);
+    let (p_inj, q_inj) = power_injections(&buses, &ybus);
     let c = opf.constraints(&x);
     let mut generation = vec![(0.0, 0.0); n];
     for (k, unit) in network.generators.iter().enumerate() {
@@ -341,7 +341,7 @@ fn the_elementwise_balances_match_the_ybus() {
 
     let state = |r: usize, col: usize| r < 2 * n && col < 2 * n;
     let ours = summed(opf.jacobian(&x), &state);
-    let theirs = summed(injection_jacobian(&buses, ybus), &state);
+    let theirs = summed(injection_jacobian(&buses, &ybus), &state);
     for (key, &want) in &theirs {
         close(*ours.get(key).unwrap_or(&0.0), want, &format!("J{key:?}"));
     }
@@ -359,7 +359,7 @@ fn the_elementwise_balances_match_the_ybus() {
     let lambda: Vec<f64> = (0..n).map(|i| -y[i]).collect();
     let mu: Vec<f64> = (0..n).map(|i| -y[n + i]).collect();
     let theirs = summed(
-        weighted_injection_hessian(&buses, ybus, &lambda, &mu),
+        weighted_injection_hessian(&buses, &ybus, &lambda, &mu),
         &state,
     );
     for (key, &want) in &theirs {

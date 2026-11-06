@@ -446,10 +446,10 @@ on the host, and the values cross the bus every iteration; `solver="nlp-gpu"` do
 solves what the CPU solves (the 88 runs of the default set, the 16 of case9241_pegase), and is
 faster per iteration from case1354_pegase up: 1.3–1.5× there and on case2869_pegase, 1.5–2.8×
 on case9241_pegase. Against ExaModelsPower.jl on the same GPU (MadNLP and cuDSS, model and
-KKT system on the device) at grid-bench's settings it is faster up to case300 and solves the
-three cases that one does not (case9241_pegase, case13659_pegase, case30000_goc), but is 1.3×
-slower on case1354_pegase, 2.5× on case2869_pegase and 4.7–6.3× on the GOC cases, 4–5.5× of
-that per iteration: the cost of the host side.
+KKT system on the device) at grid-bench's settings, with deterministic mode off as there, it is
+faster up to case2869_pegase and solves the three cases that one does not (case9241_pegase,
+case13659_pegase, case30000_goc), but is 1.1–1.6× slower on the GOC cases: about 80 ms an
+iteration on case24464_goc against 65, the cost of the host side.
 
 cuDSS runs in its deterministic mode by default: without it, four runs of case2869_pegase took
 60 to 107 iterations, as rounding steered the regularization differently each time. It costs

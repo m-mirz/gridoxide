@@ -151,6 +151,16 @@ pub trait NonlinearProblem {
     /// solver pushes any violation inside the bounds but cannot invent a good
     /// initial guess.
     fn initial_point(&self) -> Vec<f64>;
+
+    /// Whether [`jacobian`](Self::jacobian) and
+    /// [`lagrangian_hessian`](Self::lagrangian_hessian) return the same
+    /// entries in the same order at every point, only their values
+    /// differing. The solver then compares their lengths alone from one
+    /// iteration to the next, not every key: about 1 ms a comparison on
+    /// case24464_goc. A debug build still compares the keys.
+    fn fixed_pattern(&self) -> bool {
+        false
+    }
 }
 
 /// How the interior point forms its KKT system; see
@@ -170,8 +180,10 @@ pub enum KktForm {
 }
 
 /// Makes a [`SymmetricSolver`] for an `n × n` pattern from the `(row,
-/// column)` of its entries; see [`NlpOptions::kkt_solver`].
-pub type MakeSolver = fn(usize, &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>>;
+/// column)` of its entries; see [`NlpOptions::kkt_solver`]. An error ends
+/// the solve with [`OpfError::Backend`]: a solver that cannot be made is not
+/// a factorization that failed, which more regularization could mend.
+pub type MakeSolver = fn(usize, &[(usize, usize)]) -> Result<Box<dyn SymmetricSolver>, String>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct NlpOptions {
@@ -289,6 +301,8 @@ struct Internal {
     upper: Vec<f64>,
     c_lower: Vec<f64>,
     c_upper: Vec<f64>,
+    /// [`NonlinearProblem::fixed_pattern`].
+    fixed_pattern: bool,
 }
 
 impl Internal {
@@ -333,6 +347,7 @@ impl Internal {
             upper,
             c_lower,
             c_upper,
+            fixed_pattern: problem.fixed_pattern(),
         }
     }
 
@@ -426,14 +441,8 @@ impl Transpose {
         }
     }
 
-    fn fits(&self, a: &[(usize, usize, f64)], cols: usize) -> bool {
-        use rayon::prelude::*;
-        cols == self.cols
-            && a.len() == self.keys.len()
-            && a.par_iter()
-                .zip(&self.keys)
-                .with_min_len(1 << 14)
-                .all(|(&(r, c, _), &k)| (r, c) == k)
+    fn fits(&self, a: &[(usize, usize, f64)], cols: usize, fixed: bool) -> bool {
+        cols == self.cols && same_keys(a, &self.keys, fixed)
     }
 
     fn apply(&self, a: &[(usize, usize, f64)], y: &[f64]) -> Vec<f64> {
@@ -453,6 +462,26 @@ impl Transpose {
     }
 }
 
+/// Whether `list` has the entries `keys` records. With a `fixed` pattern
+/// ([`NonlinearProblem::fixed_pattern`]) its length is enough.
+fn same_keys(list: &[(usize, usize, f64)], keys: &[(usize, usize)], fixed: bool) -> bool {
+    use rayon::prelude::*;
+    let compare = || {
+        list.par_iter()
+            .zip(keys)
+            .with_min_len(1 << 14)
+            .all(|(&(r, c, _), &k)| (r, c) == k)
+    };
+    if list.len() != keys.len() {
+        return false;
+    }
+    if fixed {
+        debug_assert!(compare(), "a fixed pattern changed");
+        return true;
+    }
+    compare()
+}
+
 /// `Aᵀy`, through `plan` (made or remade here when `a`'s pattern changed)
 /// for a large `a`: the same sums either way.
 fn transpose_vec(
@@ -460,11 +489,12 @@ fn transpose_vec(
     a: &[(usize, usize, f64)],
     y: &[f64],
     cols: usize,
+    fixed: bool,
 ) -> Vec<f64> {
     if a.len() < Transpose::MIN_ENTRIES {
         return mat_transpose_vec(a, y, cols);
     }
-    if !plan.as_ref().is_some_and(|t| t.fits(a, cols)) {
+    if !plan.as_ref().is_some_and(|t| t.fits(a, cols, fixed)) {
         *plan = Some(Transpose::new(a, cols));
     }
     plan.as_ref().expect("made above").apply(a, y)
@@ -572,6 +602,7 @@ fn ncl(problem: &dyn NonlinearProblem, options: &NlpOptions) -> Result<NlpSoluti
     let mut mu = options.initial_barrier;
     let mut eta = 0.1f64;
     let mut last = None;
+    let mut factors = KktFactors::default();
     for k in 1..=MAX_OUTER {
         let tolerance = 100.0 * mu.powf(1.05);
         let s = run(
@@ -581,6 +612,7 @@ fn ncl(problem: &dyn NonlinearProblem, options: &NlpOptions) -> Result<NlpSoluti
             options,
             Barrier::Fixed { mu, tolerance },
             &Control::SOLVE,
+            &mut factors,
         )?;
         let converged = s.status == OptStatus::Optimal;
         let residual = norm_inf(&state.u[n..n + m]);
@@ -687,6 +719,9 @@ impl NonlinearProblem for Ncl<'_> {
     }
     fn initial_point(&self) -> Vec<f64> {
         self.start.clone()
+    }
+    fn fixed_pattern(&self) -> bool {
+        self.inner.fixed_pattern()
     }
 }
 
@@ -798,6 +833,9 @@ impl NonlinearProblem for Scaled<'_> {
     fn initial_point(&self) -> Vec<f64> {
         self.inner.initial_point()
     }
+    fn fixed_pattern(&self) -> bool {
+        self.inner.fixed_pattern()
+    }
 }
 
 fn solve_scaled(
@@ -813,6 +851,7 @@ fn solve_scaled(
         options,
         Barrier::Schedule,
         &Control::SOLVE,
+        &mut KktFactors::default(),
     )
 }
 
@@ -935,6 +974,7 @@ fn run(
     options: &NlpOptions,
     barrier: Barrier,
     control: &Control,
+    factors: &mut KktFactors,
 ) -> Result<NlpSolution, OpfError> {
     let (n_x, n_total, m_eq) = (p.n_x, p.n_total, p.m_eq);
     let dim = n_total + m_eq;
@@ -954,13 +994,10 @@ fn run(
         Barrier::Schedule => state.mu,
     };
     let mut filter = Filter::default();
-    // The KKT matrix's solver, its pattern analysed once and reused while it
-    // holds (`Kkt::new`): only the values change from one iteration to the
-    // next.
-    let mut solver: Option<Box<dyn SymmetricSolver>> = None;
-    // Where the augmented matrix's values come from while its pattern holds
-    // (`AugmentedPlan`): the solver is then sent values, not triplets.
-    let mut plan: Option<AugmentedPlan> = None;
+    // The restoration problem's, kept from one restoration to the next: its
+    // pattern is the same each time, and on a GPU a solver is a handle, device
+    // buffers and an analysis.
+    let mut restoration_factors = KktFactors::default();
     // `Aᵀy`'s gather while the Jacobian's pattern holds (`Transpose`).
     let mut transpose: Option<Transpose> = None;
     let mut acceptable_streak = 0usize;
@@ -1001,17 +1038,8 @@ fn run(
                 && control.restoration
                 && options.kkt == KktForm::Augmented
                 && let Some(y0) = least_squares_multipliers(
-                    problem,
-                    p,
-                    x,
-                    &a,
-                    &grad,
-                    &z_l,
-                    &z_u,
-                    options,
-                    &mut solver,
-                    &mut plan,
-                )
+                    problem, p, x, &a, &grad, &z_l, &z_u, options, factors,
+                )?
             {
                 y = y0;
             }
@@ -1023,7 +1051,7 @@ fn run(
                 .map(|k| if has_upper[k] { p.upper[k] - u[k] } else { 1.0 })
                 .collect();
 
-            let aty = transpose_vec(&mut transpose, &a, &y, n_total);
+            let aty = transpose_vec(&mut transpose, &a, &y, n_total, p.fixed_pattern);
             let r_d: Vec<f64> = (0..n_total)
                 .map(|k| grad[k] - aty[k] - z_l[k] + z_u[k])
                 .collect();
@@ -1155,13 +1183,13 @@ fn run(
                     options,
                     floor,
                     &mut delta_last,
-                    &mut solver,
-                    &mut plan,
-                ) else {
+                    factors,
+                )?
+                else {
                     break;
                 };
                 gamma = delta;
-                let factorization = kkt.with(solver.as_deref().expect("factorized"));
+                let factorization = kkt.with(factors.solver.as_deref().expect("factorized"));
 
                 // Barrier-perturbed right-hand side. No Mehrotra corrector: the
                 // predictor's premise is that the model is exact, which is what
@@ -1489,8 +1517,17 @@ fn run(
                 }
                 let theta = norm_1(&r_p);
                 match restoration(
-                    problem, p, &u, mu, theta, &filter, &has_lower, &has_upper, options,
-                ) {
+                    problem,
+                    p,
+                    &u,
+                    mu,
+                    theta,
+                    &filter,
+                    &has_lower,
+                    &has_upper,
+                    options,
+                    &mut restoration_factors,
+                )? {
                     Some((restored, steps)) => {
                         if options.log {
                             eprintln!(
@@ -1642,13 +1679,52 @@ fn run(
 /// the caller.
 /// The default [`NlpOptions::kkt_solver`]: [`LdltSolver`], `faer`'s
 /// unpivoted `LDLᵀ`.
-pub fn ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    Some(Box::new(LdltSolver::new(n, keys)?))
+pub fn ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Result<Box<dyn SymmetricSolver>, String> {
+    match LdltSolver::new(n, keys) {
+        Some(solver) => Ok(Box::new(solver)),
+        None => Err("the symbolic LDLᵀ analysis failed".into()),
+    }
 }
 
 /// [`LltSolver`], `faer`'s Cholesky, for [`KktForm::Hybrid`].
-pub fn llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    Some(Box::new(LltSolver::new(n, keys)?))
+pub fn llt_solver(n: usize, keys: &[(usize, usize)]) -> Result<Box<dyn SymmetricSolver>, String> {
+    match LltSolver::new(n, keys) {
+        Some(solver) => Ok(Box::new(solver)),
+        None => Err("the symbolic Cholesky analysis failed".into()),
+    }
+}
+
+/// The KKT matrix's solver, its pattern analysed once and reused while it
+/// holds: only the values change from one iteration to the next.
+#[derive(Default)]
+struct KktFactors {
+    solver: Option<Box<dyn SymmetricSolver>>,
+    /// Where the augmented matrix's values come from while its pattern holds:
+    /// the solver is then sent values, not triplets.
+    plan: Option<AugmentedPlan>,
+}
+
+impl KktFactors {
+    /// Factorizes the `n × n` matrix `kkt`, making a solver first if there
+    /// is none for its pattern. Reanalysed only when the entries' positions
+    /// change, which a problem with a fixed sparsity never does.
+    fn factorize(
+        &mut self,
+        n: usize,
+        kkt: &[(usize, usize, f64)],
+        make: MakeSolver,
+    ) -> Result<bool, OpfError> {
+        if let Some(solver) = &mut self.solver
+            && solver.matches(n, kkt)
+        {
+            return Ok(solver.factorize(kkt));
+        }
+        let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
+        let solver = self
+            .solver
+            .insert(make(n, &keys).map_err(OpfError::Backend)?);
+        Ok(solver.factorize(kkt))
+    }
 }
 
 /// The point the watchdog saved, and its merit for judging the steps after it.
@@ -1673,38 +1749,37 @@ fn factorize_with_inertia(
     options: &NlpOptions,
     floor: f64,
     delta_last: &mut f64,
-    solver: &mut Option<Box<dyn SymmetricSolver>>,
-    plan: &mut Option<AugmentedPlan>,
-) -> Option<(Kkt, f64)> {
-    let mut factor = |dw: f64| {
+    factors: &mut KktFactors,
+) -> Result<Option<(Kkt, f64)>, OpfError> {
+    let mut factor = |dw: f64| -> Result<Option<Kkt>, OpfError> {
         let diagonal: Vec<f64> = sigma.iter().map(|s| s + dw).collect();
         let kkt = match options.kkt {
-            KktForm::Augmented => Kkt::Augmented(Augmented::new(
+            KktForm::Augmented => Augmented::new(
                 hessian,
                 a,
                 &diagonal,
                 p,
                 options.dual_regularization,
                 options.kkt_solver,
-                solver,
-                plan,
-            )?),
-            KktForm::Hybrid { gamma } => Kkt::Hybrid(Hybrid::new(
-                hessian,
-                a,
-                &diagonal,
-                p,
-                gamma,
-                options.kkt_solver,
-                solver,
-            )?),
+                factors,
+            )?
+            .map(Kkt::Augmented),
+            KktForm::Hybrid { gamma } => {
+                Hybrid::new(hessian, a, &diagonal, p, gamma, options.kkt_solver, factors)?
+                    .map(Kkt::Hybrid)
+            }
         };
-        kkt.is_minimizing(solver.as_deref()?).then_some(kkt)
+        Ok(kkt.filter(|k| {
+            factors
+                .solver
+                .as_deref()
+                .is_some_and(|s| k.is_minimizing(s))
+        }))
     };
     if floor == 0.0
-        && let Some(f) = factor(0.0)
+        && let Some(f) = factor(0.0)?
     {
-        return Some((f, 0.0));
+        return Ok(Some((f, 0.0)));
     }
     let grow = if *delta_last == 0.0 { 100.0 } else { 8.0 };
     let mut dw = if *delta_last == 0.0 {
@@ -1714,13 +1789,13 @@ fn factorize_with_inertia(
     }
     .max(floor);
     while dw <= 1e40 {
-        if let Some(f) = factor(dw) {
+        if let Some(f) = factor(dw)? {
             *delta_last = dw;
-            return Some((f, dw));
+            return Ok(Some((f, dw)));
         }
         dw *= grow;
     }
-    None
+    Ok(None)
 }
 
 /// The KKT system with the inequality slacks eliminated, factorized.
@@ -1763,9 +1838,8 @@ impl Augmented {
         p: &Internal,
         delta_c: f64,
         make: MakeSolver,
-        solver: &mut Option<Box<dyn SymmetricSolver>>,
-        plan: &mut Option<AugmentedPlan>,
-    ) -> Option<Self> {
+        factors: &mut KktFactors,
+    ) -> Result<Option<Self>, OpfError> {
         let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
         let slacks: Vec<(usize, usize, f64)> = p
             .slack_of
@@ -1774,7 +1848,7 @@ impl Augmented {
             .filter_map(|(r, s)| s.map(|k| (r, k, diagonal[k])))
             .collect();
         if slacks.iter().any(|&(_, _, d)| d.is_nan() || d <= 0.0) {
-            return None;
+            return Ok(None);
         }
         // δc only where the row would otherwise have no diagonal (equality
         // rows): an inequality row has −1/d_k from its slack, and δc there,
@@ -1786,12 +1860,12 @@ impl Augmented {
             row_diag[r] = -1.0 / d;
         }
         // The pattern held since the plan was made: values only.
-        if let (Some(s), Some(p)) = (solver.as_mut(), plan.as_ref())
-            && p.fits(hessian, a, n_x, m)
+        if let (Some(s), Some(plan)) = (factors.solver.as_mut(), factors.plan.as_ref())
+            && plan.fits(hessian, a, n_x, m, p.fixed_pattern)
         {
-            let values = p.values(hessian, a, diagonal, &row_diag);
+            let values = plan.values(hessian, a, diagonal, &row_diag);
             if let Some(ok) = s.factorize_values(&values) {
-                return ok.then_some(Self { n_x, n, m, slacks });
+                return Ok(ok.then_some(Self { n_x, n, m, slacks }));
             }
         }
         // Sized once: grown from empty, most of 24 ms a factorization on
@@ -1811,19 +1885,18 @@ impl Augmented {
                 .map(|&(r, k, v)| (n_x + r, k, v)),
         );
         kkt.extend((0..m).map(|r| (n_x + r, n_x + r, row_diag[r])));
-        // Reanalysed only when the entries' positions change, which a
-        // problem with a fixed sparsity never does.
-        if !solver.as_ref().is_some_and(|s| s.matches(n_x + m, &kkt)) {
-            let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
-            *solver = Some(make(n_x + m, &keys)?);
-        }
-        let ok = solver.as_mut()?.factorize(&kkt);
+        let ok = factors.factorize(n_x + m, &kkt, make)?;
         // Next time, values only, if the solver takes them; the triplets
         // above are in the plan's order.
-        if plan.as_ref().is_none_or(|p| !p.fits(hessian, a, n_x, m)) {
-            *plan = Some(AugmentedPlan::new(hessian, a, n_x, m));
+        let fixed = p.fixed_pattern;
+        if factors
+            .plan
+            .as_ref()
+            .is_none_or(|plan| !plan.fits(hessian, a, n_x, m, fixed))
+        {
+            factors.plan = Some(AugmentedPlan::new(hessian, a, n_x, m));
         }
-        ok.then_some(Self { n_x, n, m, slacks })
+        Ok(ok.then_some(Self { n_x, n, m, slacks }))
     }
 
     /// Whether `solver`'s factorization has the inertia of a step that
@@ -1936,17 +2009,12 @@ impl AugmentedPlan {
         a: &[(usize, usize, f64)],
         n_x: usize,
         m: usize,
+        fixed: bool,
     ) -> bool {
-        use rayon::prelude::*;
-        let same = |list: &[(usize, usize, f64)], keys: &[(usize, usize)]| {
-            list.len() == keys.len()
-                && list
-                    .par_iter()
-                    .zip(keys)
-                    .with_min_len(1 << 14)
-                    .all(|(&(r, c, _), &k)| (r, c) == k)
-        };
-        n_x == self.n_x && m == self.m && same(hessian, &self.hessian_keys) && same(a, &self.a_keys)
+        n_x == self.n_x
+            && m == self.m
+            && same_keys(hessian, &self.hessian_keys, fixed)
+            && same_keys(a, &self.a_keys, fixed)
     }
 
     /// The matrix's values in the triplet list's order.
@@ -1998,9 +2066,8 @@ fn least_squares_multipliers(
     z_l: &[f64],
     z_u: &[f64],
     options: &NlpOptions,
-    solver: &mut Option<Box<dyn SymmetricSolver>>,
-    plan: &mut Option<AugmentedPlan>,
-) -> Option<Vec<f64>> {
+    factors: &mut KktFactors,
+) -> Result<Option<Vec<f64>>, OpfError> {
     const CONSTR_MULT_INIT_MAX: f64 = 1000.0;
     let (n_total, m_eq) = (p.n_total, p.m_eq);
     let hessian: Vec<(usize, usize, f64)> = problem
@@ -2009,23 +2076,28 @@ fn least_squares_multipliers(
         .map(|(i, j, _)| (i, j, 0.0))
         .collect();
     let identity = vec![1.0; n_total];
-    let kkt = Augmented::new(
+    let Some(kkt) = Augmented::new(
         &hessian,
         a,
         &identity,
         p,
         options.dual_regularization,
         options.kkt_solver,
-        solver,
-        plan,
-    )?;
+        factors,
+    )?
+    else {
+        return Ok(None);
+    };
     let mut rhs = vec![0.0; n_total + m_eq];
     for k in 0..n_total {
         rhs[k] = grad[k] - z_l[k] + z_u[k];
     }
-    let d = kkt.solve(solver.as_deref()?, &rhs)?;
-    let y = d[n_total..].to_vec();
-    (norm_inf(&y) <= CONSTR_MULT_INIT_MAX).then_some(y)
+    let d = factors
+        .solver
+        .as_deref()
+        .and_then(|solver| kkt.solve(solver, &rhs));
+    Ok(d.map(|d| d[n_total..].to_vec())
+        .filter(|y| norm_inf(y) <= CONSTR_MULT_INIT_MAX))
 }
 
 /// The KKT system as formed for [`NlpOptions::kkt`], factorized in the
@@ -2135,8 +2207,8 @@ impl Hybrid {
         p: &Internal,
         gamma: f64,
         make: MakeSolver,
-        solver: &mut Option<Box<dyn SymmetricSolver>>,
-    ) -> Option<Self> {
+        factors: &mut KktFactors,
+    ) -> Result<Option<Self>, OpfError> {
         let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
         let slacks: Vec<(usize, usize, f64)> = p
             .slack_of
@@ -2145,7 +2217,7 @@ impl Hybrid {
             .filter_map(|(r, s)| s.map(|k| (r, k, diagonal[k])))
             .collect();
         if slacks.iter().any(|&(_, _, d)| d.is_nan() || d <= 0.0) {
-            return None;
+            return Ok(None);
         }
         let mut weight = vec![gamma; m];
         let mut equality = vec![true; m];
@@ -2187,12 +2259,8 @@ impl Hybrid {
                 }
             }
         }
-        if !solver.as_ref().is_some_and(|s| s.matches(n_x, &kkt)) {
-            let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
-            *solver = Some(make(n_x, &keys)?);
-        }
-        let ok = solver.as_mut()?.factorize(&kkt);
-        ok.then_some(Self {
+        let ok = factors.factorize(n_x, &kkt, make)?;
+        Ok(ok.then_some(Self {
             n_x,
             n,
             m,
@@ -2202,7 +2270,7 @@ impl Hybrid {
             equality,
             shift,
             unscale,
-        })
+        }))
     }
 
     /// Whether `K_γ` is positive definite.
@@ -2483,7 +2551,8 @@ fn restoration(
     has_lower: &[bool],
     has_upper: &[bool],
     options: &NlpOptions,
-) -> Option<(Vec<f64>, usize)> {
+    factors: &mut KktFactors,
+) -> Result<Option<(Vec<f64>, usize)>, OpfError> {
     const RHO: f64 = 1e3;
     let (n, m) = (p.n_x, problem.n_constraints());
     let x_r = start[..n].to_vec();
@@ -2569,10 +2638,12 @@ fn restoration(
         &r_options,
         Barrier::Schedule,
         &control,
+        factors,
+    )?;
+    Ok(
+        (solved.status == OptStatus::Optimal && acceptable(&solved.x))
+            .then(|| (original(&solved.x), state.iterations)),
     )
-    .ok()?;
-    (solved.status == OptStatus::Optimal && acceptable(&solved.x))
-        .then(|| (original(&solved.x), state.iterations))
 }
 
 /// IPOPT's restoration problem (see [`restoration`]): the original variables,
@@ -2651,6 +2722,9 @@ impl NonlinearProblem for Resto<'_> {
     }
     fn initial_point(&self) -> Vec<f64> {
         self.start.clone()
+    }
+    fn fixed_pattern(&self) -> bool {
+        self.inner.fixed_pattern()
     }
 }
 

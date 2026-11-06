@@ -205,11 +205,8 @@ struct LimitRow {
 pub struct AcOpf {
     network: AcOpfNetwork,
     options: AcOpfOptions,
-    ybus: YBusSparse,
     params: Vec<BranchParams>,
     limit_rows: Vec<LimitRow>,
-    /// Cached bus template, so evaluations can reuse it.
-    template: Vec<Bus>,
     n_vars: usize,
     theta: usize,
     vm: usize,
@@ -263,11 +260,6 @@ impl AcOpf {
     pub fn build(network: AcOpfNetwork, options: AcOpfOptions) -> Result<Self, OpfError> {
         let n = network.n_buses;
         let g = network.generators.len();
-        let mut ybus_builder = crate::network::build_ybus(n, &network.lines, &network.transformers);
-        for &(at, y) in &network.shunts {
-            ybus_builder.add(at, at, y);
-        }
-        let ybus = ybus_builder.finish();
         let params = branch_params(&network.lines, &network.transformers);
 
         let mut limit_rows = Vec::new();
@@ -287,25 +279,6 @@ impl AcOpf {
             }
             limit_rows.sort_by_key(|l| (l.branch, matches!(l.terminal, Terminal::To)));
         }
-
-        let template: Vec<Bus> = (0..n)
-            .map(|i| Bus {
-                idx: i,
-                bus_type: if i == network.reference {
-                    BusType::Slack
-                } else {
-                    BusType::PQ
-                },
-                voltage_mag: 1.0,
-                voltage_ang: 0.0,
-                p_spec: 0.0,
-                q_spec: 0.0,
-                q_min: f64::NEG_INFINITY,
-                q_max: f64::INFINITY,
-                u_rated: 1.0,
-                zip_terms: Vec::new(),
-            })
-            .collect();
 
         // **Piecewise-linear costs enter through an epigraph**, exactly as in
         // `dc`: `min f(p)` becomes `min z` subject to `z ≥ (segment i)(p)`.
@@ -353,11 +326,11 @@ impl AcOpf {
             .map(|b| network.limits.get(&b).copied().flatten())
             .collect();
         let base_vars = 2 * n + 2 * g + n_cost;
-        let flow = (options.formulation == AcOpfFormulation::BranchFlow).then(|| {
-            let rows = 2 * n + limit_rows.len() + network.angle_limits.len() + cost_rows.len();
-            (base_vars, rows)
-        });
-        let n_vars = base_vars + if flow.is_some() { 4 * params.len() } else { 0 };
+        let base_rows = 2 * n + limit_rows.len() + network.angle_limits.len() + cost_rows.len();
+        let flow =
+            (options.formulation == AcOpfFormulation::BranchFlow).then_some((base_vars, base_rows));
+        let flow_size = if flow.is_some() { 4 * params.len() } else { 0 };
+        let n_vars = base_vars + flow_size;
         let kernels = kernels::AcKernels::new(
             &params,
             kernels::Layout {
@@ -393,20 +366,14 @@ impl AcOpf {
                 cost: cost_rows.iter().map(|&(e, c, s, _)| (e, c, s)).collect(),
                 flow,
                 n_vars,
-                n_rows: 2 * n
-                    + limit_rows.len()
-                    + network.angle_limits.len()
-                    + cost_rows.len()
-                    + if flow.is_some() { 4 * params.len() } else { 0 },
+                n_rows: base_rows + flow_size,
             },
         );
 
         Ok(Self {
             options,
-            ybus,
             params,
             limit_rows,
-            template,
             flow,
             rating,
             kernels,
@@ -436,18 +403,37 @@ impl AcOpf {
     /// power flow independently of the solver's own residual.
     #[doc(hidden)]
     pub fn buses_for_test(&self, angles: &[f64], magnitudes: &[f64]) -> Vec<Bus> {
-        let mut buses = self.template.clone();
-        for i in 0..self.network.n_buses {
-            buses[i].voltage_ang = angles[i];
-            buses[i].voltage_mag = magnitudes[i];
-        }
-        buses
+        (0..self.network.n_buses)
+            .map(|i| Bus {
+                idx: i,
+                bus_type: if i == self.network.reference {
+                    BusType::Slack
+                } else {
+                    BusType::PQ
+                },
+                voltage_mag: magnitudes[i],
+                voltage_ang: angles[i],
+                p_spec: 0.0,
+                q_spec: 0.0,
+                q_min: f64::NEG_INFINITY,
+                q_max: f64::INFINITY,
+                u_rated: 1.0,
+                zip_terms: Vec::new(),
+            })
+            .collect()
     }
 
-    /// The assembled Y-bus, shunts included.
+    /// The assembled Y-bus, shunts included. The model itself has none: it
+    /// evaluates by element (`ac_kernels`), and tests compare against this.
     #[doc(hidden)]
-    pub fn ybus_for_test(&self) -> &YBusSparse {
-        &self.ybus
+    pub fn ybus_for_test(&self) -> YBusSparse {
+        let network = &self.network;
+        let mut builder =
+            crate::network::build_ybus(network.n_buses, &network.lines, &network.transformers);
+        for &(at, y) in &network.shunts {
+            builder.add(at, at, y);
+        }
+        builder.finish()
     }
 
     /// The model's constraints, Jacobian and Lagrangian Hessian on the GPU:
@@ -571,15 +557,12 @@ impl NonlinearProblem for AcOpf {
     }
 
     fn n_constraints(&self) -> usize {
-        2 * self.network.n_buses
-            + self.limit_rows.len()
-            + self.network.angle_limits.len()
-            + self.cost_rows.len()
-            + if self.flow.is_some() {
-                4 * self.params.len()
-            } else {
-                0
-            }
+        self.kernels.n_rows()
+    }
+
+    /// The kernels' patterns are computed at construction.
+    fn fixed_pattern(&self) -> bool {
+        true
     }
 
     fn var_bounds(&self) -> (Vec<f64>, Vec<f64>) {

@@ -17,32 +17,39 @@ cases, and solving the three it fails. Measured on case24464_goc at about
   `CUDSS_THREADING_LIB`): reuse it across solves of the same network, or
   hand cuDSS a reordering it can use without nested dissection's cost.
 - [ ] **The remaining iteration gap.** case10000_goc takes 81 iterations
-  (IPOPT 82, MadNLP 63); case13659_pegase 211. Trace against IPOPT
-  (`opf-ipopt`) and MadNLP where they differ; candidates are IPOPT's
-  adaptive barrier and MadNLP's relaxed equalities.
-- [ ] **The pattern checks** (`fits`, `matches`): about 1 ms each an
-  iteration on case24464_goc, for patterns that never change. A
-  `NonlinearProblem` flag for a fixed pattern would skip them, and with it
-  `AcOpf::jacobian` and `lagrangian_hessian` could hand over values alone,
-  instead of rebuilding the triplets on every call on the device path.
+  (IPOPT 82, MadNLP 63); case13659_pegase 211. On the default set the gap to
+  IPOPT is case2869_pegase alone, and it is the end game, not the barrier:
+  from the proportional start (100 iterations, IPOPT 61) nlp takes IPOPT's
+  steps to every printed digit for 46 iterations, then, at μ = 10^-8.6 with
+  the objective already final, fails the inertia test and adds δw ~ 1e-2.
+  IPOPT adds none and stops on its acceptable streak; after our δw steps the
+  dual error rises past 1e-6, which breaks that streak. faer's intranode
+  pivoted `LBLᵀ` does not cure it (92 iterations; 78 against 68 from flat),
+  perhaps because it pivots only within a supernode. Next: find out why the
+  test fails there, and what to do if it is only noise near the optimum.
+  MadNLP's gap on the GOC cases is a separate question;
+  candidates are IPOPT's adaptive barrier and MadNLP's relaxed equalities.
+- [x] **The pattern checks** (`fits`): `NonlinearProblem::fixed_pattern`
+  skips them. Not `matches` on HyKKT's matrix, whose pattern moves with the
+  rows it counts as equalities.
+- [ ] **Triplets on the device path.** `AcOpf::jacobian` and
+  `lagrangian_hessian` still rebuild the triplets from fixed patterns on
+  every call. Handing over values alone goes through the scaling, NCL and
+  restoration wrappers.
 - [ ] **HyKKT on the device.** Its CG and residuals still run on the host;
   only worth it if it beats the augmented system once they do not.
 - [ ] **Small cases:** below case1354 the per-call device latency
   dominates; a CPU fallback by size would keep the CPU's times there.
-- [ ] **Restoration's solver.** Each restoration makes a new KKT solver: on
-  the GPU a new cuDSS handle, stream and buffers and a full analysis. Keep
-  it across restorations.
+- [x] **Restoration's solver,** kept across restorations: on the GPU a new
+  one was a cuDSS handle, stream and buffers and a full analysis. Not yet
+  measured on the device, where it also holds a second factor's memory.
 
 # From the review of PR #30
 
 Correctness:
 
-- [ ] **A device setup error reads as infeasibility.** The `cudss_*_solver`
-  hooks turn `CudssSolver::new`'s error into `None`; `Augmented::new` and
-  `Hybrid::new` pass it on, the δw loop takes it for a failed factorization,
-  retries about 20 times with a new handle each, and the run ends in "no
-  acceptable step; the problem may be infeasible here". Stop the run with
-  the device's error.
+- [x] **A device setup error reads as infeasibility.** `MakeSolver` returns
+  the error, and it ends the solve as `OpfError::Backend`.
 - [ ] **The pinned buffer after a failed factorization.**
   `CudssSolver::try_factorize` returns through `?` after ANALYSIS, the INFO
   reset or FACTORIZATION without reaching `cudaStreamSynchronize`, and
@@ -52,26 +59,16 @@ Correctness:
 - [ ] **`try_solve` on a 0×0 system** panics: `solution` holds `n.max(1)`
   entries and `download` asserts equal lengths. `try_multiply` guards
   `n == 0`; do the same.
-- [ ] **Python's `max_iter` defaults to 300**, `NlpOptions` to 3000:
-  bus-injection case13659_pegase needs 322, so it fails from Python at the
-  default.
+- [x] **Python's `max_iter`** and `ac_opf`'s `max_iterations` default to
+  3000, as `NlpOptions` does.
 - [ ] **FMA in `kernels.cu`.** `opf.cu` is built with `-fmad=false`,
   `kernels.cu` is not, so the device residual (`k_kkt_symv`) is not the
   host's arithmetic and refinement can stop a round apart from the CPU's.
 
-Docs:
-
-- [ ] **Stale numbers.** docs/src/opf/index.md ("On the GPU") and
-  plans/GPU_BATCH_TODO.md still say 4-5.5x slower than ExaModelsPower on
-  the GOC cases and 93 ms an iteration on case24464_goc; the figures at the
-  top of this file are the current ones.
-
 Cleanups:
 
-- [ ] **The Y-bus and bus template in `AcOpf::build`.** Only the
-  `*_for_test` accessors still read them; every build pays for them.
+- [x] **The Y-bus and bus template** left `AcOpf`; the test accessors build
+  them on demand.
 - [ ] **`quad_col`** is uploaded and stored in `go_ac_model`, but no kernel
   reads it.
-- [ ] **The row count** is computed three times (`AcOpf::build`,
-  `AcKernels::device_data`, `n_constraints`). If they drift, the device
-  model rejects every call and the CPU silently answers instead.
+- [x] **The row count** is computed once, in `AcOpf::build`.

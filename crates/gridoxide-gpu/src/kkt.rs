@@ -752,18 +752,24 @@ impl SymmetricSolver for CudssSolver {
 
 /// `NlpOptions::kkt_solver` for the augmented system: cuDSS's `LDLᵀ`,
 /// deterministic.
-/// `None` if the device cannot be set up.
-pub fn cudss_ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Ldlt, true).ok()?;
-    Some(Box::new(solver))
+/// An error, which ends the solve, if the device cannot be set up.
+pub fn cudss_ldlt_solver(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver = CudssSolver::new(n, keys, Factorization::Ldlt, true).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }
 
 /// `NlpOptions::kkt_solver` for `KktForm::Hybrid`: cuDSS's Cholesky,
 /// deterministic.
-/// `None` if the device cannot be set up.
-pub fn cudss_llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Llt, true).ok()?;
-    Some(Box::new(solver))
+/// An error, which ends the solve, if the device cannot be set up.
+pub fn cudss_llt_solver(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver = CudssSolver::new(n, keys, Factorization::Llt, true).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }
 
 /// [`cudss_ldlt_solver`] without cuDSS's deterministic mode, for benchmarks:
@@ -774,9 +780,10 @@ pub fn cudss_llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn Sym
 pub fn cudss_ldlt_solver_fast(
     n: usize,
     keys: &[(usize, usize)],
-) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Ldlt, false).ok()?;
-    Some(Box::new(solver))
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver =
+        CudssSolver::new(n, keys, Factorization::Ldlt, false).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }
 
 /// [`cudss_llt_solver`] without cuDSS's deterministic mode; see
@@ -784,7 +791,7 @@ pub fn cudss_ldlt_solver_fast(
 pub fn cudss_llt_solver_fast(
     n: usize,
     keys: &[(usize, usize)],
-) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Llt, false).ok()?;
-    Some(Box::new(solver))
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver = CudssSolver::new(n, keys, Factorization::Llt, false).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }
