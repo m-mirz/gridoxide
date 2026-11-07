@@ -17,7 +17,8 @@ of setup around them. So what is left first is the once-a-solve work.
   decisions stay on the host (`nlp::drive`), behind `nlp::Engine`. A steady
   iteration on case24464_goc from 55 ms to 12.4; solves 2.0-3.25x faster from
   case2869_pegase up, on the same path as the host's vectors to every printed
-  digit. Not run on the device yet: the watchdog's return to its saved point.
+  digit. The watchdog's return to its saved point has a test of its own: no
+  PGLib run here takes it on the device.
 - [ ] **The setup around the iterations,** about 0.4 s of case24464_goc's
   1.58: scaling, the patterns, `DeviceInteriorPoint::new`, each solve anew.
   Not yet broken down.

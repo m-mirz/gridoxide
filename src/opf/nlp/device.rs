@@ -56,6 +56,36 @@ pub(super) fn solve(
 ) -> Result<NlpSolution, OpfError> {
     let p = Internal::build(problem);
     let mut state = State::start(problem, &p, options);
+    let mut ip = interior_point(problem, &p, device, scale, deterministic)?;
+    ip.set_iterate(&state.u, &state.y, &state.z_l, &state.z_u)
+        .map_err(backend)?;
+    let mut engine = DeviceEngine {
+        ip,
+        problem,
+        model: device.model,
+        options,
+    };
+    let status = drive(
+        &mut engine,
+        problem,
+        &p,
+        &mut state,
+        options,
+        Barrier::Schedule,
+        &Control::SOLVE,
+    )?;
+    (state.u, state.y, state.z_l, state.z_u) = engine.ip.iterate().map_err(backend)?;
+    Ok(conclude(problem, &p, &state, status))
+}
+
+/// The device's half of `problem` in the internal form `p`.
+fn interior_point(
+    problem: &dyn NonlinearProblem,
+    p: &Internal,
+    device: DeviceProblem<'_>,
+    scale: Option<(&[f64], f64)>,
+    deterministic: bool,
+) -> Result<DeviceInteriorPoint, OpfError> {
     let rows = problem.n_constraints();
     let base: Vec<(usize, usize, f64)> =
         device.jacobian.iter().map(|&(r, c)| (r, c, 0.0)).collect();
@@ -76,26 +106,7 @@ pub(super) fn solve(
         objective_scale: scale.map_or(1.0, |(_, objective)| objective),
         deterministic,
     };
-    let mut ip = DeviceInteriorPoint::new(&data, &device.model.lock().unwrap()).map_err(backend)?;
-    ip.set_iterate(&state.u, &state.y, &state.z_l, &state.z_u)
-        .map_err(backend)?;
-    let mut engine = DeviceEngine {
-        ip,
-        problem,
-        model: device.model,
-        options,
-    };
-    let status = drive(
-        &mut engine,
-        problem,
-        &p,
-        &mut state,
-        options,
-        Barrier::Schedule,
-        &Control::SOLVE,
-    )?;
-    (state.u, state.y, state.z_l, state.z_u) = engine.ip.iterate().map_err(backend)?;
-    Ok(conclude(problem, &p, &state, status))
+    DeviceInteriorPoint::new(&data, &device.model.lock().unwrap()).map_err(backend)
 }
 
 impl Engine for DeviceEngine<'_> {
@@ -234,5 +245,48 @@ impl Engine for DeviceEngine<'_> {
         self.ip
             .restored(u, super::BOUND_MULT_RESET_THRESHOLD)
             .map_err(backend)
+    }
+}
+
+#[cfg(all(test, feature = "matpower"))]
+mod tests {
+    use super::*;
+    use crate::matpower;
+    use crate::opf::ac::{AcOpf, AcOpfOptions};
+
+    /// The watchdog's way back, which no PGLib run here has taken on the
+    /// device: every vector of the saved point returns, each to its own place.
+    #[test]
+    fn restore_returns_the_saved_point() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/benchmark-grids/pglib/pglib_opf_case14_ieee.m"
+        );
+        let case = matpower::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let network = matpower::ac_opf_network(&case).unwrap().network;
+        let mut opf = AcOpf::build(network, AcOpfOptions::default()).unwrap();
+        opf.evaluate_on_device().unwrap();
+        let device = opf.on_device().unwrap();
+        let p = Internal::build(&opf);
+        let mut ip = interior_point(&opf, &p, device, None, true).unwrap();
+
+        let vector =
+            |len: usize, start: f64| -> Vec<f64> { (0..len).map(|k| start + k as f64).collect() };
+        let (n, m) = (p.n_total, p.m_eq);
+        let saved = (
+            vector(n, 1.0),
+            vector(m, 1e3),
+            vector(n, 1e4),
+            vector(n, 1e5),
+        );
+        ip.set_iterate(&saved.0, &saved.1, &saved.2, &saved.3)
+            .unwrap();
+        ip.save().unwrap();
+        let other = vector(n.max(m), -1.0);
+        ip.set_iterate(&other[..n], &other[..m], &other[..n], &other[..n])
+            .unwrap();
+        assert_ne!(ip.iterate().unwrap().0, saved.0);
+        ip.restore().unwrap();
+        assert_eq!(ip.iterate().unwrap(), saved);
     }
 }
