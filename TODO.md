@@ -1,15 +1,16 @@
 # GPU TODO
 
 What is left on the GPU. Numbers are grid-bench's, in its containers, on one
-A100 and 30 cores on 2026-11-07 at gridoxide febde7c, against the stored
-2026-10-31 results of the other tools on the same machine. The cuDSS findings
-behind the batch's design are in
-[probes/cudss_ubatch/README.md](probes/cudss_ubatch/README.md).
+A100 and 30 cores on 2026-11-07 at gridoxide 1dd1c96, against the stored
+2026-10-31 results of the other tools on the same machine. gridoxide_gpu runs
+every GPU problem there, on the local branch `gridoxide-gpu-opf`, which needs
+a gridoxide release before it can merge. The cuDSS findings behind the batch's
+design are in [probes/cudss_ubatch/README.md](probes/cudss_ubatch/README.md).
 
 # AC-OPF
 
 The oracle accepts every solved case. 1.8-2.4x faster than
-ExaModelsPower/MadNLP from case2869_pegase up (case24464_goc 1.62 s against
+ExaModelsPower/MadNLP from case2869_pegase up (case24464_goc 1.58 s against
 3.63), and it solves case9241_pegase and case30000_goc, which MadNLP does not.
 case13659_pegase stops at grid-bench's 200 iterations: it needs 207-211.
 
@@ -54,28 +55,23 @@ case13659_pegase stops at grid-bench's 200 iterations: it needs 207-211.
 # Batch power flow
 
 The oracle accepts every scenario of every case, which no other GPU tool
-there manages. What is left to be faster is N-1, and short sweeps.
+there manages. What is left to be faster is N-1.
 
-- **Sweeps:** ahead of gpusim2grid on all of them, 1.01-1.6x on `#sweep-1k`
-  and `#sweep-10k`, 2.3-10x on the 100-scenario ones. Against gridoxide on 30
-  CPU threads: 1.5-1.6x ahead on case9241pegase's large sweeps, level on
-  case1354pegase's and case2869pegase's, 0.83-0.88x on mvlv10616's, and
-  0.23-0.82x on 100 scenarios.
-- **N-1:** 0.54-0.70x gridoxide's CPU on 200 outages and 0.91-1.06x on
-  `#n1-full`, 0.53-0.89x lightsim2grid there. gpusim2grid is about 1.5x faster on
-  `#n1-full`, and the oracle rejects it on all three.
-- **Steps:** 2.7-4.4 a scenario on average, so taking every scenario to 1e-8
-  costs about nothing against gpusim2grid's fixed four.
-- **The first step** is one factorization for the session and one solve with
-  a column per scenario, where no scenario sets a voltage or changes the
-  network (`CudssShared`): 16-24% off sweeps of 1024 at the same steps. With
-  `chord_steps=12, chord_below=0.9` more steps follow on those factors before
-  Newton: case9241pegase's 10k from 0.79 ms a scenario to 0.47, NVIDIA's
-  target of 0.5, in `gpu_bench` (0.64 through the adapter, outside its
-  container, with the base solve and the voltages' copy). case1354pegase and
-  case2869pegase gain 31-40% more, mvlv10616 loses up to 9%: its scenarios
-  leave the chord steps at once. Off by default, not Newton as stated. All
-  after febde7c, so not in the numbers above.
+- **Sweeps:** ahead of gpusim2grid on all of them, 1.35-2.8x on `#sweep-1k` and
+  `#sweep-10k`, and of lightsim2grid from 1000 scenarios up. Against gridoxide
+  on 30 CPU threads: 1.6-2.5x on the transmission cases' large sweeps,
+  0.97-1.1x on mvlv10616's, 0.4-1.2x on 100 scenarios. case9241pegase's 10k
+  takes 0.59 ms a scenario, 0.47 of it the solve (NVIDIA's target: 0.5).
+- **How:** one factorization for a sweep's first step, a solve with a column per
+  scenario, and `chord_steps=12, chord_below=0.9` on those factors before
+  Newton (`scripts/bench/README.md`, section 11). mvlv10616's scenarios leave
+  the chord steps at once, and gain only the first step.
+- **N-1:** 0.54-0.70x gridoxide's CPU on 200 outages and 0.90-1.01x on
+  `#n1-full`. gpusim2grid is about 1.5x faster on `#n1-full`, and the oracle
+  rejects it on all three.
+- **Power flow and DC:** ahead of gpusim2grid and ExaPF on all 13 power-flow
+  cases and of ToOp on all 7 DC ones; ahead of gridoxide's CPU on power flow
+  from case1354pegase up.
 - **Where the time goes** (Nsight Systems, `scripts/bench/README.md`, section
   11): cuDSS is 87-92% of the device's work and 73-83% of the wall time,
   factorization 51-58% of the device's work and the triangular solves 33-41%.
