@@ -1054,6 +1054,11 @@ solve, superpanels off; `BTF_COLAMD`, `COLAMD` and the other matchings are not
 supported here. No pivoting is 5% faster and was left out as a risk on harder
 cases.
 
+The AC-OPF's `kkt::CudssSolver` keeps the defaults: its one larger system gains
+nothing from these. Six levels are 5-21% slower, multiblock within 5%, 12
+levels within 4% either way, AMD about twice as slow (`opf_compare`,
+case2869_pegase to case30000_goc).
+
 One outage of case9241pegase fails either way but is reported as not converged
 or diverged from run to run: 6 of 12 runs against 2 of 12 with these settings.
 

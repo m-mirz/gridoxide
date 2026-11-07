@@ -121,9 +121,10 @@ of a 65-254 ms step) and our own kernels (3-5% of the device's work).
 - [x] **cuDSS 1.0's settings:** multiblock factorization and six levels of
   nested dissection: 1.3-2.7x at B = 1024, half the memory on case9241pegase,
   the same steps and accuracy, the oracle accepts every scenario.
-- [ ] **The same settings for the AC-OPF.** `kkt::CudssSolver` keeps cuDSS's
-  defaults: untried, and its factorizations are one system, not a batch, and
-  must keep their inertia.
+- [x] **The same settings for the AC-OPF:** no gain, `kkt::CudssSolver` keeps
+  cuDSS's defaults. On case2869_pegase to case30000_goc six levels are 5-21%
+  slower, multiblock within 5%, 12 levels within 4% either way, AMD about
+  twice as slow. Iterations are unchanged but for rounding.
 - [ ] **grid-bench on these settings,** in its containers: the adapter's
   docstring and results still describe the old ones.
 - [ ] **Newer cuDSS releases.** On each release, rerun the probe and the
