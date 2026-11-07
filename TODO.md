@@ -50,13 +50,20 @@ solves case9241_pegase and case30000_goc, which that does not.
 
 Every scenario accepted, which no other GPU tool manages. Sweeps lead
 gpusim2grid everywhere; case9241pegase's 10k takes 0.59 ms a scenario, 0.47 of
-it the solve. N-1 is the weak spot: 0.90-1.01x gridoxide's CPU on `#n1-full`,
-0.54-0.70x on 200 outages.
+it the solve. N-1 is the weak spot: 0.54-0.70x gridoxide's CPU on 200 outages.
+On `#n1-full`, 0.90-1.01x in grid-bench; since its outages' preparation
+finds the network's bridges once and builds the deltas in parallel (it was
+9.6 s of case9241pegase's 22), 13.0 s against the CPU's 21.1 on case9241pegase
+and 0.85 against 1.36 on case2869pegase, through the adapter outside its
+container.
 
-- [ ] **Profile `#n1-full`,** then the tail of a 10k sweep (a masked step still
-  costs 9-12% of a full one).
-- [ ] **Keep the batch full:** refill the slots of converged scenarios. Only if
-  the tail's profile asks for it.
+- [ ] **N-1's tail:** a chunk runs at its slowest outage's pace (12 steps on
+  case9241pegase against a mean of 3.8), and a masked step still costs 13-16%
+  of a full one. Keep the batch full: refill the slots of converged
+  scenarios. The CPU hand-off helped only case1354pegase; chord steps on the
+  intact network's factors at most 5%.
+- [ ] **N-1's voltages:** 1.6 s of case9241pegase's `#n1-full` is the copy to
+  Python, 2.1 GB.
 - [ ] **Mixed precision:** factor in FP32, mismatch in FP64, if the oracle
   accepts it.
 
