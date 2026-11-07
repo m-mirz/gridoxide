@@ -81,9 +81,9 @@ tol 1e-8):
 
 What we know about the causes:
 
-- cuDSS is 93-97% of the device's work and 67-84% of the wall time of a
+- cuDSS is 93-97% of the device's work and 82-92% of the wall time of a
   batch solve (Nsight Systems, `scripts/bench/README.md`, section 11). During
-  the Newton steps the GPU is busy throughout; its 13-28% idle is what falls
+  the Newton steps the GPU is busy throughout; its 5-11% idle is what falls
   outside them, `DeviceBatch::load` and the results.
 - Of the device's work, factorization is 64-76% and the triangular solves
   18-30%.
@@ -109,15 +109,17 @@ copy of the voltages back to the host.
 
 ## Candidates
 
-- [ ] **`DeviceBatch::load` on the host.** 12-26% of a batch solve's wall
-  time: it builds every scenario's state serially. Upload `start` once and
-  the overrides alone, or fill in parallel. The one large cost outside cuDSS.
+- [x] **`DeviceBatch::load` on the host,** 12-26% of a batch solve's wall
+  time, now 4-8%: it fills the scenarios in parallel from `start`'s columns.
+  Solves 8-23% faster.
 - [ ] **Keep the batch full.** As scenarios converge, refill their slots
   instead of finishing each chunk before starting the next. A refilled slot
   needs a masked `FACTORIZATION`.
-- [ ] **Factor reuse in grid-bench.** `reuse_below=0.1` saves 7-16% on
-  sweeps. The oracle grades residuals, so it should accept the results;
-  run it and see.
+- [ ] **Factor reuse in grid-bench.** The oracle accepts it: `reuse_below=0.1`
+  saves 7-19% on the `#sweep-1k` and `#sweep-10k` of case1354, 2869 and 9241,
+  every scenario passing (`scripts/bench/README.md`, section 11). Left to
+  decide: the adapter states Newton-Raphson with every active scenario
+  refactored every step, so turning it on changes what grid-bench reports.
 - [ ] **cuDSS 1.0's settings:** reordering, pivoting and nested-dissection
   levels, timed at B = 1024.
 - [ ] **Newer cuDSS releases.** On each release, rerun the probe and the
@@ -148,8 +150,8 @@ single AC and DC power flows (`GpuBatchSolver.solve_single`,
   single AC on a warm session 2.4 ms against 3.0 on case1354pegase, 7.9
   against 41 on case9241pegase; cold 2.75x slower and 0.93x; single DC warm
   1.8x slower and 0.8x.
-- [ ] **The Python tests of these two** in `python/tests/test_gpu.py` have
-  not run: no maturin on the A100 machine.
+- [x] **The Python tests of these two:** `python/tests/test_gpu.py` passes
+  on the A100.
 - [ ] **State estimation.** Batched SE over measurement sets. Large work;
   only after the batch is competitive.
 
