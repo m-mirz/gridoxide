@@ -232,13 +232,13 @@ pub struct AcOpf {
     /// (`AcOpf::evaluate_on_device`) has made them; then the model's
     /// evaluations run there.
     #[cfg(feature = "gpu")]
-    device: Option<std::sync::Mutex<DeviceEvaluation>>,
+    device: Option<DeviceEvaluation>,
 }
 
 /// The model on the device, and the patterns its values fill.
 #[cfg(feature = "gpu")]
 struct DeviceEvaluation {
-    model: gridoxide_gpu::ac::DeviceAcModel,
+    model: std::sync::Mutex<gridoxide_gpu::ac::DeviceAcModel>,
     jacobian: Vec<(usize, usize)>,
     hessian: Vec<(usize, usize)>,
 }
@@ -456,11 +456,11 @@ impl AcOpf {
     #[cfg(feature = "gpu")]
     pub fn evaluate_on_device(&mut self) -> Result<(), gridoxide_gpu::LinearError> {
         let model = self.device_model()?;
-        self.device = Some(std::sync::Mutex::new(DeviceEvaluation {
-            model,
+        self.device = Some(DeviceEvaluation {
+            model: std::sync::Mutex::new(model),
             jacobian: self.kernels.jacobian_pattern(),
             hessian: self.kernels.hessian_pattern(),
-        }));
+        });
         Ok(())
     }
 
@@ -672,7 +672,7 @@ impl NonlinearProblem for AcOpf {
     fn constraints(&self, x: &[f64]) -> Vec<f64> {
         #[cfg(feature = "gpu")]
         if let Some(device) = &self.device
-            && let Ok(out) = device.lock().unwrap().model.constraints(x)
+            && let Ok(out) = device.model.lock().unwrap().constraints(x)
         {
             return out;
         }
@@ -683,24 +683,33 @@ impl NonlinearProblem for AcOpf {
 
     fn jacobian(&self, x: &[f64]) -> Vec<(usize, usize, f64)> {
         #[cfg(feature = "gpu")]
-        if let Some(device) = &self.device {
-            let mut d = device.lock().unwrap();
-            if let Ok(values) = d.model.jacobian_values(x) {
-                return triplets(&d.jacobian, values);
-            }
+        if let Some(device) = &self.device
+            && let Ok(values) = device.model.lock().unwrap().jacobian_values(x)
+        {
+            return triplets(&device.jacobian, values);
         }
         self.kernels.jacobian(x)
     }
 
     fn lagrangian_hessian(&self, x: &[f64], y: &[f64]) -> Vec<(usize, usize, f64)> {
         #[cfg(feature = "gpu")]
-        if let Some(device) = &self.device {
-            let mut d = device.lock().unwrap();
-            if let Ok(values) = d.model.hessian_values(x, y) {
-                return triplets(&d.hessian, values);
-            }
+        if let Some(device) = &self.device
+            && let Ok(values) = device.model.lock().unwrap().hessian_values(x, y)
+        {
+            return triplets(&device.hessian, values);
         }
         self.kernels.lagrangian_hessian(x, y)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn on_device(&self) -> Option<crate::opf::nlp::DeviceProblem<'_>> {
+        self.device
+            .as_ref()
+            .map(|d| crate::opf::nlp::DeviceProblem {
+                model: &d.model,
+                jacobian: &d.jacobian,
+                hessian: &d.hessian,
+            })
     }
 
     /// A flat voltage profile with the dispatch already roughly meeting

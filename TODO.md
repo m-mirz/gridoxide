@@ -6,22 +6,29 @@ run there. The cuDSS findings behind the batch's design are in
 
 # AC-OPF on the GPU: what is left to be faster
 
-Where we stand (A100, grid-bench's settings, benchmark mode): faster than
-ExaModelsPower/MadNLP up to case2869_pegase, 1.1-1.6x slower on the GOC
-cases, and solving the three it fails. Measured on case24464_goc at about
-80 ms an iteration (MadNLP: 65).
+Where we stand (A100, 1e-6, deterministic mode off, `opf_compare`; grid-bench
+has yet to run it): 1.7-2.3x faster than ExaModelsPower/MadNLP's stored
+results on the GOC cases, and solving the three it fails. case24464_goc takes
+1.58 s (MadNLP: 3.63): 0.69 s of iterations at 12.4 ms each, nearly all cuDSS
+(factorization 6.4, solves 5.5), 0.64 s in the first iteration and about 0.4 s
+of setup around them. So what is left first is the once-a-solve work.
 
-- [ ] **The interior point on the device.** Its vector work (residuals,
-  KKT error, condense/expand around the solves, line search, step update)
-  runs on the host: about 30 ms an iteration on case24464_goc. Keeping
-  `u`, `y`, `z` on the device, as MadNLP does, removes it and the copies.
+- [x] **The interior point on the device.** `InteriorPoint::Device`: the
+  decisions stay on the host (`nlp::drive`), behind `nlp::Engine`. A steady
+  iteration on case24464_goc from 55 ms to 12.4; solves 2.0-3.25x faster from
+  case2869_pegase up, on the same path as the host's vectors to every printed
+  digit. Not run on the device yet: the watchdog's return to its saved point.
+- [ ] **The setup around the iterations,** about 0.4 s of case24464_goc's
+  1.58: scaling, the patterns, `DeviceInteriorPoint::new`, each solve anew.
+  Not yet broken down.
 - [ ] **Fewer cuDSS solves.** 4.75 an iteration (refinement rounds,
-  second-order corrections), 1.65 ms each without deterministic mode. Fewer
-  refinement rounds bought only 4-5% and moved paths; try refinement on the
-  device in one call, or cuDSS's own iterative refinement.
-- [ ] **cuDSS's analysis**, once a solve (0.7 s on case24464_goc with
-  `CUDSS_THREADING_LIB`): reuse it across solves of the same network, or
-  hand cuDSS a reordering it can use without nested dissection's cost.
+  second-order corrections), 1.65 ms each without deterministic mode, now
+  nearly half of an iteration. Fewer refinement rounds bought only 4-5% and
+  moved paths; try cuDSS's own iterative refinement.
+- [ ] **cuDSS's analysis**, once a solve (most of the first iteration's
+  0.64 s on case24464_goc with `CUDSS_THREADING_LIB`): reuse it across solves
+  of the same network, or hand cuDSS a reordering it can use without nested
+  dissection's cost.
 - [ ] **The remaining iteration gap.** case10000_goc takes 81 iterations
   (IPOPT 82, MadNLP 63); case13659_pegase 207-208 (deterministic mode; 216-280 without). On the default set the gap to
   IPOPT is case2869_pegase alone, and it is the end game, not the barrier:
@@ -38,16 +45,15 @@ cases, and solving the three it fails. Measured on case24464_goc at about
 - [x] **The pattern checks** (`fits`): `NonlinearProblem::fixed_pattern`
   skips them. Not `matches` on HyKKT's matrix, whose pattern moves with the
   rows it counts as equalities.
-- [ ] **Triplets on the device path.** `AcOpf::jacobian` and
-  `lagrangian_hessian` still rebuild the triplets from fixed patterns on
-  every call. Handing over values alone goes through the scaling, NCL and
-  restoration wrappers. Measured on case24464_goc: 3.4 ms of about 73 an
-  iteration in `opf_compare` (Jacobian 2.1, Hessian 1.3, beyond the device's
-  own 1.6).
+- [x] **Triplets on the device path:** gone with the interior point on the
+  device, which reads the model's values where they are. The restoration
+  phase, on the host's vectors, still builds them.
 - [ ] **HyKKT on the device.** Its CG and residuals still run on the host;
   only worth it if it beats the augmented system once they do not.
 - [ ] **Small cases:** below case1354 the per-call device latency
-  dominates; a CPU fallback by size would keep the CPU's times there.
+  dominates; a CPU fallback by size would keep the CPU's times there. The
+  interior point on the device costs case14_ieee and case118_ieee 12 ms more
+  (0.68x and 0.78x); it is even on case300_ieee.
 - [x] **Restoration's solver,** kept across restorations: on the GPU a new
   one was a cuDSS handle, stream and buffers and a full analysis. On
   case13659_pegase, the one case with restorations, 13.8 s to 11.1 s (flat,

@@ -129,6 +129,21 @@ def pglib_m(name):
     return path
 
 
+def test_nlp_gpu_solves_as_nlp():
+    """The interior point on the device: its model, vectors and KKT system."""
+    path = pglib_m("pglib_opf_case118_ieee")
+    try:
+        device = gridoxide.OptimalPowerFlowModel.from_matpower(path, solver="nlp-gpu")
+    except ValueError as e:
+        pytest.skip(str(e))
+    host = gridoxide.OptimalPowerFlowModel.from_matpower(path)
+    device.solve()
+    host.solve()
+    assert device.objective == pytest.approx(host.objective, rel=1e-7)
+    assert device.violation < 1e-6
+    assert device.voltage_mag() == pytest.approx(host.voltage_mag(), abs=1e-5)
+
+
 @pytest.mark.parametrize(
     "name,published",
     [("pglib_opf_case14_ieee", 2178.1), ("pglib_opf_case14_ieee__sad", 2776.8)],

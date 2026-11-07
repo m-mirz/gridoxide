@@ -24,7 +24,9 @@
 //! (`solve_single`, `solve`).
 //! And [`CudssSolver`](kkt::CudssSolver), the KKT system of `opf::nlp`'s
 //! interior point on cuDSS, and [`DeviceAcModel`](ac::DeviceAcModel), the
-//! AC-OPF model it solves, evaluated on the device.
+//! AC-OPF model it solves, evaluated on the device, and
+//! [`DeviceInteriorPoint`](ip::DeviceInteriorPoint), the interior point's
+//! vectors there too.
 
 #[cfg(feature = "cuda")]
 pub mod ac;
@@ -38,6 +40,8 @@ pub mod dc;
 pub mod device;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+#[cfg(feature = "cuda")]
+pub mod ip;
 #[cfg(feature = "cuda")]
 pub mod kkt;
 pub mod newton;

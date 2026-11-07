@@ -4049,9 +4049,9 @@ impl OptimalPowerFlowModel {
     /// out-of-service branches and generators are left out.
     ///
     /// `solver` is `"nlp"` (gridoxide's own interior point, the default),
-    /// `"nlp-gpu"`, the same interior point with its model evaluated and its
-    /// KKT system factorized on an NVIDIA GPU, by cuDSS (the extension built
-    /// with the `gpu` feature),
+    /// `"nlp-gpu"`, the same interior point with its model, its vectors and
+    /// its KKT system on an NVIDIA GPU, by cuDSS (the extension built with
+    /// the `gpu` feature),
     /// or `"ipopt"`, which needs the extension built with the `opf-ipopt`
     /// feature. `tol` and `max_iter` go to the solver as its own tolerance
     /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
@@ -4120,6 +4120,7 @@ impl OptimalPowerFlowModel {
             } else {
                 crate::gpu::cudss_ldlt_solver_fast
             };
+            options.nlp.interior_point = crate::opf::nlp::InteriorPoint::Device { deterministic };
         }
         let _ = gpu;
         #[allow(unused_mut)]

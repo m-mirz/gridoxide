@@ -441,15 +441,25 @@ options.nlp.kkt_solver = gridoxide::gpu::cudss_ldlt_solver;
 The KKT matrix's assembly and equilibration (to the bit the CPU's), its factorization and
 solves, and refinement's products with it run on the device. `AcOpf::evaluate_on_device` puts
 the model there too: its constraints, Jacobian and Hessian from the same element kernels in
-CUDA, to rounding the CPU's (only the sines and cosines differ). The interior point itself stays
-on the host, and the values cross the bus every iteration; `solver="nlp-gpu"` does both. On an A100 it
-solves what the CPU solves (the 88 runs of the default set, the 16 of case9241_pegase), and is
-faster per iteration from case1354_pegase up: 1.3–1.5× there and on case2869_pegase, 1.5–2.8×
-on case9241_pegase. Against ExaModelsPower.jl on the same GPU (MadNLP and cuDSS, model and
-KKT system on the device) at grid-bench's settings, with deterministic mode off as there, it is
-faster up to case2869_pegase and solves the three cases that one does not (case9241_pegase,
-case13659_pegase, case30000_goc), but is 1.1–1.6× slower on the GOC cases: about 80 ms an
-iteration on case24464_goc against 65, the cost of the host side.
+CUDA, to rounding the CPU's (only the sines and cosines differ).
+
+`InteriorPoint::Device` keeps the interior point's vectors there as well (`nlp::Engine`, and
+`gridoxide::gpu::ip`): the iterate, its multipliers, the Jacobian and Hessian, the right-hand
+sides and refinement. The decisions stay on the host, from the scalars that come back, and so do
+the objective and its gradient, for which `x` crosses the bus. The restoration phase, NCL and
+HyKKT run on the host's vectors. `solver="nlp-gpu"` does all of this. The arithmetic is the
+host's, in its order, so with deterministic mode on the path is the host vectors' to every printed
+digit: all 28 runs of the seven largest cases, restorations included, and the 44 of the default
+set. Only sums differ, which reach no iterate, only the decisions.
+
+On an A100, at 1e-6 with deterministic mode off, the median of three: a steady iteration on
+case24464_goc takes 12.4 ms instead of 55, nearly all of it cuDSS, and whole solves are 2.0–3.25×
+faster than with the host's vectors from case2869_pegase up (1.48× on case1354_pegase, even on
+case300_ieee, and 0.7–0.8× on the two smallest, where latency rules). Against the stored
+grid-bench results for ExaModelsPower.jl on the same kind of GPU (MadNLP and cuDSS, model and KKT
+system on the device), it is 1.7–2.3× faster on the GOC cases (case24464_goc: 1.58 s against
+3.63), and it solves the three cases that one does not (case9241_pegase, case13659_pegase,
+case30000_goc). Those are `opf_compare`'s times, not yet grid-bench's own run.
 
 cuDSS runs in its deterministic mode by default: without it, four runs of case2869_pegase took
 60 to 107 iterations, as rounding steered the regularization differently each time. It costs

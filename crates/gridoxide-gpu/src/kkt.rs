@@ -23,9 +23,10 @@
 //! On case10000_goc the host's assembly and equilibration took 11 ms a
 //! factorization, more than cuDSS's factorization (3.2 ms).
 //!
-//! The triplets' values and the right-hand side cross the bus every
-//! factorization and solve; the matrix, its scale and the factor stay on the
-//! device.
+//! Through the trait, the triplets' values and the right-hand side cross the
+//! bus every factorization and solve; the matrix, its scale and the factor
+//! stay on the device. The device's interior point (`crate::ip`) keeps the
+//! vectors there too, through the `pub(crate)` methods below.
 
 use std::ptr;
 
@@ -233,6 +234,7 @@ impl Assembly {
             // In parallel: 1.2M values on case24464_goc.
             const CHUNK: usize = 1 << 15;
             match source {
+                Source::Device => {}
                 Source::Triplets(entries) => host
                     .par_chunks_mut(CHUNK)
                     .zip(entries.par_chunks(CHUNK))
@@ -242,8 +244,10 @@ impl Assembly {
                     .zip(v.par_chunks(CHUNK))
                     .for_each(|(h, v)| h.copy_from_slice(v)),
             }
-            // SAFETY: `trip` holds n_trip values.
-            unsafe { copy_to_device(self.trip.ptr, &*host, stream)? };
+            if !matches!(source, Source::Device) {
+                // SAFETY: `trip` holds n_trip values.
+                unsafe { copy_to_device(self.trip.ptr, &*host, stream)? };
+            }
         }
         // SAFETY: every pointer is a device buffer of the length the kernel
         // reads (made in `new` for this pattern).
@@ -324,6 +328,8 @@ impl Assembly {
 enum Source<'a> {
     Triplets(&'a [(usize, usize, f64)]),
     Values(&'a [f64]),
+    /// Already in the assembly's device buffer ([`CudssSolver::triplet_values`]).
+    Device,
 }
 
 fn launched(err: i32, what: &str) -> Result<(), LinearError> {
@@ -740,6 +746,87 @@ impl CudssSolver {
         let mut y = vec![0.0; n];
         a.mv_y.download(&mut y, stream)?;
         Ok(y.iter().all(|v| v.is_finite()).then_some(y))
+    }
+}
+
+/// The solver as the device's interior point (`crate::ip`) uses it: its
+/// vectors stay on the device, and everything here queues on
+/// [`stream`](Self::stream).
+impl CudssSolver {
+    pub(crate) fn stream(&self) -> ffi::cudaStream_t {
+        self.stream.0
+    }
+
+    /// Where a factorization on the device reads the triplets' values from.
+    pub(crate) fn triplet_values(&self) -> *mut f64 {
+        self.assembly.trip.ptr
+    }
+
+    /// Factorizes the values in [`triplet_values`](Self::triplet_values).
+    pub(crate) fn factorize_on_device(&mut self) -> Result<Option<Inertia>, LinearError> {
+        self.inertia = self.try_factorize(Source::Device)?;
+        Ok(self.inertia)
+    }
+
+    /// The right-hand side [`queue_solve`](Self::queue_solve) reads.
+    pub(crate) fn rhs_ptr(&self) -> *mut f64 {
+        self.rhs.ptr
+    }
+
+    /// The solution [`queue_solve`](Self::queue_solve) writes.
+    pub(crate) fn solution_ptr(&self) -> *const f64 {
+        self.solution.ptr
+    }
+
+    /// Queues a solve with the last factorization.
+    pub(crate) fn queue_solve(&self) -> Result<(), LinearError> {
+        let n = self.pattern.n() as u32;
+        let (scale, stream) = (self.assembly.scale.ptr, self.stream.0);
+        // SAFETY: `rhs`, `solution` and `scale` are the solver's own buffers
+        // of n values.
+        unsafe {
+            launched(
+                ffi::go_scale_vec(self.rhs.ptr, scale, n, stream.cast()),
+                "go_scale_vec",
+            )?;
+            self.sys.execute(ffi::CUDSS_PHASE_SOLVE, "SOLVE")?;
+            launched(
+                ffi::go_scale_vec(self.solution.ptr, scale, n, stream.cast()),
+                "go_scale_vec",
+            )
+        }
+    }
+
+    /// Queues `y = K x` as [`try_multiply`](Self::try_multiply) computes it.
+    ///
+    /// # Safety
+    ///
+    /// `x` and `y` must be device buffers of n values.
+    pub(crate) unsafe fn queue_multiply(
+        &self,
+        x: *const f64,
+        y: *mut f64,
+    ) -> Result<(), LinearError> {
+        let a = &self.assembly;
+        // SAFETY: the pattern's buffers are the solver's own, and the caller
+        // answers for the vectors.
+        unsafe {
+            launched(
+                ffi::go_kkt_symv(
+                    self.row_ptr.ptr,
+                    self.col.ptr,
+                    a.lo_ptr.ptr,
+                    a.lo_col.ptr,
+                    a.lo_src.ptr,
+                    a.raw.ptr,
+                    x,
+                    y,
+                    self.pattern.n() as u32,
+                    self.stream.0.cast(),
+                ),
+                "go_kkt_symv",
+            )
+        }
     }
 }
 

@@ -101,6 +101,8 @@ mod cudss {
         println!("cargo:rerun-if-changed=cuda/kernels.h");
         println!("cargo:rerun-if-changed=cuda/opf.cu");
         println!("cargo:rerun-if-changed=cuda/opf.h");
+        println!("cargo:rerun-if-changed=cuda/ip.cu");
+        println!("cargo:rerun-if-changed=cuda/ip.h");
     }
 
     /// cuDSS 0.8.0 computes wrong solutions in a uniform batch (NaN for some
@@ -155,6 +157,16 @@ mod cudss {
             .flag(format!("-arch={arch}"))
             .flag("-fmad=false")
             .compile("gridoxide_gpu_opf");
+        // The interior point (cuda/ip.cu), likewise: an element of its
+        // vectors rounds as `opf::nlp`'s does.
+        cc::Build::new()
+            .cuda(true)
+            .cudart("shared")
+            .file("cuda/ip.cu")
+            .include(cuda_include)
+            .flag(format!("-arch={arch}"))
+            .flag("-fmad=false")
+            .compile("gridoxide_gpu_ip");
     }
 
     fn generate_bindings(cudss_include: &Path, cuda_include: &Path) {
@@ -162,7 +174,7 @@ mod cudss {
         let mut builder = bindgen::Builder::default()
             .header_contents(
                 "cudss_wrapper.h",
-                "#include <cudss.h>\n#include <cuda_runtime.h>\n#include \"kernels.h\"\n#include \"opf.h\"\n",
+                "#include <cudss.h>\n#include <cuda_runtime.h>\n#include \"kernels.h\"\n#include \"opf.h\"\n#include \"ip.h\"\n",
             )
             .clang_arg(format!("-I{}", cudss_include.display()))
             .clang_arg(format!("-I{}", cuda_include.display()))
@@ -178,7 +190,7 @@ mod cudss {
             )
             // The value types are CUDA's `CUDA_R_*`: cuDSS 1.0 makes
             // `CUDSS_R_*` macros over them, which bindgen cannot expand.
-            .allowlist_var("CUDSS_.*|CUDA_R_(32I|64F)|cudaEventDisableTiming")
+            .allowlist_var("CUDSS_.*|GO_IP_.*|CUDA_R_(32I|64F)|cudaEventDisableTiming")
             // Plain constants without the enum's name in front: the C names,
             // `CUDSS_STATUS_SUCCESS`, `cudaSuccess`.
             .default_enum_style(bindgen::EnumVariation::Consts)
