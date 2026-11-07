@@ -452,14 +452,14 @@ host's, in its order, so with deterministic mode on the path is the host vectors
 digit: all 28 runs of the seven largest cases, restorations included, and the 44 of the default
 set. Only sums differ, which reach no iterate, only the decisions.
 
-On an A100, at 1e-6 with deterministic mode off, the median of three: a steady iteration on
-case24464_goc takes 12.4 ms instead of 55, nearly all of it cuDSS, and whole solves are 2.0–3.25×
-faster than with the host's vectors from case2869_pegase up (1.48× on case1354_pegase, even on
-case300_ieee, and 0.7–0.8× on the two smallest, where latency rules). Against the stored
-grid-bench results for ExaModelsPower.jl on the same kind of GPU (MadNLP and cuDSS, model and KKT
-system on the device), it is 1.7–2.3× faster on the GOC cases (case24464_goc: 1.58 s against
-3.63), and it solves the three cases that one does not (case9241_pegase, case13659_pegase,
-case30000_goc). Those are `opf_compare`'s times, not yet grid-bench's own run.
+On an A100, at 1e-6 with deterministic mode off, a steady iteration on case24464_goc takes
+12.4 ms instead of 55, nearly all of it cuDSS, and whole solves are 2.0–3.25× faster than with the
+host's vectors from case2869_pegase up (1.48× on case1354_pegase, even on case300_ieee, and
+0.7–0.8× on the two smallest, where latency rules). In grid-bench's containers on that machine, the
+oracle accepts every case it solves, 1.8–2.4× faster than its stored results for ExaModelsPower.jl
+(MadNLP and cuDSS, model and KKT system on the device) from case2869_pegase up: case24464_goc
+takes 1.62 s against 3.63. It solves case9241_pegase and case30000_goc, which that does not;
+case13659_pegase, which needs 207–211 iterations, stops at grid-bench's limit of 200 there.
 
 cuDSS runs in its deterministic mode by default: without it, four runs of case2869_pegase took
 60 to 107 iterations, as rounding steered the regularization differently each time. It costs
