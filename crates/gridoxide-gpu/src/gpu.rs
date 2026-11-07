@@ -13,8 +13,9 @@
 //! A solver is a session for one network: the cuDSS analysis and the device
 //! buffers are made once for `capacity` scenarios and kept, so that solving
 //! another set of scenarios costs no analysis. A set larger than the
-//! capacity is solved in chunks of it, the last one padded with inactive
-//! scenarios, which the masks keep out of every kernel and every cuDSS call.
+//! capacity streams through its slots: a slot whose scenario ends takes the
+//! next one, so the batch stays full until the last scenarios; an empty slot
+//! is masked out of every kernel and every cuDSS call.
 //!
 //! The options are [`BatchOptions`]'s, with the CPU loop's meaning:
 //! adaptive or fixed steps, factor reuse, and the CPU hand-off of the last
@@ -138,7 +139,7 @@ impl GpuBatchSolver {
         })
     }
 
-    /// Scenarios per chunk.
+    /// Scenarios at a time: the session's slots.
     pub fn capacity(&self) -> usize {
         self.dev.batch()
     }
@@ -257,7 +258,7 @@ impl GpuBatchSolver {
         })
     }
 
-    /// The scenarios in chunks of the capacity.
+    /// The scenarios through the session's slots.
     fn solve_all(
         &mut self,
         scenarios: &[Scenario],
@@ -271,9 +272,8 @@ impl GpuBatchSolver {
             linear: LinearCounts::default(),
             cpu_handoffs: 0,
         };
-        let capacity = self.capacity();
-        for (chunk, chunk_deltas) in scenarios.chunks(capacity).zip(deltas.chunks(capacity)) {
-            self.solve_chunk(chunk, chunk_deltas, opts, &mut report)?;
+        if !scenarios.is_empty() {
+            self.solve_stream(scenarios, deltas, opts, &mut report)?;
         }
         let after = self.counts();
         report.linear = LinearCounts {
@@ -314,7 +314,9 @@ impl GpuBatchSolver {
     /// A step on the session's first-step factors, for the `active`
     /// scenarios: the solve into the update buffer, after the session's one
     /// factorization, which reads a first step's Jacobian.
-    fn shared_step(&mut self, active: &[bool]) -> Result<(), BatchError> {
+    /// The session's factorization is made, if it is not yet, from a slot of
+    /// `fresh`: one still at the start, whose Jacobian is the shared one.
+    fn shared_step(&mut self, active: &[bool], fresh: &[bool]) -> Result<(), BatchError> {
         let (values, rhs, dx) = self.dev.linear_buffers();
         if self.shared.is_none() {
             let _r = Range::new(c"batch.analysis");
@@ -333,10 +335,10 @@ impl GpuBatchSolver {
         }
         let shared = self.shared.as_mut().expect("made above");
         if !shared.factored() {
-            let first = active
+            let first = fresh
                 .iter()
                 .position(|&a| a)
-                .expect("a step has an active scenario");
+                .expect("the first shared step has a scenario at the start");
             let one: Vec<bool> = (0..active.len()).map(|s| s == first).collect();
             let _r = Range::new(c"batch.cudss_factor");
             self.dev.set_active(&one)?;
@@ -351,8 +353,13 @@ impl GpuBatchSolver {
         Ok(())
     }
 
-    /// One chunk: the loop of `newton::run`, step for step.
-    fn solve_chunk(
+    /// Every scenario through the session's `capacity` slots: the loop of
+    /// `newton::run`, step for step, each slot taking the next scenario as
+    /// soon as its own ends, or chunk by chunk (below). In chunks, a chunk
+    /// takes as many steps as its slowest scenario, every other slot masked
+    /// out meanwhile at a sixth of a step's cost: on case9241pegase's N-1 a
+    /// scenario takes 3.8 steps on average and its slowest 12.
+    fn solve_stream(
         &mut self,
         scenarios: &[Scenario],
         deltas: &[Delta],
@@ -360,31 +367,38 @@ impl GpuBatchSolver {
         report: &mut BatchReport,
     ) -> Result<(), BatchError> {
         let batch = self.capacity();
-        let m = scenarios.len();
+        let total = scenarios.len();
         let n_bus = self.start.len();
-        let _chunk = Range::new(c"batch.chunk");
+        let _stream = Range::new(c"batch.chunk");
+        let first = total.min(batch);
         {
             let _r = Range::new(c"batch.load");
-            self.dev.load(scenarios, deltas)?;
+            self.dev.load(&scenarios[..first], &deltas[..first])?;
         }
-
-        let mut active: Vec<bool> = (0..batch).map(|s| s < m).collect();
-        let mut outcome: Vec<Option<Outcome>> = vec![None; m];
-        let mut steps = vec![0usize; m];
-        let mut factorizations = vec![0usize; m];
-        let mut norm = vec![f64::INFINITY; m];
-        let mut last_norm = vec![f64::INFINITY; m];
-        let mut on_cpu: Vec<Option<Vec<Bus>>> = vec![None; m];
-        // Who steps on the shared factors, and the steps past the first.
-        let shared = Self::shares_first_step(scenarios, deltas, opts);
-        let mut on_shared: Vec<bool> = (0..batch).map(|s| shared && s < m).collect();
-        let mut chord = vec![0usize; m];
+        // Per slot: its scenario, and that scenario's Newton state.
+        let mut slot: Vec<Option<usize>> = (0..batch).map(|k| (k < first).then_some(k)).collect();
+        let mut next = first;
+        let shared = Self::shares_first_step(scenarios, deltas, opts) && batch >= MIN_SHARED;
+        // A sweep on the shared first step moves through its steps nearly in
+        // step, and refilled slots would cost every step both solves (case9241
+        // pegase's 10k: 6.29 s against 4.65): there a chunk ends before the
+        // next starts. Elsewhere (N-1) slots refill: 11.4 s to 9.4 on
+        // case9241pegase's every outage.
+        let refill = !shared;
+        let mut on_shared = vec![shared; batch];
+        let mut steps = vec![0usize; batch];
+        let mut chord = vec![0usize; batch];
+        let mut factorizations = vec![0usize; batch];
+        let mut norm = vec![f64::INFINITY; batch];
+        let mut last_norm = vec![f64::INFINITY; batch];
         let chord_steps = match opts.policy {
             StepPolicy::Adaptive => opts.chord_steps,
             StepPolicy::Fixed(_) => 0,
         };
+        let mut results: Vec<Option<ScenarioResult>> = vec![None; total];
 
         loop {
+            let active: Vec<bool> = slot.iter().map(Option::is_some).collect();
             // 1. Mismatch on the device, flags on the host.
             let norms = {
                 let _r = Range::new(c"batch.mismatch");
@@ -392,59 +406,127 @@ impl GpuBatchSolver {
                 self.dev.mismatch()?;
                 self.dev.norms()?
             };
-            for s in 0..m {
-                if !active[s] {
-                    continue;
-                }
-                norm[s] = norms[s];
-                if let Some(o) = decide(opts, norm[s], steps[s] - chord[s]) {
-                    outcome[s] = Some(o);
-                    active[s] = false;
-                } else if steps[s] > 0
-                    && (chord[s] >= chord_steps || norm[s] > opts.chord_below * last_norm[s])
+            let mut ended: Vec<(usize, Outcome)> = Vec::new();
+            for k in (0..batch).filter(|&k| active[k]) {
+                norm[k] = norms[k];
+                if let Some(o) = decide(opts, norm[k], steps[k] - chord[k]) {
+                    ended.push((k, o));
+                } else if steps[k] > 0
+                    && (chord[k] >= chord_steps || norm[k] > opts.chord_below * last_norm[k])
                 {
-                    on_shared[s] = false;
+                    on_shared[k] = false;
                 }
             }
+            if !ended.is_empty() {
+                let _r = Range::new(c"batch.results");
+                let which: Vec<usize> = ended.iter().map(|&(k, _)| k).collect();
+                let (vm, va) = self.dev.voltages_of(&which)?;
+                for (i, &(k, outcome)) in ended.iter().enumerate() {
+                    let s = slot[k].take().expect("an active slot holds a scenario");
+                    results[s] = Some(ScenarioResult {
+                        outcome,
+                        newton_steps: steps[k],
+                        factorizations: factorizations[k],
+                        final_mismatch: norm[k],
+                        on_cpu: false,
+                        voltage_mag: vm[i * n_bus..(i + 1) * n_bus].to_vec(),
+                        voltage_ang: va[i * n_bus..(i + 1) * n_bus].to_vec(),
+                    });
+                }
+                // The ended slots take the next scenarios, which start over;
+                // in chunks where the first step is shared (see above).
+                let mut fills = Vec::new();
+                if !refill && next < total && slot.iter().all(Option::is_none) {
+                    let end = (next + batch).min(total);
+                    let _r = Range::new(c"batch.load");
+                    self.dev.load(&scenarios[next..end], &deltas[next..end])?;
+                    for k in 0..batch {
+                        slot[k] = (next + k < end).then_some(next + k);
+                        (steps[k], chord[k], factorizations[k]) = (0, 0, 0);
+                        (norm[k], last_norm[k]) = (f64::INFINITY, f64::INFINITY);
+                        on_shared[k] = shared;
+                    }
+                    next = end;
+                    continue;
+                }
+                for k in which {
+                    if next == total || !refill {
+                        break;
+                    }
+                    slot[k] = Some(next);
+                    (steps[k], chord[k], factorizations[k]) = (0, 0, 0);
+                    (norm[k], last_norm[k]) = (f64::INFINITY, f64::INFINITY);
+                    on_shared[k] = shared;
+                    fills.push((k, &scenarios[next]));
+                    next += 1;
+                }
+                if !fills.is_empty() {
+                    let _r = Range::new(c"batch.load");
+                    self.dev.refill(&fills)?;
+                    let slot_deltas: Vec<Option<&Delta>> =
+                        slot.iter().map(|s| s.map(|s| &deltas[s])).collect();
+                    self.dev.set_deltas(&slot_deltas)?;
+                    // A full factorization for the new systems: as fast as a
+                    // refactorization on the pivots of the system before, and
+                    // on case9241pegase's N-1 one more outage converges.
+                    let filled: Vec<usize> = fills.iter().map(|&(k, _)| k).collect();
+                    self.lin.unfactor(&filled);
+                    // Their mismatch first, with everyone else's again.
+                    continue;
+                }
+            }
+            let active: Vec<bool> = slot.iter().map(Option::is_some).collect();
             let n_active = active.iter().filter(|&&a| a).count();
             if n_active == 0 {
                 break;
             }
 
-            // The last few, on the CPU.
-            if opts.policy == StepPolicy::Adaptive
+            // The last few, on the CPU, once no scenario is waiting.
+            if next == total
+                && opts.policy == StepPolicy::Adaptive
                 && let Some(limit) = opts.cpu_handoff
                 && n_active <= limit
             {
-                let (vm, va) = self.dev.voltages()?;
-                let handed: Vec<HandOff> = (0..m)
-                    .filter(|&s| active[s])
-                    .map(|s| {
+                let which: Vec<usize> = (0..batch).filter(|&k| active[k]).collect();
+                let (vm, va) = self.dev.voltages_of(&which)?;
+                let handed: Vec<HandOff> = which
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &k)| {
+                        let s = slot[k].expect("an active slot holds a scenario");
                         let mut buses = self.start.clone();
                         for ov in &scenarios[s].bus_overrides {
                             let b = &mut buses[ov.bus];
                             b.p_spec = ov.p_spec.unwrap_or(b.p_spec);
                             b.q_spec = ov.q_spec.unwrap_or(b.q_spec);
                         }
-                        for (i, b) in buses.iter_mut().enumerate() {
-                            b.voltage_mag = vm[s * n_bus + i];
-                            b.voltage_ang = va[s * n_bus + i];
+                        for (j, b) in buses.iter_mut().enumerate() {
+                            b.voltage_mag = vm[i * n_bus + j];
+                            b.voltage_ang = va[i * n_bus + j];
                         }
                         HandOff {
                             scenario: s,
                             buses,
-                            steps: steps[s],
+                            steps: steps[k],
                         }
                     })
                     .collect();
-                for (h, (taken, final_norm, o)) in finish_on_cpu(handed, &self.ybus, deltas, opts) {
-                    let s = h.scenario;
-                    steps[s] += taken;
-                    factorizations[s] += taken;
-                    norm[s] = final_norm;
-                    outcome[s] = Some(o);
-                    on_cpu[s] = Some(h.buses);
-                    active[s] = false;
+                let slot_of: std::collections::HashMap<usize, usize> =
+                    which.iter().map(|&k| (slot[k].unwrap(), k)).collect();
+                for (h, (taken, final_norm, outcome)) in
+                    finish_on_cpu(handed, &self.ybus, deltas, opts)
+                {
+                    let k = slot_of[&h.scenario];
+                    results[h.scenario] = Some(ScenarioResult {
+                        outcome,
+                        newton_steps: steps[k] + taken,
+                        factorizations: factorizations[k] + taken,
+                        final_mismatch: final_norm,
+                        on_cpu: true,
+                        voltage_mag: h.buses.iter().map(|b| b.voltage_mag).collect(),
+                        voltage_ang: h.buses.iter().map(|b| b.voltage_ang).collect(),
+                    });
+                    slot[k] = None;
                     report.cpu_handoffs += 1;
                 }
                 break;
@@ -452,25 +534,26 @@ impl GpuBatchSolver {
 
             // 2 and 3 for those on the session's one Jacobian. First: this
             // solve writes every column, the batch's below only its own.
-            let shared_now: Vec<bool> = (0..batch).map(|s| active[s] && on_shared[s]).collect();
+            let shared_now: Vec<bool> = (0..batch).map(|k| active[k] && on_shared[k]).collect();
             if shared_now.iter().any(|&a| a) {
-                self.shared_step(&shared_now)?;
-                for s in (0..m).filter(|&s| shared_now[s]) {
-                    if steps[s] == 0 {
+                let fresh: Vec<bool> = (0..batch).map(|k| shared_now[k] && steps[k] == 0).collect();
+                self.shared_step(&shared_now, &fresh)?;
+                for k in (0..batch).filter(|&k| shared_now[k]) {
+                    if steps[k] == 0 {
                         // Newton's step, on that factorization.
-                        factorizations[s] += 1;
+                        factorizations[k] += 1;
                     } else {
-                        chord[s] += 1;
+                        chord[k] += 1;
                     }
                 }
             }
-            let newton: Vec<bool> = (0..batch).map(|s| active[s] && !on_shared[s]).collect();
+            let newton: Vec<bool> = (0..batch).map(|k| active[k] && !on_shared[k]).collect();
             if newton.iter().any(|&a| a) {
                 // 2. Jacobians where new factors are needed, one masked
                 // factorization.
                 let refactor: Vec<bool> = (0..batch)
-                    .map(|s| {
-                        newton[s] && needs_factors(opts, factorizations[s], norm[s], last_norm[s])
+                    .map(|k| {
+                        newton[k] && needs_factors(opts, factorizations[k], norm[k], last_norm[k])
                     })
                     .collect();
                 if refactor.iter().any(|&r| r) {
@@ -481,11 +564,10 @@ impl GpuBatchSolver {
                     }
                     let _r = Range::new(c"batch.cudss_factor");
                     self.lin.factor(&refactor)?;
-                    for s in (0..m).filter(|&s| refactor[s]) {
-                        factorizations[s] += 1;
+                    for k in (0..batch).filter(|&k| refactor[k]) {
+                        factorizations[k] += 1;
                     }
                 }
-
                 // 3. One masked solve into the update buffer.
                 let _r = Range::new(c"batch.cudss_solve");
                 self.lin.solve(&newton)?;
@@ -495,36 +577,17 @@ impl GpuBatchSolver {
                 self.dev.set_active(&active)?;
                 self.dev.update_in_place()?;
             }
-            for s in (0..m).filter(|&s| active[s]) {
-                steps[s] += 1;
-                last_norm[s] = norm[s];
+            for k in (0..batch).filter(|&k| active[k]) {
+                steps[k] += 1;
+                last_norm[k] = norm[k];
             }
             report.batch_steps += 1;
         }
-
-        let _r = Range::new(c"batch.results");
-        let (vm, va) = self.dev.voltages()?;
-        for s in 0..m {
-            let (voltage_mag, voltage_ang) = match &on_cpu[s] {
-                Some(buses) => (
-                    buses.iter().map(|b| b.voltage_mag).collect(),
-                    buses.iter().map(|b| b.voltage_ang).collect(),
-                ),
-                None => (
-                    vm[s * n_bus..(s + 1) * n_bus].to_vec(),
-                    va[s * n_bus..(s + 1) * n_bus].to_vec(),
-                ),
-            };
-            report.scenarios.push(ScenarioResult {
-                outcome: outcome[s].expect("every scenario leaves the loop flagged"),
-                newton_steps: steps[s],
-                factorizations: factorizations[s],
-                final_mismatch: norm[s],
-                on_cpu: on_cpu[s].is_some(),
-                voltage_mag,
-                voltage_ang,
-            });
-        }
+        report.scenarios.extend(
+            results
+                .into_iter()
+                .map(|r| r.expect("every scenario leaves the loop flagged")),
+        );
         Ok(())
     }
 }
