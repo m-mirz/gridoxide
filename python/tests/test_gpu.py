@@ -242,8 +242,12 @@ def test_a_single_power_flow_on_the_device_matches_the_cpu():
     assert got.voltage_ang == pytest.approx(model.voltage_ang(), abs=1e-8)
     # From the solved state there is nothing left to do.
     assert gpu.solve_single(model).iterations == 1
+    flat = gpu.solve_single(model, start="flat")
+    assert flat.converged
+    assert flat.iterations > 1
+    assert flat.voltage_mag == pytest.approx(model.voltage_mag(), abs=1e-8)
     with pytest.raises(ValueError):
-        gpu.solve_single(model, start="flat")
+        gpu.solve_single(model, start="base")
 
 
 @needs_case1354

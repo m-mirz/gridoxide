@@ -4498,8 +4498,9 @@ impl GpuBatchSolver {
 
     /// A single power flow of `model` as it is now, on the device: its
     /// injections and setpoints, from the voltages of its last `solve()`
-    /// (`start="last"`) or from the linear initial guess (`"linear"`, as
-    /// `solve()` starts). One `BatchResult`; the model is left unchanged.
+    /// (`start="last"`), the linear initial guess (`"linear"`, as `solve()`
+    /// starts) or the flat start (`"flat"`, as `solve(init="flat")`). One
+    /// `BatchResult`; the model is left unchanged.
     /// `model` must be the session's network with the same bus types, or
     /// `ValueError` is raised. Worth it only on large grids: one system is
     /// cuDSS's worst case. Make the session with `capacity=1` for it.
@@ -4509,7 +4510,11 @@ impl GpuBatchSolver {
         model: PyRef<'_, PowerFlowModel>,
         start: &str,
     ) -> PyResult<BatchResult> {
-        let (mut buses, how) = model.batch_start(start)?;
+        let (mut buses, how) = if start == "flat" {
+            (model.buses_template.clone(), BatchStart::Template)
+        } else {
+            model.batch_start(start)?
+        };
         if how == BatchStart::Linear {
             linear_initial_guess(&mut buses, &model.ybus);
         }
