@@ -136,7 +136,7 @@ fn main() {
         if n1 {
             gpu.solve_contingencies(&scenarios, &opts)
         } else {
-            gpu.solve(&scenarios, &opts)
+            gpu.solve_sweep(&scenarios, &opts)
         }
         .unwrap()
     });

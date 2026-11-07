@@ -259,7 +259,7 @@ fn a_sweep_refuses_outages_and_unknown_buses() {
     assert!(gpu.solve_sweep(&net.buses, &[]).unwrap().is_empty());
 }
 
-/// A single DC power flow (`GpuDcSolver::solve`) against the CPU's
+/// A single DC power flow (`GpuDcSolver::solve_single`) against the CPU's
 /// `DcSolver::solve`: angles, flows, pickups and statuses, on a case with
 /// phase shifters (case9241pegase's transformers) and on case1354pegase, and
 /// twice on one session.
@@ -274,7 +274,7 @@ fn a_single_dc_power_flow_matches_the_cpu() {
         let mut gpu = GpuDcSolver::new(&net.buses, &net.lines, &net.transformers, opts, 4).unwrap();
         for round in 0..2 {
             let mut buses = net.buses.clone();
-            let got = gpu.solve(&mut buses).unwrap();
+            let got = gpu.solve_single(&mut buses).unwrap();
             let da = buses
                 .iter()
                 .zip(&want_buses)

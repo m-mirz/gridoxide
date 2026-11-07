@@ -4445,7 +4445,7 @@ impl GpuBatchSolver {
     /// scenarios `set_scenarios` stored, which keeps their conversion out of
     /// the call. A scenario that does not converge is reported, not raised.
     #[pyo3(signature = (scenarios=None))]
-    fn solve_batch(
+    fn solve_sweep(
         &mut self,
         scenarios: Option<Vec<Vec<(usize, f64, f64)>>>,
     ) -> PyResult<Vec<BatchResult>> {
@@ -4453,7 +4453,7 @@ impl GpuBatchSolver {
         let scenarios = given.as_deref().unwrap_or(&self.stored_scenarios);
         let report = self
             .session
-            .solve(scenarios, &self.opts)
+            .solve_sweep(scenarios, &self.opts)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let results: Vec<BatchResult> = report
             .scenarios
@@ -4476,7 +4476,7 @@ impl GpuBatchSolver {
         Ok(results)
     }
 
-    /// The last `solve_batch` or `solve_contingencies` call's voltages,
+    /// The last `solve_sweep` or `solve_contingencies` call's voltages,
     /// `(voltage_mag, voltage_ang)`, every scenario's buses after the
     /// previous scenario's, as read-only float64 buffers (`Float64Buffer`;
     /// p.u. and radians): `numpy.frombuffer(vm).reshape(len(results), -1)` reads them
@@ -4622,6 +4622,23 @@ struct GpuDcSolver {
     /// the model's DC solve does), which a sweep's overrides keep.
     shunt_load: Vec<f64>,
     n_branches: usize,
+    /// What `set_scenarios` stored, for `solve_sweep()`.
+    stored_scenarios: Vec<crate::scenario::Scenario>,
+}
+
+/// The buses of `model`'s DC solve, and per bus the shunt conductance they
+/// take as load (zero unless that solve does).
+#[cfg(feature = "gpu")]
+fn dc_buses(model: &PowerFlowModel) -> (Vec<Bus>, Vec<f64>) {
+    let mut buses = model.buses_template.clone();
+    let mut shunt_load = vec![0.0; buses.len()];
+    if model.dc_shunt_conductance_as_load {
+        for s in &model.shunts {
+            buses[s.at].p_spec -= s.y.re;
+            shunt_load[s.at] += s.y.re;
+        }
+    }
+    (buses, shunt_load)
 }
 
 #[cfg(feature = "gpu")]
@@ -4630,14 +4647,7 @@ impl GpuDcSolver {
     #[new]
     #[pyo3(signature = (model, capacity=1024))]
     fn new(model: PyRef<'_, PowerFlowModel>, capacity: usize) -> PyResult<Self> {
-        let mut buses = model.buses_template.clone();
-        let mut shunt_load = vec![0.0; buses.len()];
-        if model.dc_shunt_conductance_as_load {
-            for s in &model.shunts {
-                buses[s.at].p_spec -= s.y.re;
-                shunt_load[s.at] += s.y.re;
-            }
-        }
+        let (buses, shunt_load) = dc_buses(&model);
         let session = crate::gpu::GpuDcSolver::new(
             &model.buses_template,
             &model.lines,
@@ -4651,6 +4661,7 @@ impl GpuDcSolver {
             buses,
             shunt_load,
             n_branches: model.lines.len() + model.transformers.len(),
+            stored_scenarios: Vec::new(),
         })
     }
 
@@ -4687,17 +4698,28 @@ impl GpuDcSolver {
         ))
     }
 
-    /// A single DC power flow of the session's injections, its reduced
-    /// solve on the device: `(voltage_ang, branch_flow_p, slack_pickup)`,
+    /// A single DC power flow of `model` as it is now, which must be the
+    /// session's network, its reduced solve on the device:
+    /// `(voltage_ang, branch_flow_p, slack_pickup)`,
     /// as `solve_dc()` then `voltage_ang()`, `branch_flow_p()` and
     /// `dc_slack_pickup()` give them (pickups without their bus lists).
     /// Raises `RuntimeError` if an island's matrix is singular, as
     /// `solve_dc()` does.
-    fn solve(&mut self) -> PyResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
-        let mut buses = self.buses.clone();
+    fn solve_single(
+        &mut self,
+        model: PyRef<'_, PowerFlowModel>,
+    ) -> PyResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let (mut buses, _) = dc_buses(&model);
+        if buses.len() != self.buses.len() {
+            return Err(PyValueError::new_err(format!(
+                "the model has {} buses, the session {}",
+                buses.len(),
+                self.buses.len()
+            )));
+        }
         let solution = self
             .session
-            .solve(&mut buses)
+            .solve_single(&mut buses)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let singular: Vec<&[usize]> = solution
             .islands
@@ -4728,11 +4750,15 @@ impl GpuDcSolver {
     /// The session factored its matrix once, so a sweep is one multi-column
     /// solve per `capacity` scenarios. A DC solve cannot fail per scenario;
     /// a bus out of range raises `ValueError`.
+    #[pyo3(signature = (scenarios=None))]
     fn solve_sweep(
         &mut self,
-        scenarios: Vec<Vec<(usize, f64, f64)>>,
+        scenarios: Option<Vec<Vec<(usize, f64, f64)>>>,
     ) -> PyResult<(Float64Buffer, Float64Buffer, Float64Buffer)> {
-        let mut scenarios = overrides_to_scenarios(scenarios);
+        let mut scenarios = match scenarios {
+            Some(given) => overrides_to_scenarios(given),
+            None => self.stored_scenarios.clone(),
+        };
         for (s, sc) in scenarios.iter_mut().enumerate() {
             for ov in &mut sc.bus_overrides {
                 let Some(load) = self.shunt_load.get(ov.bus) else {
@@ -4754,6 +4780,12 @@ impl GpuDcSolver {
             Float64Buffer::new(out.flows),
             Float64Buffer::new(out.slack_pickup),
         ))
+    }
+
+    /// Stores `scenarios`, `solve_sweep`'s format, for `solve_sweep()`,
+    /// which keeps their conversion out of what a benchmark times.
+    fn set_scenarios(&mut self, scenarios: Vec<Vec<(usize, f64, f64)>>) {
+        self.stored_scenarios = overrides_to_scenarios(scenarios);
     }
 }
 

@@ -29,7 +29,7 @@
 //! that response, through the same two-slot pipeline. Its slack pickups are
 //! sums of injections, taken on the host.
 //!
-//! A single DC power flow ([`GpuDcSolver::solve`]) is the CPU's `DcSolver`
+//! A single DC power flow ([`GpuDcSolver::solve_single`]) is the CPU's `DcSolver`
 //! with its reduced solve on the device: every island's right-hand side is
 //! one column, solved on the session's factorization. The right-hand sides
 //! and everything after the angles (flows, residual, pickups) are
@@ -655,7 +655,7 @@ impl GpuDcSolver {
     /// `DcSolver::solve` does on the CPU. An island the CPU cannot factor,
     /// or whose device angles are not finite, is reported
     /// `DcIslandStatus::Singular`.
-    pub fn solve(&mut self, buses: &mut [Bus]) -> Result<DcSolution, BatchError> {
+    pub fn solve_single(&mut self, buses: &mut [Bus]) -> Result<DcSolution, BatchError> {
         let mut failure = None;
         let this = &*self;
         let solution = this

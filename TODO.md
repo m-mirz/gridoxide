@@ -92,7 +92,9 @@ there manages. What is left to be faster is N-1, and short sweeps.
 # Beyond batch power flows
 
 The device solves AC sweeps, AC and DC N-1, DC sweeps, single AC and DC power
-flows and the AC-OPF. Everything else is CPU only.
+flows and the AC-OPF. Everything else is CPU only. `GpuBatchSolver` and
+`GpuDcSolver` have the same calls: `solve_single`, `solve_sweep`,
+`solve_contingencies`.
 
 - [ ] **A linear start for AC.** The CPU's `start="linear"` has no device
   counterpart; every scenario starts from the last `solve()`. A DC solve per

@@ -140,14 +140,14 @@ feature to use them:
 
 Not in the published wheel either: `GpuBatchSolver` needs a build with `--features python,gpu`, with
 cuDSS 1.0 or later (`CUDSS_DIR`) and the CUDA 12 toolkit, or the image `docker/gpu/Dockerfile` builds. It
-solves `solve_batch`'s scenarios and `solve_contingencies`' outage lists on the GPU, every scenario to
+solves `solve_batch`'s scenarios (`solve_sweep`) and `solve_contingencies`' outage lists on the GPU, every scenario to
 its own convergence, from the model's last `solve()`:
 
 ```python
 model = gridoxide.PowerFlowModel.from_matpower("case9241pegase.m")
 model.solve()
 gpu = gridoxide.GpuBatchSolver(model, capacity=1024)  # keeps its analysis for every later call
-results = gpu.solve_batch(scenarios)                 # one BatchResult per scenario, as on the CPU
+results = gpu.solve_sweep(scenarios)                 # one BatchResult per scenario, as on the CPU
 outages = gpu.solve_contingencies([[b] for b in range(model.n_branches)])
 ```
 

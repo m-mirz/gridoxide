@@ -33,6 +33,13 @@
 //! scenario then finishes on Newton's steps, to the same tolerance on the same
 //! mismatch.
 //!
+//! [`GpuDcSolver`](crate::dc::GpuDcSolver) has the same three calls:
+//! `solve_single`, `solve_sweep` and `solve_contingencies`. Two things differ
+//! because the problems do: a session here keeps its start, which a shared
+//! first step needs, where a DC sweep takes its template with each call; and
+//! a scenario here reports its own outcome, as a DC solve cannot fail one by
+//! one.
+//!
 //! A single power flow ([`GpuBatchSolver::solve_single`]) is a batch of
 //! one from the buses it is given. One system is cuDSS's worst case, a
 //! roughly fixed cost per system, so it pays only on large grids; make its
@@ -144,7 +151,7 @@ impl GpuBatchSolver {
     /// Solves every scenario from `start`'s state, as
     /// [`solve_batch`](crate::newton::solve_batch) does, and refuses the same
     /// scenarios.
-    pub fn solve(
+    pub fn solve_sweep(
         &mut self,
         scenarios: &[Scenario],
         opts: &BatchOptions,
@@ -165,7 +172,7 @@ impl GpuBatchSolver {
     /// CPU's `PersistentSolver::solve` does. `buses` must be the session's
     /// network: the same count and bus types, which are checked, and the same
     /// ZIP terms, which are not (the device took them with the network).
-    /// Later [`solve`](Self::solve)s still start from the session's own
+    /// Later [`solve_sweep`](Self::solve_sweep)s still start from the session's own
     /// start. Branch outages and the CPU hand-off of `opts` apply as to a
     /// batch of one.
     pub fn solve_single(
@@ -190,7 +197,7 @@ impl GpuBatchSolver {
         }
         let kept = std::mem::replace(&mut self.start, buses.to_vec());
         self.dev.set_start(&self.start);
-        let report = self.solve(&[Scenario::default()], opts);
+        let report = self.solve_sweep(&[Scenario::default()], opts);
         self.dev.set_start(&kept);
         self.start = kept;
         let r = report?

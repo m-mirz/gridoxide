@@ -1,5 +1,5 @@
 //! Whether a single AC or DC power flow is worth doing on the device:
-//! `GpuBatchSolver::solve_single` and `GpuDcSolver::solve` against
+//! `GpuBatchSolver::solve_single` and `GpuDcSolver::solve_single` against
 //! gridoxide's CPU solves, on each MATPOWER case given.
 //!
 //! ```text
@@ -19,7 +19,7 @@
 //! tolerance (default 1e-8), through `PersistentSolver` (KLU) and through a
 //! capacity-1 `GpuBatchSolver`, which factors every step.
 //!
-//! DC is `DcSolver::solve` against `GpuDcSolver::solve`, which solves the
+//! DC is `DcSolver::solve` against `GpuDcSolver::solve_single`, which solves the
 //! reduced system on the device and does the rest on the host, as the CPU.
 
 use std::time::Instant;
@@ -129,13 +129,13 @@ fn dc(net: &gridoxide::matpower::MatpowerNetwork) {
         let mut buses = net.buses.clone();
         GpuDcSolver::new(&net.buses, lines, transformers, opts, 1)
             .unwrap()
-            .solve(&mut buses)
+            .solve_single(&mut buses)
             .unwrap()
     });
     let mut session = GpuDcSolver::new(&net.buses, lines, transformers, opts, 1).unwrap();
     let (gpu_warm, _) = timed(|| {
         let mut buses = net.buses.clone();
-        session.solve(&mut buses).unwrap()
+        session.solve_single(&mut buses).unwrap()
     });
     println!("  DC:");
     println!(

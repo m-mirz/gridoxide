@@ -114,7 +114,7 @@ fn sweeps_match_the_cpu_loop() {
             let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
             for capacity in [64, 24] {
                 let mut gpu = GpuBatchSolver::new(&base, &ybus, capacity).unwrap();
-                let got = gpu.solve(&scenarios, &opts).unwrap();
+                let got = gpu.solve_sweep(&scenarios, &opts).unwrap();
                 let what = format!("{case}, {policy:?}, capacity {capacity}");
                 assert_same(&got, &want, &[], &what);
                 // One chunk of 64 shares its first step; 24 are too few to.
@@ -149,14 +149,14 @@ fn a_shared_first_step_factorizes_once() {
     let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
     let mut gpu = GpuBatchSolver::new(&base, &ybus, 32).unwrap();
     // Chunks of 32, 32 and 6: the first two share it, the last has its own.
-    let got = gpu.solve(&scenarios, &opts).unwrap();
+    let got = gpu.solve_sweep(&scenarios, &opts).unwrap();
     assert_same(&got, &want, &[], "first solve");
     assert_eq!(
         got.linear.systems_factored,
         want.linear.systems_factored - 64 + 1
     );
     assert_eq!(got.linear.systems_solved, want.linear.systems_solved);
-    let again = gpu.solve(&scenarios, &opts).unwrap();
+    let again = gpu.solve_sweep(&scenarios, &opts).unwrap();
     assert_same(&again, &want, &[], "second solve");
     assert_eq!(
         again.linear.systems_factored,
@@ -183,7 +183,7 @@ fn chord_steps_reach_newtons_solutions() {
         ..newton
     };
     let mut gpu = GpuBatchSolver::new(&base, &ybus, 64).unwrap();
-    let got = gpu.solve(&scenarios, &opts).unwrap();
+    let got = gpu.solve_sweep(&scenarios, &opts).unwrap();
     assert!(got.linear.systems_factored < want.linear.systems_factored / 2);
     for (g, c) in got.scenarios.iter().zip(&want.scenarios) {
         assert_eq!(g.outcome, Outcome::Converged);
@@ -218,7 +218,7 @@ fn a_sweep_narrower_than_the_session_solves_as_a_full_one() {
             },
         )
         .unwrap();
-        let got = gpu.solve(&scenarios, &opts).unwrap();
+        let got = gpu.solve_sweep(&scenarios, &opts).unwrap();
         for (g, c) in got.scenarios.iter().zip(&want.scenarios) {
             assert_eq!(g.outcome, Outcome::Converged);
             for (a, b) in g.voltage_mag.iter().zip(&c.voltage_mag) {
@@ -241,7 +241,12 @@ fn fixed_steps_take_no_chord_steps() {
     };
     let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
     let mut gpu = GpuBatchSolver::new(&base, &ybus, 64).unwrap();
-    assert_same(&gpu.solve(&scenarios, &opts).unwrap(), &want, &[], "fixed");
+    assert_same(
+        &gpu.solve_sweep(&scenarios, &opts).unwrap(),
+        &want,
+        &[],
+        "fixed",
+    );
 }
 
 /// A scenario that sets a voltage starts elsewhere, so its chunk's first step
@@ -263,7 +268,7 @@ fn a_voltage_setpoint_keeps_the_first_step_apart() {
     };
     let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
     let mut gpu = GpuBatchSolver::new(&base, &ybus, 64).unwrap();
-    let got = gpu.solve(&scenarios, &opts).unwrap();
+    let got = gpu.solve_sweep(&scenarios, &opts).unwrap();
     assert_same(&got, &want, &[], "a voltage setpoint");
     assert_eq!(got.linear.systems_factored, want.linear.systems_factored);
 }
@@ -279,8 +284,10 @@ fn the_adaptive_loop_converges_what_fixed_steps_miss() {
         policy: StepPolicy::Fixed(4),
         ..BatchOptions::default()
     };
-    let short = gpu.solve(&scenarios, &fixed).unwrap();
-    let adaptive = gpu.solve(&scenarios, &BatchOptions::default()).unwrap();
+    let short = gpu.solve_sweep(&scenarios, &fixed).unwrap();
+    let adaptive = gpu
+        .solve_sweep(&scenarios, &BatchOptions::default())
+        .unwrap();
     let converged = |r: &BatchReport| {
         r.scenarios
             .iter()
@@ -308,7 +315,7 @@ fn options_match_the_cpu_loop() {
         reuse_below: Some(0.1),
         ..BatchOptions::default()
     };
-    let got = gpu.solve(&scenarios, &reuse).unwrap();
+    let got = gpu.solve_sweep(&scenarios, &reuse).unwrap();
     let want = cpu(&base, &ybus, &scenarios, &reuse).unwrap();
     assert_same(&got, &want, &[], "factor reuse");
     assert_eq!(got.linear, want.linear);
@@ -325,7 +332,7 @@ fn options_match_the_cpu_loop() {
         ..BatchOptions::default()
     };
     let scenarios = tail;
-    let got = gpu.solve(&scenarios, &handoff).unwrap();
+    let got = gpu.solve_sweep(&scenarios, &handoff).unwrap();
     let want = cpu(&base, &ybus, &scenarios, &handoff).unwrap();
     assert!(got.cpu_handoffs > 0, "the hand-off is exercised");
     assert_same(&got, &want, &[], "CPU hand-off");
@@ -344,7 +351,7 @@ fn a_hopeless_scenario_does_not_disturb_the_rest() {
     };
     let got = GpuBatchSolver::new(&base, &ybus, 16)
         .unwrap()
-        .solve(&scenarios, &opts)
+        .solve_sweep(&scenarios, &opts)
         .unwrap();
     let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
     eprintln!(
@@ -428,9 +435,9 @@ fn a_session_solves_again() {
     let (_, base, ybus) = load("matpower/case1354pegase.m");
     let mut gpu = GpuBatchSolver::new(&base, &ybus, 32).unwrap();
     let opts = BatchOptions::default();
-    let first = gpu.solve(&ramp(&base, 40), &opts).unwrap();
-    let other = gpu.solve(&ramp(&base, 7), &opts).unwrap();
-    let again = gpu.solve(&ramp(&base, 40), &opts).unwrap();
+    let first = gpu.solve_sweep(&ramp(&base, 40), &opts).unwrap();
+    let other = gpu.solve_sweep(&ramp(&base, 7), &opts).unwrap();
+    let again = gpu.solve_sweep(&ramp(&base, 40), &opts).unwrap();
     assert_eq!(other.scenarios.len(), 7);
     assert_same(&again, &first, &[], "solved again");
     assert_eq!(
@@ -500,7 +507,7 @@ fn a_single_power_flow_matches_the_cpu() {
         .map(|(a, b)| (a.0 - b.0).abs().max((a.1 - b.1).abs()))
         .fold(0.0, f64::max);
     assert!(repeat < 1e-10, "repeat: max |dV| {repeat:e}");
-    let batch = gpu.solve(&[Scenario::default()], &opts).unwrap();
+    let batch = gpu.solve_sweep(&[Scenario::default()], &opts).unwrap();
     assert_eq!(batch.scenarios[0].newton_steps, 0);
 
     assert!(matches!(
