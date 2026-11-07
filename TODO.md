@@ -12,9 +12,22 @@ than ExaModelsPower from case2869_pegase up but on case13659_pegase; it also
 solves case9241_pegase and case30000_goc, which that does not.
 
 - [ ] **case13659_pegase's crawl:** 206-254 iterations and 4.66 s, against
-  ExaModelsPower's 63 and 2.10. The inertia is off by hundreds at μ = 0.1, a
-  truly indefinite Hessian; 130 of 208 iterations carry a δw of 1e4 to 1e9, at
-  steps of about 1e-3.
+  ExaModelsPower's 63 and 2.10. The cause is how bus injection writes branch
+  limits: |S(V)|² ≤ rate², nonconvex in the voltages, whose multipliers make the
+  Hessian indefinite (inertia off by hundreds, δw of 1e4 to 1e9, steps of
+  1e-3). Without branch limits bus injection takes 64 iterations; branch flow,
+  whose limit is p² + q² ≤ rate² on flow variables, takes 63-66 with them, as
+  ExaModelsPower and PowerModels (flow variables too) do. But a branch-flow
+  iteration costs 2-2.5x a bus one (case24464_goc: factorization 17.6 ms
+  against 6.3, solves 11.6 against 5.4): cuDSS factors 4 more variables and
+  rows a branch. At grid-bench's settings, bus / branch flow: case13659_pegase
+  218 / 63 iterations, 4.43 / 1.98 s; case24464_goc 1.59 / 3.92 s;
+  case9241_pegase 0.78 / 1.63 s. Next: **condense the flow variables out of
+  branch flow's KKT system**, exactly, as the inequality slacks are now:
+  branch flow's path at about bus injection's cost an iteration. Prototype on
+  the host first, for the iterations and the conditioning (the eliminated rows'
+  barrier terms), then the device. Either formulation is within grid-bench's
+  rules, MATPOWER's problem; the adapter's docstring states which.
 - [ ] **The rest of the iteration gap.** case10000_goc 81 (MadNLP 63),
   case19402_goc 70 (62), case10480_goc 66 (60). Candidates: IPOPT's adaptive
   barrier, MadNLP's relaxed equalities.
