@@ -13,18 +13,25 @@ ExaModelsPower/MadNLP from case2869_pegase up (case24464_goc 1.62 s against
 3.63), and it solves case9241_pegase and case30000_goc, which MadNLP does not.
 case13659_pegase stops at grid-bench's 200 iterations: it needs 207-211.
 
-- [ ] **The inertia test's false alarms.** First for the iteration gap. On
-  case2869_pegase (proportional start, 1e-8) the last 48 of 100 iterations
-  follow a δw at an optimum already reached, and each δw is a false alarm:
-  at the first, the unpivoted `LDLᵀ` reports `(6757, 19486)`, a dense pivoted
-  factorization of the same matrix the expected `(6758, 19485)`, and the
-  eigenvalue nearest zero of `D K D` is 5.6e-7, far above rounding. Raising δc
-  is not the fix: 1e-7 takes that case from 131 iterations to 69 (flat) but
-  fails case13659_pegase, and 1e-6 fails more. Next: MadNLP's inertia-free
-  curvature test, and whether the same false alarms hold back
-  case13659_pegase, the one that matters at grid-bench's tolerance (at 1e-6
-  case2869_pegase takes 45, MadNLP 46). faer's intranode pivoted `LBLᵀ` did
-  not cure it (92 iterations; 78 against 68 from flat).
+- [ ] **The inertia test's false alarms,** at 1e-8 only (at 1e-6
+  case2869_pegase takes 45, MadNLP 46). On case2869_pegase (proportional
+  start) the last 48 of 100 iterations follow a δw at an optimum already
+  reached, each a false alarm: the unpivoted `LDLᵀ` is off by exactly one
+  every time, reporting `(6757, 19486)` where a dense pivoted factorization of
+  the same matrix gives the expected `(6758, 19485)`, with the eigenvalue
+  nearest zero of `D K D` at 5.6e-7, far above rounding. What needs curing is
+  the factorization, not the test. Tried and worse: raising δc (1e-7 takes
+  that case from 131 iterations to 69 from flat but fails case13659_pegase,
+  1e-6 fails more); keeping the δw = 0 step if its curvature is positive, with
+  inertia off by one or two (case118_ieee__api never ends, at 1e-6 too); the
+  same only at μ ≤ 1e-7 and `inf_pr` ≤ 1e-4 (all solve, but 3489 iterations
+  become 3596 over 68 runs at 1e-8, case2869_pegase 131 to 103 from flat and
+  98 to 220 from proportional). faer's intranode pivoted `LBLᵀ` did not cure it
+  (92 iterations; 78 against 68 from flat).
+- [ ] **case13659_pegase over grid-bench's 200 iterations.** Not false alarms:
+  the inertia is off by hundreds to over a thousand, at μ = 0.1 with `inf_pr`
+  about 25 and `inf_du` about 1e5, and 130 of 208 iterations carry a δw of 1e4
+  to 1e9, at steps of about 1e-3.
 - [ ] **The rest of the iteration gap.** case10000_goc takes 81 iterations
   (IPOPT 82, MadNLP 63), case19402_goc 70 (62), case10480_goc 66 (60).
   Candidates are IPOPT's adaptive barrier and MadNLP's relaxed equalities.
@@ -63,6 +70,18 @@ there manages. What is left to be faster is N-1, and short sweeps.
   11): cuDSS is 87-92% of the device's work and 73-83% of the wall time,
   factorization 51-58% of the device's work and the triangular solves 33-41%.
 
+- [ ] **One factorization for a sweep's first step.** Every scenario starts
+  from the same voltages, so step one's Jacobian is the same matrix, factorized
+  once per scenario today. Target (from NVIDIA): 0.5 ms a scenario on
+  case9241pegase's 10k, now 0.79 in `gpu_bench` and 0.91 in grid-bench, whose
+  time adds the base solve and the voltages' copy. A batch step costs about
+  0.12 ms of factorization and 0.075 of solve a system; one factor with 1024
+  right-hand sides costs 0.012 a column (0.0036 on case2869pegase). Sharing
+  step one is still Newton, and should give about 0.60. Chord steps on that
+  factor before Newton take it to an estimated 0.4: with `reuse=0.3`
+  case2869pegase needs no factorization past step one (10.5 steps), but on
+  case9241pegase about half the scenarios stall on chord steps alone. Not N-1:
+  its Jacobians differ by outage.
 - [ ] **Profile `#n1-full`,** where the GPU trails most at scale, then the
   tail of a 10k sweep, when few scenarios are still active: a masked step
   still costs 9-12% of a full one.
