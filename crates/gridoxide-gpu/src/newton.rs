@@ -74,6 +74,14 @@ pub struct BatchOptions {
     pub reuse_below: Option<f64>,
     /// Once this few scenarios remain active, finish them on the CPU.
     pub cpu_handoff: Option<usize>,
+    /// On the GPU, where a sweep shares its first step: up to this many more
+    /// steps on that step's factors, a chord method, before Newton's. They
+    /// cost a solve's column each, and do not count towards `max_iter`. A
+    /// scenario leaves them early by `chord_below`. 0 is Newton as stated.
+    pub chord_steps: usize,
+    /// A scenario leaves the chord steps once its mismatch fell by less than
+    /// this factor in a step (0.5: less than twofold).
+    pub chord_below: f64,
 }
 
 impl Default for BatchOptions {
@@ -85,6 +93,8 @@ impl Default for BatchOptions {
             diverge_above: 1e10,
             reuse_below: None,
             cpu_handoff: None,
+            chord_steps: 0,
+            chord_below: 0.5,
         }
     }
 }

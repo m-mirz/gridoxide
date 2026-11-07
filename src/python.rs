@@ -4253,7 +4253,8 @@ impl OptimalPowerFlowModel {
 /// Batched power flows on an NVIDIA GPU: a session for one
 /// `PowerFlowModel`'s network. See `gridoxide::gpu::GpuBatchSolver`.
 ///
-/// `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None)`
+/// `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None,
+/// chord_steps=0, chord_below=0.5)`
 /// takes what it needs from `model` once: its network, `tol` and `max_iter`,
 /// and the voltages of its last `solve()`, which every scenario starts from
 /// (`solve_batch`'s `start="last"`; the CPU's `"linear"`, a linear solve per
@@ -4390,12 +4391,14 @@ impl GpuBatchSolver {
 #[pymethods]
 impl GpuBatchSolver {
     #[new]
-    #[pyo3(signature = (model, capacity=1024, reuse_below=None, cpu_handoff=None))]
+    #[pyo3(signature = (model, capacity=1024, reuse_below=None, cpu_handoff=None, chord_steps=0, chord_below=0.5))]
     fn new(
         model: PyRef<'_, PowerFlowModel>,
         capacity: usize,
         reuse_below: Option<f64>,
         cpu_handoff: Option<usize>,
+        chord_steps: usize,
+        chord_below: f64,
     ) -> PyResult<Self> {
         let (template, _) = model.batch_start("last")?;
         let session = crate::gpu::GpuBatchSolver::with_branches(
@@ -4411,6 +4414,8 @@ impl GpuBatchSolver {
             max_iter: model.max_iter,
             reuse_below,
             cpu_handoff,
+            chord_steps,
+            chord_below,
             ..crate::gpu::BatchOptions::default()
         };
         let mut cpu = BatchSolver::new(model.backend);

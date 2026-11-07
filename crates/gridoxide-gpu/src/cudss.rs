@@ -423,7 +423,11 @@ impl Drop for CudssBatch {
 /// buffers are the batch's, `n × batch` being what a multi-column solve takes.
 pub(crate) struct CudssShared {
     stream: ffi::cudaStream_t,
-    batch: usize,
+    n: usize,
+    rhs: *mut f64,
+    sol: *mut f64,
+    /// The columns the descriptors `b` and `x` hold now.
+    width: usize,
     handle: ffi::cudssHandle_t,
     config: ffi::cudssConfig_t,
     data: ffi::cudssData_t,
@@ -462,7 +466,10 @@ impl CudssShared {
         let col_idx: Vec<i32> = pattern.col_idx.iter().map(|&c| c as i32).collect();
         let mut lin = Self {
             stream,
-            batch,
+            n,
+            rhs,
+            sol,
+            width: 0,
             handle: ptr::null_mut(),
             config: ptr::null_mut(),
             data: ptr::null_mut(),
@@ -518,13 +525,31 @@ impl CudssShared {
                 ),
                 "cudssMatrixCreateCsr",
             )?;
-            for (m, buf) in [(&mut lin.b, rhs), (&mut lin.x, sol)] {
+        }
+        lin.set_width(batch)?;
+        lin.execute(ffi::CUDSS_PHASE_ANALYSIS, "ANALYSIS")?;
+        Ok(lin)
+    }
+
+    /// The descriptors of the first `width` columns of the buffers.
+    fn set_width(&mut self, width: usize) -> Result<(), LinearError> {
+        if width == self.width {
+            return Ok(());
+        }
+        // SAFETY: the old descriptors are done with, the stream runs in order,
+        // and the buffers hold at least `width` columns (the caller's).
+        unsafe {
+            for (m, buf) in [(&mut self.b, self.rhs), (&mut self.x, self.sol)] {
+                if !m.is_null() {
+                    cudss(ffi::cudssMatrixDestroy(*m), "cudssMatrixDestroy")?;
+                    *m = ptr::null_mut();
+                }
                 cudss(
                     ffi::cudssMatrixCreateDn(
                         m,
-                        n as i64,
-                        batch as i64,
-                        n as i64,
+                        self.n as i64,
+                        width as i64,
+                        self.n as i64,
                         buf.cast(),
                         ffi::CUDA_R_64F,
                         ffi::CUDSS_LAYOUT_COL_MAJOR,
@@ -533,8 +558,8 @@ impl CudssShared {
                 )?;
             }
         }
-        lin.execute(ffi::CUDSS_PHASE_ANALYSIS, "ANALYSIS")?;
-        Ok(lin)
+        self.width = width;
+        Ok(())
     }
 
     fn execute(&self, phase: ffi::cudssPhase_t, what: &str) -> Result<(), LinearError> {
@@ -577,10 +602,12 @@ impl CudssShared {
         Ok(())
     }
 
-    /// Solves every column of the batch's right-hand side into its solution;
-    /// `selected` of them mean anything.
-    pub(crate) fn solve(&mut self, selected: usize) -> Result<(), LinearError> {
-        debug_assert!(selected <= self.batch);
+    /// Solves the first `width` columns of the batch's right-hand side into
+    /// its solution, `selected` of which mean anything: a sweep of 100 in a
+    /// session of 1024 pays for 100, at every chord step.
+    pub(crate) fn solve(&mut self, width: usize, selected: usize) -> Result<(), LinearError> {
+        debug_assert!(selected <= width);
+        self.set_width(width)?;
         self.execute(ffi::CUDSS_PHASE_SOLVE, "SOLVE")?;
         self.counts.solve_calls += 1;
         self.counts.systems_solved += selected;

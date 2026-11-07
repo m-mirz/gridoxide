@@ -68,22 +68,18 @@ there manages. What is left to be faster is N-1, and short sweeps.
   costs about nothing against gpusim2grid's fixed four.
 - **The first step** is one factorization for the session and one solve with
   a column per scenario, where no scenario sets a voltage or changes the
-  network (`CudssShared`): 16-24% off sweeps of 1024, the same steps, on
-  gridoxide after febde7c, so not yet in the numbers above.
+  network (`CudssShared`): 16-24% off sweeps of 1024 at the same steps. With
+  `chord_steps=12, chord_below=0.9` more steps follow on those factors before
+  Newton: case9241pegase's 10k from 0.79 ms a scenario to 0.47, NVIDIA's
+  target of 0.5, in `gpu_bench` (0.64 through the adapter, outside its
+  container, with the base solve and the voltages' copy). case1354pegase and
+  case2869pegase gain 31-40% more, mvlv10616 loses up to 9%: its scenarios
+  leave the chord steps at once. Off by default, not Newton as stated. All
+  after febde7c, so not in the numbers above.
 - **Where the time goes** (Nsight Systems, `scripts/bench/README.md`, section
   11): cuDSS is 87-92% of the device's work and 73-83% of the wall time,
   factorization 51-58% of the device's work and the triangular solves 33-41%.
 
-- [ ] **Chord steps on a sweep's shared factor.** Target (from NVIDIA): 0.5 ms
-  a scenario on case9241pegase's 10k. The first step's shared factorization
-  (below) took it from 0.79 to 0.64 in `gpu_bench`; grid-bench's time adds the
-  base solve and the voltages' copy, about 0.12. A batch step costs about 0.12
-  ms of factorization and 0.075 of solve a system, a column of the shared
-  factor 0.012. Chord steps on it before Newton should reach about 0.4: with
-  `reuse=0.3` case2869pegase needs no factorization past step one (10.5
-  steps), but on case9241pegase about half the scenarios stall on chord steps
-  alone. No longer Newton as grid-bench's adapter states it. Not N-1: its
-  Jacobians differ by outage.
 - [ ] **Profile `#n1-full`,** where the GPU trails most at scale, then the
   tail of a 10k sweep, when few scenarios are still active: a masked step
   still costs 9-12% of a full one.

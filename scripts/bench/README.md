@@ -1082,6 +1082,25 @@ same steps, solve in ms:
 A chunk of fewer than 32 scenarios, a scenario that sets a voltage, N-1 and
 factor reuse keep the batch's own first step.
 
+`BatchOptions::chord_steps` takes further steps on those factors, each a column
+of the same solve, then Newton's: a chord method, linear where Newton is
+quadratic, ending on the same mismatch at the same tolerance. A scenario leaves
+after that many, or when its mismatch falls by less than `chord_below` in a step.
+Off by default. `gpu_bench`, 1e-8, solve in ms, against the table's After:
+
+| Case, scenarios | 12 steps, below 0.9 |
+|---|---|
+| case1354pegase, 1024 | 64.6 |
+| case2869pegase, 1024 | 114.8 |
+| case9241pegase, 1024 | 602 |
+| case9241pegase, 10000 | 4721 |
+| mvlv10616, 1024 | 756, from 697 |
+
+On case9241pegase 8 steps give 630 and 16 give 632. Two or fewer gain little,
+and a `chord_below` of 0.2 throws most of it away. grid-bench's oracle accepts
+all 15 sweeps. The solve covers the columns up to the last scenario still on
+these factors, so a sweep of 100 in a session of 1024 pays for 100.
+
 ### Against grid-bench's oracle
 
 Through grid-bench's GPU batch adapter and `oracle.evaluate`, at its 1e-8 p.u.,

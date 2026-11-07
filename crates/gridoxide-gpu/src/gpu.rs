@@ -27,6 +27,12 @@
 //! differ, a scenario that sets a voltage, or factor reuse, which keeps a
 //! scenario's own factors.
 //!
+//! Those factors also serve further steps, if [`BatchOptions::chord_steps`]
+//! asks: a chord method, each step a column of the same solve, a sixteenth of
+//! a Newton step's cost on case9241pegase but converging only linearly. Every
+//! scenario then finishes on Newton's steps, to the same tolerance on the same
+//! mismatch.
+//!
 //! A single power flow ([`GpuBatchSolver::solve_single`]) is a batch of
 //! one from the buses it is given. One system is cuDSS's worst case, a
 //! roughly fixed cost per system, so it pays only on large grids; make its
@@ -298,8 +304,9 @@ impl GpuBatchSolver {
                 .all(|sc| sc.bus_overrides.iter().all(|o| o.voltage_mag.is_none()))
     }
 
-    /// The first step of a chunk that shares it, for the `active` scenarios:
-    /// the solve into the update buffer, after the session's one factorization.
+    /// A step on the session's first-step factors, for the `active`
+    /// scenarios: the solve into the update buffer, after the session's one
+    /// factorization, which reads a first step's Jacobian.
     fn shared_step(&mut self, active: &[bool]) -> Result<(), BatchError> {
         let (values, rhs, dx) = self.dev.linear_buffers();
         if self.shared.is_none() {
@@ -332,7 +339,8 @@ impl GpuBatchSolver {
             unsafe { shared.factor(values.add(first * nnz))? };
         }
         let _r = Range::new(c"batch.cudss_solve");
-        shared.solve(active.iter().filter(|&&a| a).count())?;
+        let width = active.iter().rposition(|&a| a).map_or(0, |s| s + 1);
+        shared.solve(width, active.iter().filter(|&&a| a).count())?;
         Ok(())
     }
 
@@ -360,7 +368,14 @@ impl GpuBatchSolver {
         let mut norm = vec![f64::INFINITY; m];
         let mut last_norm = vec![f64::INFINITY; m];
         let mut on_cpu: Vec<Option<Vec<Bus>>> = vec![None; m];
-        let mut shared_step = Self::shares_first_step(scenarios, deltas, opts);
+        // Who steps on the shared factors, and the steps past the first.
+        let shared = Self::shares_first_step(scenarios, deltas, opts);
+        let mut on_shared: Vec<bool> = (0..batch).map(|s| shared && s < m).collect();
+        let mut chord = vec![0usize; m];
+        let chord_steps = match opts.policy {
+            StepPolicy::Adaptive => opts.chord_steps,
+            StepPolicy::Fixed(_) => 0,
+        };
 
         loop {
             // 1. Mismatch on the device, flags on the host.
@@ -375,9 +390,13 @@ impl GpuBatchSolver {
                     continue;
                 }
                 norm[s] = norms[s];
-                if let Some(o) = decide(opts, norm[s], steps[s]) {
+                if let Some(o) = decide(opts, norm[s], steps[s] - chord[s]) {
                     outcome[s] = Some(o);
                     active[s] = false;
+                } else if steps[s] > 0
+                    && (chord[s] >= chord_steps || norm[s] > opts.chord_below * last_norm[s])
+                {
+                    on_shared[s] = false;
                 }
             }
             let n_active = active.iter().filter(|&&a| a).count();
@@ -424,19 +443,27 @@ impl GpuBatchSolver {
                 break;
             }
 
-            if std::mem::take(&mut shared_step) {
-                // 2 and 3 of the first step, on the session's one Jacobian.
-                // Each scenario still takes that factorization's step.
-                self.shared_step(&active)?;
-                for s in (0..m).filter(|&s| active[s]) {
-                    factorizations[s] += 1;
+            // 2 and 3 for those on the session's one Jacobian. First: this
+            // solve writes every column, the batch's below only its own.
+            let shared_now: Vec<bool> = (0..batch).map(|s| active[s] && on_shared[s]).collect();
+            if shared_now.iter().any(|&a| a) {
+                self.shared_step(&shared_now)?;
+                for s in (0..m).filter(|&s| shared_now[s]) {
+                    if steps[s] == 0 {
+                        // Newton's step, on that factorization.
+                        factorizations[s] += 1;
+                    } else {
+                        chord[s] += 1;
+                    }
                 }
-            } else {
+            }
+            let newton: Vec<bool> = (0..batch).map(|s| active[s] && !on_shared[s]).collect();
+            if newton.iter().any(|&a| a) {
                 // 2. Jacobians where new factors are needed, one masked
                 // factorization.
                 let refactor: Vec<bool> = (0..batch)
                     .map(|s| {
-                        active[s] && needs_factors(opts, factorizations[s], norm[s], last_norm[s])
+                        newton[s] && needs_factors(opts, factorizations[s], norm[s], last_norm[s])
                     })
                     .collect();
                 if refactor.iter().any(|&r| r) {
@@ -454,7 +481,7 @@ impl GpuBatchSolver {
 
                 // 3. One masked solve into the update buffer.
                 let _r = Range::new(c"batch.cudss_solve");
-                self.lin.solve(&active)?;
+                self.lin.solve(&newton)?;
             }
             {
                 let _r = Range::new(c"batch.update");

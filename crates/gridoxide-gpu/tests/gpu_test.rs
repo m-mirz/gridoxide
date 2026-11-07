@@ -164,6 +164,86 @@ fn a_shared_first_step_factorizes_once() {
     );
 }
 
+/// Chord steps on the shared factors end at the same solutions, within the
+/// tolerance, in fewer factorizations; the iteration limit counts Newton's
+/// steps alone, so more chord steps than `max_iter` still converge.
+#[test]
+fn chord_steps_reach_newtons_solutions() {
+    let (_, base, ybus) = load("matpower/case1354pegase.m");
+    let scenarios = ramp(&base, 64);
+    let newton = BatchOptions {
+        tol: 1e-10,
+        ..BatchOptions::default()
+    };
+    let want = cpu(&base, &ybus, &scenarios, &newton).unwrap();
+    let opts = BatchOptions {
+        max_iter: 6,
+        chord_steps: 12,
+        chord_below: 0.9,
+        ..newton
+    };
+    let mut gpu = GpuBatchSolver::new(&base, &ybus, 64).unwrap();
+    let got = gpu.solve(&scenarios, &opts).unwrap();
+    assert!(got.linear.systems_factored < want.linear.systems_factored / 2);
+    for (g, c) in got.scenarios.iter().zip(&want.scenarios) {
+        assert_eq!(g.outcome, Outcome::Converged);
+        assert!(g.final_mismatch < 1e-10);
+        for (a, b) in g.voltage_mag.iter().zip(&c.voltage_mag) {
+            assert!((a - b).abs() < 1e-8, "{a} against {b}");
+        }
+    }
+}
+
+/// A sweep narrower than the session solves only its own columns, and the
+/// width follows the scenarios still on the shared factors.
+#[test]
+fn a_sweep_narrower_than_the_session_solves_as_a_full_one() {
+    let (_, base, ybus) = load("matpower/case1354pegase.m");
+    let mut gpu = GpuBatchSolver::new(&base, &ybus, 128).unwrap();
+    for (scenarios, chord_steps) in [(40, 0), (128, 0), (40, 12), (70, 12)] {
+        let scenarios = ramp(&base, scenarios);
+        let opts = BatchOptions {
+            tol: 1e-10,
+            chord_steps,
+            chord_below: 0.9,
+            ..BatchOptions::default()
+        };
+        let want = cpu(
+            &base,
+            &ybus,
+            &scenarios,
+            &BatchOptions {
+                chord_steps: 0,
+                ..opts
+            },
+        )
+        .unwrap();
+        let got = gpu.solve(&scenarios, &opts).unwrap();
+        for (g, c) in got.scenarios.iter().zip(&want.scenarios) {
+            assert_eq!(g.outcome, Outcome::Converged);
+            for (a, b) in g.voltage_mag.iter().zip(&c.voltage_mag) {
+                assert!((a - b).abs() < 1e-8, "{a} against {b}");
+            }
+        }
+    }
+}
+
+/// Fixed steps stay Newton's: chord steps would change what `Fixed(k)` means.
+#[test]
+fn fixed_steps_take_no_chord_steps() {
+    let (_, base, ybus) = load("matpower/case1354pegase.m");
+    let scenarios = ramp(&base, 64);
+    let opts = BatchOptions {
+        tol: 1e-10,
+        policy: StepPolicy::Fixed(4),
+        chord_steps: 12,
+        ..BatchOptions::default()
+    };
+    let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
+    let mut gpu = GpuBatchSolver::new(&base, &ybus, 64).unwrap();
+    assert_same(&gpu.solve(&scenarios, &opts).unwrap(), &want, &[], "fixed");
+}
+
 /// A scenario that sets a voltage starts elsewhere, so its chunk's first step
 /// is not shared; the session's factors would have been the wrong matrix.
 #[test]
