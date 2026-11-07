@@ -164,7 +164,6 @@ impl DeviceAcModel {
         let gen_ptr = int(ix(&data.gen_ptr)?)?;
         let gen_idx = int(ix(&data.gen_idx)?)?;
         let gen_bus = int(ix(&data.gen_bus)?)?;
-        let quad_col = int(ix(&data.quadratic.iter().map(|q| q.0).collect::<Vec<_>>())?)?;
         let limit_term = int(ix(&data.limit_terminal)?)?;
         let angle_from = int(ix(&data.angle.iter().map(|a| a.0).collect::<Vec<_>>())?)?;
         let angle_to = int(ix(&data.angle.iter().map(|a| a.1).collect::<Vec<_>>())?)?;
@@ -212,7 +211,6 @@ impl DeviceAcModel {
             gen_ptr,
             gen_idx,
             gen_bus,
-            quad_col,
             quad_h,
             limit_term,
             angle_from,

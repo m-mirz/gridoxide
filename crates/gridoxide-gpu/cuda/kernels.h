@@ -147,9 +147,6 @@ int go_kkt_scale(const unsigned* row, const unsigned* col, const double* factor,
 /* x[i] *= d[i]. */
 int go_scale_vec(double* x, const double* d, unsigned n, void* stream);
 
-/* y[i] = x[i] / d[i]. */
-int go_unscale_vec(const double* x, const double* d, double* y, unsigned n, void* stream);
-
 /* y = A x, A symmetric with its upper triangle in CSR (up_ptr, up_col,
  * values; the diagonal first in each row, as LowerPattern's columns have it)
  * and its strictly lower part as a CSR of positions into `values` (lo_ptr,
@@ -158,6 +155,11 @@ int go_unscale_vec(const double* x, const double* d, double* y, unsigned n, void
 int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned* lo_ptr,
                 const unsigned* lo_col, const unsigned* lo_src, const double* values,
                 const double* x, double* y, unsigned n, void* stream);
+
+/* An NVTX range on this thread, for Nsight Systems. NVTX is header-only and
+ * nothing to link: without a tool attached these return at once. */
+void go_nvtx_push(const char* name);
+void go_nvtx_pop(void);
 
 #ifdef __cplusplus
 }

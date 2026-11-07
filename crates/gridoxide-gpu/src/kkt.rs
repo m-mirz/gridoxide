@@ -93,6 +93,8 @@ struct Assembly {
     lo_ptr: DeviceBuffer<u32>,
     lo_col: DeviceBuffer<u32>,
     lo_src: DeviceBuffer<u32>,
+    /// The matrix as assembled, before equilibration, for the mat-vec.
+    raw: DeviceBuffer<f64>,
     /// The mat-vec's vectors.
     mv_x: DeviceBuffer<f64>,
     mv_y: DeviceBuffer<f64>,
@@ -204,6 +206,7 @@ impl Assembly {
             lo_ptr: up(&lo_ptr)?,
             lo_col: up(&lo_col)?,
             lo_src: up(&lo_src)?,
+            raw: DeviceBuffer::new(nnz.max(1))?,
             mv_x: DeviceBuffer::new(n.max(1))?,
             mv_y: DeviceBuffer::new(n.max(1))?,
         })
@@ -256,6 +259,16 @@ impl Assembly {
                     stream.cast(),
                 ),
                 "go_kkt_gather",
+            )?;
+            cuda(
+                ffi::cudaMemcpyAsync(
+                    self.raw.ptr.cast(),
+                    values.ptr.cast(),
+                    self.nnz * size_of::<f64>(),
+                    ffi::cudaMemcpyDeviceToDevice,
+                    stream,
+                ),
+                "cudaMemcpyAsync",
             )?;
             let row_max = |values: &DeviceBuffer<f64>| {
                 launched(
@@ -586,9 +599,9 @@ impl CudssSolver {
         Ok((values, scale))
     }
 
-    /// Factorizes; `Ok(None)` when the matrix has no factorization of this
-    /// kind (a zero pivot, or not positive definite for Cholesky).
-    fn try_factorize(&mut self, source: Source<'_>) -> Result<Option<Inertia>, LinearError> {
+    /// Queues the assembly, the analysis if it is the first, and the
+    /// factorization on the stream.
+    fn queue_factorization(&mut self, source: Source<'_>) -> Result<(), LinearError> {
         let n = self.pattern.n();
         self.assembly
             .run(source, &mut self.values, n, self.stream.0)?;
@@ -604,12 +617,27 @@ impl CudssSolver {
         self.sys
             .set(ffi::CUDSS_DATA_INFO, &[0i32], "INFO (reset)")?;
         self.sys
-            .execute(ffi::CUDSS_PHASE_FACTORIZATION, "FACTORIZATION")?;
-        cuda(
-            // SAFETY: the stream is the solver's.
+            .execute(ffi::CUDSS_PHASE_FACTORIZATION, "FACTORIZATION")
+    }
+
+    /// Factorizes; `Ok(None)` when the matrix has no factorization of this
+    /// kind (a zero pivot, or not positive definite for Cholesky).
+    fn try_factorize(&mut self, source: Source<'_>) -> Result<Option<Inertia>, LinearError> {
+        let n = self.pattern.n();
+        // cuDSS's analysis fails on an empty matrix.
+        if n == 0 {
+            return Ok(Some(Inertia::default()));
+        }
+        let queued = self.queue_factorization(source);
+        // Also when queueing failed: `factorize` takes that for a failed
+        // factorization, the interior point retries, and `Assembly::run`
+        // must find no copy out of its pinned buffer in flight.
+        // SAFETY: the stream is the solver's.
+        let synced = cuda(
             unsafe { ffi::cudaStreamSynchronize(self.stream.0) },
             "cudaStreamSynchronize",
-        )?;
+        );
+        queued.and(synced)?;
         let mut bad = [0i32];
         self.assembly.bad.download(&mut bad, self.stream.0)?;
         if bad[0] != 0 {
@@ -646,6 +674,9 @@ impl CudssSolver {
         if self.inertia.is_none() || rhs.len() != n {
             return Ok(None);
         }
+        if n == 0 {
+            return Ok(Some(Vec::new()));
+        }
         let scale = self.assembly.scale.ptr;
         // SAFETY: `rhs`, `solution` and `scale` are the solver's own buffers
         // of n values; the upload goes through a raw pointer because `solve`
@@ -672,8 +703,12 @@ impl CudssSolver {
 }
 
 impl CudssSolver {
-    /// `K x` on the device: the equilibrated `D K D` it factorized, as
-    /// `D⁻¹ (D K D) (D⁻¹ x)`.
+    /// `K x` on the device, from `K` as assembled. Not through the `D K D` it
+    /// factorized, as `D⁻¹ (D K D) (D⁻¹ x)`: that rounds differently from the
+    /// host's product, and refinement stops on this residual. On the default
+    /// set the iterations then stray up to 33 from the CPU's (18 this way);
+    /// case118_ieee__api from the flat start took 83 against 50, and 382 once
+    /// a change of rounding moved it.
     fn try_multiply(&self, x: &[f64]) -> Result<Option<Vec<f64>>, LinearError> {
         let n = self.pattern.n();
         if self.inertia.is_none() || x.len() != n || n == 0 {
@@ -681,15 +716,11 @@ impl CudssSolver {
         }
         let a = &self.assembly;
         let stream = self.stream.0;
-        // SAFETY: every buffer is the solver's own, of n values (the vectors
-        // and the scale) or of the pattern's sizes; the upload goes through
+        // SAFETY: every buffer is the solver's own, of n values (the vectors)
+        // or of the pattern's sizes; the upload goes through
         // a raw pointer because `multiply` takes `&self`.
         unsafe {
             copy_to_device(a.mv_x.ptr, x, stream)?;
-            launched(
-                ffi::go_unscale_vec(a.mv_x.ptr, a.scale.ptr, a.mv_y.ptr, n as u32, stream.cast()),
-                "go_unscale_vec",
-            )?;
             launched(
                 ffi::go_kkt_symv(
                     self.row_ptr.ptr,
@@ -697,17 +728,13 @@ impl CudssSolver {
                     a.lo_ptr.ptr,
                     a.lo_col.ptr,
                     a.lo_src.ptr,
-                    self.values.ptr,
-                    a.mv_y.ptr,
+                    a.raw.ptr,
                     a.mv_x.ptr,
+                    a.mv_y.ptr,
                     n as u32,
                     stream.cast(),
                 ),
                 "go_kkt_symv",
-            )?;
-            launched(
-                ffi::go_unscale_vec(a.mv_x.ptr, a.scale.ptr, a.mv_y.ptr, n as u32, stream.cast()),
-                "go_unscale_vec",
             )?;
         }
         let mut y = vec![0.0; n];

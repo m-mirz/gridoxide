@@ -997,3 +997,28 @@ authoring. See that file's header for the full table; the two results worth repe
   SmallGrid and Svedala) the nodes are joined only by switches that are open or out of service, and
   the exporter merged across them anyway. The test asserts that cause rather than the count, so it
   would fail if the reader ever missed an edge.
+
+## 11. GPU batch power flow: where the time goes
+
+`GpuBatchSolver` marks its loop with NVTX ranges (`batch.*`), and
+`nsys_batch_breakdown.py` reads the trace; how to run it is at its top. A100
+40 GB, cuDSS 1.0.0, Nsight Systems 2024.6, `gpu_bench`, the three solves after
+its warm-up, 1e-6. The trace adds about 10-15% to the solve.
+
+| Case, scenarios | cuDSS, of device work | Our kernels | Copies | cuDSS, of wall time | GPU idle |
+|---|---|---|---|---|---|
+| case1354pegase, sweep 256 | 96.8% | 1.5% | 1.8% | 84.1% | 13.2% |
+| case1354pegase, sweep 1024 | 96.5% | 1.3% | 2.1% | 80.9% | 16.2% |
+| case1354pegase, N-1 256 | 94.6% | 1.9% | 3.6% | 76.6% | 19.0% |
+| case2869pegase, sweep 256 | 94.9% | 2.2% | 2.8% | 74.6% | 21.4% |
+| case2869pegase, sweep 1024 | 94.6% | 2.1% | 3.3% | 72.3% | 23.6% |
+| case2869pegase, N-1 256 | 93.0% | 2.5% | 4.5% | 66.6% | 28.3% |
+| case9241pegase, sweep 256 | 93.6% | 3.0% | 3.4% | 71.6% | 23.5% |
+| case9241pegase, N-1 256 | 93.1% | 3.7% | 3.2% | 73.9% | 20.6% |
+
+Of the device's work, factorization is 64-76% and the triangular solves
+18-30%; the Jacobian is 1-2% and the mismatch about 1%. The idle time is
+nearly all the host's `DeviceBatch::load` (12-26% of the wall time), which
+builds every scenario's state serially before the upload. Not in the table:
+cuDSS's analysis, once a session, is several times one solve at 256 scenarios
+on the smaller cases (about 370 ms against 65 on case1354pegase, untraced).

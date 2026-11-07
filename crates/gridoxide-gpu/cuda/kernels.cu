@@ -8,6 +8,7 @@
 // One thread per (scenario, item), over a grid-stride loop, except the
 // mismatch, which reduces each scenario's norm in one block.
 
+#include <nvtx3/nvToolsExt.h>
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -536,22 +537,19 @@ __global__ void k_scale_vec(double* __restrict__ x, const double* __restrict__ d
         x[i] *= d[i];
 }
 
-__global__ void k_unscale_vec(const double* __restrict__ x, const double* __restrict__ d,
-                              double* __restrict__ y, unsigned n) {
-    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
-         i += (size_t)blockDim.x * gridDim.x)
-        y[i] = x[i] / d[i];
-}
-
 __global__ void k_kkt_symv(const int* __restrict__ up_ptr, const int* __restrict__ up_col,
                            const unsigned* __restrict__ lo_ptr, const unsigned* __restrict__ lo_col,
                            const unsigned* __restrict__ lo_src, const double* __restrict__ values,
                            const double* __restrict__ x, double* __restrict__ y, unsigned n) {
     for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
          i += (size_t)blockDim.x * gridDim.x) {
+        // Rounded product and sum, as the host's: nvcc would contract them,
+        // and this file is built with FMA for the Newton step's kernels.
         double s = 0.0;
-        for (unsigned k = lo_ptr[i]; k < lo_ptr[i + 1]; ++k) s += values[lo_src[k]] * x[lo_col[k]];
-        for (int k = up_ptr[i]; k < up_ptr[i + 1]; ++k) s += values[k] * x[up_col[k]];
+        for (unsigned k = lo_ptr[i]; k < lo_ptr[i + 1]; ++k)
+            s = __dadd_rn(s, __dmul_rn(values[lo_src[k]], x[lo_col[k]]));
+        for (int k = up_ptr[i]; k < up_ptr[i + 1]; ++k)
+            s = __dadd_rn(s, __dmul_rn(values[k], x[up_col[k]]));
         y[i] = s;
     }
 }
@@ -596,13 +594,6 @@ extern "C" int go_scale_vec(double* x, const double* d, unsigned n, void* stream
     return launched();
 }
 
-extern "C" int go_unscale_vec(const double* x, const double* d, double* y, unsigned n,
-                              void* stream) {
-    if (n == 0) return 0;
-    k_unscale_vec<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(x, d, y, n);
-    return launched();
-}
-
 extern "C" int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned* lo_ptr,
                            const unsigned* lo_col, const unsigned* lo_src, const double* values,
                            const double* x, double* y, unsigned n, void* stream) {
@@ -611,3 +602,7 @@ extern "C" int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned*
                                                                    lo_src, values, x, y, n);
     return launched();
 }
+
+extern "C" void go_nvtx_push(const char* name) { nvtxRangePushA(name); }
+
+extern "C" void go_nvtx_pop(void) { nvtxRangePop(); }

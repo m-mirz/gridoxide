@@ -62,6 +62,11 @@ The device solves AC sweeps (`GpuBatchSolver.solve_batch`), AC N-1
 (`GpuBatchSolver.solve_contingencies`) and DC N-1
 (`GpuDcSolver.solve_contingencies`). Everything else is CPU only.
 
+- [ ] **`DeviceBatch::load` on the host.** 12-26% of a batch solve's wall
+  time, and nearly all the GPU's idle time (`scripts/bench/README.md`,
+  section 11): it builds every scenario's state serially. Upload `start` once
+  and the overrides alone, or fill in parallel. cuDSS is 93-97% of the
+  device's work, so no other kernel of ours is worth tuning first.
 - [ ] **DC sweeps.** `GpuDcSolver` already keeps one factorization; a sweep
   of injection scenarios is one multi-column solve over their right-hand
   sides. The cheapest addition.

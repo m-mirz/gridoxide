@@ -12,6 +12,9 @@ For profiling with `perf`, set:
 sysctl kernel.perf_event_paranoid=1
 ```
 
+The GPU batch power flow carries NVTX ranges (`batch.*`) for Nsight Systems: see section 11 of
+`scripts/bench/README.md`. They cost nothing without a tool attached.
+
 ## What is measured, and where
 
 `scripts/bench/README.md` is organized as a numbered sequence of benchmarks:

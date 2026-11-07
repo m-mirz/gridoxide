@@ -249,3 +249,26 @@ impl Drop for Event {
 // SAFETY: a CUDA event handle may be used from any host thread.
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}
+
+/// An NVTX range until dropped, for Nsight Systems (`nsys profile`).
+///
+/// It times the host: kernels and cuDSS's phases only queue here, and what
+/// they take falls in the range that next synchronizes. `nsys stats --report
+/// nvtx_gpu_proj_sum` gives the device's time per range.
+pub(crate) struct Range(std::marker::PhantomData<*const ()>);
+
+impl Range {
+    pub(crate) fn new(name: &'static std::ffi::CStr) -> Self {
+        // SAFETY: `name` is NUL-terminated and outlives the call.
+        unsafe { ffi::go_nvtx_push(name.as_ptr()) };
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl Drop for Range {
+    fn drop(&mut self) {
+        // SAFETY: pops the range `new` pushed, on the thread that pushed it
+        // (the raw pointer keeps `Range` from being `Send`).
+        unsafe { ffi::go_nvtx_pop() };
+    }
+}

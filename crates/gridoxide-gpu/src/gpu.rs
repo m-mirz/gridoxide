@@ -24,6 +24,7 @@ use gridoxide_core::network::{ShuntAdm, YBusSparse};
 use gridoxide_core::scenario::Scenario;
 use gridoxide_core::types::{Bus, Line, Transformer};
 
+use crate::cuda::Range;
 use crate::cudss::CudssBatch;
 use crate::device::DeviceBatch;
 use crate::newton::{
@@ -87,6 +88,7 @@ impl GpuBatchSolver {
         capacity: usize,
     ) -> Result<Self, BatchError> {
         let capacity = capacity.max(1);
+        let _r = Range::new(c"batch.analysis");
         let dev = DeviceBatch::with_capacity(start, &ybus, capacity)?;
         let (values, rhs, dx) = dev.linear_buffers();
         // SAFETY: the buffers are `dev`'s, sized for its capacity, and `dev`
@@ -216,7 +218,11 @@ impl GpuBatchSolver {
         let batch = self.capacity();
         let m = scenarios.len();
         let n_bus = self.start.len();
-        self.dev.load(scenarios, deltas)?;
+        let _chunk = Range::new(c"batch.chunk");
+        {
+            let _r = Range::new(c"batch.load");
+            self.dev.load(scenarios, deltas)?;
+        }
 
         let mut active: Vec<bool> = (0..batch).map(|s| s < m).collect();
         let mut outcome: Vec<Option<Outcome>> = vec![None; m];
@@ -228,9 +234,12 @@ impl GpuBatchSolver {
 
         loop {
             // 1. Mismatch on the device, flags on the host.
-            self.dev.set_active(&active)?;
-            self.dev.mismatch()?;
-            let norms = self.dev.norms()?;
+            let norms = {
+                let _r = Range::new(c"batch.mismatch");
+                self.dev.set_active(&active)?;
+                self.dev.mismatch()?;
+                self.dev.norms()?
+            };
             for s in 0..m {
                 if !active[s] {
                     continue;
@@ -290,8 +299,12 @@ impl GpuBatchSolver {
                 .map(|s| active[s] && needs_factors(opts, factorizations[s], norm[s], last_norm[s]))
                 .collect();
             if refactor.iter().any(|&r| r) {
-                self.dev.set_active(&refactor)?;
-                self.dev.fill_jacobian()?;
+                {
+                    let _r = Range::new(c"batch.jacobian");
+                    self.dev.set_active(&refactor)?;
+                    self.dev.fill_jacobian()?;
+                }
+                let _r = Range::new(c"batch.cudss_factor");
                 self.lin.factor(&refactor)?;
                 for s in (0..m).filter(|&s| refactor[s]) {
                     factorizations[s] += 1;
@@ -299,9 +312,15 @@ impl GpuBatchSolver {
             }
 
             // 3. One masked solve into the update buffer, and the update.
-            self.lin.solve(&active)?;
-            self.dev.set_active(&active)?;
-            self.dev.update_in_place()?;
+            {
+                let _r = Range::new(c"batch.cudss_solve");
+                self.lin.solve(&active)?;
+            }
+            {
+                let _r = Range::new(c"batch.update");
+                self.dev.set_active(&active)?;
+                self.dev.update_in_place()?;
+            }
             for s in (0..m).filter(|&s| active[s]) {
                 steps[s] += 1;
                 last_norm[s] = norm[s];
@@ -309,6 +328,7 @@ impl GpuBatchSolver {
             report.batch_steps += 1;
         }
 
+        let _r = Range::new(c"batch.results");
         let (vm, va) = self.dev.voltages()?;
         for s in 0..m {
             let (voltage_mag, voltage_ang) = match &on_cpu[s] {

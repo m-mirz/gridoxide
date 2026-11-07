@@ -35,14 +35,17 @@ cases, and solving the three it fails. Measured on case24464_goc at about
 - [ ] **Triplets on the device path.** `AcOpf::jacobian` and
   `lagrangian_hessian` still rebuild the triplets from fixed patterns on
   every call. Handing over values alone goes through the scaling, NCL and
-  restoration wrappers.
+  restoration wrappers. Measured on case24464_goc: 3.4 ms of about 73 an
+  iteration (Jacobian 2.1, Hessian 1.3, beyond the device's own 1.6).
 - [ ] **HyKKT on the device.** Its CG and residuals still run on the host;
   only worth it if it beats the augmented system once they do not.
 - [ ] **Small cases:** below case1354 the per-call device latency
   dominates; a CPU fallback by size would keep the CPU's times there.
 - [x] **Restoration's solver,** kept across restorations: on the GPU a new
-  one was a cuDSS handle, stream and buffers and a full analysis. Not yet
-  measured on the device, where it also holds a second factor's memory.
+  one was a cuDSS handle, stream and buffers and a full analysis. On
+  case13659_pegase, the one case with restorations, 13.8 s to 11.1 s (flat,
+  3 of them) and 13.3 s to 11.6 s (proportional, 2), at the same iterations;
+  peak device memory about 925 MiB either way.
 
 # From the review of PR #30
 
@@ -50,25 +53,25 @@ Correctness:
 
 - [x] **A device setup error reads as infeasibility.** `MakeSolver` returns
   the error, and it ends the solve as `OpfError::Backend`.
-- [ ] **The pinned buffer after a failed factorization.**
-  `CudssSolver::try_factorize` returns through `?` after ANALYSIS, the INFO
-  reset or FACTORIZATION without reaching `cudaStreamSynchronize`, and
-  `Assembly::run` counts on the last factorization having synchronized: the
-  next retry can write `host_trip` while its copy is in flight. Synchronize
-  on the error path too.
-- [ ] **`try_solve` on a 0×0 system** panics: `solution` holds `n.max(1)`
-  entries and `download` asserts equal lengths. `try_multiply` guards
-  `n == 0`; do the same.
+- [x] **The pinned buffer after a failed factorization.**
+  `CudssSolver::try_factorize` synchronizes on the error path too.
+- [x] **`try_solve` on a 0×0 system** did not panic after all: cuDSS's
+  analysis fails on an empty matrix, so no factorization reached it. An empty
+  system now factorizes and solves, as on the host.
 - [x] **Python's `max_iter`** and `ac_opf`'s `max_iterations` default to
   3000, as `NlpOptions` does.
-- [ ] **FMA in `kernels.cu`.** `opf.cu` is built with `-fmad=false`,
-  `kernels.cu` is not, so the device residual (`k_kkt_symv`) is not the
-  host's arithmetic and refinement can stop a round apart from the CPU's.
+- [x] **FMA in `kernels.cu`.** The device residual was further from the
+  host's than FMA: it went through the equilibrated `D K D`. `go_kkt_symv`
+  now takes `K` as assembled, without FMA. Against the CPU's iterations on
+  96 runs (default set and case9241_pegase, deterministic), the summed gap
+  falls from 89 to 46 and the worst from 33 to 18. Dropping FMA alone did
+  not help: `case118_ieee__api` went from 83 iterations to 382 (CPU: 50).
+  The rest of `kernels.cu` keeps FMA: the Newton step's kernels do not
+  follow the CPU's rounding.
 
 Cleanups:
 
 - [x] **The Y-bus and bus template** left `AcOpf`; the test accessors build
   them on demand.
-- [ ] **`quad_col`** is uploaded and stored in `go_ac_model`, but no kernel
-  reads it.
+- [x] **`quad_col`** left `go_ac_model`.
 - [x] **The row count** is computed once, in `AcOpf::build`.

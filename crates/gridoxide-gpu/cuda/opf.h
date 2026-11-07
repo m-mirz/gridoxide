@@ -41,8 +41,7 @@ typedef struct go_ac_model {
     const unsigned* gen_idx;
     /* Per generator. */
     const unsigned* gen_bus;
-    /* Per quadratic cost term: its column and second derivative. */
-    const unsigned* quad_col;
+    /* Per quadratic cost term: its second derivative. */
     const double* quad_h;
     /* Per limit row, its terminal; per angle row, its buses; per cost row,
      * its epigraph column, generator column and slope. */
