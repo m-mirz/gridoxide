@@ -27,7 +27,8 @@
 //! HyKKT's; `OPF_LINEAR=cudss-fast` without cuDSS's deterministic mode,
 //! as benchmarks run it. `CUDSS_THREADING_LIB` (cuDSS's `libcudss_mtlayer_gomp.so`)
 //! runs its analysis on every core. `OPF_MODEL=gpu` evaluates the model
-//! there too (`AcOpf::evaluate_on_device`).
+//! there too (`AcOpf::evaluate_on_device`), and the interior point's vectors
+//! with it (`InteriorPoint::Device`), unless `OPF_IP=host`.
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -123,6 +124,15 @@ fn build(name: &str, log: bool) -> AcOpf {
         _ => {}
     }
     options.nlp.ncl = std::env::var_os("NLP_NCL").is_some();
+    // With the model on the device, the interior point's vectors too.
+    if std::env::var("OPF_MODEL").as_deref() == Ok("gpu")
+        && std::env::var("OPF_IP").as_deref() != Ok("host")
+    {
+        let linear = std::env::var("OPF_LINEAR");
+        options.nlp.interior_point = nlp::InteriorPoint::Device {
+            deterministic: linear.as_deref() != Ok("cudss-fast"),
+        };
+    }
     #[allow(unused_mut)]
     let mut opf = AcOpf::build(opf.network, options).unwrap();
     #[cfg(feature = "gpu")]

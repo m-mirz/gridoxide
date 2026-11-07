@@ -235,6 +235,16 @@ fn multiply_is_the_matrix_product() {
     }
 }
 
+/// A system with no unknowns has an empty solution, on the device as on the
+/// host; the mat-vec's buffers hold at least one value, and it declines.
+#[test]
+fn an_empty_system_solves() {
+    let mut gpu = CudssSolver::new(0, &[], Factorization::Ldlt, true).unwrap();
+    assert!(gpu.factorize(&[]));
+    assert_eq!(gpu.solve(&[]), Some(Vec::new()));
+    assert_eq!(gpu.multiply(&[]), None);
+}
+
 /// From the values alone, in the keys' order, cuDSS factorizes what it does
 /// from the triplets: the same inertia and solution, to the bit.
 #[test]

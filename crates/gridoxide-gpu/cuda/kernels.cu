@@ -8,6 +8,7 @@
 // One thread per (scenario, item), over a grid-stride loop, except the
 // mismatch, which reduces each scenario's norm in one block.
 
+#include <nvtx3/nvToolsExt.h>
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -536,22 +537,19 @@ __global__ void k_scale_vec(double* __restrict__ x, const double* __restrict__ d
         x[i] *= d[i];
 }
 
-__global__ void k_unscale_vec(const double* __restrict__ x, const double* __restrict__ d,
-                              double* __restrict__ y, unsigned n) {
-    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
-         i += (size_t)blockDim.x * gridDim.x)
-        y[i] = x[i] / d[i];
-}
-
 __global__ void k_kkt_symv(const int* __restrict__ up_ptr, const int* __restrict__ up_col,
                            const unsigned* __restrict__ lo_ptr, const unsigned* __restrict__ lo_col,
                            const unsigned* __restrict__ lo_src, const double* __restrict__ values,
                            const double* __restrict__ x, double* __restrict__ y, unsigned n) {
     for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
          i += (size_t)blockDim.x * gridDim.x) {
+        // Rounded product and sum, as the host's: nvcc would contract them,
+        // and this file is built with FMA for the Newton step's kernels.
         double s = 0.0;
-        for (unsigned k = lo_ptr[i]; k < lo_ptr[i + 1]; ++k) s += values[lo_src[k]] * x[lo_col[k]];
-        for (int k = up_ptr[i]; k < up_ptr[i + 1]; ++k) s += values[k] * x[up_col[k]];
+        for (unsigned k = lo_ptr[i]; k < lo_ptr[i + 1]; ++k)
+            s = __dadd_rn(s, __dmul_rn(values[lo_src[k]], x[lo_col[k]]));
+        for (int k = up_ptr[i]; k < up_ptr[i + 1]; ++k)
+            s = __dadd_rn(s, __dmul_rn(values[k], x[up_col[k]]));
         y[i] = s;
     }
 }
@@ -596,18 +594,100 @@ extern "C" int go_scale_vec(double* x, const double* d, unsigned n, void* stream
     return launched();
 }
 
-extern "C" int go_unscale_vec(const double* x, const double* d, double* y, unsigned n,
-                              void* stream) {
-    if (n == 0) return 0;
-    k_unscale_vec<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(x, d, y, n);
-    return launched();
-}
-
 extern "C" int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned* lo_ptr,
                            const unsigned* lo_col, const unsigned* lo_src, const double* values,
                            const double* x, double* y, unsigned n, void* stream) {
     if (n == 0) return 0;
     k_kkt_symv<<<grid_for(n), kThreads, 0, (cudaStream_t)stream>>>(up_ptr, up_col, lo_ptr, lo_col,
                                                                    lo_src, values, x, y, n);
+    return launched();
+}
+
+extern "C" void go_nvtx_push(const char* name) { nvtxRangePushA(name); }
+
+extern "C" void go_nvtx_pop(void) { nvtxRangePop(); }
+
+// DC sweeps (src/dc.rs): one column per injection scenario, the response to
+// its injection change added to the base case. See kernels.h.
+namespace {
+
+__global__ void k_zero(double* __restrict__ x, size_t total) {
+    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < total;
+         t += (size_t)blockDim.x * gridDim.x) {
+        x[t] = 0.0;
+    }
+}
+
+__global__ void k_dc_scatter(const unsigned* __restrict__ cols, const unsigned* __restrict__ rows,
+                             const double* __restrict__ vals, unsigned count,
+                             double* __restrict__ rhs, unsigned n) {
+    for (unsigned e = blockIdx.x * blockDim.x + threadIdx.x; e < count;
+         e += blockDim.x * gridDim.x) {
+        rhs[(size_t)cols[e] * n + rows[e]] = vals[e];
+    }
+}
+
+__global__ void k_dc_sweep_angles(const double* __restrict__ theta, const int* __restrict__ pos,
+                                  const double* __restrict__ base_angles,
+                                  double* __restrict__ angles, unsigned n, unsigned n_bus,
+                                  size_t total) {
+    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < total;
+         t += (size_t)blockDim.x * gridDim.x) {
+        size_t col = t / n_bus;
+        unsigned bus = (unsigned)(t % n_bus);
+        angles[t] = base_angles[bus] + response(theta + col * n, pos, bus);
+    }
+}
+
+__global__ void k_dc_sweep_flows(const double* __restrict__ theta,
+                                 const unsigned* __restrict__ br_from,
+                                 const unsigned* __restrict__ br_to,
+                                 const double* __restrict__ br_b, const int* __restrict__ pos,
+                                 const double* __restrict__ base_flows,
+                                 double* __restrict__ flows, unsigned n, unsigned n_br,
+                                 size_t total) {
+    for (size_t t = blockIdx.x * (size_t)blockDim.x + threadIdx.x; t < total;
+         t += (size_t)blockDim.x * gridDim.x) {
+        size_t col = t / n_br;
+        unsigned j = (unsigned)(t % n_br);
+        const double* th = theta + col * n;
+        flows[t] = base_flows[j] +
+                   br_b[j] * (response(th, pos, br_from[j]) - response(th, pos, br_to[j]));
+    }
+}
+
+}  // namespace
+
+extern "C" int go_dc_injection_rhs(const unsigned* cols, const unsigned* rows,
+                                   const double* vals, unsigned count, double* rhs, unsigned n,
+                                   unsigned k, void* stream) {
+    size_t total = (size_t)n * k;
+    if (total == 0) return 0;
+    k_zero<<<grid_for(total), kThreads, 0, (cudaStream_t)stream>>>(rhs, total);
+    if (count > 0) {
+        k_dc_scatter<<<grid_for(count), kThreads, 0, (cudaStream_t)stream>>>(cols, rows, vals,
+                                                                             count, rhs, n);
+    }
+    return launched();
+}
+
+extern "C" int go_dc_sweep_angles(const double* theta, const int* pos, const double* base_angles,
+                                  double* angles, unsigned n, unsigned n_bus, unsigned k,
+                                  void* stream) {
+    size_t total = (size_t)n_bus * k;
+    if (total == 0) return 0;
+    k_dc_sweep_angles<<<grid_for(total), kThreads, 0, (cudaStream_t)stream>>>(
+        theta, pos, base_angles, angles, n, n_bus, total);
+    return launched();
+}
+
+extern "C" int go_dc_sweep_flows(const double* theta, const unsigned* br_from,
+                                 const unsigned* br_to, const double* br_b, const int* pos,
+                                 const double* base_flows, double* flows, unsigned n,
+                                 unsigned n_br, unsigned k, void* stream) {
+    size_t total = (size_t)n_br * k;
+    if (total == 0) return 0;
+    k_dc_sweep_flows<<<grid_for(total), kThreads, 0, (cudaStream_t)stream>>>(
+        theta, br_from, br_to, br_b, pos, base_flows, flows, n, n_br, total);
     return launched();
 }

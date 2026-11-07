@@ -110,8 +110,8 @@ impl Merged {
         })
     }
 
-    /// Sums the slot values into the unique entries and copies them back.
-    fn gather(&mut self, stream: ffi::cudaStream_t) -> Result<Vec<f64>, LinearError> {
+    /// Queues the sum of the slot values into the unique entries.
+    fn queue_gather(&self, stream: ffi::cudaStream_t) -> Result<(), LinearError> {
         // SAFETY: device buffers of the gather's sizes, made in `new`.
         unsafe {
             launched(
@@ -124,8 +124,12 @@ impl Merged {
                     stream.cast(),
                 ),
                 "go_kkt_gather",
-            )?;
+            )
         }
+    }
+
+    /// The unique entries, once the queued gather has run.
+    fn read(&self, stream: ffi::cudaStream_t) -> Result<Vec<f64>, LinearError> {
         let mut out = vec![0.0; self.values.len()];
         self.values.download(&mut out, stream)?;
         out.truncate(self.unique);
@@ -164,7 +168,6 @@ impl DeviceAcModel {
         let gen_ptr = int(ix(&data.gen_ptr)?)?;
         let gen_idx = int(ix(&data.gen_idx)?)?;
         let gen_bus = int(ix(&data.gen_bus)?)?;
-        let quad_col = int(ix(&data.quadratic.iter().map(|q| q.0).collect::<Vec<_>>())?)?;
         let limit_term = int(ix(&data.limit_terminal)?)?;
         let angle_from = int(ix(&data.angle.iter().map(|a| a.0).collect::<Vec<_>>())?)?;
         let angle_to = int(ix(&data.angle.iter().map(|a| a.1).collect::<Vec<_>>())?)?;
@@ -212,7 +215,6 @@ impl DeviceAcModel {
             gen_ptr,
             gen_idx,
             gen_bus,
-            quad_col,
             quad_h,
             limit_term,
             angle_from,
@@ -249,28 +251,98 @@ impl DeviceAcModel {
         unsafe { copy_to_device(self.x.ptr, x, self.stream.0) }
     }
 
-    /// Every row's value at `x`.
-    pub fn constraints(&mut self, x: &[f64]) -> Result<Vec<f64>, LinearError> {
-        self.put_x(x)?;
-        let s = self.stream.0;
+    /// Where [`queue_constraints`](Self::queue_constraints) puts the rows.
+    pub(crate) fn rows_ptr(&self) -> *const f64 {
+        self.rows.ptr
+    }
+
+    /// Where [`queue_jacobian`](Self::queue_jacobian) puts its values.
+    pub(crate) fn jacobian_ptr(&self) -> *const f64 {
+        self.jacobian.values.ptr
+    }
+
+    /// Where [`queue_hessian`](Self::queue_hessian) puts its values.
+    pub(crate) fn hessian_ptr(&self) -> *const f64 {
+        self.hessian.values.ptr
+    }
+
+    pub(crate) fn n_rows(&self) -> usize {
+        self.n_rows
+    }
+
+    /// Queues every row's value at the device vector `x` on `s`.
+    ///
+    /// # Safety
+    ///
+    /// `x` must hold the model's variables until the queued work has run.
+    pub(crate) unsafe fn queue_constraints(
+        &self,
+        x: *const f64,
+        s: ffi::cudaStream_t,
+    ) -> Result<(), LinearError> {
         // SAFETY: the model's pointers are the buffers it owns; the vectors
         // are its own of the model's sizes.
         unsafe {
             launched(
-                ffi::go_ac_flows(&self.model, self.x.ptr, self.flows.ptr, s.cast()),
+                ffi::go_ac_flows(&self.model, x, self.flows.ptr, s.cast()),
                 "go_ac_flows",
             )?;
             launched(
-                ffi::go_ac_constraints(
-                    &self.model,
-                    self.x.ptr,
-                    self.flows.ptr,
-                    self.rows.ptr,
-                    s.cast(),
-                ),
+                ffi::go_ac_constraints(&self.model, x, self.flows.ptr, self.rows.ptr, s.cast()),
                 "go_ac_constraints",
+            )
+        }
+    }
+
+    /// Queues the Jacobian's values at the device vector `x` on `s`.
+    ///
+    /// # Safety
+    ///
+    /// As [`queue_constraints`](Self::queue_constraints).
+    pub(crate) unsafe fn queue_jacobian(
+        &self,
+        x: *const f64,
+        s: ffi::cudaStream_t,
+    ) -> Result<(), LinearError> {
+        // SAFETY: the slot buffer holds the Jacobian's slot count.
+        unsafe {
+            launched(
+                ffi::go_ac_jacobian_slots(&self.model, x, self.jacobian.slots.ptr, s.cast()),
+                "go_ac_jacobian_slots",
             )?;
         }
+        self.jacobian.queue_gather(s)
+    }
+
+    /// Queues the Lagrangian Hessian's values at the device vectors `x` and
+    /// `y` on `s`.
+    ///
+    /// # Safety
+    ///
+    /// As [`queue_constraints`](Self::queue_constraints), and `y` must hold
+    /// the model's rows likewise.
+    pub(crate) unsafe fn queue_hessian(
+        &self,
+        x: *const f64,
+        y: *const f64,
+        s: ffi::cudaStream_t,
+    ) -> Result<(), LinearError> {
+        // SAFETY: the slot buffer holds the Hessian's slot count.
+        unsafe {
+            launched(
+                ffi::go_ac_hessian_slots(&self.model, x, y, self.hessian.slots.ptr, s.cast()),
+                "go_ac_hessian_slots",
+            )?;
+        }
+        self.hessian.queue_gather(s)
+    }
+
+    /// Every row's value at `x`.
+    pub fn constraints(&mut self, x: &[f64]) -> Result<Vec<f64>, LinearError> {
+        self.put_x(x)?;
+        let s = self.stream.0;
+        // SAFETY: `x` on the device holds n_vars values.
+        unsafe { self.queue_constraints(self.x.ptr, s)? };
         let mut out = vec![0.0; self.rows.len()];
         self.rows.download(&mut out, s)?;
         out.truncate(self.n_rows);
@@ -281,20 +353,9 @@ impl DeviceAcModel {
     pub fn jacobian_values(&mut self, x: &[f64]) -> Result<Vec<f64>, LinearError> {
         self.put_x(x)?;
         let s = self.stream.0;
-        // SAFETY: as in `constraints`; the slot buffer holds the Jacobian's
-        // slot count.
-        unsafe {
-            launched(
-                ffi::go_ac_jacobian_slots(
-                    &self.model,
-                    self.x.ptr,
-                    self.jacobian.slots.ptr,
-                    s.cast(),
-                ),
-                "go_ac_jacobian_slots",
-            )?;
-        }
-        self.jacobian.gather(s)
+        // SAFETY: `x` on the device holds n_vars values.
+        unsafe { self.queue_jacobian(self.x.ptr, s)? };
+        self.jacobian.read(s)
     }
 
     /// The Lagrangian Hessian's values at `(x, y)`, in the order of the
@@ -313,17 +374,8 @@ impl DeviceAcModel {
         // values.
         unsafe {
             copy_to_device(self.y.ptr, y, s)?;
-            launched(
-                ffi::go_ac_hessian_slots(
-                    &self.model,
-                    self.x.ptr,
-                    self.y.ptr,
-                    self.hessian.slots.ptr,
-                    s.cast(),
-                ),
-                "go_ac_hessian_slots",
-            )?;
+            self.queue_hessian(self.x.ptr, self.y.ptr, s)?;
         }
-        self.hessian.gather(s)
+        self.hessian.read(s)
     }
 }

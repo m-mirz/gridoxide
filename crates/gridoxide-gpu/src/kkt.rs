@@ -23,9 +23,10 @@
 //! On case10000_goc the host's assembly and equilibration took 11 ms a
 //! factorization, more than cuDSS's factorization (3.2 ms).
 //!
-//! The triplets' values and the right-hand side cross the bus every
-//! factorization and solve; the matrix, its scale and the factor stay on the
-//! device.
+//! Through the trait, the triplets' values and the right-hand side cross the
+//! bus every factorization and solve; the matrix, its scale and the factor
+//! stay on the device. The device's interior point (`crate::ip`) keeps the
+//! vectors there too, through the `pub(crate)` methods below.
 
 use std::ptr;
 
@@ -93,6 +94,8 @@ struct Assembly {
     lo_ptr: DeviceBuffer<u32>,
     lo_col: DeviceBuffer<u32>,
     lo_src: DeviceBuffer<u32>,
+    /// The matrix as assembled, before equilibration, for the mat-vec.
+    raw: DeviceBuffer<f64>,
     /// The mat-vec's vectors.
     mv_x: DeviceBuffer<f64>,
     mv_y: DeviceBuffer<f64>,
@@ -204,6 +207,7 @@ impl Assembly {
             lo_ptr: up(&lo_ptr)?,
             lo_col: up(&lo_col)?,
             lo_src: up(&lo_src)?,
+            raw: DeviceBuffer::new(nnz.max(1))?,
             mv_x: DeviceBuffer::new(n.max(1))?,
             mv_y: DeviceBuffer::new(n.max(1))?,
         })
@@ -230,6 +234,7 @@ impl Assembly {
             // In parallel: 1.2M values on case24464_goc.
             const CHUNK: usize = 1 << 15;
             match source {
+                Source::Device => {}
                 Source::Triplets(entries) => host
                     .par_chunks_mut(CHUNK)
                     .zip(entries.par_chunks(CHUNK))
@@ -239,8 +244,10 @@ impl Assembly {
                     .zip(v.par_chunks(CHUNK))
                     .for_each(|(h, v)| h.copy_from_slice(v)),
             }
-            // SAFETY: `trip` holds n_trip values.
-            unsafe { copy_to_device(self.trip.ptr, &*host, stream)? };
+            if !matches!(source, Source::Device) {
+                // SAFETY: `trip` holds n_trip values.
+                unsafe { copy_to_device(self.trip.ptr, &*host, stream)? };
+            }
         }
         // SAFETY: every pointer is a device buffer of the length the kernel
         // reads (made in `new` for this pattern).
@@ -256,6 +263,16 @@ impl Assembly {
                     stream.cast(),
                 ),
                 "go_kkt_gather",
+            )?;
+            cuda(
+                ffi::cudaMemcpyAsync(
+                    self.raw.ptr.cast(),
+                    values.ptr.cast(),
+                    self.nnz * size_of::<f64>(),
+                    ffi::cudaMemcpyDeviceToDevice,
+                    stream,
+                ),
+                "cudaMemcpyAsync",
             )?;
             let row_max = |values: &DeviceBuffer<f64>| {
                 launched(
@@ -311,6 +328,8 @@ impl Assembly {
 enum Source<'a> {
     Triplets(&'a [(usize, usize, f64)]),
     Values(&'a [f64]),
+    /// Already in the assembly's device buffer ([`CudssSolver::triplet_values`]).
+    Device,
 }
 
 fn launched(err: i32, what: &str) -> Result<(), LinearError> {
@@ -586,9 +605,9 @@ impl CudssSolver {
         Ok((values, scale))
     }
 
-    /// Factorizes; `Ok(None)` when the matrix has no factorization of this
-    /// kind (a zero pivot, or not positive definite for Cholesky).
-    fn try_factorize(&mut self, source: Source<'_>) -> Result<Option<Inertia>, LinearError> {
+    /// Queues the assembly, the analysis if it is the first, and the
+    /// factorization on the stream.
+    fn queue_factorization(&mut self, source: Source<'_>) -> Result<(), LinearError> {
         let n = self.pattern.n();
         self.assembly
             .run(source, &mut self.values, n, self.stream.0)?;
@@ -604,12 +623,27 @@ impl CudssSolver {
         self.sys
             .set(ffi::CUDSS_DATA_INFO, &[0i32], "INFO (reset)")?;
         self.sys
-            .execute(ffi::CUDSS_PHASE_FACTORIZATION, "FACTORIZATION")?;
-        cuda(
-            // SAFETY: the stream is the solver's.
+            .execute(ffi::CUDSS_PHASE_FACTORIZATION, "FACTORIZATION")
+    }
+
+    /// Factorizes; `Ok(None)` when the matrix has no factorization of this
+    /// kind (a zero pivot, or not positive definite for Cholesky).
+    fn try_factorize(&mut self, source: Source<'_>) -> Result<Option<Inertia>, LinearError> {
+        let n = self.pattern.n();
+        // cuDSS's analysis fails on an empty matrix.
+        if n == 0 {
+            return Ok(Some(Inertia::default()));
+        }
+        let queued = self.queue_factorization(source);
+        // Also when queueing failed: `factorize` takes that for a failed
+        // factorization, the interior point retries, and `Assembly::run`
+        // must find no copy out of its pinned buffer in flight.
+        // SAFETY: the stream is the solver's.
+        let synced = cuda(
             unsafe { ffi::cudaStreamSynchronize(self.stream.0) },
             "cudaStreamSynchronize",
-        )?;
+        );
+        queued.and(synced)?;
         let mut bad = [0i32];
         self.assembly.bad.download(&mut bad, self.stream.0)?;
         if bad[0] != 0 {
@@ -646,6 +680,9 @@ impl CudssSolver {
         if self.inertia.is_none() || rhs.len() != n {
             return Ok(None);
         }
+        if n == 0 {
+            return Ok(Some(Vec::new()));
+        }
         let scale = self.assembly.scale.ptr;
         // SAFETY: `rhs`, `solution` and `scale` are the solver's own buffers
         // of n values; the upload goes through a raw pointer because `solve`
@@ -672,8 +709,12 @@ impl CudssSolver {
 }
 
 impl CudssSolver {
-    /// `K x` on the device: the equilibrated `D K D` it factorized, as
-    /// `D⁻¹ (D K D) (D⁻¹ x)`.
+    /// `K x` on the device, from `K` as assembled. Not through the `D K D` it
+    /// factorized, as `D⁻¹ (D K D) (D⁻¹ x)`: that rounds differently from the
+    /// host's product, and refinement stops on this residual. On the default
+    /// set the iterations then stray up to 33 from the CPU's (18 this way);
+    /// case118_ieee__api from the flat start took 83 against 50, and 382 once
+    /// a change of rounding moved it.
     fn try_multiply(&self, x: &[f64]) -> Result<Option<Vec<f64>>, LinearError> {
         let n = self.pattern.n();
         if self.inertia.is_none() || x.len() != n || n == 0 {
@@ -681,15 +722,11 @@ impl CudssSolver {
         }
         let a = &self.assembly;
         let stream = self.stream.0;
-        // SAFETY: every buffer is the solver's own, of n values (the vectors
-        // and the scale) or of the pattern's sizes; the upload goes through
+        // SAFETY: every buffer is the solver's own, of n values (the vectors)
+        // or of the pattern's sizes; the upload goes through
         // a raw pointer because `multiply` takes `&self`.
         unsafe {
             copy_to_device(a.mv_x.ptr, x, stream)?;
-            launched(
-                ffi::go_unscale_vec(a.mv_x.ptr, a.scale.ptr, a.mv_y.ptr, n as u32, stream.cast()),
-                "go_unscale_vec",
-            )?;
             launched(
                 ffi::go_kkt_symv(
                     self.row_ptr.ptr,
@@ -697,22 +734,99 @@ impl CudssSolver {
                     a.lo_ptr.ptr,
                     a.lo_col.ptr,
                     a.lo_src.ptr,
-                    self.values.ptr,
-                    a.mv_y.ptr,
+                    a.raw.ptr,
                     a.mv_x.ptr,
+                    a.mv_y.ptr,
                     n as u32,
                     stream.cast(),
                 ),
                 "go_kkt_symv",
             )?;
-            launched(
-                ffi::go_unscale_vec(a.mv_x.ptr, a.scale.ptr, a.mv_y.ptr, n as u32, stream.cast()),
-                "go_unscale_vec",
-            )?;
         }
         let mut y = vec![0.0; n];
         a.mv_y.download(&mut y, stream)?;
         Ok(y.iter().all(|v| v.is_finite()).then_some(y))
+    }
+}
+
+/// The solver as the device's interior point (`crate::ip`) uses it: its
+/// vectors stay on the device, and everything here queues on
+/// [`stream`](Self::stream).
+impl CudssSolver {
+    pub(crate) fn stream(&self) -> ffi::cudaStream_t {
+        self.stream.0
+    }
+
+    /// Where a factorization on the device reads the triplets' values from.
+    pub(crate) fn triplet_values(&self) -> *mut f64 {
+        self.assembly.trip.ptr
+    }
+
+    /// Factorizes the values in [`triplet_values`](Self::triplet_values).
+    pub(crate) fn factorize_on_device(&mut self) -> Result<Option<Inertia>, LinearError> {
+        self.inertia = self.try_factorize(Source::Device)?;
+        Ok(self.inertia)
+    }
+
+    /// The right-hand side [`queue_solve`](Self::queue_solve) reads.
+    pub(crate) fn rhs_ptr(&self) -> *mut f64 {
+        self.rhs.ptr
+    }
+
+    /// The solution [`queue_solve`](Self::queue_solve) writes.
+    pub(crate) fn solution_ptr(&self) -> *const f64 {
+        self.solution.ptr
+    }
+
+    /// Queues a solve with the last factorization.
+    pub(crate) fn queue_solve(&self) -> Result<(), LinearError> {
+        let n = self.pattern.n() as u32;
+        let (scale, stream) = (self.assembly.scale.ptr, self.stream.0);
+        // SAFETY: `rhs`, `solution` and `scale` are the solver's own buffers
+        // of n values.
+        unsafe {
+            launched(
+                ffi::go_scale_vec(self.rhs.ptr, scale, n, stream.cast()),
+                "go_scale_vec",
+            )?;
+            self.sys.execute(ffi::CUDSS_PHASE_SOLVE, "SOLVE")?;
+            launched(
+                ffi::go_scale_vec(self.solution.ptr, scale, n, stream.cast()),
+                "go_scale_vec",
+            )
+        }
+    }
+
+    /// Queues `y = K x` as [`try_multiply`](Self::try_multiply) computes it.
+    ///
+    /// # Safety
+    ///
+    /// `x` and `y` must be device buffers of n values.
+    pub(crate) unsafe fn queue_multiply(
+        &self,
+        x: *const f64,
+        y: *mut f64,
+    ) -> Result<(), LinearError> {
+        let a = &self.assembly;
+        // SAFETY: the pattern's buffers are the solver's own, and the caller
+        // answers for the vectors.
+        unsafe {
+            launched(
+                ffi::go_kkt_symv(
+                    self.row_ptr.ptr,
+                    self.col.ptr,
+                    a.lo_ptr.ptr,
+                    a.lo_col.ptr,
+                    a.lo_src.ptr,
+                    a.raw.ptr,
+                    x,
+                    y,
+                    self.pattern.n() as u32,
+                    self.stream.0.cast(),
+                ),
+                "go_kkt_symv",
+            )
+        }
     }
 }
 
@@ -752,18 +866,24 @@ impl SymmetricSolver for CudssSolver {
 
 /// `NlpOptions::kkt_solver` for the augmented system: cuDSS's `LDLᵀ`,
 /// deterministic.
-/// `None` if the device cannot be set up.
-pub fn cudss_ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Ldlt, true).ok()?;
-    Some(Box::new(solver))
+/// An error, which ends the solve, if the device cannot be set up.
+pub fn cudss_ldlt_solver(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver = CudssSolver::new(n, keys, Factorization::Ldlt, true).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }
 
 /// `NlpOptions::kkt_solver` for `KktForm::Hybrid`: cuDSS's Cholesky,
 /// deterministic.
-/// `None` if the device cannot be set up.
-pub fn cudss_llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Llt, true).ok()?;
-    Some(Box::new(solver))
+/// An error, which ends the solve, if the device cannot be set up.
+pub fn cudss_llt_solver(
+    n: usize,
+    keys: &[(usize, usize)],
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver = CudssSolver::new(n, keys, Factorization::Llt, true).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }
 
 /// [`cudss_ldlt_solver`] without cuDSS's deterministic mode, for benchmarks:
@@ -774,9 +894,10 @@ pub fn cudss_llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn Sym
 pub fn cudss_ldlt_solver_fast(
     n: usize,
     keys: &[(usize, usize)],
-) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Ldlt, false).ok()?;
-    Some(Box::new(solver))
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver =
+        CudssSolver::new(n, keys, Factorization::Ldlt, false).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }
 
 /// [`cudss_llt_solver`] without cuDSS's deterministic mode; see
@@ -784,7 +905,7 @@ pub fn cudss_ldlt_solver_fast(
 pub fn cudss_llt_solver_fast(
     n: usize,
     keys: &[(usize, usize)],
-) -> Option<Box<dyn SymmetricSolver>> {
-    let solver = CudssSolver::new(n, keys, Factorization::Llt, false).ok()?;
-    Some(Box::new(solver))
+) -> Result<Box<dyn SymmetricSolver>, String> {
+    let solver = CudssSolver::new(n, keys, Factorization::Llt, false).map_err(|e| e.to_string())?;
+    Ok(Box::new(solver))
 }

@@ -34,6 +34,7 @@ use gridoxide_core::network::YBusSparse;
 use gridoxide_core::scenario::Scenario;
 use gridoxide_core::types::{Bus, BusType, ZipKind};
 
+use rayon::prelude::*;
 use std::collections::{BTreeSet, HashMap};
 
 use gridoxide_core::network::ShuntAdm;
@@ -338,25 +339,33 @@ impl DeviceBatch {
             )));
         }
         let (n_bus, batch, s) = (self.n_bus, self.batch, self.stream.0);
-        let mut vm = Vec::with_capacity(n_bus * batch);
-        let mut va = Vec::with_capacity(n_bus * batch);
-        let mut p_spec = Vec::with_capacity(n_bus * batch);
-        let mut q_spec = Vec::with_capacity(n_bus * batch);
-        for k in 0..batch {
-            let first = vm.len();
-            for b in &self.start {
-                vm.push(b.voltage_mag);
-                va.push(b.voltage_ang);
-                p_spec.push(b.p_spec);
-                q_spec.push(b.q_spec);
-            }
-            for ov in scenarios.get(k).map_or(&[][..], |sc| &sc.bus_overrides) {
-                let at = first + ov.bus;
-                p_spec[at] = ov.p_spec.unwrap_or(p_spec[at]);
-                q_spec[at] = ov.q_spec.unwrap_or(q_spec[at]);
-                vm[at] = ov.voltage_mag.unwrap_or(vm[at]);
-            }
-        }
+        // `start`'s columns once, then a memcpy per scenario, in parallel:
+        // element by element from the `Bus`es this was 90% of the load, and
+        // the load up to a quarter of a batch's time.
+        let column = |f: fn(&Bus) -> f64| self.start.iter().map(f).collect::<Vec<f64>>();
+        let (vm0, va0) = (column(|b| b.voltage_mag), column(|b| b.voltage_ang));
+        let (p0, q0) = (column(|b| b.p_spec), column(|b| b.q_spec));
+        let mut vm = vec![0.0; n_bus * batch];
+        let mut va = vec![0.0; n_bus * batch];
+        let mut p_spec = vec![0.0; n_bus * batch];
+        let mut q_spec = vec![0.0; n_bus * batch];
+        let slots = n_bus.max(1);
+        vm.par_chunks_mut(slots)
+            .zip(va.par_chunks_mut(slots))
+            .zip(p_spec.par_chunks_mut(slots))
+            .zip(q_spec.par_chunks_mut(slots))
+            .enumerate()
+            .for_each(|(k, (((vm, va), p), q))| {
+                vm.copy_from_slice(&vm0);
+                va.copy_from_slice(&va0);
+                p.copy_from_slice(&p0);
+                q.copy_from_slice(&q0);
+                for ov in scenarios.get(k).map_or(&[][..], |sc| &sc.bus_overrides) {
+                    p[ov.bus] = ov.p_spec.unwrap_or(p[ov.bus]);
+                    q[ov.bus] = ov.q_spec.unwrap_or(q[ov.bus]);
+                    vm[ov.bus] = ov.voltage_mag.unwrap_or(vm[ov.bus]);
+                }
+            });
         self.vm.upload(&vm, s)?;
         self.va.upload(&va, s)?;
         self.p_spec.upload(&p_spec, s)?;
@@ -411,6 +420,15 @@ impl DeviceBatch {
 
     pub fn batch(&self) -> usize {
         self.batch
+    }
+
+    /// The state later [`load`](Self::load)s start every scenario from:
+    /// `start`'s voltages and injections. Its bus types and ZIP terms must
+    /// be the network's, which the caller has checked or accepts: the
+    /// pattern and the ZIP terms were taken when the batch was made.
+    pub(crate) fn set_start(&mut self, start: &[Bus]) {
+        assert_eq!(start.len(), self.n_bus, "one state per bus");
+        self.start = start.to_vec();
     }
 
     /// Unknowns per scenario: the length of its mismatch and update.

@@ -1,5 +1,5 @@
 //! Batched AC power flow for NVIDIA GPUs; what is left to make it faster is
-//! in `plans/GPU_BATCH_TODO.md`.
+//! in `TODO.md`.
 //!
 //! Two layers, the second written against the first so that it is built and
 //! tested on the CPU before any device code exists:
@@ -18,11 +18,15 @@
 //! scenario's Newton state on the device with the step's kernels, and
 //! [`GpuBatchSolver`](gpu::GpuBatchSolver), the adaptive loop over both: a
 //! session per network that keeps its cuDSS analysis. And
-//! [`GpuDcSolver`](dc::GpuDcSolver), DC N-1: one factorization, every
-//! outage's angles and flows from one multi-column solve. And
-//! [`CudssSolver`](kkt::CudssSolver), the KKT system of `opf::nlp`'s
+//! [`GpuDcSolver`](dc::GpuDcSolver), DC N-1 and DC sweeps: one
+//! factorization, every outage's or scenario's angles and flows from one
+//! multi-column solve. Both also solve a single power flow
+//! (`solve_single`, `solve`).
+//! And [`CudssSolver`](kkt::CudssSolver), the KKT system of `opf::nlp`'s
 //! interior point on cuDSS, and [`DeviceAcModel`](ac::DeviceAcModel), the
-//! AC-OPF model it solves, evaluated on the device.
+//! AC-OPF model it solves, evaluated on the device, and
+//! [`DeviceInteriorPoint`](ip::DeviceInteriorPoint), the interior point's
+//! vectors there too.
 
 #[cfg(feature = "cuda")]
 pub mod ac;
@@ -37,6 +41,8 @@ pub mod device;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 #[cfg(feature = "cuda")]
+pub mod ip;
+#[cfg(feature = "cuda")]
 pub mod kkt;
 pub mod newton;
 pub mod uniform;
@@ -44,7 +50,7 @@ pub mod uniform;
 #[cfg(feature = "cuda")]
 pub use cudss::CudssUniformBatch;
 #[cfg(feature = "cuda")]
-pub use dc::GpuDcSolver;
+pub use dc::{DcSweep, GpuDcSolver};
 #[cfg(feature = "cuda")]
 pub use device::DeviceBatch;
 #[cfg(feature = "cuda")]

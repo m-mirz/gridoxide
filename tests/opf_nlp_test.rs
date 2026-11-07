@@ -490,9 +490,9 @@ impl gridoxide::ldlt::SymmetricSolver for MultiplyingLdlt {
 fn multiplying_ldlt(
     n: usize,
     keys: &[(usize, usize)],
-) -> Option<Box<dyn gridoxide::ldlt::SymmetricSolver>> {
-    Some(Box::new(MultiplyingLdlt {
-        inner: gridoxide::ldlt::LdltSolver::new(n, keys)?,
+) -> Result<Box<dyn gridoxide::ldlt::SymmetricSolver>, String> {
+    Ok(Box::new(MultiplyingLdlt {
+        inner: gridoxide::ldlt::LdltSolver::new(n, keys).ok_or("no symbolic analysis")?,
         n,
         lower: Vec::new(),
     }))
@@ -525,5 +525,29 @@ fn refinement_from_the_solvers_product_finds_what_the_triplets_do() {
         for (i, (a, b)) in got.x.iter().zip(&want.x).enumerate() {
             assert!((a - b).abs() < 1e-9, "problem {k}, x{i}: {a} vs {b}");
         }
+    }
+}
+
+fn no_device(
+    _: usize,
+    _: &[(usize, usize)],
+) -> Result<Box<dyn gridoxide::ldlt::SymmetricSolver>, String> {
+    Err("no device".into())
+}
+
+/// A solver that cannot be made ends the solve with its error, for either
+/// form of the KKT system: more regularization cannot mend it, and "the
+/// problem may be infeasible here" would send the caller after the wrong
+/// thing.
+#[test]
+fn a_solver_that_cannot_be_made_ends_the_solve_with_its_error() {
+    for kkt in [KktForm::Augmented, KktForm::Hybrid { gamma: 1e8 }] {
+        let options = NlpOptions {
+            kkt,
+            kkt_solver: no_device,
+            ..NlpOptions::default()
+        };
+        let error = solve(&InsideADisc, &options).unwrap_err();
+        assert!(error.to_string().contains("no device"), "{error}");
     }
 }

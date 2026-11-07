@@ -224,6 +224,31 @@ impl CudssBatch {
                 ),
                 "cudssConfigSet(UBATCH_SIZE)",
             )?;
+            // A grid's Jacobian is small next to what cuDSS's defaults are
+            // made for. Multiblock factorization and six levels of nested
+            // dissection (the default is 10) take 1.3-2.7x off a batch at 1024
+            // scenarios, in the same Newton steps, on half the device memory.
+            // See scripts/bench/README.md, section 11.
+            let (multiblock, levels): (ffi::cudssFactorizationAlg_t, i32) =
+                (ffi::CUDSS_FACTORIZATION_ALG_MULTIBLOCK, 6);
+            cudss(
+                ffi::cudssConfigSet(
+                    lin.config,
+                    ffi::CUDSS_CONFIG_FACTORIZATION_ALG,
+                    (&multiblock as *const ffi::cudssFactorizationAlg_t).cast(),
+                    size_of::<ffi::cudssFactorizationAlg_t>(),
+                ),
+                "cudssConfigSet(FACTORIZATION_ALG)",
+            )?;
+            cudss(
+                ffi::cudssConfigSet(
+                    lin.config,
+                    ffi::CUDSS_CONFIG_ND_NLEVELS,
+                    (&levels as *const i32).cast(),
+                    size_of::<i32>(),
+                ),
+                "cudssConfigSet(ND_NLEVELS)",
+            )?;
         }
         // All ones before the analysis: the mask's device storage is
         // allocated there, and later masks only change its contents.
@@ -371,6 +396,232 @@ impl Drop for CudssBatch {
         // SAFETY: each handle is destroyed once, if it was made, descriptors
         // before the data and handle they belong to, after the stream has
         // finished the work that uses them.
+        unsafe {
+            ffi::cudaStreamSynchronize(self.stream);
+            for m in [self.a, self.b, self.x] {
+                if !m.is_null() {
+                    ffi::cudssMatrixDestroy(m);
+                }
+            }
+            if !self.data.is_null() {
+                ffi::cudssDataDestroy(self.handle, self.data);
+            }
+            if !self.config.is_null() {
+                ffi::cudssConfigDestroy(self.config);
+            }
+            if !self.handle.is_null() {
+                ffi::cudssDestroy(self.handle);
+            }
+        }
+    }
+}
+
+/// One system and every right-hand side of a batch: the first Newton step of
+/// scenarios that start from the same voltages, whose Jacobian is one matrix.
+/// A column costs 0.012 ms on case9241pegase, against 0.20 for a factorization
+/// and a solve in the uniform batch, which reads a factor per system. The
+/// buffers are the batch's, `n × batch` being what a multi-column solve takes.
+pub(crate) struct CudssShared {
+    stream: ffi::cudaStream_t,
+    n: usize,
+    rhs: *mut f64,
+    sol: *mut f64,
+    /// The columns the descriptors `b` and `x` hold now.
+    width: usize,
+    handle: ffi::cudssHandle_t,
+    config: ffi::cudssConfig_t,
+    data: ffi::cudssData_t,
+    a: ffi::cudssMatrix_t,
+    b: ffi::cudssMatrix_t,
+    x: ffi::cudssMatrix_t,
+    _row_ptr: DeviceBuffer<i32>,
+    _col_idx: DeviceBuffer<i32>,
+    factored: bool,
+    counts: LinearCounts,
+}
+
+impl CudssShared {
+    /// Analyses `pattern` for one system with `batch` right-hand sides,
+    /// `rhs` and `sol` (`batch × n` each) on `stream`. The analysis overwrites
+    /// the first system of `values` with surrogate values.
+    ///
+    /// # Safety
+    ///
+    /// As [`CudssBatch::analyze`].
+    pub(crate) unsafe fn analyze(
+        pattern: &CsrPattern,
+        batch: usize,
+        stream: ffi::cudaStream_t,
+        values: *mut f64,
+        rhs: *mut f64,
+        sol: *mut f64,
+    ) -> Result<Self, LinearError> {
+        let (n, nnz) = (pattern.n, pattern.nnz());
+        let too_big = |what: &str| LinearError::Shape(format!("{what} does not fit cuDSS's int32"));
+        let row_ptr: Vec<i32> = pattern
+            .row_ptr
+            .iter()
+            .map(|&k| i32::try_from(k).map_err(|_| too_big("the pattern")))
+            .collect::<Result<_, _>>()?;
+        let col_idx: Vec<i32> = pattern.col_idx.iter().map(|&c| c as i32).collect();
+        let mut lin = Self {
+            stream,
+            n,
+            rhs,
+            sol,
+            width: 0,
+            handle: ptr::null_mut(),
+            config: ptr::null_mut(),
+            data: ptr::null_mut(),
+            a: ptr::null_mut(),
+            b: ptr::null_mut(),
+            x: ptr::null_mut(),
+            _row_ptr: DeviceBuffer::new(n + 1)?,
+            _col_idx: DeviceBuffer::new(nnz)?,
+            factored: false,
+            counts: LinearCounts::default(),
+        };
+        let threading_lib = std::env::var("CUDSS_THREADING_LIB")
+            .ok()
+            .map(|lib| CString::new(lib).expect("CUDSS_THREADING_LIB holds a NUL"));
+        // SAFETY: each call gets valid out-pointers.
+        unsafe {
+            cudss(ffi::cudssCreate(&mut lin.handle), "cudssCreate")?;
+            cudss(ffi::cudssSetStream(lin.handle, stream), "cudssSetStream")?;
+            if let Some(lib) = &threading_lib {
+                cudss(
+                    ffi::cudssSetThreadingLayer(lin.handle, lib.as_ptr()),
+                    "cudssSetThreadingLayer",
+                )?;
+            }
+            cudss(ffi::cudssConfigCreate(&mut lin.config), "cudssConfigCreate")?;
+            cudss(
+                ffi::cudssDataCreate(lin.handle, &mut lin.data),
+                "cudssDataCreate",
+            )?;
+        }
+        lin._row_ptr.upload(&row_ptr, stream)?;
+        lin._col_idx.upload(&col_idx, stream)?;
+        // SAFETY: `values` holds at least one system (the caller's), and the
+        // descriptors point at device buffers that outlive `lin`.
+        unsafe {
+            copy_to_device(values, &pattern.surrogate_values(), stream)?;
+            cudss(
+                ffi::cudssMatrixCreateCsr(
+                    &mut lin.a,
+                    n as i64,
+                    n as i64,
+                    nnz as i64,
+                    lin._row_ptr.ptr.cast(),
+                    ptr::null_mut(),
+                    lin._col_idx.ptr.cast(),
+                    values.cast(),
+                    ffi::CUDA_R_32I,
+                    ffi::CUDA_R_32I,
+                    ffi::CUDA_R_64F,
+                    ffi::CUDSS_MTYPE_GENERAL,
+                    ffi::CUDSS_MVIEW_FULL,
+                    ffi::CUDSS_BASE_ZERO,
+                ),
+                "cudssMatrixCreateCsr",
+            )?;
+        }
+        lin.set_width(batch)?;
+        lin.execute(ffi::CUDSS_PHASE_ANALYSIS, "ANALYSIS")?;
+        Ok(lin)
+    }
+
+    /// The descriptors of the first `width` columns of the buffers.
+    fn set_width(&mut self, width: usize) -> Result<(), LinearError> {
+        if width == self.width {
+            return Ok(());
+        }
+        // SAFETY: the old descriptors are done with, the stream runs in order,
+        // and the buffers hold at least `width` columns (the caller's).
+        unsafe {
+            for (m, buf) in [(&mut self.b, self.rhs), (&mut self.x, self.sol)] {
+                if !m.is_null() {
+                    cudss(ffi::cudssMatrixDestroy(*m), "cudssMatrixDestroy")?;
+                    *m = ptr::null_mut();
+                }
+                cudss(
+                    ffi::cudssMatrixCreateDn(
+                        m,
+                        self.n as i64,
+                        width as i64,
+                        self.n as i64,
+                        buf.cast(),
+                        ffi::CUDA_R_64F,
+                        ffi::CUDSS_LAYOUT_COL_MAJOR,
+                    ),
+                    "cudssMatrixCreateDn",
+                )?;
+            }
+        }
+        self.width = width;
+        Ok(())
+    }
+
+    fn execute(&self, phase: ffi::cudssPhase_t, what: &str) -> Result<(), LinearError> {
+        // SAFETY: every handle was made in `analyze`.
+        cudss(
+            unsafe {
+                ffi::cudssExecute(
+                    self.handle,
+                    phase as i32,
+                    self.config,
+                    self.data,
+                    self.a,
+                    self.x,
+                    self.b,
+                )
+            },
+            what,
+        )
+    }
+
+    pub(crate) fn factored(&self) -> bool {
+        self.factored
+    }
+
+    /// Factors the system at `values`, one system of the batch's buffer.
+    ///
+    /// # Safety
+    ///
+    /// `values` must be a device buffer of the pattern's nonzeros.
+    pub(crate) unsafe fn factor(&mut self, values: *mut f64) -> Result<(), LinearError> {
+        // SAFETY: the caller's.
+        cudss(
+            unsafe { ffi::cudssMatrixSetValues(self.a, values.cast()) },
+            "cudssMatrixSetValues",
+        )?;
+        self.execute(ffi::CUDSS_PHASE_FACTORIZATION, "FACTORIZATION")?;
+        self.factored = true;
+        self.counts.factor_calls += 1;
+        self.counts.systems_factored += 1;
+        Ok(())
+    }
+
+    /// Solves the first `width` columns of the batch's right-hand side into
+    /// its solution, `selected` of which mean anything: a sweep of 100 in a
+    /// session of 1024 pays for 100, at every chord step.
+    pub(crate) fn solve(&mut self, width: usize, selected: usize) -> Result<(), LinearError> {
+        debug_assert!(selected <= width);
+        self.set_width(width)?;
+        self.execute(ffi::CUDSS_PHASE_SOLVE, "SOLVE")?;
+        self.counts.solve_calls += 1;
+        self.counts.systems_solved += selected;
+        Ok(())
+    }
+
+    pub(crate) fn counts(&self) -> LinearCounts {
+        self.counts
+    }
+}
+
+impl Drop for CudssShared {
+    fn drop(&mut self) {
+        // SAFETY: as `CudssBatch`'s.
         unsafe {
             ffi::cudaStreamSynchronize(self.stream);
             for m in [self.a, self.b, self.x] {

@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! cargo run --release -p gridoxide-gpu --features cuda --example gpu_bench -- \
-//!     <case.m> [B] [sweep|n1] [capacity] [tol] [handoff=N] [reuse=R]
+//!     <case.m> [B] [sweep|n1] [capacity] [tol] [handoff=N] [reuse=R] [chord=K] [below=R]
 //! ```
 //!
 //! The scenarios are `batch_counts`'s: a grid-bench sweep (a daily load curve
@@ -16,7 +16,9 @@
 //! median of three, after one untimed run. `handoff=N` finishes the last N
 //! active scenarios of each chunk on the CPU, `reuse=R` keeps a scenario on
 //! its factors while its mismatch falls more than R-fold
-//! (`BatchOptions::cpu_handoff`, `reuse_below`).
+//! (`BatchOptions::cpu_handoff`, `reuse_below`). `chord=K` takes up to K more
+//! steps on a sweep's shared first-step factors, leaving them when the mismatch
+//! falls by less than `below=R` in a step (`chord_steps`, `chord_below`).
 //!
 //! For N-1 the CPU is timed on the outages the device solves, those that keep
 //! the network connected, so that both columns do the same work; the outages
@@ -116,7 +118,9 @@ fn main() {
         match arg.split_once('=') {
             Some(("handoff", n)) => opts.cpu_handoff = Some(n.parse().unwrap()),
             Some(("reuse", r)) => opts.reuse_below = Some(r.parse().unwrap()),
-            _ => panic!("unknown option {arg}: handoff=N or reuse=R"),
+            Some(("chord", k)) => opts.chord_steps = k.parse().unwrap(),
+            Some(("below", r)) => opts.chord_below = r.parse().unwrap(),
+            _ => panic!("unknown option {arg}: handoff=N, reuse=R, chord=K or below=R"),
         }
     }
 
@@ -132,7 +136,7 @@ fn main() {
         if n1 {
             gpu.solve_contingencies(&scenarios, &opts)
         } else {
-            gpu.solve(&scenarios, &opts)
+            gpu.solve_sweep(&scenarios, &opts)
         }
         .unwrap()
     });

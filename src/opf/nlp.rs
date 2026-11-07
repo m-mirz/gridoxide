@@ -79,6 +79,14 @@
 //! Algorithm NCL (`NlpOptions::ncl`) is an opt-in outer loop for degenerate
 //! problems.
 //!
+//! # Where it runs
+//!
+//! [`drive`] takes every decision above, from scalars; an [`Engine`] does
+//! everything with a vector. [`HostEngine`] is the default;
+//! [`InteriorPoint::Device`] keeps the iterate, its multipliers, the model's
+//! values and the steps on the GPU (`device`), by the same arithmetic in the
+//! same order, so its path is the host's on the same KKT solver.
+//!
 //! # What it shares
 //!
 //! The reformulation and the augmented system are [`ipm`](super::ipm)'s — see
@@ -103,6 +111,11 @@
 
 use crate::ldlt::{Inertia, LdltSolver, LltSolver, SymmetricSolver};
 use crate::opf::{OpfError, OptStatus};
+
+#[cfg(feature = "gpu")]
+mod device;
+#[cfg(feature = "gpu")]
+pub use device::DeviceProblem;
 
 /// A twice-differentiable problem.
 ///
@@ -151,6 +164,38 @@ pub trait NonlinearProblem {
     /// solver pushes any violation inside the bounds but cannot invent a good
     /// initial guess.
     fn initial_point(&self) -> Vec<f64>;
+
+    /// Whether [`jacobian`](Self::jacobian) and
+    /// [`lagrangian_hessian`](Self::lagrangian_hessian) return the same
+    /// entries in the same order at every point, only their values
+    /// differing. The solver then compares their lengths alone from one
+    /// iteration to the next, not every key: about 1 ms a comparison on
+    /// case24464_goc. A debug build still compares the keys.
+    fn fixed_pattern(&self) -> bool {
+        false
+    }
+
+    /// The problem's model on the device, for
+    /// [`InteriorPoint::Device`]; `None` keeps the interior point on the
+    /// host.
+    #[cfg(feature = "gpu")]
+    fn on_device(&self) -> Option<DeviceProblem<'_>> {
+        None
+    }
+}
+
+/// Where the interior point's vectors live; see [`NlpOptions::interior_point`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum InteriorPoint {
+    /// On the host, whatever `kkt_solver` and the problem run on.
+    #[default]
+    Host,
+    /// On the GPU, with the KKT system on cuDSS in its deterministic mode or
+    /// not (`kkt_solver` then serves the restoration phase alone). For a
+    /// problem with a model on the device ([`NonlinearProblem::on_device`])
+    /// and [`KktForm::Augmented`] without NCL; anything else stays on the
+    /// host. Needs the `gpu` feature.
+    Device { deterministic: bool },
 }
 
 /// How the interior point forms its KKT system; see
@@ -170,8 +215,10 @@ pub enum KktForm {
 }
 
 /// Makes a [`SymmetricSolver`] for an `n × n` pattern from the `(row,
-/// column)` of its entries; see [`NlpOptions::kkt_solver`].
-pub type MakeSolver = fn(usize, &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>>;
+/// column)` of its entries; see [`NlpOptions::kkt_solver`]. An error ends
+/// the solve with [`OpfError::Backend`]: a solver that cannot be made is not
+/// a factorization that failed, which more regularization could mend.
+pub type MakeSolver = fn(usize, &[(usize, usize)]) -> Result<Box<dyn SymmetricSolver>, String>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct NlpOptions {
@@ -214,6 +261,8 @@ pub struct NlpOptions {
     /// solver must report the inertia, or HyKKT's condensed positive
     /// definite one, which a Cholesky solver ([`llt_solver`]) factorizes.
     pub kkt: KktForm,
+    /// Where the iterate, its multipliers and the steps live.
+    pub interior_point: InteriorPoint,
     /// Solve by Algorithm NCL around the interior point (see `ncl`): a
     /// residual on every constraint row, removed by multiplier updates over
     /// a sequence of subproblems. For problems whose active constraints are
@@ -246,6 +295,7 @@ impl Default for NlpOptions {
             refinement_rounds: 10,
             kkt_solver: ldlt_solver,
             kkt: KktForm::Augmented,
+            interior_point: InteriorPoint::Host,
             scaling: true,
             ncl: false,
             log: false,
@@ -289,6 +339,8 @@ struct Internal {
     upper: Vec<f64>,
     c_lower: Vec<f64>,
     c_upper: Vec<f64>,
+    /// [`NonlinearProblem::fixed_pattern`].
+    fixed_pattern: bool,
 }
 
 impl Internal {
@@ -333,6 +385,7 @@ impl Internal {
             upper,
             c_lower,
             c_upper,
+            fixed_pattern: problem.fixed_pattern(),
         }
     }
 
@@ -426,14 +479,8 @@ impl Transpose {
         }
     }
 
-    fn fits(&self, a: &[(usize, usize, f64)], cols: usize) -> bool {
-        use rayon::prelude::*;
-        cols == self.cols
-            && a.len() == self.keys.len()
-            && a.par_iter()
-                .zip(&self.keys)
-                .with_min_len(1 << 14)
-                .all(|(&(r, c, _), &k)| (r, c) == k)
+    fn fits(&self, a: &[(usize, usize, f64)], cols: usize, fixed: bool) -> bool {
+        cols == self.cols && same_keys(a, &self.keys, fixed)
     }
 
     fn apply(&self, a: &[(usize, usize, f64)], y: &[f64]) -> Vec<f64> {
@@ -453,6 +500,26 @@ impl Transpose {
     }
 }
 
+/// Whether `list` has the entries `keys` records. With a `fixed` pattern
+/// ([`NonlinearProblem::fixed_pattern`]) its length is enough.
+fn same_keys(list: &[(usize, usize, f64)], keys: &[(usize, usize)], fixed: bool) -> bool {
+    use rayon::prelude::*;
+    let compare = || {
+        list.par_iter()
+            .zip(keys)
+            .with_min_len(1 << 14)
+            .all(|(&(r, c, _), &k)| (r, c) == k)
+    };
+    if list.len() != keys.len() {
+        return false;
+    }
+    if fixed {
+        debug_assert!(compare(), "a fixed pattern changed");
+        return true;
+    }
+    compare()
+}
+
 /// `Aᵀy`, through `plan` (made or remade here when `a`'s pattern changed)
 /// for a large `a`: the same sums either way.
 fn transpose_vec(
@@ -460,11 +527,12 @@ fn transpose_vec(
     a: &[(usize, usize, f64)],
     y: &[f64],
     cols: usize,
+    fixed: bool,
 ) -> Vec<f64> {
     if a.len() < Transpose::MIN_ENTRIES {
         return mat_transpose_vec(a, y, cols);
     }
-    if !plan.as_ref().is_some_and(|t| t.fits(a, cols)) {
+    if !plan.as_ref().is_some_and(|t| t.fits(a, cols, fixed)) {
         *plan = Some(Transpose::new(a, cols));
     }
     plan.as_ref().expect("made above").apply(a, y)
@@ -494,18 +562,18 @@ pub fn solve(
     problem: &dyn NonlinearProblem,
     options: &NlpOptions,
 ) -> Result<NlpSolution, OpfError> {
-    let inner = |problem: &dyn NonlinearProblem| {
+    let inner = |problem: &dyn NonlinearProblem, scale: Option<(&[f64], f64)>| {
         if options.ncl {
             ncl(problem, options)
         } else {
-            solve_scaled(problem, options)
+            solve_scaled(problem, scale, options)
         }
     };
     if !options.scaling {
-        return inner(problem);
+        return inner(problem, None);
     }
     let scaled = Scaled::new(problem);
-    let mut solution = inner(&scaled)?;
+    let mut solution = inner(&scaled, Some((&scaled.rows, scaled.objective)))?;
     // Back to the caller's units: the objective and every multiplier carry
     // the objective's scale, a constraint multiplier its row's too.
     solution.objective = problem.objective(&solution.x);
@@ -572,6 +640,7 @@ fn ncl(problem: &dyn NonlinearProblem, options: &NlpOptions) -> Result<NlpSoluti
     let mut mu = options.initial_barrier;
     let mut eta = 0.1f64;
     let mut last = None;
+    let mut factors = KktFactors::default();
     for k in 1..=MAX_OUTER {
         let tolerance = 100.0 * mu.powf(1.05);
         let s = run(
@@ -581,6 +650,7 @@ fn ncl(problem: &dyn NonlinearProblem, options: &NlpOptions) -> Result<NlpSoluti
             options,
             Barrier::Fixed { mu, tolerance },
             &Control::SOLVE,
+            &mut factors,
         )?;
         let converged = s.status == OptStatus::Optimal;
         let residual = norm_inf(&state.u[n..n + m]);
@@ -687,6 +757,9 @@ impl NonlinearProblem for Ncl<'_> {
     }
     fn initial_point(&self) -> Vec<f64> {
         self.start.clone()
+    }
+    fn fixed_pattern(&self) -> bool {
+        self.inner.fixed_pattern()
     }
 }
 
@@ -798,12 +871,30 @@ impl NonlinearProblem for Scaled<'_> {
     fn initial_point(&self) -> Vec<f64> {
         self.inner.initial_point()
     }
+    fn fixed_pattern(&self) -> bool {
+        self.inner.fixed_pattern()
+    }
+    #[cfg(feature = "gpu")]
+    fn on_device(&self) -> Option<DeviceProblem<'_>> {
+        self.inner.on_device()
+    }
 }
 
+/// Solves `problem`, `scale` being the row and objective scale it already
+/// carries (`Scaled`), for an engine that evaluates the model unscaled.
 fn solve_scaled(
     problem: &dyn NonlinearProblem,
+    scale: Option<(&[f64], f64)>,
     options: &NlpOptions,
 ) -> Result<NlpSolution, OpfError> {
+    #[cfg(feature = "gpu")]
+    if let InteriorPoint::Device { deterministic } = options.interior_point
+        && options.kkt == KktForm::Augmented
+        && let Some(on_device) = problem.on_device()
+    {
+        return device::solve(problem, on_device, scale, options, deterministic);
+    }
+    let _ = scale;
     let p = Internal::build(problem);
     let mut state = State::start(problem, &p, options);
     run(
@@ -813,6 +904,7 @@ fn solve_scaled(
         options,
         Barrier::Schedule,
         &Control::SOLVE,
+        &mut KktFactors::default(),
     )
 }
 
@@ -925,6 +1017,665 @@ impl State {
     }
 }
 
+/// The direction a step follows: the Newton step of the iteration, or the
+/// last second-order correction of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Direction {
+    Newton,
+    Correction,
+}
+
+/// The current iterate's residuals, as the barrier and the filter read them.
+#[derive(Clone, Copy, Debug)]
+struct Residuals {
+    /// `‖r_d‖∞`, the dual residual.
+    dual: f64,
+    /// `‖r_p‖∞`, the constraint residual.
+    primal: f64,
+    /// θ: `‖r_p‖₁`.
+    theta: f64,
+    /// `‖y‖₁`.
+    y_sum: f64,
+    /// `‖z_L‖₁ + ‖z_U‖₁`.
+    z_sum: f64,
+}
+
+/// What the line search starts from.
+#[derive(Clone, Copy, Debug)]
+struct SearchStart {
+    /// φ at the current iterate.
+    phi: f64,
+    /// φ's directional derivative along the Newton step.
+    dphi: f64,
+    /// The fraction-to-boundary step.
+    alpha_max: f64,
+    /// `‖Δu‖∞` and `‖u‖∞`, for the tiny-step rule.
+    step: f64,
+    point: f64,
+}
+
+/// Everything the interior point does with a vector, behind the decisions
+/// [`drive`] takes from the scalars that come back: the barrier, the filter,
+/// the inertia correction's δw, the watchdog and the restoration phase exist
+/// once. [`HostEngine`] holds its vectors on the host; `device`'s engine
+/// keeps them on the GPU, where a method's traffic is little but its scalars.
+///
+/// Called in order for one iteration: [`evaluate`](Self::evaluate),
+/// [`residuals`](Self::residuals), [`prepare`](Self::prepare), then
+/// [`factorize`](Self::factorize) and [`direction`](Self::direction) until a
+/// step is found by [`trial`](Self::trial), and
+/// [`update`](Self::update).
+trait Engine {
+    /// The objective at the iterate; the gradient, constraint residual and
+    /// Jacobian stay in the engine.
+    fn evaluate(&mut self) -> Result<f64, OpfError>;
+    /// IPOPT's start of the constraint multipliers, where it is within
+    /// `constr_mult_init_max` (see [`least_squares_multipliers`]).
+    fn start_multipliers(&mut self) -> Result<(), OpfError>;
+    fn residuals(&mut self) -> Result<Residuals, OpfError>;
+    /// The worst complementarity pair against a target (0 for the problem,
+    /// μ for the barrier subproblem): a max-norm, as IPOPT's, since an
+    /// average lets one far-off pair hide behind the rest.
+    fn complementarity(&mut self, target: f64) -> Result<f64, OpfError>;
+    /// The Lagrangian's Hessian and the barrier's diagonal Σ at the iterate.
+    fn prepare(&mut self) -> Result<(), OpfError>;
+    /// Factorizes with `dw` on the Hessian block; whether it has the inertia
+    /// of a step that minimizes the barrier model.
+    fn factorize(&mut self, dw: f64) -> Result<bool, OpfError>;
+    /// The Newton step on the last factorization; false if the solve failed.
+    fn direction(&mut self, mu: f64) -> Result<bool, OpfError>;
+    fn search_start(&mut self, f: f64, mu: f64, tau: f64) -> Result<SearchStart, OpfError>;
+    /// θ and φ at the iterate plus `alpha` along `direction`; `None` outside
+    /// the bounds or where the problem is not finite.
+    fn trial(
+        &mut self,
+        direction: Direction,
+        alpha: f64,
+        mu: f64,
+    ) -> Result<Option<(f64, f64)>, OpfError>;
+    /// Starts the second-order corrections, at the last trial.
+    fn start_correction(&mut self) -> Result<(), OpfError>;
+    /// The next correction, from the last one's step `alpha`, and its
+    /// fraction-to-boundary step; `None` if it is not worth trying.
+    fn correct(&mut self, alpha: f64, tau: f64) -> Result<Option<f64>, OpfError>;
+    /// Keeps the iterate and its multipliers for [`restore`](Self::restore).
+    fn save(&mut self) -> Result<(), OpfError>;
+    fn restore(&mut self) -> Result<(), OpfError>;
+    /// The bound multipliers' step along `direction` and the largest
+    /// fraction of it that keeps them positive.
+    fn multiplier_step(&mut self, direction: Direction, mu: f64, tau: f64)
+    -> Result<f64, OpfError>;
+    /// `‖Δu‖∞` along `direction`, for the log.
+    fn step_norm(&mut self, direction: Direction) -> Result<f64, OpfError>;
+    /// Takes the step, and keeps the bound multipliers in their band.
+    fn update(
+        &mut self,
+        direction: Direction,
+        alpha: f64,
+        alpha_z: f64,
+        mu: f64,
+    ) -> Result<(), OpfError>;
+    /// The iterate, on the host.
+    fn point(&mut self) -> Result<Vec<f64>, OpfError>;
+    /// Continues from a restored point, with IPOPT's multipliers after
+    /// restoration: the constraint multipliers to zero
+    /// (`constr_mult_reset_threshold` = 0), the bound multipliers to one if
+    /// any exceeds 1000 (`bound_mult_reset_threshold`). Kept, the multipliers
+    /// that stalled the line search stall it again: on case13659_pegase
+    /// IPOPT's dual error fell from 3e7 to 98 at this reset, and its steps
+    /// from 1e-3 to 0.06.
+    fn restored(&mut self, u: &[f64]) -> Result<(), OpfError>;
+}
+
+/// `u`, `y`, `z_L` and `z_U`.
+type Iterate = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+/// [`Engine`] on the host.
+struct HostEngine<'a> {
+    problem: &'a dyn NonlinearProblem,
+    p: &'a Internal,
+    options: &'a NlpOptions,
+    factors: &'a mut KktFactors,
+    has_lower: Vec<bool>,
+    has_upper: Vec<bool>,
+    u: Vec<f64>,
+    y: Vec<f64>,
+    z_l: Vec<f64>,
+    z_u: Vec<f64>,
+    grad: Vec<f64>,
+    a: Vec<(usize, usize, f64)>,
+    r_p: Vec<f64>,
+    g: Vec<f64>,
+    t: Vec<f64>,
+    r_d: Vec<f64>,
+    hessian: Vec<(usize, usize, f64)>,
+    sigma: Vec<f64>,
+    /// The last factorization and its δw.
+    kkt: Option<Kkt>,
+    gamma: f64,
+    rhs: Vec<f64>,
+    du: Vec<f64>,
+    dy: Vec<f64>,
+    du_soc: Vec<f64>,
+    dy_soc: Vec<f64>,
+    dz_l: Vec<f64>,
+    dz_u: Vec<f64>,
+    /// The constraint residual at the last trial, and the corrections' sum.
+    trial_r: Vec<f64>,
+    c_soc: Vec<f64>,
+    saved: Option<Iterate>,
+    /// `Aᵀy`'s gather while the Jacobian's pattern holds (`Transpose`).
+    transpose: Option<Transpose>,
+}
+
+impl<'a> HostEngine<'a> {
+    fn new(
+        problem: &'a dyn NonlinearProblem,
+        p: &'a Internal,
+        options: &'a NlpOptions,
+        factors: &'a mut KktFactors,
+        state: &mut State,
+    ) -> Self {
+        Self {
+            problem,
+            p,
+            options,
+            factors,
+            has_lower: p.lower.iter().map(|v| v.is_finite()).collect(),
+            has_upper: p.upper.iter().map(|v| v.is_finite()).collect(),
+            u: std::mem::take(&mut state.u),
+            y: std::mem::take(&mut state.y),
+            z_l: std::mem::take(&mut state.z_l),
+            z_u: std::mem::take(&mut state.z_u),
+            grad: Vec::new(),
+            a: Vec::new(),
+            r_p: Vec::new(),
+            g: Vec::new(),
+            t: Vec::new(),
+            r_d: Vec::new(),
+            hessian: Vec::new(),
+            sigma: Vec::new(),
+            kkt: None,
+            gamma: 0.0,
+            rhs: Vec::new(),
+            du: Vec::new(),
+            dy: Vec::new(),
+            du_soc: Vec::new(),
+            dy_soc: Vec::new(),
+            dz_l: Vec::new(),
+            dz_u: Vec::new(),
+            trial_r: Vec::new(),
+            c_soc: Vec::new(),
+            saved: None,
+            transpose: None,
+        }
+    }
+
+    fn step(&self, direction: Direction) -> &[f64] {
+        match direction {
+            Direction::Newton => &self.du,
+            Direction::Correction => &self.du_soc,
+        }
+    }
+
+    /// A solve with iterative refinement against the system as regularized
+    /// by δw (δc is only there to make it factorizable).
+    ///
+    /// It stops when the residual is below 1e-12 of the right-hand side, or
+    /// when a round no longer halves it (refinement has stalled), and never
+    /// before one round (IPOPT's `min_refinement_steps`). Not IPOPT's ratio
+    /// test, ‖r‖ / (‖K‖‖d‖ + ‖rhs‖): near an optimum ‖K‖ carries barrier
+    /// terms of 1e11, and that test passed while the multipliers' part of
+    /// the step was still wrong (case2869_pegase, branch flows: x as IPOPT's
+    /// to 1e-8, y apart by 0.6% from iteration 24).
+    ///
+    /// The best solution seen is kept, not the last: a diverging refinement
+    /// makes it worse. On case13659_pegase (branch flows, proportional
+    /// start) a solve at 2.5e-2 of the right-hand side diverged to 0.7 and a
+    /// step of 3.6e5, which was taken; the run never recovered. Rejecting
+    /// inaccurate solves instead (IPOPT's `residual_ratio_singular`, raising
+    /// δw) does not help here: δw does not reach the constraint block the
+    /// inaccuracy comes from, and on the bus-injection model of the same
+    /// case every δw up to 1e24 was rejected.
+    ///
+    /// Returns the solution and its residual relative to the right-hand
+    /// side.
+    fn solve(&self, rhs: &[f64]) -> Option<(Vec<f64>, f64)> {
+        let (n_total, m_eq) = (self.p.n_total, self.p.m_eq);
+        let dim = n_total + m_eq;
+        let kkt = self.kkt.as_ref()?;
+        let factorization = kkt.with(self.factors.solver.as_deref()?);
+        let mut d = factorization.solve(rhs)?;
+        let target = 1e-12 * norm_inf(rhs);
+        let mut last = f64::INFINITY;
+        let mut best = (f64::INFINITY, d.clone());
+        for round in 0..self.options.refinement_rounds {
+            // On a GPU solver, from its product with the matrix it holds
+            // (`Factorized::residual`): the host's three products over the
+            // triplets were 12% of an iteration on case10000_goc.
+            let residual = factorization.residual(rhs, &d).unwrap_or_else(|| {
+                let mut residual = rhs.to_vec();
+                let du = &d[..n_total];
+                let w = &d[n_total..];
+                let hdu = mat_vec_symmetric(&self.hessian, du, n_total);
+                let atw = mat_transpose_vec(&self.a, w, n_total);
+                let adu = mat_vec(&self.a, du, m_eq);
+                for k in 0..n_total {
+                    residual[k] -= hdu[k] + (self.sigma[k] + self.gamma) * du[k] + atw[k];
+                }
+                // Against IPOPT's system, δc = 0: `Kkt` puts δc only on
+                // equality rows, where refinement removes it.
+                for r in 0..m_eq {
+                    residual[n_total + r] -= adu[r];
+                }
+                residual
+            });
+            let size = norm_inf(&residual);
+            if size < best.0 {
+                best = (size, d.clone());
+            }
+            if round > 0 && (size <= target || size > 0.5 * last) {
+                break;
+            }
+            last = size;
+            let Some(correction) = factorization.solve(&residual) else {
+                break;
+            };
+            for i in 0..dim {
+                d[i] += correction[i];
+            }
+        }
+        let (size, d) = best;
+        let relative = size / norm_inf(rhs).max(f64::MIN_POSITIVE);
+        d.iter().all(|v| v.is_finite()).then_some((d, relative))
+    }
+}
+
+impl Engine for HostEngine<'_> {
+    fn evaluate(&mut self) -> Result<f64, OpfError> {
+        let p = self.p;
+        let x = &self.u[..p.n_x];
+        let f = self.problem.objective(x);
+        let grad_x = self.problem.gradient(x);
+        let c = self.problem.constraints(x);
+        let jac_x = self.problem.jacobian(x);
+        self.a = p.jacobian(&jac_x);
+        self.r_p = p.residual(&c, &self.u);
+        self.grad = vec![0.0; p.n_total];
+        self.grad[..p.n_x].copy_from_slice(&grad_x);
+        Ok(f)
+    }
+
+    fn start_multipliers(&mut self) -> Result<(), OpfError> {
+        if let Some(y0) = least_squares_multipliers(
+            self.problem,
+            self.p,
+            &self.u[..self.p.n_x],
+            &self.a,
+            &self.grad,
+            &self.z_l,
+            &self.z_u,
+            self.options,
+            self.factors,
+        )? {
+            self.y = y0;
+        }
+        Ok(())
+    }
+
+    fn residuals(&mut self) -> Result<Residuals, OpfError> {
+        let (p, n_total) = (self.p, self.p.n_total);
+        self.g = (0..n_total)
+            .map(|k| {
+                if self.has_lower[k] {
+                    self.u[k] - p.lower[k]
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        self.t = (0..n_total)
+            .map(|k| {
+                if self.has_upper[k] {
+                    p.upper[k] - self.u[k]
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let aty = transpose_vec(
+            &mut self.transpose,
+            &self.a,
+            &self.y,
+            n_total,
+            p.fixed_pattern,
+        );
+        self.r_d = (0..n_total)
+            .map(|k| self.grad[k] - aty[k] - self.z_l[k] + self.z_u[k])
+            .collect();
+        Ok(Residuals {
+            dual: norm_inf(&self.r_d),
+            primal: norm_inf(&self.r_p),
+            theta: norm_1(&self.r_p),
+            y_sum: norm_1(&self.y),
+            z_sum: norm_1(&self.z_l) + norm_1(&self.z_u),
+        })
+    }
+
+    fn complementarity(&mut self, target: f64) -> Result<f64, OpfError> {
+        Ok((0..self.p.n_total)
+            .map(|k| {
+                let lo = if self.has_lower[k] {
+                    (self.g[k] * self.z_l[k] - target).abs()
+                } else {
+                    0.0
+                };
+                let hi = if self.has_upper[k] {
+                    (self.t[k] * self.z_u[k] - target).abs()
+                } else {
+                    0.0
+                };
+                lo.max(hi)
+            })
+            .fold(0.0, f64::max))
+    }
+
+    fn prepare(&mut self) -> Result<(), OpfError> {
+        // Rows past the problem's own are the pinning rows, linear in u.
+        self.hessian = self.problem.lagrangian_hessian(
+            &self.u[..self.p.n_x],
+            &self.y[..self.problem.n_constraints()],
+        );
+        self.sigma = (0..self.p.n_total)
+            .map(|k| {
+                (if self.has_lower[k] {
+                    self.z_l[k] / self.g[k]
+                } else {
+                    0.0
+                }) + (if self.has_upper[k] {
+                    self.z_u[k] / self.t[k]
+                } else {
+                    0.0
+                })
+            })
+            .collect();
+        Ok(())
+    }
+
+    fn factorize(&mut self, dw: f64) -> Result<bool, OpfError> {
+        let options = self.options;
+        let diagonal: Vec<f64> = self.sigma.iter().map(|s| s + dw).collect();
+        let kkt = match options.kkt {
+            KktForm::Augmented => Augmented::new(
+                &self.hessian,
+                &self.a,
+                &diagonal,
+                self.p,
+                options.dual_regularization,
+                options.kkt_solver,
+                self.factors,
+            )?
+            .map(Kkt::Augmented),
+            KktForm::Hybrid { gamma } => Hybrid::new(
+                &self.hessian,
+                &self.a,
+                &diagonal,
+                self.p,
+                gamma,
+                options.kkt_solver,
+                self.factors,
+            )?
+            .map(Kkt::Hybrid),
+        };
+        self.kkt = kkt.filter(|k| {
+            self.factors
+                .solver
+                .as_deref()
+                .is_some_and(|s| k.is_minimizing(s))
+        });
+        self.gamma = dw;
+        Ok(self.kkt.is_some())
+    }
+
+    fn direction(&mut self, mu: f64) -> Result<bool, OpfError> {
+        let (n_total, m_eq) = (self.p.n_total, self.p.m_eq);
+        // Barrier-perturbed right-hand side. No Mehrotra corrector: the
+        // predictor's premise is that the model is exact, which is what
+        // nonconvexity denies.
+        let mut rhs = vec![0.0; n_total + m_eq];
+        for k in 0..n_total {
+            let mut rho = -self.r_d[k] - mu * damping(k, &self.has_lower, &self.has_upper);
+            if self.has_lower[k] {
+                rho -= (self.g[k] * self.z_l[k] - mu) / self.g[k];
+            }
+            if self.has_upper[k] {
+                rho += (self.t[k] * self.z_u[k] - mu) / self.t[k];
+            }
+            rhs[k] = rho;
+        }
+        for r in 0..m_eq {
+            rhs[n_total + r] = -self.r_p[r];
+        }
+        let solved = self.solve(&rhs);
+        self.rhs = rhs;
+        let Some((d, _)) = solved else {
+            return Ok(false);
+        };
+        self.du = d[..n_total].to_vec();
+        self.dy = (0..m_eq).map(|r| -d[n_total + r]).collect();
+        Ok(true)
+    }
+
+    fn search_start(&mut self, f: f64, mu: f64, tau: f64) -> Result<SearchStart, OpfError> {
+        let (p, n_total) = (self.p, self.p.n_total);
+        let phi = barrier_objective(f, &self.u, mu, p, &self.has_lower, &self.has_upper);
+        let dphi: f64 = (0..n_total)
+            .map(|k| {
+                let mut term = self.grad[k] + mu * damping(k, &self.has_lower, &self.has_upper);
+                if self.has_lower[k] {
+                    term -= mu / self.g[k];
+                }
+                if self.has_upper[k] {
+                    term += mu / self.t[k];
+                }
+                term * self.du[k]
+            })
+            .sum();
+        let alpha_max = fraction_to_boundary(
+            n_total,
+            &self.has_lower,
+            &self.has_upper,
+            &self.g,
+            &self.t,
+            &self.du,
+            tau,
+        );
+        Ok(SearchStart {
+            phi,
+            dphi,
+            alpha_max,
+            step: norm_inf(&self.du),
+            point: norm_inf(&self.u),
+        })
+    }
+
+    fn trial(
+        &mut self,
+        direction: Direction,
+        alpha: f64,
+        mu: f64,
+    ) -> Result<Option<(f64, f64)>, OpfError> {
+        let step = self.step(direction);
+        let at: Vec<f64> = (0..self.p.n_total)
+            .map(|k| self.u[k] + alpha * step[k])
+            .collect();
+        let judged = evaluate(
+            self.problem,
+            self.p,
+            &at,
+            mu,
+            &self.has_lower,
+            &self.has_upper,
+        );
+        Ok(judged.map(|(th, ph, r)| {
+            self.trial_r = r;
+            (th, ph)
+        }))
+    }
+
+    fn start_correction(&mut self) -> Result<(), OpfError> {
+        self.c_soc.clone_from(&self.r_p);
+        Ok(())
+    }
+
+    fn correct(&mut self, alpha: f64, tau: f64) -> Result<Option<f64>, OpfError> {
+        let (n_total, m_eq) = (self.p.n_total, self.p.m_eq);
+        for r in 0..m_eq {
+            self.c_soc[r] = alpha * self.c_soc[r] + self.trial_r[r];
+            self.rhs[n_total + r] = -self.c_soc[r];
+        }
+        // A correction is only worth its solve if the solve is accurate:
+        // abandoned above 1e-5 of its right-hand side (IPOPT's
+        // `residual_ratio_singular`), and the search backtracks along the
+        // main step instead. On case2869_pegase (branch flows) a correction
+        // at 7e-2 was accepted at α = 0.95 and put a circulation of 37 GW
+        // into two flow variables at one bus, which the balance rows cannot
+        // see; the run never recovered.
+        let Some((d, residual)) = self.solve(&self.rhs) else {
+            return Ok(None);
+        };
+        if residual > 1e-5 {
+            return Ok(None);
+        }
+        self.du_soc = d[..n_total].to_vec();
+        self.dy_soc = (0..m_eq).map(|r| -d[n_total + r]).collect();
+        Ok(Some(fraction_to_boundary(
+            n_total,
+            &self.has_lower,
+            &self.has_upper,
+            &self.g,
+            &self.t,
+            &self.du_soc,
+            tau,
+        )))
+    }
+
+    fn save(&mut self) -> Result<(), OpfError> {
+        self.saved = Some((
+            self.u.clone(),
+            self.y.clone(),
+            self.z_l.clone(),
+            self.z_u.clone(),
+        ));
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), OpfError> {
+        if let Some((u, y, z_l, z_u)) = self.saved.take() {
+            (self.u, self.y, self.z_l, self.z_u) = (u, y, z_l, z_u);
+        }
+        Ok(())
+    }
+
+    fn multiplier_step(
+        &mut self,
+        direction: Direction,
+        mu: f64,
+        tau: f64,
+    ) -> Result<f64, OpfError> {
+        let n_total = self.p.n_total;
+        let du = self.step(direction);
+        let dz_l: Vec<f64> = (0..n_total)
+            .map(|k| {
+                if self.has_lower[k] {
+                    (mu - self.g[k] * self.z_l[k] - self.z_l[k] * du[k]) / self.g[k]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let dz_u: Vec<f64> = (0..n_total)
+            .map(|k| {
+                if self.has_upper[k] {
+                    (mu - self.t[k] * self.z_u[k] + self.z_u[k] * du[k]) / self.t[k]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut a = 1.0f64;
+        for k in 0..n_total {
+            if self.has_lower[k] && dz_l[k] < 0.0 {
+                a = a.min(-tau * self.z_l[k] / dz_l[k]);
+            }
+            if self.has_upper[k] && dz_u[k] < 0.0 {
+                a = a.min(-tau * self.z_u[k] / dz_u[k]);
+            }
+        }
+        self.dz_l = dz_l;
+        self.dz_u = dz_u;
+        Ok(a)
+    }
+
+    fn step_norm(&mut self, direction: Direction) -> Result<f64, OpfError> {
+        Ok(norm_inf(self.step(direction)))
+    }
+
+    fn update(
+        &mut self,
+        direction: Direction,
+        alpha: f64,
+        alpha_z: f64,
+        mu: f64,
+    ) -> Result<(), OpfError> {
+        let (p, n_total) = (self.p, self.p.n_total);
+        let (du, dy) = match direction {
+            Direction::Newton => (&self.du, &self.dy),
+            Direction::Correction => (&self.du_soc, &self.dy_soc),
+        };
+        for k in 0..n_total {
+            self.u[k] += alpha * du[k];
+            self.z_l[k] += alpha_z * self.dz_l[k];
+            self.z_u[k] += alpha_z * self.dz_u[k];
+        }
+        for r in 0..p.m_eq {
+            self.y[r] += alpha * dy[r];
+        }
+        // Keep the bound multipliers in a sane band around μ/slack. Without
+        // this they drift over many iterations until the barrier term they
+        // scale stops resembling the constraint it came from — a slow failure
+        // that looks like stalling rather than like a bug.
+        // IPOPT's κΣ = 1e10, around the slacks after the step.
+        for k in 0..n_total {
+            if self.has_lower[k] {
+                let center = mu / (self.u[k] - p.lower[k]);
+                self.z_l[k] = self.z_l[k].clamp(center / 1e10, center * 1e10);
+            }
+            if self.has_upper[k] {
+                let center = mu / (p.upper[k] - self.u[k]);
+                self.z_u[k] = self.z_u[k].clamp(center / 1e10, center * 1e10);
+            }
+        }
+        Ok(())
+    }
+
+    fn point(&mut self) -> Result<Vec<f64>, OpfError> {
+        Ok(self.u.clone())
+    }
+
+    fn restored(&mut self, u: &[f64]) -> Result<(), OpfError> {
+        self.u.copy_from_slice(u);
+        self.y.iter_mut().for_each(|v| *v = 0.0);
+        if norm_inf(&self.z_l).max(norm_inf(&self.z_u)) > BOUND_MULT_RESET_THRESHOLD {
+            for k in 0..self.p.n_total {
+                self.z_l[k] = if self.has_lower[k] { 1.0 } else { 0.0 };
+                self.z_u[k] = if self.has_upper[k] { 1.0 } else { 0.0 };
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The interior point's iterations from `state` on, until the barrier
 /// (`Barrier`) says it is done or `options.max_iterations` more have run;
 /// `state` is left at the last iterate.
@@ -935,18 +1686,57 @@ fn run(
     options: &NlpOptions,
     barrier: Barrier,
     control: &Control,
+    factors: &mut KktFactors,
 ) -> Result<NlpSolution, OpfError> {
-    let (n_x, n_total, m_eq) = (p.n_x, p.n_total, p.m_eq);
-    let dim = n_total + m_eq;
+    let mut engine = HostEngine::new(problem, p, options, factors, state);
+    let status = drive(&mut engine, problem, p, state, options, barrier, control)?;
+    let (u, y, z_l, z_u) = (engine.u, engine.y, engine.z_l, engine.z_u);
+    (state.u, state.y, state.z_l, state.z_u) = (u, y, z_l, z_u);
+    Ok(conclude(problem, p, state, status))
+}
+
+/// The solution at `state`'s iterate.
+fn conclude(
+    problem: &dyn NonlinearProblem,
+    p: &Internal,
+    state: &State,
+    status: OptStatus,
+) -> NlpSolution {
+    let x = &state.u[..p.n_x];
+    let f = problem.objective(x);
+    let c = problem.constraints(x);
+    finish(
+        problem,
+        p,
+        &state.u,
+        &state.y,
+        &state.z_l,
+        &state.z_u,
+        f,
+        &c,
+        state.iterations,
+        status,
+    )
+}
+
+/// The interior point's decisions, on `engine`'s vectors; see [`Engine`].
+/// Leaves the barrier, the regularization's memory and the iteration count
+/// in `state`, whose vectors are the engine's meanwhile.
+fn drive(
+    engine: &mut dyn Engine,
+    problem: &dyn NonlinearProblem,
+    p: &Internal,
+    state: &mut State,
+    options: &NlpOptions,
+    barrier: Barrier,
+    control: &Control,
+) -> Result<OptStatus, OpfError> {
+    let (n_x, m_eq) = (p.n_x, p.m_eq);
     let has_lower: Vec<bool> = p.lower.iter().map(|v| v.is_finite()).collect();
     let has_upper: Vec<bool> = p.upper.iter().map(|v| v.is_finite()).collect();
     let n_bounds =
         has_lower.iter().filter(|b| **b).count() + has_upper.iter().filter(|b| **b).count();
 
-    let mut u = std::mem::take(&mut state.u);
-    let mut y = std::mem::take(&mut state.y);
-    let mut z_l = std::mem::take(&mut state.z_l);
-    let mut z_u = std::mem::take(&mut state.z_u);
     let mut delta_last = state.delta_last;
     let mut iterations = state.iterations;
     let mut mu = match barrier {
@@ -954,15 +1744,10 @@ fn run(
         Barrier::Schedule => state.mu,
     };
     let mut filter = Filter::default();
-    // The KKT matrix's solver, its pattern analysed once and reused while it
-    // holds (`Kkt::new`): only the values change from one iteration to the
-    // next.
-    let mut solver: Option<Box<dyn SymmetricSolver>> = None;
-    // Where the augmented matrix's values come from while its pattern holds
-    // (`AugmentedPlan`): the solver is then sent values, not triplets.
-    let mut plan: Option<AugmentedPlan> = None;
-    // `Aᵀy`'s gather while the Jacobian's pattern holds (`Transpose`).
-    let mut transpose: Option<Transpose> = None;
+    // The restoration problem's, kept from one restoration to the next: its
+    // pattern is the same each time, and on a GPU a solver is a handle, device
+    // buffers and an analysis.
+    let mut restoration_factors = KktFactors::default();
     let mut acceptable_streak = 0usize;
     let mut error = f64::INFINITY;
     let mut first = true;
@@ -981,17 +1766,7 @@ fn run(
         for _ in 0..options.max_iterations {
             iterations += 1;
 
-            let x = &u[..n_x];
-            let f = problem.objective(x);
-            let grad_x = problem.gradient(x);
-            let c = problem.constraints(x);
-            let jac_x = problem.jacobian(x);
-
-            let a = p.jacobian(&jac_x);
-            let r_p = p.residual(&c, &u);
-
-            let mut grad = vec![0.0; n_total];
-            grad[..n_x].copy_from_slice(&grad_x);
+            let f = engine.evaluate()?;
 
             // IPOPT's start of the constraint multipliers: the least-squares
             // fit of the dual residual at the starting point, where it is
@@ -1000,54 +1775,12 @@ fn run(
                 && matches!(barrier, Barrier::Schedule)
                 && control.restoration
                 && options.kkt == KktForm::Augmented
-                && let Some(y0) = least_squares_multipliers(
-                    problem,
-                    p,
-                    x,
-                    &a,
-                    &grad,
-                    &z_l,
-                    &z_u,
-                    options,
-                    &mut solver,
-                    &mut plan,
-                )
             {
-                y = y0;
+                engine.start_multipliers()?;
             }
 
-            let g: Vec<f64> = (0..n_total)
-                .map(|k| if has_lower[k] { u[k] - p.lower[k] } else { 1.0 })
-                .collect();
-            let t: Vec<f64> = (0..n_total)
-                .map(|k| if has_upper[k] { p.upper[k] - u[k] } else { 1.0 })
-                .collect();
-
-            let aty = transpose_vec(&mut transpose, &a, &y, n_total);
-            let r_d: Vec<f64> = (0..n_total)
-                .map(|k| grad[k] - aty[k] - z_l[k] + z_u[k])
-                .collect();
-
-            // The worst complementarity pair against a target (0 for the
-            // problem, μ for the barrier subproblem): a max-norm, as IPOPT's,
-            // since an average lets one far-off pair hide behind the rest.
-            let complementarity = |target: f64| -> f64 {
-                (0..n_total)
-                    .map(|k| {
-                        let lo = if has_lower[k] {
-                            (g[k] * z_l[k] - target).abs()
-                        } else {
-                            0.0
-                        };
-                        let hi = if has_upper[k] {
-                            (t[k] * z_u[k] - target).abs()
-                        } else {
-                            0.0
-                        };
-                        lo.max(hi)
-                    })
-                    .fold(0.0, f64::max)
-            };
+            let residuals = engine.residuals()?;
+            let theta = residuals.theta;
 
             // The scaled KKT error, IPOPT's (Wächter & Biegler 2006, eq. 5): the
             // dual residual divided by the *average* multiplier size, and only
@@ -1057,21 +1790,22 @@ fn run(
             // (case9241_pegase then stalled at μ = 2.5e-9 with the dual error
             // stuck at 1e-2).
             const S_MAX: f64 = 100.0;
-            let z_sum = norm_1(&z_l) + norm_1(&z_u);
-            let s_d = ((norm_1(&y) + z_sum) / ((m_eq + n_bounds).max(1) as f64)).max(S_MAX) / S_MAX;
+            let z_sum = residuals.z_sum;
+            let s_d =
+                ((residuals.y_sum + z_sum) / ((m_eq + n_bounds).max(1) as f64)).max(S_MAX) / S_MAX;
             let s_c = (z_sum / (n_bounds.max(1) as f64)).max(S_MAX) / S_MAX;
-            error = (norm_inf(&r_d) / s_d)
-                .max(norm_inf(&r_p))
-                .max(complementarity(0.0) / s_c);
+            error = (residuals.dual / s_d)
+                .max(residuals.primal)
+                .max(engine.complementarity(0.0)? / s_c);
             acceptable_streak = if error <= options.acceptable_tolerance {
                 acceptable_streak + 1
             } else {
                 0
             };
 
-            let sub_error = (norm_inf(&r_d) / s_d)
-                .max(norm_inf(&r_p))
-                .max(complementarity(mu) / s_c);
+            let sub_error = (residuals.dual / s_d)
+                .max(residuals.primal)
+                .max(engine.complementarity(mu)? / s_c);
             match barrier {
                 Barrier::Schedule => {
                     if (error <= options.tolerance && mu <= options.tolerance)
@@ -1102,9 +1836,9 @@ fn run(
                         // A new barrier problem: the old filter does not
                         // apply.
                         filter.reset();
-                        error_at = (norm_inf(&r_d) / s_d)
-                            .max(norm_inf(&r_p))
-                            .max(complementarity(mu) / s_c);
+                        error_at = (residuals.dual / s_d)
+                            .max(residuals.primal)
+                            .max(engine.complementarity(mu)? / s_c);
                     }
                 }
                 Barrier::Fixed { tolerance, .. } => {
@@ -1116,7 +1850,7 @@ fn run(
             // The violation bounds from the first point of this run (MadNCL
             // resets them, and the filter, for every subproblem the same way).
             if first {
-                filter.start(norm_1(&r_p));
+                filter.start(theta);
                 first = false;
             }
 
@@ -1125,15 +1859,7 @@ fn run(
             // short of every bound they approach.
             let tau = options.tau.max(1.0 - mu);
 
-            // Rows past the problem's own are the pinning rows, linear in u.
-            let hessian = problem.lagrangian_hessian(x, &y[..problem.n_constraints()]);
-
-            let sigma: Vec<f64> = (0..n_total)
-                .map(|k| {
-                    (if has_lower[k] { z_l[k] / g[k] } else { 0.0 })
-                        + (if has_upper[k] { z_u[k] / t[k] } else { 0.0 })
-                })
-                .collect();
+            engine.prepare()?;
 
             // The step, with IPOPT's inertia correction (`factorize_with_inertia`):
             // the Hessian block is regularized by the smallest δw that gives the
@@ -1145,156 +1871,39 @@ fn run(
             let mut accepted = None;
             let mut trials = 0usize;
             let mut restore = false;
-            let mut revert: Option<Watchdog> = None;
+            let mut revert = false;
             for _ in 0..12 {
-                let Some((kkt, delta)) = factorize_with_inertia(
-                    &hessian,
-                    &a,
-                    &sigma,
-                    p,
-                    options,
-                    floor,
-                    &mut delta_last,
-                    &mut solver,
-                    &mut plan,
-                ) else {
+                let Some(delta) = factorize_with_inertia(engine, options, floor, &mut delta_last)?
+                else {
                     break;
                 };
                 gamma = delta;
-                let factorization = kkt.with(solver.as_deref().expect("factorized"));
-
-                // Barrier-perturbed right-hand side. No Mehrotra corrector: the
-                // predictor's premise is that the model is exact, which is what
-                // nonconvexity denies.
-                let mut rhs = vec![0.0; dim];
-                for k in 0..n_total {
-                    let mut rho = -r_d[k] - mu * damping(k, &has_lower, &has_upper);
-                    if has_lower[k] {
-                        rho -= (g[k] * z_l[k] - mu) / g[k];
-                    }
-                    if has_upper[k] {
-                        rho += (t[k] * z_u[k] - mu) / t[k];
-                    }
-                    rhs[k] = rho;
-                }
-                for r in 0..m_eq {
-                    rhs[n_total + r] = -r_p[r];
-                }
-
-                // A solve with iterative refinement against the system as
-                // regularized by δw (δc is only there to make it factorizable).
-                //
-                // It stops when the residual is below 1e-12 of the right-hand
-                // side, or when a round no longer halves it (refinement has
-                // stalled), and never before one round (IPOPT's
-                // `min_refinement_steps`). Not IPOPT's ratio test, ‖r‖ /
-                // (‖K‖‖d‖ + ‖rhs‖): near an optimum ‖K‖ carries barrier terms
-                // of 1e11, and that test passed while the multipliers' part of
-                // the step was still wrong (case2869_pegase, branch flows: x
-                // as IPOPT's to 1e-8, y apart by 0.6% from iteration 24).
-                //
-                // The best solution seen is kept, not the last: a diverging
-                // refinement makes it worse. On case13659_pegase (branch
-                // flows, proportional start) a solve at 2.5e-2 of the
-                // right-hand side diverged to 0.7 and a step of 3.6e5, which
-                // was taken; the run never recovered. Rejecting inaccurate
-                // solves instead (IPOPT's `residual_ratio_singular`, raising
-                // δw) does not help here: δw does not reach the constraint
-                // block the inaccuracy comes from, and on the bus-injection
-                // model of the same case every δw up to 1e24 was rejected.
-                //
-                // Returns the solution and its residual relative to the
-                // right-hand side.
-                let solve = |rhs: &[f64]| -> Option<(Vec<f64>, f64)> {
-                    let mut d = factorization.solve(rhs)?;
-                    let target = 1e-12 * norm_inf(rhs);
-                    let mut last = f64::INFINITY;
-                    let mut best = (f64::INFINITY, d.clone());
-                    for round in 0..options.refinement_rounds {
-                        // On a GPU solver, from its product with the matrix
-                        // it holds (`Factorized::residual`): the host's three
-                        // products over the triplets were 12% of an
-                        // iteration on case10000_goc.
-                        let residual = factorization.residual(rhs, &d).unwrap_or_else(|| {
-                            let mut residual = rhs.to_vec();
-                            let du = &d[..n_total];
-                            let w = &d[n_total..];
-                            let hdu = mat_vec_symmetric(&hessian, du, n_total);
-                            let atw = mat_transpose_vec(&a, w, n_total);
-                            let adu = mat_vec(&a, du, m_eq);
-                            for k in 0..n_total {
-                                residual[k] -= hdu[k] + (sigma[k] + gamma) * du[k] + atw[k];
-                            }
-                            // Against IPOPT's system, δc = 0: `Kkt` puts δc
-                            // only on equality rows, where refinement removes
-                            // it.
-                            for r in 0..m_eq {
-                                residual[n_total + r] -= adu[r];
-                            }
-                            residual
-                        });
-                        let size = norm_inf(&residual);
-                        if size < best.0 {
-                            best = (size, d.clone());
-                        }
-                        if round > 0 && (size <= target || size > 0.5 * last) {
-                            break;
-                        }
-                        last = size;
-                        let Some(correction) = factorization.solve(&residual) else {
-                            break;
-                        };
-                        for i in 0..dim {
-                            d[i] += correction[i];
-                        }
-                    }
-                    let (size, d) = best;
-                    let relative = size / norm_inf(rhs).max(f64::MIN_POSITIVE);
-                    d.iter().all(|v| v.is_finite()).then_some((d, relative))
-                };
-                let Some((d, _)) = solve(&rhs) else {
+                if !engine.direction(mu)? {
                     floor = (100.0 * gamma).max(options.regularization);
                     continue;
-                };
-                let du: Vec<f64> = d[..n_total].to_vec();
-                let dy: Vec<f64> = (0..m_eq).map(|r| -d[n_total + r]).collect();
+                }
 
                 // Filter line search (`Filter`), backtracking from the
                 // fraction-to-boundary step, with second-order corrections when
                 // the full step does not reduce the violation.
-                let theta = norm_1(&r_p);
-                let phi = barrier_objective(f, &u, mu, p, &has_lower, &has_upper);
-                let dphi: f64 = (0..n_total)
-                    .map(|k| {
-                        let mut term = grad[k] + mu * damping(k, &has_lower, &has_upper);
-                        if has_lower[k] {
-                            term -= mu / g[k];
-                        }
-                        if has_upper[k] {
-                            term += mu / t[k];
-                        }
-                        term * du[k]
-                    })
-                    .sum();
-                let alpha_max =
-                    fraction_to_boundary(n_total, &has_lower, &has_upper, &g, &t, &du, tau);
+                let SearchStart {
+                    phi,
+                    dphi,
+                    alpha_max,
+                    step,
+                    point,
+                } = engine.search_start(f, mu, tau)?;
                 let alpha_min = filter.alpha_min(theta, dphi).max(options.min_step);
-                let trial_at = |du: &[f64], alpha: f64| -> Vec<f64> {
-                    (0..n_total).map(|k| u[k] + alpha * du[k]).collect()
-                };
 
-                let mut found: Option<(Vec<f64>, Vec<f64>, f64, bool)> = None;
+                let mut found: Option<(Direction, f64, bool)> = None;
                 if watchdog.as_ref().is_some_and(|w| w.mu != mu) {
                     // A new barrier problem: the saved point's merit no longer
                     // compares.
                     watchdog = None;
                 }
                 if watchdog.is_none() && shortened >= 10 {
+                    engine.save()?;
                     watchdog = Some(Watchdog {
-                        u: u.clone(),
-                        y: y.clone(),
-                        z_l: z_l.clone(),
-                        z_u: z_u.clone(),
                         theta,
                         phi,
                         dphi,
@@ -1305,99 +1914,59 @@ fn run(
                 }
                 let watching = watchdog.is_some();
                 if let Some(w) = watchdog.as_mut() {
-                    let judged = evaluate(
-                        problem,
-                        p,
-                        &trial_at(&du, alpha_max),
-                        mu,
-                        &has_lower,
-                        &has_upper,
-                    )
-                    .and_then(|(th, ph, _)| {
-                        filter.accepts(alpha_max, w.theta, w.phi, w.dphi, th, ph)
-                    });
+                    let judged =
+                        engine
+                            .trial(Direction::Newton, alpha_max, mu)?
+                            .and_then(|(th, ph)| {
+                                filter.accepts(alpha_max, w.theta, w.phi, w.dphi, th, ph)
+                            });
                     if let Some(f_type) = judged {
-                        found = Some((du.clone(), dy.clone(), alpha_max, f_type));
+                        found = Some((Direction::Newton, alpha_max, f_type));
                         watchdog = None;
                     } else if w.trials < 3 {
                         w.trials += 1;
                         // Taken unchecked; the filter is left as it is.
-                        found = Some((du.clone(), dy.clone(), alpha_max, true));
+                        found = Some((Direction::Newton, alpha_max, true));
                     } else {
-                        revert = watchdog.take();
+                        watchdog = None;
+                        revert = true;
                         break;
                     }
                 }
                 let mut alpha = alpha_max;
                 let mut first = true;
                 while !watching && alpha >= alpha_min {
-                    if let Some((th, ph, rp)) = evaluate(
-                        problem,
-                        p,
-                        &trial_at(&du, alpha),
-                        mu,
-                        &has_lower,
-                        &has_upper,
-                    ) {
+                    if let Some((th, ph)) = engine.trial(Direction::Newton, alpha, mu)? {
                         if let Some(f_type) = filter.accepts(alpha, theta, phi, dphi, th, ph) {
-                            found = Some((du.clone(), dy.clone(), alpha, f_type));
+                            found = Some((Direction::Newton, alpha, f_type));
                             break;
                         }
                         if first && th >= theta {
                             // Second-order correction (IPOPT's `max_soc` = 4):
                             // the step again, with the constraint residual at the
                             // trial point folded into the right-hand side.
-                            let mut c_soc = r_p.clone();
-                            let (mut alpha_soc, mut th_prev, mut rp_trial) = (alpha, theta, rp);
+                            engine.start_correction()?;
+                            let (mut alpha_soc, mut th_prev) = (alpha, theta);
                             for _ in 0..4 {
-                                for r in 0..m_eq {
-                                    c_soc[r] = alpha_soc * c_soc[r] + rp_trial[r];
-                                    rhs[n_total + r] = -c_soc[r];
-                                }
-                                // A correction is only worth its solve if
-                                // the solve is accurate: abandoned above
-                                // 1e-5 of its right-hand side (IPOPT's
-                                // `residual_ratio_singular`), and the search
-                                // backtracks along the main step instead. On
-                                // case2869_pegase (branch flows) a correction
-                                // at 7e-2 was accepted at α = 0.95 and put a
-                                // circulation of 37 GW into two flow
-                                // variables at one bus, which the balance
-                                // rows cannot see; the run never recovered.
-                                let Some((d_soc, residual)) = solve(&rhs) else {
+                                let Some(next) = engine.correct(alpha_soc, tau)? else {
                                     break;
                                 };
-                                if residual > 1e-5 {
-                                    break;
-                                }
-                                let du_soc: Vec<f64> = d_soc[..n_total].to_vec();
-                                alpha_soc = fraction_to_boundary(
-                                    n_total, &has_lower, &has_upper, &g, &t, &du_soc, tau,
-                                );
-                                let Some((th_s, ph_s, rp_s)) = evaluate(
-                                    problem,
-                                    p,
-                                    &trial_at(&du_soc, alpha_soc),
-                                    mu,
-                                    &has_lower,
-                                    &has_upper,
-                                ) else {
+                                alpha_soc = next;
+                                let Some((th_s, ph_s)) =
+                                    engine.trial(Direction::Correction, alpha_soc, mu)?
+                                else {
                                     break;
                                 };
                                 if let Some(f_type) =
                                     filter.accepts(alpha, theta, phi, dphi, th_s, ph_s)
                                 {
-                                    let dy_soc = (0..m_eq).map(|r| -d_soc[n_total + r]).collect();
-                                    found = Some((du_soc, dy_soc, alpha_soc, f_type));
+                                    found = Some((Direction::Correction, alpha_soc, f_type));
                                     break;
                                 }
                                 if th_s > 0.99 * th_prev {
                                     break;
                                 }
-                                (th_prev, rp_trial) = (th_s, rp_s);
-                            }
-                            for r in 0..m_eq {
-                                rhs[n_total + r] = -r_p[r];
+                                th_prev = th_s;
                             }
                             if found.is_some() {
                                 break;
@@ -1421,14 +1990,12 @@ fn run(
                 // each step at the optimum, its constraint multipliers moved
                 // as little, and its dual error never fell below 2e-5.
                 let found = match found {
-                    None if theta <= filter.theta_min
-                        && norm_inf(&du) <= 1e-8 * (1.0 + norm_inf(&u)) =>
-                    {
-                        Some((du.clone(), dy.clone(), alpha_max, true))
+                    None if theta <= filter.theta_min && step <= 1e-8 * (1.0 + point) => {
+                        Some((Direction::Newton, alpha_max, true))
                     }
                     found => found,
                 };
-                let Some((du, dy, alpha, f_type)) = found else {
+                let Some((direction, alpha, f_type)) = found else {
                     if theta > filter.theta_min {
                         filter.add(theta, phi);
                         restore = true;
@@ -1452,33 +2019,14 @@ fn run(
                 if !watching {
                     shortened = if alpha < alpha_max { shortened + 1 } else { 0 };
                 }
-
-                let dz_l: Vec<f64> = (0..n_total)
-                    .map(|k| {
-                        if has_lower[k] {
-                            (mu - g[k] * z_l[k] - z_l[k] * du[k]) / g[k]
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-                let dz_u: Vec<f64> = (0..n_total)
-                    .map(|k| {
-                        if has_upper[k] {
-                            (mu - t[k] * z_u[k] + z_u[k] * du[k]) / t[k]
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-                accepted = Some((du, dy, dz_l, dz_u, alpha));
+                accepted = Some((direction, alpha));
                 break;
             }
 
-            if let Some(w) = revert {
+            if revert {
                 // No full step was accepted against the saved point: back to
                 // it, for an ordinary line search there.
-                (u, y, z_l, z_u) = (w.u, w.y, w.z_l, w.z_u);
+                engine.restore()?;
                 continue;
             }
             if restore {
@@ -1487,10 +2035,19 @@ fn run(
                 if !control.restoration {
                     break 'solve OptStatus::Other("no acceptable step in the restoration phase");
                 }
-                let theta = norm_1(&r_p);
+                let u = engine.point()?;
                 match restoration(
-                    problem, p, &u, mu, theta, &filter, &has_lower, &has_upper, options,
-                ) {
+                    problem,
+                    p,
+                    &u,
+                    mu,
+                    theta,
+                    &filter,
+                    &has_lower,
+                    &has_upper,
+                    options,
+                    &mut restoration_factors,
+                )? {
                     Some((restored, steps)) => {
                         if options.log {
                             eprintln!(
@@ -1501,22 +2058,7 @@ fn run(
                                 }
                             );
                         }
-                        u = restored;
-                        // IPOPT's multipliers after restoration: the
-                        // constraint multipliers to zero
-                        // (`constr_mult_reset_threshold` = 0), the bound
-                        // multipliers to one if any exceeds 1000
-                        // (`bound_mult_reset_threshold`). Kept, the multipliers
-                        // that stalled the line search stall it again: on
-                        // case13659_pegase IPOPT's dual error fell from 3e7 to
-                        // 98 at this reset, and its steps from 1e-3 to 0.06.
-                        y.iter_mut().for_each(|v| *v = 0.0);
-                        if norm_inf(&z_l).max(norm_inf(&z_u)) > 1e3 {
-                            for k in 0..n_total {
-                                z_l[k] = if has_lower[k] { 1.0 } else { 0.0 };
-                                z_u[k] = if has_upper[k] { 1.0 } else { 0.0 };
-                            }
-                        }
+                        engine.restored(&restored)?;
                         continue;
                     }
                     None => {
@@ -1529,7 +2071,7 @@ fn run(
                 }
             }
 
-            let Some((du, dy, dz_l, dz_u, alpha)) = accepted else {
+            let Some((direction, alpha)) = accepted else {
                 break 'solve stopped(
                     error,
                     options,
@@ -1542,18 +2084,7 @@ fn run(
             // the primal step). Tied to a primal step cut short by a bound, they
             // would barely move, and the barrier curvature Σ = z/s they set would
             // keep producing the same blocked direction.
-            let alpha_z = {
-                let mut a = 1.0f64;
-                for k in 0..n_total {
-                    if has_lower[k] && dz_l[k] < 0.0 {
-                        a = a.min(-tau * z_l[k] / dz_l[k]);
-                    }
-                    if has_upper[k] && dz_u[k] < 0.0 {
-                        a = a.min(-tau * z_u[k] / dz_u[k]);
-                    }
-                }
-                a
-            };
+            let alpha_z = engine.multiplier_step(direction, mu, tau)?;
             if options.log {
                 if iterations == 1 {
                     eprintln!(
@@ -1564,10 +2095,10 @@ fn run(
                     "{:4} {:+.7e} {:.2e} {:.2e} {:6.2} {:.2e} {:6.2} {:.2e} {:.2e} {:3}",
                     iterations,
                     f,
-                    norm_inf(&r_p),
-                    norm_inf(&r_d) / s_d,
+                    residuals.primal,
+                    residuals.dual / s_d,
                     mu.log10(),
-                    norm_inf(&du),
+                    engine.step_norm(direction)?,
                     if gamma > 0.0 {
                         gamma.log10()
                     } else {
@@ -1578,32 +2109,9 @@ fn run(
                     trials,
                 );
             }
-            for k in 0..n_total {
-                u[k] += alpha * du[k];
-                z_l[k] += alpha_z * dz_l[k];
-                z_u[k] += alpha_z * dz_u[k];
-            }
-            for r in 0..m_eq {
-                y[r] += alpha * dy[r];
-            }
-
-            // Keep the bound multipliers in a sane band around μ/slack. Without
-            // this they drift over many iterations until the barrier term they
-            // scale stops resembling the constraint it came from — a slow failure
-            // that looks like stalling rather than like a bug.
-            // IPOPT's κΣ = 1e10, around the slacks after the step.
-            for k in 0..n_total {
-                if has_lower[k] {
-                    let center = mu / (u[k] - p.lower[k]);
-                    z_l[k] = z_l[k].clamp(center / 1e10, center * 1e10);
-                }
-                if has_upper[k] {
-                    let center = mu / (p.upper[k] - u[k]);
-                    z_u[k] = z_u[k].clamp(center / 1e10, center * 1e10);
-                }
-            }
+            engine.update(direction, alpha, alpha_z, mu)?;
             if let Some(stop) = control.stop
-                && stop(&u[..n_x])
+                && stop(&engine.point()?[..n_x])
             {
                 break 'solve OptStatus::Optimal;
             }
@@ -1611,21 +2119,10 @@ fn run(
 
         stopped(error, options, "iteration limit")
     };
-
-    let x = &u[..n_x];
-    let f = problem.objective(x);
-    let c = problem.constraints(x);
-    let solution = finish(problem, p, &u, &y, &z_l, &z_u, f, &c, iterations, status);
-    *state = State {
-        u,
-        y,
-        z_l,
-        z_u,
-        mu,
-        delta_last,
-        iterations,
-    };
-    Ok(solution)
+    state.mu = mu;
+    state.delta_last = delta_last;
+    state.iterations = iterations;
+    Ok(status)
 }
 
 /// The KKT matrix factorized with IPOPT's inertia correction (Wächter &
@@ -1642,21 +2139,57 @@ fn run(
 /// the caller.
 /// The default [`NlpOptions::kkt_solver`]: [`LdltSolver`], `faer`'s
 /// unpivoted `LDLᵀ`.
-pub fn ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    Some(Box::new(LdltSolver::new(n, keys)?))
+pub fn ldlt_solver(n: usize, keys: &[(usize, usize)]) -> Result<Box<dyn SymmetricSolver>, String> {
+    match LdltSolver::new(n, keys) {
+        Some(solver) => Ok(Box::new(solver)),
+        None => Err("the symbolic LDLᵀ analysis failed".into()),
+    }
 }
 
 /// [`LltSolver`], `faer`'s Cholesky, for [`KktForm::Hybrid`].
-pub fn llt_solver(n: usize, keys: &[(usize, usize)]) -> Option<Box<dyn SymmetricSolver>> {
-    Some(Box::new(LltSolver::new(n, keys)?))
+pub fn llt_solver(n: usize, keys: &[(usize, usize)]) -> Result<Box<dyn SymmetricSolver>, String> {
+    match LltSolver::new(n, keys) {
+        Some(solver) => Ok(Box::new(solver)),
+        None => Err("the symbolic Cholesky analysis failed".into()),
+    }
 }
 
-/// The point the watchdog saved, and its merit for judging the steps after it.
+/// The KKT matrix's solver, its pattern analysed once and reused while it
+/// holds: only the values change from one iteration to the next.
+#[derive(Default)]
+struct KktFactors {
+    solver: Option<Box<dyn SymmetricSolver>>,
+    /// Where the augmented matrix's values come from while its pattern holds:
+    /// the solver is then sent values, not triplets.
+    plan: Option<AugmentedPlan>,
+}
+
+impl KktFactors {
+    /// Factorizes the `n × n` matrix `kkt`, making a solver first if there
+    /// is none for its pattern. Reanalysed only when the entries' positions
+    /// change, which a problem with a fixed sparsity never does.
+    fn factorize(
+        &mut self,
+        n: usize,
+        kkt: &[(usize, usize, f64)],
+        make: MakeSolver,
+    ) -> Result<bool, OpfError> {
+        if let Some(solver) = &mut self.solver
+            && solver.matches(n, kkt)
+        {
+            return Ok(solver.factorize(kkt));
+        }
+        let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
+        let solver = self
+            .solver
+            .insert(make(n, &keys).map_err(OpfError::Backend)?);
+        Ok(solver.factorize(kkt))
+    }
+}
+
+/// The merit of the point the watchdog saved (`Engine::save`), for judging
+/// the steps after it.
 struct Watchdog {
-    u: Vec<f64>,
-    y: Vec<f64>,
-    z_l: Vec<f64>,
-    z_u: Vec<f64>,
     theta: f64,
     phi: f64,
     dphi: f64,
@@ -1664,47 +2197,14 @@ struct Watchdog {
     trials: usize,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn factorize_with_inertia(
-    hessian: &[(usize, usize, f64)],
-    a: &[(usize, usize, f64)],
-    sigma: &[f64],
-    p: &Internal,
+    engine: &mut dyn Engine,
     options: &NlpOptions,
     floor: f64,
     delta_last: &mut f64,
-    solver: &mut Option<Box<dyn SymmetricSolver>>,
-    plan: &mut Option<AugmentedPlan>,
-) -> Option<(Kkt, f64)> {
-    let mut factor = |dw: f64| {
-        let diagonal: Vec<f64> = sigma.iter().map(|s| s + dw).collect();
-        let kkt = match options.kkt {
-            KktForm::Augmented => Kkt::Augmented(Augmented::new(
-                hessian,
-                a,
-                &diagonal,
-                p,
-                options.dual_regularization,
-                options.kkt_solver,
-                solver,
-                plan,
-            )?),
-            KktForm::Hybrid { gamma } => Kkt::Hybrid(Hybrid::new(
-                hessian,
-                a,
-                &diagonal,
-                p,
-                gamma,
-                options.kkt_solver,
-                solver,
-            )?),
-        };
-        kkt.is_minimizing(solver.as_deref()?).then_some(kkt)
-    };
-    if floor == 0.0
-        && let Some(f) = factor(0.0)
-    {
-        return Some((f, 0.0));
+) -> Result<Option<f64>, OpfError> {
+    if floor == 0.0 && engine.factorize(0.0)? {
+        return Ok(Some(0.0));
     }
     let grow = if *delta_last == 0.0 { 100.0 } else { 8.0 };
     let mut dw = if *delta_last == 0.0 {
@@ -1714,13 +2214,13 @@ fn factorize_with_inertia(
     }
     .max(floor);
     while dw <= 1e40 {
-        if let Some(f) = factor(dw) {
+        if engine.factorize(dw)? {
             *delta_last = dw;
-            return Some((f, dw));
+            return Ok(Some(dw));
         }
         dw *= grow;
     }
-    None
+    Ok(None)
 }
 
 /// The KKT system with the inequality slacks eliminated, factorized.
@@ -1763,9 +2263,8 @@ impl Augmented {
         p: &Internal,
         delta_c: f64,
         make: MakeSolver,
-        solver: &mut Option<Box<dyn SymmetricSolver>>,
-        plan: &mut Option<AugmentedPlan>,
-    ) -> Option<Self> {
+        factors: &mut KktFactors,
+    ) -> Result<Option<Self>, OpfError> {
         let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
         let slacks: Vec<(usize, usize, f64)> = p
             .slack_of
@@ -1774,7 +2273,7 @@ impl Augmented {
             .filter_map(|(r, s)| s.map(|k| (r, k, diagonal[k])))
             .collect();
         if slacks.iter().any(|&(_, _, d)| d.is_nan() || d <= 0.0) {
-            return None;
+            return Ok(None);
         }
         // δc only where the row would otherwise have no diagonal (equality
         // rows): an inequality row has −1/d_k from its slack, and δc there,
@@ -1786,12 +2285,12 @@ impl Augmented {
             row_diag[r] = -1.0 / d;
         }
         // The pattern held since the plan was made: values only.
-        if let (Some(s), Some(p)) = (solver.as_mut(), plan.as_ref())
-            && p.fits(hessian, a, n_x, m)
+        if let (Some(s), Some(plan)) = (factors.solver.as_mut(), factors.plan.as_ref())
+            && plan.fits(hessian, a, n_x, m, p.fixed_pattern)
         {
-            let values = p.values(hessian, a, diagonal, &row_diag);
+            let values = plan.values(hessian, a, diagonal, &row_diag);
             if let Some(ok) = s.factorize_values(&values) {
-                return ok.then_some(Self { n_x, n, m, slacks });
+                return Ok(ok.then_some(Self { n_x, n, m, slacks }));
             }
         }
         // Sized once: grown from empty, most of 24 ms a factorization on
@@ -1811,19 +2310,18 @@ impl Augmented {
                 .map(|&(r, k, v)| (n_x + r, k, v)),
         );
         kkt.extend((0..m).map(|r| (n_x + r, n_x + r, row_diag[r])));
-        // Reanalysed only when the entries' positions change, which a
-        // problem with a fixed sparsity never does.
-        if !solver.as_ref().is_some_and(|s| s.matches(n_x + m, &kkt)) {
-            let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
-            *solver = Some(make(n_x + m, &keys)?);
-        }
-        let ok = solver.as_mut()?.factorize(&kkt);
+        let ok = factors.factorize(n_x + m, &kkt, make)?;
         // Next time, values only, if the solver takes them; the triplets
         // above are in the plan's order.
-        if plan.as_ref().is_none_or(|p| !p.fits(hessian, a, n_x, m)) {
-            *plan = Some(AugmentedPlan::new(hessian, a, n_x, m));
+        let fixed = p.fixed_pattern;
+        if factors
+            .plan
+            .as_ref()
+            .is_none_or(|plan| !plan.fits(hessian, a, n_x, m, fixed))
+        {
+            factors.plan = Some(AugmentedPlan::new(hessian, a, n_x, m));
         }
-        ok.then_some(Self { n_x, n, m, slacks })
+        Ok(ok.then_some(Self { n_x, n, m, slacks }))
     }
 
     /// Whether `solver`'s factorization has the inertia of a step that
@@ -1936,17 +2434,12 @@ impl AugmentedPlan {
         a: &[(usize, usize, f64)],
         n_x: usize,
         m: usize,
+        fixed: bool,
     ) -> bool {
-        use rayon::prelude::*;
-        let same = |list: &[(usize, usize, f64)], keys: &[(usize, usize)]| {
-            list.len() == keys.len()
-                && list
-                    .par_iter()
-                    .zip(keys)
-                    .with_min_len(1 << 14)
-                    .all(|(&(r, c, _), &k)| (r, c) == k)
-        };
-        n_x == self.n_x && m == self.m && same(hessian, &self.hessian_keys) && same(a, &self.a_keys)
+        n_x == self.n_x
+            && m == self.m
+            && same_keys(hessian, &self.hessian_keys, fixed)
+            && same_keys(a, &self.a_keys, fixed)
     }
 
     /// The matrix's values in the triplet list's order.
@@ -1977,6 +2470,12 @@ impl AugmentedPlan {
     }
 }
 
+/// IPOPT's `constr_mult_init_max`; see [`least_squares_multipliers`].
+const CONSTR_MULT_INIT_MAX: f64 = 1000.0;
+
+/// IPOPT's `bound_mult_reset_threshold`; see [`Engine::restored`].
+const BOUND_MULT_RESET_THRESHOLD: f64 = 1e3;
+
 /// IPOPT's least-squares constraint multipliers (`constr_mult_init_max` =
 /// 1000): the `y` minimizing `‖∇f − z_L + z_U − Aᵀy‖` at the starting
 /// point, from the augmented system with the identity in the Hessian's
@@ -1998,10 +2497,8 @@ fn least_squares_multipliers(
     z_l: &[f64],
     z_u: &[f64],
     options: &NlpOptions,
-    solver: &mut Option<Box<dyn SymmetricSolver>>,
-    plan: &mut Option<AugmentedPlan>,
-) -> Option<Vec<f64>> {
-    const CONSTR_MULT_INIT_MAX: f64 = 1000.0;
+    factors: &mut KktFactors,
+) -> Result<Option<Vec<f64>>, OpfError> {
     let (n_total, m_eq) = (p.n_total, p.m_eq);
     let hessian: Vec<(usize, usize, f64)> = problem
         .lagrangian_hessian(x, &vec![0.0; problem.n_constraints()])
@@ -2009,23 +2506,28 @@ fn least_squares_multipliers(
         .map(|(i, j, _)| (i, j, 0.0))
         .collect();
     let identity = vec![1.0; n_total];
-    let kkt = Augmented::new(
+    let Some(kkt) = Augmented::new(
         &hessian,
         a,
         &identity,
         p,
         options.dual_regularization,
         options.kkt_solver,
-        solver,
-        plan,
-    )?;
+        factors,
+    )?
+    else {
+        return Ok(None);
+    };
     let mut rhs = vec![0.0; n_total + m_eq];
     for k in 0..n_total {
         rhs[k] = grad[k] - z_l[k] + z_u[k];
     }
-    let d = kkt.solve(solver.as_deref()?, &rhs)?;
-    let y = d[n_total..].to_vec();
-    (norm_inf(&y) <= CONSTR_MULT_INIT_MAX).then_some(y)
+    let d = factors
+        .solver
+        .as_deref()
+        .and_then(|solver| kkt.solve(solver, &rhs));
+    Ok(d.map(|d| d[n_total..].to_vec())
+        .filter(|y| norm_inf(y) <= CONSTR_MULT_INIT_MAX))
 }
 
 /// The KKT system as formed for [`NlpOptions::kkt`], factorized in the
@@ -2135,8 +2637,8 @@ impl Hybrid {
         p: &Internal,
         gamma: f64,
         make: MakeSolver,
-        solver: &mut Option<Box<dyn SymmetricSolver>>,
-    ) -> Option<Self> {
+        factors: &mut KktFactors,
+    ) -> Result<Option<Self>, OpfError> {
         let (n_x, n, m) = (p.n_x, p.n_total, p.m_eq);
         let slacks: Vec<(usize, usize, f64)> = p
             .slack_of
@@ -2145,7 +2647,7 @@ impl Hybrid {
             .filter_map(|(r, s)| s.map(|k| (r, k, diagonal[k])))
             .collect();
         if slacks.iter().any(|&(_, _, d)| d.is_nan() || d <= 0.0) {
-            return None;
+            return Ok(None);
         }
         let mut weight = vec![gamma; m];
         let mut equality = vec![true; m];
@@ -2187,12 +2689,8 @@ impl Hybrid {
                 }
             }
         }
-        if !solver.as_ref().is_some_and(|s| s.matches(n_x, &kkt)) {
-            let keys: Vec<(usize, usize)> = kkt.iter().map(|&(r, c, _)| (r, c)).collect();
-            *solver = Some(make(n_x, &keys)?);
-        }
-        let ok = solver.as_mut()?.factorize(&kkt);
-        ok.then_some(Self {
+        let ok = factors.factorize(n_x, &kkt, make)?;
+        Ok(ok.then_some(Self {
             n_x,
             n,
             m,
@@ -2202,7 +2700,7 @@ impl Hybrid {
             equality,
             shift,
             unscale,
-        })
+        }))
     }
 
     /// Whether `K_γ` is positive definite.
@@ -2483,7 +2981,8 @@ fn restoration(
     has_lower: &[bool],
     has_upper: &[bool],
     options: &NlpOptions,
-) -> Option<(Vec<f64>, usize)> {
+    factors: &mut KktFactors,
+) -> Result<Option<(Vec<f64>, usize)>, OpfError> {
     const RHO: f64 = 1e3;
     let (n, m) = (p.n_x, problem.n_constraints());
     let x_r = start[..n].to_vec();
@@ -2569,10 +3068,12 @@ fn restoration(
         &r_options,
         Barrier::Schedule,
         &control,
+        factors,
+    )?;
+    Ok(
+        (solved.status == OptStatus::Optimal && acceptable(&solved.x))
+            .then(|| (original(&solved.x), state.iterations)),
     )
-    .ok()?;
-    (solved.status == OptStatus::Optimal && acceptable(&solved.x))
-        .then(|| (original(&solved.x), state.iterations))
 }
 
 /// IPOPT's restoration problem (see [`restoration`]): the original variables,
@@ -2651,6 +3152,9 @@ impl NonlinearProblem for Resto<'_> {
     }
     fn initial_point(&self) -> Vec<f64> {
         self.start.clone()
+    }
+    fn fixed_pattern(&self) -> bool {
+        self.inner.fixed_pattern()
     }
 }
 

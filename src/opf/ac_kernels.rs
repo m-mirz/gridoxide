@@ -182,6 +182,8 @@ pub(super) struct AcKernels {
     pub cost: Vec<(usize, usize, f64)>,
     /// Branch flows: the first flow column and the first definition row.
     pub flow: Option<(usize, usize)>,
+    /// The model's rows, counted once, in `AcOpf::build`.
+    n_rows: usize,
     jacobian_merge: Merge,
     hessian_merge: Merge,
 }
@@ -313,6 +315,7 @@ impl AcKernels {
             angle: layout.angle,
             cost: layout.cost,
             flow: layout.flow,
+            n_rows: layout.n_rows,
             jacobian_merge: Merge::default(),
             hessian_merge: Merge::default(),
         };
@@ -321,6 +324,10 @@ impl AcKernels {
         kernels.jacobian_merge = Merge::new(&kernels.jacobian_slots(&x));
         kernels.hessian_merge = Merge::new(&kernels.hessian_slots(&x, &y));
         kernels
+    }
+
+    pub fn n_rows(&self) -> usize {
+        self.n_rows
     }
 
     fn terminal_count(&self) -> usize {
@@ -686,15 +693,6 @@ impl AcKernels {
     /// module's functions in CUDA.
     pub fn device_data(&self, n_vars: usize) -> gridoxide_gpu::ac::AcModelData {
         let pair = |c: &Complex<f64>| [c.re, c.im];
-        let n_rows = 2 * self.n
-            + self.limit_terminal.len()
-            + self.angle.len()
-            + self.cost.len()
-            + if self.flow.is_some() {
-                2 * self.terminal_count()
-            } else {
-                0
-            };
         gridoxide_gpu::ac::AcModelData {
             n: self.n,
             theta: self.theta,
@@ -719,7 +717,7 @@ impl AcKernels {
             cost: self.cost.clone(),
             flow: self.flow,
             n_vars,
-            n_rows,
+            n_rows: self.n_rows,
             jacobian: self.jacobian_merge.gather(),
             hessian: self.hessian_merge.gather(),
         }

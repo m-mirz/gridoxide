@@ -147,9 +147,6 @@ int go_kkt_scale(const unsigned* row, const unsigned* col, const double* factor,
 /* x[i] *= d[i]. */
 int go_scale_vec(double* x, const double* d, unsigned n, void* stream);
 
-/* y[i] = x[i] / d[i]. */
-int go_unscale_vec(const double* x, const double* d, double* y, unsigned n, void* stream);
-
 /* y = A x, A symmetric with its upper triangle in CSR (up_ptr, up_col,
  * values; the diagonal first in each row, as LowerPattern's columns have it)
  * and its strictly lower part as a CSR of positions into `values` (lo_ptr,
@@ -158,6 +155,29 @@ int go_unscale_vec(const double* x, const double* d, double* y, unsigned n, void
 int go_kkt_symv(const int* up_ptr, const int* up_col, const unsigned* lo_ptr,
                 const unsigned* lo_col, const unsigned* lo_src, const double* values,
                 const double* x, double* y, unsigned n, void* stream);
+
+/* An NVTX range on this thread, for Nsight Systems. NVTX is header-only and
+ * nothing to link: without a tool attached these return at once. */
+void go_nvtx_push(const char* name);
+void go_nvtx_pop(void);
+
+/* DC sweeps (src/dc.rs), for k injection scenarios at a time, on the same
+ * network tables and layout as DC N-1 above. */
+
+/* rhs = 0 (n x k), then rhs[rows[e], cols[e]] = vals[e] for each of the
+ * `count` entries: each scenario's injection change at its unknowns, at most
+ * one entry per row and column. */
+int go_dc_injection_rhs(const unsigned* cols, const unsigned* rows, const double* vals,
+                        unsigned count, double* rhs, unsigned n, unsigned k, void* stream);
+
+/* angles[col, bus] = base_angles[bus] + theta[pos[bus], col]. */
+int go_dc_sweep_angles(const double* theta, const int* pos, const double* base_angles,
+                       double* angles, unsigned n, unsigned n_bus, unsigned k, void* stream);
+
+/* flows[col, j] = base_flows[j] + b_j (theta[from_j, col] - theta[to_j, col]). */
+int go_dc_sweep_flows(const double* theta, const unsigned* br_from, const unsigned* br_to,
+                      const double* br_b, const int* pos, const double* base_flows,
+                      double* flows, unsigned n, unsigned n_br, unsigned k, void* stream);
 
 #ifdef __cplusplus
 }

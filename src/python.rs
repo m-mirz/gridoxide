@@ -3933,7 +3933,7 @@ fn dc_opf(
 #[cfg(feature = "opf")]
 #[pyfunction]
 #[pyo3(signature = (path, data_path = None, enforce_limits = true,
-                    max_iterations = 300, tolerance = 1e-8, freq_hz = 50.0))]
+                    max_iterations = 3000, tolerance = 1e-8, freq_hz = 50.0))]
 fn ac_opf(
     py: Python<'_>,
     path: &str,
@@ -4049,9 +4049,9 @@ impl OptimalPowerFlowModel {
     /// out-of-service branches and generators are left out.
     ///
     /// `solver` is `"nlp"` (gridoxide's own interior point, the default),
-    /// `"nlp-gpu"`, the same interior point with its model evaluated and its
-    /// KKT system factorized on an NVIDIA GPU, by cuDSS (the extension built
-    /// with the `gpu` feature),
+    /// `"nlp-gpu"`, the same interior point with its model, its vectors and
+    /// its KKT system on an NVIDIA GPU, by cuDSS (the extension built with
+    /// the `gpu` feature),
     /// or `"ipopt"`, which needs the extension built with the `opf-ipopt`
     /// feature. `tol` and `max_iter` go to the solver as its own tolerance
     /// and iteration limit; IPOPT's `tol` is its scaled KKT error.
@@ -4063,7 +4063,7 @@ impl OptimalPowerFlowModel {
     ///
     /// Every solve starts from the point `solve(init=...)` names.
     #[staticmethod]
-    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=300, deterministic=true))]
+    #[pyo3(signature = (path, solver="nlp", tol=1e-8, max_iter=3000, deterministic=true))]
     fn from_matpower(
         path: &str,
         solver: &str,
@@ -4120,6 +4120,7 @@ impl OptimalPowerFlowModel {
             } else {
                 crate::gpu::cudss_ldlt_solver_fast
             };
+            options.nlp.interior_point = crate::opf::nlp::InteriorPoint::Device { deterministic };
         }
         let _ = gpu;
         #[allow(unused_mut)]
@@ -4252,7 +4253,8 @@ impl OptimalPowerFlowModel {
 /// Batched power flows on an NVIDIA GPU: a session for one
 /// `PowerFlowModel`'s network. See `gridoxide::gpu::GpuBatchSolver`.
 ///
-/// `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None)`
+/// `GpuBatchSolver(model, capacity=1024, reuse_below=None, cpu_handoff=None,
+/// chord_steps=0, chord_below=0.5)`
 /// takes what it needs from `model` once: its network, `tol` and `max_iter`,
 /// and the voltages of its last `solve()`, which every scenario starts from
 /// (`solve_batch`'s `start="last"`; the CPU's `"linear"`, a linear solve per
@@ -4389,12 +4391,14 @@ impl GpuBatchSolver {
 #[pymethods]
 impl GpuBatchSolver {
     #[new]
-    #[pyo3(signature = (model, capacity=1024, reuse_below=None, cpu_handoff=None))]
+    #[pyo3(signature = (model, capacity=1024, reuse_below=None, cpu_handoff=None, chord_steps=0, chord_below=0.5))]
     fn new(
         model: PyRef<'_, PowerFlowModel>,
         capacity: usize,
         reuse_below: Option<f64>,
         cpu_handoff: Option<usize>,
+        chord_steps: usize,
+        chord_below: f64,
     ) -> PyResult<Self> {
         let (template, _) = model.batch_start("last")?;
         let session = crate::gpu::GpuBatchSolver::with_branches(
@@ -4410,6 +4414,8 @@ impl GpuBatchSolver {
             max_iter: model.max_iter,
             reuse_below,
             cpu_handoff,
+            chord_steps,
+            chord_below,
             ..crate::gpu::BatchOptions::default()
         };
         let mut cpu = BatchSolver::new(model.backend);
@@ -4439,7 +4445,7 @@ impl GpuBatchSolver {
     /// scenarios `set_scenarios` stored, which keeps their conversion out of
     /// the call. A scenario that does not converge is reported, not raised.
     #[pyo3(signature = (scenarios=None))]
-    fn solve_batch(
+    fn solve_sweep(
         &mut self,
         scenarios: Option<Vec<Vec<(usize, f64, f64)>>>,
     ) -> PyResult<Vec<BatchResult>> {
@@ -4447,7 +4453,7 @@ impl GpuBatchSolver {
         let scenarios = given.as_deref().unwrap_or(&self.stored_scenarios);
         let report = self
             .session
-            .solve(scenarios, &self.opts)
+            .solve_sweep(scenarios, &self.opts)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let results: Vec<BatchResult> = report
             .scenarios
@@ -4470,7 +4476,7 @@ impl GpuBatchSolver {
         Ok(results)
     }
 
-    /// The last `solve_batch` or `solve_contingencies` call's voltages,
+    /// The last `solve_sweep` or `solve_contingencies` call's voltages,
     /// `(voltage_mag, voltage_ang)`, every scenario's buses after the
     /// previous scenario's, as read-only float64 buffers (`Float64Buffer`;
     /// p.u. and radians): `numpy.frombuffer(vm).reshape(len(results), -1)` reads them
@@ -4488,6 +4494,41 @@ impl GpuBatchSolver {
     /// `solve_batch()` calls without them.
     fn set_scenarios(&mut self, scenarios: Vec<Vec<(usize, f64, f64)>>) {
         self.stored_scenarios = overrides_to_scenarios(scenarios);
+    }
+
+    /// A single power flow of `model` as it is now, on the device: its
+    /// injections and setpoints, from the voltages of its last `solve()`
+    /// (`start="last"`), the linear initial guess (`"linear"`, as `solve()`
+    /// starts) or the flat start (`"flat"`, as `solve(init="flat")`). One
+    /// `BatchResult`; the model is left unchanged.
+    /// `model` must be the session's network with the same bus types, or
+    /// `ValueError` is raised. Worth it only on large grids: one system is
+    /// cuDSS's worst case. Make the session with `capacity=1` for it.
+    #[pyo3(signature = (model, start="last"))]
+    fn solve_single(
+        &mut self,
+        model: PyRef<'_, PowerFlowModel>,
+        start: &str,
+    ) -> PyResult<BatchResult> {
+        let (mut buses, how) = if start == "flat" {
+            (model.buses_template.clone(), BatchStart::Template)
+        } else {
+            model.batch_start(start)?
+        };
+        if how == BatchStart::Linear {
+            linear_initial_guess(&mut buses, &model.ybus);
+        }
+        let r = self
+            .session
+            .solve_single(&mut buses, &self.opts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(BatchResult {
+            converged: r.outcome == crate::gpu::Outcome::Converged,
+            iterations: r.newton_steps + 1,
+            max_mismatch: r.final_mismatch,
+            voltage_mag: r.voltage_mag,
+            voltage_ang: r.voltage_ang,
+        })
     }
 
     /// As `PowerFlowModel.solve_contingencies`, on the device: one list of
@@ -4568,8 +4609,8 @@ impl GpuBatchSolver {
     }
 }
 
-/// DC N-1 on an NVIDIA GPU: a session for one `PowerFlowModel`'s DC
-/// network. See `gridoxide::gpu::GpuDcSolver`.
+/// DC N-1 and DC sweeps on an NVIDIA GPU: a session for one
+/// `PowerFlowModel`'s DC network. See `gridoxide::gpu::GpuDcSolver`.
 ///
 /// `GpuDcSolver(model, capacity=1024)` takes the model's DC network once:
 /// its branches, DC options, reference buses and injections (shunt
@@ -4582,7 +4623,27 @@ impl GpuBatchSolver {
 struct GpuDcSolver {
     session: crate::gpu::GpuDcSolver,
     buses: Vec<Bus>,
+    /// Per bus, the shunt conductance `buses` takes as load (zero unless
+    /// the model's DC solve does), which a sweep's overrides keep.
+    shunt_load: Vec<f64>,
     n_branches: usize,
+    /// What `set_scenarios` stored, for `solve_sweep()`.
+    stored_scenarios: Vec<crate::scenario::Scenario>,
+}
+
+/// The buses of `model`'s DC solve, and per bus the shunt conductance they
+/// take as load (zero unless that solve does).
+#[cfg(feature = "gpu")]
+fn dc_buses(model: &PowerFlowModel) -> (Vec<Bus>, Vec<f64>) {
+    let mut buses = model.buses_template.clone();
+    let mut shunt_load = vec![0.0; buses.len()];
+    if model.dc_shunt_conductance_as_load {
+        for s in &model.shunts {
+            buses[s.at].p_spec -= s.y.re;
+            shunt_load[s.at] += s.y.re;
+        }
+    }
+    (buses, shunt_load)
 }
 
 #[cfg(feature = "gpu")]
@@ -4591,12 +4652,7 @@ impl GpuDcSolver {
     #[new]
     #[pyo3(signature = (model, capacity=1024))]
     fn new(model: PyRef<'_, PowerFlowModel>, capacity: usize) -> PyResult<Self> {
-        let mut buses = model.buses_template.clone();
-        if model.dc_shunt_conductance_as_load {
-            for s in &model.shunts {
-                buses[s.at].p_spec -= s.y.re;
-            }
-        }
+        let (buses, shunt_load) = dc_buses(&model);
         let session = crate::gpu::GpuDcSolver::new(
             &model.buses_template,
             &model.lines,
@@ -4608,7 +4664,9 @@ impl GpuDcSolver {
         Ok(Self {
             session,
             buses,
+            shunt_load,
             n_branches: model.lines.len() + model.transformers.len(),
+            stored_scenarios: Vec::new(),
         })
     }
 
@@ -4643,6 +4701,96 @@ impl GpuDcSolver {
             Float64Buffer::new(out.flows),
             out.solved,
         ))
+    }
+
+    /// A single DC power flow of `model` as it is now, which must be the
+    /// session's network, its reduced solve on the device:
+    /// `(voltage_ang, branch_flow_p, slack_pickup)`,
+    /// as `solve_dc()` then `voltage_ang()`, `branch_flow_p()` and
+    /// `dc_slack_pickup()` give them (pickups without their bus lists).
+    /// Raises `RuntimeError` if an island's matrix is singular, as
+    /// `solve_dc()` does.
+    fn solve_single(
+        &mut self,
+        model: PyRef<'_, PowerFlowModel>,
+    ) -> PyResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let (mut buses, _) = dc_buses(&model);
+        if buses.len() != self.buses.len() {
+            return Err(PyValueError::new_err(format!(
+                "the model has {} buses, the session {}",
+                buses.len(),
+                self.buses.len()
+            )));
+        }
+        let solution = self
+            .session
+            .solve_single(&mut buses)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let singular: Vec<&[usize]> = solution
+            .islands
+            .iter()
+            .filter(|i| i.status == DcIslandStatus::Singular)
+            .map(|i| i.bus_indices.as_slice())
+            .collect();
+        if !singular.is_empty() {
+            return Err(PyRuntimeError::new_err(format!(
+                "DC susceptance matrix is singular (component(s) with buses {singular:?})"
+            )));
+        }
+        Ok((
+            buses.iter().map(|b| b.voltage_ang).collect(),
+            solution.branch_p,
+            solution.islands.iter().map(|i| i.slack_pickup).collect(),
+        ))
+    }
+
+    /// The base case's DC power flow (on the CPU), then every scenario of
+    /// `scenarios` on the device, in `solve_batch`'s format: per scenario,
+    /// `(bus, p, q)` overrides of the model's injections; `q` is ignored.
+    /// Returns `(angles, flows, slack_pickup)`, read-only float64 buffers of
+    /// every scenario's bus angles (radians), from-end branch flows and
+    /// per-island reference pickups (per unit, islands in `dc_slack_pickup`'s
+    /// order), one scenario after another.
+    ///
+    /// The session factored its matrix once, so a sweep is one multi-column
+    /// solve per `capacity` scenarios. A DC solve cannot fail per scenario;
+    /// a bus out of range raises `ValueError`.
+    #[pyo3(signature = (scenarios=None))]
+    fn solve_sweep(
+        &mut self,
+        scenarios: Option<Vec<Vec<(usize, f64, f64)>>>,
+    ) -> PyResult<(Float64Buffer, Float64Buffer, Float64Buffer)> {
+        let mut scenarios = match scenarios {
+            Some(given) => overrides_to_scenarios(given),
+            None => self.stored_scenarios.clone(),
+        };
+        for (s, sc) in scenarios.iter_mut().enumerate() {
+            for ov in &mut sc.bus_overrides {
+                let Some(load) = self.shunt_load.get(ov.bus) else {
+                    return Err(PyValueError::new_err(format!(
+                        "scenario {s} overrides bus {}, but there are {} buses",
+                        ov.bus,
+                        self.buses.len()
+                    )));
+                };
+                ov.p_spec = ov.p_spec.map(|p| p - load);
+            }
+        }
+        let out = self
+            .session
+            .solve_sweep(&self.buses, &scenarios)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok((
+            Float64Buffer::new(out.angles),
+            Float64Buffer::new(out.flows),
+            Float64Buffer::new(out.slack_pickup),
+        ))
+    }
+
+    /// Stores `scenarios`, `solve_sweep`'s format, for `solve_sweep()`,
+    /// which keeps their conversion out of what a benchmark times.
+    fn set_scenarios(&mut self, scenarios: Vec<Vec<(usize, f64, f64)>>) {
+        self.stored_scenarios = overrides_to_scenarios(scenarios);
     }
 }
 
