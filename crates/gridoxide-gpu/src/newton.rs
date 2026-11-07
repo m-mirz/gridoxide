@@ -327,30 +327,115 @@ pub(crate) fn contingencies(
     let n = start.len();
     let ybus = intact_ybus(n, lines, transformers, shunts);
     let intact_components = structural_component_count(n, lines, transformers, &[]);
-    let mut members = Vec::new();
-    let mut deltas = Vec::new();
-    for (s, sc) in scenarios.iter().enumerate() {
-        let mut outaged = vec![false; n_branches];
-        for &b in &sc.branch_outages {
-            outaged[b] = true;
+    // A single outage splits the network exactly when its branch is a
+    // bridge: one search for them all, where counting the network's
+    // components for every outage was 0.67 ms an outage on case9241pegase,
+    // 9.6 s of its full N-1's 22. Outages of several branches still count.
+    let bridge = bridges(n, lines, transformers);
+    let splits = |sc: &Scenario| match sc.branch_outages.as_slice() {
+        [] => false,
+        &[b] => bridge[b],
+        several => {
+            let mut outaged = vec![false; n_branches];
+            for &b in several {
+                outaged[b] = true;
+            }
+            structural_component_count(n, lines, transformers, &outaged) != intact_components
         }
-        if structural_component_count(n, lines, transformers, &outaged) != intact_components {
-            continue;
-        }
-        members.push(s);
-        deltas.push(Delta::of_outage(
-            &ybus,
-            lines,
-            transformers,
-            &sc.branch_outages,
-        ));
-    }
+    };
+    use rayon::prelude::*;
+    let kept: Vec<(usize, Delta)> = scenarios
+        .par_iter()
+        .enumerate()
+        .filter(|(_, sc)| !splits(sc))
+        .map(|(s, sc)| {
+            let delta = Delta::of_outage(&ybus, lines, transformers, &sc.branch_outages);
+            (s, delta)
+        })
+        .collect();
+    let (members, deltas) = kept.into_iter().unzip();
 
     Ok(Contingencies {
         ybus,
         members,
         deltas,
     })
+}
+
+/// Per flat branch (lines, then transformers), whether taking it out alone
+/// splits a connected part of the network: whether it is a bridge of the
+/// branch multigraph, so a branch beside a parallel one is not, and a
+/// self-loop never. Tarjan's low-link search, without recursion, so that a
+/// long radial feeder cannot overflow the stack.
+pub(crate) fn bridges(n: usize, lines: &[Line], transformers: &[Transformer]) -> Vec<bool> {
+    let ends: Vec<(usize, usize)> = lines
+        .iter()
+        .map(|l| (l.from, l.to))
+        .chain(transformers.iter().map(|t| (t.from, t.to)))
+        .collect();
+    // Each bus's branches, as (neighbour, branch).
+    let mut start = vec![0usize; n + 1];
+    for &(f, t) in &ends {
+        if f != t {
+            start[f + 1] += 1;
+            start[t + 1] += 1;
+        }
+    }
+    for i in 0..n {
+        start[i + 1] += start[i];
+    }
+    let mut next = start[..n].to_vec();
+    let mut adj = vec![(0usize, 0usize); start[n]];
+    for (b, &(f, t)) in ends.iter().enumerate() {
+        if f != t {
+            adj[next[f]] = (t, b);
+            next[f] += 1;
+            adj[next[t]] = (f, b);
+            next[t] += 1;
+        }
+    }
+    const UNSEEN: usize = usize::MAX;
+    let mut order = vec![UNSEEN; n];
+    let mut low = vec![0usize; n];
+    let mut bridge = vec![false; ends.len()];
+    let mut time = 0;
+    // (bus, the branch it was reached by, its next adjacency position).
+    let mut stack: Vec<(usize, usize, usize)> = Vec::new();
+    for root in 0..n {
+        if order[root] != UNSEEN {
+            continue;
+        }
+        order[root] = time;
+        low[root] = time;
+        time += 1;
+        stack.push((root, usize::MAX, start[root]));
+        while let Some(&mut (v, via, ref mut at)) = stack.last_mut() {
+            if *at < start[v + 1] {
+                let (w, b) = adj[*at];
+                *at += 1;
+                if b == via {
+                    continue;
+                }
+                if order[w] == UNSEEN {
+                    order[w] = time;
+                    low[w] = time;
+                    time += 1;
+                    stack.push((w, b, start[w]));
+                } else {
+                    low[v] = low[v].min(order[w]);
+                }
+            } else {
+                stack.pop();
+                if let Some(&(parent, _, _)) = stack.last() {
+                    low[parent] = low[parent].min(low[v]);
+                    if low[v] > order[parent] {
+                        bridge[via] = true;
+                    }
+                }
+            }
+        }
+    }
+    bridge
 }
 
 /// The intact network's Y-bus that N-1's deltas apply to.
@@ -752,5 +837,78 @@ fn csr_of(pattern: &JacobianPattern, n: usize) -> CsrPattern {
         n,
         row_ptr,
         col_idx: pattern.cols().iter().map(|&c| c as usize).collect(),
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    fn line(from: usize, to: usize) -> Line {
+        Line {
+            from,
+            to,
+            r: 0.01,
+            x: 0.1,
+            b_shunt: 0.0,
+            g_shunt: 0.0,
+        }
+    }
+
+    /// Against a count of the network's parts with each branch out, the test
+    /// the bridges replace.
+    fn check(n: usize, lines: &[Line]) {
+        let got = bridges(n, lines, &[]);
+        let intact = structural_component_count(n, lines, &[], &[]);
+        for b in 0..lines.len() {
+            let mut out = vec![false; lines.len()];
+            out[b] = true;
+            let want = structural_component_count(n, lines, &[], &out) != intact;
+            assert_eq!(got[b], want, "branch {b} of {lines:?}");
+        }
+    }
+
+    #[test]
+    fn bridges_are_the_branches_whose_outage_splits_the_network() {
+        // A ring with a tail, parallel branches, a self-loop, and an island.
+        check(1, &[]);
+        check(2, &[line(0, 1)]);
+        check(2, &[line(0, 1), line(0, 1)]);
+        check(3, &[line(0, 1), line(1, 2), line(2, 0)]);
+        check(
+            7,
+            &[
+                line(0, 1),
+                line(1, 2),
+                line(2, 0),
+                line(2, 3),
+                line(3, 4),
+                line(3, 4),
+                line(4, 4),
+                line(5, 6),
+            ],
+        );
+        // Random sparse graphs, as grids are, with parallel branches.
+        let mut state = 7u64;
+        let mut next = |m: usize| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize % m
+        };
+        for _ in 0..300 {
+            let n = 2 + next(40);
+            let lines: Vec<Line> = (0..n + next(n)).map(|_| line(next(n), next(n))).collect();
+            check(n, &lines);
+        }
+    }
+
+    /// A long feeder, every branch a bridge, deeper than a recursive search
+    /// could go.
+    #[test]
+    fn a_long_feeder_does_not_overflow() {
+        let n = 200_000;
+        let lines: Vec<Line> = (1..n).map(|i| line(i - 1, i)).collect();
+        assert!(bridges(n, &lines, &[]).iter().all(|&b| b));
     }
 }
