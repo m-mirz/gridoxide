@@ -93,6 +93,10 @@ mod cudss {
             println!("cargo:rerun-if-env-changed={var}");
         }
         println!("cargo:rerun-if-changed={}", cudss_include.display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            cuda_include.join("cuda_runtime.h").display()
+        );
         println!("cargo:rerun-if-changed=cuda/kernels.cu");
         println!("cargo:rerun-if-changed=cuda/kernels.h");
         println!("cargo:rerun-if-changed=cuda/opf.cu");

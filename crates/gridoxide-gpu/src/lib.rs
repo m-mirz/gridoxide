@@ -18,9 +18,11 @@
 //! scenario's Newton state on the device with the step's kernels, and
 //! [`GpuBatchSolver`](gpu::GpuBatchSolver), the adaptive loop over both: a
 //! session per network that keeps its cuDSS analysis. And
-//! [`GpuDcSolver`](dc::GpuDcSolver), DC N-1: one factorization, every
-//! outage's angles and flows from one multi-column solve. And
-//! [`CudssSolver`](kkt::CudssSolver), the KKT system of `opf::nlp`'s
+//! [`GpuDcSolver`](dc::GpuDcSolver), DC N-1 and DC sweeps: one
+//! factorization, every outage's or scenario's angles and flows from one
+//! multi-column solve. Both also solve a single power flow
+//! (`solve_single`, `solve`).
+//! And [`CudssSolver`](kkt::CudssSolver), the KKT system of `opf::nlp`'s
 //! interior point on cuDSS, and [`DeviceAcModel`](ac::DeviceAcModel), the
 //! AC-OPF model it solves, evaluated on the device.
 
@@ -44,7 +46,7 @@ pub mod uniform;
 #[cfg(feature = "cuda")]
 pub use cudss::CudssUniformBatch;
 #[cfg(feature = "cuda")]
-pub use dc::GpuDcSolver;
+pub use dc::{DcSweep, GpuDcSolver};
 #[cfg(feature = "cuda")]
 pub use device::DeviceBatch;
 #[cfg(feature = "cuda")]

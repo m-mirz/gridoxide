@@ -1,4 +1,4 @@
-//! DC N-1 on the device: [`GpuDcSolver`].
+//! DC N-1 and DC sweeps on the device: [`GpuDcSolver`].
 //!
 //! gridoxide-core's `DcSensitivity::contingencies` with its solves and its
 //! arithmetic on the device. The reduced susceptance matrix `B` (every
@@ -21,15 +21,32 @@
 //! 2.9 GB of angles and flows. The base case is the CPU's DC solve
 //! (`DcSolver`, kept by the session): one sparse solve, a millisecond on
 //! case9241pegase.
+//!
+//! A sweep of injection scenarios ([`GpuDcSolver::solve_sweep`]) is
+//! gridoxide-core's `DcBatchSolver` on the same factorization: each
+//! scenario's injection change at the unknowns is a column of one
+//! multi-column solve, `Δθ = B⁻¹ ΔP`, and its rows are the base case plus
+//! that response, through the same two-slot pipeline. Its slack pickups are
+//! sums of injections, taken on the host.
+//!
+//! A single DC power flow ([`GpuDcSolver::solve`]) is the CPU's `DcSolver`
+//! with its reduced solve on the device: every island's right-hand side is
+//! one column, solved on the session's factorization. The right-hand sides
+//! and everything after the angles (flows, residual, pickups) are
+//! `DcSolver::solve_with`'s own code, so the two agree to the solve's
+//! rounding.
 
 use std::ptr;
 
-use gridoxide_core::linear::{DcContingencies, DcOptions, DcSolver, dc_branches};
+use gridoxide_core::linear::{
+    DcContingencies, DcOptions, DcSolution, DcSolver, DcSystem, dc_branches,
+};
+use gridoxide_core::scenario::Scenario;
 use gridoxide_core::types::{Bus, BusType, Line, Transformer};
 
 use crate::cuda::{DeviceBuffer, Event, PinnedBuffer, Stream, cuda, ffi};
 use crate::cudss::cudss;
-use crate::newton::BatchError;
+use crate::newton::{BatchError, check_buses};
 use crate::uniform::LinearError;
 
 /// `|1 − d|` below this is a radial branch: gridoxide-core's
@@ -249,7 +266,84 @@ impl Slot {
     }
 }
 
-/// A session of DC N-1 on one network; see the module documentation.
+/// What [`GpuDcSolver::solve_sweep`] returns: per scenario, what
+/// gridoxide-core's `DcBatchResult` holds, in flat scenario-major buffers.
+#[derive(Clone, Debug)]
+pub struct DcSweep {
+    n_scenarios: usize,
+    n_buses: usize,
+    n_branches: usize,
+    n_islands: usize,
+    /// Per scenario, one angle per bus (radians).
+    pub angles: Vec<f64>,
+    /// Per scenario, one from-end flow per flat branch (per unit).
+    pub flows: Vec<f64>,
+    /// Per scenario, what each island's reference buses supply (per unit),
+    /// in the order of the base solve's `DcSolution::islands`, as
+    /// `DcBatchResult::slack_pickup`.
+    pub slack_pickup: Vec<f64>,
+}
+
+impl DcSweep {
+    /// Scenarios.
+    pub fn len(&self) -> usize {
+        self.n_scenarios
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Scenario `k`'s bus angles.
+    pub fn angles(&self, k: usize) -> &[f64] {
+        &self.angles[k * self.n_buses..(k + 1) * self.n_buses]
+    }
+
+    /// Scenario `k`'s branch flows.
+    pub fn flows(&self, k: usize) -> &[f64] {
+        &self.flows[k * self.n_branches..(k + 1) * self.n_branches]
+    }
+
+    /// Scenario `k`'s slack pickups, one per island.
+    pub fn slack_pickup(&self, k: usize) -> &[f64] {
+        &self.slack_pickup[k * self.n_islands..(k + 1) * self.n_islands]
+    }
+}
+
+/// A sweep's injection changes at the unknowns, every scenario's after the
+/// previous one's: column (scenario), row and value of each.
+struct Injections {
+    col: Vec<u32>,
+    row: Vec<u32>,
+    val: Vec<f64>,
+    /// Per scenario, where its entries start; one more at the end.
+    start: Vec<usize>,
+}
+
+/// What [`GpuDcSolver::pipelined`] returns: every column's angles, flows
+/// and solved flags.
+type Rows = (Vec<f64>, Vec<f64>, Vec<bool>);
+
+/// The device's copy of one chunk's [`Injections`], grown as a sweep needs.
+struct InjectionBuffers {
+    col: DeviceBuffer<u32>,
+    row: DeviceBuffer<u32>,
+    val: DeviceBuffer<f64>,
+}
+
+impl InjectionBuffers {
+    fn new(len: usize) -> Result<Self, LinearError> {
+        let len = len.max(1);
+        Ok(Self {
+            col: DeviceBuffer::new(len)?,
+            row: DeviceBuffer::new(len)?,
+            val: DeviceBuffer::new(len)?,
+        })
+    }
+}
+
+/// A session of DC N-1 and DC sweeps on one network; see the module
+/// documentation.
 pub struct GpuDcSolver {
     // First: its descriptors point into the buffers below and it runs on
     // `stream`, so it goes before them; the streams go before the slots,
@@ -262,6 +356,8 @@ pub struct GpuDcSolver {
     n_br: usize,
     capacity: usize,
     base: DcSolver,
+    /// `pos` on the host, for a sweep's right-hand sides.
+    host_pos: Vec<i32>,
     _row_ptr: DeviceBuffer<i32>,
     _col: DeviceBuffer<i32>,
     _values: DeviceBuffer<f64>,
@@ -274,6 +370,7 @@ pub struct GpuDcSolver {
     out_br: DeviceBuffer<u32>,
     rhs: DeviceBuffer<f64>,
     theta: DeviceBuffer<f64>,
+    injections: InjectionBuffers,
     slots: [Slot; 2],
 }
 
@@ -369,6 +466,7 @@ impl GpuDcSolver {
             capacity,
             base: DcSolver::new(buses, lines, transformers, opts),
             pos: up_i(&r.pos)?,
+            host_pos: r.pos.clone(),
             br_from: up_u(&r.br_from)?,
             br_to: up_u(&r.br_to)?,
             br_b: up(&r.br_b)?,
@@ -377,6 +475,7 @@ impl GpuDcSolver {
             out_br: DeviceBuffer::new(capacity)?,
             rhs,
             theta,
+            injections: InjectionBuffers::new(capacity)?,
             slots: [
                 Slot::new(n_bus, n_br, capacity)?,
                 Slot::new(n_bus, n_br, capacity)?,
@@ -411,6 +510,224 @@ impl GpuDcSolver {
                 n_branches: self.n_br,
             });
         }
+        self.upload_base(buses)?;
+        let (angles, flows, solved) = self.pipelined(outages.len(), true, |first, k, slot| {
+            let out_br: Vec<u32> = outages[first..first + k]
+                .iter()
+                .map(|&b| b as u32)
+                .collect();
+            // SAFETY: `out_br` holds `capacity` values, at least `k`.
+            unsafe { crate::cuda::copy_to_device(self.out_br.ptr, &out_br, self.stream.0)? };
+            self.run_chunk(k, slot)
+        })?;
+        Ok(DcContingencies::from_parts(
+            self.n_bus, self.n_br, angles, flows, solved,
+        ))
+    }
+
+    /// The base case of `buses` (their injections; the reference buses the
+    /// session was made with) solved on the CPU, then every scenario of
+    /// `scenarios` on the device: its angles, flows and slack pickups, as
+    /// gridoxide-core's `DcBatchSolver::solve` returns them for the same
+    /// template and scenarios.
+    ///
+    /// As there, a scenario's `p_spec` overrides replace the template's,
+    /// its ZIP terms stay, and `q_spec` and `voltage_mag` are ignored; a
+    /// scenario with branch outages is refused (outages are
+    /// [`solve_contingencies`](Self::solve_contingencies)).
+    pub fn solve_sweep(
+        &mut self,
+        buses: &[Bus],
+        scenarios: &[Scenario],
+    ) -> Result<DcSweep, BatchError> {
+        if let Some(scenario) = scenarios
+            .iter()
+            .position(|sc| !sc.branch_outages.is_empty())
+        {
+            return Err(BatchError::OutagesUnsupported { scenario });
+        }
+        check_buses(buses, scenarios)?;
+        let islands = self.upload_base(buses)?;
+
+        // Each island's non-reference buses, whose injections its references
+        // balance (DC is lossless), and their sum in the template.
+        let mut island_of = vec![usize::MAX; self.n_bus];
+        let mut base_sum = vec![0.0; islands.len()];
+        for (i, island) in islands.iter().enumerate() {
+            for &bus in &island.bus_indices {
+                if !island.slack_indices.contains(&bus) {
+                    island_of[bus] = i;
+                    base_sum[i] += dc_injection(&buses[bus]);
+                }
+            }
+        }
+
+        // The injection changes, the last override of a bus winning.
+        let mut inj = Injections {
+            col: Vec::new(),
+            row: Vec::new(),
+            val: Vec::new(),
+            start: Vec::with_capacity(scenarios.len() + 1),
+        };
+        let mut slack_pickup = Vec::with_capacity(scenarios.len() * islands.len());
+        let mut delta = vec![0.0; self.n_bus];
+        let mut touched = Vec::new();
+        for (s, sc) in scenarios.iter().enumerate() {
+            inj.start.push(inj.val.len());
+            for ov in &sc.bus_overrides {
+                if let Some(p) = ov.p_spec {
+                    touched.push(ov.bus);
+                    delta[ov.bus] = p - buses[ov.bus].p_spec;
+                }
+            }
+            let mut sum = base_sum.clone();
+            for &bus in &touched {
+                let d = std::mem::take(&mut delta[bus]);
+                if d == 0.0 {
+                    continue;
+                }
+                if island_of[bus] != usize::MAX {
+                    sum[island_of[bus]] += d;
+                }
+                if self.host_pos[bus] >= 0 {
+                    inj.col.push(s as u32);
+                    inj.row.push(self.host_pos[bus] as u32);
+                    inj.val.push(d);
+                }
+            }
+            touched.clear();
+            slack_pickup.extend(sum.iter().map(|v| -v));
+        }
+        inj.start.push(inj.val.len());
+
+        let cap = self.capacity;
+        let most = (0..scenarios.len())
+            .step_by(cap)
+            .map(|first| {
+                let last = (first + cap).min(scenarios.len());
+                inj.start[last] - inj.start[first]
+            })
+            .max()
+            .unwrap_or(0);
+        if most > self.injections.val.len() {
+            // The stream's queued work may still read the old buffers.
+            cuda(
+                // SAFETY: the session's own stream.
+                unsafe { ffi::cudaStreamSynchronize(self.stream.0) },
+                "cudaStreamSynchronize",
+            )?;
+            self.injections = InjectionBuffers::new(most)?;
+        }
+
+        let (angles, flows, _) = self.pipelined(scenarios.len(), false, |first, k, slot| {
+            let (a, b) = (inj.start[first], inj.start[first + k]);
+            let col: Vec<u32> = inj.col[a..b].iter().map(|&c| c - first as u32).collect();
+            // SAFETY: the buffers hold `most` values, at least `b - a`.
+            unsafe {
+                crate::cuda::copy_to_device(self.injections.col.ptr, &col, self.stream.0)?;
+                crate::cuda::copy_to_device(
+                    self.injections.row.ptr,
+                    &inj.row[a..b],
+                    self.stream.0,
+                )?;
+                crate::cuda::copy_to_device(
+                    self.injections.val.ptr,
+                    &inj.val[a..b],
+                    self.stream.0,
+                )?;
+            }
+            self.run_sweep_chunk(k, b - a, slot)
+        })?;
+        Ok(DcSweep {
+            n_scenarios: scenarios.len(),
+            n_buses: self.n_bus,
+            n_branches: self.n_br,
+            n_islands: islands.len(),
+            angles,
+            flows,
+            slack_pickup,
+        })
+    }
+
+    /// A single DC power flow of `buses` (their injections; the reference
+    /// buses the session was made with), its reduced solve on the device:
+    /// angles written back into `buses` and the rest returned, as
+    /// `DcSolver::solve` does on the CPU. An island the CPU cannot factor,
+    /// or whose device angles are not finite, is reported
+    /// `DcIslandStatus::Singular`.
+    pub fn solve(&mut self, buses: &mut [Bus]) -> Result<DcSolution, BatchError> {
+        let mut failure = None;
+        let this = &*self;
+        let solution = this
+            .base
+            .solve_with(buses, |systems| match this.solve_column(systems) {
+                Ok(theta) => theta,
+                Err(e) => {
+                    failure = Some(e);
+                    vec![None; systems.len()]
+                }
+            });
+        failure.map_or(Ok(solution), Err)
+    }
+
+    /// Every system's right-hand side in one column, solved on the device;
+    /// each system's angles, `None` where it is not factored or not finite.
+    fn solve_column(&self, systems: &[DcSystem<'_>]) -> Result<Vec<Option<Vec<f64>>>, BatchError> {
+        let n = self.n;
+        let row = |bus: usize| -> Result<usize, BatchError> {
+            usize::try_from(self.host_pos[bus]).map_err(|_| {
+                BatchError::Linear(LinearError::Shape(format!(
+                    "bus {bus} is an unknown of the CPU's DC solve but not of the device's"
+                )))
+            })
+        };
+        let mut rhs = vec![0.0; n];
+        for sys in systems {
+            for (&bus, &v) in sys.unknown.iter().zip(&sys.rhs) {
+                rhs[row(bus)?] = v;
+            }
+        }
+        let mut theta = vec![0.0; n];
+        if n > 0 {
+            // SAFETY: `rhs` and `theta` hold `n × capacity` values, at least
+            // `n`; the copy back is waited for before `theta` is read.
+            unsafe {
+                crate::cuda::copy_to_device(self.rhs.ptr, &rhs, self.stream.0)?;
+                let (x, b) = (
+                    Dense::new(n, 1, self.theta.ptr)?,
+                    Dense::new(n, 1, self.rhs.ptr)?,
+                );
+                self.sys
+                    .execute(ffi::CUDSS_PHASE_SOLVE, x.0, b.0, "SOLVE")?;
+                copy_async_to_host(theta.as_mut_ptr(), self.theta.ptr, n, self.stream.0)?;
+                cuda(
+                    ffi::cudaStreamSynchronize(self.stream.0),
+                    "cudaStreamSynchronize",
+                )?;
+            }
+        }
+        systems
+            .iter()
+            .map(|sys| {
+                if !sys.factored {
+                    return Ok(None);
+                }
+                let angles = sys
+                    .unknown
+                    .iter()
+                    .map(|&bus| row(bus).map(|r| theta[r]))
+                    .collect::<Result<Vec<f64>, _>>()?;
+                Ok(angles.iter().all(|a| a.is_finite()).then_some(angles))
+            })
+            .collect()
+    }
+
+    /// The base case of `buses` solved on the CPU, its angles and flows on
+    /// the device; its islands.
+    fn upload_base(
+        &mut self,
+        buses: &[Bus],
+    ) -> Result<Vec<gridoxide_core::linear::DcIslandReport>, BatchError> {
         let mut solved_buses = buses.to_vec();
         let base = self.base.solve(&mut solved_buses);
         let base_angles: Vec<f64> = solved_buses.iter().map(|b| b.voltage_ang).collect();
@@ -420,14 +737,26 @@ impl GpuDcSolver {
         if self.n_br > 0 {
             self.base_flows.upload(&base.branch_p, self.stream.0)?;
         }
+        Ok(base.islands)
+    }
 
-        let total = outages.len();
+    /// `total` columns in chunks of `capacity`, pipelined over the two
+    /// slots: `compute(first, k, slot)` queues chunk `first..first + k` on
+    /// the session's stream, writing its rows into the slot, and its rows
+    /// reach the result while the next chunk is computed. `solved` is
+    /// copied back only `with_solved`; otherwise the returned flags are all
+    /// false.
+    fn pipelined(
+        &self,
+        total: usize,
+        with_solved: bool,
+        mut compute: impl FnMut(usize, usize, &Slot) -> Result<(), BatchError>,
+    ) -> Result<Rows, BatchError> {
         let (n_bus, n_br) = (self.n_bus, self.n_br);
         let mut angles = vec![0.0; total * n_bus];
         let mut flows = vec![0.0; total * n_br];
         let mut solved = vec![false; total];
         let cap = self.capacity;
-        let this = &*self;
         std::thread::scope(|scope| -> Result<(), BatchError> {
             let mut pending: [Option<std::thread::ScopedJoinHandle<'_, Result<(), LinearError>>>;
                 2] = [None, None];
@@ -435,34 +764,32 @@ impl GpuDcSolver {
                 .chunks_mut(cap * n_bus.max(1))
                 .zip(flows.chunks_mut(cap * n_br.max(1)))
                 .zip(solved.chunks_mut(cap));
-            for (i, (chunk, ((dst_angles, dst_flows), dst_solved))) in
-                outages.chunks(cap).zip(rows).enumerate()
-            {
-                let k = chunk.len();
-                let slot = &this.slots[i % 2];
+            for (i, ((dst_angles, dst_flows), dst_solved)) in rows.enumerate() {
+                let (first, k) = (i * cap, dst_solved.len());
+                let slot = &self.slots[i % 2];
                 // The slot's pinned buffers are free once chunk i − 2's host
                 // copy has run, and its device buffers once that chunk's
                 // device-to-host copy has (which the host copy waited for).
                 if let Some(h) = pending[i % 2].take() {
                     h.join().expect("a host copy panicked")?;
                 }
-                let out_br: Vec<u32> = chunk.iter().map(|&b| b as u32).collect();
+                compute(first, k, slot)?;
                 // SAFETY: every buffer holds `capacity` columns, at least
                 // `k`; the slot is free (above), and each stream orders its
                 // own work, the events the work between them.
                 unsafe {
-                    crate::cuda::copy_to_device(this.out_br.ptr, &out_br, this.stream.0)?;
-                    this.run_chunk(k, slot)?;
                     cuda(
-                        ffi::cudaEventRecord(slot.computed.0, this.stream.0),
+                        ffi::cudaEventRecord(slot.computed.0, self.stream.0),
                         "cudaEventRecord",
                     )?;
                     cuda(
-                        ffi::cudaStreamWaitEvent(this.copy_stream.0, slot.computed.0, 0),
+                        ffi::cudaStreamWaitEvent(self.copy_stream.0, slot.computed.0, 0),
                         "cudaStreamWaitEvent",
                     )?;
-                    let cs = this.copy_stream.0;
-                    copy_async_to_host(slot.host_solved.as_mut_ptr(), slot.solved.ptr, k, cs)?;
+                    let cs = self.copy_stream.0;
+                    if with_solved {
+                        copy_async_to_host(slot.host_solved.as_mut_ptr(), slot.solved.ptr, k, cs)?;
+                    }
                     copy_async_to_host(
                         slot.host_angles.as_mut_ptr(),
                         slot.angles.ptr,
@@ -487,8 +814,10 @@ impl GpuDcSolver {
                     )?;
                     parallel_copy(dst_angles, host_angles.prefix(k * n_bus));
                     parallel_copy(dst_flows, host_flows.prefix(k * n_br));
-                    for (s, f) in dst_solved.iter_mut().zip(host_solved.prefix(k)) {
-                        *s = *f != 0;
+                    if with_solved {
+                        for (s, f) in dst_solved.iter_mut().zip(host_solved.prefix(k)) {
+                            *s = *f != 0;
+                        }
                     }
                     Ok(())
                 }));
@@ -498,9 +827,68 @@ impl GpuDcSolver {
             }
             Ok(())
         })?;
-        Ok(DcContingencies::from_parts(
-            n_bus, n_br, angles, flows, solved,
-        ))
+        Ok((angles, flows, solved))
+    }
+
+    /// A sweep's kernels and solve for the first `k` columns, whose `count`
+    /// injection entries are in `self.injections`.
+    fn run_sweep_chunk(&self, k: usize, count: usize, slot: &Slot) -> Result<(), BatchError> {
+        let (n, s) = (self.n, self.stream.0.cast());
+        // SAFETY: every buffer is sized for `capacity` columns, at least `k`,
+        // and the injection buffers for at least `count` entries.
+        unsafe {
+            if n > 0 {
+                launched(
+                    ffi::go_dc_injection_rhs(
+                        self.injections.col.ptr,
+                        self.injections.row.ptr,
+                        self.injections.val.ptr,
+                        count as u32,
+                        self.rhs.ptr,
+                        n as u32,
+                        k as u32,
+                        s,
+                    ),
+                    "go_dc_injection_rhs",
+                )?;
+                let (x, b) = (
+                    Dense::new(n, k, self.theta.ptr)?,
+                    Dense::new(n, k, self.rhs.ptr)?,
+                );
+                self.sys
+                    .execute(ffi::CUDSS_PHASE_SOLVE, x.0, b.0, "SOLVE")?;
+            }
+            launched(
+                ffi::go_dc_sweep_angles(
+                    self.theta.ptr,
+                    self.pos.ptr,
+                    self.base_angles.ptr,
+                    slot.angles.ptr,
+                    n as u32,
+                    self.n_bus as u32,
+                    k as u32,
+                    s,
+                ),
+                "go_dc_sweep_angles",
+            )?;
+            launched(
+                ffi::go_dc_sweep_flows(
+                    self.theta.ptr,
+                    self.br_from.ptr,
+                    self.br_to.ptr,
+                    self.br_b.ptr,
+                    self.pos.ptr,
+                    self.base_flows.ptr,
+                    slot.flows.ptr,
+                    n as u32,
+                    self.n_br as u32,
+                    k as u32,
+                    s,
+                ),
+                "go_dc_sweep_flows",
+            )?;
+        }
+        Ok(())
     }
 
     /// The kernels and the solve for the first `k` columns.
@@ -584,6 +972,12 @@ impl GpuDcSolver {
         }
         Ok(())
     }
+}
+
+/// A bus's DC injection: `p_spec` and its ZIP terms at `|V| = 1`, as
+/// gridoxide-core's DC solve takes it.
+fn dc_injection(bus: &Bus) -> f64 {
+    bus.p_spec + bus.zip_terms.iter().map(|z| z.s_const.re).sum::<f64>()
 }
 
 fn launched(err: i32, what: &str) -> Result<(), LinearError> {

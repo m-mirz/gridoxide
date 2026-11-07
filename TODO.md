@@ -129,18 +129,27 @@ copy of the voltages back to the host.
 
 The device solves AC sweeps (`GpuBatchSolver.solve_batch`), AC N-1
 (`GpuBatchSolver.solve_contingencies`), DC N-1
-(`GpuDcSolver.solve_contingencies`) and the AC-OPF (above). Everything else
-is CPU only.
+(`GpuDcSolver.solve_contingencies`), DC sweeps (`GpuDcSolver.solve_sweep`),
+single AC and DC power flows (`GpuBatchSolver.solve_single`,
+`GpuDcSolver.solve`) and the AC-OPF (above). Everything else is CPU only.
 
-- [ ] **DC sweeps.** `GpuDcSolver` already keeps one factorization; a sweep
-  of injection scenarios is one multi-column solve over their right-hand
-  sides. The cheapest addition.
+- [x] **DC sweeps.** `GpuDcSolver::solve_sweep`, one multi-column solve per
+  chunk on the session's factorization, through N-1's two-slot pipeline.
+  Slower than `DcBatchSolver` on 30 threads: 1000 scenarios take 45 ms
+  against 12 on case1354pegase, 290 against 94 on case9241pegase
+  (`examples/gpu_dc_sweep_bench.rs`).
 - [ ] **A linear start for AC.** The CPU's `start="linear"` has no device
   counterpart; every scenario starts from the last `solve()`. A DC solve per
   scenario on the device would give it one.
-- [ ] **Single AC or DC power flow.** One system is cuDSS's worst case (a
-  roughly fixed cost per system), so this is worth it only on grids large
-  enough to fill the device. Measure before building.
+- [x] **Single AC or DC power flow.** `GpuBatchSolver::solve_single` (a
+  batch of one from the given buses) and `GpuDcSolver::solve` (the CPU's
+  `DcSolver` with its reduced solve on the device, through
+  `DcSolver::solve_with`). `examples/gpu_single_bench.rs`, against the CPU:
+  single AC on a warm session 2.4 ms against 3.0 on case1354pegase, 7.9
+  against 41 on case9241pegase; cold 2.75x slower and 0.93x; single DC warm
+  1.8x slower and 0.8x.
+- [ ] **The Python tests of these two** in `python/tests/test_gpu.py` have
+  not run: no maturin on the A100 machine.
 - [ ] **State estimation.** Batched SE over measurement sets. Large work;
   only after the batch is competitive.
 

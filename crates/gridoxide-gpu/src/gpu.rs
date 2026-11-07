@@ -19,6 +19,12 @@
 //! The options are [`BatchOptions`]'s, with the CPU loop's meaning:
 //! adaptive or fixed steps, factor reuse, and the CPU hand-off of the last
 //! few scenarios.
+//!
+//! A single power flow ([`GpuBatchSolver::solve_single`]) is a batch of
+//! one from the buses it is given. One system is cuDSS's worst case, a
+//! roughly fixed cost per system, so it pays only on large grids; make its
+//! session with `capacity` 1, or the other slots are masked out at every
+//! step.
 
 use gridoxide_core::network::{ShuntAdm, YBusSparse};
 use gridoxide_core::scenario::Scenario;
@@ -131,6 +137,50 @@ impl GpuBatchSolver {
         }
         let deltas = vec![Delta::default(); scenarios.len()];
         self.solve_all(scenarios, &deltas, opts)
+    }
+
+    /// A single power flow of `buses`, from their voltages with their
+    /// injections and setpoints, voltages written back into them as the
+    /// CPU's `PersistentSolver::solve` does. `buses` must be the session's
+    /// network: the same count and bus types, which are checked, and the same
+    /// ZIP terms, which are not (the device took them with the network).
+    /// Later [`solve`](Self::solve)s still start from the session's own
+    /// start. Branch outages and the CPU hand-off of `opts` apply as to a
+    /// batch of one.
+    pub fn solve_single(
+        &mut self,
+        buses: &mut [Bus],
+        opts: &BatchOptions,
+    ) -> Result<ScenarioResult, BatchError> {
+        let n_buses = self.start.len();
+        if buses.len() != n_buses {
+            return Err(BatchError::NotTheSessionsBuses {
+                n_buses,
+                given: buses.len(),
+                bus: None,
+            });
+        }
+        if let Some(bus) = (0..n_buses).find(|&i| buses[i].bus_type != self.start[i].bus_type) {
+            return Err(BatchError::NotTheSessionsBuses {
+                n_buses,
+                given: n_buses,
+                bus: Some(bus),
+            });
+        }
+        let kept = std::mem::replace(&mut self.start, buses.to_vec());
+        self.dev.set_start(&self.start);
+        let report = self.solve(&[Scenario::default()], opts);
+        self.dev.set_start(&kept);
+        self.start = kept;
+        let r = report?
+            .scenarios
+            .pop()
+            .expect("one result for one scenario");
+        for (i, b) in buses.iter_mut().enumerate() {
+            b.voltage_mag = r.voltage_mag[i];
+            b.voltage_ang = r.voltage_ang[i];
+        }
+        Ok(r)
     }
 
     /// N-1, as [`solve_contingency_batch`](crate::newton::solve_contingency_batch)

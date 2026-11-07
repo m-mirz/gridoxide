@@ -4490,6 +4490,36 @@ impl GpuBatchSolver {
         self.stored_scenarios = overrides_to_scenarios(scenarios);
     }
 
+    /// A single power flow of `model` as it is now, on the device: its
+    /// injections and setpoints, from the voltages of its last `solve()`
+    /// (`start="last"`) or from the linear initial guess (`"linear"`, as
+    /// `solve()` starts). One `BatchResult`; the model is left unchanged.
+    /// `model` must be the session's network with the same bus types, or
+    /// `ValueError` is raised. Worth it only on large grids: one system is
+    /// cuDSS's worst case. Make the session with `capacity=1` for it.
+    #[pyo3(signature = (model, start="last"))]
+    fn solve_single(
+        &mut self,
+        model: PyRef<'_, PowerFlowModel>,
+        start: &str,
+    ) -> PyResult<BatchResult> {
+        let (mut buses, how) = model.batch_start(start)?;
+        if how == BatchStart::Linear {
+            linear_initial_guess(&mut buses, &model.ybus);
+        }
+        let r = self
+            .session
+            .solve_single(&mut buses, &self.opts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(BatchResult {
+            converged: r.outcome == crate::gpu::Outcome::Converged,
+            iterations: r.newton_steps + 1,
+            max_mismatch: r.final_mismatch,
+            voltage_mag: r.voltage_mag,
+            voltage_ang: r.voltage_ang,
+        })
+    }
+
     /// As `PowerFlowModel.solve_contingencies`, on the device: one list of
     /// flat branch indices per contingency, one `ContingencyResult` per
     /// contingency in order. `status` is `"converged"`, `"max_iterations"` or
@@ -4568,8 +4598,8 @@ impl GpuBatchSolver {
     }
 }
 
-/// DC N-1 on an NVIDIA GPU: a session for one `PowerFlowModel`'s DC
-/// network. See `gridoxide::gpu::GpuDcSolver`.
+/// DC N-1 and DC sweeps on an NVIDIA GPU: a session for one
+/// `PowerFlowModel`'s DC network. See `gridoxide::gpu::GpuDcSolver`.
 ///
 /// `GpuDcSolver(model, capacity=1024)` takes the model's DC network once:
 /// its branches, DC options, reference buses and injections (shunt
@@ -4582,6 +4612,9 @@ impl GpuBatchSolver {
 struct GpuDcSolver {
     session: crate::gpu::GpuDcSolver,
     buses: Vec<Bus>,
+    /// Per bus, the shunt conductance `buses` takes as load (zero unless
+    /// the model's DC solve does), which a sweep's overrides keep.
+    shunt_load: Vec<f64>,
     n_branches: usize,
 }
 
@@ -4592,9 +4625,11 @@ impl GpuDcSolver {
     #[pyo3(signature = (model, capacity=1024))]
     fn new(model: PyRef<'_, PowerFlowModel>, capacity: usize) -> PyResult<Self> {
         let mut buses = model.buses_template.clone();
+        let mut shunt_load = vec![0.0; buses.len()];
         if model.dc_shunt_conductance_as_load {
             for s in &model.shunts {
                 buses[s.at].p_spec -= s.y.re;
+                shunt_load[s.at] += s.y.re;
             }
         }
         let session = crate::gpu::GpuDcSolver::new(
@@ -4608,6 +4643,7 @@ impl GpuDcSolver {
         Ok(Self {
             session,
             buses,
+            shunt_load,
             n_branches: model.lines.len() + model.transformers.len(),
         })
     }
@@ -4642,6 +4678,75 @@ impl GpuDcSolver {
             Float64Buffer::new(out.angles),
             Float64Buffer::new(out.flows),
             out.solved,
+        ))
+    }
+
+    /// A single DC power flow of the session's injections, its reduced
+    /// solve on the device: `(voltage_ang, branch_flow_p, slack_pickup)`,
+    /// as `solve_dc()` then `voltage_ang()`, `branch_flow_p()` and
+    /// `dc_slack_pickup()` give them (pickups without their bus lists).
+    /// Raises `RuntimeError` if an island's matrix is singular, as
+    /// `solve_dc()` does.
+    fn solve(&mut self) -> PyResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let mut buses = self.buses.clone();
+        let solution = self
+            .session
+            .solve(&mut buses)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let singular: Vec<&[usize]> = solution
+            .islands
+            .iter()
+            .filter(|i| i.status == DcIslandStatus::Singular)
+            .map(|i| i.bus_indices.as_slice())
+            .collect();
+        if !singular.is_empty() {
+            return Err(PyRuntimeError::new_err(format!(
+                "DC susceptance matrix is singular (component(s) with buses {singular:?})"
+            )));
+        }
+        Ok((
+            buses.iter().map(|b| b.voltage_ang).collect(),
+            solution.branch_p,
+            solution.islands.iter().map(|i| i.slack_pickup).collect(),
+        ))
+    }
+
+    /// The base case's DC power flow (on the CPU), then every scenario of
+    /// `scenarios` on the device, in `solve_batch`'s format: per scenario,
+    /// `(bus, p, q)` overrides of the model's injections; `q` is ignored.
+    /// Returns `(angles, flows, slack_pickup)`, read-only float64 buffers of
+    /// every scenario's bus angles (radians), from-end branch flows and
+    /// per-island reference pickups (per unit, islands in `dc_slack_pickup`'s
+    /// order), one scenario after another.
+    ///
+    /// The session factored its matrix once, so a sweep is one multi-column
+    /// solve per `capacity` scenarios. A DC solve cannot fail per scenario;
+    /// a bus out of range raises `ValueError`.
+    fn solve_sweep(
+        &mut self,
+        scenarios: Vec<Vec<(usize, f64, f64)>>,
+    ) -> PyResult<(Float64Buffer, Float64Buffer, Float64Buffer)> {
+        let mut scenarios = overrides_to_scenarios(scenarios);
+        for (s, sc) in scenarios.iter_mut().enumerate() {
+            for ov in &mut sc.bus_overrides {
+                let Some(load) = self.shunt_load.get(ov.bus) else {
+                    return Err(PyValueError::new_err(format!(
+                        "scenario {s} overrides bus {}, but there are {} buses",
+                        ov.bus,
+                        self.buses.len()
+                    )));
+                };
+                ov.p_spec = ov.p_spec.map(|p| p - load);
+            }
+        }
+        let out = self
+            .session
+            .solve_sweep(&self.buses, &scenarios)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok((
+            Float64Buffer::new(out.angles),
+            Float64Buffer::new(out.flows),
+            Float64Buffer::new(out.slack_pickup),
         ))
     }
 }
