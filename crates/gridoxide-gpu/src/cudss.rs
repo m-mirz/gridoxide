@@ -224,6 +224,31 @@ impl CudssBatch {
                 ),
                 "cudssConfigSet(UBATCH_SIZE)",
             )?;
+            // A grid's Jacobian is small next to what cuDSS's defaults are
+            // made for. Multiblock factorization and six levels of nested
+            // dissection (the default is 10) take 1.3-2.7x off a batch at 1024
+            // scenarios, in the same Newton steps, on half the device memory.
+            // See scripts/bench/README.md, section 11.
+            let (multiblock, levels): (ffi::cudssFactorizationAlg_t, i32) =
+                (ffi::CUDSS_FACTORIZATION_ALG_MULTIBLOCK, 6);
+            cudss(
+                ffi::cudssConfigSet(
+                    lin.config,
+                    ffi::CUDSS_CONFIG_FACTORIZATION_ALG,
+                    (&multiblock as *const ffi::cudssFactorizationAlg_t).cast(),
+                    size_of::<ffi::cudssFactorizationAlg_t>(),
+                ),
+                "cudssConfigSet(FACTORIZATION_ALG)",
+            )?;
+            cudss(
+                ffi::cudssConfigSet(
+                    lin.config,
+                    ffi::CUDSS_CONFIG_ND_NLEVELS,
+                    (&levels as *const i32).cast(),
+                    size_of::<i32>(),
+                ),
+                "cudssConfigSet(ND_NLEVELS)",
+            )?;
         }
         // All ones before the analysis: the mask's device storage is
         // allocated there, and later masks only change its contents.

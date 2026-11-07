@@ -1007,38 +1007,71 @@ its warm-up, 1e-6. The trace adds about 10-15% to the solve.
 
 | Case, scenarios | cuDSS, of device work | Our kernels | Copies | cuDSS, of wall time | GPU idle |
 |---|---|---|---|---|---|
-| case1354pegase, sweep 256 | 96.7% | 1.4% | 1.8% | 91.6% | 5.3% |
-| case1354pegase, sweep 1024 | 96.3% | 1.3% | 2.4% | 91.3% | 5.1% |
-| case1354pegase, N-1 256 | 94.3% | 1.9% | 3.8% | 86.9% | 7.9% |
-| case2869pegase, sweep 256 | 94.7% | 2.2% | 3.0% | 87.6% | 7.5% |
-| case2869pegase, sweep 1024 | 94.6% | 2.1% | 3.3% | 88.6% | 6.4% |
-| case2869pegase, N-1 256 | 92.6% | 2.5% | 4.9% | 82.4% | 11.0% |
-| case9241pegase, sweep 256 | 93.0% | 3.0% | 4.0% | 86.1% | 7.5% |
-| case9241pegase, N-1 256 | 92.7% | 3.7% | 3.6% | 86.4% | 6.9% |
+| case1354pegase, sweep 256 | 91.7% | 3.7% | 4.7% | 82.1% | 10.5% |
+| case1354pegase, sweep 1024 | 90.4% | 3.4% | 6.1% | 79.8% | 11.7% |
+| case1354pegase, N-1 256 | 86.8% | 4.4% | 8.8% | 73.2% | 15.6% |
+| case2869pegase, sweep 256 | 91.3% | 3.7% | 4.9% | 80.4% | 12.0% |
+| case2869pegase, sweep 1024 | 90.6% | 3.6% | 5.7% | 81.2% | 10.5% |
+| case2869pegase, N-1 256 | 88.3% | 4.1% | 7.5% | 74.9% | 15.2% |
+| case9241pegase, sweep 256 | 90.8% | 4.0% | 5.2% | 82.0% | 9.7% |
+| case9241pegase, N-1 256 | 90.9% | 4.5% | 4.5% | 83.0% | 8.7% |
 
-Of the device's work, factorization is 64-76% and the triangular solves
-18-30%; the Jacobian is 1-2% and the mismatch about 1%. The idle time is the
-host's `DeviceBatch::load` (4-8% of the wall time) and the results (2-5%).
-`load` was 12-26%, and cuDSS 67-84% of the wall time, until it filled the
-scenarios in parallel from `start`'s columns: the fill was 90% of it, the
-uploads 0.7-5 ms, N-1's changes under 0.4 ms. That made the solves 8-23%
-faster. Not in the table: cuDSS's analysis, once a session, is several times
-one solve at 256 scenarios on the smaller cases (about 370 ms against 65 on
+Of the device's work, factorization is 51-58% and the triangular solves
+33-41%; the Jacobian is about 2% and the mismatch 1-2%. The idle time is the
+host's `DeviceBatch::load` (6-12% of the wall time) and the results (4-7%).
+Not in the table: cuDSS's analysis, once a session, is several times one solve
+at 256 scenarios on the smaller cases (about 370 ms against 65 on
 case1354pegase, untraced).
 
-### Factor reuse against grid-bench's oracle
+Two changes led here. `load` was 12-26% of the wall time, until it filled the
+scenarios in parallel from `start`'s columns: the fill was 90% of it, the
+uploads 0.7-5 ms, N-1's changes under 0.4 ms. That made the solves 8-23%
+faster. Then cuDSS's settings, below; before them cuDSS was 93-97% of the
+device's work, factorization 64-76% of it.
 
-`reuse_below` through grid-bench's GPU batch adapter and `oracle.evaluate`, at
-its 1e-8 p.u., outside its containers (Python 3.12, the sweeps generated
-without `cases.prep`'s truth check). ms per scenario, median of three:
+### cuDSS's settings
 
-| Sweep | Off | 0.1 | 0.01 |
-|---|---|---|---|
-| case1354pegase#sweep-1k | 0.263 | 0.233 | 0.232 |
-| case2869pegase#sweep-1k | 0.467 | 0.410 | 0.400 |
-| case9241pegase#sweep-1k | 1.361 | 1.261 | 1.260 |
-| case1354pegase#sweep-10k | 0.254 | 0.210 | 0.229 |
-| case2869pegase#sweep-10k | 0.411 | 0.332 | 0.345 |
+`CudssBatch` sets multiblock factorization and six levels of nested dissection
+(`CUDSS_FACTORIZATION_ALG_MULTIBLOCK`, `CUDSS_CONFIG_ND_NLEVELS`; the default
+is 10). `gpu_bench`, 1024 scenarios, 1e-8, solve in ms:
 
-The oracle accepts every scenario of all fifteen runs: the worst residual is
-1e-6 MVA against its limit of 1e-3.
+| Case | Default | Multiblock | Six levels | Both |
+|---|---|---|---|---|
+| case_ACTIVSg200 | 36.5 | 20.9 | | 13.6 |
+| case1354pegase | 258.7 | 173.6 | 142.7 | 113.2 |
+| case1888rte | 294.3 | 200.0 | | 152.2 |
+| case2869pegase | 396.8 | 276.5 | 287.5 | 246.7 |
+| case6495rte | 913.6 | 673.9 | | 659.0 |
+| case9241pegase | 1192.7 | 898.7 | 1009.4 | 933.0 |
+
+The same Newton steps on every case and the same difference from the CPU, and
+peak device memory on case9241pegase falls from 13.3 GB to 7.1. N-1 with every
+branch out gains 1.3-1.6x (case1354pegase 614 to 386 ms, case2869pegase 1833
+to 1392), with the same outcomes as the CPU. Eight levels are about the same,
+ten are the default's cost on the small cases; four and five are slower on
+case9241pegase. No gain or a failure: AMD (4x slower), matching off, the general
+solve, superpanels off; `BTF_COLAMD`, `COLAMD` and the other matchings are not
+supported here. No pivoting is 5% faster and was left out as a risk on harder
+cases.
+
+One outage of case9241pegase fails either way but is reported as not converged
+or diverged from run to run: 6 of 12 runs against 2 of 12 with these settings.
+
+### Against grid-bench's oracle
+
+Through grid-bench's GPU batch adapter and `oracle.evaluate`, at its 1e-8 p.u.,
+outside its containers (Python 3.12, the sweeps generated without
+`cases.prep`'s truth check). ms per scenario, median of three:
+
+| Sweep | Default settings | Default, `reuse_below=0.1` | These settings | These, `reuse_below=0.1` |
+|---|---|---|---|---|
+| case1354pegase#sweep-1k | 0.263 | 0.233 | 0.123 | 0.138 |
+| case2869pegase#sweep-1k | 0.467 | 0.410 | 0.328 | 0.345 |
+| case9241pegase#sweep-1k | 1.361 | 1.261 | 1.115 | 1.153 |
+| case1354pegase#sweep-10k | 0.254 | 0.210 | 0.113 | 0.116 |
+| case2869pegase#sweep-10k | 0.411 | 0.332 | 0.267 | 0.278 |
+
+The oracle accepts every scenario of all twenty runs: the worst residual is
+1e-6 MVA against its limit of 1e-3. Factor reuse saved 7-19% while
+factorization was dear, and costs 3-12% now: its extra Newton steps outweigh
+the factorizations it saves.

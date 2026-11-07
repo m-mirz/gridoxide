@@ -69,7 +69,8 @@ cases, which no other GPU tool there manages. It is not fast enough.
 ## Where it stands
 
 On one A100 on 2026-10-30 (grid-bench branch `gridoxide-gpu`, cuDSS 1.0.0,
-tol 1e-8):
+tol 1e-8), before `load`'s fix and cuDSS's settings below; the settings alone take 1.2-2.2x
+off these sweeps; grid-bench has yet to run them in its containers:
 
 - **Sweeps:** gpusim2grid is 1.2-2.3x faster on `#sweep-1k` and
   `#sweep-10k`. The gap grows from 1k to 10k, because gpusim2grid's time per
@@ -81,21 +82,20 @@ tol 1e-8):
 
 What we know about the causes:
 
-- cuDSS is 93-97% of the device's work and 82-92% of the wall time of a
+- cuDSS is 87-92% of the device's work and 73-83% of the wall time of a
   batch solve (Nsight Systems, `scripts/bench/README.md`, section 11). During
-  the Newton steps the GPU is busy throughout; its 5-11% idle is what falls
-  outside them, `DeviceBatch::load` and the results.
-- Of the device's work, factorization is 64-76% and the triangular solves
-  18-30%.
-- cuDSS's cost is roughly fixed per system: its factorization runs at
-  0.03-0.1% of FP64 peak. That favours large grids.
+  the Newton steps the GPU is busy throughout; its 9-16% idle is what falls
+  outside them, `DeviceBatch::load` (6-12%) and the results (4-7%).
+- Of the device's work, factorization is 51-58% and the triangular solves
+  33-41%.
+- cuDSS's cost is roughly fixed per system: at its default settings its
+  factorization ran at 0.03-0.1% of FP64 peak. That favours large grids.
 - cuDSS 1.0.0 costs 1.75-3.7x what 0.8.0 does per system. We cannot use
   0.8.0: it returns NaN in a uniform batch.
 - gpusim2grid runs four fixed steps. We take every scenario to 1e-8.
 
 These are ruled out as causes: the per-step host round trip (about 0.1 ms
-of a 65-254 ms step), our own kernels (1-4% of the device's work) and the
-copy of the voltages back to the host.
+of a 65-254 ms step) and our own kernels (3-5% of the device's work).
 
 ## Measure first
 
@@ -115,13 +115,17 @@ copy of the voltages back to the host.
 - [ ] **Keep the batch full.** As scenarios converge, refill their slots
   instead of finishing each chunk before starting the next. A refilled slot
   needs a masked `FACTORIZATION`.
-- [ ] **Factor reuse in grid-bench.** The oracle accepts it: `reuse_below=0.1`
-  saves 7-19% on the `#sweep-1k` and `#sweep-10k` of case1354, 2869 and 9241,
-  every scenario passing (`scripts/bench/README.md`, section 11). Left to
-  decide: the adapter states Newton-Raphson with every active scenario
-  refactored every step, so turning it on changes what grid-bench reports.
-- [ ] **cuDSS 1.0's settings:** reordering, pivoting and nested-dissection
-  levels, timed at B = 1024.
+- [x] **Factor reuse in grid-bench:** not worth it now. The oracle accepts
+  it, but with cuDSS's settings below `reuse_below=0.1` is 3-12% slower than
+  none: its extra Newton steps outweigh the factorizations it saves.
+- [x] **cuDSS 1.0's settings:** multiblock factorization and six levels of
+  nested dissection: 1.3-2.7x at B = 1024, half the memory on case9241pegase,
+  the same steps and accuracy, the oracle accepts every scenario.
+- [ ] **The same settings for the AC-OPF.** `kkt::CudssSolver` keeps cuDSS's
+  defaults: untried, and its factorizations are one system, not a batch, and
+  must keep their inertia.
+- [ ] **grid-bench on these settings,** in its containers: the adapter's
+  docstring and results still describe the old ones.
 - [ ] **Newer cuDSS releases.** On each release, rerun the probe and the
   device tests, and adopt the release if it is correct and cheaper.
 - [ ] **Mixed precision.** Factor in FP32 and keep the mismatch in FP64.
