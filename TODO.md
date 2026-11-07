@@ -6,13 +6,6 @@ A100 and 30 cores on 2026-11-07 at gridoxide febde7c, against the stored
 behind the batch's design are in
 [probes/cudss_ubatch/README.md](probes/cudss_ubatch/README.md).
 
-## grid-bench
-
-- [ ] **Land the run.** The `gridoxide_gpu` OPF adapter, the image built from
-  a checkout, the step counts and the new results are in a local clone, on a
-  branch not yet in grid-bench. The batch adapter's results table still
-  describes the old numbers.
-
 # AC-OPF
 
 The oracle accepts every solved case. 1.8-2.4x faster than
@@ -76,8 +69,6 @@ there manages. What is left to be faster is N-1, and short sweeps.
 - [ ] **Keep the batch full.** As scenarios converge, refill their slots
   instead of finishing each chunk before starting the next. A refilled slot
   needs a masked `FACTORIZATION`. Only if the tail's profile asks for it.
-- [ ] **Newer cuDSS releases.** On each release, rerun the probe and the
-  device tests, and adopt the release if it is correct and cheaper.
 - [ ] **Mixed precision.** Factor in FP32 and keep the mismatch in FP64. An
   experiment, kept only if the oracle accepts it.
 
@@ -89,7 +80,6 @@ flows and the AC-OPF. Everything else is CPU only.
 - [ ] **A linear start for AC.** The CPU's `start="linear"` has no device
   counterpart; every scenario starts from the last `solve()`. A DC solve per
   scenario on the device would give it one.
-- [ ] **State estimation.** Batched SE over measurement sets. Large work.
 
 # Settled
 
