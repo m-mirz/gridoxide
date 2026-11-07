@@ -99,6 +99,9 @@ pub struct DeviceBatch {
     values: DeviceBuffer<f64>,
     dx: DeviceBuffer<f64>,
 
+    /// Room for the voltages of finished slots, made on first use.
+    staging: Option<(DeviceBuffer<f64>, DeviceBuffer<f64>)>,
+
     // On the host, for loading scenarios.
     start: Vec<Bus>,
     host_row_ptr: Vec<usize>,
@@ -310,6 +313,7 @@ impl DeviceBatch {
             slots: DeviceBuffer::new(n_slots * batch)?,
             values: DeviceBuffer::new(nnz * batch)?,
             dx: DeviceBuffer::new(n * batch)?,
+            staging: None,
             start: start.to_vec(),
             host_row_ptr: y_row_ptr,
             host_col: y_col,
@@ -371,14 +375,26 @@ impl DeviceBatch {
         self.p_spec.upload(&p_spec, s)?;
         self.q_spec.upload(&q_spec, s)?;
 
+        let slot_deltas: Vec<Option<&Delta>> = (0..batch).map(|k| deltas.get(k)).collect();
+        self.set_deltas(&slot_deltas)?;
+
+        let active: Vec<bool> = (0..batch).map(|k| k < scenarios.len()).collect();
+        self.set_active(&active)
+    }
+
+    /// Each slot's N-1 delta on the shared Y-bus, `None` for none: the
+    /// tables the mismatch and Jacobian kernels read the changed values from.
+    pub(crate) fn set_deltas(&mut self, deltas: &[Option<&Delta>]) -> Result<(), LinearError> {
+        let (batch, s) = (self.batch, self.stream.0);
+        assert_eq!(deltas.len(), batch, "one delta or none per slot");
         // Each outage's changed values by Y-bus position, the rows they are
         // in, and the fill-slot owners they change.
         let (mut ovr_ptr, mut ovr_pos, mut ovr_y) = (vec![0usize], Vec::new(), Vec::new());
         let (mut row_scn, mut row_bus) = (Vec::new(), Vec::new());
         let (mut slot_scn, mut slot_owner, mut slot_y) = (Vec::new(), Vec::new(), Vec::new());
-        for k in 0..batch {
+        for (k, delta) in deltas.iter().enumerate() {
             let mut rows = BTreeSet::new();
-            if let Some(delta) = deltas.get(k) {
+            if let Some(delta) = delta {
                 for (&(r, c), &v) in delta.at.iter().zip(&delta.outaged) {
                     let row = self.host_row_ptr[r]..self.host_row_ptr[r + 1];
                     let at = self.host_col[row.clone()]
@@ -414,8 +430,95 @@ impl DeviceBatch {
         self.slot_owner = upload(&u32s(slot_owner, "N-1's changes")?, s)?;
         self.slot_y = upload(&slot_y, s)?;
 
-        let active: Vec<bool> = (0..batch).map(|k| k < scenarios.len()).collect();
-        self.set_active(&active)
+        Ok(())
+    }
+
+    /// Puts `fills`' scenarios, `(slot, scenario)`, into those slots, each
+    /// from `start`'s state with its overrides, as [`load`](Self::load) does;
+    /// the other slots are left as they are. Their deltas are
+    /// [`set_deltas`](Self::set_deltas)'s.
+    pub(crate) fn refill(&mut self, fills: &[(usize, &Scenario)]) -> Result<(), LinearError> {
+        let (n_bus, s) = (self.n_bus, self.stream.0);
+        for &(k, sc) in fills {
+            assert!(k < self.batch, "slot {k} of {}", self.batch);
+            let mut vm: Vec<f64> = self.start.iter().map(|b| b.voltage_mag).collect();
+            let va: Vec<f64> = self.start.iter().map(|b| b.voltage_ang).collect();
+            let mut p: Vec<f64> = self.start.iter().map(|b| b.p_spec).collect();
+            let mut q: Vec<f64> = self.start.iter().map(|b| b.q_spec).collect();
+            for ov in &sc.bus_overrides {
+                p[ov.bus] = ov.p_spec.unwrap_or(p[ov.bus]);
+                q[ov.bus] = ov.q_spec.unwrap_or(q[ov.bus]);
+                vm[ov.bus] = ov.voltage_mag.unwrap_or(vm[ov.bus]);
+            }
+            // SAFETY: slot `k` of each state buffer holds n_bus values; the
+            // copies are staged from pageable memory before they return.
+            unsafe {
+                for (buf, col) in [
+                    (&self.vm, &vm),
+                    (&self.va, &va),
+                    (&self.p_spec, &p),
+                    (&self.q_spec, &q),
+                ] {
+                    crate::cuda::copy_to_device(buf.ptr.add(k * n_bus), col, s)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The voltage magnitudes and angles of `slots`, one slot after another:
+    /// copied together on the device first, so that a few slots of a large
+    /// batch cost one transfer of their own size.
+    pub(crate) fn voltages_of(
+        &mut self,
+        slots: &[usize],
+    ) -> Result<(Vec<f64>, Vec<f64>), LinearError> {
+        let (n_bus, s) = (self.n_bus, self.stream.0);
+        let len = slots.len() * n_bus;
+        if len == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        if self.staging.is_none() {
+            self.staging = Some((
+                DeviceBuffer::new(self.batch * n_bus)?,
+                DeviceBuffer::new(self.batch * n_bus)?,
+            ));
+        }
+        let (svm, sva) = self.staging.as_ref().expect("made above");
+        let bytes = n_bus * size_of::<f64>();
+        let mut out = (vec![0.0; len], vec![0.0; len]);
+        // SAFETY: slot `k` of `vm` and `va` and slot `i` of the staging
+        // buffers each hold n_bus values; the host vectors hold `len`.
+        unsafe {
+            for (i, &k) in slots.iter().enumerate() {
+                for (dst, src) in [(svm, &self.vm), (sva, &self.va)] {
+                    cuda(
+                        ffi::cudaMemcpyAsync(
+                            dst.ptr.add(i * n_bus).cast(),
+                            src.ptr.add(k * n_bus).cast(),
+                            bytes,
+                            ffi::cudaMemcpyDeviceToDevice,
+                            s,
+                        ),
+                        "cudaMemcpyAsync (slot voltages)",
+                    )?;
+                }
+            }
+            for (dst, src) in [(&mut out.0, svm), (&mut out.1, sva)] {
+                cuda(
+                    ffi::cudaMemcpyAsync(
+                        dst.as_mut_ptr().cast(),
+                        src.ptr.cast(),
+                        len * size_of::<f64>(),
+                        ffi::cudaMemcpyDeviceToHost,
+                        s,
+                    ),
+                    "cudaMemcpyAsync (slot voltages)",
+                )?;
+            }
+            cuda(ffi::cudaStreamSynchronize(s), "cudaStreamSynchronize")?;
+        }
+        Ok(out)
     }
 
     pub fn batch(&self) -> usize {

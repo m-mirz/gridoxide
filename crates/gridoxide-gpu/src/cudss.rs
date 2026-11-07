@@ -311,6 +311,14 @@ impl CudssBatch {
         self.counts
     }
 
+    /// Marks `slots` as holding new systems: their next factorization is a
+    /// full one, not a refactorization on the pivots of the system before.
+    pub(crate) fn unfactor(&mut self, slots: &[usize]) {
+        for &s in slots {
+            self.factored[s] = false;
+        }
+    }
+
     /// `CUDSS_DATA_LU_NNZ`: the nonzeros of the factors cuDSS's analysis
     /// planned.
     pub(crate) fn lu_nnz(&self) -> Result<i64, LinearError> {
