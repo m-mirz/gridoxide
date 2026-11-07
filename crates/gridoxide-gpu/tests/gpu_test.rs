@@ -117,8 +117,11 @@ fn sweeps_match_the_cpu_loop() {
                 let got = gpu.solve(&scenarios, &opts).unwrap();
                 let what = format!("{case}, {policy:?}, capacity {capacity}");
                 assert_same(&got, &want, &[], &what);
+                // One chunk of 64 shares its first step; 24 are too few to.
+                let shared = if capacity == 64 { 64 - 1 } else { 0 };
                 assert_eq!(
-                    got.linear.systems_factored, want.linear.systems_factored,
+                    got.linear.systems_factored,
+                    want.linear.systems_factored - shared,
                     "{what}"
                 );
                 assert_eq!(
@@ -131,6 +134,58 @@ fn sweeps_match_the_cpu_loop() {
             }
         }
     }
+}
+
+/// A sweep's first step is factorized once for the session: across chunks,
+/// a short last chunk that does not share it, and a second solve.
+#[test]
+fn a_shared_first_step_factorizes_once() {
+    let (_, base, ybus) = load("matpower/case1354pegase.m");
+    let scenarios = ramp(&base, 70);
+    let opts = BatchOptions {
+        tol: 1e-10,
+        ..BatchOptions::default()
+    };
+    let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
+    let mut gpu = GpuBatchSolver::new(&base, &ybus, 32).unwrap();
+    // Chunks of 32, 32 and 6: the first two share it, the last has its own.
+    let got = gpu.solve(&scenarios, &opts).unwrap();
+    assert_same(&got, &want, &[], "first solve");
+    assert_eq!(
+        got.linear.systems_factored,
+        want.linear.systems_factored - 64 + 1
+    );
+    assert_eq!(got.linear.systems_solved, want.linear.systems_solved);
+    let again = gpu.solve(&scenarios, &opts).unwrap();
+    assert_same(&again, &want, &[], "second solve");
+    assert_eq!(
+        again.linear.systems_factored,
+        want.linear.systems_factored - 64
+    );
+}
+
+/// A scenario that sets a voltage starts elsewhere, so its chunk's first step
+/// is not shared; the session's factors would have been the wrong matrix.
+#[test]
+fn a_voltage_setpoint_keeps_the_first_step_apart() {
+    let (_, base, ybus) = load("matpower/case1354pegase.m");
+    let pv = base
+        .iter()
+        .find(|b| b.bus_type == gridoxide::types::BusType::PV)
+        .unwrap();
+    let mut scenarios = ramp(&base, 64);
+    scenarios[10]
+        .bus_overrides
+        .push(BusOverride::new(pv.idx).vm(pv.voltage_mag * 1.02));
+    let opts = BatchOptions {
+        tol: 1e-10,
+        ..BatchOptions::default()
+    };
+    let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
+    let mut gpu = GpuBatchSolver::new(&base, &ybus, 64).unwrap();
+    let got = gpu.solve(&scenarios, &opts).unwrap();
+    assert_same(&got, &want, &[], "a voltage setpoint");
+    assert_eq!(got.linear.systems_factored, want.linear.systems_factored);
 }
 
 /// A fixed step count leaves some of mvlv1004's scenarios short, as on the

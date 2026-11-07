@@ -66,22 +66,24 @@ there manages. What is left to be faster is N-1, and short sweeps.
   `#n1-full`, and the oracle rejects it on all three.
 - **Steps:** 2.7-4.4 a scenario on average, so taking every scenario to 1e-8
   costs about nothing against gpusim2grid's fixed four.
+- **The first step** is one factorization for the session and one solve with
+  a column per scenario, where no scenario sets a voltage or changes the
+  network (`CudssShared`): 16-24% off sweeps of 1024, the same steps, on
+  gridoxide after febde7c, so not yet in the numbers above.
 - **Where the time goes** (Nsight Systems, `scripts/bench/README.md`, section
   11): cuDSS is 87-92% of the device's work and 73-83% of the wall time,
   factorization 51-58% of the device's work and the triangular solves 33-41%.
 
-- [ ] **One factorization for a sweep's first step.** Every scenario starts
-  from the same voltages, so step one's Jacobian is the same matrix, factorized
-  once per scenario today. Target (from NVIDIA): 0.5 ms a scenario on
-  case9241pegase's 10k, now 0.79 in `gpu_bench` and 0.91 in grid-bench, whose
-  time adds the base solve and the voltages' copy. A batch step costs about
-  0.12 ms of factorization and 0.075 of solve a system; one factor with 1024
-  right-hand sides costs 0.012 a column (0.0036 on case2869pegase). Sharing
-  step one is still Newton, and should give about 0.60. Chord steps on that
-  factor before Newton take it to an estimated 0.4: with `reuse=0.3`
-  case2869pegase needs no factorization past step one (10.5 steps), but on
-  case9241pegase about half the scenarios stall on chord steps alone. Not N-1:
-  its Jacobians differ by outage.
+- [ ] **Chord steps on a sweep's shared factor.** Target (from NVIDIA): 0.5 ms
+  a scenario on case9241pegase's 10k. The first step's shared factorization
+  (below) took it from 0.79 to 0.64 in `gpu_bench`; grid-bench's time adds the
+  base solve and the voltages' copy, about 0.12. A batch step costs about 0.12
+  ms of factorization and 0.075 of solve a system, a column of the shared
+  factor 0.012. Chord steps on it before Newton should reach about 0.4: with
+  `reuse=0.3` case2869pegase needs no factorization past step one (10.5
+  steps), but on case9241pegase about half the scenarios stall on chord steps
+  alone. No longer Newton as grid-bench's adapter states it. Not N-1: its
+  Jacobians differ by outage.
 - [ ] **Profile `#n1-full`,** where the GPU trails most at scale, then the
   tail of a 10k sweep, when few scenarios are still active: a masked step
   still costs 9-12% of a full one.

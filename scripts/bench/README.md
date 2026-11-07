@@ -1062,6 +1062,26 @@ case2869_pegase to case30000_goc).
 One outage of case9241pegase fails either way but is reported as not converged
 or diverged from run to run: 6 of 12 runs against 2 of 12 with these settings.
 
+### One factorization for a sweep's first step
+
+Scenarios that start from the same voltages on the same network have one
+Jacobian at the first step, to the bit, ZIP loads included. It is factorized
+once for the session and the step is one solve with a column per scenario,
+reading one factor where the uniform batch reads one per system: a column costs
+0.012 ms on case9241pegase, 0.0036 on case2869pegase, against about 0.12 of
+factorization and 0.075 of solve a system in the batch. `gpu_bench`, 1e-8, the
+same steps, solve in ms:
+
+| Case, scenarios | Before | After |
+|---|---|---|
+| case1354pegase, 1024 | 113.2 | 94.3 |
+| case2869pegase, 1024 | 248 | 188 |
+| case9241pegase, 1024 | 925 | 772 |
+| case9241pegase, 10000 | 7911 | 6437 |
+
+A chunk of fewer than 32 scenarios, a scenario that sets a voltage, N-1 and
+factor reuse keep the batch's own first step.
+
 ### Against grid-bench's oracle
 
 Through grid-bench's GPU batch adapter and `oracle.evaluate`, at its 1e-8 p.u.,

@@ -337,6 +337,34 @@ fn one_newton_step_of_n1_matches_the_cpu() {
 
 /// An inactive scenario's buffers are left exactly as they were by every
 /// kernel.
+/// What `GpuBatchSolver` shares: scenarios that change injections alone have
+/// the same Jacobian at the start, to the bit, ZIP loads included.
+#[test]
+fn the_first_steps_jacobian_is_one_matrix() {
+    let (base, ybus) = load("matpower/case1354pegase.m");
+    for base in [base.clone(), with_zip(base)] {
+        // Injections alone: `ramp` also moves PV setpoints.
+        let scenarios: Vec<Scenario> = (0..16)
+            .map(|k| {
+                let f = 0.6 + 0.025 * k as f64;
+                Scenario::new(
+                    base.iter()
+                        .filter(|b| b.p_spec != 0.0 || b.q_spec != 0.0)
+                        .map(|b| BusOverride::new(b.idx).p(b.p_spec * f).q(b.q_spec * f))
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut dev = DeviceBatch::new(&base, &ybus, &scenarios).unwrap();
+        dev.mismatch().unwrap();
+        dev.fill_jacobian().unwrap();
+        let values = dev.jacobian_values().unwrap();
+        let mut systems = values.chunks(dev.csr().nnz());
+        let first = systems.next().unwrap();
+        assert!(systems.all(|s| s == first));
+    }
+}
+
 #[test]
 fn inactive_scenarios_are_left_alone() {
     let (base, ybus) = load("matpower/case1354pegase.m");

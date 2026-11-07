@@ -20,6 +20,13 @@
 //! adaptive or fixed steps, factor reuse, and the CPU hand-off of the last
 //! few scenarios.
 //!
+//! Scenarios that start from the same voltages on the same network have the
+//! same Jacobian at the first step: it is factorized once for the session, and
+//! that step is one solve with a column per scenario (`CudssShared`). Still
+//! Newton's step, for a fifth of a sweep's time. Not for N-1, whose Y-buses
+//! differ, a scenario that sets a voltage, or factor reuse, which keeps a
+//! scenario's own factors.
+//!
 //! A single power flow ([`GpuBatchSolver::solve_single`]) is a batch of
 //! one from the buses it is given. One system is cuDSS's worst case, a
 //! roughly fixed cost per system, so it pays only on large grids; make its
@@ -31,13 +38,18 @@ use gridoxide_core::scenario::Scenario;
 use gridoxide_core::types::{Bus, Line, Transformer};
 
 use crate::cuda::Range;
-use crate::cudss::CudssBatch;
+use crate::cudss::{CudssBatch, CudssShared};
 use crate::device::DeviceBatch;
 use crate::newton::{
     BatchError, BatchOptions, BatchReport, Contingencies, Delta, HandOff, Outcome, ScenarioResult,
     StepPolicy, check_buses, contingencies, decide, finish_on_cpu, intact_ybus, needs_factors,
 };
 use crate::uniform::LinearCounts;
+
+/// The fewest scenarios for which a shared first step pays: it costs a
+/// session one more analysis, and a column of a narrow solve costs up to 20
+/// times what it does in a wide one.
+const MIN_SHARED: usize = 32;
 
 /// The branches an N-1 session takes out.
 struct Branches {
@@ -49,9 +61,11 @@ struct Branches {
 /// A session of batched power flows on one network; see the module
 /// documentation.
 pub struct GpuBatchSolver {
-    // First: its descriptors point into `dev`'s buffers and it runs on
-    // `dev`'s stream, so it goes before them.
+    // First: their descriptors point into `dev`'s buffers and they run on
+    // `dev`'s stream, so they go before them.
     lin: CudssBatch,
+    /// The first step's system, made by the first sweep that shares it.
+    shared: Option<CudssShared>,
     dev: DeviceBatch,
     start: Vec<Bus>,
     /// The Y-bus the device holds (the intact one for N-1), for the CPU
@@ -103,6 +117,7 @@ impl GpuBatchSolver {
             unsafe { CudssBatch::analyze(dev.csr(), capacity, dev.stream(), values, rhs, dx)? };
         Ok(Self {
             lin,
+            shared: None,
             dev,
             start: start.to_vec(),
             ybus,
@@ -236,7 +251,7 @@ impl GpuBatchSolver {
         deltas: &[Delta],
         opts: &BatchOptions,
     ) -> Result<BatchReport, BatchError> {
-        let before = self.lin.counts();
+        let before = self.counts();
         let mut report = BatchReport {
             scenarios: Vec::with_capacity(scenarios.len()),
             batch_steps: 0,
@@ -247,7 +262,7 @@ impl GpuBatchSolver {
         for (chunk, chunk_deltas) in scenarios.chunks(capacity).zip(deltas.chunks(capacity)) {
             self.solve_chunk(chunk, chunk_deltas, opts, &mut report)?;
         }
-        let after = self.lin.counts();
+        let after = self.counts();
         report.linear = LinearCounts {
             factor_calls: after.factor_calls - before.factor_calls,
             solve_calls: after.solve_calls - before.solve_calls,
@@ -255,6 +270,70 @@ impl GpuBatchSolver {
             systems_solved: after.systems_solved - before.systems_solved,
         };
         Ok(report)
+    }
+
+    /// What cuDSS has done in this session.
+    fn counts(&self) -> LinearCounts {
+        let (a, b) = (
+            self.lin.counts(),
+            self.shared.as_ref().map(|s| s.counts()).unwrap_or_default(),
+        );
+        LinearCounts {
+            factor_calls: a.factor_calls + b.factor_calls,
+            solve_calls: a.solve_calls + b.solve_calls,
+            systems_factored: a.systems_factored + b.systems_factored,
+            systems_solved: a.systems_solved + b.systems_solved,
+        }
+    }
+
+    /// Whether every scenario of a chunk has the session's Jacobian at the
+    /// first step: `start`'s voltages on the intact network. `solve_single`
+    /// starts elsewhere, and is below [`MIN_SHARED`].
+    fn shares_first_step(scenarios: &[Scenario], deltas: &[Delta], opts: &BatchOptions) -> bool {
+        scenarios.len() >= MIN_SHARED
+            && opts.reuse_below.is_none()
+            && deltas.iter().all(|d| d.at.is_empty())
+            && scenarios
+                .iter()
+                .all(|sc| sc.bus_overrides.iter().all(|o| o.voltage_mag.is_none()))
+    }
+
+    /// The first step of a chunk that shares it, for the `active` scenarios:
+    /// the solve into the update buffer, after the session's one factorization.
+    fn shared_step(&mut self, active: &[bool]) -> Result<(), BatchError> {
+        let (values, rhs, dx) = self.dev.linear_buffers();
+        if self.shared.is_none() {
+            let _r = Range::new(c"batch.analysis");
+            // SAFETY: as in `open`.
+            let shared = unsafe {
+                CudssShared::analyze(
+                    self.dev.csr(),
+                    self.capacity(),
+                    self.dev.stream(),
+                    values,
+                    rhs,
+                    dx,
+                )?
+            };
+            self.shared = Some(shared);
+        }
+        let shared = self.shared.as_mut().expect("made above");
+        if !shared.factored() {
+            let first = active
+                .iter()
+                .position(|&a| a)
+                .expect("a step has an active scenario");
+            let one: Vec<bool> = (0..active.len()).map(|s| s == first).collect();
+            let _r = Range::new(c"batch.cudss_factor");
+            self.dev.set_active(&one)?;
+            self.dev.fill_jacobian()?;
+            let nnz = self.dev.csr().nnz();
+            // SAFETY: slot `first` of the batch's values, `nnz` of them.
+            unsafe { shared.factor(values.add(first * nnz))? };
+        }
+        let _r = Range::new(c"batch.cudss_solve");
+        shared.solve(active.iter().filter(|&&a| a).count())?;
+        Ok(())
     }
 
     /// One chunk: the loop of `newton::run`, step for step.
@@ -281,6 +360,7 @@ impl GpuBatchSolver {
         let mut norm = vec![f64::INFINITY; m];
         let mut last_norm = vec![f64::INFINITY; m];
         let mut on_cpu: Vec<Option<Vec<Bus>>> = vec![None; m];
+        let mut shared_step = Self::shares_first_step(scenarios, deltas, opts);
 
         loop {
             // 1. Mismatch on the device, flags on the host.
@@ -344,25 +424,35 @@ impl GpuBatchSolver {
                 break;
             }
 
-            // 2. Jacobians where new factors are needed, one masked factorization.
-            let refactor: Vec<bool> = (0..batch)
-                .map(|s| active[s] && needs_factors(opts, factorizations[s], norm[s], last_norm[s]))
-                .collect();
-            if refactor.iter().any(|&r| r) {
-                {
-                    let _r = Range::new(c"batch.jacobian");
-                    self.dev.set_active(&refactor)?;
-                    self.dev.fill_jacobian()?;
-                }
-                let _r = Range::new(c"batch.cudss_factor");
-                self.lin.factor(&refactor)?;
-                for s in (0..m).filter(|&s| refactor[s]) {
+            if std::mem::take(&mut shared_step) {
+                // 2 and 3 of the first step, on the session's one Jacobian.
+                // Each scenario still takes that factorization's step.
+                self.shared_step(&active)?;
+                for s in (0..m).filter(|&s| active[s]) {
                     factorizations[s] += 1;
                 }
-            }
+            } else {
+                // 2. Jacobians where new factors are needed, one masked
+                // factorization.
+                let refactor: Vec<bool> = (0..batch)
+                    .map(|s| {
+                        active[s] && needs_factors(opts, factorizations[s], norm[s], last_norm[s])
+                    })
+                    .collect();
+                if refactor.iter().any(|&r| r) {
+                    {
+                        let _r = Range::new(c"batch.jacobian");
+                        self.dev.set_active(&refactor)?;
+                        self.dev.fill_jacobian()?;
+                    }
+                    let _r = Range::new(c"batch.cudss_factor");
+                    self.lin.factor(&refactor)?;
+                    for s in (0..m).filter(|&s| refactor[s]) {
+                        factorizations[s] += 1;
+                    }
+                }
 
-            // 3. One masked solve into the update buffer, and the update.
-            {
+                // 3. One masked solve into the update buffer.
                 let _r = Range::new(c"batch.cudss_solve");
                 self.lin.solve(&active)?;
             }
