@@ -33,6 +33,6 @@ gridoxide-generate-grid = "gridoxide.generate_grid:main"
 # `python/gridoxide/`, alongside the compiled extension built as the
 # private `gridoxide._gridoxide` submodule (see src/python.rs's module doc
 # comment) so both ship in the same wheel.
-features = ["python"]
+features = ["python", "cgmes"]
 python-source = "python"
 module-name = "gridoxide._gridoxide"

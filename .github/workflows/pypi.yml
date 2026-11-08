@@ -34,7 +34,7 @@ jobs:
           # No `klu` — the published wheel doesn't ship it (see
           # Cargo.toml's `python`/`klu` feature doc comments: klu vendors
           # LGPL-2.1-or-later SuiteSparse source and needs a C compiler +
-          # libclang on every target platform). `features = ["python"]`
+          # libclang on every target platform). `features = ["python", "cgmes"]`
           # already set in pyproject.toml's [tool.maturin], so no
           # --features flag needed here.
 

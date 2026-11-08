@@ -185,6 +185,10 @@ pub struct IslandReport {
     /// two-or-more for `AmbiguousReferenceBus`.
     pub slack_indices: Vec<usize>,
     pub status: IslandStatus,
+    /// Largest per-unit P or Q mismatch left in this component, as the
+    /// convergence check measures it. `None` where nothing was solved or the
+    /// number would mean nothing: `NoReferenceBus`, `AmbiguousReferenceBus`.
+    pub max_mismatch: Option<f64>,
 }
 
 /// Computes each still-undecided (`Solvable`-verdict) component's own P/Q
@@ -228,6 +232,7 @@ fn resolve_pending(
                 bus_indices,
                 slack_indices,
                 status,
+                max_mismatch: Some(max_mis),
             }
         })
         .collect()
@@ -255,11 +260,13 @@ pub(crate) fn finish_island_reports(
                 bus_indices: c.bus_indices,
                 slack_indices: c.slack_indices,
                 status: IslandStatus::NoReferenceBus,
+                max_mismatch: None,
             })),
             Verdict::AmbiguousReferenceBus => reports.push(Some(IslandReport {
                 bus_indices: c.bus_indices,
                 slack_indices: c.slack_indices,
                 status: IslandStatus::AmbiguousReferenceBus,
+                max_mismatch: None,
             })),
             Verdict::Solvable => {
                 pending.push((pos, c.bus_indices, c.slack_indices));

@@ -252,6 +252,14 @@ for node in result.nodes:
 - `result.faults` — per fault: `i_f`, `i_f_angle`, per phase.
 - `result.sources` — each source's contribution, `i` and `i_angle`.
 
+### Whether every component solved
+
+`solve()` raises only for a component that did not converge. One with no angle reference, or
+several, is not a failure of Newton's and raises nothing; `model.islands()` reports each component
+of the last solve as a dict of `status` (`"converged"`, `"max_iterations"`, `"singular"`,
+`"no_reference"`, `"ambiguous_reference"`), `buses`, `references` and `max_mismatch` (per-unit, `None`
+where nothing was solved).
+
 ### Node-breaker topology and switches
 
 CGMES models carry their substation switching arrangement; `topology="node_breaker"` keeps it

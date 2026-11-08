@@ -81,7 +81,12 @@ fn test_cgmes_smallgrid() {
         163,
         "expected 4 TopologicalNodes to merge via closed switches, 167 -> 163"
     );
-    assert_eq!(lines.len(), 185, "expected 185 ACLineSegment lines");
+    // 185 ACLineSegments, 5 of them `Equipment.inService` false.
+    assert_eq!(
+        lines.len(),
+        180,
+        "expected 180 ACLineSegment lines in service"
+    );
     assert_eq!(
         transformers.len(),
         14,
@@ -108,5 +113,22 @@ fn test_cgmes_smallgrid() {
     let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
+    // The five lines out of service end in stubs the SV still gives a voltage,
+    // from the charging current it has them carry (at most 0.8 Mvar): everywhere
+    // else, in every model we read, an `inService` false carries no flow at all.
+    let published = expected.len();
+    let expected: Vec<_> = expected
+        .into_iter()
+        .filter(|e| {
+            bus_index
+                .get(&e.tn_mrid)
+                .is_none_or(|&i| result[i].voltage_mag > 0.0)
+        })
+        .collect();
+    assert_eq!(
+        published - expected.len(),
+        5,
+        "expected only the five stubs dead"
+    );
     cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 2e-2);
 }

@@ -70,7 +70,12 @@ fn test_cgmes_svedala() {
         191,
         "expected no bus merging (TP already pre-merged)"
     );
-    assert_eq!(lines.len(), 90, "expected 90 ACLineSegment lines");
+    // 90 ACLineSegments, 2 of them `Equipment.inService` false.
+    assert_eq!(
+        lines.len(),
+        88,
+        "expected 88 ACLineSegment lines in service"
+    );
     assert_eq!(
         transformers.len(),
         53,
@@ -78,8 +83,8 @@ fn test_cgmes_svedala() {
     );
     assert_eq!(
         shunts.len(),
-        46,
-        "expected 46 LinearShuntCompensator shunts"
+        19,
+        "expected 19 LinearShuntCompensator shunts in service, of 46"
     );
 
     // This fixture's own TopologicalIsland lists 108 of its 191 buses, so 83

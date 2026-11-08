@@ -4,3 +4,7 @@
 [submodule "tests/data/benchmark-grids"]
 	path = tests/data/benchmark-grids
 	url = https://github.com/m-mirz/benchmark-grids.git
+[submodule "tests/data/relicapgrid"]
+	path = tests/data/relicapgrid
+	url = https://github.com/entsoe/relicapgrid.git
+	branch = cgmes-3.0_ncp-2.5_tc-2.0

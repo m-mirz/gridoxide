@@ -264,9 +264,21 @@ impl TerminalIndex {
         let mut orphans: Vec<(String, String, Option<String>)> = Vec::new(); // (terminal, connectivity_node, conducting_equipment)
         for t_mrid in by_type(ds, "Terminal") {
             let t = own(ds, t_mrid, "Terminal")?;
+            // Equipment out of service conducts nothing, whatever its terminals
+            // say: Espheim's tripped line `8-9` keeps `connected` true on both,
+            // and the SV has no flow on it.
+            let in_service = t
+                .get_ref("Terminal.ConductingEquipment")
+                .and_then(|ce| ds.entries.get(ce))
+                .is_none_or(|ce| {
+                    equipment_in_service(
+                        ce.get_bool("Equipment.inService"),
+                        ce.get_bool("Equipment.normallyInService"),
+                    )
+                });
             connected_of.insert(
                 t_mrid.clone(),
-                t.get_bool("ACDCTerminal.connected").unwrap_or(true),
+                in_service && t.get_bool("ACDCTerminal.connected").unwrap_or(true),
             );
             if let Some(ce) = t.get_ref("Terminal.ConductingEquipment") {
                 let seq = t.get_i64("ACDCTerminal.sequenceNumber").unwrap_or(1);
@@ -314,22 +326,22 @@ impl TerminalIndex {
                 .or_default()
                 .push((t_mrid, ce_mrid));
         }
-        for (cn_mrid, terms_here) in &orphans_by_cn {
-            let u_rated = terms_here
-                .iter()
-                .find_map(|(_, ce_mrid)| {
-                    let ei = get(ds, ce_mrid.as_deref()?, "EquivalentInjection")?;
-                    let bv_ref = ei.get_ref("ConductingEquipment.BaseVoltage")?;
-                    get(ds, bv_ref, "BaseVoltage")?.get_f64("BaseVoltage.nominalVoltage")
-                })
-                .ok_or_else(|| {
-                    missing(
-                        "ConnectivityNode",
-                        cn_mrid,
-                        "(no EquivalentInjection with a resolvable BaseVoltage found)",
-                    )
-                })?
-                * 1e3;
+        for terms_here in orphans_by_cn.values() {
+            // Without an EquivalentInjection this is no boundary but a node the
+            // topology leaves out: part of a substation out of the case (Espheim's
+            // 10.5 kV busbar in ReliCapGrid). It stays off the network, like a
+            // terminal with no node at all: its terminals get no bus, and equipment
+            // reaching for one is skipped. A bus of its own would be wrong, not
+            // just unneeded: closed switches would merge it with what it touches,
+            // joining islands the topology keeps apart.
+            let Some(u_rated) = terms_here.iter().find_map(|(_, ce_mrid)| {
+                let ei = get(ds, ce_mrid.as_deref()?, "EquivalentInjection")?;
+                let bv_ref = ei.get_ref("ConductingEquipment.BaseVoltage")?;
+                get(ds, bv_ref, "BaseVoltage")?.get_f64("BaseVoltage.nominalVoltage")
+            }) else {
+                continue;
+            };
+            let u_rated = u_rated * 1e3;
             let idx = buses.len();
             buses.push(Bus {
                 idx,
@@ -2164,7 +2176,18 @@ fn convert_equipment(
     ends_by_pt.sort_by(|a, b| a.0.cmp(&b.0));
     for (pt_mrid, mut ends) in ends_by_pt {
         ends.sort_by_key(|e| e.get_i64("TransformerEnd.endNumber").unwrap_or(0));
+        // An end whose terminal has no bus is off the network (see
+        // `TerminalIndex::build`), so its tap changer is not read: the SSH has
+        // no reason to carry one for a transformer out of the case.
+        let off_network = |end: &&Element| {
+            end.get_ref("TransformerEnd.Terminal")
+                .is_some_and(|t| terms.bus_via_terminal_mrid(t).is_none())
+        };
         match ends.len() {
+            // Conducts nothing without both ends, as a line does.
+            2 if ends.iter().any(|e| off_network(e)) => {}
+            // The windings left still couple through the star point.
+            3 if ends.iter().filter(|e| !off_network(e)).count() < 2 => {}
             2 => {
                 let (t, c) = build_two_winding(
                     ds, &tap_index, &terms, &buses, &pt_mrid, ends[0], ends[1], s_base_va,
@@ -2221,7 +2244,7 @@ fn convert_equipment(
                         * 1e3,
                     zip_terms: Vec::new(),
                 });
-                for end in &ends {
+                for end in ends.iter().filter(|e| !off_network(e)) {
                     let (t, c) =
                         build_star_leg(ds, &tap_index, &terms, &buses, end, star_idx, s_base_va)?;
                     transformers.push(t);
@@ -2685,10 +2708,23 @@ fn convert_equipment(
     // duplicated `HashMap`-iteration-order effects elsewhere, WHICH bus
     // ended up corrupted varied from run to run.)
     let mut slack_angle_ref_mrid: Vec<String> = Vec::new();
-    for mrid in by_type(ds, "TopologicalIsland") {
-        let ti = own(ds, mrid, "TopologicalIsland")?;
+    // What each reference bus was before it became one, and the size of the
+    // largest island naming it, for `assemble_merged_references`.
+    let mut before_reference: HashMap<usize, ReferenceBus> = HashMap::new();
+    for mrid in sorted_mrids(ds, "TopologicalIsland") {
+        let ti = own(ds, &mrid, "TopologicalIsland")?;
         if let Some(tn_ref) = ti.get_ref("TopologicalIsland.AngleRefTopologicalNode") {
             if let Some(&idx) = idx_of.get(tn_ref) {
+                let island_size = ti.get_refs("TopologicalIsland.TopologicalNodes").len();
+                before_reference
+                    .entry(idx)
+                    .and_modify(|r| r.island_size = r.island_size.max(island_size))
+                    .or_insert(ReferenceBus {
+                        bus_type: buses[idx].bus_type,
+                        voltage_mag: buses[idx].voltage_mag,
+                        voltage_ang: buses[idx].voltage_ang,
+                        island_size,
+                    });
                 buses[idx].bus_type = BusType::Slack;
                 slack_indices.push(idx);
                 slack_angle_ref_mrid.push(tn_ref.to_string());
@@ -2725,6 +2761,17 @@ fn convert_equipment(
             }
         }
     }
+
+    assemble_merged_references(
+        ds,
+        &terms,
+        &mut buses,
+        &lines,
+        &transformers,
+        &before_reference,
+        &generation,
+        s_base_va,
+    )?;
 
     // Built before the struct takes ownership of `lines`.
     let terminal_branch = {
@@ -3777,7 +3824,10 @@ fn classify_cs_converter(cc: &Element, mrid: &str) -> Result<ConverterRole, Cgme
 }
 
 struct ConverterInfo {
+    /// Where its power enters the AC network: its own terminal.
     ac_bus: usize,
+    /// Where its controls measure: `ACDCConverter.PccTerminal`.
+    pcc_bus: usize,
     dc_bus: usize,
     role: ConverterRole,
     idle_loss: f64,
@@ -3786,6 +3836,8 @@ struct ConverterInfo {
     base_s: f64,
     rated_udc: f64,
     q_mw: f64,
+    /// The AC voltage it holds at its PCC, in kV (`qPccControl` `voltagePcc`).
+    holds_upcc_kv: Option<f64>,
 }
 
 /// Equipment mrid -> its own (sorted-by-sequence) plain `DCTerminal` mrids,
@@ -3879,13 +3931,12 @@ pub struct DcResolution {
 /// `None` if the dataset has no `DCTopologicalNode`s at all (no HVDC
 /// equipment, or the TP profile hasn't been loaded for it).
 ///
-/// `q_spec` is taken directly from each converter's static SSH `q` (CIM's
-/// own "starting value for a steady state solution in the case a simplified
-/// power flow model is used" language) rather than solved dynamically — a
-/// deliberate, documented scope cut: implementing `qPccControl`/droop as a
-/// genuine control mode is a comparably-sized second project, and FullGrid's
-/// own converters have static, non-dynamic Q targets, so this doesn't cost
-/// accuracy in the fixture used to validate this function.
+/// `q_spec` is taken from each converter's static SSH `q` (CIM's own "starting
+/// value for a steady state solution in the case a simplified power flow model
+/// is used" language), except that a `VsConverter` with `qPccControl`
+/// `voltagePcc` holds its `targetUpcc`: a `PQ` bus at its PCC becomes `PV`.
+/// A bus a machine or reference already holds keeps its setpoint. Droop, reactive
+/// capability and a `powerFactorPcc` target are not modelled.
 pub fn cgmes_resolve_dc_converters(
     ds: &CimDataset,
     buses: &mut [Bus],
@@ -4089,15 +4140,19 @@ pub fn cgmes_resolve_dc_converters(
         let Some(&dc_bus) = positive_pole_of.get(mrid) else {
             continue;
         };
-        let Some(ac_bus) = vc
+        let pcc_bus = vc
             .get_ref("ACDCConverter.PccTerminal")
-            .and_then(|r| ac_terms.bus_via_terminal_mrid(r))
-            .or_else(|| ac_terms.bus(mrid, 0))
-        else {
+            .and_then(|r| ac_terms.bus_via_terminal_mrid(r));
+        // The converter is connected at its own terminal. `PccTerminal` is where
+        // it measures, and may be a terminal of other equipment: Britheim's is on
+        // an ACLineSegment, whose other end is the angle reference, where an
+        // injection would vanish.
+        let Some(ac_bus) = ac_terms.bus(mrid, 0).or(pcc_bus) else {
             continue;
         };
         converters.push(ConverterInfo {
             ac_bus,
+            pcc_bus: pcc_bus.unwrap_or(ac_bus),
             dc_bus,
             role: classify_vs_converter(vc, mrid)?,
             idle_loss: vc.get_f64("ACDCConverter.idleLoss").unwrap_or(0.0),
@@ -4110,6 +4165,11 @@ pub fn cgmes_resolve_dc_converters(
                 .get_f64("ACDCConverter.ratedUdc")
                 .ok_or_else(|| missing("VsConverter", mrid, "ratedUdc"))?,
             q_mw: vc.get_f64("ACDCConverter.q").unwrap_or(0.0),
+            holds_upcc_kv: vc
+                .get_ref("VsConverter.qPccControl")
+                .filter(|mode| mode.ends_with("voltagePcc"))
+                .and_then(|_| vc.get_f64("VsConverter.targetUpcc"))
+                .filter(|&kv| kv > 0.0),
         });
     }
     for mrid in by_type(ds, "CsConverter") {
@@ -4117,15 +4177,15 @@ pub fn cgmes_resolve_dc_converters(
         let Some(&dc_bus) = positive_pole_of.get(mrid) else {
             continue;
         };
-        let Some(ac_bus) = cc
+        let pcc_bus = cc
             .get_ref("ACDCConverter.PccTerminal")
-            .and_then(|r| ac_terms.bus_via_terminal_mrid(r))
-            .or_else(|| ac_terms.bus(mrid, 0))
-        else {
+            .and_then(|r| ac_terms.bus_via_terminal_mrid(r));
+        let Some(ac_bus) = ac_terms.bus(mrid, 0).or(pcc_bus) else {
             continue;
         };
         converters.push(ConverterInfo {
             ac_bus,
+            pcc_bus: pcc_bus.unwrap_or(ac_bus),
             dc_bus,
             role: classify_cs_converter(cc, mrid)?,
             idle_loss: cc.get_f64("ACDCConverter.idleLoss").unwrap_or(0.0),
@@ -4138,6 +4198,7 @@ pub fn cgmes_resolve_dc_converters(
                 .get_f64("ACDCConverter.ratedUdc")
                 .ok_or_else(|| missing("CsConverter", mrid, "ratedUdc"))?,
             q_mw: cc.get_f64("ACDCConverter.q").unwrap_or(0.0),
+            holds_upcc_kv: None,
         });
     }
 
@@ -4216,6 +4277,13 @@ pub fn cgmes_resolve_dc_converters(
         let pac_absorbed = p_dc_injected + loss;
         buses[c.ac_bus].p_spec += -pac_absorbed * 1e6 / s_base_va;
         buses[c.ac_bus].q_spec += -c.q_mw * 1e6 / s_base_va;
+        if let Some(kv) = c.holds_upcc_kv {
+            let bus = &mut buses[c.pcc_bus];
+            if bus.bus_type == BusType::PQ {
+                bus.bus_type = BusType::PV;
+                bus.voltage_mag = kv * 1e3 / bus.u_rated;
+            }
+        }
     }
 
     Ok(Some(DcResolution {
@@ -4223,6 +4291,98 @@ pub fn cgmes_resolve_dc_converters(
         voltages_kv: dc_buses.iter().map(|b| b.voltage).collect(),
         status,
     }))
+}
+
+/// A reference bus as it was before it became one.
+struct ReferenceBus {
+    bus_type: BusType,
+    voltage_mag: f64,
+    voltage_ang: f64,
+    /// `TopologicalNode`s in the largest island naming it.
+    island_size: usize,
+}
+
+/// Turns IGMs merged by their shared boundary `TopologicalNode`s into one
+/// network, where a component holds several angle references: the mark of such
+/// a merge, since a `TopologicalIsland` names one and an assembled CGM's
+/// topology has one per component already. Each IGM's references were its own;
+/// holding them all over-determines the component
+/// (`IslandStatus::AmbiguousReferenceBus`).
+///
+/// - The largest island's reference stays (of equals, the lowest bus). The others
+///   give up the angle, with their scheduled injection now counting. One with
+///   generation keeps holding the voltage the SV gave it: an IGM's reference is
+///   usually a machine its exporter never scheduled a Q for, so as `PQ` it
+///   would drift (Belgovia's, 16% in ReliCapGrid). One without goes back to `PQ`,
+///   or to the setpoint it had.
+/// - `EquivalentInjection`s stand in for the network beyond a boundary. On a bus
+///   holding several, IGMs meet and the real ties are there, so they all go. One
+///   alone still faces an IGM not loaded and stays. What the pair did not cancel
+///   is the boundary mismatch, and lands on the reference.
+///
+/// A component with one reference is left alone: in an assembled CGM's SSH the
+/// injections on a tie are already exact opposites.
+fn assemble_merged_references(
+    ds: &CimDataset,
+    terms: &TerminalIndex,
+    buses: &mut [Bus],
+    lines: &[Line],
+    transformers: &[Transformer],
+    before_reference: &HashMap<usize, ReferenceBus>,
+    generation: &[f64],
+    s_base_va: f64,
+) -> Result<(), CgmesError> {
+    if before_reference.len() < 2 {
+        return Ok(());
+    }
+    let ybus = crate::network::build_ybus(buses.len(), lines, transformers).finish();
+    let mut merged = vec![false; buses.len()];
+    for component in crate::network::connected_components(&ybus) {
+        let mut references: Vec<usize> = component
+            .iter()
+            .copied()
+            .filter(|bus| before_reference.contains_key(bus))
+            .collect();
+        if references.len() < 2 {
+            continue;
+        }
+        references.sort_by_key(|bus| (std::cmp::Reverse(before_reference[bus].island_size), *bus));
+        for bus in &references[1..] {
+            let before = &before_reference[bus];
+            buses[*bus].voltage_ang = before.voltage_ang;
+            if before.bus_type == BusType::PQ && generation.get(*bus).is_some_and(|&g| g > 0.0) {
+                buses[*bus].bus_type = BusType::PV;
+            } else {
+                buses[*bus].bus_type = before.bus_type;
+                buses[*bus].voltage_mag = before.voltage_mag;
+            }
+        }
+        for bus in component {
+            merged[bus] = true;
+        }
+    }
+
+    let mut on_bus: HashMap<usize, Vec<(f64, f64)>> = HashMap::new();
+    for mrid in by_type(ds, "EquivalentInjection") {
+        let Some(bus) = terms.bus(mrid, 0).filter(|&bus| merged[bus]) else {
+            continue;
+        };
+        if terms.connected(mrid, 0) {
+            let ei = own(ds, mrid, "EquivalentInjection")?;
+            on_bus.entry(bus).or_default().push((
+                ei.get_f64("EquivalentInjection.p").unwrap_or(0.0),
+                ei.get_f64("EquivalentInjection.q").unwrap_or(0.0),
+            ));
+        }
+    }
+    for (bus, injections) in on_bus.into_iter().filter(|(_, i)| i.len() > 1) {
+        for (p, q) in injections {
+            // What Step 3 added.
+            buses[bus].p_spec += p * 1e6 / s_base_va;
+            buses[bus].q_spec += q * 1e6 / s_base_va;
+        }
+    }
+    Ok(())
 }
 
 /// Where a bus view's node set comes from.

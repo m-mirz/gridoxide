@@ -297,6 +297,8 @@ struct PowerFlowModel {
     /// to separately re-derive `cgmes::cgmes_topological_node_bus_index`'s
     /// own post-switch-merge index remapping themselves.
     tn_bus_index: std::collections::HashMap<String, usize>,
+    /// Each component's outcome in the last Newton `solve()`.
+    islands: Vec<crate::solver::IslandReport>,
     /// Bus index -> MATPOWER bus number, populated by `from_matpower` only.
     bus_numbers: Vec<u64>,
     /// Flat branch index -> 0-based row of `mpc.branch`, populated by
@@ -412,6 +414,7 @@ impl PowerFlowModel {
             branch_rows: Vec::new(),
             dc_shunt_conductance_as_load: false,
             dc_solver: None,
+            islands: Vec::new(),
         })
     }
 
@@ -485,6 +488,7 @@ impl PowerFlowModel {
             branch_rows: net.branch_rows,
             dc_shunt_conductance_as_load: true,
             dc_solver: None,
+            islands: Vec::new(),
         })
     }
 
@@ -651,6 +655,7 @@ impl PowerFlowModel {
             branch_rows: Vec::new(),
             dc_shunt_conductance_as_load: false,
             dc_solver: None,
+            islands: Vec::new(),
         })
     }
 
@@ -738,6 +743,7 @@ impl PowerFlowModel {
         init: &str,
     ) -> PyResult<()> {
         let init = parse_init(init)?;
+        self.islands.clear();
         match self.method {
             PowerFlowMethod::Dc => return self.solve_dc(),
             PowerFlowMethod::LinearImpedance => return self.solve_linear_impedance(),
@@ -804,6 +810,7 @@ impl PowerFlowModel {
             self.solver
                 .solve(&mut self.buses, &self.ybus, self.tol, self.max_iter)
         };
+        self.islands = islands.clone();
         for island in &islands {
             match island.status {
                 IslandStatus::Converged
@@ -824,6 +831,35 @@ impl PowerFlowModel {
             }
         }
         Ok(())
+    }
+
+    /// Each connected component's outcome in the last Newton `solve()`, as a
+    /// dict: `status` (`"converged"`, `"max_iterations"`, `"singular"`,
+    /// `"no_reference"`, `"ambiguous_reference"`), `buses`, `references` (its
+    /// slack buses) and `max_mismatch` (per-unit, `None` where nothing was
+    /// solved). `solve()` raises only for the two that did not converge; a
+    /// component with no reference or several is reported only here.
+    fn islands(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        self.islands
+            .iter()
+            .map(|island| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item(
+                    "status",
+                    match island.status {
+                        IslandStatus::Converged => "converged",
+                        IslandStatus::MaxIterationsReached => "max_iterations",
+                        IslandStatus::Singular => "singular",
+                        IslandStatus::NoReferenceBus => "no_reference",
+                        IslandStatus::AmbiguousReferenceBus => "ambiguous_reference",
+                    },
+                )?;
+                d.set_item("buses", &island.bus_indices)?;
+                d.set_item("references", &island.slack_indices)?;
+                d.set_item("max_mismatch", island.max_mismatch)?;
+                Ok(d.unbind())
+            })
+            .collect()
     }
 
     /// Every transformer's tap position after the last solve, `None` where it
