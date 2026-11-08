@@ -106,6 +106,44 @@ removed after it broke `case3120sp`.
 
 **Not built or tested in CI** — the same local/manual-verification posture as `klu` and `pardiso`.
 
+## Equipment the case leaves out
+
+A terminal on a `ConnectivityNode` the TP places on no `TopologicalNode` gets a bus only beside an
+`EquivalentInjection`, which marks a boundary a standalone area ends at. Without one, the node is
+part of a substation out of the case (Espheim's 10.5 kV busbar in ReliCapGrid): its terminals get no
+bus, and equipment reaching for one is skipped, tap changer included. A bus of its own would be
+wrong as well as unneeded, since closed switches would merge it with what it touches and join
+islands the topology keeps apart.
+
+`Equipment.inService` false takes equipment out whatever its terminals' `connected` says, a line
+included (ReliCapGrid's Espheim line `8-9`, `connected` true at both ends). Across the conformance
+models and ReliCapGrid, such equipment carries no flow in the published SV, RealGrid's 228 lines
+among it; SmallGrid's five lines, which feed stubs at most 0.8 Mvar of charging, are the exception
+`cgmes_smallgrid_test.rs` names.
+
+A contingency's `outOfService` equipment takes this route too, whatever its class:
+`cgmes::out_of_service` on the element, or from Python `model.with_out_of_service(mrids)`, which
+converts afresh from the decoded profiles and leaves `model` as it was. A converter out of service,
+or one whose DC side nothing holds any more because its partner or the line to it is out, transfers
+no power, so an HVDC link's loss is felt at both AC ends. A `CsConverter` carrying no DC current has no
+reactive demand either; a `VsConverter` keeps its scheduled Q, as it can without DC power.
+
+## Merged models
+
+A component holding several angle references marks IGMs merged by their shared boundary
+`TopologicalNode`s: a `TopologicalIsland` names one reference, and an assembled CGM's TP has one per
+component. Each IGM's were its own, and holding them all over-determines the component
+(`IslandStatus::AmbiguousReferenceBus`), so `assemble_merged_references` makes it one network:
+
+- the largest island's reference stays; the others give up the angle, and a machine's keeps holding
+  the voltage the SV gave it;
+- on a bus holding several `EquivalentInjection`s, IGMs meet and the real ties are there, so they all
+  go. One alone faces an IGM not loaded and stays.
+
+What a pair of injections did not cancel is the boundary mismatch, and lands on the reference. A
+component with one reference is left alone: in an assembled CGM's SSH, the injections on a tie are
+exact opposites. This does not read the boundary files, which merge without changing a bus.
+
 ## The per-class pages
 
 The remaining pages in this section each take one CIM class or attribute that needed real modeling

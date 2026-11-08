@@ -80,6 +80,8 @@
 # CGMES Data Model
 
 - [Reading CGMES Input](./cgmes/index.md)
+  - [Security Analysis and the SAR](./cgmes/security_analysis.md)
+  - [The 2026 SV-IOP](./cgmes/sv_iop_2026.md)
 - [Node-Breaker Topology](./cgmes/node_breaker.md)
 - [StaticVarCompensator](./cgmes/static_var_compensator.md)
 - [Line Shunt Conductance (`ACLineSegment.gch`)](./cgmes/shunt_conductance.md)

@@ -85,6 +85,9 @@ mod cgmes_pst_phase_tap_changer_table_test;
 #[path = "cgmes_realgrid_test.rs"]
 mod cgmes_realgrid_test;
 #[cfg(feature = "cgmes")]
+#[path = "cgmes_relicapgrid_test.rs"]
+mod cgmes_relicapgrid_test;
+#[cfg(feature = "cgmes")]
 #[path = "cgmes_remote_test.rs"]
 mod cgmes_remote_test;
 #[cfg(feature = "cgmes")]

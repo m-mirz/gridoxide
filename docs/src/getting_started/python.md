@@ -252,6 +252,44 @@ for node in result.nodes:
 - `result.faults` — per fault: `i_f`, `i_f_angle`, per phase.
 - `result.sources` — each source's contribution, `i` and `i_angle`.
 
+### Contingencies of any equipment
+
+`solve_contingencies` trips branches, sharing a factorization across a sweep. A contingency of a CGMES
+model may also lose a shunt, a machine, a load or an HVDC converter or line, and
+`with_out_of_service` takes any of them, N-k included, by mRID:
+
+```python
+model = gridoxide.PowerFlowModel.from_cgmes(paths)
+for equipment in contingencies:          # lists of mRIDs
+    outage = model.with_out_of_service(equipment)   # raises ValueError for an unknown mRID
+    outage.solve(enforce_q_limits=True)  # raises RuntimeError if it does not converge
+```
+
+Each outage is converted afresh from the profiles, decoded once, and `model` is left as it was. A part
+of the network the outage cuts off from its angle reference shows as `"no_reference"` in `islands()`.
+
+### Security analysis
+
+`gridoxide.security_analysis(profiles, co_files)` solves a model's base case and each contingency of its CO files,
+holds each terminal's current against its limits and writes a SAR: see
+[Security Analysis and the SAR](../cgmes/security_analysis.md).
+
+### Flows at the terminals
+
+`model.terminal_flows()` gives each branch terminal's flow after a `solve()`, keyed by its mRID, as
+`(p, q, i)` in MW, Mvar and A, with `p` and `q` positive into the branch, which is CIM's load sign. It
+is what a limit in the model can be held against. Equipment out of service has no entry, and it needs a
+`from_cgmes(topology="bus_branch")` model not solved with `control_taps`, which moves tap changers these
+flows would not see.
+
+### Whether every component solved
+
+`solve()` raises only for a component that did not converge. One with no angle reference, or
+several, is not a failure of Newton's and raises nothing; `model.islands()` reports each component
+of the last solve as a dict of `status` (`"converged"`, `"max_iterations"`, `"singular"`,
+`"no_reference"`, `"ambiguous_reference"`), `buses`, `references` and `max_mismatch` (per-unit, `None`
+where nothing was solved).
+
 ### Node-breaker topology and switches
 
 CGMES models carry their substation switching arrangement; `topology="node_breaker"` keeps it

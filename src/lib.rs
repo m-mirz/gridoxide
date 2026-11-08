@@ -47,5 +47,7 @@ pub use gridoxide_gpu as gpu;
 mod python;
 #[cfg(feature = "rao")]
 pub mod rao;
+#[cfg(feature = "cgmes")]
+pub mod security_analysis;
 #[cfg(feature = "ucte")]
 pub mod ucte;

@@ -8,6 +8,7 @@ need them opt in explicitly.
 |---|---|---|
 | `CGMES-Test-Configurations/` | submodule | ~158 MB |
 | `benchmark-grids/` | submodule | ~5 MB |
+| `relicapgrid/` | submodule | ~30 MB |
 | `pgm/` | committed | ~3.5 MB |
 
 The OPF tests use the pglib-opf cases in `benchmark-grids/pglib/`. The Rust
@@ -27,13 +28,19 @@ docstring explains why these cases and not `benchmark-grids/matpower/`.
   CRACs and Cucumber suite, which the UCTE, IIDM and RAO tests read through
   `tests/openrao/mod.rs` and `openrao-fixtures.txt`. See that directory's
   `README.md`.
+- **`relicapgrid/`** — ENTSO-E's [ReliCapGrid](https://github.com/entsoe/relicapgrid),
+  the dataset of the 2026 SV-IOP (CC BY-SA 4.0, see its `LICENSE.md`): nine IGMs, their
+  boundary and common data and an assembled CGM, used by `cgmes_relicapgrid_test.rs` and
+  `python/tests/test_relicapgrid_*.py`, whose results are in `docs/src/cgmes/sv_iop_2026.md`.
+  Pinned to the commit cimoxide's `scripts/relicapgrid` results are for.
 
-Neither is initialized by a plain `git clone`. CI fetches `benchmark-grids/`
-but not `CGMES-Test-Configurations/`. Pull one in when you need it:
+None is initialized by a plain `git clone`. CI fetches `benchmark-grids/`
+but neither of the others. Pull one in when you need it:
 
 ```bash
 git submodule update --init tests/data/CGMES-Test-Configurations
 git submodule update --init tests/data/benchmark-grids
-# or both, plus anything added later:
+git submodule update --init tests/data/relicapgrid
+# or all, plus anything added later:
 git submodule update --init --recursive
 ```

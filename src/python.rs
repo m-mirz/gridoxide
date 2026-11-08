@@ -290,6 +290,18 @@ struct PowerFlowModel {
     /// arithmetic.
     #[cfg(feature = "cgmes")]
     node_breaker: Option<crate::switches::NodeBreakerNetwork>,
+    /// The decoded profiles and options a `from_cgmes` model came from.
+    #[cfg(feature = "cgmes")]
+    cgmes_source: Option<(crate::cgmes::CimDataset, CgmesOptions)>,
+    /// Terminal mRID -> its branch and side, with the system base; bus-branch
+    /// `from_cgmes` models only. For `terminal_flows`.
+    #[cfg(feature = "cgmes")]
+    terminals: Option<(
+        std::collections::HashMap<String, (usize, crate::branch_flow::Terminal)>,
+        f64,
+    )>,
+    /// The last solve moved tap changers, which `transformers` does not show.
+    tap_moved: bool,
     /// `TopologicalNode` mrid -> bus index, populated by `from_cgmes` (empty
     /// for `from_pgm_json`, which has no mrid concept at all) — lets Python
     /// callers look up a specific bus's solved voltage by mrid to compare
@@ -297,6 +309,8 @@ struct PowerFlowModel {
     /// to separately re-derive `cgmes::cgmes_topological_node_bus_index`'s
     /// own post-switch-merge index remapping themselves.
     tn_bus_index: std::collections::HashMap<String, usize>,
+    /// Each component's outcome in the last Newton `solve()`.
+    islands: Vec<crate::solver::IslandReport>,
     /// Bus index -> MATPOWER bus number, populated by `from_matpower` only.
     bus_numbers: Vec<u64>,
     /// Flat branch index -> 0-based row of `mpc.branch`, populated by
@@ -309,6 +323,150 @@ struct PowerFlowModel {
     /// built on the first DC solve and dropped with `sensitivity`, which
     /// depends on the same topology.
     dc_solver: Option<crate::linear::DcSolver>,
+}
+
+/// What `from_cgmes` was given beyond its files, for building again from the decoded
+/// profiles (`with_out_of_service`).
+#[cfg(feature = "cgmes")]
+struct CgmesOptions {
+    backend: String,
+    tol: f64,
+    max_iter: usize,
+    s_base_va: f64,
+    method: String,
+    dc_approximation: String,
+    topology: String,
+    retain: String,
+}
+
+#[cfg(feature = "cgmes")]
+impl PowerFlowModel {
+    fn from_dataset(ds: &crate::cgmes::CimDataset, options: &CgmesOptions) -> PyResult<Self> {
+        let (backend, tol, max_iter, s_base_va, method, dc_approximation, topology, retain) = (
+            options.backend.as_str(),
+            options.tol,
+            options.max_iter,
+            options.s_base_va,
+            options.method.as_str(),
+            options.dc_approximation.as_str(),
+            options.topology.as_str(),
+            options.retain.as_str(),
+        );
+        // Populated by the bus-branch path only. The node-breaker view appends
+        // a branch per retained switch after the model's own transformers, so
+        // the tables — parallel to those transformers alone — would be
+        // misaligned there; `cgmes_node_breaker_to_buses_and_branches` drops
+        // them for the same reason.
+        let mut taps: (
+            Vec<Option<crate::types::TapChanger>>,
+            Vec<crate::outerloop::TapRegulation>,
+        ) = (Vec::new(), Vec::new());
+        // Same reasoning as `taps`: the node-breaker view numbers buses its own
+        // way, so machine-to-bus indices from the bus-branch view would point at
+        // the wrong buses there. Left empty rather than mismapped.
+        let mut dispatch_data: (Vec<crate::types::RegulatingMachine>, Vec<f64>) =
+            (Vec::new(), Vec::new());
+        let mut terminals = None;
+        let (buses_template, lines, transformers, shunts, tn_bus_index, node_breaker) =
+            match topology {
+                "bus_branch" => {
+                    if retain != "none" {
+                        return Err(PyValueError::new_err(
+                            "retain= only applies to topology=\"node_breaker\"; the bus-branch \
+                             view has already merged every switch away",
+                        ));
+                    }
+                    let net = crate::cgmes::cgmes_to_network(&ds, s_base_va).map_err(|e| {
+                        PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
+                    })?;
+                    terminals = Some((net.terminal_branch, s_base_va));
+                    let (mut buses, lines, transformers, shunts) =
+                        (net.buses, net.lines, net.transformers, net.shunts);
+                    taps = (net.tap_changers, net.regulation);
+                    dispatch_data = (
+                        net.voltage_control.machines,
+                        net.voltage_control.nonregulating_q,
+                    );
+                    cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va).map_err(|e| {
+                        PyRuntimeError::new_err(format!("resolving CGMES HVDC converters: {e}"))
+                    })?;
+                    let tn = cgmes_topological_node_bus_index(&ds).map_err(|e| {
+                        PyRuntimeError::new_err(format!("resolving CGMES bus index: {e}"))
+                    })?;
+                    (buses, lines, transformers, shunts, tn, None)
+                }
+                "node_breaker" => {
+                    let policy = parse_retention(retain)?;
+                    let net = crate::cgmes::cgmes_node_breaker_to_buses_and_branches(
+                        &ds,
+                        s_base_va,
+                        &policy,
+                        crate::switches::SwitchTreatment::Regularize,
+                    )
+                    .map_err(|e| PyRuntimeError::new_err(format!("converting CGMES model: {e}")))?;
+                    // HVDC converters resolve by `TopologicalNode`, which the
+                    // node-breaker path indexes too — but its bus numbering is
+                    // its own, so the mapping is left empty rather than handing
+                    // back indices from the other view.
+                    (
+                        net.buses.clone(),
+                        net.lines.clone(),
+                        net.transformers.clone(),
+                        net.shunts.clone(),
+                        std::collections::HashMap::new(),
+                        Some(net),
+                    )
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown topology '{other}', expected 'bus_branch' or 'node_breaker'"
+                    )));
+                }
+            };
+
+        let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let ybus = ybus.finish();
+        let backend = parse_backend(backend)?;
+        Ok(Self {
+            buses: buses_template.clone(),
+            buses_template,
+            ybus,
+            lines,
+            transformers,
+            shunts,
+            machines: dispatch_data.0,
+            nonregulating_q: dispatch_data.1,
+            solver: PersistentSolver::new(backend),
+            backend,
+            method: parse_method(method)?,
+            dc_opts: DcOptions {
+                approximation: parse_dc_approximation(dc_approximation)?,
+                ..DcOptions::default()
+            },
+            dc_solution: None,
+            sensitivity: None,
+            dc_pool: None,
+            node_breaker,
+            cgmes_source: None,
+            #[cfg(feature = "cgmes")]
+            terminals,
+            tap_moved: false,
+            batch: None,
+            stored_scenarios: Vec::new(),
+            tap_changers: taps.0,
+            regulation: taps.1,
+            outer: None,
+            tol,
+            max_iter,
+            tn_bus_index,
+            bus_numbers: Vec::new(),
+            branch_rows: Vec::new(),
+            dc_shunt_conductance_as_load: false,
+            dc_solver: None,
+            islands: Vec::new(),
+        })
+    }
 }
 
 #[pymethods]
@@ -400,6 +558,11 @@ impl PowerFlowModel {
             dc_pool: None,
             #[cfg(feature = "cgmes")]
             node_breaker: None,
+            #[cfg(feature = "cgmes")]
+            cgmes_source: None,
+            #[cfg(feature = "cgmes")]
+            terminals: None,
+            tap_moved: false,
             batch: None,
             stored_scenarios: Vec::new(),
             tap_changers: Vec::new(),
@@ -412,6 +575,7 @@ impl PowerFlowModel {
             branch_rows: Vec::new(),
             dc_shunt_conductance_as_load: false,
             dc_solver: None,
+            islands: Vec::new(),
         })
     }
 
@@ -473,6 +637,11 @@ impl PowerFlowModel {
             dc_pool: None,
             #[cfg(feature = "cgmes")]
             node_breaker: None,
+            #[cfg(feature = "cgmes")]
+            cgmes_source: None,
+            #[cfg(feature = "cgmes")]
+            terminals: None,
+            tap_moved: false,
             batch: None,
             stored_scenarios: Vec::new(),
             tap_changers: Vec::new(),
@@ -485,6 +654,7 @@ impl PowerFlowModel {
             branch_rows: net.branch_rows,
             dc_shunt_conductance_as_load: true,
             dc_solver: None,
+            islands: Vec::new(),
         })
     }
 
@@ -545,113 +715,56 @@ impl PowerFlowModel {
         let ds = load_profiles(&path_refs)
             .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))?;
 
-        // Populated by the bus-branch path only. The node-breaker view appends
-        // a branch per retained switch after the model's own transformers, so
-        // the tables — parallel to those transformers alone — would be
-        // misaligned there; `cgmes_node_breaker_to_buses_and_branches` drops
-        // them for the same reason.
-        let mut taps: (
-            Vec<Option<crate::types::TapChanger>>,
-            Vec<crate::outerloop::TapRegulation>,
-        ) = (Vec::new(), Vec::new());
-        // Same reasoning as `taps`: the node-breaker view numbers buses its own
-        // way, so machine-to-bus indices from the bus-branch view would point at
-        // the wrong buses there. Left empty rather than mismapped.
-        let mut dispatch_data: (Vec<crate::types::RegulatingMachine>, Vec<f64>) =
-            (Vec::new(), Vec::new());
-        let (buses_template, lines, transformers, shunts, tn_bus_index, node_breaker) =
-            match topology {
-                "bus_branch" => {
-                    if retain != "none" {
-                        return Err(PyValueError::new_err(
-                            "retain= only applies to topology=\"node_breaker\"; the bus-branch \
-                             view has already merged every switch away",
-                        ));
-                    }
-                    let net = crate::cgmes::cgmes_to_network(&ds, s_base_va).map_err(|e| {
-                        PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
-                    })?;
-                    let (mut buses, lines, transformers, shunts) =
-                        (net.buses, net.lines, net.transformers, net.shunts);
-                    taps = (net.tap_changers, net.regulation);
-                    dispatch_data = (
-                        net.voltage_control.machines,
-                        net.voltage_control.nonregulating_q,
-                    );
-                    cgmes_resolve_dc_converters(&ds, &mut buses, s_base_va).map_err(|e| {
-                        PyRuntimeError::new_err(format!("resolving CGMES HVDC converters: {e}"))
-                    })?;
-                    let tn = cgmes_topological_node_bus_index(&ds).map_err(|e| {
-                        PyRuntimeError::new_err(format!("resolving CGMES bus index: {e}"))
-                    })?;
-                    (buses, lines, transformers, shunts, tn, None)
-                }
-                "node_breaker" => {
-                    let policy = parse_retention(retain)?;
-                    let net = crate::cgmes::cgmes_node_breaker_to_buses_and_branches(
-                        &ds,
-                        s_base_va,
-                        &policy,
-                        crate::switches::SwitchTreatment::Regularize,
-                    )
-                    .map_err(|e| PyRuntimeError::new_err(format!("converting CGMES model: {e}")))?;
-                    // HVDC converters resolve by `TopologicalNode`, which the
-                    // node-breaker path indexes too — but its bus numbering is
-                    // its own, so the mapping is left empty rather than handing
-                    // back indices from the other view.
-                    (
-                        net.buses.clone(),
-                        net.lines.clone(),
-                        net.transformers.clone(),
-                        net.shunts.clone(),
-                        std::collections::HashMap::new(),
-                        Some(net),
-                    )
-                }
-                other => {
-                    return Err(PyValueError::new_err(format!(
-                        "unknown topology '{other}', expected 'bus_branch' or 'node_breaker'"
-                    )));
-                }
-            };
-
-        let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
-        stamp_shunts(&mut ybus, &shunts);
-        let ybus = ybus.finish();
-        let backend = parse_backend(backend)?;
-        Ok(Self {
-            buses: buses_template.clone(),
-            buses_template,
-            ybus,
-            lines,
-            transformers,
-            shunts,
-            machines: dispatch_data.0,
-            nonregulating_q: dispatch_data.1,
-            solver: PersistentSolver::new(backend),
-            backend,
-            method: parse_method(method)?,
-            dc_opts: DcOptions {
-                approximation: parse_dc_approximation(dc_approximation)?,
-                ..DcOptions::default()
-            },
-            dc_solution: None,
-            sensitivity: None,
-            dc_pool: None,
-            node_breaker,
-            batch: None,
-            stored_scenarios: Vec::new(),
-            tap_changers: taps.0,
-            regulation: taps.1,
-            outer: None,
+        let options = CgmesOptions {
+            backend: backend.to_string(),
             tol,
             max_iter,
-            tn_bus_index,
-            bus_numbers: Vec::new(),
-            branch_rows: Vec::new(),
-            dc_shunt_conductance_as_load: false,
-            dc_solver: None,
-        })
+            s_base_va,
+            method: method.to_string(),
+            dc_approximation: dc_approximation.to_string(),
+            topology: topology.to_string(),
+            retain: retain.to_string(),
+        };
+        let mut model = Self::from_dataset(&ds, &options)?;
+        model.cgmes_source = Some((ds, options));
+        Ok(model)
+    }
+
+    /// This model with `equipment` (mRIDs, as a contingency's
+    /// `ContingencyEquipment.Equipment` names them, of any class) out of service,
+    /// converted afresh from the decoded profiles. This model is left as it is, so a
+    /// sweep of contingencies does not read the files again. Raises `ValueError` for
+    /// an mRID the profiles lack, and `RuntimeError` on a model not from `from_cgmes`.
+    #[cfg(feature = "cgmes")]
+    fn with_out_of_service(&mut self, equipment: Vec<String>) -> PyResult<Self> {
+        let Some((ds, options)) = self.cgmes_source.as_mut() else {
+            return Err(PyRuntimeError::new_err(
+                "with_out_of_service needs a model from from_cgmes",
+            ));
+        };
+        let mut originals = Vec::with_capacity(equipment.len());
+        for mrid in &equipment {
+            let key = if ds.entries.contains_key(mrid) {
+                mrid.clone()
+            } else {
+                format!("_{mrid}")
+            };
+            let Some(element) = ds.entries.get_mut(&key) else {
+                for (key, original) in originals {
+                    ds.entries.insert(key, original);
+                }
+                return Err(PyValueError::new_err(format!(
+                    "no equipment {mrid} in the profiles"
+                )));
+            };
+            let out = crate::cgmes::out_of_service(element);
+            originals.push((key, std::mem::replace(element, out)));
+        }
+        let model = Self::from_dataset(ds, options);
+        for (key, original) in originals.into_iter().rev() {
+            ds.entries.insert(key, original);
+        }
+        model
     }
 
     /// Number of buses (nodes), including the virtual slack bus each active
@@ -707,6 +820,10 @@ impl PowerFlowModel {
     /// regulating controls, which today means `from_cgmes(topology=
     /// "bus_branch")`. With none present it is a no-op rather than an error.
     ///
+    /// `slack_weights` shares it by a weight per bus instead of equally (`n_nodes`
+    /// entries; a component whose weights are all zero stays on its reference).
+    /// Generator limits are not enforced: a share can push a machine past its maximum.
+    ///
     /// Read what they did with `tap_positions()`, `tap_controllers()`,
     /// `q_limit_switches()` and `slack_shift()`.
     ///
@@ -725,6 +842,7 @@ impl PowerFlowModel {
         max_outer = 40,
         max_tap_shift = 3,
         init = "linear_impedance",
+        slack_weights = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn solve(
@@ -736,8 +854,24 @@ impl PowerFlowModel {
         max_outer: usize,
         max_tap_shift: i32,
         init: &str,
+        slack_weights: Option<Vec<f64>>,
     ) -> PyResult<()> {
         let init = parse_init(init)?;
+        if let Some(weights) = &slack_weights {
+            if distribute_slack {
+                return Err(PyValueError::new_err(
+                    "distribute_slack shares equally and slack_weights by weight: give one",
+                ));
+            }
+            if weights.len() != self.buses_template.len() {
+                return Err(PyValueError::new_err(format!(
+                    "slack_weights has {} entries, expected one per bus ({})",
+                    weights.len(),
+                    self.buses_template.len()
+                )));
+            }
+        }
+        self.islands.clear();
         match self.method {
             PowerFlowMethod::Dc => return self.solve_dc(),
             PowerFlowMethod::LinearImpedance => return self.solve_linear_impedance(),
@@ -761,9 +895,14 @@ impl PowerFlowModel {
         // machine; opt-in because turning it on changes answers.
         let wants_remote =
             control_remote_voltage && self.machines.iter().any(|m| m.at_bus != m.controls_bus);
-        let islands = if enforce_q_limits || distribute_slack || wants_taps || wants_remote {
-            let distribution =
-                distribute_slack.then(|| crate::outerloop::SlackDistribution::uniform(&self.buses));
+        self.tap_moved = wants_taps;
+        let distribution = match slack_weights {
+            Some(weights) => Some(crate::outerloop::SlackDistribution::from_weights(weights)),
+            None => {
+                distribute_slack.then(|| crate::outerloop::SlackDistribution::uniform(&self.buses))
+            }
+        };
+        let islands = if enforce_q_limits || distribution.is_some() || wants_taps || wants_remote {
             let report = crate::run_power_flow_with_remote(
                 std::mem::take(&mut self.buses),
                 &self.lines,
@@ -804,6 +943,7 @@ impl PowerFlowModel {
             self.solver
                 .solve(&mut self.buses, &self.ybus, self.tol, self.max_iter)
         };
+        self.islands = islands.clone();
         for island in &islands {
             match island.status {
                 IslandStatus::Converged
@@ -824,6 +964,68 @@ impl PowerFlowModel {
             }
         }
         Ok(())
+    }
+
+    /// The flow at each terminal of a branch after the last `solve()`, by terminal
+    /// mRID: `(p, q, i)` in MW, Mvar and A, with `p` and `q` positive into the
+    /// branch, which is CIM's load sign. A dead bus's terminal has zero. Equipment
+    /// out of service has no entry, nor does a branch open at one end. Needs a
+    /// `from_cgmes(topology="bus_branch")` model not solved with `control_taps`,
+    /// which moves tap changers these flows would not see.
+    #[cfg(feature = "cgmes")]
+    fn terminal_flows(&self) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
+        let Some((terminals, s_base_va)) = self.terminals.as_ref() else {
+            return Err(PyRuntimeError::new_err(
+                "terminal_flows needs a model from from_cgmes(topology=\"bus_branch\")",
+            ));
+        };
+        if self.islands.is_empty() {
+            return Err(PyRuntimeError::new_err("terminal_flows needs a solve()"));
+        }
+        if self.tap_moved {
+            return Err(PyRuntimeError::new_err(
+                "terminal_flows cannot follow solve(control_taps=True)",
+            ));
+        }
+        Ok(crate::security_analysis::terminal_flows(
+            terminals,
+            &self.buses,
+            &self.lines,
+            &self.transformers,
+            *s_base_va,
+        )
+        .into_iter()
+        .map(|(mrid, flow)| (mrid, (flow.p_mw, flow.q_mvar, flow.amps)))
+        .collect())
+    }
+
+    /// Each connected component's outcome in the last Newton `solve()`, as a
+    /// dict: `status` (`"converged"`, `"max_iterations"`, `"singular"`,
+    /// `"no_reference"`, `"ambiguous_reference"`), `buses`, `references` (its
+    /// slack buses) and `max_mismatch` (per-unit, `None` where nothing was
+    /// solved). `solve()` raises only for the two that did not converge; a
+    /// component with no reference or several is reported only here.
+    fn islands(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        self.islands
+            .iter()
+            .map(|island| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item(
+                    "status",
+                    match island.status {
+                        IslandStatus::Converged => "converged",
+                        IslandStatus::MaxIterationsReached => "max_iterations",
+                        IslandStatus::Singular => "singular",
+                        IslandStatus::NoReferenceBus => "no_reference",
+                        IslandStatus::AmbiguousReferenceBus => "ambiguous_reference",
+                    },
+                )?;
+                d.set_item("buses", &island.bus_indices)?;
+                d.set_item("references", &island.slack_indices)?;
+                d.set_item("max_mismatch", island.max_mismatch)?;
+                Ok(d.unbind())
+            })
+            .collect()
     }
 
     /// Every transformer's tap position after the last solve, `None` where it
@@ -1098,7 +1300,7 @@ impl PowerFlowModel {
     }
 
     /// Per bus, how much its active schedule moved, per-unit. Empty unless
-    /// `solve(distribute_slack=True)`.
+    /// `solve(distribute_slack=True)` or `solve(slack_weights=...)`.
     fn slack_shift(&self) -> Vec<f64> {
         self.outer
             .as_ref()
@@ -4794,9 +4996,146 @@ impl GpuDcSolver {
     }
 }
 
+/// The result of `security_analysis`.
+#[cfg(feature = "cgmes")]
+#[pyclass(name = "SecurityAnalysis")]
+struct PySecurityAnalysis {
+    inner: crate::security_analysis::SecurityAnalysis,
+}
+
+#[cfg(feature = "cgmes")]
+#[pymethods]
+impl PySecurityAnalysis {
+    /// Contingencies solved.
+    #[getter]
+    fn solved(&self) -> usize {
+        self.inner.solved
+    }
+
+    /// The contingencies that did not converge, by mRID.
+    #[getter]
+    fn stalled(&self) -> Vec<String> {
+        self.inner.stalled.clone()
+    }
+
+    /// The contingencies naming equipment the model lacks, by mRID.
+    #[getter]
+    fn absent(&self) -> Vec<String> {
+        self.inner.absent.clone()
+    }
+
+    #[getter]
+    fn scenario_time(&self) -> String {
+        self.inner.scenario_time.clone()
+    }
+
+    /// The contingency datasets' identifiers, which the SAR requires.
+    #[getter]
+    fn requires(&self) -> Vec<String> {
+        self.inner.requires.clone()
+    }
+
+    /// The base case's flow at each terminal, by mRID: `(p, q, i)` in MW, Mvar and A.
+    fn base_flows(&self) -> std::collections::HashMap<String, (f64, f64, f64)> {
+        self.inner
+            .base
+            .iter()
+            .map(|(mrid, flow)| (mrid.clone(), (flow.p_mw, flow.q_mvar, flow.amps)))
+            .collect()
+    }
+
+    /// Each violated limit in each state, as a dict: `contingency` (`None` in the base case),
+    /// `terminal`, `limit`, `limit_a`, `percent`, `p`, `q`, `i`.
+    fn violations(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        self.inner
+            .violations
+            .iter()
+            .map(|v| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("contingency", v.contingency.as_deref())?;
+                d.set_item("terminal", &v.terminal)?;
+                d.set_item("limit", &v.limit.mrid)?;
+                d.set_item("limit_a", v.limit.amps)?;
+                d.set_item("percent", v.percent())?;
+                d.set_item("p", v.flow.p_mw)?;
+                d.set_item("q", v.flow.q_mvar)?;
+                d.set_item("i", v.flow.amps)?;
+                Ok(d.unbind())
+            })
+            .collect()
+    }
+
+    /// Where capability sharing moved a machine past a limit: `(contingency, machine, MW, limit)`.
+    fn past_limits(&self) -> Vec<(Option<String>, String, f64, f64)> {
+        self.inner
+            .past_limits
+            .iter()
+            .map(|p| (p.contingency.clone(), p.machine.clone(), p.mw, p.limit))
+            .collect()
+    }
+
+    /// The analysis as a dataset of the `SecurityAnalysisResult` profile, as text.
+    #[pyo3(signature = (publisher, is_version_of, rights_holder, generated_at, title, description))]
+    fn to_sar(
+        &self,
+        publisher: String,
+        is_version_of: String,
+        rights_holder: String,
+        generated_at: String,
+        title: String,
+        description: String,
+    ) -> PyResult<String> {
+        self.inner
+            .to_sar(&crate::security_analysis::SarHeader {
+                title,
+                description,
+                publisher,
+                is_version_of,
+                rights_holder,
+                generated_at,
+            })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+}
+
+/// Solves a CGMES model's base case and each contingency of its CO files, and holds each
+/// terminal's current against its limits. `sharing` is who takes the imbalance: `"capability"`
+/// (the machines by `maxOperatingP`), `"reference"` or `"equal"`.
+#[cfg(feature = "cgmes")]
+#[pyfunction]
+#[pyo3(signature = (paths, contingency_paths, sharing="capability", enforce_q_limits=false))]
+fn security_analysis(
+    paths: Vec<String>,
+    contingency_paths: Vec<String>,
+    sharing: &str,
+    enforce_q_limits: bool,
+) -> PyResult<PySecurityAnalysis> {
+    let decode = |paths: &[String]| {
+        let refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
+        load_profiles(&refs)
+            .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))
+    };
+    let mut grid = decode(&paths)?;
+    let contingencies = decode(&contingency_paths)?;
+    let options = crate::security_analysis::SecurityOptions {
+        sharing: sharing.parse().map_err(PyValueError::new_err)?,
+        enforce_q_limits,
+        ..Default::default()
+    };
+    Ok(PySecurityAnalysis {
+        inner: crate::security_analysis::run(&mut grid, &contingencies, &options)
+            .map_err(PyRuntimeError::new_err)?,
+    })
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
+    #[cfg(feature = "cgmes")]
+    {
+        m.add_class::<PySecurityAnalysis>()?;
+        m.add_function(wrap_pyfunction!(security_analysis, m)?)?;
+    }
     m.add_class::<BatchResult>()?;
     m.add_class::<ContingencyResult>()?;
     m.add_class::<Float64Buffer>()?;

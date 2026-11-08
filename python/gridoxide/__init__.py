@@ -32,6 +32,15 @@ __all__ = [
     "short_circuit",
 ]
 
+# CGMES input needs the `cgmes` feature, which the published wheels carry from the
+# release after 0.4.0. `hasattr(gridoxide, "security_analysis")` is the check.
+try:
+    from ._gridoxide import SecurityAnalysis, security_analysis  # noqa: F401
+except ImportError:
+    pass
+else:
+    __all__ += ["SecurityAnalysis", "security_analysis"]
+
 # The optimal power flow entry points need the `opf` feature compiled in, so
 # they are not present in every build. Exported when they are, absent when they
 # are not — `hasattr(gridoxide, "dc_opf")` is the check, and importing
