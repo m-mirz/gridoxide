@@ -24,6 +24,10 @@ described on the page that covers it
 ([backends](../solvers/backends.md), [CGMES input](../cgmes/index.md),
 [Python bindings](./python.md)).
 
+`parallel`, on by default, gives faer its own threads. WebAssembly builds turn it off
+(`--no-default-features`), as `wasm32-unknown-unknown` cannot start threads. There the power flow, CGMES input and
+`security_analysis` run on one thread; `BatchSolver` returns an error, as it builds a thread pool.
+
 ## Running
 
 With no arguments the binary runs a bundled power-flow demo:

@@ -73,6 +73,11 @@ jobs:
     # `encoding` feature — which changes the shape of a public type. That
     # combination compiled in no single-feature step and broke in the one
     # nobody ran. This is that step.
+    # Compiling is not running: this does not show that threads are not started at runtime.
+    - name: Check WebAssembly, without faer's threads
+      run: |
+        rustup target add wasm32-unknown-unknown
+        cargo check --target wasm32-unknown-unknown --lib --no-default-features --features cgmes,ucte,iidm,opf,rao,dynamics,matpower
     - name: Check every CI-covered feature together
       run: cargo check --all-targets --features cgmes,ucte,iidm,opf,rao,dynamics,capi,matpower
     # Tested on the union, *less `cgmes`*: its tests read

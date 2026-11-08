@@ -12,8 +12,8 @@ categories = ["science", "simulation"]
 license = "Apache-2.0"
 
 [dependencies]
-gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.4.0" }
-faer = "0.24.4"
+gridoxide-sparse = { path = "../gridoxide-sparse", version = "0.4.0", default-features = false }
+faer = { version = "0.24.4", default-features = false, features = ["std", "sparse-linalg"] }
 num-complex = { version = "0.4.6", features = ["serde"] }
 # The batch solvers — power flow's and state estimation's — run scenarios
 # across rayon's pool; see the comment on this dependency in the workspace
@@ -25,7 +25,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [features]
-default = []
+default = ["parallel"]
+# faer's own threads. Off for wasm32-unknown-unknown, which cannot start them.
+parallel = ["faer/rayon", "gridoxide-sparse/parallel"]
 # The two FFI sparse backends, as `JacobianBackend` variants. Both are built
 # in gridoxide-sparse; see its features for what each needs.
 klu = ["gridoxide-sparse/klu"]
