@@ -20,6 +20,10 @@ classifiers = [
 # isn't listed here. 
 [project.optional-dependencies]
 matpower = ["numpy>=1.24", "scipy>=1.10"]
+# What python/tests/test_relicapgrid_*.py read and validate ReliCapGrid with, independently of
+# gridoxide's own use of cimoxide-model. They skip without it. Tests only: gridoxide depends on
+# cimoxide-model, and never on this.
+test = ["cimoxide>=0.6", "pytest"]
 
 [project.scripts]
 gridoxide-matpower = "gridoxide.matpower:main"

@@ -95,6 +95,14 @@ usage:
                                 slack, with no impedance behind it, instead of
                                 power-grid-model's virtual bus behind the
                                 source impedance (symmetric only).
+  gridoxide cgmes-security <profiles>... --contingencies <co>... [--slack <sharing>]
+                                [--sar <out.xml> --publisher <iri> --version-of <iri>
+                                --rights-holder <name> --generated-at <time>]
+                                a CGMES model's base case and each contingency of its
+                                CO files, current limits monitored, optionally written
+                                as a SAR. <sharing> is capability (default: machines by
+                                maxOperatingP), reference or equal. Exits 1 if a limit
+                                is violated. Needs the cgmes feature.
   gridoxide security <network> --crac <crac.json> [--json]
                                 assess a network against a CRAC: which critical
                                 elements are overloaded, in which state, and by
@@ -438,6 +446,17 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("cgmes-security") => match run_cgmes_security(&args[1..]) {
+            Ok(secure) => {
+                if !secure {
+                    std::process::exit(1);
+                }
+            }
+            Err(message) => {
+                eprintln!("error: {message}");
+                std::process::exit(2);
+            }
+        },
         Some("-h") | Some("--help") | Some("help") => print!("{USAGE}"),
         Some(other) => {
             eprintln!("error: unknown command {other:?}\n\n{USAGE}");
@@ -2410,6 +2429,85 @@ fn run_switches(args: &[String]) -> Result<(), String> {
 
 #[cfg(not(feature = "cgmes"))]
 fn run_switches(_args: &[String]) -> Result<(), String> {
+    Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
+}
+
+/// `gridoxide cgmes-security <profiles>... --contingencies <co>...`
+///
+/// Returns `Ok(true)` when no limit is violated in a state that solved.
+#[cfg(feature = "cgmes")]
+fn run_cgmes_security(args: &[String]) -> Result<bool, String> {
+    use gridoxide::cgmes::load_profiles;
+    use gridoxide::security_analysis::{SarHeader, SecurityOptions, run};
+    use std::path::Path;
+
+    let paths: Vec<&Path> = args
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .map(Path::new)
+        .collect();
+    let flags = &args[paths.len()..];
+    let co: Vec<&Path> = flags
+        .iter()
+        .skip_while(|a| *a != "--contingencies")
+        .skip(1)
+        .take_while(|a| !a.starts_with("--"))
+        .map(Path::new)
+        .collect();
+    if paths.is_empty() || co.is_empty() {
+        return Err(format!(
+            "cgmes-security needs profiles and --contingencies\n\n{USAGE}"
+        ));
+    }
+    let mut options = SecurityOptions::default();
+    if let Some(sharing) = flag_value(flags, "--slack")? {
+        options.sharing = sharing.parse()?;
+    }
+    let mut grid = load_profiles(&paths).map_err(|e| e.to_string())?;
+    let contingencies = load_profiles(&co).map_err(|e| e.to_string())?;
+    let analysis = run(&mut grid, &contingencies, &options)?;
+    let in_base = analysis
+        .violations
+        .iter()
+        .filter(|v| v.contingency.is_none())
+        .count();
+    println!(
+        "{} contingencies solved, {} stalled, {} naming equipment the model lacks; \
+         {in_base} violations in the base case, {} after a contingency; \
+         {} machines shared past their limits",
+        analysis.solved,
+        analysis.stalled.len(),
+        analysis.absent.len(),
+        analysis.violations.len() - in_base,
+        analysis.past_limits.len(),
+    );
+    if let Some(out) = flag_value(flags, "--sar")? {
+        let required = |flag: &str| -> Result<String, String> {
+            flag_value(flags, flag)?.ok_or(format!("--sar needs {flag}"))
+        };
+        let header = SarHeader {
+            title: format!(
+                "{}_SAR",
+                analysis
+                    .scenario_time
+                    .get(..10)
+                    .unwrap_or_default()
+                    .replace('-', "")
+            ),
+            description: "Security analysis by gridoxide.".to_string(),
+            publisher: required("--publisher")?,
+            is_version_of: required("--version-of")?,
+            rights_holder: required("--rights-holder")?,
+            generated_at: required("--generated-at")?,
+        };
+        let xml = analysis.to_sar(&header).map_err(|e| e.to_string())?;
+        std::fs::write(&out, xml).map_err(|e| format!("writing {out}: {e}"))?;
+    }
+    Ok(analysis.violations.is_empty())
+}
+
+#[cfg(not(feature = "cgmes"))]
+fn run_cgmes_security(_args: &[String]) -> Result<bool, String> {
     Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
 }
 

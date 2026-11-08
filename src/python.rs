@@ -987,35 +987,16 @@ impl PowerFlowModel {
                 "terminal_flows cannot follow solve(control_taps=True)",
             ));
         }
-        let voltages = crate::branch_flow::bus_voltages(&self.buses);
-        let branches = crate::branch_flow::branch_params(&self.lines, &self.transformers);
-        Ok(terminals
-            .iter()
-            .filter_map(|(mrid, &(index, side))| {
-                let branch = branches.get(index)?;
-                let (near, far) = match side {
-                    crate::branch_flow::Terminal::From => (branch.from, branch.to),
-                    crate::branch_flow::Terminal::To => (branch.to, branch.from),
-                };
-                let dead =
-                    self.buses[near].voltage_mag == 0.0 || self.buses[far].voltage_mag == 0.0;
-                let (p, q) = if dead {
-                    (0.0, 0.0)
-                } else {
-                    crate::branch_flow::terminal_flow(branch, side, &voltages)
-                };
-                let volts = self.buses[near].voltage_mag * self.buses[near].u_rated;
-                let current = if volts > 0.0 {
-                    p.hypot(q) * s_base_va / (3f64.sqrt() * volts)
-                } else {
-                    0.0
-                };
-                Some((
-                    mrid.clone(),
-                    (p * s_base_va / 1e6, q * s_base_va / 1e6, current),
-                ))
-            })
-            .collect())
+        Ok(crate::security_analysis::terminal_flows(
+            terminals,
+            &self.buses,
+            &self.lines,
+            &self.transformers,
+            *s_base_va,
+        )
+        .into_iter()
+        .map(|(mrid, flow)| (mrid, (flow.p_mw, flow.q_mvar, flow.amps)))
+        .collect())
     }
 
     /// Each connected component's outcome in the last Newton `solve()`, as a
@@ -5015,9 +4996,146 @@ impl GpuDcSolver {
     }
 }
 
+/// The result of `security_analysis`.
+#[cfg(feature = "cgmes")]
+#[pyclass(name = "SecurityAnalysis")]
+struct PySecurityAnalysis {
+    inner: crate::security_analysis::SecurityAnalysis,
+}
+
+#[cfg(feature = "cgmes")]
+#[pymethods]
+impl PySecurityAnalysis {
+    /// Contingencies solved.
+    #[getter]
+    fn solved(&self) -> usize {
+        self.inner.solved
+    }
+
+    /// The contingencies that did not converge, by mRID.
+    #[getter]
+    fn stalled(&self) -> Vec<String> {
+        self.inner.stalled.clone()
+    }
+
+    /// The contingencies naming equipment the model lacks, by mRID.
+    #[getter]
+    fn absent(&self) -> Vec<String> {
+        self.inner.absent.clone()
+    }
+
+    #[getter]
+    fn scenario_time(&self) -> String {
+        self.inner.scenario_time.clone()
+    }
+
+    /// The contingency datasets' identifiers, which the SAR requires.
+    #[getter]
+    fn requires(&self) -> Vec<String> {
+        self.inner.requires.clone()
+    }
+
+    /// The base case's flow at each terminal, by mRID: `(p, q, i)` in MW, Mvar and A.
+    fn base_flows(&self) -> std::collections::HashMap<String, (f64, f64, f64)> {
+        self.inner
+            .base
+            .iter()
+            .map(|(mrid, flow)| (mrid.clone(), (flow.p_mw, flow.q_mvar, flow.amps)))
+            .collect()
+    }
+
+    /// Each violated limit in each state, as a dict: `contingency` (`None` in the base case),
+    /// `terminal`, `limit`, `limit_a`, `percent`, `p`, `q`, `i`.
+    fn violations(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        self.inner
+            .violations
+            .iter()
+            .map(|v| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("contingency", v.contingency.as_deref())?;
+                d.set_item("terminal", &v.terminal)?;
+                d.set_item("limit", &v.limit.mrid)?;
+                d.set_item("limit_a", v.limit.amps)?;
+                d.set_item("percent", v.percent())?;
+                d.set_item("p", v.flow.p_mw)?;
+                d.set_item("q", v.flow.q_mvar)?;
+                d.set_item("i", v.flow.amps)?;
+                Ok(d.unbind())
+            })
+            .collect()
+    }
+
+    /// Where capability sharing moved a machine past a limit: `(contingency, machine, MW, limit)`.
+    fn past_limits(&self) -> Vec<(Option<String>, String, f64, f64)> {
+        self.inner
+            .past_limits
+            .iter()
+            .map(|p| (p.contingency.clone(), p.machine.clone(), p.mw, p.limit))
+            .collect()
+    }
+
+    /// The analysis as a dataset of the `SecurityAnalysisResult` profile, as text.
+    #[pyo3(signature = (publisher, is_version_of, rights_holder, generated_at, title, description))]
+    fn to_sar(
+        &self,
+        publisher: String,
+        is_version_of: String,
+        rights_holder: String,
+        generated_at: String,
+        title: String,
+        description: String,
+    ) -> PyResult<String> {
+        self.inner
+            .to_sar(&crate::security_analysis::SarHeader {
+                title,
+                description,
+                publisher,
+                is_version_of,
+                rights_holder,
+                generated_at,
+            })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+}
+
+/// Solves a CGMES model's base case and each contingency of its CO files, and holds each
+/// terminal's current against its limits. `sharing` is who takes the imbalance: `"capability"`
+/// (the machines by `maxOperatingP`), `"reference"` or `"equal"`.
+#[cfg(feature = "cgmes")]
+#[pyfunction]
+#[pyo3(signature = (paths, contingency_paths, sharing="capability", enforce_q_limits=false))]
+fn security_analysis(
+    paths: Vec<String>,
+    contingency_paths: Vec<String>,
+    sharing: &str,
+    enforce_q_limits: bool,
+) -> PyResult<PySecurityAnalysis> {
+    let decode = |paths: &[String]| {
+        let refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
+        load_profiles(&refs)
+            .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))
+    };
+    let mut grid = decode(&paths)?;
+    let contingencies = decode(&contingency_paths)?;
+    let options = crate::security_analysis::SecurityOptions {
+        sharing: sharing.parse().map_err(PyValueError::new_err)?,
+        enforce_q_limits,
+        ..Default::default()
+    };
+    Ok(PySecurityAnalysis {
+        inner: crate::security_analysis::run(&mut grid, &contingencies, &options)
+            .map_err(PyRuntimeError::new_err)?,
+    })
+}
+
 #[pymodule]
 fn _gridoxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PowerFlowModel>()?;
+    #[cfg(feature = "cgmes")]
+    {
+        m.add_class::<PySecurityAnalysis>()?;
+        m.add_function(wrap_pyfunction!(security_analysis, m)?)?;
+    }
     m.add_class::<BatchResult>()?;
     m.add_class::<ContingencyResult>()?;
     m.add_class::<Float64Buffer>()?;

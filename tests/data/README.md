@@ -30,7 +30,8 @@ docstring explains why these cases and not `benchmark-grids/matpower/`.
   `README.md`.
 - **`relicapgrid/`** — ENTSO-E's [ReliCapGrid](https://github.com/entsoe/relicapgrid),
   the dataset of the 2026 SV-IOP (CC BY-SA 4.0, see its `LICENSE.md`): nine IGMs, their
-  boundary and common data and an assembled CGM, used by `cgmes_relicapgrid_test.rs`.
+  boundary and common data and an assembled CGM, used by `cgmes_relicapgrid_test.rs` and
+  `python/tests/test_relicapgrid_*.py`, whose results are in `docs/src/cgmes/sv_iop_2026.md`.
   Pinned to the commit cimoxide's `scripts/relicapgrid` results are for.
 
 None is initialized by a plain `git clone`. CI fetches `benchmark-grids/`

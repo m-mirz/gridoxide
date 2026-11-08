@@ -204,3 +204,100 @@ fn an_hvdc_link_transfers_nothing_without_a_converter_or_its_line() {
         intact.entries.insert(equipment.to_string(), original);
     }
 }
+
+/// The CGM as ReliCapGrid's CI assembles it: every IGM's EQ and updated SSH, Jotunheim's
+/// topology and state, the boundary and the common data.
+fn cgm(root: &Path) -> Vec<PathBuf> {
+    let listed = |dir: PathBuf, keep: &dyn Fn(&str) -> bool| -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("directory")
+            .map(|f| f.expect("directory entry").path())
+            .filter(|p| keep(p.file_name().and_then(|n| n.to_str()).unwrap_or("")))
+            .collect();
+        found.sort();
+        found
+    };
+    let mut paths = listed(root.join("Jotunheim/ChangeSet/cimxml"), &|_| true);
+    paths.extend(listed(root.join("Jotunheim/Grid/cimxml"), &|n| {
+        n.contains("_SV_") || n.contains("_TP_")
+    }));
+    for area in [
+        "Belgovia",
+        "Britheim",
+        "DC-Espheim-Svedala",
+        "DC-Nordheim-Galia",
+        "Espheim",
+        "Galia",
+        "Nordheim",
+        "Portheim",
+        "Svedala",
+    ] {
+        paths.extend(listed(root.join(area).join("Grid/cimxml"), &|n| {
+            n.contains("_EQ_")
+        }));
+    }
+    paths.extend(listed(root.join("boundaryData/Grid/cimxml"), &|_| true));
+    paths.extend(listed(root.join("commonData/Grid/cimxml"), &|_| true));
+    paths
+}
+
+fn co_files(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for area in std::fs::read_dir(root).expect("instances") {
+        let dir = area
+            .expect("directory entry")
+            .path()
+            .join("NetworkCode/cimxml");
+        if let Ok(files) = std::fs::read_dir(dir) {
+            paths.extend(
+                files
+                    .map(|f| f.expect("directory entry").path())
+                    .filter(|p| p.to_string_lossy().contains("_CO")),
+            );
+        }
+    }
+    paths.sort();
+    paths
+}
+
+/// ReliCapGrid's whole security analysis, by who takes the imbalance. BO-TR2_3, behind the CGM's
+/// one reference, is what that choice moves most.
+#[test]
+fn security_analysis_of_the_cgm() {
+    use gridoxide::security_analysis::{
+        ImbalanceSharing, SecurityOptions, read_contingencies, run,
+    };
+
+    let Some(root) = instance() else { return };
+    let mut grid = decode(&cgm(&root));
+    let contingencies = decode(&co_files(&root));
+    assert_eq!(
+        read_contingencies(&contingencies)
+            .expect("all outOfService")
+            .len(),
+        325
+    );
+    for (sharing, solved, stalled, base, after) in [
+        (ImbalanceSharing::Capability, 304, 21, 13, 4003),
+        (ImbalanceSharing::Reference, 312, 13, 17, 5230),
+        (ImbalanceSharing::Equal, 287, 38, 21, 5970),
+    ] {
+        let options = SecurityOptions {
+            sharing,
+            ..Default::default()
+        };
+        let analysis = run(&mut grid, &contingencies, &options).expect("the base case solves");
+        let in_base = analysis
+            .violations
+            .iter()
+            .filter(|v| v.contingency.is_none())
+            .count();
+        assert_eq!(analysis.solved, solved, "{sharing:?}");
+        assert_eq!(analysis.stalled.len(), stalled, "{sharing:?}");
+        assert_eq!(in_base, base, "{sharing:?}");
+        assert_eq!(analysis.violations.len() - in_base, after, "{sharing:?}");
+        if sharing == ImbalanceSharing::Capability {
+            assert!(analysis.past_limits.is_empty());
+        }
+    }
+}

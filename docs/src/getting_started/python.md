@@ -268,6 +268,12 @@ for equipment in contingencies:          # lists of mRIDs
 Each outage is converted afresh from the profiles, decoded once, and `model` is left as it was. A part
 of the network the outage cuts off from its angle reference shows as `"no_reference"` in `islands()`.
 
+### Security analysis
+
+`gridoxide.security_analysis(profiles, co_files)` solves a model's base case and each contingency of its CO files,
+holds each terminal's current against its limits and writes a SAR: see
+[Security Analysis and the SAR](../cgmes/security_analysis.md).
+
 ### Flows at the terminals
 
 `model.terminal_flows()` gives each branch terminal's flow after a `solve()`, keyed by its mRID, as
