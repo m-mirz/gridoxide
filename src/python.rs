@@ -293,6 +293,15 @@ struct PowerFlowModel {
     /// The decoded profiles and options a `from_cgmes` model came from.
     #[cfg(feature = "cgmes")]
     cgmes_source: Option<(crate::cgmes::CimDataset, CgmesOptions)>,
+    /// Terminal mRID -> its branch and side, with the system base; bus-branch
+    /// `from_cgmes` models only. For `terminal_flows`.
+    #[cfg(feature = "cgmes")]
+    terminals: Option<(
+        std::collections::HashMap<String, (usize, crate::branch_flow::Terminal)>,
+        f64,
+    )>,
+    /// The last solve moved tap changers, which `transformers` does not show.
+    tap_moved: bool,
     /// `TopologicalNode` mrid -> bus index, populated by `from_cgmes` (empty
     /// for `from_pgm_json`, which has no mrid concept at all) — lets Python
     /// callers look up a specific bus's solved voltage by mrid to compare
@@ -357,6 +366,7 @@ impl PowerFlowModel {
         // the wrong buses there. Left empty rather than mismapped.
         let mut dispatch_data: (Vec<crate::types::RegulatingMachine>, Vec<f64>) =
             (Vec::new(), Vec::new());
+        let mut terminals = None;
         let (buses_template, lines, transformers, shunts, tn_bus_index, node_breaker) =
             match topology {
                 "bus_branch" => {
@@ -369,6 +379,7 @@ impl PowerFlowModel {
                     let net = crate::cgmes::cgmes_to_network(&ds, s_base_va).map_err(|e| {
                         PyRuntimeError::new_err(format!("converting CGMES model: {e}"))
                     })?;
+                    terminals = Some((net.terminal_branch, s_base_va));
                     let (mut buses, lines, transformers, shunts) =
                         (net.buses, net.lines, net.transformers, net.shunts);
                     taps = (net.tap_changers, net.regulation);
@@ -438,6 +449,9 @@ impl PowerFlowModel {
             dc_pool: None,
             node_breaker,
             cgmes_source: None,
+            #[cfg(feature = "cgmes")]
+            terminals,
+            tap_moved: false,
             batch: None,
             stored_scenarios: Vec::new(),
             tap_changers: taps.0,
@@ -546,6 +560,9 @@ impl PowerFlowModel {
             node_breaker: None,
             #[cfg(feature = "cgmes")]
             cgmes_source: None,
+            #[cfg(feature = "cgmes")]
+            terminals: None,
+            tap_moved: false,
             batch: None,
             stored_scenarios: Vec::new(),
             tap_changers: Vec::new(),
@@ -622,6 +639,9 @@ impl PowerFlowModel {
             node_breaker: None,
             #[cfg(feature = "cgmes")]
             cgmes_source: None,
+            #[cfg(feature = "cgmes")]
+            terminals: None,
+            tap_moved: false,
             batch: None,
             stored_scenarios: Vec::new(),
             tap_changers: Vec::new(),
@@ -800,6 +820,10 @@ impl PowerFlowModel {
     /// regulating controls, which today means `from_cgmes(topology=
     /// "bus_branch")`. With none present it is a no-op rather than an error.
     ///
+    /// `slack_weights` shares it by a weight per bus instead of equally (`n_nodes`
+    /// entries; a component whose weights are all zero stays on its reference).
+    /// Generator limits are not enforced: a share can push a machine past its maximum.
+    ///
     /// Read what they did with `tap_positions()`, `tap_controllers()`,
     /// `q_limit_switches()` and `slack_shift()`.
     ///
@@ -818,6 +842,7 @@ impl PowerFlowModel {
         max_outer = 40,
         max_tap_shift = 3,
         init = "linear_impedance",
+        slack_weights = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn solve(
@@ -829,8 +854,23 @@ impl PowerFlowModel {
         max_outer: usize,
         max_tap_shift: i32,
         init: &str,
+        slack_weights: Option<Vec<f64>>,
     ) -> PyResult<()> {
         let init = parse_init(init)?;
+        if let Some(weights) = &slack_weights {
+            if distribute_slack {
+                return Err(PyValueError::new_err(
+                    "distribute_slack shares equally and slack_weights by weight: give one",
+                ));
+            }
+            if weights.len() != self.buses_template.len() {
+                return Err(PyValueError::new_err(format!(
+                    "slack_weights has {} entries, expected one per bus ({})",
+                    weights.len(),
+                    self.buses_template.len()
+                )));
+            }
+        }
         self.islands.clear();
         match self.method {
             PowerFlowMethod::Dc => return self.solve_dc(),
@@ -855,9 +895,14 @@ impl PowerFlowModel {
         // machine; opt-in because turning it on changes answers.
         let wants_remote =
             control_remote_voltage && self.machines.iter().any(|m| m.at_bus != m.controls_bus);
-        let islands = if enforce_q_limits || distribute_slack || wants_taps || wants_remote {
-            let distribution =
-                distribute_slack.then(|| crate::outerloop::SlackDistribution::uniform(&self.buses));
+        self.tap_moved = wants_taps;
+        let distribution = match slack_weights {
+            Some(weights) => Some(crate::outerloop::SlackDistribution::from_weights(weights)),
+            None => {
+                distribute_slack.then(|| crate::outerloop::SlackDistribution::uniform(&self.buses))
+            }
+        };
+        let islands = if enforce_q_limits || distribution.is_some() || wants_taps || wants_remote {
             let report = crate::run_power_flow_with_remote(
                 std::mem::take(&mut self.buses),
                 &self.lines,
@@ -919,6 +964,58 @@ impl PowerFlowModel {
             }
         }
         Ok(())
+    }
+
+    /// The flow at each terminal of a branch after the last `solve()`, by terminal
+    /// mRID: `(p, q, i)` in MW, Mvar and A, with `p` and `q` positive into the
+    /// branch, which is CIM's load sign. A dead bus's terminal has zero. Equipment
+    /// out of service has no entry, nor does a branch open at one end. Needs a
+    /// `from_cgmes(topology="bus_branch")` model not solved with `control_taps`,
+    /// which moves tap changers these flows would not see.
+    #[cfg(feature = "cgmes")]
+    fn terminal_flows(&self) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
+        let Some((terminals, s_base_va)) = self.terminals.as_ref() else {
+            return Err(PyRuntimeError::new_err(
+                "terminal_flows needs a model from from_cgmes(topology=\"bus_branch\")",
+            ));
+        };
+        if self.islands.is_empty() {
+            return Err(PyRuntimeError::new_err("terminal_flows needs a solve()"));
+        }
+        if self.tap_moved {
+            return Err(PyRuntimeError::new_err(
+                "terminal_flows cannot follow solve(control_taps=True)",
+            ));
+        }
+        let voltages = crate::branch_flow::bus_voltages(&self.buses);
+        let branches = crate::branch_flow::branch_params(&self.lines, &self.transformers);
+        Ok(terminals
+            .iter()
+            .filter_map(|(mrid, &(index, side))| {
+                let branch = branches.get(index)?;
+                let (near, far) = match side {
+                    crate::branch_flow::Terminal::From => (branch.from, branch.to),
+                    crate::branch_flow::Terminal::To => (branch.to, branch.from),
+                };
+                let dead =
+                    self.buses[near].voltage_mag == 0.0 || self.buses[far].voltage_mag == 0.0;
+                let (p, q) = if dead {
+                    (0.0, 0.0)
+                } else {
+                    crate::branch_flow::terminal_flow(branch, side, &voltages)
+                };
+                let volts = self.buses[near].voltage_mag * self.buses[near].u_rated;
+                let current = if volts > 0.0 {
+                    p.hypot(q) * s_base_va / (3f64.sqrt() * volts)
+                } else {
+                    0.0
+                };
+                Some((
+                    mrid.clone(),
+                    (p * s_base_va / 1e6, q * s_base_va / 1e6, current),
+                ))
+            })
+            .collect())
     }
 
     /// Each connected component's outcome in the last Newton `solve()`, as a
@@ -1222,7 +1319,7 @@ impl PowerFlowModel {
     }
 
     /// Per bus, how much its active schedule moved, per-unit. Empty unless
-    /// `solve(distribute_slack=True)`.
+    /// `solve(distribute_slack=True)` or `solve(slack_weights=...)`.
     fn slack_shift(&self) -> Vec<f64> {
         self.outer
             .as_ref()

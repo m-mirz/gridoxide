@@ -268,6 +268,14 @@ for equipment in contingencies:          # lists of mRIDs
 Each outage is converted afresh from the profiles, decoded once, and `model` is left as it was. A part
 of the network the outage cuts off from its angle reference shows as `"no_reference"` in `islands()`.
 
+### Flows at the terminals
+
+`model.terminal_flows()` gives each branch terminal's flow after a `solve()`, keyed by its mRID, as
+`(p, q, i)` in MW, Mvar and A, with `p` and `q` positive into the branch, which is CIM's load sign. It
+is what a limit in the model can be held against. Equipment out of service has no entry, and it needs a
+`from_cgmes(topology="bus_branch")` model not solved with `control_taps`, which moves tap changers these
+flows would not see.
+
 ### Whether every component solved
 
 `solve()` raises only for a component that did not converge. One with no angle reference, or
