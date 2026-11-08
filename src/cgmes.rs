@@ -3838,6 +3838,8 @@ struct ConverterInfo {
     q_mw: f64,
     /// The AC voltage it holds at its PCC, in kV (`qPccControl` `voltagePcc`).
     holds_upcc_kv: Option<f64>,
+    /// A `CsConverter`, whose reactive demand comes of carrying DC current.
+    current_source: bool,
 }
 
 /// Equipment mrid -> its own (sorted-by-sequence) plain `DCTerminal` mrids,
@@ -4140,6 +4142,12 @@ pub fn cgmes_resolve_dc_converters(
         let Some(&dc_bus) = positive_pole_of.get(mrid) else {
             continue;
         };
+        if !equipment_in_service(
+            vc.get_bool("Equipment.inService"),
+            vc.get_bool("Equipment.normallyInService"),
+        ) {
+            continue;
+        }
         let pcc_bus = vc
             .get_ref("ACDCConverter.PccTerminal")
             .and_then(|r| ac_terms.bus_via_terminal_mrid(r));
@@ -4170,6 +4178,7 @@ pub fn cgmes_resolve_dc_converters(
                 .filter(|mode| mode.ends_with("voltagePcc"))
                 .and_then(|_| vc.get_f64("VsConverter.targetUpcc"))
                 .filter(|&kv| kv > 0.0),
+            current_source: false,
         });
     }
     for mrid in by_type(ds, "CsConverter") {
@@ -4177,6 +4186,12 @@ pub fn cgmes_resolve_dc_converters(
         let Some(&dc_bus) = positive_pole_of.get(mrid) else {
             continue;
         };
+        if !equipment_in_service(
+            cc.get_bool("Equipment.inService"),
+            cc.get_bool("Equipment.normallyInService"),
+        ) {
+            continue;
+        }
         let pcc_bus = cc
             .get_ref("ACDCConverter.PccTerminal")
             .and_then(|r| ac_terms.bus_via_terminal_mrid(r));
@@ -4199,6 +4214,7 @@ pub fn cgmes_resolve_dc_converters(
                 .ok_or_else(|| missing("CsConverter", mrid, "ratedUdc"))?,
             q_mw: cc.get_f64("ACDCConverter.q").unwrap_or(0.0),
             holds_upcc_kv: None,
+            current_source: true,
         });
     }
 
@@ -4264,6 +4280,11 @@ pub fn cgmes_resolve_dc_converters(
     let status = solve_dc_network(&mut dc_buses, &dc_lines, DC_SOLVE_TOL, 100);
     let currents = injected_currents(&dc_buses, &dc_lines);
     for c in &converters {
+        // Nothing holds the DC side's voltage any more (its partner or the line
+        // to it is out, as in a contingency): the converter transfers nothing.
+        if status.isolated_buses.contains(&c.dc_bus) {
+            continue;
+        }
         let p_dc_injected = dc_buses[c.dc_bus].voltage * currents[c.dc_bus];
         let idc_amps = currents[c.dc_bus].abs() * 1000.0;
         let loss = converter_loss_mw(
@@ -4276,7 +4297,10 @@ pub fn cgmes_resolve_dc_converters(
         );
         let pac_absorbed = p_dc_injected + loss;
         buses[c.ac_bus].p_spec += -pac_absorbed * 1e6 / s_base_va;
-        buses[c.ac_bus].q_spec += -c.q_mw * 1e6 / s_base_va;
+        // Its partner or the line to it is out: no current, no reactive demand.
+        if !(c.current_source && idc_amps < 1e-6) {
+            buses[c.ac_bus].q_spec += -c.q_mw * 1e6 / s_base_va;
+        }
         if let Some(kv) = c.holds_upcc_kv {
             let bus = &mut buses[c.pcc_bus];
             if bus.bus_type == BusType::PQ {
@@ -4291,6 +4315,17 @@ pub fn cgmes_resolve_dc_converters(
         voltages_kv: dc_buses.iter().map(|b| b.voltage).collect(),
         status,
     }))
+}
+
+/// `element` with `Equipment.inService` false, which takes it out of a conversion
+/// whatever its class: how a contingency's `outOfService` equipment is applied.
+pub fn out_of_service(element: &Element) -> Element {
+    let mut fields = element.fields().clone();
+    fields.insert(
+        "Equipment.inService",
+        cimmodel::base::FieldValue::Text("false".to_string()),
+    );
+    Element::with_fields(element.class(), element.mrid().to_string(), fields)
 }
 
 /// A reference bus as it was before it became one.

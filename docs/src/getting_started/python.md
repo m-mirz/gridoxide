@@ -252,6 +252,22 @@ for node in result.nodes:
 - `result.faults` — per fault: `i_f`, `i_f_angle`, per phase.
 - `result.sources` — each source's contribution, `i` and `i_angle`.
 
+### Contingencies of any equipment
+
+`solve_contingencies` trips branches, sharing a factorization across a sweep. A contingency of a CGMES
+model may also lose a shunt, a machine, a load or an HVDC converter or line, and
+`with_out_of_service` takes any of them, N-k included, by mRID:
+
+```python
+model = gridoxide.PowerFlowModel.from_cgmes(paths)
+for equipment in contingencies:          # lists of mRIDs
+    outage = model.with_out_of_service(equipment)   # raises ValueError for an unknown mRID
+    outage.solve(enforce_q_limits=True)  # raises RuntimeError if it does not converge
+```
+
+Each outage is converted afresh from the profiles, decoded once, and `model` is left as it was. A part
+of the network the outage cuts off from its angle reference shows as `"no_reference"` in `islands()`.
+
 ### Whether every component solved
 
 `solve()` raises only for a component that did not converge. One with no angle reference, or

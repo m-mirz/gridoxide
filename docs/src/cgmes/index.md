@@ -121,6 +121,13 @@ models and ReliCapGrid, such equipment carries no flow in the published SV, Real
 among it; SmallGrid's five lines, which feed stubs at most 0.8 Mvar of charging, are the exception
 `cgmes_smallgrid_test.rs` names.
 
+A contingency's `outOfService` equipment takes this route too, whatever its class:
+`cgmes::out_of_service` on the element, or from Python `model.with_out_of_service(mrids)`, which
+converts afresh from the decoded profiles and leaves `model` as it was. A converter out of service,
+or one whose DC side nothing holds any more because its partner or the line to it is out, transfers
+no power, so an HVDC link's loss is felt at both AC ends. A `CsConverter` carrying no DC current has no
+reactive demand either; a `VsConverter` keeps its scheduled Q, as it can without DC power.
+
 ## Merged models
 
 A component holding several angle references marks IGMs merged by their shared boundary

@@ -155,3 +155,52 @@ fn a_converter_injects_at_its_own_terminal_and_holds_at_its_pcc() {
     let index = cgmes_topological_node_bus_index(&ds).expect("index");
     cgmes_common::assert_matches_sv(&solved, &index, &cgmes_common::expected_voltages(&ds), 5e-3);
 }
+
+/// Sets `mrid` out of service, as a contingency does.
+fn trip(ds: &mut CimDataset, mrid: &str) {
+    let out = gridoxide::cgmes::out_of_service(&ds.entries[mrid]);
+    ds.entries.insert(mrid.to_string(), out);
+}
+
+/// The AC power each bus gets from the HVDC link, per unit: the larger of P and Q.
+fn link_injection(ds: &CimDataset) -> Vec<f64> {
+    let s_base = 100e6;
+    let net = cgmes_to_network(ds, s_base).expect("conversion");
+    let mut buses = net.buses.clone();
+    cgmes_resolve_dc_converters(ds, &mut buses, s_base).expect("converters");
+    buses
+        .iter()
+        .zip(&net.buses)
+        .map(|(with, without)| {
+            (with.p_spec - without.p_spec)
+                .abs()
+                .max((with.q_spec - without.q_spec).abs())
+        })
+        .collect()
+}
+
+/// ReliCapGrid's CO_UC7 and CO_UC8: without its converter or its line, a link transfers
+/// nothing at either end, but for the idle loss of a converter left connected (1e-5 MW).
+#[test]
+fn an_hvdc_link_transfers_nothing_without_a_converter_or_its_line() {
+    let Some(root) = instance() else { return };
+    let paths = files(&root, &["DC-Espheim-Svedala"]);
+    let mut intact = decode(&paths);
+    let carried = link_injection(&intact)
+        .iter()
+        .filter(|&&p| p > 0.05)
+        .count();
+    assert_eq!(carried, 2, "10 MW at both ends of the intact link");
+    for equipment in [
+        "_038ce404-30dc-4289-b9db-7076cb870b8e", // CsConverter DC-3P-Convert-1
+        "_be09fc02-de3f-49e4-aa84-94803bcc5d76", // DCLineSegment DC-Line-EH_SD1
+    ] {
+        let original = intact.entries[equipment].clone();
+        trip(&mut intact, equipment);
+        assert!(
+            link_injection(&intact).iter().all(|&p| p < 1e-6),
+            "{equipment} out"
+        );
+        intact.entries.insert(equipment.to_string(), original);
+    }
+}

@@ -290,6 +290,9 @@ struct PowerFlowModel {
     /// arithmetic.
     #[cfg(feature = "cgmes")]
     node_breaker: Option<crate::switches::NodeBreakerNetwork>,
+    /// The decoded profiles and options a `from_cgmes` model came from.
+    #[cfg(feature = "cgmes")]
+    cgmes_source: Option<(crate::cgmes::CimDataset, CgmesOptions)>,
     /// `TopologicalNode` mrid -> bus index, populated by `from_cgmes` (empty
     /// for `from_pgm_json`, which has no mrid concept at all) — lets Python
     /// callers look up a specific bus's solved voltage by mrid to compare
@@ -313,242 +316,33 @@ struct PowerFlowModel {
     dc_solver: Option<crate::linear::DcSolver>,
 }
 
-#[pymethods]
+/// What `from_cgmes` was given beyond its files, for building again from the decoded
+/// profiles (`with_out_of_service`).
+#[cfg(feature = "cgmes")]
+struct CgmesOptions {
+    backend: String,
+    tol: f64,
+    max_iter: usize,
+    s_base_va: f64,
+    method: String,
+    dc_approximation: String,
+    topology: String,
+    retain: String,
+}
+
+#[cfg(feature = "cgmes")]
 impl PowerFlowModel {
-    /// Loads a PGM-format JSON file (the same format `examples/bench_network.rs`
-    /// and `matpower_to_pgm.py`/`convert_pandapower_case.py` produce).
-    ///
-    /// `backend` is `"klu_native"` (default), `"scalar"`, `"block"`, `"klu"`
-    /// (needs the crate's `klu` feature built in too), or `"pardiso"`
-    /// (needs the crate's `pardiso` feature built in too, plus `MKLROOT`
-    /// set at build time).
-    /// `s_base_va`/`freq_hz` match
-    /// `pgm::pgm_to_buses_and_branches`'s own defaults used elsewhere in
-    /// this project (1e6 VA, 50 Hz) unless overridden.
-    ///
-    /// `method` is `"newton_raphson"` (default), `"dc"` (real Bθ) or
-    /// `"linear_impedance"` (the complex constant-admittance linearization,
-    /// power-grid-model's `CalculationMethod.linear`). `tol`/`max_iter`/
-    /// `backend` apply to Newton only — the other two are direct solves.
-    /// `dc_approximation` is `"ignore_r"` (default, `b = 1/x`) or
-    /// `"ignore_g"` (`b = x/(r²+x²)`); it also governs the sensitivity
-    /// factors, which are available whatever `method` is set to.
-    ///
-    /// `ideal_sources=True` makes each `source`'s node the slack bus at its
-    /// `u_ref`, with no impedance behind it (`sk` and `rx_ratio` are not read).
-    /// The default is power-grid-model's source: a virtual slack bus behind
-    /// the source impedance, which `voltage_mag()` lists after the nodes.
-    #[staticmethod]
-    #[pyo3(signature = (
-        path,
-        backend="klu_native",
-        tol=1e-6,
-        max_iter=20,
-        s_base_va=1e6,
-        freq_hz=50.0,
-        method="newton_raphson",
-        dc_approximation="ignore_r",
-        ideal_sources=false,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn from_pgm_json(
-        path: &str,
-        backend: &str,
-        tol: f64,
-        max_iter: usize,
-        s_base_va: f64,
-        freq_hz: f64,
-        method: &str,
-        dc_approximation: &str,
-        ideal_sources: bool,
-    ) -> PyResult<Self> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
-        let input: PgmInput = serde_json::from_str(&raw)
-            .map_err(|e| PyValueError::new_err(format!("parsing {path} as PGM JSON: {e}")))?;
-        // `shunt` entries have to be converted before `pgm_to_buses_and_branches`
-        // consumes `input`, then stamped onto the Y-bus diagonal — a PGM `shunt`
-        // is a self-admittance, not a branch, so `build_ybus` never sees it.
-        let id_to_idx = crate::pgm::node_id_to_idx(&input);
-        let shunts = crate::pgm::pgm_shunts_1ph(&input, &id_to_idx, s_base_va);
-        let crate::pgm::PgmNetwork {
-            buses: buses_template,
-            lines,
-            transformers,
-            ..
-        } = crate::pgm::pgm_to_network_with(input, s_base_va, freq_hz, source_model(ideal_sources));
-        let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
-        stamp_shunts(&mut ybus, &shunts);
-        let ybus = ybus.finish();
-        let backend = parse_backend(backend)?;
-        Ok(Self {
-            buses: buses_template.clone(),
-            buses_template,
-            ybus,
-            lines,
-            transformers,
-            shunts,
-            solver: PersistentSolver::new(backend),
-            backend,
-            machines: Vec::new(),
-            nonregulating_q: Vec::new(),
-            method: parse_method(method)?,
-            dc_opts: DcOptions {
-                approximation: parse_dc_approximation(dc_approximation)?,
-                ..DcOptions::default()
-            },
-            dc_solution: None,
-            sensitivity: None,
-            dc_pool: None,
-            #[cfg(feature = "cgmes")]
-            node_breaker: None,
-            batch: None,
-            stored_scenarios: Vec::new(),
-            tap_changers: Vec::new(),
-            regulation: Vec::new(),
-            outer: None,
-            tol,
-            max_iter,
-            tn_bus_index: std::collections::HashMap::new(),
-            bus_numbers: Vec::new(),
-            branch_rows: Vec::new(),
-            dc_shunt_conductance_as_load: false,
-            dc_solver: None,
-            islands: Vec::new(),
-        })
-    }
-
-    /// Loads a MATPOWER case (`.m`) by gridoxide's own reader
-    /// (`src/matpower.rs`), solving the problem MATPOWER's `runpf` solves:
-    /// the case's reference bus as the slack, PV buses at their generators'
-    /// `Vg`, isolated buses and out-of-service equipment left out.
-    ///
-    /// Per unit on the case's own `baseMVA`, so `tol` is the largest power
-    /// mismatch in the same units MATPOWER measures it in. Buses keep the
-    /// order of `mpc.bus`; `bus_numbers()` gives each one's `BUS_I`.
-    /// Branches are lines first, then transformers (every branch with a ratio
-    /// or a phase shift), in file order within each.
-    #[staticmethod]
-    #[pyo3(signature = (
-        path,
-        backend="klu_native",
-        tol=1e-6,
-        max_iter=20,
-        method="newton_raphson",
-        dc_approximation="ignore_r",
-    ))]
-    fn from_matpower(
-        path: &str,
-        backend: &str,
-        tol: f64,
-        max_iter: usize,
-        method: &str,
-        dc_approximation: &str,
-    ) -> PyResult<Self> {
-        let net = crate::matpower::read(path).map_err(|e| match e {
-            crate::matpower::MatpowerError::Io(e) => {
-                PyRuntimeError::new_err(format!("reading {path}: {e}"))
-            }
-            e => PyValueError::new_err(format!("{path}: {e}")),
-        })?;
-        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
-        stamp_shunts(&mut ybus, &net.shunts);
-        let ybus = ybus.finish();
-        let backend = parse_backend(backend)?;
-        Ok(Self {
-            buses: net.buses.clone(),
-            buses_template: net.buses,
-            ybus,
-            lines: net.lines,
-            transformers: net.transformers,
-            shunts: net.shunts,
-            solver: PersistentSolver::new(backend),
-            backend,
-            machines: Vec::new(),
-            nonregulating_q: Vec::new(),
-            method: parse_method(method)?,
-            dc_opts: DcOptions {
-                approximation: parse_dc_approximation(dc_approximation)?,
-                ..DcOptions::default()
-            },
-            dc_solution: None,
-            sensitivity: None,
-            dc_pool: None,
-            #[cfg(feature = "cgmes")]
-            node_breaker: None,
-            batch: None,
-            stored_scenarios: Vec::new(),
-            tap_changers: Vec::new(),
-            regulation: Vec::new(),
-            outer: None,
-            tol,
-            max_iter,
-            tn_bus_index: std::collections::HashMap::new(),
-            bus_numbers: net.bus_numbers,
-            branch_rows: net.branch_rows,
-            dc_shunt_conductance_as_load: true,
-            dc_solver: None,
-            islands: Vec::new(),
-        })
-    }
-
-    /// Each bus's MATPOWER bus number (`BUS_I`), in bus order. Empty unless
-    /// the model was built by `from_matpower`.
-    fn bus_numbers(&self) -> Vec<u64> {
-        self.bus_numbers.clone()
-    }
-
-    /// Each branch's 0-based row in `mpc.branch`, in the flat branch order
-    /// (lines, then transformers) that `solve_contingencies` and the
-    /// branch-indexed results use. Out-of-service branches have no flat
-    /// index and are absent. Empty unless the model was built by
-    /// `from_matpower`.
-    fn branch_rows(&self) -> Vec<usize> {
-        self.branch_rows.clone()
-    }
-
-    /// Loads a CGMES profile bundle (any number of EQ/EQBD/SSH/TP/SV files,
-    /// in any order — `cgmes::load_profiles` merges them by mRID regardless
-    /// of which file each element came from, the same way `references/`'s
-    /// own CGMES-capable tool, powsybl, merges a profile set). Resolves any
-    /// HVDC converters found (`cgmes_resolve_dc_converters`) into fixed AC
-    /// bus injections before the model is built, exactly like every native
-    /// CGMES test in `tests/cgmes_*_test.rs` already does — this binding is
-    /// a thin wrapper around that same conversion pipeline, not a separate
-    /// code path, so results match the Rust-side tests bus-for-bus.
-    ///
-    /// Only built when the crate's `cgmes` feature is enabled too
-    /// (`maturin develop --features python,cgmes`) — see
-    /// `docs/src/reference/provenance.md` for why that dependency is opt-in.
-    #[cfg(feature = "cgmes")]
-    #[staticmethod]
-    #[pyo3(signature = (
-        paths,
-        backend="klu_native",
-        tol=1e-6,
-        max_iter=20,
-        s_base_va=100e6,
-        method="newton_raphson",
-        dc_approximation="ignore_r",
-        topology="bus_branch",
-        retain="none",
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn from_cgmes(
-        paths: Vec<String>,
-        backend: &str,
-        tol: f64,
-        max_iter: usize,
-        s_base_va: f64,
-        method: &str,
-        dc_approximation: &str,
-        topology: &str,
-        retain: &str,
-    ) -> PyResult<Self> {
-        let path_refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
-        let ds = load_profiles(&path_refs)
-            .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))?;
-
+    fn from_dataset(ds: &crate::cgmes::CimDataset, options: &CgmesOptions) -> PyResult<Self> {
+        let (backend, tol, max_iter, s_base_va, method, dc_approximation, topology, retain) = (
+            options.backend.as_str(),
+            options.tol,
+            options.max_iter,
+            options.s_base_va,
+            options.method.as_str(),
+            options.dc_approximation.as_str(),
+            options.topology.as_str(),
+            options.retain.as_str(),
+        );
         // Populated by the bus-branch path only. The node-breaker view appends
         // a branch per retained switch after the model's own transformers, so
         // the tables — parallel to those transformers alone — would be
@@ -643,6 +437,7 @@ impl PowerFlowModel {
             sensitivity: None,
             dc_pool: None,
             node_breaker,
+            cgmes_source: None,
             batch: None,
             stored_scenarios: Vec::new(),
             tap_changers: taps.0,
@@ -657,6 +452,299 @@ impl PowerFlowModel {
             dc_solver: None,
             islands: Vec::new(),
         })
+    }
+}
+
+#[pymethods]
+impl PowerFlowModel {
+    /// Loads a PGM-format JSON file (the same format `examples/bench_network.rs`
+    /// and `matpower_to_pgm.py`/`convert_pandapower_case.py` produce).
+    ///
+    /// `backend` is `"klu_native"` (default), `"scalar"`, `"block"`, `"klu"`
+    /// (needs the crate's `klu` feature built in too), or `"pardiso"`
+    /// (needs the crate's `pardiso` feature built in too, plus `MKLROOT`
+    /// set at build time).
+    /// `s_base_va`/`freq_hz` match
+    /// `pgm::pgm_to_buses_and_branches`'s own defaults used elsewhere in
+    /// this project (1e6 VA, 50 Hz) unless overridden.
+    ///
+    /// `method` is `"newton_raphson"` (default), `"dc"` (real Bθ) or
+    /// `"linear_impedance"` (the complex constant-admittance linearization,
+    /// power-grid-model's `CalculationMethod.linear`). `tol`/`max_iter`/
+    /// `backend` apply to Newton only — the other two are direct solves.
+    /// `dc_approximation` is `"ignore_r"` (default, `b = 1/x`) or
+    /// `"ignore_g"` (`b = x/(r²+x²)`); it also governs the sensitivity
+    /// factors, which are available whatever `method` is set to.
+    ///
+    /// `ideal_sources=True` makes each `source`'s node the slack bus at its
+    /// `u_ref`, with no impedance behind it (`sk` and `rx_ratio` are not read).
+    /// The default is power-grid-model's source: a virtual slack bus behind
+    /// the source impedance, which `voltage_mag()` lists after the nodes.
+    #[staticmethod]
+    #[pyo3(signature = (
+        path,
+        backend="klu_native",
+        tol=1e-6,
+        max_iter=20,
+        s_base_va=1e6,
+        freq_hz=50.0,
+        method="newton_raphson",
+        dc_approximation="ignore_r",
+        ideal_sources=false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_pgm_json(
+        path: &str,
+        backend: &str,
+        tol: f64,
+        max_iter: usize,
+        s_base_va: f64,
+        freq_hz: f64,
+        method: &str,
+        dc_approximation: &str,
+        ideal_sources: bool,
+    ) -> PyResult<Self> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| PyRuntimeError::new_err(format!("reading {path}: {e}")))?;
+        let input: PgmInput = serde_json::from_str(&raw)
+            .map_err(|e| PyValueError::new_err(format!("parsing {path} as PGM JSON: {e}")))?;
+        // `shunt` entries have to be converted before `pgm_to_buses_and_branches`
+        // consumes `input`, then stamped onto the Y-bus diagonal — a PGM `shunt`
+        // is a self-admittance, not a branch, so `build_ybus` never sees it.
+        let id_to_idx = crate::pgm::node_id_to_idx(&input);
+        let shunts = crate::pgm::pgm_shunts_1ph(&input, &id_to_idx, s_base_va);
+        let crate::pgm::PgmNetwork {
+            buses: buses_template,
+            lines,
+            transformers,
+            ..
+        } = crate::pgm::pgm_to_network_with(input, s_base_va, freq_hz, source_model(ideal_sources));
+        let mut ybus = build_ybus(buses_template.len(), &lines, &transformers);
+        stamp_shunts(&mut ybus, &shunts);
+        let ybus = ybus.finish();
+        let backend = parse_backend(backend)?;
+        Ok(Self {
+            buses: buses_template.clone(),
+            buses_template,
+            ybus,
+            lines,
+            transformers,
+            shunts,
+            solver: PersistentSolver::new(backend),
+            backend,
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
+            method: parse_method(method)?,
+            dc_opts: DcOptions {
+                approximation: parse_dc_approximation(dc_approximation)?,
+                ..DcOptions::default()
+            },
+            dc_solution: None,
+            sensitivity: None,
+            dc_pool: None,
+            #[cfg(feature = "cgmes")]
+            node_breaker: None,
+            #[cfg(feature = "cgmes")]
+            cgmes_source: None,
+            batch: None,
+            stored_scenarios: Vec::new(),
+            tap_changers: Vec::new(),
+            regulation: Vec::new(),
+            outer: None,
+            tol,
+            max_iter,
+            tn_bus_index: std::collections::HashMap::new(),
+            bus_numbers: Vec::new(),
+            branch_rows: Vec::new(),
+            dc_shunt_conductance_as_load: false,
+            dc_solver: None,
+            islands: Vec::new(),
+        })
+    }
+
+    /// Loads a MATPOWER case (`.m`) by gridoxide's own reader
+    /// (`src/matpower.rs`), solving the problem MATPOWER's `runpf` solves:
+    /// the case's reference bus as the slack, PV buses at their generators'
+    /// `Vg`, isolated buses and out-of-service equipment left out.
+    ///
+    /// Per unit on the case's own `baseMVA`, so `tol` is the largest power
+    /// mismatch in the same units MATPOWER measures it in. Buses keep the
+    /// order of `mpc.bus`; `bus_numbers()` gives each one's `BUS_I`.
+    /// Branches are lines first, then transformers (every branch with a ratio
+    /// or a phase shift), in file order within each.
+    #[staticmethod]
+    #[pyo3(signature = (
+        path,
+        backend="klu_native",
+        tol=1e-6,
+        max_iter=20,
+        method="newton_raphson",
+        dc_approximation="ignore_r",
+    ))]
+    fn from_matpower(
+        path: &str,
+        backend: &str,
+        tol: f64,
+        max_iter: usize,
+        method: &str,
+        dc_approximation: &str,
+    ) -> PyResult<Self> {
+        let net = crate::matpower::read(path).map_err(|e| match e {
+            crate::matpower::MatpowerError::Io(e) => {
+                PyRuntimeError::new_err(format!("reading {path}: {e}"))
+            }
+            e => PyValueError::new_err(format!("{path}: {e}")),
+        })?;
+        let mut ybus = build_ybus(net.buses.len(), &net.lines, &net.transformers);
+        stamp_shunts(&mut ybus, &net.shunts);
+        let ybus = ybus.finish();
+        let backend = parse_backend(backend)?;
+        Ok(Self {
+            buses: net.buses.clone(),
+            buses_template: net.buses,
+            ybus,
+            lines: net.lines,
+            transformers: net.transformers,
+            shunts: net.shunts,
+            solver: PersistentSolver::new(backend),
+            backend,
+            machines: Vec::new(),
+            nonregulating_q: Vec::new(),
+            method: parse_method(method)?,
+            dc_opts: DcOptions {
+                approximation: parse_dc_approximation(dc_approximation)?,
+                ..DcOptions::default()
+            },
+            dc_solution: None,
+            sensitivity: None,
+            dc_pool: None,
+            #[cfg(feature = "cgmes")]
+            node_breaker: None,
+            #[cfg(feature = "cgmes")]
+            cgmes_source: None,
+            batch: None,
+            stored_scenarios: Vec::new(),
+            tap_changers: Vec::new(),
+            regulation: Vec::new(),
+            outer: None,
+            tol,
+            max_iter,
+            tn_bus_index: std::collections::HashMap::new(),
+            bus_numbers: net.bus_numbers,
+            branch_rows: net.branch_rows,
+            dc_shunt_conductance_as_load: true,
+            dc_solver: None,
+            islands: Vec::new(),
+        })
+    }
+
+    /// Each bus's MATPOWER bus number (`BUS_I`), in bus order. Empty unless
+    /// the model was built by `from_matpower`.
+    fn bus_numbers(&self) -> Vec<u64> {
+        self.bus_numbers.clone()
+    }
+
+    /// Each branch's 0-based row in `mpc.branch`, in the flat branch order
+    /// (lines, then transformers) that `solve_contingencies` and the
+    /// branch-indexed results use. Out-of-service branches have no flat
+    /// index and are absent. Empty unless the model was built by
+    /// `from_matpower`.
+    fn branch_rows(&self) -> Vec<usize> {
+        self.branch_rows.clone()
+    }
+
+    /// Loads a CGMES profile bundle (any number of EQ/EQBD/SSH/TP/SV files,
+    /// in any order — `cgmes::load_profiles` merges them by mRID regardless
+    /// of which file each element came from, the same way `references/`'s
+    /// own CGMES-capable tool, powsybl, merges a profile set). Resolves any
+    /// HVDC converters found (`cgmes_resolve_dc_converters`) into fixed AC
+    /// bus injections before the model is built, exactly like every native
+    /// CGMES test in `tests/cgmes_*_test.rs` already does — this binding is
+    /// a thin wrapper around that same conversion pipeline, not a separate
+    /// code path, so results match the Rust-side tests bus-for-bus.
+    ///
+    /// Only built when the crate's `cgmes` feature is enabled too
+    /// (`maturin develop --features python,cgmes`) — see
+    /// `docs/src/reference/provenance.md` for why that dependency is opt-in.
+    #[cfg(feature = "cgmes")]
+    #[staticmethod]
+    #[pyo3(signature = (
+        paths,
+        backend="klu_native",
+        tol=1e-6,
+        max_iter=20,
+        s_base_va=100e6,
+        method="newton_raphson",
+        dc_approximation="ignore_r",
+        topology="bus_branch",
+        retain="none",
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_cgmes(
+        paths: Vec<String>,
+        backend: &str,
+        tol: f64,
+        max_iter: usize,
+        s_base_va: f64,
+        method: &str,
+        dc_approximation: &str,
+        topology: &str,
+        retain: &str,
+    ) -> PyResult<Self> {
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
+        let ds = load_profiles(&path_refs)
+            .map_err(|e| PyRuntimeError::new_err(format!("decoding CGMES profiles: {e}")))?;
+
+        let options = CgmesOptions {
+            backend: backend.to_string(),
+            tol,
+            max_iter,
+            s_base_va,
+            method: method.to_string(),
+            dc_approximation: dc_approximation.to_string(),
+            topology: topology.to_string(),
+            retain: retain.to_string(),
+        };
+        let mut model = Self::from_dataset(&ds, &options)?;
+        model.cgmes_source = Some((ds, options));
+        Ok(model)
+    }
+
+    /// This model with `equipment` (mRIDs, as a contingency's
+    /// `ContingencyEquipment.Equipment` names them, of any class) out of service,
+    /// converted afresh from the decoded profiles. This model is left as it is, so a
+    /// sweep of contingencies does not read the files again. Raises `ValueError` for
+    /// an mRID the profiles lack, and `RuntimeError` on a model not from `from_cgmes`.
+    #[cfg(feature = "cgmes")]
+    fn with_out_of_service(&mut self, equipment: Vec<String>) -> PyResult<Self> {
+        let Some((ds, options)) = self.cgmes_source.as_mut() else {
+            return Err(PyRuntimeError::new_err(
+                "with_out_of_service needs a model from from_cgmes",
+            ));
+        };
+        let mut originals = Vec::with_capacity(equipment.len());
+        for mrid in &equipment {
+            let key = if ds.entries.contains_key(mrid) {
+                mrid.clone()
+            } else {
+                format!("_{mrid}")
+            };
+            let Some(element) = ds.entries.get_mut(&key) else {
+                for (key, original) in originals {
+                    ds.entries.insert(key, original);
+                }
+                return Err(PyValueError::new_err(format!(
+                    "no equipment {mrid} in the profiles"
+                )));
+            };
+            let out = crate::cgmes::out_of_service(element);
+            originals.push((key, std::mem::replace(element, out)));
+        }
+        let model = Self::from_dataset(ds, options);
+        for (key, original) in originals.into_iter().rev() {
+            ds.entries.insert(key, original);
+        }
+        model
     }
 
     /// Number of buses (nodes), including the virtual slack bus each active
