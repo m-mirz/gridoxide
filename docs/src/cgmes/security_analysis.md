@@ -19,7 +19,10 @@ gridoxide cgmes-security profiles/*.xml --contingencies co/*.xml --sar out.xml \
 ```
 
 The building blocks are public: `read_contingencies`, `current_limits`, `terminal_flows`, `monitor`,
-`machines`, `capability_weights`.
+`machines`, `capability_weights`. `solve` solves one state as the analysis solves each: it returns the
+buses, each component's outcome, each `TopologicalNode`'s bus, the terminal flows, and what the options
+did (the buses reactive limits took off voltage control, the shift sharing the imbalance gave each bus,
+the machines it took past their limits).
 
 ## What it reports
 
