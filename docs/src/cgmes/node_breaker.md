@@ -227,6 +227,19 @@ converting the equipment needs the angle reference from
 `TopologicalIsland.AngleRefTopologicalNode` — EQ and SSH alone give the topology but not a slack, and
 gridoxide will not invent one.
 
+## A bus-branch network from the switches
+
+`cgmes_to_network_with(&ds, s_base, CgmesTopologyMode::NodeBreakerFromEq)` merges every closed
+switch (`RetentionPolicy::MergeAll`) and keeps what the node-breaker network above drops: tap
+changers, regulation and the terminal resolver, which it can because no switch is appended after the
+transformers. It is the network `cgmes_to_network` builds, its buses taken from the switches rather
+than from the TP, so a switch the SSH opens splits a bus. `CgmesNetwork::terminal_bus` finds each
+terminal's bus either way, and `security_analysis` uses it through `SecurityOptions::topology`.
+
+A bus whose connectivity nodes sit in no voltage level, as a boundary point's do, takes its nominal
+voltage from its `TopologicalNode`, as the bus-branch path does; without it, the tie lines' ends had
+none and any IGM with a boundary was singular.
+
 ## What is not there yet
 
 - **Measurements** are not read from CGMES. The estimator accepts a node-breaker network (below),

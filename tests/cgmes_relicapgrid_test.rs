@@ -162,6 +162,137 @@ fn the_analysis_solves_its_base_case_as_the_importer_does() {
     assert!(shared.shift_mw.iter().any(|mw| *mw != 0.0));
 }
 
+/// The base case solved, the reference taking the imbalance, from the TP or from the switches.
+fn state_in(
+    ds: &CimDataset,
+    topology: gridoxide::cgmes::CgmesTopologyMode,
+) -> gridoxide::security_analysis::State {
+    use gridoxide::security_analysis::{ImbalanceSharing, SecurityOptions, solve};
+    let options = SecurityOptions {
+        sharing: ImbalanceSharing::Reference,
+        topology,
+        ..Default::default()
+    };
+    solve(ds, &options).expect("a state")
+}
+
+/// The largest difference in voltage, p.u., between two states at the `TopologicalNode`s both
+/// solved.
+fn largest_difference(
+    a: &gridoxide::security_analysis::State,
+    b: &gridoxide::security_analysis::State,
+) -> f64 {
+    let mut most = 0f64;
+    for (node, &i) in &a.bus_of {
+        if let Some(&j) = b.bus_of.get(node)
+            && a.buses[i].voltage_mag > 0.0
+            && b.buses[j].voltage_mag > 0.0
+        {
+            most = most.max((a.buses[i].voltage_mag - b.buses[j].voltage_mag).abs());
+        }
+    }
+    most
+}
+
+/// The buses from the switches as the SSH sets them are those of the TP wherever the two
+/// agree, and so is the answer: a boundary point, in no voltage level, takes its
+/// `TopologicalNode`'s nominal voltage, as the TP path does.
+#[test]
+fn the_switches_give_what_the_tp_gives_where_they_agree() {
+    use gridoxide::cgmes::CgmesTopologyMode::{BusBranchFromTp, NodeBreakerFromEq};
+    let Some(root) = instance() else { return };
+    for area in ["Belgovia", "Britheim", "Galia", "Svedala"] {
+        let ds = decode(&files(&root, &[area]));
+        let (tp, switches) = (
+            state_in(&ds, BusBranchFromTp),
+            state_in(&ds, NodeBreakerFromEq),
+        );
+        assert!(tp.converged() && switches.converged(), "{area}");
+        assert!(
+            largest_difference(&tp, &switches) < 1e-6,
+            "{area}: {}",
+            largest_difference(&tp, &switches)
+        );
+        assert!(
+            !switches.flows.is_empty(),
+            "{area}: terminal flows from the switches"
+        );
+    }
+}
+
+/// The SSH opening a breaker splits a bus from the switches, and the answer follows; the TP,
+/// written for the switches as they were, does not see it.
+#[test]
+fn a_breaker_opened_in_the_data_changes_the_network_from_the_switches_only() {
+    use gridoxide::cgmes::CgmesTopologyMode::{BusBranchFromTp, NodeBreakerFromEq};
+    let Some(root) = instance() else { return };
+    let mut ds = decode(&files(&root, &["Svedala"]));
+    let before = state_in(&ds, NodeBreakerFromEq);
+    let tp_before = state_in(&ds, BusBranchFromTp);
+    let topology = gridoxide::cgmes::cgmes_node_breaker_topology(&ds).expect("switches");
+    let mut breakers: Vec<&String> = topology
+        .topology
+        .switches
+        .iter()
+        .zip(&topology.switch_mrids)
+        .filter(|(s, _)| {
+            s.kind == gridoxide::topology::model::SwitchKind::Breaker && !s.open && s.in_service
+        })
+        .map(|(_, m)| m)
+        .collect();
+    breakers.sort();
+    let set = |ds: &mut CimDataset, breaker: &str, open: bool| {
+        let ssh = format!(
+            r##"<rdf:RDF xmlns:cim="http://iec.ch/TC57/CIM100#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><cim:Breaker rdf:about="#{breaker}"><cim:Switch.open>{open}</cim:Switch.open></cim:Breaker></rdf:RDF>"##
+        );
+        ds.merge(CimDataset::decode_str(&ssh).expect("an SSH"));
+    };
+    let mut split = 0;
+    for breaker in breakers.iter().take(10) {
+        set(&mut ds, breaker, true);
+        let after = state_in(&ds, NodeBreakerFromEq);
+        let tp_after = state_in(&ds, BusBranchFromTp);
+        set(&mut ds, breaker, false);
+        assert!(after.converged(), "{breaker}");
+        assert_eq!(
+            largest_difference(&tp_before, &tp_after),
+            0.0,
+            "{breaker}: the TP moved"
+        );
+        if after.buses.len() > before.buses.len() {
+            split += 1;
+            assert!(
+                largest_difference(&before, &after) > 0.0
+                    || after.islands.len() > before.islands.len(),
+                "{breaker}"
+            );
+        }
+    }
+    assert!(split >= 5, "{split} of 10 breakers split a bus");
+    // Closed again, it is the network it was.
+    assert_eq!(
+        largest_difference(&before, &state_in(&ds, NodeBreakerFromEq)),
+        0.0
+    );
+}
+
+/// Espheim's TP leaves 34 connected terminals of its 10.5 kV busbar on no `TopologicalNode`
+/// (see `equipment_the_topology_leaves_out_stays_off_the_network`); its switches connect them,
+/// and with them two of the TP's components, each with its angle reference.
+#[test]
+fn where_the_tp_and_the_switches_disagree_two_references_meet() {
+    use gridoxide::cgmes::CgmesTopologyMode::{BusBranchFromTp, NodeBreakerFromEq};
+    let Some(root) = instance() else { return };
+    let ds = decode(&files(&root, &["Espheim"]));
+    let tp = state_in(&ds, BusBranchFromTp);
+    let switches = state_in(&ds, NodeBreakerFromEq);
+    let count = |s: &gridoxide::security_analysis::State, status: IslandStatus| {
+        s.islands.iter().filter(|i| i.status == status).count()
+    };
+    assert_eq!(count(&tp, IslandStatus::AmbiguousReferenceBus), 0);
+    assert_eq!(count(&switches, IslandStatus::AmbiguousReferenceBus), 1);
+}
+
 /// One injection facing an IGM not loaded still stands in for it.
 #[test]
 fn an_injection_facing_an_absent_igm_stays() {

@@ -34,6 +34,17 @@ has no result, as the profile has no place for one; `stalled` lists them.
 A TATL allows more than the PATL for a while, so one at or below its PATL is not a limit, and is left
 out. Otherwise terminals are held against every limit they have.
 
+## Where the buses come from
+
+`SecurityOptions::topology` (`topology=` in Python) says where the network's buses come from: the
+TP's `TopologicalNode`s (`BusBranchFromTp`, the default), or the switches as the SSH sets them, every
+closed one merged (`NodeBreakerFromEq`, `"switches"`). From the switches a switch opened or closed in
+the data, as a remedial action does, makes a different network; the TP, written for the switches as
+they were, does not see it. Everything else is the same: taps, regulation, terminal flows, limits.
+On ReliCapGrid's IGMs whose TP agrees with their switches (Belgovia, Britheim, Galia, Svedala) the
+two give the same voltages to within 1e-6 p.u.; Espheim's TP leaves equipment off that its switches
+connect, and from the switches one component holds two angle references.
+
 ## Who takes the imbalance
 
 What a state schedules seldom equals what it needs, and the difference has to land somewhere. That

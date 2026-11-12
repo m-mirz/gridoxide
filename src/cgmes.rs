@@ -1532,12 +1532,38 @@ pub struct CgmesNetwork {
     /// rather than reconstructed; [`cgmes_control_areas`] turns a `TieFlow`'s
     /// terminal into a boundary branch through it.
     pub terminal_branch: HashMap<String, (usize, crate::branch_flow::Terminal)>,
+    /// Each `Terminal`'s bus, by its mRID: how equipment finds its bus whichever the topology,
+    /// a `TopologicalNode` split by an open switch included.
+    pub terminal_bus: HashMap<String, usize>,
+    /// Each `TopologicalNode`'s bus, by its mRID. From the switches
+    /// ([`CgmesTopologyMode::NodeBreakerFromEq`]) a node split by an open switch names one of
+    /// its buses.
+    pub node_bus: HashMap<String, usize>,
 }
 
 /// [`cgmes_to_buses_and_branches`], keeping the tap tables.
 pub fn cgmes_to_network(ds: &CimDataset, s_base_va: f64) -> Result<CgmesNetwork, CgmesError> {
     let skeleton = build_ac_bus_skeleton(ds)?;
     convert_equipment(ds, s_base_va, skeleton)
+}
+
+/// [`cgmes_to_network`], its buses from the TP's `TopologicalNode`s or from the switches as the
+/// SSH sets them, every closed one merged ([`CgmesTopologyMode`]). From the switches it is the
+/// same network with the same tap changers, regulation and terminals, so whatever runs on one
+/// runs on the other; a model whose TP agrees with its switches gives the same answer either way.
+pub fn cgmes_to_network_with(
+    ds: &CimDataset,
+    s_base_va: f64,
+    mode: CgmesTopologyMode,
+) -> Result<CgmesNetwork, CgmesError> {
+    match mode.resolve(ds) {
+        CgmesTopologyMode::NodeBreakerFromEq => {
+            let (buses, idx_of, terms, _, _) =
+                build_node_breaker_skeleton(ds, &crate::topology::RetentionPolicy::MergeAll)?;
+            convert_equipment(ds, s_base_va, (buses, idx_of, terms))
+        }
+        _ => cgmes_to_network(ds, s_base_va),
+    }
 }
 
 /// Converts a CGMES dataset's equipment onto an already-built bus skeleton.
@@ -1746,6 +1772,8 @@ fn convert_equipment(
     skeleton: (Vec<Bus>, HashMap<String, usize>, TerminalIndex),
 ) -> Result<CgmesNetwork, CgmesError> {
     let (mut buses, idx_of, terms) = skeleton;
+    let terminal_bus = terms.bus_of.clone();
+    let node_bus = idx_of.clone();
 
     // Before anything reads a base. Every conversion below — line impedance,
     // transformer ratio, voltage setpoint, SVC rating — is expressed in one, and
@@ -2852,6 +2880,8 @@ fn convert_equipment(
         tap_report,
         voltage_control,
         terminal_branch,
+        terminal_bus,
+        node_bus,
     })
 }
 
@@ -3944,14 +3974,25 @@ pub fn cgmes_resolve_dc_converters(
     buses: &mut [Bus],
     s_base_va: f64,
 ) -> Result<Option<DcResolution>, CgmesError> {
+    cgmes_resolve_dc_converters_with(ds, buses, s_base_va, CgmesTopologyMode::BusBranchFromTp)
+}
+
+/// [`cgmes_resolve_dc_converters`] on the buses [`cgmes_to_network_with`] gave in `mode`: a
+/// converter's AC terminal resolved on the same topology.
+pub fn cgmes_resolve_dc_converters_with(
+    ds: &CimDataset,
+    buses: &mut [Bus],
+    s_base_va: f64,
+    mode: CgmesTopologyMode,
+) -> Result<Option<DcResolution>, CgmesError> {
     let dctn_mrids = by_type(ds, "DCTopologicalNode");
     if dctn_mrids.is_empty() {
         return Ok(None);
     }
 
-    // Rebuilds exactly the same Steps 1+2+2.5 `cgmes_to_buses_and_branches`
-    // itself runs (bus skeleton, `TerminalIndex`, closed-switch merge) via
-    // the shared `build_ac_bus_skeleton` helper, so a converter's
+    // Rebuilds exactly the same skeleton the network was converted on (the
+    // TP's, or the switches' in `mode`) via the shared skeleton helpers, so a
+    // converter's
     // `PccTerminal`/own terminal resolves to the same AC bus index that call
     // already produced — deterministic given the same `ds`, since every step
     // involved (`by_type` ordering, `TerminalIndex::build`, the union-find
@@ -3960,7 +4001,12 @@ pub fn cgmes_resolve_dc_converters(
     // `bus_via_terminal_mrid`/`bus`) is kept; the rebuilt bus skeleton and
     // `idx_of` are discarded — this function only ever writes into the
     // caller's own already-merged `buses`.
-    let (_, _, ac_terms) = build_ac_bus_skeleton(ds)?;
+    let ac_terms = match mode.resolve(ds) {
+        CgmesTopologyMode::NodeBreakerFromEq => {
+            build_node_breaker_skeleton(ds, &crate::topology::RetentionPolicy::MergeAll)?.2
+        }
+        _ => build_ac_bus_skeleton(ds)?.2,
+    };
 
     let dc_idx_of: HashMap<String, usize> = dctn_mrids
         .iter()
@@ -4431,18 +4477,34 @@ fn assemble_merged_references(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CgmesTopologyMode {
     /// Node-breaker when EQ carries `ConnectivityNode`s, otherwise the TP path.
-    ///
-    /// Not yet the default anywhere — nothing in the solver pipeline consumes a
-    /// node-breaker view, so selecting one automatically would only change
-    /// which code path produced an identical answer. It becomes meaningful when
-    /// a retention policy can keep a switch.
     Auto,
     /// `TopologicalNode` *is* the bus. gridoxide's historical path, and still
     /// what every importer entry point uses.
     #[default]
     BusBranchFromTp,
     /// `ConnectivityNode`s are the nodes and switches are edges between them.
+    /// [`cgmes_to_network_with`] merges every closed switch: the buses follow
+    /// the switches as the SSH sets them, not the TP's `TopologicalNode`s, so
+    /// opening one splits a bus.
     NodeBreakerFromEq,
+}
+
+impl CgmesTopologyMode {
+    /// [`Auto`](Self::Auto) decided for `ds`.
+    pub fn resolve(self, ds: &CimDataset) -> Self {
+        match self {
+            Self::Auto
+                if ds
+                    .by_type
+                    .get("ConnectivityNode")
+                    .is_some_and(|n| !n.is_empty()) =>
+            {
+                Self::NodeBreakerFromEq
+            }
+            Self::Auto => Self::BusBranchFromTp,
+            other => other,
+        }
+    }
 }
 
 /// The node-breaker graph read out of EQ+SSH, with the identity needed to map
@@ -4731,6 +4793,17 @@ pub fn cgmes_node_breaker_topology(ds: &CimDataset) -> Result<CgmesNodeBreaker, 
 /// container holding a boundary node, which genuinely has no voltage level.
 /// Measured on the four node-breaker configurations: 0 nodes with no container
 /// at all, and 2/5/3/0 whose container is something else.
+/// A `TopologicalNode`'s nominal voltage in V, from its `BaseVoltage`.
+fn topological_node_voltage(ds: &CimDataset, tn_mrid: &str) -> Option<f64> {
+    let tn = get(ds, tn_mrid, "TopologicalNode")?;
+    let bv = get(
+        ds,
+        tn.get_ref("TopologicalNode.BaseVoltage")?,
+        "BaseVoltage",
+    )?;
+    Some(bv.get_f64("BaseVoltage.nominalVoltage")? * 1e3)
+}
+
 fn connectivity_node_voltage(ds: &CimDataset, cn_mrid: &str) -> Option<f64> {
     let cn = get(ds, cn_mrid, "ConnectivityNode")?;
     let container = cn.get_ref("ConnectivityNode.ConnectivityNodeContainer")?;
@@ -4792,6 +4865,15 @@ fn build_node_breaker_skeleton(
                 .nodes_of(BusIdx(b))
                 .iter()
                 .find_map(|n| connectivity_node_voltage(ds, &nb.node_mrids[n.0]))
+                // A node in no voltage level, as a boundary point's is: its
+                // TopologicalNode's, which is what the bus-branch path reads.
+                .or_else(|| {
+                    view.nodes_of(BusIdx(b)).iter().find_map(|n| {
+                        nb.tn_of_node[n.0]
+                            .as_deref()
+                            .and_then(|tn| topological_node_voltage(ds, tn))
+                    })
+                })
                 .unwrap_or(0.0);
             Bus {
                 idx: b,
