@@ -394,6 +394,51 @@ fn curative_actions_are_solved_after_their_contingency_and_named_in_the_sar() {
     );
     // The grid is as it was.
     assert_eq!(grid.entries[&breaker].get_str("Switch.open"), Some("false"));
+
+    // The largest machine stopped: the state after differs, and the grid is as it was.
+    let machine = grid.by_type["SynchronousMachine"]
+        .iter()
+        .max_by(|a, b| {
+            let p = |m: &String| {
+                grid.entries[m]
+                    .get_f64("RotatingMachine.p")
+                    .unwrap_or(0.0)
+                    .abs()
+            };
+            p(a).total_cmp(&p(b))
+        })
+        .expect("a machine")
+        .clone();
+    let p = grid.entries[&machine]
+        .get_str("RotatingMachine.p")
+        .map(str::to_string);
+    let stop = HashMap::from([(
+        violated.clone(),
+        vec![Curative {
+            action: action.clone(),
+            changes: vec![Change {
+                object: machine.clone(),
+                property: "RotatingMachine.p".into(),
+                value: "0".into(),
+            }],
+        }],
+    )]);
+    let stopped =
+        run_with_curative(&mut grid, &contingencies, &stop, &options).expect("an analysis");
+    assert_eq!(stopped.curative_solved + stopped.curative_stalled.len(), 1);
+    if stopped.curative_solved == 1 {
+        assert_ne!(
+            of(&stopped, true),
+            of(&plain, false),
+            "stopping the machine changes the flows"
+        );
+    }
+    assert_eq!(
+        grid.entries[&machine]
+            .get_str("RotatingMachine.p")
+            .map(str::to_string),
+        p
+    );
     let sar = with
         .to_sar(&SarHeader {
             title: "t".into(),
