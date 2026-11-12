@@ -294,6 +294,48 @@ fn where_the_tp_and_the_switches_disagree_two_references_meet() {
     assert_eq!(count(&switches, IslandStatus::AmbiguousReferenceBus), 1);
 }
 
+/// A load out of service is taken out from the switches as from the TP: each contingency of
+/// Svedala's CO gives the same violations either way where its loads are concerned.
+#[test]
+fn equipment_out_of_service_conducts_nothing_from_the_switches_either() {
+    use gridoxide::cgmes::{CgmesTopologyMode, cgmes_to_network_with, out_of_service};
+    let Some(root) = instance() else { return };
+    let mut grid = decode(&files(&root, &["Svedala"]));
+    let load = grid
+        .by_type
+        .get("ConformLoad")
+        .and_then(|l| {
+            l.iter().find(|m| {
+                grid.entries[*m]
+                    .get_f64("EnergyConsumer.p")
+                    .is_some_and(|p| p.abs() > 1.0)
+            })
+        })
+        .expect("a load")
+        .clone();
+    let total = |grid: &CimDataset, mode| -> f64 {
+        let net = cgmes_to_network_with(grid, 100.0, mode).expect("a network");
+        net.buses.iter().map(|b| b.p_spec).sum()
+    };
+    for mode in [
+        CgmesTopologyMode::BusBranchFromTp,
+        CgmesTopologyMode::NodeBreakerFromEq,
+    ] {
+        let with = total(&grid, mode);
+        let original = grid.entries[&load].clone();
+        let out = out_of_service(&original);
+        grid.entries.insert(load.clone(), out);
+        let without = total(&grid, mode);
+        grid.entries.insert(load.clone(), original.clone());
+        let p = original.get_f64("EnergyConsumer.p").unwrap();
+        // p_spec per unit of 100 VA: p MW is p·1e4.
+        assert!(
+            ((without - with) / 1e4 - p).abs() < 1e-6,
+            "{mode:?}: {with} {without} {p}"
+        );
+    }
+}
+
 /// Curative actions after a contingency: a breaker an action leaves as it is gives the
 /// contingency's own violations, now after the action, each with a RemedialActionApplied in the
 /// SAR; a change the object has no field for is said so and not made.
