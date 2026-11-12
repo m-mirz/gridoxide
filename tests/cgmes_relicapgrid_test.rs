@@ -131,6 +131,37 @@ fn merged_igms_hold_one_reference_per_component() {
     );
 }
 
+/// `security_analysis::solve`, the base case as the analysis solves it, is the plain solve
+/// when the reference takes the imbalance, and says what sharing it does instead.
+#[test]
+fn the_analysis_solves_its_base_case_as_the_importer_does() {
+    use gridoxide::security_analysis::{ImbalanceSharing, SecurityOptions, solve as solve_state};
+    let Some(root) = instance() else { return };
+    let ds = decode(&files(&root, &["Belgovia"]));
+    let (plain, _) = solve(&ds);
+    let options = SecurityOptions {
+        sharing: ImbalanceSharing::Reference,
+        ..Default::default()
+    };
+    let state = solve_state(&ds, &options).expect("a state");
+    assert!(state.converged());
+    assert!(state.shift_mw.is_empty());
+    for (a, b) in plain.iter().zip(&state.buses) {
+        assert!((a.voltage_mag - b.voltage_mag).abs() < 1e-9);
+        assert!((a.voltage_ang - b.voltage_ang).abs() < 1e-9);
+    }
+    assert_eq!(
+        state.bus_of,
+        cgmes_topological_node_bus_index(&ds).expect("index")
+    );
+    assert!(!state.flows.is_empty());
+
+    let shared = solve_state(&ds, &SecurityOptions::default()).expect("a state");
+    assert!(shared.converged());
+    assert_eq!(shared.shift_mw.len(), shared.buses.len());
+    assert!(shared.shift_mw.iter().any(|mw| *mw != 0.0));
+}
+
 /// One injection facing an IGM not loaded still stands in for it.
 #[test]
 fn an_injection_facing_an_absent_igm_stays() {

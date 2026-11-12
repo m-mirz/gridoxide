@@ -24,7 +24,7 @@ use crate::cgmes::{
     out_of_service,
 };
 use crate::outerloop::SlackDistribution;
-use crate::solver::IslandStatus;
+use crate::solver::{IslandReport, IslandStatus};
 use crate::types::{Bus, Line, Transformer};
 use crate::{PowerFlowOptions, TapData, run_power_flow};
 
@@ -442,20 +442,54 @@ pub fn outside_limits(
     found
 }
 
-/// What a state solved to.
-struct Solved {
-    flows: HashMap<String, TerminalFlow>,
-    past_limits: Vec<PastLimit>,
+/// One state of a CGMES model solved, as [`run`] solves its base case and each contingency:
+/// HVDC converters resolved, the imbalance shared as [`SecurityOptions::sharing`] says, and
+/// reactive limits held if [`SecurityOptions::enforce_q_limits`].
+#[derive(Clone, Debug)]
+pub struct State {
+    pub buses: Vec<Bus>,
+    /// Each connected component's outcome. A component with no angle reference, or more than
+    /// one, is reported here and not solved as the others are.
+    pub islands: Vec<IslandReport>,
+    /// Each `TopologicalNode`'s bus, by its mRID.
+    pub bus_of: HashMap<String, usize>,
+    /// Each terminal's flow, by its mRID; empty unless every component converged.
+    pub flows: HashMap<String, TerminalFlow>,
+    /// The machines capability sharing takes past their limits.
+    pub past_limits: Vec<PastLimit>,
+    /// The buses reactive limits took off voltage control, in the order they were.
+    pub q_limit_switches: Vec<usize>,
+    /// Per bus, how far sharing the imbalance moved its active schedule, in MW; empty when
+    /// the reference took it all.
+    pub shift_mw: Vec<f64>,
 }
 
-/// One state of `ds`, or `None` if a component did not converge.
-fn solve_state(
+impl State {
+    /// Whether every component converged or was left as one that cannot be solved: none
+    /// stopped short or met a singular Jacobian.
+    pub fn converged(&self) -> bool {
+        !self.islands.iter().any(|island| {
+            matches!(
+                island.status,
+                IslandStatus::MaxIterationsReached | IslandStatus::Singular
+            )
+        })
+    }
+}
+
+/// Solves `ds` as it stands: its base case, as [`run`] solves it. See [`State`].
+pub fn solve(ds: &CimDataset, options: &SecurityOptions) -> Result<State, String> {
+    solve_with(ds, &machines(ds), &HashSet::new(), None, options)
+}
+
+/// One state of `ds`, with `out` the equipment a contingency takes out.
+fn solve_with(
     ds: &CimDataset,
     fleet: &[Machine],
     out: &HashSet<&str>,
     contingency: Option<&str>,
     options: &SecurityOptions,
-) -> Result<Option<Solved>, String> {
+) -> Result<State, String> {
     let net = cgmes_to_network(ds, options.s_base_va).map_err(|e| e.to_string())?;
     let mut buses = net.buses;
     cgmes_resolve_dc_converters(ds, &mut buses, options.s_base_va).map_err(|e| e.to_string())?;
@@ -483,39 +517,57 @@ fn solve_state(
             ..Default::default()
         },
     );
-    if report.islands.iter().any(|island| {
-        matches!(
-            island.status,
-            IslandStatus::MaxIterationsReached | IslandStatus::Singular
-        )
-    }) {
-        return Ok(None);
-    }
-    let past_limits = match (
-        options.sharing,
-        report.outer.as_ref().and_then(|o| o.slack.as_ref()),
-    ) {
-        (ImbalanceSharing::Capability, Some(slack)) => outside_limits(
-            fleet,
-            &bus_index,
-            &weights,
-            &slack.shift,
-            options.s_base_va,
-            out,
-            contingency,
-        ),
-        _ => Vec::new(),
+    let slack = report.outer.as_ref().and_then(|o| o.slack.as_ref());
+    let mut state = State {
+        flows: HashMap::new(),
+        past_limits: match (options.sharing, slack) {
+            (ImbalanceSharing::Capability, Some(slack)) => outside_limits(
+                fleet,
+                &bus_index,
+                &weights,
+                &slack.shift,
+                options.s_base_va,
+                out,
+                contingency,
+            ),
+            _ => Vec::new(),
+        },
+        q_limit_switches: report
+            .outer
+            .as_ref()
+            .map_or_else(Vec::new, |o| o.q_limit_switches.clone()),
+        shift_mw: slack.map_or_else(Vec::new, |s| {
+            s.shift
+                .iter()
+                .map(|p| p * options.s_base_va / 1e6)
+                .collect()
+        }),
+        buses: report.buses,
+        islands: report.islands,
+        bus_of: bus_index,
     };
-    Ok(Some(Solved {
-        flows: terminal_flows(
+    if state.converged() {
+        state.flows = terminal_flows(
             &net.terminal_branch,
-            &report.buses,
+            &state.buses,
             &net.lines,
             &net.transformers,
             options.s_base_va,
-        ),
-        past_limits,
-    }))
+        );
+    }
+    Ok(state)
+}
+
+/// One state of `ds`, or `None` if a component did not converge.
+fn solve_state(
+    ds: &CimDataset,
+    fleet: &[Machine],
+    out: &HashSet<&str>,
+    contingency: Option<&str>,
+    options: &SecurityOptions,
+) -> Result<Option<State>, String> {
+    let state = solve_with(ds, fleet, out, contingency, options)?;
+    Ok(state.converged().then_some(state))
 }
 
 /// The result of [`run`].
