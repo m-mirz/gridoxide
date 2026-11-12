@@ -40,6 +40,11 @@
     <nc:PowerFlowResult.atTime>2000-01-01T00:00:00Z</nc:PowerFlowResult.atTime>
     <nc:PowerFlowResult.OperationalLimit rdf:resource="#_x"/>
   </nc:ContingencyPowerFlowResult>
+  <nc:RemedialActionApplied rdf:ID="_00000000-0000-0000-0000-000000000004">
+    <nc:RemedialActionApplied.mRID>00000000-0000-0000-0000-000000000004</nc:RemedialActionApplied.mRID>
+    <nc:RemedialActionApplied.PowerFlowResult rdf:resource="#_x"/>
+    <nc:RemedialActionApplied.RemedialAction rdf:resource="#_x"/>
+  </nc:RemedialActionApplied>
   <nc:BaseCasePowerFlowResult rdf:ID="_00000000-0000-0000-0000-000000000003">
     <nc:PowerFlowResult.isViolation>false</nc:PowerFlowResult.isViolation>
     <nc:PowerFlowResult.absoluteValue>0</nc:PowerFlowResult.absoluteValue>

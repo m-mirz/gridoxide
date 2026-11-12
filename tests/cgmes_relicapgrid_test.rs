@@ -3,6 +3,7 @@
 //! the submodule. What each case's data contains, and which of them agree with their
 //! SV, is pinned case by case in cimoxide's `scripts/relicapgrid/test_power_flow.py`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gridoxide::cgmes::{
@@ -291,6 +292,124 @@ fn where_the_tp_and_the_switches_disagree_two_references_meet() {
     };
     assert_eq!(count(&tp, IslandStatus::AmbiguousReferenceBus), 0);
     assert_eq!(count(&switches, IslandStatus::AmbiguousReferenceBus), 1);
+}
+
+/// Curative actions after a contingency: a breaker an action leaves as it is gives the
+/// contingency's own violations, now after the action, each with a RemedialActionApplied in the
+/// SAR; a change the object has no field for is said so and not made.
+#[test]
+fn curative_actions_are_solved_after_their_contingency_and_named_in_the_sar() {
+    use gridoxide::cgmes::CgmesTopologyMode;
+    use gridoxide::security_analysis::{
+        Change, Curative, ImbalanceSharing, SarHeader, SecurityOptions, run, run_with_curative,
+    };
+    let Some(root) = instance() else { return };
+    let mut grid = decode(&files(&root, &["Svedala"]));
+    let co: Vec<PathBuf> = std::fs::read_dir(root.join("Svedala/NetworkCode/cimxml"))
+        .expect("Svedala's network codes")
+        .map(|f| f.expect("an entry").path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy() == "Svedala_CO.xml")
+        })
+        .collect();
+    let contingencies = decode(&co);
+    let options = SecurityOptions {
+        sharing: ImbalanceSharing::Reference,
+        topology: CgmesTopologyMode::NodeBreakerFromEq,
+        ..Default::default()
+    };
+    let plain = run(&mut grid, &contingencies, &options).expect("an analysis");
+    // A contingency with violations, and a breaker closed in the grid.
+    let violated = plain
+        .violations
+        .iter()
+        .find_map(|v| v.contingency.clone())
+        .expect("a contingency violating a limit");
+    let topology = gridoxide::cgmes::cgmes_node_breaker_topology(&grid).expect("switches");
+    let breaker = topology
+        .topology
+        .switches
+        .iter()
+        .zip(&topology.switch_mrids)
+        .find(|(s, _)| {
+            s.kind == gridoxide::topology::model::SwitchKind::Breaker && !s.open && s.in_service
+        })
+        .map(|(_, m)| m.clone())
+        .expect("a closed breaker");
+    let action = "_a-curative-action".to_string();
+    let curative = HashMap::from([(
+        violated.clone(),
+        vec![Curative {
+            action: action.clone(),
+            changes: vec![
+                Change {
+                    object: breaker.clone(),
+                    property: "Switch.open".into(),
+                    value: "false".into(),
+                },
+                Change {
+                    object: breaker.clone(),
+                    property: "ACLineSegment.r".into(),
+                    value: "1".into(),
+                },
+            ],
+        }],
+    )]);
+    let with =
+        run_with_curative(&mut grid, &contingencies, &curative, &options).expect("an analysis");
+    assert_eq!(with.solved, plain.solved);
+    assert_eq!(with.curative_solved, 1);
+    assert!(with.curative_stalled.is_empty());
+    assert_eq!(with.not_applied.len(), 1, "{:?}", with.not_applied);
+    let of = |a: &gridoxide::security_analysis::SecurityAnalysis,
+              applied: bool|
+     -> Vec<(String, String, String)> {
+        a.violations
+            .iter()
+            .filter(|v| {
+                v.contingency.as_deref() == Some(violated.as_str())
+                    && v.applied.is_empty() != applied
+            })
+            .map(|v| {
+                (
+                    v.terminal.clone(),
+                    v.limit.mrid.clone(),
+                    format!("{:.3}", v.flow.amps),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        of(&with, true),
+        of(&plain, false),
+        "the same state, after the action"
+    );
+    assert_eq!(of(&with, false), of(&plain, false));
+    assert!(
+        with.violations
+            .iter()
+            .filter(|v| !v.applied.is_empty())
+            .all(|v| v.applied == [action.clone()])
+    );
+    // The grid is as it was.
+    assert_eq!(grid.entries[&breaker].get_str("Switch.open"), Some("false"));
+    let sar = with
+        .to_sar(&SarHeader {
+            title: "t".into(),
+            description: "d".into(),
+            publisher: "https://example.org/p".into(),
+            is_version_of: "https://example.org/m".into(),
+            rights_holder: "r".into(),
+            generated_at: "2026-11-13T00:00:00Z".into(),
+        })
+        .expect("a SAR");
+    let applied = CimDataset::decode_str(&sar).expect("it decodes");
+    let found = applied
+        .by_type
+        .get("nc:RemedialActionApplied")
+        .map_or(0, Vec::len);
+    assert_eq!(found, of(&with, true).len());
 }
 
 /// One injection facing an IGM not loaded still stands in for it.
