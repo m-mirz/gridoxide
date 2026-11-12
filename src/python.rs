@@ -5100,16 +5100,28 @@ impl PySecurityAnalysis {
 
 /// Solves a CGMES model's base case and each contingency of its CO files, and holds each
 /// terminal's current against its limits. `sharing` is who takes the imbalance: `"capability"`
-/// (the machines by `maxOperatingP`), `"reference"` or `"equal"`.
+/// (the machines by `maxOperatingP`), `"reference"` or `"equal"`. `topology` is where the buses
+/// come from: `"tp"`, the TP's `TopologicalNode`s, or `"switches"`, the switches as the SSH sets
+/// them.
 #[cfg(feature = "cgmes")]
 #[pyfunction]
-#[pyo3(signature = (paths, contingency_paths, sharing="capability", enforce_q_limits=false))]
+#[pyo3(signature = (paths, contingency_paths, sharing="capability", enforce_q_limits=false, topology="tp"))]
 fn security_analysis(
     paths: Vec<String>,
     contingency_paths: Vec<String>,
     sharing: &str,
     enforce_q_limits: bool,
+    topology: &str,
 ) -> PyResult<PySecurityAnalysis> {
+    let topology = match topology {
+        "tp" => crate::cgmes::CgmesTopologyMode::BusBranchFromTp,
+        "switches" => crate::cgmes::CgmesTopologyMode::NodeBreakerFromEq,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown topology '{other}', expected 'tp' or 'switches'"
+            )));
+        }
+    };
     let decode = |paths: &[String]| {
         let refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
         load_profiles(&refs)
@@ -5120,6 +5132,7 @@ fn security_analysis(
     let options = crate::security_analysis::SecurityOptions {
         sharing: sharing.parse().map_err(PyValueError::new_err)?,
         enforce_q_limits,
+        topology,
         ..Default::default()
     };
     Ok(PySecurityAnalysis {

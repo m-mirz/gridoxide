@@ -20,7 +20,7 @@ use cimmodel::convert::{dataset_to_json, dataset_to_xml_for_profile};
 
 use crate::branch_flow::{Terminal, branch_params, bus_voltages, terminal_flow};
 use crate::cgmes::{
-    CimDataset, cgmes_resolve_dc_converters, cgmes_to_network, cgmes_topological_node_bus_index,
+    CgmesTopologyMode, CimDataset, cgmes_resolve_dc_converters_with, cgmes_to_network_with,
     out_of_service,
 };
 use crate::outerloop::SlackDistribution;
@@ -79,6 +79,9 @@ pub struct SecurityOptions {
     /// Off by default: a model whose voltage targets its reactive limits cannot all hold
     /// stalls with them, in the base case and so everywhere.
     pub enforce_q_limits: bool,
+    /// Where the buses come from: the TP's `TopologicalNode`s (the default), or the switches as
+    /// the SSH sets them, so that a switch opened or closed in the data is a different network.
+    pub topology: CgmesTopologyMode,
 }
 
 impl Default for SecurityOptions {
@@ -89,6 +92,7 @@ impl Default for SecurityOptions {
             tol: 1e-6,
             max_iter: 20,
             enforce_q_limits: false,
+            topology: CgmesTopologyMode::BusBranchFromTp,
         }
     }
 }
@@ -320,6 +324,8 @@ pub struct Machine {
     pub mrid: String,
     pub name: String,
     node: String,
+    /// Its terminal: its bus, whichever the topology.
+    terminal: String,
     /// MW generated, as the SSH schedules it.
     pub scheduled: f64,
     pub minimum: f64,
@@ -329,10 +335,12 @@ pub struct Machine {
 /// The machines that can take a share of an imbalance.
 pub fn machines(ds: &CimDataset) -> Vec<Machine> {
     let mut terminals: HashMap<&str, &Element> = HashMap::new();
+    let mut terminal_of: HashMap<&str, &str> = HashMap::new();
     for mrid in ds.by_type.get("Terminal").into_iter().flatten() {
         let terminal = &ds.entries[mrid];
         if let Some(equipment) = terminal.get_ref("Terminal.ConductingEquipment") {
             terminals.insert(equipment, terminal);
+            terminal_of.insert(equipment, mrid.as_str());
         }
     }
     let mut found = Vec::new();
@@ -353,6 +361,7 @@ pub fn machines(ds: &CimDataset) -> Vec<Machine> {
                 .and_then(|node| node.get_ref("ConnectivityNode.TopologicalNode"))
         });
         let Some(node) = node else { continue };
+        let terminal_mrid = terminal_of.get(mrid.as_str()).copied().unwrap_or_default();
         let unit = machine
             .get_ref("RotatingMachine.GeneratingUnit")
             .and_then(|unit| ds.entries.get(unit));
@@ -367,6 +376,7 @@ pub fn machines(ds: &CimDataset) -> Vec<Machine> {
                 .unwrap_or(mrid)
                 .to_string(),
             node: node.to_string(),
+            terminal: terminal_mrid.to_string(),
             scheduled: -machine.get_f64("RotatingMachine.p").unwrap_or(0.0),
             minimum: of_unit("GeneratingUnit.minOperatingP"),
             maximum: of_unit("GeneratingUnit.maxOperatingP"),
@@ -377,6 +387,18 @@ pub fn machines(ds: &CimDataset) -> Vec<Machine> {
 }
 
 /// Per bus, the `maxOperatingP` of its machines not in `out`.
+impl Machine {
+    /// Its bus in `bus_index`, by its terminal (as [`CgmesNetwork::terminal_bus`] keys them),
+    /// else by its `TopologicalNode`.
+    ///
+    /// [`CgmesNetwork::terminal_bus`]: crate::cgmes::CgmesNetwork::terminal_bus
+    fn bus<'a>(&self, bus_index: &'a HashMap<String, usize>) -> Option<&'a usize> {
+        bus_index
+            .get(&self.terminal)
+            .or_else(|| bus_index.get(&self.node))
+    }
+}
+
 pub fn capability_weights(
     fleet: &[Machine],
     bus_index: &HashMap<String, usize>,
@@ -385,7 +407,7 @@ pub fn capability_weights(
 ) -> Vec<f64> {
     let mut weights = vec![0.0; n_buses];
     for machine in fleet {
-        if let Some(&bus) = bus_index.get(&machine.node)
+        if let Some(&bus) = machine.bus(bus_index)
             && !out.contains(machine.mrid.as_str())
         {
             weights[bus] += machine.maximum;
@@ -416,7 +438,7 @@ pub fn outside_limits(
 ) -> Vec<PastLimit> {
     let mut found = Vec::new();
     for machine in fleet {
-        let Some(&bus) = bus_index.get(&machine.node) else {
+        let Some(&bus) = machine.bus(bus_index) else {
             continue;
         };
         if out.contains(machine.mrid.as_str()) || weights[bus] <= 0.0 {
@@ -451,8 +473,11 @@ pub struct State {
     /// Each connected component's outcome. A component with no angle reference, or more than
     /// one, is reported here and not solved as the others are.
     pub islands: Vec<IslandReport>,
-    /// Each `TopologicalNode`'s bus, by its mRID.
+    /// Each `TopologicalNode`'s bus, by its mRID. From the switches, a node an open switch
+    /// splits names one of its buses: [`State::bus_of_terminal`] tells them apart.
     pub bus_of: HashMap<String, usize>,
+    /// Each terminal's bus, by its mRID.
+    pub bus_of_terminal: HashMap<String, usize>,
     /// Each terminal's flow, by its mRID; empty unless every component converged.
     pub flows: HashMap<String, TerminalFlow>,
     /// The machines capability sharing takes past their limits.
@@ -490,10 +515,13 @@ fn solve_with(
     contingency: Option<&str>,
     options: &SecurityOptions,
 ) -> Result<State, String> {
-    let net = cgmes_to_network(ds, options.s_base_va).map_err(|e| e.to_string())?;
+    let net = cgmes_to_network_with(ds, options.s_base_va, options.topology)
+        .map_err(|e| e.to_string())?;
     let mut buses = net.buses;
-    cgmes_resolve_dc_converters(ds, &mut buses, options.s_base_va).map_err(|e| e.to_string())?;
-    let bus_index = cgmes_topological_node_bus_index(ds).map_err(|e| e.to_string())?;
+    cgmes_resolve_dc_converters_with(ds, &mut buses, options.s_base_va, options.topology)
+        .map_err(|e| e.to_string())?;
+    // Machines by their terminals, which a bus split by an open switch keeps apart.
+    let bus_index = net.terminal_bus;
     let weights = capability_weights(fleet, &bus_index, buses.len(), out);
     let distribute_slack = match options.sharing {
         ImbalanceSharing::Capability => Some(SlackDistribution::from_weights(weights.clone())),
@@ -544,7 +572,8 @@ fn solve_with(
         }),
         buses: report.buses,
         islands: report.islands,
-        bus_of: bus_index,
+        bus_of: net.node_bus,
+        bus_of_terminal: bus_index,
     };
     if state.converged() {
         state.flows = terminal_flows(
@@ -937,6 +966,7 @@ mod tests {
                 mrid: "s".to_string(),
                 name: "small".to_string(),
                 node: "n".to_string(),
+                terminal: String::new(),
                 scheduled: 50.0,
                 minimum: 40.0,
                 maximum: 100.0,
@@ -945,6 +975,7 @@ mod tests {
                 mrid: "b".to_string(),
                 name: "big".to_string(),
                 node: "n".to_string(),
+                terminal: String::new(),
                 scheduled: 850.0,
                 minimum: 0.0,
                 maximum: 900.0,
