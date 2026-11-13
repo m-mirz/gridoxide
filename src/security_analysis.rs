@@ -32,6 +32,7 @@ const SAR_TEMPLATE: &str = include_str!("security_analysis_sar_template.xml");
 const TEMPLATE_HEADER: &str = "urn:uuid:00000000-0000-0000-0000-000000000000";
 const TEMPLATE_CONTINGENCY_RESULT: &str = "_00000000-0000-0000-0000-000000000002";
 const TEMPLATE_BASE_RESULT: &str = "_00000000-0000-0000-0000-000000000003";
+const TEMPLATE_APPLIED: &str = "_00000000-0000-0000-0000-000000000004";
 
 /// Who takes the difference between what a state schedules and what it needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,6 +285,8 @@ pub fn terminal_flows(
 pub struct Violation {
     /// `None` in the base case.
     pub contingency: Option<String>,
+    /// The remedial actions applied after the contingency, by mRID; empty before any.
+    pub applied: Vec<String>,
     pub terminal: String,
     pub limit: CurrentLimit,
     pub flow: TerminalFlow,
@@ -308,6 +311,7 @@ pub fn monitor(
             if flow.amps > limit.amps {
                 found.push(Violation {
                     contingency: contingency.map(str::to_string),
+                    applied: Vec::new(),
                     terminal: terminal.clone(),
                     limit: limit.clone(),
                     flow: *flow,
@@ -614,6 +618,12 @@ pub struct SecurityAnalysis {
     pub stalled: Vec<String>,
     /// The contingencies naming equipment the model lacks: another IGM's, say.
     pub absent: Vec<String>,
+    /// The contingencies solved again with their curative actions applied.
+    pub curative_solved: usize,
+    /// The contingencies whose curative solve did not converge.
+    pub curative_stalled: Vec<String>,
+    /// The curative changes that could not be made, and why.
+    pub not_applied: Vec<String>,
     pub past_limits: Vec<PastLimit>,
     /// The contingency datasets' identifiers, which a SAR requires.
     pub requires: Vec<String>,
@@ -639,12 +649,60 @@ fn scenario_time(ds: &CimDataset) -> Result<String, String> {
     Ok(time)
 }
 
+/// A change a remedial action makes: `property` (`Class.attr`) of the object `object`, to
+/// `value` as written (`true`, `12`, `-45.5`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub object: String,
+    pub property: String,
+    pub value: String,
+}
+
+/// A remedial action applied after a contingency, as the changes it makes. Which actions go with
+/// which contingency, and what values they give, the caller decides: the RA data's
+/// `ContingencyWithRemedialAction`s, and their ranges or schedules at a time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Curative {
+    /// The `RemedialAction`'s mRID, for the SAR's `RemedialActionApplied`.
+    pub action: String,
+    pub changes: Vec<Change>,
+}
+
+/// `element` with `property` set to `value`, if its class has it.
+fn changed(element: &Element, property: &str, value: &str) -> Option<Element> {
+    let registry = cimmodel::registry::type_registry();
+    let key = element
+        .types()
+        .find_map(|class| registry.attr(class, property))?
+        .id;
+    let mut fields = element.fields().clone();
+    fields.insert(key, cimmodel::FieldValue::Text(value.to_string()));
+    Some(Element::with_fields(
+        element.class(),
+        element.mrid().to_string(),
+        fields,
+    ))
+}
+
 /// Solves `grid`'s base case and each contingency of `contingency_data` (a decoded CO
 /// dataset), and holds each terminal's current against its limits. `grid` is as it was
 /// after: an outage is applied to the elements for its solve and put back.
 pub fn run(
     grid: &mut CimDataset,
     contingency_data: &CimDataset,
+    options: &SecurityOptions,
+) -> Result<SecurityAnalysis, String> {
+    run_with_curative(grid, contingency_data, &HashMap::new(), options)
+}
+
+/// [`run`], and each contingency of `curative` solved again with its remedial actions applied
+/// together, while the contingency holds: their changes made, solved, and put back. The results
+/// of that state are violations whose [`Violation::applied`] names the actions. A switch an
+/// action opens or closes is seen only from the switches (`SecurityOptions::topology`).
+pub fn run_with_curative(
+    grid: &mut CimDataset,
+    contingency_data: &CimDataset,
+    curative: &HashMap<String, Vec<Curative>>,
     options: &SecurityOptions,
 ) -> Result<SecurityAnalysis, String> {
     let limits = current_limits(grid);
@@ -662,6 +720,9 @@ pub fn run(
         solved: 0,
         stalled: Vec::new(),
         absent: Vec::new(),
+        curative_solved: 0,
+        curative_stalled: Vec::new(),
+        not_applied: Vec::new(),
         requires: {
             let mut datasets: Vec<String> = contingency_data
                 .by_type
@@ -700,6 +761,41 @@ pub fn run(
         }
         let out: HashSet<&str> = contingency.equipment.iter().map(String::as_str).collect();
         let state = solve_state(grid, &fleet, &out, Some(&contingency.mrid), options);
+        // Its curative actions, together, while the contingency holds.
+        let actions = curative
+            .get(&contingency.mrid)
+            .filter(|a| !a.is_empty() && matches!(state, Ok(Some(_))));
+        let after = actions.map(|actions| {
+            let mut made = Vec::new();
+            for action in actions {
+                for change in &action.changes {
+                    let Some(element) = grid.entries.get_mut(&change.object) else {
+                        analysis.not_applied.push(format!(
+                            "{}: {} has no object {}",
+                            contingency.mrid, action.action, change.object
+                        ));
+                        continue;
+                    };
+                    match changed(element, &change.property, &change.value) {
+                        Some(new) => {
+                            made.push((change.object.clone(), std::mem::replace(element, new)))
+                        }
+                        None => analysis.not_applied.push(format!(
+                            "{}: {} sets {}, which {} has not",
+                            contingency.mrid, action.action, change.property, change.object
+                        )),
+                    }
+                }
+            }
+            let solved = solve_state(grid, &fleet, &out, Some(&contingency.mrid), options);
+            for (mrid, original) in made.into_iter().rev() {
+                grid.entries.insert(mrid, original);
+            }
+            let mut names: Vec<String> = actions.iter().map(|a| a.action.clone()).collect();
+            names.sort();
+            names.dedup();
+            (names, solved)
+        });
         for (mrid, original) in originals.into_iter().rev() {
             grid.entries.insert(mrid, original);
         }
@@ -721,15 +817,43 @@ pub fn run(
             .violations
             .extend(monitor(&state.flows, &limits, Some(&contingency.mrid)));
         analysis.past_limits.extend(state.past_limits);
+        if let Some((names, solved)) = after {
+            match solved? {
+                Some(mut state) => {
+                    analysis.curative_solved += 1;
+                    state
+                        .flows
+                        .retain(|terminal, _| !tripped.contains(terminal));
+                    analysis.violations.extend(
+                        monitor(&state.flows, &limits, Some(&contingency.mrid))
+                            .into_iter()
+                            .map(|v| Violation {
+                                applied: names.clone(),
+                                ..v
+                            }),
+                    );
+                    analysis.past_limits.extend(state.past_limits);
+                }
+                None => analysis.curative_stalled.push(contingency.mrid.clone()),
+            }
+        }
     }
     analysis.violations.sort_by(|a, b| {
-        (a.contingency.as_deref(), &a.terminal, &a.limit.mrid).cmp(&(
-            b.contingency.as_deref(),
-            &b.terminal,
-            &b.limit.mrid,
-        ))
+        (
+            a.contingency.as_deref(),
+            &a.applied,
+            &a.terminal,
+            &a.limit.mrid,
+        )
+            .cmp(&(
+                b.contingency.as_deref(),
+                &b.applied,
+                &b.terminal,
+                &b.limit.mrid,
+            ))
     });
     analysis.stalled.sort();
+    analysis.curative_stalled.sort();
     Ok(analysis)
 }
 
@@ -782,6 +906,7 @@ impl SecurityAnalysis {
         let header_class = dataset.entries[TEMPLATE_HEADER].class();
         let contingency_class = dataset.entries[TEMPLATE_CONTINGENCY_RESULT].class();
         let base_class = dataset.entries[TEMPLATE_BASE_RESULT].class();
+        let applied_class = dataset.entries[TEMPLATE_APPLIED].class();
 
         let id = identifier(&format!(
             "dataset/{}/{}/{}",
@@ -817,19 +942,25 @@ impl SecurityAnalysis {
             dataset.element_from_json(header_class, &own)?,
         );
 
+        // A result, under an identifier of what it is about; one after remedial actions, with
+        // a RemedialActionApplied for each of them.
         let mut add = |contingency: Option<&str>,
+                       applied: &[String],
                        terminal: &str,
                        limit: Option<&str>,
                        mut fields: Value|
          -> Result<(), Box<dyn Error>> {
-            let key = format!(
-                "_{}",
-                identifier(&format!(
-                    "{}/{terminal}/{}",
-                    contingency.unwrap_or(""),
-                    limit.unwrap_or("")
-                ))
+            let about = format!(
+                "{}/{terminal}/{}{}",
+                contingency.unwrap_or(""),
+                limit.unwrap_or(""),
+                if applied.is_empty() {
+                    String::new()
+                } else {
+                    format!("/after/{}", applied.join("+"))
+                }
             );
+            let key = format!("_{}", identifier(&about));
             let map = fields.as_object_mut().expect("built as an object");
             map.insert("id".to_string(), json!(key));
             map.insert("PowerFlowResult.ACDCTerminal".to_string(), json!(terminal));
@@ -852,7 +983,18 @@ impl SecurityAnalysis {
                 base_class
             };
             let element = dataset.element_from_json(class, &fields)?;
-            dataset.set(key, element);
+            dataset.set(key.clone(), element);
+            for action in applied {
+                let id = identifier(&format!("{about}/applied/{action}"));
+                let fields = json!({
+                    "_type": "nc:RemedialActionApplied", "id": format!("_{id}"),
+                    "RemedialActionApplied.mRID": id,
+                    "RemedialActionApplied.PowerFlowResult": key,
+                    "RemedialActionApplied.RemedialAction": action,
+                });
+                let element = dataset.element_from_json(applied_class, &fields)?;
+                dataset.set(format!("_{id}"), element);
+            }
             Ok(())
         };
 
@@ -865,6 +1007,7 @@ impl SecurityAnalysis {
             }
             add(
                 violation.contingency.as_deref(),
+                &violation.applied,
                 &violation.terminal,
                 Some(&violation.limit.mrid),
                 json!({
@@ -891,6 +1034,7 @@ impl SecurityAnalysis {
             }
             add(
                 None,
+                &[],
                 terminal,
                 None,
                 json!({
@@ -907,6 +1051,7 @@ impl SecurityAnalysis {
             TEMPLATE_HEADER,
             TEMPLATE_CONTINGENCY_RESULT,
             TEMPLATE_BASE_RESULT,
+            TEMPLATE_APPLIED,
         ] {
             dataset.remove(mrid);
         }
@@ -1039,6 +1184,7 @@ mod tests {
             TEMPLATE_HEADER,
             TEMPLATE_CONTINGENCY_RESULT,
             TEMPLATE_BASE_RESULT,
+            TEMPLATE_APPLIED,
         ] {
             assert!(dataset.entries.contains_key(mrid), "{mrid}");
         }

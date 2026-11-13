@@ -4904,9 +4904,20 @@ fn build_node_breaker_skeleton(
     let mut unresolved: Vec<String> = Vec::new();
     for t_mrid in by_type(ds, "Terminal") {
         let t = own(ds, t_mrid, "Terminal")?;
+        // Equipment out of service conducts nothing, as in the bus-branch resolver: a
+        // contingency's load or machine is taken out this way.
+        let in_service = t
+            .get_ref("Terminal.ConductingEquipment")
+            .and_then(|ce| ds.entries.get(ce))
+            .is_none_or(|ce| {
+                equipment_in_service(
+                    ce.get_bool("Equipment.inService"),
+                    ce.get_bool("Equipment.normallyInService"),
+                )
+            });
         connected_of.insert(
             t_mrid.clone(),
-            t.get_bool("ACDCTerminal.connected").unwrap_or(true),
+            in_service && t.get_bool("ACDCTerminal.connected").unwrap_or(true),
         );
         if let Some(ce) = t.get_ref("Terminal.ConductingEquipment") {
             let seq = t.get_i64("ACDCTerminal.sequenceNumber").unwrap_or(1);

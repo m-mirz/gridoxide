@@ -45,6 +45,16 @@ On ReliCapGrid's IGMs whose TP agrees with their switches (Belgovia, Britheim, G
 two give the same voltages to within 1e-6 p.u.; Espheim's TP leaves equipment off that its switches
 connect, and from the switches one component holds two angle references.
 
+## Curative actions
+
+`run_with_curative` takes, by contingency, the remedial actions to apply after it: each a
+`Curative`, its RemedialAction's mRID and the changes it makes (an object's `Class.attr` set to a
+value). The contingency is solved, then solved again with all its actions applied together; the
+violations of that state carry the actions in `Violation::applied`, and the SAR writes a
+`RemedialActionApplied` for each action on each such result. Which actions go with a contingency,
+and their values, the caller decides from the RA data. A switch an action sets is seen only from
+the switches (`topology`).
+
 ## Who takes the imbalance
 
 What a state schedules seldom equals what it needs, and the difference has to land somewhere. That
