@@ -206,12 +206,12 @@ Two things are worth knowing before running one:
 ## From the command line
 
 ```
-gridoxide switches <profile.xml>... [--retain none|busbar_adjacent|all]
+gridox switches <profile.xml>... [--retain none|busbar_adjacent|all]
                    [--open <mrid>] [--solve]
 ```
 
 ```console
-$ gridoxide switches MiniGrid_{EQBD,EQ,SSH,TP,SV}.xml --solve
+$ gridox switches MiniGrid_{EQBD,EQ,SSH,TP,SV}.xml --solve
 45 bus(es) from 103 connectivity node(s); retain = busbar_adjacent
 90 switch(es) in the model, 30 retained, 30 stamped as branches
 power flow: Converged in 2 iteration(s)

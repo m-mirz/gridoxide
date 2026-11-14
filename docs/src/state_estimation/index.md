@@ -126,7 +126,7 @@ asked otherwise.
 From the shell:
 
 ```bash
-gridoxide estimate tests/data/pgm/state_estimation/1os2msr/input.json
+gridox estimate tests/data/pgm/state_estimation/1os2msr/input.json
 ```
 
 From Python:

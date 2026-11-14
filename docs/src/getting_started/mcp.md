@@ -4,7 +4,7 @@
 chat — Claude Code, Claude Desktop, VS Code's agent mode, Codex, Cursor — read the power
 networks in a directory and run gridoxide over them. Its source is `crates/gridoxide-mcp`.
 
-It reads every format `gridoxide solve` reads: MATPOWER (`.m`), UCTE-DEF (`.uct`), PowSyBl IIDM
+It reads every format `gridox solve` reads: MATPOWER (`.m`), UCTE-DEF (`.uct`), PowSyBl IIDM
 (`.xiidm`) and directories of CGMES profiles. The loading and the solve are the same code —
 `gridoxide::load` — so the server and the CLI cannot disagree about a network.
 
@@ -14,7 +14,7 @@ It reads every format `gridoxide solve` reads: MATPOWER (`.m`), UCTE-DEF (`.uct`
 |---|---|
 | `list_networks` | the networks below a directory, with their format |
 | `summary` | size, bus types, voltage levels, tap changers, regulating controls, areas, and the importer's notes |
-| `power_flow` | an AC power flow, with the outer loops `gridoxide solve` offers as flags (`control_taps`, `enforce_q_limits`, `distribute_slack`, `area_interchange`, `control_remote_voltage`) |
+| `power_flow` | an AC power flow, with the outer loops `gridox solve` offers as flags (`control_taps`, `enforce_q_limits`, `distribute_slack`, `area_interchange`, `control_remote_voltage`) |
 | `results` | the buses or branches of the last `power_flow` on a network, filtered by name and sorted |
 
 Every tool reads; none writes a file. Output is plain text sized for a model's context: long

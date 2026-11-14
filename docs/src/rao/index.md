@@ -75,7 +75,7 @@ while being optimal.
 
 **Negative margins are the normal case.** A margin is negative exactly when a limit is exceeded, so
 the objective is meaningful on an insecure network and the sign of the answer is the security
-verdict. `gridoxide security` exits 1 when any margin is negative, so it can gate a pipeline.
+verdict. `gridox security` exits 1 when any margin is negative, so it can gate a pipeline.
 
 **\\(x\\) is discrete and \\(a\\) is continuous.** There is no gradient between an open switch and a
 closed one, so the two halves need different machinery: a search tree over \\(x\\), and a linear
@@ -103,7 +103,7 @@ rather than a re-solve. On `case9241pegase` that is 0.40 ms against 13.4 ms.
 
 A search tree evaluates thousands of candidates, so that ratio is the difference between a tool that
 runs in a control room and one that does not. An AC gate is available
-(`FlowModel::Ac`, `gridoxide rao --validate-ac`) for scoring and for the final verdict, at the cost of
+(`FlowModel::Ac`, `gridox rao --validate-ac`) for scoring and for the final verdict, at the cost of
 a Newton-Raphson solve per outer iteration.
 
 ## The worked example used throughout
@@ -147,15 +147,15 @@ worth asking on its own:
 
 ```bash
 # Where does it hurt?
-gridoxide security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
+gridox security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json
 
 # What should we do about it?
-gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
+gridox rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json --depth 2
 
 # ... under the reference's own settings, rather than gridoxide's defaults.
-gridoxide rao tests/data/ucte/3nodes_pst.uct \
+gridox rao tests/data/ucte/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json \
     --parameters RaoParameters.json
 ```
@@ -172,7 +172,7 @@ Both take a UCTE `.uct`, an IIDM `.xiidm`, or a **CGMES** model — for CGMES, t
 the profile set or any one profile beside the others:
 
 ```bash
-gridoxide security path/to/SmallGrid-Merged --crac smallgrid.crac.json
+gridox security path/to/SmallGrid-Merged --crac smallgrid.crac.json
 ```
 
 A CRAC names a CGMES element by the mRID of its `ConductingEquipment`, which is what powsybl gives an

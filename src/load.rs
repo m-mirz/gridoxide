@@ -1,6 +1,6 @@
 //! A network read from any of the importers, and an AC power flow over it.
 //!
-//! What `gridoxide solve` and the `gridmcp` MCP server share: the format is
+//! What `gridox solve` and the `gridmcp` MCP server share: the format is
 //! told from the path ([`detect`]), the file read into one shape
 //! ([`load`]) whichever importer produced it, and solved with the outer loops
 //! the settings ask for ([`Network::solve`]).
@@ -100,7 +100,7 @@ pub struct Network {
     pub nonregulating_q: Vec<f64>,
 }
 
-/// The outer loops and tolerances of a solve — `gridoxide solve`'s flags.
+/// The outer loops and tolerances of a solve — `gridox solve`'s flags.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolveSettings {
     pub control_taps: bool,

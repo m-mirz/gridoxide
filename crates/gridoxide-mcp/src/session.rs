@@ -3,7 +3,7 @@
 //!
 //! A network is one file (`.m`, `.uct`, `.xiidm`) or a directory of CGMES
 //! profiles; a single CGMES profile stands for its directory, as
-//! `gridoxide solve` reads it.
+//! `gridox solve` reads it.
 
 use std::collections::HashMap;
 use std::io::Read;

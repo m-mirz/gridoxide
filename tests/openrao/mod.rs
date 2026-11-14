@@ -10,7 +10,7 @@ use std::path::PathBuf;
 const MANIFEST: &str = include_str!("../data/openrao-fixtures.txt");
 
 pub fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/benchmark-grids/powsybl-open-rao")
+    PathBuf::from(crate::REPO).join("tests/data/benchmark-grids/powsybl-open-rao")
 }
 
 /// A path relative to the root, which must exist: a missing file would

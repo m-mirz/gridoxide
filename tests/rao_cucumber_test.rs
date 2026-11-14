@@ -711,7 +711,7 @@ fn resolve(kind: &str, reference: &str) -> PathBuf {
 /// this harness's own reasons.
 ///
 /// `gridoxide::rao::parameters` is the reading; it used to live here, which is
-/// how the gate came to validate behaviour `gridoxide rao` could not ask for.
+/// how the gate came to validate behaviour `gridox rao` could not ask for.
 /// Calling it from here is what keeps it validated: if that reading changes,
 /// these 1862 assertions say so.
 ///

@@ -2,7 +2,7 @@
 # gridoxide-gpu is an optional dependency of gridoxide (the `gpu` feature): a
 # plain `cargo build` here builds only this root package, and the GPU crate
 # builds without CUDA unless its `cuda` feature is on.
-members = ["crates/gridoxide-core", "crates/gridoxide-sparse", "crates/gridoxide-mcp", "crates/gridoxide-gpu"]
+members = ["crates/gridoxide-core", "crates/gridoxide-sparse", "crates/gridoxide-cli", "crates/gridoxide-mcp", "crates/gridoxide-gpu"]
 
 # Shared by every crate in the workspace, so they release in lockstep.
 [workspace.package]
@@ -213,7 +213,7 @@ rao = ["opf"]
 # factorization — no system libraries, no C toolchain, nothing to install — so
 # unlike `klu`/`pardiso`/`opf-highs` this one *is* built and tested in CI.
 #
-# This is what `gridoxide opf` and the Python `dc_opf` need. `opf-highs` below
+# This is what `gridox opf` and the Python `dc_opf` need. `opf-highs` below
 # is an optional second backend, not a requirement.
 opf = []
 # RMS (phasor-domain) dynamic simulation — src/dynamics/. The DAE, its

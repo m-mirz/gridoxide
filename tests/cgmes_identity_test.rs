@@ -289,7 +289,7 @@ fn boundary_buses_are_numbered_the_same_on_every_import() {
 ///
 /// This is what the two halves were for. `cgmes_tap_table_test.rs` gave the
 /// shifter every position it can take; this file gave the branch a name a CRAC
-/// can call it by; and `run_security` / `run_rao` in `src/main.rs` accept a
+/// can call it by; and `run_security` / `run_rao` in `crates/gridoxide-cli/src/main.rs` accept a
 /// directory of profiles. With any of the three missing the optimizer either
 /// cannot find the element, cannot move it, or is never handed it.
 ///

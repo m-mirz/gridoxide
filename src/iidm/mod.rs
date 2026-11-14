@@ -1014,7 +1014,7 @@ fn open(
         // `shuntLinearModel` attaches to the shunt above. It used to sit in the
         // no-op list below as an element "with nothing to contribute", which
         // left every IIDM generator at ±infinity — so `outerloop::ReactiveLimits`
-        // and `gridoxide solve --enforce-q-limits` had nothing to enforce, and
+        // and `gridox solve --enforce-q-limits` had nothing to enforce, and
         // one network read as `.uct` and as `.xiidm` disagreed about its own
         // machines. `TestCase12Nodes` is that network, and states ±9000 here.
         "minMaxReactiveLimits" => {

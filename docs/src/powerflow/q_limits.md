@@ -150,7 +150,7 @@ capability of everything holding that bus — which is the right bound to enforc
 importer accumulates. But it leaves a question unanswered: when six machines hold one bus, which of
 them is carrying the reactive power?
 
-`gridoxide solve --dispatch` (and `PowerFlowModel.machine_dispatch()`) answers it, by attributing
+`gridox solve --dispatch` (and `PowerFlowModel.machine_dispatch()`) answers it, by attributing
 the solved injection after the fact:
 
 - by an explicit per-machine key where the source document states one;

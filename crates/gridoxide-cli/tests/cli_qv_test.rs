@@ -1,12 +1,13 @@
-//! The `gridoxide qv` subcommand.
+//! The `gridox qv` subcommand.
 //!
 //! The physics is gated in `qv_test.rs` against a closed-form two-bus curve;
-//! what is pinned here is the hand-rolled argument handling and that each flag
+//! what is pinned here is the argument handling and that each flag
 //! reaches the code it names.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[path = "../../../tests/pglib/mod.rs"]
 mod pglib;
 
 fn case14() -> PathBuf {
@@ -14,10 +15,10 @@ fn case14() -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn qv(extra: &[&str]) -> Output {

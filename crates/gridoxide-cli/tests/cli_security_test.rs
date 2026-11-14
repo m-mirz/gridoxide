@@ -1,7 +1,7 @@
-//! The `gridoxide security` subcommand.
+//! The `gridox security` subcommand.
 //!
-//! `main.rs`'s argument handling is hand-rolled, so it is pinned here by
-//! driving the built binary rather than calling into the library.
+//! Pinned by driving the built binary rather than calling into the library,
+//! as the arguments and exit codes are the binary's own.
 //!
 //! The exit code carries meaning and is the point of most of these: 0 secure,
 //! 1 insecure, 2 the invocation was wrong. Conflating the last two is how a
@@ -9,13 +9,14 @@
 
 use std::process::{Command, Output};
 
+#[path = "../../../tests/openrao/mod.rs"]
 mod openrao;
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("run gridoxide")
+        .expect("run gridox")
 }
 
 fn stdout(output: &Output) -> String {
@@ -229,7 +230,7 @@ fn iidm_networks_work_as_well_as_ucte() {
 }
 
 // ---------------------------------------------------------------------------
-// `gridoxide rao`
+// `gridox rao`
 // ---------------------------------------------------------------------------
 
 #[test]

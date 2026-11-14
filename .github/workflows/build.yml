@@ -68,6 +68,17 @@ jobs:
           cargo check --all-targets --features "$features"
           echo "::endgroup::"
         done
+    # The CLI (crates/gridoxide-cli) gates its subcommands on the same features,
+    # forwarded; a plain `cargo check` at the root does not build it.
+    - name: Check the CLI with each feature set on its own
+      run: |
+        for features in "" opf ucte iidm iidm,ucte dynamics dynamics,iidm \
+                        rao rao,ucte,iidm matpower cgmes \
+                        cgmes,ucte,iidm,opf,rao,dynamics,matpower; do
+          echo "::group::cargo check -p gridoxide-cli --features '$features'"
+          cargo check -p gridoxide-cli --all-targets --no-default-features --features "$features"
+          echo "::endgroup::"
+        done
     # Feature *unification* is its own failure mode, which the checks above
     # cannot see: `iidm` and `cgmes` share quick-xml, and cimmodel enables its
     # `encoding` feature — which changes the shape of a public type. That
@@ -88,11 +99,15 @@ jobs:
     # The integration tests are one binary (`tests/all.rs`), so this links once.
     - name: Test every CI-covered feature together
       run: cargo test --features ucte,iidm,opf,rao,dynamics,capi,matpower
+    # The CLI's tests run the `gridox` binary, which only its own package gets.
+    # Its defaults less `cgmes`, for the same reason.
+    - name: Test the CLI
+      run: cargo test -p gridoxide-cli --no-default-features --features parallel,ucte,iidm,opf,rao,dynamics,matpower
     # The library is split into crates (see crates/), and a plain `cargo test`
     # at the root tests only the root package. The others' own unit tests —
     # the KLU port's among them — run here.
     - name: Test the workspace's other crates
-      run: cargo test --workspace --exclude gridoxide
+      run: cargo test --workspace --exclude gridoxide --exclude gridoxide-cli
     - name: Build the dynamics scaling examples
       run: |
         cargo build --release --features dynamics --example dynamics_scale

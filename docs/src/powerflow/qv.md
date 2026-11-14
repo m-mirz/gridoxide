@@ -128,9 +128,9 @@ been asserting something untrue about the physics.
 ## Using it
 
 ```bash
-gridoxide qv network.json --weakest 10          # rank buses by margin
-gridoxide qv network.json --bus 13 --curve      # one bus, with the curve
-gridoxide qv network.json --bus 13 --v-min 0.2  # sweep further down
+gridox qv network.json --weakest 10          # rank buses by margin
+gridox qv network.json --bus 13 --curve      # one bus, with the curve
+gridox qv network.json --bus 13 --v-min 0.2  # sweep further down
 ```
 
 ```python

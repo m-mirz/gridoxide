@@ -1,13 +1,14 @@
-//! The `gridoxide opf` subcommand.
+//! The `gridox opf` subcommand.
 //!
 //! The numerics are validated against analytic cases, KKT certificates and
 //! pglib's published objectives in `opf_dc_test.rs`. What is pinned here is
-//! the hand-rolled argument handling, the companion-document default, and that
+//! the argument handling, the companion-document default, and that
 //! the output actually reports the things a dispatcher reads off an OPF.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[path = "../../../tests/pglib/mod.rs"]
 mod pglib;
 
 fn fixture(name: &str) -> PathBuf {
@@ -15,15 +16,16 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
+/// The DC problem, which these tests are about; the AC one is the default.
 fn opf(case: &str, extra: &[&str]) -> Output {
     let path = fixture(case);
-    let mut args = vec!["opf", path.to_str().unwrap()];
+    let mut args = vec!["opf", path.to_str().unwrap(), "--dc"];
     args.extend_from_slice(extra);
     run(&args)
 }
@@ -122,6 +124,30 @@ fn a_missing_companion_document_explains_itself() {
 #[test]
 fn needs_a_network_path() {
     let out = run(&["opf"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("needs a network path"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("<NETWORK>"));
+}
+
+/// The DC-only flags need --dc, and the AC-only ones refuse it.
+#[test]
+fn flags_of_the_other_formulation_are_refused() {
+    for args in [
+        &["opf", "x.json", "--dc", "--no-limits"][..],
+        &["opf", "x.json", "--dc", "--max-iter", "5"],
+        &["opf", "x.json", "--highs"],
+        &["opf", "x.json", "--shed-price", "100"],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+/// AC is the default, as for `solve`; the DC problem is asked for.
+#[test]
+fn ac_is_the_default() {
+    let path = fixture("pglib_opf_case5_pjm");
+    let ac = stdout_of(&run(&["opf", path.to_str().unwrap()]));
+    assert!(ac.contains("this is a local optimum"), "{ac}");
+    let dc = stdout_of(&opf("pglib_opf_case5_pjm", &[]));
+    assert!(!dc.contains("this is a local optimum"), "{dc}");
 }

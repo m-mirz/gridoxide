@@ -134,7 +134,7 @@ validate it, and this project's rule is that a number it prints is a number some
 From the CLI:
 
 ```bash
-gridoxide short-circuit network.json --scaling max
+gridox short-circuit network.json --scaling max
 ```
 
 From Rust:

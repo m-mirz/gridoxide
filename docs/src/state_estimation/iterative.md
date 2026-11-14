@@ -347,7 +347,7 @@ only where an expected value was published.
 Selecting it:
 
 ```bash
-gridoxide estimate grid.json --iterative-linear
+gridox estimate grid.json --iterative-linear
 ```
 
 ```python
