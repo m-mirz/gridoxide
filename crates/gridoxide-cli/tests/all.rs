@@ -13,6 +13,9 @@ mod cli_continuation_test;
 mod cli_dynamics_test;
 #[path = "cli_estimate_test.rs"]
 mod cli_estimate_test;
+#[cfg(feature = "matpower")]
+#[path = "cli_formats_test.rs"]
+mod cli_formats_test;
 #[cfg(feature = "opf")]
 #[path = "cli_opf_test.rs"]
 mod cli_opf_test;

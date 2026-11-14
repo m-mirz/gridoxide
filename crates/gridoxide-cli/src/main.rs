@@ -93,6 +93,78 @@ fn verdict(result: Result<bool, String>) -> i32 {
     }
 }
 
+/// What `dc`, `sensitivity`, `qv` and `continuation` read: buses, branches and
+/// the shunts beside them, at a base.
+struct Grid {
+    buses: Vec<gridoxide::types::Bus>,
+    lines: Vec<gridoxide::types::Line>,
+    transformers: Vec<gridoxide::types::Transformer>,
+    shunts: Vec<gridoxide::network::ShuntAdm>,
+    s_base_va: f64,
+}
+
+/// Reads `path` as a power-grid-model JSON document (`.json`), or as any format
+/// `solve` reads. PGM states no base, so `base_mva` (else `pgm_base_va`) sets
+/// it, and folds its shunts into the buses; the other formats state their own
+/// base, which `base_mva` may not override, and list their shunts apart.
+fn read_grid(path: &str, base_mva: Option<f64>, pgm_base_va: f64) -> Result<Grid, String> {
+    if path.to_ascii_lowercase().ends_with(".json") {
+        let s_base_va = base_mva.map_or(pgm_base_va, |m| m * 1e6);
+        let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+        let input: PgmInput =
+            serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
+        let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+        return Ok(Grid {
+            buses,
+            lines,
+            transformers,
+            shunts: Vec::new(),
+            s_base_va,
+        });
+    }
+    read_other_grid(path, base_mva)
+}
+
+#[cfg(any(
+    feature = "ucte",
+    feature = "iidm",
+    feature = "cgmes",
+    feature = "matpower"
+))]
+fn read_other_grid(path: &str, base_mva: Option<f64>) -> Result<Grid, String> {
+    let net = gridoxide::load::load(path)?;
+    if base_mva.is_some() {
+        return Err(format!(
+            "--base-mva sets a PGM document's base; {} states its own ({} MVA)",
+            net.format.name(),
+            net.s_base_va / 1e6
+        ));
+    }
+    for note in &net.notes {
+        println!("note: {note}");
+    }
+    Ok(Grid {
+        buses: net.buses,
+        lines: net.lines,
+        transformers: net.transformers,
+        shunts: net.shunts,
+        s_base_va: net.s_base_va,
+    })
+}
+
+#[cfg(not(any(
+    feature = "ucte",
+    feature = "iidm",
+    feature = "cgmes",
+    feature = "matpower"
+)))]
+fn read_other_grid(path: &str, _: Option<f64>) -> Result<Grid, String> {
+    Err(format!(
+        "{path}: this build reads only PGM JSON; other formats need an importer feature \
+         (`cgmes`, `ucte`, `iidm` or `matpower`)"
+    ))
+}
+
 /// `value` as an index below `limit`: clap has parsed it, only the network
 /// knows how many there are.
 fn check_index(value: usize, flag: &str, limit: usize) -> Result<usize, String> {
@@ -1054,13 +1126,16 @@ fn parse_shift(a: &args::ModesArgs) -> Result<Option<num_complex::Complex<f64>>,
 
 /// `gridox qv` — a bus's reactive margin.
 fn run_qv_cli(a: &args::QvArgs) -> Result<(), String> {
-    let path = a.path.as_str();
     use gridoxide::qv::{QvOptions, QvStatus, qv_curve};
 
-    let base_mva = a.base_mva;
-    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
-    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, base_mva * 1e6, 50.0);
+    let Grid {
+        buses,
+        lines,
+        transformers,
+        shunts,
+        s_base_va,
+    } = read_grid(&a.path, a.base_mva, 100e6)?;
+    let base_mva = s_base_va / 1e6;
     let n = buses.len();
 
     let opts = QvOptions {
@@ -1090,7 +1165,7 @@ fn run_qv_cli(a: &args::QvArgs) -> Result<(), String> {
     );
 
     if let Some(bus) = one {
-        let curve = qv_curve(&buses, &lines, &transformers, &[], bus, opts);
+        let curve = qv_curve(&buses, &lines, &transformers, &shunts, bus, opts);
         if let QvStatus::Rejected(why) = &curve.status {
             return Err(format!("bus {bus}: {why:?}"));
         }
@@ -1149,7 +1224,7 @@ fn run_qv_cli(a: &args::QvArgs) -> Result<(), String> {
     let mut rows: Vec<(f64, usize, f64, bool)> = Vec::new();
     let mut skipped = 0usize;
     for bus in 0..n {
-        let curve = qv_curve(&buses, &lines, &transformers, &[], bus, opts.clone());
+        let curve = qv_curve(&buses, &lines, &transformers, &shunts, bus, opts.clone());
         match (&curve.nose, &curve.status) {
             (Some(nose), QvStatus::NoseFound) => {
                 rows.push((nose.margin_pu, bus, nose.voltage, true))
@@ -1188,18 +1263,20 @@ fn run_qv_cli(a: &args::QvArgs) -> Result<(), String> {
 
 /// `gridox continuation` — trace the P-V curve to the point of collapse.
 fn run_continuation_cli(a: &args::ContinuationArgs) -> Result<(), String> {
-    let path = a.path.as_str();
     use gridoxide::continuation::augmented::Parametrization;
     use gridoxide::continuation::{
         ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch, LoadingDirection,
         QLimitKind, StopCriterion, run_continuation,
     };
 
-    let base_mva = a.base_mva;
-    let s_base_va = base_mva * 1e6;
-    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
-    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+    let Grid {
+        buses,
+        lines,
+        transformers,
+        shunts,
+        s_base_va,
+    } = read_grid(&a.path, a.base_mva, 100e6)?;
+    let base_mva = s_base_va / 1e6;
     let n = buses.len();
 
     let indices = |list: &[usize], flag: &str| -> Result<Vec<usize>, String> {
@@ -1253,7 +1330,7 @@ fn run_continuation_cli(a: &args::ContinuationArgs) -> Result<(), String> {
         ..Default::default()
     };
 
-    let curve = run_continuation(buses, &lines, &transformers, &[], opts);
+    let curve = run_continuation(buses, &lines, &transformers, &shunts, opts);
     if let ContinuationStatus::Rejected(why) = &curve.status {
         return Err(format!("continuation was not attempted: {why:?}"));
     }
@@ -1369,11 +1446,13 @@ fn run_continuation_cli(a: &args::ContinuationArgs) -> Result<(), String> {
 }
 
 fn run_sensitivity(a: &args::SensitivityArgs) -> Result<(), String> {
-    let path = a.path.as_str();
-    let s_base_va = 1e6;
-    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
-    let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+    let Grid {
+        buses,
+        lines,
+        transformers,
+        shunts,
+        ..
+    } = read_grid(&a.path, None, 1e6)?;
 
     let terminal = match a.terminal {
         args::Terminal::From => Terminal::From,
@@ -1387,7 +1466,7 @@ fn run_sensitivity(a: &args::SensitivityArgs) -> Result<(), String> {
         buses,
         &lines,
         &transformers,
-        &[],
+        &shunts,
         gridoxide::TapData::none(),
         PowerFlowOptions::default(),
     );
@@ -1403,7 +1482,7 @@ fn run_sensitivity(a: &args::SensitivityArgs) -> Result<(), String> {
 
     let ybus = {
         let mut y = build_ybus(buses.len(), &lines, &transformers);
-        stamp_shunts(&mut y, &[]);
+        stamp_shunts(&mut y, &shunts);
         y.finish()
     };
     let sensitivity = AcSensitivity::new(&buses, &ybus, &lines, &transformers)
@@ -1669,11 +1748,13 @@ fn run_short_circuit(a: &args::ShortCircuitArgs) -> Result<(), String> {
 /// per-island slack pickup — plus the residual, which on a healthy network is
 /// round-off and on an ill-conditioned one is the first sign of it.
 fn run_dc(a: &args::DcArgs) -> Result<(), String> {
-    let path = a.path.as_str();
-    let s_base_va = 1e6;
-    let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
-    let (mut buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
+    let Grid {
+        mut buses,
+        lines,
+        transformers,
+        shunts,
+        s_base_va,
+    } = read_grid(&a.path, None, 1e6)?;
 
     let approximation = if a.ignore_g {
         DcApproximation::IgnoreG
@@ -1717,6 +1798,14 @@ fn run_dc(a: &args::DcArgs) -> Result<(), String> {
         println!(
             "  note: {} branch(es) carry no DC flow (open terminal, self-loop, or no susceptance)",
             solution.ignored_branches.len()
+        );
+    }
+    if !shunts.is_empty() {
+        // B-theta has no shunts; MATPOWER's own DC flow would take their
+        // conductance as load, which this does not.
+        println!(
+            "  note: {} shunt(s) ignored, as the DC model has none",
+            shunts.len()
         );
     }
     println!("  max residual = {:.3e} p.u.", solution.max_residual);

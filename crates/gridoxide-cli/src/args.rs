@@ -124,13 +124,14 @@ pub struct EstimateArgs {
     pub ideal_sources: bool,
 }
 
-/// Run a DC (Bθ) power flow over a PGM JSON document.
+/// Run a DC (Bθ) power flow.
 ///
 /// Prints bus angles, branch flows and per-island slack pickup. Bus and branch
 /// arguments are gridoxide's own 0-based indices, as the tables print them.
+/// Shunts are left out, as the DC model has none.
 #[derive(Args)]
 pub struct DcArgs {
-    /// A PGM JSON document
+    /// The network: PGM JSON (.json), .m, .uct, .xiidm or CGMES
     pub path: String,
     /// Use b = x/(r²+x²) instead of the default b = 1/x
     #[arg(long)]
@@ -143,7 +144,7 @@ pub struct DcArgs {
     pub lodf: Option<usize>,
 }
 
-/// Solve an AC power flow over a PGM JSON document and differentiate it.
+/// Solve an AC power flow and differentiate it.
 ///
 /// --dp/--dq/--dk/--dalpha each pick one variable and print how every branch
 /// flow and bus voltage responds to it. --watch picks one branch instead and
@@ -157,7 +158,7 @@ pub struct DcArgs {
         .args(["dp", "dq", "dk", "dalpha", "watch"])
 ))]
 pub struct SensitivityArgs {
-    /// A PGM JSON document
+    /// The network: PGM JSON (.json), .m, .uct, .xiidm or CGMES
     pub path: String,
     /// Active injection at this bus
     #[arg(long, value_name = "BUS")]
@@ -207,7 +208,7 @@ pub enum Scaling {
     Min,
 }
 
-/// Trace a bus's Q-V curve over a PGM JSON document, for its reactive margin.
+/// Trace a bus's Q-V curve, for its reactive margin.
 ///
 /// How much reactive support holding the bus at a given voltage takes, and how
 /// much margin there is before no setpoint is reachable. The minimum of the curve is the reactive margin, in MVAr. Complements
@@ -216,7 +217,7 @@ pub enum Scaling {
 /// which bus is weakest.
 #[derive(Args)]
 pub struct QvArgs {
-    /// A PGM JSON document
+    /// The network: PGM JSON (.json), .m, .uct, .xiidm or CGMES
     pub path: String,
     /// Trace this bus and print its curve
     #[arg(long, value_name = "BUS", conflicts_with = "weakest")]
@@ -236,16 +237,16 @@ pub struct QvArgs {
     /// Report the sampled minimum instead of interpolating it
     #[arg(long)]
     pub no_refine: bool,
-    /// System base, MVA
-    #[arg(long, value_name = "M", default_value_t = 100.0)]
-    pub base_mva: f64,
+    /// A PGM document's system base, MVA (default 100); other formats state
+    /// their own
+    #[arg(long, value_name = "M")]
+    pub base_mva: Option<f64>,
     /// Print the curve's points
     #[arg(long)]
     pub curve: bool,
 }
 
-/// Trace the P-V curve of a PGM JSON document to the point of voltage
-/// collapse.
+/// Trace the P-V curve to the point of voltage collapse.
 ///
 /// How much further the network can be loaded, which bus gives way first, and
 /// where each generator runs out of reactive capability on the way. The answer
@@ -253,7 +254,7 @@ pub struct QvArgs {
 /// net consumer at constant power factor and leaves the slack to pick it up.
 #[derive(Args)]
 pub struct ContinuationArgs {
-    /// A PGM JSON document
+    /// The network: PGM JSON (.json), .m, .uct, .xiidm or CGMES
     pub path: String,
     /// Stop at this loading
     #[arg(long, value_name = "LAMBDA", conflicts_with = "lower_branch")]
@@ -280,9 +281,10 @@ pub struct ContinuationArgs {
     /// Stress only these buses
     #[arg(long, value_name = "I,J,K", value_delimiter = ',')]
     pub buses: Option<Vec<usize>>,
-    /// System base, MVA
-    #[arg(long, value_name = "M", default_value_t = 100.0)]
-    pub base_mva: f64,
+    /// A PGM document's system base, MVA (default 100); other formats state
+    /// their own
+    #[arg(long, value_name = "M")]
+    pub base_mva: Option<f64>,
     /// Corrector tolerance
     #[arg(long, value_name = "T", default_value = "1e-8")]
     pub tol: f64,
