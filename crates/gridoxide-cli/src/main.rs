@@ -1,20 +1,15 @@
-//! gridoxide's command-line front end.
-//!
-//! Invoked with no arguments it runs the bundled power-flow demo, which is what
-//! it has always done. `estimate <path>` runs state estimation over a PGM
-//! document containing sensors, and `dc <path>` runs a DC (Bθ) power flow over
-//! one.
+//! `gridox`, gridoxide's command line.
 //!
 //! Argument handling is deliberately hand-rolled: a few modes and one path do
 //! not justify a dependency, and the crate otherwise has none for this.
 
 use std::fs;
+#[cfg(feature = "opf")]
 use std::path::PathBuf;
 
 use gridoxide::PowerFlowOptions;
 use gridoxide::ac_sensitivity::{AcSensitivity, Function, Variable};
 use gridoxide::branch_flow::Terminal;
-use gridoxide::json::NetworkData;
 use gridoxide::linear::{DcApproximation, DcOptions, DcSensitivity, dc_branches, dc_power_flow};
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::shortcircuit::short_circuit_from_pgm;
@@ -26,16 +21,15 @@ use gridoxide::se::nr::{SeMethod, SeOptions, SeStatus, estimate, linear_start};
 use gridoxide::se::observability;
 use gridoxide::shortcircuit::{SequenceValue, ShortCircuitOptions, VoltageScaling};
 use gridoxide::solver::SolveStatus;
-use gridoxide::{run_power_flow, run_power_flow_analysis};
+use gridoxide::run_power_flow;
 
 const USAGE: &str = "\
 usage:
-  gridoxide                     run the bundled power-flow demo
-  gridoxide solve <network> [--control-taps] [--enforce-q-limits] [--dispatch]
-                  [--control-remote-voltage]
-                  [--distribute-slack | --area-interchange]
-                  [--max-outer <n>] [--max-tap-shift <n>]
-                  [--tol <t>] [--max-iter <n>]
+  gridox solve <network> [--control-taps] [--enforce-q-limits] [--dispatch]
+               [--control-remote-voltage]
+               [--distribute-slack | --area-interchange]
+               [--max-outer <n>] [--max-tap-shift <n>]
+               [--tol <t>] [--max-iter <n>]
                                 run an AC power flow, optionally with the outer
                                 loops that make a control a control rather than
                                 a constant: on-load tap changers holding a
@@ -69,7 +63,7 @@ usage:
                                 profile .xml files), UCTE-DEF (.uct), IIDM
                                 (.xiidm) or MATPOWER (.m). Needs the matching
                                 importer feature.
-  gridoxide estimate <path> [--iterative-linear] [--asymmetric] [--no-zero-injection]
+  gridox estimate <path> [--iterative-linear] [--asymmetric] [--no-zero-injection]
                                 [--ideal-sources]
                                 run state estimation over a PGM JSON document
                                 containing voltage, power or current sensors.
@@ -95,7 +89,7 @@ usage:
                                 slack, with no impedance behind it, instead of
                                 power-grid-model's virtual bus behind the
                                 source impedance (symmetric only).
-  gridoxide cgmes-security <profiles>... --contingencies <co>... [--slack <sharing>]
+  gridox cgmes-security <profiles>... --contingencies <co>... [--slack <sharing>]
                                 [--sar <out.xml> --publisher <iri> --version-of <iri>
                                 --rights-holder <name> --generated-at <time>]
                                 a CGMES model's base case and each contingency of its
@@ -103,7 +97,7 @@ usage:
                                 as a SAR. <sharing> is capability (default: machines by
                                 maxOperatingP), reference or equal. Exits 1 if a limit
                                 is violated. Needs the cgmes feature.
-  gridoxide security <network> --crac <crac.json> [--json]
+  gridox security <network> --crac <crac.json> [--json]
                                 assess a network against a CRAC: which critical
                                 elements are overloaded, in which state, and by
                                 how much. The network may be UCTE-DEF (.uct) or
@@ -111,8 +105,8 @@ usage:
                                 gridoxide's own <network>.rao.json companion.
                                 Exits 0 when every margin is non-negative and 1
                                 when any is not, so it can gate a pipeline.
-  gridoxide rao <network> --crac <crac.json> [--parameters <p.json>]
-                         [--depth N] [--validate-ac] [--json]
+  gridox rao <network> --crac <crac.json> [--parameters <p.json>]
+                      [--depth N] [--validate-ac] [--json]
                                 optimize remedial actions: search over the
                                 network actions the CRAC permits, re-optimizing
                                 the range actions at every candidate, and report
@@ -124,8 +118,8 @@ usage:
                                 thresholds. --depth wins over the file where
                                 both are given.
                                 Exits 0 when every perimeter ends secure.
-  gridoxide switches <profile.xml>... [--retain none|busbar_adjacent|all]
-                     [--open <mrid>] [--solve]
+  gridox switches <profile.xml>... [--retain none|busbar_adjacent|all]
+                  [--open <mrid>] [--solve]
                                 list a CGMES model's switching devices, read
                                 from EQ+SSH rather than merged away at import.
                                 --retain chooses which survive as elements
@@ -133,8 +127,8 @@ usage:
                                 before solving; --solve runs a power flow and
                                 reports each switch's own flow.
                                 Needs the `cgmes` feature.
-  gridoxide qv <path> [--bus <i> | --weakest <n>] [--v-max <v>] [--v-min <v>]
-               [--step <s>] [--no-refine] [--base-mva <m>] [--curve]
+  gridox qv <path> [--bus <i> | --weakest <n>] [--v-max <v>] [--v-min <v>]
+            [--step <s>] [--no-refine] [--base-mva <m>] [--curve]
                                 trace a bus's Q-V curve: how much reactive
                                 support holding it at a given voltage takes, and
                                 how much margin there is before no setpoint is
@@ -149,7 +143,7 @@ usage:
                                 known not to agree on which bus is weakest —
                                 that is why both exist.
                                 Reads a PGM JSON document.
-  gridoxide continuation <path> [--target-lambda <l> | --lower-branch]
+  gridox continuation <path> [--target-lambda <l> | --lower-branch]
                      [--step <s>] [--max-steps <n>] [--enforce-q-limits]
                      [--parametrization local|natural|arclength]
                      [--pickup <i,j,k>] [--buses <i,j,k>]
@@ -171,9 +165,9 @@ usage:
                                 the exact lambda each machine saturates at is
                                 located rather than rounded to a step.
                                 Reads a PGM JSON document.
-  gridoxide dynamics <path> --modes <n> [--modes-freq <Hz>]
-                     [--modes-damping <zeta>] [--modes-near <re>,<im>]
-                     [--modes-sensitivity]
+  gridox dynamics <path> --modes <n> [--modes-freq <Hz>]
+                  [--modes-damping <zeta>] [--modes-near <re>,<im>]
+                  [--modes-sensitivity]
                                 report the n least-damped modes of the
                                 linearized system instead of running it: which
                                 oscillations exist, how fast each decays, and
@@ -197,10 +191,10 @@ usage:
                                 to change. Only parameters the equilibrium does
                                 not depend on are offered; see the docs for why
                                 that is a restriction and not an omission.
-  gridoxide dynamics <path> [--stop <t>] [--step <h>] [--tol <t>]
-                     [--damping <n>] [--backend scalar|klu-native]
-                     [--speed-voltages | --no-speed-voltages]
-                     [--csv <out>] [--observe <substring>]
+  gridox dynamics <path> [--stop <t>] [--step <h>] [--tol <t>]
+                  [--damping <n>] [--backend scalar|klu-native]
+                  [--speed-voltages | --no-speed-voltages]
+                  [--csv <out>] [--observe <substring>]
                                 run an RMS (phasor-domain) dynamic simulation:
                                 what the network does over *time* after a
                                 disturbance, rather than at one instant. Reads a
@@ -225,7 +219,7 @@ usage:
                                 closed-form gates are derived from. It is worth
                                 0.6% of terminal power at a 0.9% speed
                                 deviation — turning it on moves the answer.
-  gridoxide short-circuit <path> [--scaling max|min]
+  gridox short-circuit <path> [--scaling max|min]
                                 run an IEC 60909 short-circuit calculation over
                                 a PGM JSON document containing `fault` entries,
                                 printing per-node voltages, per-fault currents
@@ -233,7 +227,7 @@ usage:
                                 --scaling picks the voltage factor c (default
                                 max, for the largest current; min is the
                                 sensitivity study).
-  gridoxide opf <network.json> [--ac] [--data <opf.json>] [--no-shedding]
+  gridox opf <network.json> [--ac] [--data <opf.json>] [--no-shedding]
                      [--shed-price <$/MWh>] [--ignore-r] [--highs]
                      [--no-limits] [--max-iter <n>]
                                 run a DC optimal power flow: least-cost dispatch
@@ -257,7 +251,7 @@ usage:
                                 branch ratings and --max-iter caps the solve;
                                 --no-shedding/--shed-price/--ignore-r/--highs
                                 are DC-only.
-  gridoxide sensitivity <path> [--dp <bus>] [--dq <bus>] [--dk <branch>]
+  gridox sensitivity <path> [--dp <bus>] [--dq <bus>] [--dk <branch>]
                      [--dalpha <branch>] [--watch <branch>] [--terminal from|to]
                                 solve an AC power flow and differentiate it.
                                 --dp/--dq/--dk/--dalpha each pick one variable
@@ -267,7 +261,7 @@ usage:
                                 --watch picks one branch instead and prints the
                                 reverse: what every injection and every tap
                                 would do to *its* flow. At least one is needed.
-  gridoxide dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]
+  gridox dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]
                                 run a DC (Bθ) power flow over a PGM JSON
                                 document, printing bus angles, branch flows and
                                 per-island slack pickup.
@@ -281,7 +275,10 @@ usage:
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None => power_flow_demo(),
+        None => {
+            eprint!("{USAGE}");
+            std::process::exit(2);
+        }
         Some("solve") => match args.get(1) {
             Some(path) if !path.starts_with("--") => {
                 if let Err(message) = run_solve(path, &args[2..]) {
@@ -400,7 +397,7 @@ fn main() {
                 }
             }
             _ => {
-                eprintln!("usage: gridoxide qv <path> [--bus <i> | --weakest <n>]");
+                eprintln!("usage: gridox qv <path> [--bus <i> | --weakest <n>]");
                 std::process::exit(1);
             }
         },
@@ -412,7 +409,7 @@ fn main() {
                 }
             }
             _ => {
-                eprintln!("usage: gridoxide continuation <path> [options]");
+                eprintln!("usage: gridox continuation <path> [options]");
                 std::process::exit(1);
             }
         },
@@ -462,52 +459,6 @@ fn main() {
             eprintln!("error: unknown command {other:?}\n\n{USAGE}");
             std::process::exit(2);
         }
-    }
-}
-
-fn power_flow_demo() {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/data/network.json");
-    let network_json = fs::read_to_string(path).expect("Unable to read network.json");
-    let network_data: NetworkData =
-        serde_json::from_str(&network_json).expect("Unable to parse network.json");
-
-    let report = run_power_flow_analysis(network_data);
-
-    // The solver itself is silent so it can be driven from many threads at
-    // once (see `batch::BatchSolver`); this reconstructs the progress output
-    // it used to print, from `SolveStats::mismatch_history`.
-    for (i, max_mis) in report.stats.mismatch_history.iter().enumerate() {
-        println!("iter {}: max mismatch = {:.6e}", i + 1, max_mis);
-    }
-    match report.stats.status {
-        SolveStatus::Converged => println!("Converged in {} iterations", report.stats.iterations()),
-        SolveStatus::MaxIterationsReached => {
-            println!(
-                "Failed to converge in {} iterations",
-                report.stats.iterations()
-            )
-        }
-        SolveStatus::Singular => println!("Jacobian is singular. Failed to solve."),
-    }
-
-    println!("Final voltages:");
-    for b in report.buses.iter() {
-        println!(
-            "Bus {}: |V| = {:.6}, angle = {:.6} deg",
-            b.idx,
-            b.voltage_mag,
-            b.voltage_ang.to_degrees()
-        );
-    }
-
-    println!("\nIslands: {} connected component(s)", report.islands.len());
-    for (i, island) in report.islands.iter().enumerate() {
-        println!(
-            "  island {i}: {} bus(es), status = {:?}",
-            island.bus_indices.len(),
-            island.status
-        );
     }
 }
 
@@ -1054,7 +1005,7 @@ fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
     }
 }
 
-/// `gridoxide dynamics` — what the network does over time.
+/// `gridox dynamics` — what the network does over time.
 ///
 /// Everything else this binary offers answers a question about one instant.
 /// This one integrates: the machines' rotors and fluxes, their controls, and
@@ -1256,7 +1207,7 @@ fn run_dynamics_cli(_path: &str, _flags: &[String]) -> Result<(), String> {
     )
 }
 
-/// `gridoxide dynamics --modes` — the modes of the linearized system.
+/// `gridox dynamics --modes` — the modes of the linearized system.
 #[cfg(feature = "dynamics")]
 fn report_modes(
     system: &mut gridoxide::dynamics::DynamicSystem,
@@ -1534,7 +1485,7 @@ fn parse_shift(flags: &[String]) -> Result<Option<num_complex::Complex<f64>>, St
     }
 }
 
-/// `gridoxide qv` — a bus's reactive margin.
+/// `gridox qv` — a bus's reactive margin.
 fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::qv::{QvOptions, QvStatus, qv_curve};
 
@@ -1673,13 +1624,13 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
         println!("\n  {skipped} bus(es) yielded no curve (slack, or too few converged points)");
     }
     println!(
-        "\nthis is a per-bus measure at the base operating point. `gridoxide continuation` asks \
+        "\nthis is a per-bus measure at the base operating point. `gridox continuation` asks \
          the system-wide question, and the two are known not to agree on which bus is weakest."
     );
     Ok(())
 }
 
-/// `gridoxide continuation` — trace the P-V curve to the point of collapse.
+/// `gridox continuation` — trace the P-V curve to the point of collapse.
 fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
     use gridoxide::continuation::augmented::Parametrization;
     use gridoxide::continuation::{
@@ -2432,7 +2383,7 @@ fn run_switches(_args: &[String]) -> Result<(), String> {
     Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
 }
 
-/// `gridoxide cgmes-security <profiles>... --contingencies <co>...`
+/// `gridox cgmes-security <profiles>... --contingencies <co>...`
 ///
 /// Returns `Ok(true)` when no limit is violated in a state that solved.
 #[cfg(feature = "cgmes")]
@@ -2511,7 +2462,7 @@ fn run_cgmes_security(_args: &[String]) -> Result<bool, String> {
     Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
 }
 
-/// `gridoxide security <network> --crac <crac.json> [--json]`
+/// `gridox security <network> --crac <crac.json> [--json]`
 ///
 /// Returns `Ok(true)` when every margin is non-negative. The caller turns that
 /// into an exit code, so this can gate a pipeline: a secure network exits 0, an
@@ -2869,7 +2820,7 @@ fn sorted_counts(counts: &std::collections::HashMap<String, usize>) -> Vec<(&Str
     out
 }
 
-/// `gridoxide rao <network> --crac <crac.json> [--parameters p.json] [--depth N] [--json]`
+/// `gridox rao <network> --crac <crac.json> [--parameters p.json] [--depth N] [--json]`
 ///
 /// Each state the CRAC defines is optimized independently: the actions
 /// available there are searched, and the range actions re-optimized under each
@@ -3263,7 +3214,7 @@ fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
 }
 
 // ---------------------------------------------------------------------------
-// `gridoxide solve`
+// `gridox solve`
 // ---------------------------------------------------------------------------
 
 #[cfg(any(

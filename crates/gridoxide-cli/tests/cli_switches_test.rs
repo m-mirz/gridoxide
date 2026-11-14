@@ -1,16 +1,16 @@
-//! The `gridoxide switches` subcommand.
+//! The `gridox switches` subcommand.
 //!
 //! The CLI had no test coverage at all before this; `main.rs`'s argument
 //! handling is hand-rolled, so the parsing is worth pinning even though the
 //! solver underneath it is tested thoroughly elsewhere. Everything here drives
-//! the built binary through `CARGO_BIN_EXE_gridoxide` rather than calling into
+//! the built binary through `CARGO_BIN_EXE_gridox` rather than calling into
 //! the library, which is the only way to exercise that parsing at all.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn minigrid() -> Option<Vec<PathBuf>> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let dir = Path::new(crate::REPO)
         .join("tests/data/CGMES-Test-Configurations/v3.0/MiniGrid/MiniGrid-Merged");
     if !dir.exists() {
         eprintln!(
@@ -30,10 +30,10 @@ fn minigrid() -> Option<Vec<PathBuf>> {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn run_switches(extra: &[&str]) -> Option<Output> {
@@ -175,6 +175,6 @@ fn the_subcommand_is_documented_in_usage() {
     let out = run(&["--help"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("gridoxide switches"), "{stdout}");
+    assert!(stdout.contains("gridox switches"), "{stdout}");
     assert!(stdout.contains("--retain"), "{stdout}");
 }

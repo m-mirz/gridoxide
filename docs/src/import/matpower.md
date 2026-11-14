@@ -20,7 +20,7 @@ model.solve(init="flat")
 voltages = dict(zip(model.bus_numbers(), model.voltage_mag()))
 ```
 
-From the command line, `gridoxide solve case118.m`. Behind the `matpower`
+From the command line, `gridox solve case118.m`. Behind the `matpower`
 feature, which has no dependency; the Python bindings always include it.
 
 ## The problem it solves is MATPOWER's

@@ -79,7 +79,7 @@ because a relative phase between things that are not oscillating means nothing.
 ## What it looks like
 
 ```text
-$ gridoxide dynamics case.json --modes 6
+$ gridox dynamics case.json --modes 6
 
 13 mode(s) over 13 differential state(s)
 every mode, by a dense decomposition of the state matrix
@@ -133,7 +133,7 @@ The question a stability study actually asks is narrower: *the modes near this f
 least damped ones*, six or ten of them. Naming where to look is what makes that affordable:
 
 ```text
-$ gridoxide dynamics ring4096.json --modes 4 --modes-freq 1.0
+$ gridox dynamics ring4096.json --modes 4 --modes-freq 1.0
 
 4 mode(s) over 20480 differential state(s)
 the 4 nearest -0.3146+6.2832j (1.000 Hz) — sparse Arnoldi, 3 restart(s). NOT every mode the system has.
@@ -217,7 +217,7 @@ in the pencil's own left and right eigenvectors — which avoids differentiating
 usefully, as `dζ/dp`: how much damping ratio a unit of the parameter buys.
 
 ```text
-$ gridoxide dynamics case.json --modes 3 --modes-sensitivity
+$ gridox dynamics case.json --modes 3 --modes-sensitivity
 
 sensitivity of the least-damped mode (-0.73018+7.99385j, ζ = 0.0910):
          parameter       value                  dlambda/dp    dzeta/dp  dzeta per 1%

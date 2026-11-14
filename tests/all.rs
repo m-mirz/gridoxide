@@ -9,6 +9,12 @@
 //! selects by file.
 //!
 //! The `cfg`s are what `required-features` said in `Cargo.toml` per file.
+//!
+//! The CLI's tests are in `crates/gridoxide-cli/tests/`, as only the package
+//! holding a binary gets its `CARGO_BIN_EXE_`.
+
+/// Where `tests/data` is, for the helpers `crates/gridoxide-cli/tests` shares.
+const REPO: &str = env!("CARGO_MANIFEST_DIR");
 
 #[path = "ac_contingency_test.rs"]
 mod ac_contingency_test;
@@ -111,34 +117,6 @@ mod cgmes_voltage_base_test;
 #[cfg(feature = "cgmes")]
 #[path = "cgmes_voltage_control_test.rs"]
 mod cgmes_voltage_control_test;
-#[path = "cli_continuation_test.rs"]
-mod cli_continuation_test;
-#[cfg(feature = "dynamics")]
-#[path = "cli_dynamics_test.rs"]
-mod cli_dynamics_test;
-#[path = "cli_estimate_test.rs"]
-mod cli_estimate_test;
-#[cfg(feature = "opf")]
-#[path = "cli_opf_test.rs"]
-mod cli_opf_test;
-#[path = "cli_qv_test.rs"]
-mod cli_qv_test;
-#[cfg(all(feature = "rao", feature = "ucte", feature = "iidm"))]
-#[path = "cli_rao_test.rs"]
-mod cli_rao_test;
-#[cfg(all(feature = "rao", feature = "ucte", feature = "iidm"))]
-#[path = "cli_security_test.rs"]
-mod cli_security_test;
-#[path = "cli_sensitivity_test.rs"]
-mod cli_sensitivity_test;
-#[path = "cli_short_circuit_test.rs"]
-mod cli_short_circuit_test;
-#[cfg(all(feature = "cgmes", feature = "ucte"))]
-#[path = "cli_solve_test.rs"]
-mod cli_solve_test;
-#[cfg(feature = "cgmes")]
-#[path = "cli_switches_test.rs"]
-mod cli_switches_test;
 #[path = "constrained_switch_test.rs"]
 mod constrained_switch_test;
 #[path = "continuation_events_test.rs"]

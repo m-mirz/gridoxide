@@ -242,11 +242,11 @@ re-checks rather than on a reference to diff against.
 ## Using it
 
 ```bash
-gridoxide continuation network.json --enforce-q-limits
-gridoxide continuation network.json --enforce-q-limits --curve      # the whole walk
-gridoxide continuation network.json --target-lambda 0.5             # stop short
-gridoxide continuation network.json --lower-branch                  # past the nose and back
-gridoxide continuation network.json --buses 12,13 --pickup 1,2      # a zonal stress
+gridox continuation network.json --enforce-q-limits
+gridox continuation network.json --enforce-q-limits --curve      # the whole walk
+gridox continuation network.json --target-lambda 0.5             # stop short
+gridox continuation network.json --lower-branch                  # past the nose and back
+gridox continuation network.json --buses 12,13 --pickup 1,2      # a zonal stress
 ```
 
 ```python

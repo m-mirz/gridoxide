@@ -1,4 +1,4 @@
-//! The `gridoxide opf` subcommand.
+//! The `gridox opf` subcommand.
 //!
 //! The numerics are validated against analytic cases, KKT certificates and
 //! pglib's published objectives in `opf_dc_test.rs`. What is pinned here is
@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[path = "../../../tests/pglib/mod.rs"]
 mod pglib;
 
 fn fixture(name: &str) -> PathBuf {
@@ -15,10 +16,10 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn opf(case: &str, extra: &[&str]) -> Output {

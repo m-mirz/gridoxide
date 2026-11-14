@@ -88,7 +88,7 @@ u_1 = \frac{806.90}{5773.50} = 0.13976\ \text{p.u.}
 ### What the code says
 
 ```console
-$ gridoxide short-circuit \
+$ gridox short-circuit \
       tests/data/pgm/short_circuit/single_node_source_three_phase_c_maximum/input.json \
       --scaling max
 
@@ -170,7 +170,7 @@ Taking the magnitudes naively — \\(1.10 - 0.20618 = 0.89382\\) — is wrong in
 is a good demonstration that the small angle is real and not rounding.
 
 ```console
-$ gridoxide short-circuit docs/examples/one-node-slg.json --scaling max
+$ gridox short-circuit docs/examples/one-node-slg.json --scaling max
 
 fault currents (A):
   fault      3: a =      3571.15, b =         0.00, c =         0.00

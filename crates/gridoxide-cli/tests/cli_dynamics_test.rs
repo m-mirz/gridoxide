@@ -1,4 +1,4 @@
-//! The `gridoxide dynamics` subcommand.
+//! The `gridox dynamics` subcommand.
 //!
 //! The physics is gated elsewhere — against closed forms in `dynamics_test.rs`
 //! and `dynamics_events_test.rs`, and against Dynawo in
@@ -11,14 +11,14 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn document() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/dynamics/smib.json")
+    PathBuf::from(crate::REPO).join("tests/data/dynamics/smib.json")
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn dynamics(extra: &[&str]) -> Output {

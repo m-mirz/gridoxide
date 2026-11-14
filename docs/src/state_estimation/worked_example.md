@@ -221,7 +221,7 @@ power-grid-model's `1os2msr` fixture: three nodes, two lines, one source, three 
 angles, and seven power sensors.
 
 ```console
-$ gridoxide estimate tests/data/pgm/state_estimation/1os2msr/input.json
+$ gridox estimate tests/data/pgm/state_estimation/1os2msr/input.json
 
 4 bus(es), 20 measurement(s) after aggregation
 Converged in 4 iteration(s)

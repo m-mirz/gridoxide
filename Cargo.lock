@@ -685,6 +685,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridoxide-cli"
+version = "0.6.0"
+dependencies = [
+ "gridoxide",
+ "num-complex",
+ "serde_json",
+]
+
+[[package]]
 name = "gridoxide-core"
 version = "0.6.0"
 dependencies = [

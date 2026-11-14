@@ -1,25 +1,25 @@
-//! The `gridoxide short-circuit` subcommand.
+//! The `gridox short-circuit` subcommand.
 //!
 //! `main.rs`'s argument handling is hand-rolled, so the parsing is worth
 //! pinning even though the solver underneath it is validated thoroughly in
 //! `pgm_short_circuit_test.rs`. Everything here drives the built binary through
-//! `CARGO_BIN_EXE_gridoxide`, which is the only way to exercise that parsing.
+//! `CARGO_BIN_EXE_gridox`, which is the only way to exercise that parsing.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(crate::REPO)
         .join("tests/data/pgm/short_circuit")
         .join(name)
         .join("input.json")
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn stdout_of(out: &Output) -> String {

@@ -268,7 +268,7 @@ correctness, and inherits its bugs silently.
 ### CLI
 
 ```bash
-gridoxide opf network.json
+gridox opf network.json
 ```
 
 Costs and limits come from a companion document defaulting to `<network>.opf.json` — the pair
@@ -352,7 +352,7 @@ The full problem: real voltage magnitudes, reactive power and losses, optimizing
 active *and* reactive output together.
 
 ```bash
-gridoxide opf network.json --ac
+gridox opf network.json --ac
 ```
 
 ### What changes

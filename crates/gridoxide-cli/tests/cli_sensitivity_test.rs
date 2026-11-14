@@ -1,4 +1,4 @@
-//! The `gridoxide sensitivity` subcommand.
+//! The `gridox sensitivity` subcommand.
 //!
 //! The numerics are validated against a finite-difference re-solve in
 //! `ac_sensitivity_test.rs`; what is pinned here is the hand-rolled argument
@@ -8,15 +8,15 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(crate::REPO)
         .join("tests/data/pgm/powerflow/symmetric/distribution-case/input.json")
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn sensitivity(extra: &[&str]) -> Output {

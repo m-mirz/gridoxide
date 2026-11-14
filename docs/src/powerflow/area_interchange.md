@@ -129,7 +129,7 @@ importing 2500.
 Both are reachable from the command line:
 
 ```
-gridoxide solve <network> --area-interchange
+gridox solve <network> --area-interchange
 ```
 
 ### A cross-format check worth having

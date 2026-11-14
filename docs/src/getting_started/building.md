@@ -30,22 +30,24 @@ described on the page that covers it
 
 ## Running
 
-With no arguments the binary runs a bundled power-flow demo:
+The command line is `gridox`, in its own package, `gridoxide-cli`, so a plain `cargo build` at the
+root builds only the library. Run it through cargo, as in `cargo run -p gridoxide-cli -- solve
+case118.m`, or build it with `cargo build -p gridoxide-cli` and run the executable from the
+project root:
 
 ```bash
-cargo run
+./target/debug/gridox     # debug build
+./target/release/gridox   # release build
 ```
 
-Or run the built executable directly from the project root:
-
-```bash
-./target/debug/gridoxide     # debug build
-./target/release/gridoxide   # release build
-```
+`gridox` has every feature on that needs no system library (`cgmes`, `ucte`, `iidm`, `matpower`,
+`opf`, `rao`, `dynamics`); the others it forwards to the library under the same names, as in
+`cargo build -p gridoxide-cli --features opf-highs`. `cargo install gridoxide-cli` installs it, and
+each GitHub release carries it for Linux, Windows and macOS.
 
 ### Subcommands
 
-`gridoxide --help` prints the full argument list. Each subcommand reads a
+`gridox --help` prints the full argument list. Each subcommand reads a
 [power-grid-model JSON](../cgmes/index.md) document, except `switches`, which reads CGMES profiles.
 
 | Command | What it does |
@@ -62,16 +64,16 @@ then transformers — the tables each command prints say which is which.
 
 ```bash
 # Least-cost dispatch, and what the network is costing you.
-cargo run --features opf -- opf grid.json
+cargo run -p gridoxide-cli -- opf grid.json
 
 # The same question against the full AC equations.
-cargo run --features opf -- opf grid.json --ac
+cargo run -p gridoxide-cli -- opf grid.json --ac
 
 # Which injection would relieve an overload on branch 8?
-cargo run -- sensitivity grid.json --watch 8
+cargo run -p gridoxide-cli -- sensitivity grid.json --watch 8
 
 # The largest three-phase fault current this network can produce.
-cargo run -- short-circuit grid.json --scaling max
+cargo run -p gridoxide-cli -- short-circuit grid.json --scaling max
 ```
 
 Argument handling is deliberately hand-rolled rather than pulled from a CLI crate: a handful of

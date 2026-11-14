@@ -1,0 +1,50 @@
+[package]
+name = "gridoxide-cli"
+description = "gridox: the gridoxide command line — power flow, state estimation, short circuit, OPF, security analysis and RAO"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+documentation = "https://m-mirz.github.io/gridoxide/"
+readme = "README.md"
+keywords = ["power-flow", "state-estimation", "cgmes", "cli", "power-systems"]
+categories = ["science", "simulation", "command-line-utilities"]
+# The binary links all of gridoxide, and with it gridoxide-sparse's klu_native
+# translation of SuiteSparse — so it carries gridoxide's licence, not just
+# this crate's own Apache-2.0 code. See the root Cargo.toml.
+license = "Apache-2.0 AND BSD-3-Clause AND LGPL-2.1-or-later"
+# Integration tests are one binary, `tests/all.rs`, as at the root.
+autotests = false
+
+[[bin]]
+name = "gridox"
+path = "src/main.rs"
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
+
+[dependencies]
+gridoxide = { path = "../..", version = "0.6.0", default-features = false }
+num-complex = "0.4.6"
+serde_json = "1.0"
+
+# Each forwards to gridoxide's feature of the same name; `src/main.rs` gates its
+# subcommands on them. The default is every one that needs no system library,
+# which is what release.yml builds and what `cargo install gridoxide-cli` gives.
+[features]
+default = ["parallel", "cgmes", "ucte", "iidm", "matpower", "opf", "rao", "dynamics"]
+parallel = ["gridoxide/parallel"]
+cgmes = ["gridoxide/cgmes"]
+ucte = ["gridoxide/ucte"]
+iidm = ["gridoxide/iidm"]
+matpower = ["gridoxide/matpower"]
+opf = ["gridoxide/opf"]
+rao = ["opf", "gridoxide/rao"]
+dynamics = ["gridoxide/dynamics"]
+# Link a system library each; see the root Cargo.toml.
+opf-highs = ["opf", "gridoxide/opf-highs"]
+opf-ipopt = ["opf", "gridoxide/opf-ipopt"]
+klu = ["gridoxide/klu"]
+pardiso = ["gridoxide/pardiso"]
+smallsignal-arpack = ["dynamics", "gridoxide/smallsignal-arpack"]
+gpu = ["gridoxide/gpu"]

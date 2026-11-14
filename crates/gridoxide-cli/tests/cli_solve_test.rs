@@ -1,4 +1,4 @@
-//! The `gridoxide solve` subcommand.
+//! The `gridox solve` subcommand.
 //!
 //! There was no CLI route to an AC power flow at all before this: `switches
 //! --solve` ran one as a side effect of listing switches, `dc` ran the linear
@@ -9,10 +9,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../../../tests/openrao/mod.rs"]
 mod openrao;
 
 fn config(name: &str) -> Option<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let dir = Path::new(crate::REPO)
         .join("tests/data/CGMES-Test-Configurations/v3.0")
         .join(name);
     if !dir.exists() {
@@ -27,10 +28,10 @@ fn config(name: &str) -> Option<PathBuf> {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn stdout(out: &Output) -> String {
