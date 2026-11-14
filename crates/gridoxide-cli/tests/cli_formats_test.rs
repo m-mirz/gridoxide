@@ -1,6 +1,6 @@
 //! The commands on inputs other than power-grid-model JSON: `dc`,
 //! `sensitivity`, `qv` and `continuation` on every network format, `estimate`
-//! on a MATPOWER case with a measurement file, and `opf --ac` on a MATPOWER
+//! on a MATPOWER case with a measurement file, and `opf` on a MATPOWER
 //! case's own costs.
 //!
 //! The solvers are gated elsewhere; what is pinned here is that each command
@@ -159,7 +159,7 @@ fn a_matpower_estimate_needs_measurements_that_fit_the_case() {
 fn ac_opf_reads_matpower() {
     let Some(case) = case14() else { return };
     let path = case.to_str().unwrap();
-    let text = stdout_of(&run(&["opf", path, "--ac"]));
+    let text = stdout_of(&run(&["opf", path]));
     let cost: f64 = text
         .lines()
         .find_map(|l| l.strip_prefix("total cost: "))
@@ -169,7 +169,7 @@ fn ac_opf_reads_matpower() {
     assert!((cost - 8081.53).abs() < 0.05, "{cost}");
 
     // The DC OPF and --data are a PGM document's.
-    for extra in [&[][..], &["--ac", "--data", "x.json"]] {
+    for extra in [&["--dc"][..], &["--data", "x.json"]] {
         let mut args = vec!["opf", path];
         args.extend_from_slice(extra);
         assert_eq!(run(&args).status.code(), Some(1), "{args:?}");

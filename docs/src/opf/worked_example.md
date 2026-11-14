@@ -66,7 +66,7 @@ appears in both balance rows with equal and opposite coefficients and in no bind
 \\(30 - 10 = \$20\\)/MWh, which is exactly the amount by which it is too expensive to run.
 
 ```console
-$ gridox opf docs/examples/two-bus-lmp.json
+$ gridox opf docs/examples/two-bus-lmp.json --dc
 
 2 bus(es), 2 generator(s), 100.0 MW of demand
 total cost: 1000.00 $/h
@@ -119,7 +119,7 @@ Three readings of that same number, all correct and all worth having:
   because the line is full.
 
 ```console
-$ gridox opf docs/examples/two-bus-lmp.json
+$ gridox opf docs/examples/two-bus-lmp.json --dc
 
 2 bus(es), 2 generator(s), 100.0 MW of demand
 total cost: 1800.00 $/h

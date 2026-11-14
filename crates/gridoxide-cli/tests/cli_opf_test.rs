@@ -22,9 +22,10 @@ fn run(args: &[&str]) -> Output {
         .expect("failed to run the gridox binary")
 }
 
+/// The DC problem, which these tests are about; the AC one is the default.
 fn opf(case: &str, extra: &[&str]) -> Output {
     let path = fixture(case);
-    let mut args = vec!["opf", path.to_str().unwrap()];
+    let mut args = vec!["opf", path.to_str().unwrap(), "--dc"];
     args.extend_from_slice(extra);
     run(&args)
 }
@@ -127,16 +128,26 @@ fn needs_a_network_path() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("<NETWORK>"));
 }
 
-/// The AC-only flags need --ac, and the DC-only ones refuse it.
+/// The DC-only flags need --dc, and the AC-only ones refuse it.
 #[test]
 fn flags_of_the_other_formulation_are_refused() {
     for args in [
-        &["opf", "x.json", "--no-limits"][..],
-        &["opf", "x.json", "--max-iter", "5"],
-        &["opf", "x.json", "--ac", "--highs"],
-        &["opf", "x.json", "--ac", "--shed-price", "100"],
+        &["opf", "x.json", "--dc", "--no-limits"][..],
+        &["opf", "x.json", "--dc", "--max-iter", "5"],
+        &["opf", "x.json", "--highs"],
+        &["opf", "x.json", "--shed-price", "100"],
     ] {
         let out = run(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
     }
+}
+
+/// AC is the default, as for `solve`; the DC problem is asked for.
+#[test]
+fn ac_is_the_default() {
+    let path = fixture("pglib_opf_case5_pjm");
+    let ac = stdout_of(&run(&["opf", path.to_str().unwrap()]));
+    assert!(ac.contains("this is a local optimum"), "{ac}");
+    let dc = stdout_of(&opf("pglib_opf_case5_pjm", &[]));
+    assert!(!dc.contains("this is a local optimum"), "{dc}");
 }

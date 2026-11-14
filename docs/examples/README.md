@@ -24,7 +24,7 @@ cargo build --release -p gridoxide-cli
 
 ./target/release/gridox short-circuit docs/examples/one-node-slg.json --scaling max
 ./target/release/gridox short-circuit docs/examples/one-node-2ph.json --scaling max
-./target/release/gridox opf docs/examples/two-bus-lmp.json
+./target/release/gridox opf docs/examples/two-bus-lmp.json --dc
 ./target/release/gridox security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json
 ./target/release/gridox rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \

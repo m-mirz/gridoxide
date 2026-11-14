@@ -419,41 +419,45 @@ fn parse_complex(raw: &str) -> Result<num_complex::Complex<f64>, String> {
 /// Run an optimal power flow: least-cost dispatch subject to generator limits
 /// and branch ratings.
 ///
-/// Prints the dispatch, locational marginal prices and whatever binds. For a
-/// PGM JSON document, costs and limits come from a companion document, by
+/// Prints the dispatch, locational marginal prices and whatever binds. AC, as
+/// `solve` is and as `runopf` is: real voltages, reactive power and losses,
+/// generator P and Q together. Nonconvex, so the answer is a local optimum.
+/// --dc solves the convex DC problem instead, as `rundcopf` does.
+///
+/// For a PGM JSON document, costs and limits come from a companion document, by
 /// default <network>.opf.json, the pair `gridoxide-matpower` writes. A MATPOWER
 /// case (.m) states its own, in `gencost` and its limit columns, and is solved
-/// as `runopf` would, with --ac. DC unless --ac. Needs the `opf` feature.
+/// as `runopf` would. Needs the `opf` feature.
 #[derive(Args)]
 pub struct OpfArgs {
-    /// A PGM JSON document, or a MATPOWER case (.m) with --ac
+    /// A PGM JSON document, or a MATPOWER case (.m) for the AC problem
     pub network: String,
     /// The companion OPF document of a PGM JSON document
     #[arg(long, value_name = "OPF.JSON")]
     pub data: Option<String>,
-    /// Solve the full AC problem: voltages, reactive power and losses,
-    /// generator P and Q together. Nonconvex, so the answer is a local optimum
+    /// Solve the DC problem: active power on b-theta, with load shedding and
+    /// the locational marginal prices that follow from it. PGM JSON only
     #[arg(long)]
-    pub ac: bool,
-    /// Forbid load shedding (DC)
-    #[arg(long, conflicts_with = "ac")]
+    pub dc: bool,
+    /// Forbid load shedding (with --dc)
+    #[arg(long, requires = "dc")]
     pub no_shedding: bool,
-    /// Price of shed load, $/MWh (DC)
-    #[arg(long, value_name = "PRICE", conflicts_with = "ac")]
+    /// Price of shed load, $/MWh (with --dc)
+    #[arg(long, value_name = "PRICE", requires = "dc")]
     pub shed_price: Option<f64>,
     /// Use b = 1/x instead of b = x/(r²+x²), the opposite default from `dc`,
-    /// on purpose: each matches its own field's reference tools (DC)
-    #[arg(long, conflicts_with = "ac")]
+    /// on purpose: each matches its own field's reference tools (with --dc)
+    #[arg(long, requires = "dc")]
     pub ignore_r: bool,
     /// Solve with HiGHS instead of the built-in interior-point method; needs
-    /// the `opf-highs` feature (DC)
-    #[arg(long, conflicts_with = "ac")]
+    /// the `opf-highs` feature (with --dc)
+    #[arg(long, requires = "dc")]
     pub highs: bool,
-    /// Drop branch ratings (AC)
-    #[arg(long, requires = "ac")]
+    /// Drop branch ratings (not with --dc)
+    #[arg(long, conflicts_with = "dc")]
     pub no_limits: bool,
-    /// Cap the interior-point iterations (AC)
-    #[arg(long, value_name = "N", requires = "ac")]
+    /// Cap the interior-point iterations (not with --dc)
+    #[arg(long, value_name = "N", conflicts_with = "dc")]
     pub max_iter: Option<usize>,
 }
 

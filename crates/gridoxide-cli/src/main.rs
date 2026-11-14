@@ -480,21 +480,22 @@ fn run_estimate(a: &args::EstimateArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs a DC optimal power flow over the PGM document at `path` and its
-/// companion OPF document.
+/// `gridox opf`: the AC problem ([`run_ac_opf`]) unless `--dc`, and with it a
+/// DC optimal power flow over the PGM document at `path` and its companion OPF
+/// document.
 ///
 /// Prints what a dispatcher reads off one: what each unit should produce, what
 /// it costs, what a marginal megawatt is worth at each bus, and which limits
 /// are the reason the answer is not simply "run the cheapest unit".
 #[cfg(feature = "opf")]
 fn run_opf(a: &args::OpfArgs) -> Result<(), String> {
-    if a.ac {
+    if !a.dc {
         return run_ac_opf(a);
     }
     if is_matpower(&a.network) {
         return Err(
-            "a MATPOWER case is solved as AC (`--ac`), as `runopf` does; the DC OPF reads a \
-             PGM JSON document and its companion"
+            "the DC OPF reads a PGM JSON document and its companion; a MATPOWER case is \
+             solved as AC, as `runopf` does (drop --dc)"
                 .into(),
         );
     }

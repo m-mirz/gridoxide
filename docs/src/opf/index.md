@@ -268,10 +268,10 @@ correctness, and inherits its bugs silently.
 ### CLI
 
 ```bash
-gridox opf network.json
+gridox opf network.json --dc
 ```
 
-Costs and limits come from a companion document defaulting to `<network>.opf.json` — the pair
+`--dc` because `gridox opf` solves the AC problem by default, as `solve` does. Costs and limits come from a companion document defaulting to `<network>.opf.json` — the pair
 `gridoxide-matpower` writes when converting a MATPOWER case. On `case5_pjm`:
 
 ```
@@ -352,7 +352,7 @@ The full problem: real voltage magnitudes, reactive power and losses, optimizing
 active *and* reactive output together.
 
 ```bash
-gridox opf network.json --ac
+gridox opf network.json
 ```
 
 ### What changes
