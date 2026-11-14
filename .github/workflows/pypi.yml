@@ -116,17 +116,12 @@ jobs:
 
   # gridoxide-mcp: the `gridmcp` binary as a wheel (maturin `bindings = "bin"`),
   # so MCP clients can start it with `uvx --from gridoxide-mcp gridmcp`. Wheels
-  # only, for the platforms the bindings ship. No submodules: the binary is
-  # built from source alone.
+  # only, and for Linux x86_64 only, to keep the release short: Windows and
+  # macOS get `gridmcp` from crates.io and the VS Code extension. No
+  # submodules: the binary is built from source alone.
   mcp:
-    name: gridoxide-mcp ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - { name: linux-x86_64, os: ubuntu-latest, target: x86_64 }
-          - { name: windows-x64, os: windows-latest, target: x64 }
-          - { name: macos-aarch64, os: macos-latest, target: aarch64 }
+    name: gridoxide-mcp linux-x86_64
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -138,19 +133,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-mcp-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-mcp-${{ matrix.target }}-
+          key: ${{ runner.os }}-cargo-mcp-x86_64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-mcp-x86_64-
 
       - uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: x86_64
           working-directory: crates/gridoxide-mcp
           args: --release --out ../../dist
           manylinux: auto
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-mcp-${{ matrix.name }}
+          name: wheels-mcp-linux-x86_64
           path: dist
 
   publish:

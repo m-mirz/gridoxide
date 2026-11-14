@@ -31,8 +31,8 @@ buses too.
 | | |
 |---|---|
 | VS Code | the [gridoxide extension](https://marketplace.visualstudio.com/items?itemName=m-mirz.gridoxide) bundles the binary and offers it to chat; nothing else to install |
-| uv | `uvx --from gridoxide-mcp gridmcp` — no install step |
-| pip / pipx | `pipx install gridoxide-mcp`, then `gridmcp` |
+| uv (Linux x86_64) | `uvx --from gridoxide-mcp gridmcp` — no install step |
+| pip / pipx (Linux x86_64) | `pipx install gridoxide-mcp`, then `gridmcp` |
 | cargo | `cargo install gridoxide-mcp` |
 
 `--dir <path>` (else `GRIDOXIDE_NETWORK_DIR`, else the working directory) is where relative paths

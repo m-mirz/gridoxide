@@ -20,14 +20,16 @@ paths resolve.
 
 ## Install
 
-With [uv](https://docs.astral.sh/uv/), nothing needs installing first; clients start it as
+On Linux x86_64, with [uv](https://docs.astral.sh/uv/), nothing needs installing first;
+clients start it as
 
 ```
 uvx --from gridoxide-mcp gridmcp --dir /path/to/networks
 ```
 
 or install it once with `uv tool install gridoxide-mcp` (or `pipx install gridoxide-mcp`) and
-run `gridmcp`. It is also on crates.io (`cargo install gridoxide-mcp`) and bundled in the
+run `gridmcp`. PyPI carries a wheel for Linux x86_64 only; elsewhere use one of the following. It
+is also on crates.io (`cargo install gridoxide-mcp`) and bundled in the
 [VS Code extension](https://marketplace.visualstudio.com/items?itemName=m-mirz.gridoxide).
 
 ## Configure a client
