@@ -1,7 +1,9 @@
 //! `gridox`, gridoxide's command line.
 //!
-//! Argument handling is deliberately hand-rolled: a few modes and one path do
-//! not justify a dependency, and the crate otherwise has none for this.
+//! Its arguments are declared in `args.rs`, which clap parses; each command
+//! here takes its own struct of them.
+
+mod args;
 
 use std::fs;
 #[cfg(feature = "opf")]
@@ -14,6 +16,7 @@ use gridoxide::linear::{DcApproximation, DcOptions, DcSensitivity, dc_branches, 
 use gridoxide::network::{build_ybus, stamp_shunts};
 use gridoxide::pgm::shortcircuit::short_circuit_from_pgm;
 use gridoxide::pgm::{PgmInput, pgm_to_buses_and_branches};
+use gridoxide::run_power_flow;
 use gridoxide::se::bad_data::{self, Candidates};
 use gridoxide::se::constraints::Constraints;
 use gridoxide::se::jacobian::StateLayout;
@@ -21,445 +24,82 @@ use gridoxide::se::nr::{SeMethod, SeOptions, SeStatus, estimate, linear_start};
 use gridoxide::se::observability;
 use gridoxide::shortcircuit::{SequenceValue, ShortCircuitOptions, VoltageScaling};
 use gridoxide::solver::SolveStatus;
-use gridoxide::run_power_flow;
-
-const USAGE: &str = "\
-usage:
-  gridox solve <network> [--control-taps] [--enforce-q-limits] [--dispatch]
-               [--control-remote-voltage]
-               [--distribute-slack | --area-interchange]
-               [--max-outer <n>] [--max-tap-shift <n>]
-               [--tol <t>] [--max-iter <n>]
-                                run an AC power flow, optionally with the outer
-                                loops that make a control a control rather than
-                                a constant: on-load tap changers holding a
-                                voltage or a flow, generators respecting their
-                                reactive limits, and the system imbalance shared
-                                across generators instead of dumped on one
-                                slack. All three compose; without any of them
-                                this is an ordinary Newton solve.
-                                --control-remote-voltage moves a machine that
-                                regulates a bus other than its own onto that
-                                machine: without it the reactive power appears
-                                at the bus being held instead of at the machine,
-                                so the reactive flow between them is missing. It
-                                changes answers, which is why it is opt-in.
-                                CGMES only.
-                                --dispatch additionally attributes each
-                                voltage-controlled bus's reactive power to the
-                                individual machines holding it, and names any
-                                machine that is at its own limit while the bus
-                                as a whole is not. CGMES only — no other format
-                                states per-machine reactive capability.
-                                --area-interchange stands in distributed
-                                slack's place — it generalizes it — and holds
-                                each control area's net export at what the file
-                                says it agreed to. CGMES supplies both the areas
-                                (ControlArea/TieFlow) and the schedule
-                                (netInterchange); UCTE supplies areas from its
-                                ##Z country codes and states no schedule, so
-                                every target is zero there.
-                                The network may be CGMES (a directory, or the
-                                profile .xml files), UCTE-DEF (.uct), IIDM
-                                (.xiidm) or MATPOWER (.m). Needs the matching
-                                importer feature.
-  gridox estimate <path> [--iterative-linear] [--asymmetric] [--no-zero-injection]
-                                [--ideal-sources]
-                                run state estimation over a PGM JSON document
-                                containing voltage, power or current sensors.
-                                The default method is Newton-Raphson; the flag
-                                selects the faster, less exact linearized one.
-                                --asymmetric estimates in the *phase domain*:
-                                three buses per node rather than one, with each
-                                asym sensor reading its own phase instead of a
-                                balanced total. That is what makes an unbalanced
-                                network estimable rather than approximable, and
-                                on a distribution feeder the unbalance is the
-                                question rather than a refinement. It refuses,
-                                by name, the components the three-phase model
-                                does not carry. --no-zero-injection drops the
-                                constraint holding each node with no load or
-                                generator at exactly zero injection: such a
-                                node then injects whatever its sensors say
-                                (plain weighted least squares), and one without
-                                sensors is unobservable. A source's node and a
-                                three-winding star point keep theirs, which
-                                gridoxide's model of them needs.
-                                --ideal-sources makes each source's node the
-                                slack, with no impedance behind it, instead of
-                                power-grid-model's virtual bus behind the
-                                source impedance (symmetric only).
-  gridox cgmes-security <profiles>... --contingencies <co>... [--slack <sharing>]
-                                [--sar <out.xml> --publisher <iri> --version-of <iri>
-                                --rights-holder <name> --generated-at <time>]
-                                a CGMES model's base case and each contingency of its
-                                CO files, current limits monitored, optionally written
-                                as a SAR. <sharing> is capability (default: machines by
-                                maxOperatingP), reference or equal. Exits 1 if a limit
-                                is violated. Needs the cgmes feature.
-  gridox security <network> --crac <crac.json> [--json]
-                                assess a network against a CRAC: which critical
-                                elements are overloaded, in which state, and by
-                                how much. The network may be UCTE-DEF (.uct) or
-                                IIDM (.xiidm); the CRAC may be OpenRAO JSON or
-                                gridoxide's own <network>.rao.json companion.
-                                Exits 0 when every margin is non-negative and 1
-                                when any is not, so it can gate a pipeline.
-  gridox rao <network> --crac <crac.json> [--parameters <p.json>]
-                      [--depth N] [--validate-ac] [--json]
-                                optimize remedial actions: search over the
-                                network actions the CRAC permits, re-optimizing
-                                the range actions at every candidate, and report
-                                what to do in each state. --depth bounds how
-                                many network actions may be stacked (default 2).
-                                --parameters reads OpenRAO's own RaoParameters
-                                document: objective (including MIN_COST), flow
-                                model, MNECs, second preventive and the search
-                                thresholds. --depth wins over the file where
-                                both are given.
-                                Exits 0 when every perimeter ends secure.
-  gridox switches <profile.xml>... [--retain none|busbar_adjacent|all]
-                  [--open <mrid>] [--solve]
-                                list a CGMES model's switching devices, read
-                                from EQ+SSH rather than merged away at import.
-                                --retain chooses which survive as elements
-                                (default busbar_adjacent); --open flips one
-                                before solving; --solve runs a power flow and
-                                reports each switch's own flow.
-                                Needs the `cgmes` feature.
-  gridox qv <path> [--bus <i> | --weakest <n>] [--v-max <v>] [--v-min <v>]
-            [--step <s>] [--no-refine] [--base-mva <m>] [--curve]
-                                trace a bus's Q-V curve: how much reactive
-                                support holding it at a given voltage takes, and
-                                how much margin there is before no setpoint is
-                                reachable. The minimum of the curve is the
-                                reactive margin, in MVAr.
-                                --weakest ranks every bus by that margin, which
-                                is the usual way to ask the question; --bus
-                                traces one and prints it.
-                                Complements `continuation`, which asks how much
-                                further the whole system can be loaded. The two
-                                measure related but different things and are
-                                known not to agree on which bus is weakest —
-                                that is why both exist.
-                                Reads a PGM JSON document.
-  gridox continuation <path> [--target-lambda <l> | --lower-branch]
-                     [--step <s>] [--max-steps <n>] [--enforce-q-limits]
-                     [--parametrization local|natural|arclength]
-                     [--pickup <i,j,k>] [--buses <i,j,k>]
-                     [--base-mva <m>] [--tol <t>] [--max-iter <n>] [--curve]
-                                trace the P-V curve to the point of voltage
-                                collapse: how much further this network can be
-                                loaded, which bus gives way first, and where
-                                each generator runs out of reactive capability
-                                on the way. Reports the loadability limit as a
-                                multiple of the base load (lambda) and as MW.
-                                The answer is a property of the *direction*
-                                loading grows in, not of the network alone;
-                                the default grows every net consumer at constant
-                                power factor and leaves the slack to pick it up.
-                                --pickup shares that pickup over the named buses
-                                instead; --buses stresses only the named ones.
-                                --enforce-q-limits is worth having: reactive
-                                limits usually decide where the nose is, and
-                                the exact lambda each machine saturates at is
-                                located rather than rounded to a step.
-                                Reads a PGM JSON document.
-  gridox dynamics <path> --modes <n> [--modes-freq <Hz>]
-                  [--modes-damping <zeta>] [--modes-near <re>,<im>]
-                  [--modes-sensitivity]
-                                report the n least-damped modes of the
-                                linearized system instead of running it: which
-                                oscillations exist, how fast each decays, and
-                                which machines take part in it. Answers a
-                                question no single run can, and is the only
-                                reliable way to find a *negatively* damped mode
-                                — a run finds one only if the disturbance
-                                happened to excite it.
-                                Below two thousand states this computes *every*
-                                mode. Past that it switches to a sparse method
-                                that computes only the n nearest a point in the
-                                complex plane, and says so — name that point
-                                with --modes-freq (a frequency in Hz, with
-                                --modes-damping as a ratio) or with
-                                --modes-near. Naming any of them selects the
-                                sparse method at any size, which is how to ask
-                                about one band of a large system.
-                                --modes-sensitivity adds, for the least-damped
-                                mode, how far it moves per unit of each machine
-                                parameter — the question behind deciding what
-                                to change. Only parameters the equilibrium does
-                                not depend on are offered; see the docs for why
-                                that is a restriction and not an omission.
-  gridox dynamics <path> [--stop <t>] [--step <h>] [--tol <t>]
-                  [--damping <n>] [--backend scalar|klu-native]
-                  [--speed-voltages | --no-speed-voltages]
-                  [--csv <out>] [--observe <substring>]
-                                run an RMS (phasor-domain) dynamic simulation:
-                                what the network does over *time* after a
-                                disturbance, rather than at one instant. Reads a
-                                gridoxide JSON document carrying a `dynamics`
-                                section — the machines, their exciters,
-                                governors and stabilizers, and the schedule of
-                                faults, trips and load steps to apply.
-                                Prints how each machine fared and what the
-                                voltages did; --csv writes the whole trajectory,
-                                and --observe narrows it to the columns whose
-                                names contain a substring.
-                                Everything starts from a solved power flow, so
-                                the case must be one that solves; every device
-                                is then initialized so that nothing moves until
-                                the first event does.
-                                --speed-voltages carries the rotor speed on the
-                                machines' speed-voltage terms and writes their
-                                swing equations in torque, which is what Dynawo
-                                and Sauer & Pai do. Off by default: the omega
-                                approximately one assumption is what makes the
-                                phasor formulation coherent, and it is what the
-                                closed-form gates are derived from. It is worth
-                                0.6% of terminal power at a 0.9% speed
-                                deviation — turning it on moves the answer.
-  gridox short-circuit <path> [--scaling max|min]
-                                run an IEC 60909 short-circuit calculation over
-                                a PGM JSON document containing `fault` entries,
-                                printing per-node voltages, per-fault currents
-                                and each source's contribution.
-                                --scaling picks the voltage factor c (default
-                                max, for the largest current; min is the
-                                sensitivity study).
-  gridox opf <network.json> [--ac] [--data <opf.json>] [--no-shedding]
-                     [--shed-price <$/MWh>] [--ignore-r] [--highs]
-                     [--no-limits] [--max-iter <n>]
-                                run a DC optimal power flow: least-cost dispatch
-                                subject to generator limits and branch ratings,
-                                printing the dispatch, locational marginal
-                                prices and whatever is binding.
-                                Costs and limits come from a companion document,
-                                defaulting to <network>.opf.json — the pair
-                                `gridoxide-matpower` writes. Needs the `opf`
-                                feature; --highs selects the reference HiGHS
-                                backend instead of the built-in interior-point
-                                one, and additionally needs `opf-highs`.
-                                --ignore-r uses b = 1/x instead of the default
-                                b = x/(r²+x²). Note this is the opposite default
-                                from `dc` above, on purpose: each matches what
-                                its own field's reference tools compute.
-                                --ac solves the full AC problem instead: real
-                                voltages, reactive power and losses, optimizing
-                                generator P and Q together. Nonconvex, so the
-                                answer is a local optimum. --no-limits drops the
-                                branch ratings and --max-iter caps the solve;
-                                --no-shedding/--shed-price/--ignore-r/--highs
-                                are DC-only.
-  gridox sensitivity <path> [--dp <bus>] [--dq <bus>] [--dk <branch>]
-                     [--dalpha <branch>] [--watch <branch>] [--terminal from|to]
-                                solve an AC power flow and differentiate it.
-                                --dp/--dq/--dk/--dalpha each pick one variable
-                                (active/reactive injection, transformer ratio,
-                                phase-shifter angle) and print how every branch
-                                flow and bus voltage responds to it.
-                                --watch picks one branch instead and prints the
-                                reverse: what every injection and every tap
-                                would do to *its* flow. At least one is needed.
-  gridox dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]
-                                run a DC (Bθ) power flow over a PGM JSON
-                                document, printing bus angles, branch flows and
-                                per-island slack pickup.
-                                --ignore-g uses b = x/(r²+x²) instead of the
-                                default b = 1/x; --ptdf/--lodf additionally
-                                print one sensitivity column. Bus and branch
-                                arguments are gridoxide's own 0-based indices,
-                                as printed by the tables above them.
-";
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        None => {
-            eprint!("{USAGE}");
-            std::process::exit(2);
+    use args::{Command, DynamicsCommand};
+    use clap::Parser;
+
+    let code = match args::Cli::parse().command {
+        Command::Solve(a) => outcome(run_solve(&a)),
+        Command::Estimate(a) => {
+            let method = if a.iterative_linear {
+                SeMethod::IterativeLinear
+            } else {
+                SeMethod::NewtonRaphson
+            };
+            let phases = if a.asymmetric { 3 } else { 1 };
+            let sources = if a.ideal_sources {
+                gridoxide::pgm::SourceModel::Ideal
+            } else {
+                gridoxide::pgm::SourceModel::Impedance
+            };
+            outcome(run_estimate(
+                &a.path,
+                method,
+                phases,
+                !a.no_zero_injection,
+                sources,
+            ))
         }
-        Some("solve") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_solve(path, &args[2..]) {
-                    eprintln!("error: {message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("error: solve needs a network path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("estimate") => match args.get(1) {
-            Some(path) => {
-                let method = if args.iter().any(|a| a == "--iterative-linear") {
-                    SeMethod::IterativeLinear
-                } else {
-                    SeMethod::NewtonRaphson
-                };
-                let phases = if args.iter().any(|a| a == "--asymmetric") {
-                    3
-                } else {
-                    1
-                };
-                let zero_injection = !args.iter().any(|a| a == "--no-zero-injection");
-                let sources = if args.iter().any(|a| a == "--ideal-sources") {
-                    gridoxide::pgm::SourceModel::Ideal
-                } else {
-                    gridoxide::pgm::SourceModel::Impedance
-                };
-                if let Err(message) = run_estimate(path, method, phases, zero_injection, sources) {
-                    eprintln!("error: {message}");
-                    std::process::exit(1);
-                }
-            }
-            None => {
-                eprintln!("error: estimate needs a path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("dc") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_dc(path, &args[2..]) {
-                    eprintln!("error: {message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("error: dc needs a path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("security") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => match run_security(path, &args[2..]) {
-                Ok(secure) => {
-                    if !secure {
-                        std::process::exit(1);
-                    }
-                }
-                Err(message) => {
-                    eprintln!("error: {message}");
-                    std::process::exit(2);
-                }
-            },
-            _ => {
-                eprintln!("error: security needs a network path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("rao") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => match run_rao(path, &args[2..]) {
-                Ok(secure) => {
-                    if !secure {
-                        std::process::exit(1);
-                    }
-                }
-                Err(message) => {
-                    eprintln!("error: {message}");
-                    std::process::exit(2);
-                }
-            },
-            _ => {
-                eprintln!("error: rao needs a network path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("opf") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_opf(path, &args[2..]) {
-                    eprintln!("error: {message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("error: opf needs a network path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("sensitivity") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_sensitivity(path, &args[2..]) {
-                    eprintln!("error: {message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("error: sensitivity needs a path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("qv") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_qv_cli(path, &args[2..]) {
-                    eprintln!("{message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("usage: gridox qv <path> [--bus <i> | --weakest <n>]");
-                std::process::exit(1);
-            }
-        },
-        Some("continuation") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_continuation_cli(path, &args[2..]) {
-                    eprintln!("{message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("usage: gridox continuation <path> [options]");
-                std::process::exit(1);
-            }
-        },
-        Some("dynamics") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_dynamics_cli(path, &args[2..]) {
-                    eprintln!("error: {message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("error: dynamics needs a document path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("short-circuit") => match args.get(1) {
-            Some(path) if !path.starts_with("--") => {
-                if let Err(message) = run_short_circuit(path, &args[2..]) {
-                    eprintln!("error: {message}");
-                    std::process::exit(1);
-                }
-            }
-            _ => {
-                eprintln!("error: short-circuit needs a path\n\n{USAGE}");
-                std::process::exit(2);
-            }
-        },
-        Some("switches") => {
-            if let Err(message) = run_switches(&args[1..]) {
-                eprintln!("error: {message}");
-                std::process::exit(1);
-            }
-        }
-        Some("cgmes-security") => match run_cgmes_security(&args[1..]) {
-            Ok(secure) => {
-                if !secure {
-                    std::process::exit(1);
-                }
-            }
-            Err(message) => {
-                eprintln!("error: {message}");
-                std::process::exit(2);
-            }
-        },
-        Some("-h") | Some("--help") | Some("help") => print!("{USAGE}"),
-        Some(other) => {
-            eprintln!("error: unknown command {other:?}\n\n{USAGE}");
-            std::process::exit(2);
+        Command::Dc(a) => outcome(run_dc(&a)),
+        Command::Sensitivity(a) => outcome(run_sensitivity(&a)),
+        Command::ShortCircuit(a) => outcome(run_short_circuit(&a)),
+        Command::Qv(a) => outcome(run_qv_cli(&a)),
+        Command::Continuation(a) => outcome(run_continuation_cli(&a)),
+        Command::Dynamics(DynamicsCommand::Simulate(a)) => outcome(run_dynamics_cli(&a)),
+        Command::Dynamics(DynamicsCommand::Modes(a)) => outcome(run_modes_cli(&a)),
+        Command::Opf(a) => outcome(run_opf(&a)),
+        Command::Security(a) => verdict(run_security(&a)),
+        Command::Rao(a) => verdict(run_rao(&a)),
+        Command::CgmesSecurity(a) => verdict(run_cgmes_security(&a)),
+        Command::Switches(a) => outcome(run_switches(&a)),
+    };
+    std::process::exit(code);
+}
+
+/// A command's exit code: 0 when it ran, 1 when it failed. A usage error
+/// never gets here; clap exits 2 for it.
+fn outcome(result: Result<(), String>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(message) => {
+            eprintln!("error: {message}");
+            1
         }
     }
+}
+
+/// A verdict's exit code, so it can gate a pipeline: 0 secure, 1 not, and 2
+/// when it could not tell. Conflating the last two is how a study silently
+/// passes because the CRAC failed to load.
+fn verdict(result: Result<bool, String>) -> i32 {
+    match result {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(message) => {
+            eprintln!("error: {message}");
+            2
+        }
+    }
+}
+
+/// `value` as an index below `limit`: clap has parsed it, only the network
+/// knows how many there are.
+fn check_index(value: usize, flag: &str, limit: usize) -> Result<usize, String> {
+    if value >= limit {
+        return Err(format!("{flag}: {value} is out of range (0..{limit})"));
+    }
+    Ok(value)
 }
 
 /// Estimates the state of the grid in `path` and prints it, along with the two
@@ -656,31 +296,6 @@ fn run_estimate(
     Ok(())
 }
 
-/// Parses `--flag <value>` out of the trailing argument list.
-///
-/// Returns `Ok(None)` when the flag is absent, so a missing flag and a
-/// malformed one stay distinguishable.
-fn flag_value(args: &[String], flag: &str) -> Result<Option<String>, String> {
-    match args.iter().position(|a| a == flag) {
-        None => Ok(None),
-        Some(i) => args
-            .get(i + 1)
-            .cloned()
-            .ok_or_else(|| format!("{flag} needs a value"))
-            .map(Some),
-    }
-}
-
-fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
-    let value: usize = raw
-        .parse()
-        .map_err(|_| format!("{flag}: {raw:?} is not a non-negative integer"))?;
-    if value >= limit {
-        return Err(format!("{flag}: {value} is out of range (0..{limit})"));
-    }
-    Ok(value)
-}
-
 /// Runs a DC optimal power flow over the PGM document at `path` and its
 /// companion OPF document.
 ///
@@ -688,17 +303,18 @@ fn parse_index(raw: &str, flag: &str, limit: usize) -> Result<usize, String> {
 /// it costs, what a marginal megawatt is worth at each bus, and which limits
 /// are the reason the answer is not simply "run the cheapest unit".
 #[cfg(feature = "opf")]
-fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
-    if flags.iter().any(|f| f == "--ac") {
-        return run_ac_opf(path, flags);
+fn run_opf(a: &args::OpfArgs) -> Result<(), String> {
+    if a.ac {
+        return run_ac_opf(a);
     }
+    let path = a.network.as_str();
     use gridoxide::opf::dc::{DcOpf, DcOpfOptions};
     use gridoxide::opf::model::OpfData;
     use gridoxide::opf::{OptStatus, Solver};
 
     // The converter writes `<network>.opf.json` beside the network document,
     // so defaulting to that makes the common case a single argument.
-    let data_path = match flag_value(flags, "--data")? {
+    let data_path = match &a.data {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(path).with_extension("opf.json"),
     };
@@ -717,18 +333,16 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
         .map_err(|e| format!("parsing {}: {e}", data_path.display()))?;
 
     let mut options = DcOpfOptions {
-        allow_shedding: !flags.iter().any(|a| a == "--no-shedding"),
+        allow_shedding: !a.no_shedding,
         ..Default::default()
     };
-    if let Some(raw) = flag_value(flags, "--shed-price")? {
-        options.shed_price = raw
-            .parse()
-            .map_err(|_| format!("--shed-price: {raw:?} is not a number"))?;
+    if let Some(price) = a.shed_price {
+        options.shed_price = price;
     }
 
     // DC-OPF defaults to the true series susceptance rather than the `1/x`
     // the `dc` command uses; see `DcOpfOptions` for why the two differ.
-    let approximation = if flags.iter().any(|f| f == "--ignore-r") {
+    let approximation = if a.ignore_r {
         gridoxide::linear::DcApproximation::IgnoreR
     } else {
         gridoxide::linear::DcApproximation::IgnoreG
@@ -745,7 +359,7 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
     // system install; `--highs` reaches the reference backend where one is
     // available. The two are cross-checked in `tests/opf_cross_test.rs`, so
     // this is a choice about dependencies rather than about the answer.
-    let solution = if flags.iter().any(|f| f == "--highs") {
+    let solution = if a.highs {
         #[cfg(feature = "opf-highs")]
         {
             let mut solver =
@@ -844,12 +458,13 @@ fn run_opf(path: &str, flags: &[String]) -> Result<(), String> {
 /// objective at an infeasible point is not an answer, so the two belong
 /// together.
 #[cfg(feature = "opf")]
-fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
+fn run_ac_opf(a: &args::OpfArgs) -> Result<(), String> {
+    let path = a.network.as_str();
     use gridoxide::opf::OptStatus;
     use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
     use gridoxide::opf::model::OpfData;
 
-    let data_path = match flag_value(flags, "--data")? {
+    let data_path = match &a.data {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(path).with_extension("opf.json"),
     };
@@ -866,13 +481,11 @@ fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
         .map_err(|e| format!("parsing {}: {e}", data_path.display()))?;
 
     let mut options = AcOpfOptions {
-        enforce_limits: !flags.iter().any(|f| f == "--no-limits"),
+        enforce_limits: !a.no_limits,
         ..AcOpfOptions::default()
     };
-    if let Some(raw) = flag_value(flags, "--max-iter")? {
-        options.nlp.max_iterations = raw
-            .parse()
-            .map_err(|_| format!("--max-iter: {raw:?} is not a number"))?;
+    if let Some(n) = a.max_iter {
+        options.nlp.max_iterations = n;
     }
 
     let network = gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options)
@@ -976,36 +589,11 @@ fn run_ac_opf(path: &str, flags: &[String]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "opf"))]
-fn run_opf(_path: &str, _flags: &[String]) -> Result<(), String> {
+fn run_opf(_: &args::OpfArgs) -> Result<(), String> {
     Err("this build has no OPF solver; rebuild with `cargo build --features opf`".to_string())
 }
 
-/// Solves an AC power flow over the PGM document at `path` and differentiates
-/// it.
-///
-/// Offers both directions the library does, because they answer different
-/// questions: `--dp` and friends ask "this moves — what responds?", `--watch`
-/// asks "this is overloaded — what would relieve it?".
-/// Parses a comma-separated bus-index list, e.g. `--pickup 3,7,12`.
-fn parse_index_list(raw: &str, flag: &str, limit: usize) -> Result<Vec<usize>, String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| parse_index(s, flag, limit))
-        .collect()
-}
-
-fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
-    match flag_value(flags, flag)? {
-        None => Ok(None),
-        Some(raw) => raw
-            .parse::<f64>()
-            .map(Some)
-            .map_err(|_| format!("{flag}: expected a number, got {raw:?}")),
-    }
-}
-
-/// `gridox dynamics` — what the network does over time.
+/// `gridox dynamics simulate` — what the network does over time.
 ///
 /// Everything else this binary offers answers a question about one instant.
 /// This one integrates: the machines' rotors and fluxes, their controls, and
@@ -1016,50 +604,22 @@ fn parse_f64_flag(flags: &[String], flag: &str) -> Result<Option<f64>, String> {
 /// anything; whether each machine stayed in step, how far the frequency went
 /// and how deep the voltage dipped are.
 #[cfg(feature = "dynamics")]
-fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
-    use gridoxide::dynamics::{DynamicsOptions, DynamicsStatus, json, run_dynamics};
+fn run_dynamics_cli(a: &args::SimulateArgs) -> Result<(), String> {
+    use gridoxide::dynamics::{DynamicsOptions, DynamicsStatus, run_dynamics};
     use gridoxide::solver::JacobianBackend;
 
-    let mut document = json::read(path).map_err(|e| e.to_string())?;
-    // The document states this; the flag overrides it, because it is a
-    // modelling question a reader may want to ask both ways of the same case.
-    if flags.iter().any(|f| f == "--speed-voltages") {
-        document.dynamics.speed_voltages = true;
-    }
-    if flags.iter().any(|f| f == "--no-speed-voltages") {
-        document.dynamics.speed_voltages = false;
-    }
-    let (mut system, events, relays) = document.build_with_relays().map_err(|e| e.to_string())?;
-
-    // `--modes` asks a different question from a run, so it answers that one
-    // and stops: not "what happens after this disturbance" but "what dynamic
-    // character does this system have at all".
-    if let Some(count) = flag_value(flags, "--modes")? {
-        let count: usize = count
-            .parse()
-            .map_err(|_| format!("--modes: expected a count, got {count:?}"))?;
-        return report_modes(&mut system, count, flags);
-    }
-
-    let backend = match flag_value(flags, "--backend")?.as_deref() {
-        Some("scalar") => JacobianBackend::Scalar,
-        None | Some("klu-native") => JacobianBackend::KluNative,
-        Some(other) => {
-            return Err(format!(
-                "--backend: expected scalar or klu-native, got {other:?}"
-            ));
-        }
+    let (mut system, events, relays) = read_dynamics(&a.document)?
+        .build_with_relays()
+        .map_err(|e| e.to_string())?;
+    let backend = match a.backend {
+        args::Backend::Scalar => JacobianBackend::Scalar,
+        args::Backend::KluNative => JacobianBackend::KluNative,
     };
     let options = DynamicsOptions {
-        end_time: parse_f64_flag(flags, "--stop")?.unwrap_or(10.0),
-        step: parse_f64_flag(flags, "--step")?.unwrap_or(0.005),
-        tol: parse_f64_flag(flags, "--tol")?.unwrap_or(1e-9),
-        damping_steps: match flag_value(flags, "--damping")? {
-            None => 2,
-            Some(raw) => raw
-                .parse()
-                .map_err(|_| format!("--damping: expected a count, got {raw:?}"))?,
-        },
+        end_time: a.stop,
+        step: a.step,
+        tol: a.tol,
+        damping_steps: a.damping,
         events,
         relays,
         backend,
@@ -1160,8 +720,8 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
         );
     }
 
-    if let Some(out) = flag_value(flags, "--csv")? {
-        let filter = flag_value(flags, "--observe")?;
+    if let Some(out) = &a.csv {
+        let filter = a.observe.clone();
         let keep: Vec<usize> = (0..trajectory.names.len())
             .filter(|&k| match &filter {
                 None => true,
@@ -1200,26 +760,62 @@ fn run_dynamics_cli(path: &str, flags: &[String]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "dynamics"))]
-fn run_dynamics_cli(_path: &str, _flags: &[String]) -> Result<(), String> {
+fn run_dynamics_cli(_: &args::SimulateArgs) -> Result<(), String> {
     Err(
         "this build has no RMS dynamics; rebuild with `cargo build --features dynamics`"
             .to_string(),
     )
 }
 
-/// `gridox dynamics --modes` — the modes of the linearized system.
+/// The dynamics document at `a.path`, with the speed-voltage choice the flags
+/// make. The document states it; a flag overrides it, because it is a modelling
+/// question a reader may want to ask both ways of the same case.
+#[cfg(feature = "dynamics")]
+fn read_dynamics(
+    a: &args::DynamicsDocument,
+) -> Result<gridoxide::dynamics::DynamicsDocument, String> {
+    let mut document = gridoxide::dynamics::json::read(&a.path).map_err(|e| e.to_string())?;
+    if a.speed_voltages {
+        document.dynamics.speed_voltages = true;
+    }
+    if a.no_speed_voltages {
+        document.dynamics.speed_voltages = false;
+    }
+    Ok(document)
+}
+
+/// `gridox dynamics modes` asks a different question from a run: not "what
+/// happens after this disturbance" but "what dynamic character does this
+/// system have at all".
+#[cfg(feature = "dynamics")]
+fn run_modes_cli(a: &args::ModesArgs) -> Result<(), String> {
+    let (mut system, _, _) = read_dynamics(&a.document)?
+        .build_with_relays()
+        .map_err(|e| e.to_string())?;
+    report_modes(&mut system, a)
+}
+
+#[cfg(not(feature = "dynamics"))]
+fn run_modes_cli(_: &args::ModesArgs) -> Result<(), String> {
+    Err(
+        "this build has no RMS dynamics; rebuild with `cargo build --features dynamics`"
+            .to_string(),
+    )
+}
+
+/// `gridox dynamics modes` — the modes of the linearized system.
 #[cfg(feature = "dynamics")]
 fn report_modes(
     system: &mut gridoxide::dynamics::DynamicSystem,
-    count: usize,
-    flags: &[String],
+    a: &args::ModesArgs,
 ) -> Result<(), String> {
+    let count = a.count;
     use gridoxide::dynamics::smallsignal::{self, Method, SmallSignalOptions};
 
     // Naming *where* to look selects the sparse method, whatever the size:
     // asking about one band is a different question from asking for everything,
     // and a caller who asks it should get it answered rather than overruled.
-    let aimed = parse_shift(flags)?;
+    let aimed = parse_shift(a)?;
     let result = match aimed {
         Some(shift) => {
             let opts = SmallSignalOptions {
@@ -1317,7 +913,7 @@ fn report_modes(
     // Which knob moves the worst mode, when asked. The critical mode only:
     // that is the question a stability study asks, and a sensitivity per mode
     // per parameter is a table nobody reads.
-    if flags.iter().any(|f| f == "--modes-sensitivity") {
+    if a.sensitivity {
         report_sensitivities(system, &result)?;
     }
 
@@ -1360,7 +956,7 @@ fn percentage(p: f64) -> String {
     }
 }
 
-/// `--modes-sensitivity` — which parameter moves the least-damped mode.
+/// `dynamics modes --sensitivity` — which parameter moves the least-damped mode.
 #[cfg(feature = "dynamics")]
 fn report_sensitivities(
     system: &mut gridoxide::dynamics::DynamicSystem,
@@ -1433,63 +1029,35 @@ fn device_label(result: &gridoxide::dynamics::smallsignal::SmallSignal, device: 
         .unwrap_or_else(|| format!("device{device}"))
 }
 
-/// Where `--modes` should look, if the caller said.
+/// Where `dynamics modes` should look, if the caller said.
 ///
-/// `--modes-freq` is the form the question comes in — "the modes near 1 Hz" —
-/// and `--modes-near` is the literal complex number for anyone who wants to
+/// `--freq` is the form the question comes in — "the modes near 1 Hz" —
+/// and `--near` is the literal complex number for anyone who wants to
 /// name it directly. Giving neither means the dense method, which needs no aim
 /// because it computes everything.
 #[cfg(feature = "dynamics")]
-fn parse_shift(flags: &[String]) -> Result<Option<num_complex::Complex<f64>>, String> {
+fn parse_shift(a: &args::ModesArgs) -> Result<Option<num_complex::Complex<f64>>, String> {
     use gridoxide::dynamics::smallsignal::SmallSignalOptions;
 
-    let freq = parse_f64_flag(flags, "--modes-freq")?;
-    let damping = parse_f64_flag(flags, "--modes-damping")?;
-    let near = flag_value(flags, "--modes-near")?;
-
-    if let Some(near) = near {
-        if freq.is_some() || damping.is_some() {
-            return Err("--modes-near names the shift outright; \
-                        do not also give --modes-freq or --modes-damping"
-                .to_string());
-        }
-        let (re, im) = near
-            .split_once(',')
-            .ok_or_else(|| format!("--modes-near: expected <re>,<im>, got {near:?}"))?;
-        let re: f64 = re
-            .trim()
-            .parse()
-            .map_err(|_| format!("--modes-near: {re:?} is not a number"))?;
-        let im: f64 = im
-            .trim()
-            .parse()
-            .map_err(|_| format!("--modes-near: {im:?} is not a number"))?;
-        return Ok(Some(num_complex::Complex::new(re, im)));
+    // clap has kept --near apart from --freq, and --damping-ratio with it.
+    if let Some(near) = a.near {
+        return Ok(Some(near));
     }
-
-    match (freq, damping) {
-        (None, None) => Ok(None),
-        (None, Some(_)) => Err("--modes-damping only says how far off the axis to aim; \
-             give --modes-freq to say where"
-            .to_string()),
-        (Some(hz), zeta) => {
-            if hz <= 0.0 {
-                return Err(format!(
-                    "--modes-freq: expected a positive frequency, got {hz}"
-                ));
-            }
-            Ok(Some(
-                SmallSignalOptions::near_frequency(hz, zeta.unwrap_or(0.05)).shift,
-            ))
-        }
+    match a.freq {
+        None => Ok(None),
+        Some(hz) if hz <= 0.0 => Err(format!("--freq: expected a positive frequency, got {hz}")),
+        Some(hz) => Ok(Some(
+            SmallSignalOptions::near_frequency(hz, a.damping_ratio.unwrap_or(0.05)).shift,
+        )),
     }
 }
 
 /// `gridox qv` — a bus's reactive margin.
-fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
+fn run_qv_cli(a: &args::QvArgs) -> Result<(), String> {
+    let path = a.path.as_str();
     use gridoxide::qv::{QvOptions, QvStatus, qv_curve};
 
-    let base_mva = parse_f64_flag(flags, "--base-mva")?.unwrap_or(100.0);
+    let base_mva = a.base_mva;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, base_mva * 1e6, 50.0);
@@ -1500,26 +1068,14 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
             max_iter: 60,
             ..Default::default()
         },
-        v_max: parse_f64_flag(flags, "--v-max")?.unwrap_or(1.10),
-        v_min: parse_f64_flag(flags, "--v-min")?.unwrap_or(0.40),
-        step: parse_f64_flag(flags, "--step")?.unwrap_or(0.01),
-        refine: !flags.iter().any(|f| f == "--no-refine"),
+        v_max: a.v_max,
+        v_min: a.v_min,
+        step: a.step,
+        refine: !a.no_refine,
     };
 
-    let one = match flag_value(flags, "--bus")? {
-        Some(raw) => Some(parse_index(&raw, "--bus", n)?),
-        None => None,
-    };
-    let weakest = match flag_value(flags, "--weakest")? {
-        Some(raw) => Some(
-            raw.parse::<usize>()
-                .map_err(|_| format!("--weakest: expected a count, got {raw:?}"))?,
-        ),
-        None => None,
-    };
-    if one.is_some() && weakest.is_some() {
-        return Err("--bus and --weakest ask for different things".into());
-    }
+    let one = a.bus.map(|i| check_index(i, "--bus", n)).transpose()?;
+    let weakest = a.weakest;
 
     println!(
         "{n} bus(es); sweeping |V| from {:.3} to {:.3} in steps of {:.3}{}",
@@ -1548,7 +1104,7 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
                 ""
             }
         );
-        if flags.iter().any(|f| f == "--curve") {
+        if a.curve {
             println!("\n     |V|      Q needed (MVAr)   iterations");
             for p in &curve.points {
                 println!(
@@ -1631,58 +1187,52 @@ fn run_qv_cli(path: &str, flags: &[String]) -> Result<(), String> {
 }
 
 /// `gridox continuation` — trace the P-V curve to the point of collapse.
-fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
+fn run_continuation_cli(a: &args::ContinuationArgs) -> Result<(), String> {
+    let path = a.path.as_str();
     use gridoxide::continuation::augmented::Parametrization;
     use gridoxide::continuation::{
         ContinuationOptions, ContinuationStatus, CriticalPointKind, CurveBranch, LoadingDirection,
         QLimitKind, StopCriterion, run_continuation,
     };
 
-    let base_mva = parse_f64_flag(flags, "--base-mva")?.unwrap_or(100.0);
+    let base_mva = a.base_mva;
     let s_base_va = base_mva * 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
     let n = buses.len();
 
-    let direction = match flag_value(flags, "--buses")? {
-        Some(list) => {
-            LoadingDirection::scale_buses(&buses, &parse_index_list(&list, "--buses", n)?)
-        }
+    let indices = |list: &[usize], flag: &str| -> Result<Vec<usize>, String> {
+        list.iter().map(|&i| check_index(i, flag, n)).collect()
+    };
+    let direction = match &a.buses {
+        Some(list) => LoadingDirection::scale_buses(&buses, &indices(list, "--buses")?),
         None => LoadingDirection::scale_loads(&buses),
     };
-    let direction = match flag_value(flags, "--pickup")? {
+    let direction = match &a.pickup {
         None => direction,
         Some(list) => {
             let mut weights = vec![0.0; n];
-            for i in parse_index_list(&list, "--pickup", n)? {
+            for i in indices(list, "--pickup")? {
                 weights[i] = 1.0;
             }
             LoadingDirection::scale_loads_with_pickup(&buses, &weights)
         }
     };
 
-    let parametrization = match flag_value(flags, "--parametrization")?.as_deref() {
+    let parametrization = match a.parametrization {
         // Deliberately `default()` rather than a name repeated here: the choice
         // is a performance cliff (pseudo-arclength's bordering row is dense, and
         // costs ~90x a sparse one at a few thousand buses), so the CLI must not
         // be able to drift away from the library's default.
         None => Parametrization::default(),
-        Some("local") => Parametrization::Local,
-        Some("natural") => Parametrization::Natural,
-        Some("arclength") => Parametrization::PseudoArcLength,
-        Some(other) => {
-            return Err(format!(
-                "--parametrization: expected arclength, local or natural, got {other:?}"
-            ));
-        }
+        Some(args::Parametrization::Local) => Parametrization::Local,
+        Some(args::Parametrization::Natural) => Parametrization::Natural,
+        Some(args::Parametrization::Arclength) => Parametrization::PseudoArcLength,
     };
-    let target_lambda = parse_f64_flag(flags, "--target-lambda")?;
-    let lower_branch = flags.iter().any(|f| f == "--lower-branch");
-    if target_lambda.is_some() && lower_branch {
-        return Err("--target-lambda and --lower-branch ask for different walks".into());
-    }
-    let enforce_q_limits = flags.iter().any(|f| f == "--enforce-q-limits");
+    let target_lambda = a.target_lambda;
+    let lower_branch = a.lower_branch;
+    let enforce_q_limits = a.enforce_q_limits;
 
     let opts = ContinuationOptions {
         direction: direction.clone(),
@@ -1691,22 +1241,12 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
             target_lambda,
             trace_lower_branch: lower_branch,
         },
-        step: parse_f64_flag(flags, "--step")?.unwrap_or(0.1),
-        max_steps: match flag_value(flags, "--max-steps")? {
-            None => 200,
-            Some(raw) => raw
-                .parse()
-                .map_err(|_| format!("--max-steps: expected a count, got {raw:?}"))?,
-        },
+        step: a.step,
+        max_steps: a.max_steps,
         power_flow: PowerFlowOptions {
             enforce_q_limits,
-            tol: parse_f64_flag(flags, "--tol")?.unwrap_or(1e-8),
-            max_iter: match flag_value(flags, "--max-iter")? {
-                None => 30,
-                Some(raw) => raw
-                    .parse()
-                    .map_err(|_| format!("--max-iter: expected a count, got {raw:?}"))?,
-            },
+            tol: a.tol,
+            max_iter: a.max_iter,
             ..Default::default()
         },
         base_mva,
@@ -1739,7 +1279,7 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
         direction.total_active_load_increase() * base_mva
     );
 
-    if flags.iter().any(|f| f == "--curve") {
+    if a.curve {
         println!("\n  lambda   arclength   min |V|  at bus   dlambda/dsigma   its  branch");
         for p in &curve.points {
             let (bus, vmin) = p
@@ -1828,16 +1368,16 @@ fn run_continuation_cli(path: &str, flags: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
+fn run_sensitivity(a: &args::SensitivityArgs) -> Result<(), String> {
+    let path = a.path.as_str();
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
 
-    let terminal = match flag_value(flags, "--terminal")?.as_deref() {
-        None | Some("from") => Terminal::From,
-        Some("to") => Terminal::To,
-        Some(other) => return Err(format!("--terminal: expected from or to, got {other:?}")),
+    let terminal = match a.terminal {
+        args::Terminal::From => Terminal::From,
+        args::Terminal::To => Terminal::To,
     };
 
     // The linearization is only as meaningful as the point it is taken at, so
@@ -1882,35 +1422,37 @@ fn run_sensitivity(path: &str, flags: &[String]) -> Result<(), String> {
 
     let mut did_something = false;
 
-    for (flag, make) in [
+    for (flag, value, make) in [
         (
             "--dp",
+            a.dp,
             &Variable::ActiveInjection as &dyn Fn(usize) -> Variable,
         ),
-        ("--dq", &Variable::ReactiveInjection),
+        ("--dq", a.dq, &Variable::ReactiveInjection),
     ] {
-        if let Some(raw) = flag_value(flags, flag)? {
-            let bus = parse_index(&raw, flag, buses.len())?;
+        if let Some(raw) = value {
+            let bus = check_index(raw, flag, buses.len())?;
             print_forward(&sensitivity, make(bus), terminal, flag, bus, &buses)?;
             did_something = true;
         }
     }
-    for (flag, make) in [
+    for (flag, value, make) in [
         (
             "--dk",
+            a.dk,
             &Variable::TransformerRatio as &dyn Fn(usize) -> Variable,
         ),
-        ("--dalpha", &Variable::PhaseShift),
+        ("--dalpha", a.dalpha, &Variable::PhaseShift),
     ] {
-        if let Some(raw) = flag_value(flags, flag)? {
-            let branch = parse_index(&raw, flag, n_branches)?;
+        if let Some(raw) = value {
+            let branch = check_index(raw, flag, n_branches)?;
             print_forward(&sensitivity, make(branch), terminal, flag, branch, &buses)?;
             did_something = true;
         }
     }
 
-    if let Some(raw) = flag_value(flags, "--watch")? {
-        let branch = parse_index(&raw, "--watch", n_branches)?;
+    if let Some(raw) = a.watch {
+        let branch = check_index(raw, "--watch", n_branches)?;
         let row = sensitivity
             .function_row(Function::BranchActivePower { branch, terminal })
             .ok_or("the adjoint solve is singular")?;
@@ -1996,15 +1538,15 @@ fn print_forward(
 /// what each source contributes to it, what the branches and shunts between
 /// them carry, and how far the voltage collapses across the rest of the
 /// network while it does.
-fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
+fn run_short_circuit(a: &args::ShortCircuitArgs) -> Result<(), String> {
+    let path = a.path.as_str();
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
 
-    let scaling = match flag_value(flags, "--scaling")?.as_deref() {
-        None | Some("max") | Some("maximum") => VoltageScaling::Maximum,
-        Some("min") | Some("minimum") => VoltageScaling::Minimum,
-        Some(other) => return Err(format!("--scaling: expected max or min, got {other:?}")),
+    let scaling = match a.scaling {
+        args::Scaling::Max => VoltageScaling::Maximum,
+        args::Scaling::Min => VoltageScaling::Minimum,
     };
     let opts = ShortCircuitOptions { scaling };
 
@@ -2126,13 +1668,14 @@ fn run_short_circuit(path: &str, flags: &[String]) -> Result<(), String> {
 /// Reports the same three things the solver produces — angles, branch flows,
 /// per-island slack pickup — plus the residual, which on a healthy network is
 /// round-off and on an ill-conditioned one is the first sign of it.
-fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
+fn run_dc(a: &args::DcArgs) -> Result<(), String> {
+    let path = a.path.as_str();
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
     let (mut buses, lines, transformers) = pgm_to_buses_and_branches(input, s_base_va, 50.0);
 
-    let approximation = if flags.iter().any(|a| a == "--ignore-g") {
+    let approximation = if a.ignore_g {
         DcApproximation::IgnoreG
     } else {
         DcApproximation::IgnoreR
@@ -2197,8 +1740,7 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
         );
     }
 
-    let ptdf = flag_value(flags, "--ptdf")?;
-    let lodf = flag_value(flags, "--lodf")?;
+    let (ptdf, lodf) = (a.ptdf, a.lodf);
     if ptdf.is_none() && lodf.is_none() {
         return Ok(());
     }
@@ -2208,7 +1750,7 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
         .ok_or("the reduced susceptance matrix is singular, so no sensitivities exist")?;
 
     if let Some(raw) = ptdf {
-        let bus = parse_index(&raw, "--ptdf", buses.len())?;
+        let bus = check_index(raw, "--ptdf", buses.len())?;
         match sensitivity.ptdf_column(bus) {
             Some(column) => {
                 println!("\nPTDF column for bus {bus} (∂P_branch / ∂P_bus):");
@@ -2221,7 +1763,7 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
     }
 
     if let Some(raw) = lodf {
-        let branch = parse_index(&raw, "--lodf", n_branches)?;
+        let branch = check_index(raw, "--lodf", n_branches)?;
         match sensitivity.lodf_column(branch) {
             Some(column) => {
                 println!("\nLODF column for branch {branch} (fraction of its flow picked up):");
@@ -2246,30 +1788,21 @@ fn run_dc(path: &str, flags: &[String]) -> Result<(), String> {
 /// takes power-grid-model JSON. It exists because a switch is only visible in
 /// the node-breaker view, and that view is what `--retain` selects.
 #[cfg(feature = "cgmes")]
-fn run_switches(args: &[String]) -> Result<(), String> {
+fn run_switches(a: &args::SwitchesArgs) -> Result<(), String> {
     use gridoxide::cgmes::{cgmes_node_breaker_to_buses_and_branches, load_profiles};
     use gridoxide::switches::SwitchTreatment;
     use gridoxide::topology::{RetentionPolicy, SwitchIdx};
 
-    let paths: Vec<&String> = args.iter().take_while(|a| !a.starts_with("--")).collect();
-    if paths.is_empty() {
-        return Err("switches needs at least one CGMES profile file".to_string());
-    }
-    let flags = &args[paths.len()..];
-
-    let retain = flag_value(flags, "--retain")?.unwrap_or_else(|| "busbar_adjacent".to_string());
-    let policy = match retain.as_str() {
-        "none" => RetentionPolicy::MergeAll,
-        "busbar_adjacent" => RetentionPolicy::RetainAdjacentToBusbar,
-        "all" => RetentionPolicy::RetainAll,
-        other => {
-            return Err(format!(
-                "--retain: unknown policy {other:?}, expected none, busbar_adjacent or all"
-            ));
+    let paths = &a.profiles;
+    let (policy, retain) = match a.retain {
+        args::Retain::MergeAll => (RetentionPolicy::MergeAll, "none"),
+        args::Retain::BusbarAdjacent => {
+            (RetentionPolicy::RetainAdjacentToBusbar, "busbar_adjacent")
         }
+        args::Retain::All => (RetentionPolicy::RetainAll, "all"),
     };
-    let open = flag_value(flags, "--open")?;
-    let solve = flags.iter().any(|a| a == "--solve");
+    let open = a.open.clone();
+    let solve = a.solve;
 
     let path_refs: Vec<&std::path::Path> = paths
         .iter()
@@ -2379,7 +1912,7 @@ fn run_switches(args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "cgmes"))]
-fn run_switches(_args: &[String]) -> Result<(), String> {
+fn run_switches(_: &args::SwitchesArgs) -> Result<(), String> {
     Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
 }
 
@@ -2387,31 +1920,15 @@ fn run_switches(_args: &[String]) -> Result<(), String> {
 ///
 /// Returns `Ok(true)` when no limit is violated in a state that solved.
 #[cfg(feature = "cgmes")]
-fn run_cgmes_security(args: &[String]) -> Result<bool, String> {
+fn run_cgmes_security(a: &args::CgmesSecurityArgs) -> Result<bool, String> {
     use gridoxide::cgmes::load_profiles;
     use gridoxide::security_analysis::{SarHeader, SecurityOptions, run};
     use std::path::Path;
 
-    let paths: Vec<&Path> = args
-        .iter()
-        .take_while(|a| !a.starts_with("--"))
-        .map(Path::new)
-        .collect();
-    let flags = &args[paths.len()..];
-    let co: Vec<&Path> = flags
-        .iter()
-        .skip_while(|a| *a != "--contingencies")
-        .skip(1)
-        .take_while(|a| !a.starts_with("--"))
-        .map(Path::new)
-        .collect();
-    if paths.is_empty() || co.is_empty() {
-        return Err(format!(
-            "cgmes-security needs profiles and --contingencies\n\n{USAGE}"
-        ));
-    }
+    let paths: Vec<&Path> = a.profiles.iter().map(Path::new).collect();
+    let co: Vec<&Path> = a.contingencies.iter().map(Path::new).collect();
     let mut options = SecurityOptions::default();
-    if let Some(sharing) = flag_value(flags, "--slack")? {
+    if let Some(sharing) = &a.slack {
         options.sharing = sharing.parse()?;
     }
     let mut grid = load_profiles(&paths).map_err(|e| e.to_string())?;
@@ -2432,10 +1949,9 @@ fn run_cgmes_security(args: &[String]) -> Result<bool, String> {
         analysis.violations.len() - in_base,
         analysis.past_limits.len(),
     );
-    if let Some(out) = flag_value(flags, "--sar")? {
-        let required = |flag: &str| -> Result<String, String> {
-            flag_value(flags, flag)?.ok_or(format!("--sar needs {flag}"))
-        };
+    if let Some(out) = &a.sar {
+        // clap requires all four with --sar.
+        let required = |value: &Option<String>| value.clone().unwrap_or_default();
         let header = SarHeader {
             title: format!(
                 "{}_SAR",
@@ -2446,19 +1962,19 @@ fn run_cgmes_security(args: &[String]) -> Result<bool, String> {
                     .replace('-', "")
             ),
             description: "Security analysis by gridoxide.".to_string(),
-            publisher: required("--publisher")?,
-            is_version_of: required("--version-of")?,
-            rights_holder: required("--rights-holder")?,
-            generated_at: required("--generated-at")?,
+            publisher: required(&a.publisher),
+            is_version_of: required(&a.version_of),
+            rights_holder: required(&a.rights_holder),
+            generated_at: required(&a.generated_at),
         };
         let xml = analysis.to_sar(&header).map_err(|e| e.to_string())?;
-        std::fs::write(&out, xml).map_err(|e| format!("writing {out}: {e}"))?;
+        std::fs::write(out, xml).map_err(|e| format!("writing {out}: {e}"))?;
     }
     Ok(analysis.violations.is_empty())
 }
 
 #[cfg(not(feature = "cgmes"))]
-fn run_cgmes_security(_args: &[String]) -> Result<bool, String> {
+fn run_cgmes_security(_: &args::CgmesSecurityArgs) -> Result<bool, String> {
     Err("this build has no CGMES support; rebuild with `cargo build --features cgmes`".to_string())
 }
 
@@ -2469,11 +1985,12 @@ fn run_cgmes_security(_args: &[String]) -> Result<bool, String> {
 /// insecure one exits 1, and a *broken invocation* exits 2. Conflating the last
 /// two is how a study silently passes because the CRAC failed to load.
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
-fn run_security(path: &str, flags: &[String]) -> Result<bool, String> {
+fn run_security(a: &args::SecurityArgs) -> Result<bool, String> {
     use gridoxide::rao::{Network, Resolution, crac_json, evaluate};
 
-    let crac_path = flag_value(flags, "--crac")?.ok_or("security needs --crac <crac.json>")?;
-    let as_json = flags.iter().any(|f| f == "--json");
+    let path = a.network.as_str();
+    let crac_path = &a.crac;
+    let as_json = a.json;
 
     let network = load_network_for_security(path)?;
     let text =
@@ -2803,7 +2320,7 @@ fn security_json(
 }
 
 #[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
-fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
+fn run_security(_: &args::SecurityArgs) -> Result<bool, String> {
     Err(
         "security needs the `rao` feature and an importer (`ucte` or `iidm`); \
          rebuild with `--features rao,ucte`"
@@ -2814,6 +2331,7 @@ fn run_security(_path: &str, _flags: &[String]) -> Result<bool, String> {
 /// Counts by name, in a stable order — a `HashMap`'s iteration order is
 /// unspecified, and a warning list that reorders between runs is a diff nobody
 /// can read.
+#[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
 fn sorted_counts(counts: &std::collections::HashMap<String, usize>) -> Vec<(&String, &usize)> {
     let mut out: Vec<(&String, &usize)> = counts.iter().collect();
     out.sort();
@@ -2828,22 +2346,17 @@ fn sorted_counts(counts: &std::collections::HashMap<String, usize>) -> Vec<(&Str
 /// if the preventive one had done nothing, which is the multi-perimeter work
 /// still to come. The output says so rather than leaving it to be assumed.
 #[cfg(all(feature = "rao", any(feature = "ucte", feature = "iidm")))]
-fn run_rao(path: &str, flags: &[String]) -> Result<bool, String> {
+fn run_rao(a: &args::RaoArgs) -> Result<bool, String> {
     use gridoxide::opf::ipm::IpmSolver;
     use gridoxide::rao::{Network, Resolution, SearchOptions, crac_json};
 
-    let crac_path = flag_value(flags, "--crac")?.ok_or("rao needs --crac <crac.json>")?;
-    let depth_flag = flag_value(flags, "--depth")?;
-    let depth_given = depth_flag.is_some();
-    let depth = match depth_flag {
-        Some(value) => value
-            .parse::<usize>()
-            .map_err(|_| format!("bad --depth `{value}`"))?,
-        None => 2,
-    };
-    let parameters_path = flag_value(flags, "--parameters")?;
-    let as_json = flags.iter().any(|f| f == "--json");
-    let validate_ac = flags.iter().any(|f| f == "--validate-ac");
+    let path = a.network.as_str();
+    let crac_path = &a.crac;
+    let depth_given = a.depth.is_some();
+    let depth = a.depth.unwrap_or(2);
+    let parameters_path = a.parameters.clone();
+    let as_json = a.json;
+    let validate_ac = a.validate_ac;
 
     let network = load_network_for_security(path)?;
     let text =
@@ -3205,7 +2718,7 @@ fn rao_json(
 }
 
 #[cfg(not(all(feature = "rao", any(feature = "ucte", feature = "iidm"))))]
-fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
+fn run_rao(_: &args::RaoArgs) -> Result<bool, String> {
     Err(
         "rao needs the `rao` feature and an importer (`ucte` or `iidm`); \
          rebuild with `--features rao,ucte`"
@@ -3223,40 +2736,24 @@ fn run_rao(_path: &str, _flags: &[String]) -> Result<bool, String> {
     feature = "cgmes",
     feature = "matpower"
 ))]
-fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
+fn run_solve(a: &args::SolveArgs) -> Result<(), String> {
     use gridoxide::outerloop::ControllerOutcome;
     use gridoxide::solver::SolveStatus;
 
-    let number = |flag: &str, default: f64| -> Result<f64, String> {
-        match flag_value(flags, flag)? {
-            None => Ok(default),
-            Some(raw) => raw
-                .parse()
-                .map_err(|_| format!("{flag}: {raw:?} is not a number")),
-        }
-    };
-    let count = |flag: &str, default: usize| -> Result<usize, String> {
-        match flag_value(flags, flag)? {
-            None => Ok(default),
-            Some(raw) => raw
-                .parse()
-                .map_err(|_| format!("{flag}: {raw:?} is not an integer")),
-        }
-    };
-
+    let path = a.network.as_str();
     let settings = gridoxide::load::SolveSettings {
-        control_taps: flags.iter().any(|f| f == "--control-taps"),
-        enforce_q_limits: flags.iter().any(|f| f == "--enforce-q-limits"),
-        distribute_slack: flags.iter().any(|f| f == "--distribute-slack"),
-        area_interchange: flags.iter().any(|f| f == "--area-interchange"),
-        control_remote_voltage: flags.iter().any(|f| f == "--control-remote-voltage"),
-        tol: number("--tol", 1e-8)?,
-        max_iter: count("--max-iter", 30)?,
-        max_outer: count("--max-outer", 40)?,
-        max_tap_shift: count("--max-tap-shift", 3)? as i32,
+        control_taps: a.control_taps,
+        enforce_q_limits: a.enforce_q_limits,
+        distribute_slack: a.distribute_slack,
+        area_interchange: a.area_interchange,
+        control_remote_voltage: a.control_remote_voltage,
+        tol: a.tol,
+        max_iter: a.max_iter,
+        max_outer: a.max_outer,
+        max_tap_shift: a.max_tap_shift as i32,
     };
     settings.check()?;
-    let dispatch = flags.iter().any(|f| f == "--dispatch");
+    let dispatch = a.dispatch;
 
     let net = gridoxide::load::load(path)?;
     for note in &net.notes {
@@ -3513,7 +3010,7 @@ fn run_solve(path: &str, flags: &[String]) -> Result<(), String> {
     feature = "cgmes",
     feature = "matpower"
 )))]
-fn run_solve(_path: &str, _flags: &[String]) -> Result<(), String> {
+fn run_solve(_: &args::SolveArgs) -> Result<(), String> {
     Err(
         "solve needs an importer feature (`cgmes`, `ucte`, `iidm` or `matpower`); \
          rebuild with `--features cgmes`"

@@ -2,7 +2,7 @@
 //!
 //! The numerics are validated against analytic cases, KKT certificates and
 //! pglib's published objectives in `opf_dc_test.rs`. What is pinned here is
-//! the hand-rolled argument handling, the companion-document default, and that
+//! the argument handling, the companion-document default, and that
 //! the output actually reports the things a dispatcher reads off an OPF.
 
 use std::path::PathBuf;
@@ -123,6 +123,20 @@ fn a_missing_companion_document_explains_itself() {
 #[test]
 fn needs_a_network_path() {
     let out = run(&["opf"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("needs a network path"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("<NETWORK>"));
+}
+
+/// The AC-only flags need --ac, and the DC-only ones refuse it.
+#[test]
+fn flags_of_the_other_formulation_are_refused() {
+    for args in [
+        &["opf", "x.json", "--no-limits"][..],
+        &["opf", "x.json", "--max-iter", "5"],
+        &["opf", "x.json", "--ac", "--highs"],
+        &["opf", "x.json", "--ac", "--shed-price", "100"],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
 }

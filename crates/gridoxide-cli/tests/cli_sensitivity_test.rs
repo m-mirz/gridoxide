@@ -1,7 +1,7 @@
 //! The `gridox sensitivity` subcommand.
 //!
 //! The numerics are validated against a finite-difference re-solve in
-//! `ac_sensitivity_test.rs`; what is pinned here is the hand-rolled argument
+//! `ac_sensitivity_test.rs`; what is pinned here is the argument
 //! handling and the two directions actually reaching the right code.
 
 use std::path::PathBuf;
@@ -122,9 +122,9 @@ fn the_to_terminal_is_selectable() {
 #[test]
 fn asking_for_nothing_is_an_error() {
     let out = sensitivity(&[]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("at least one of"), "{err}");
+    assert!(err.contains("--dp"), "{err}");
 }
 
 #[test]
@@ -141,6 +141,6 @@ fn rejects_an_out_of_range_index_and_an_unknown_terminal() {
 #[test]
 fn needs_a_path() {
     let out = run(&["sensitivity"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("needs a path"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("<PATH>"));
 }

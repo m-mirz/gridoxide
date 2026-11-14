@@ -1,9 +1,8 @@
 //! The `gridox short-circuit` subcommand.
 //!
-//! `main.rs`'s argument handling is hand-rolled, so the parsing is worth
-//! pinning even though the solver underneath it is validated thoroughly in
-//! `pgm_short_circuit_test.rs`. Everything here drives the built binary through
-//! `CARGO_BIN_EXE_gridox`, which is the only way to exercise that parsing.
+//! The solver underneath is validated thoroughly in `pgm_short_circuit_test.rs`;
+//! what is pinned here is the command's arguments, by driving the built binary
+//! through `CARGO_BIN_EXE_gridox`, the only way to exercise them.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -163,6 +162,6 @@ fn rejects_an_unknown_scaling() {
 #[test]
 fn needs_a_path() {
     let out = run(&["short-circuit"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("needs a path"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("<PATH>"));
 }

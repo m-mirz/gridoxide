@@ -1,7 +1,7 @@
 //! The `gridox qv` subcommand.
 //!
 //! The physics is gated in `qv_test.rs` against a closed-form two-bus curve;
-//! what is pinned here is the hand-rolled argument handling and that each flag
+//! what is pinned here is the argument handling and that each flag
 //! reaches the code it names.
 
 use std::path::PathBuf;

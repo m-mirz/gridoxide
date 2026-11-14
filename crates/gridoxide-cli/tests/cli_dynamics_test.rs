@@ -2,8 +2,9 @@
 //!
 //! The physics is gated elsewhere — against closed forms in `dynamics_test.rs`
 //! and `dynamics_events_test.rs`, and against Dynawo in
-//! `dynamics_reference_test.rs`. What is pinned here is the hand-rolled
-//! argument handling, that each flag reaches the code it names, and that the
+//! `dynamics_reference_test.rs`. What is pinned here is the argument handling
+//! of `dynamics simulate` and `dynamics modes`, that each flag reaches the code
+//! it names, and that the
 //! summary reports the things a reader of a transient-stability run actually
 //! wants: whether each machine stayed in step, and how deep the voltage went.
 
@@ -21,11 +22,30 @@ fn run(args: &[&str]) -> Output {
         .expect("failed to run the gridox binary")
 }
 
-fn dynamics(extra: &[&str]) -> Output {
+fn dynamics(command: &str, extra: &[&str]) -> Output {
     let path = document();
-    let mut args = vec!["dynamics", path.to_str().unwrap()];
+    let mut args = vec!["dynamics", command, path.to_str().unwrap()];
     args.extend_from_slice(extra);
     run(&args)
+}
+
+fn simulate(extra: &[&str]) -> Output {
+    dynamics("simulate", extra)
+}
+
+fn modes(extra: &[&str]) -> Output {
+    dynamics("modes", extra)
+}
+
+/// A usage error: clap's exit code, and its message.
+fn usage_error(out: &Output) -> String {
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 fn stdout_of(out: &Output) -> String {
@@ -39,7 +59,7 @@ fn stdout_of(out: &Output) -> String {
 
 #[test]
 fn it_runs_a_document_and_reports_what_the_machines_did() {
-    let text = stdout_of(&dynamics(&["--stop", "6", "--step", "0.005"]));
+    let text = stdout_of(&simulate(&["--stop", "6", "--step", "0.005"]));
 
     assert!(
         text.contains("3 bus(es), 13 differential state(s), 3 scheduled event(s)"),
@@ -61,7 +81,7 @@ fn it_runs_a_document_and_reports_what_the_machines_did() {
 #[test]
 fn the_csv_flag_writes_the_trajectory_and_observe_narrows_it() {
     let out = tempfile();
-    let text = stdout_of(&dynamics(&[
+    let text = stdout_of(&simulate(&[
         "--stop",
         "3",
         "--csv",
@@ -84,7 +104,7 @@ fn the_csv_flag_writes_the_trajectory_and_observe_narrows_it() {
 #[test]
 fn an_observe_pattern_that_matches_nothing_is_an_error() {
     let out = tempfile();
-    let result = dynamics(&[
+    let result = simulate(&[
         "--stop",
         "1",
         "--csv",
@@ -100,8 +120,8 @@ fn an_observe_pattern_that_matches_nothing_is_an_error() {
 
 #[test]
 fn the_backends_are_selectable_and_agree() {
-    let scalar = stdout_of(&dynamics(&["--stop", "3", "--backend", "scalar"]));
-    let klu = stdout_of(&dynamics(&["--stop", "3", "--backend", "klu-native"]));
+    let scalar = stdout_of(&simulate(&["--stop", "3", "--backend", "scalar"]));
+    let klu = stdout_of(&simulate(&["--stop", "3", "--backend", "klu-native"]));
 
     // The per-machine summary is printed to six figures, so identical text is a
     // real agreement rather than a rounded one.
@@ -117,22 +137,21 @@ fn the_backends_are_selectable_and_agree() {
         "the backend is a performance choice, not an answer"
     );
 
-    let bad = dynamics(&["--backend", "quantum"]);
-    assert!(!bad.status.success());
+    let err = usage_error(&simulate(&["--backend", "quantum"]));
     assert!(
-        String::from_utf8_lossy(&bad.stderr).contains("expected scalar or klu-native"),
-        "{}",
-        String::from_utf8_lossy(&bad.stderr)
+        err.contains("[possible values: scalar, klu-native]"),
+        "{err}"
     );
 }
 
 #[test]
 fn a_missing_path_and_a_bad_document_are_both_named() {
-    let missing = run(&["dynamics"]);
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("needs a document path"));
+    for command in ["simulate", "modes"] {
+        let err = usage_error(&run(&["dynamics", command]));
+        assert!(err.contains("<PATH>"), "{err}");
+    }
 
-    let absent = run(&["dynamics", "/nonexistent/case.json"]);
+    let absent = run(&["dynamics", "simulate", "/nonexistent/case.json"]);
     assert!(!absent.status.success());
     let stderr = String::from_utf8_lossy(&absent.stderr);
     assert!(stderr.contains("/nonexistent/case.json"), "{stderr}");
@@ -155,7 +174,7 @@ fn tempfile() -> PathBuf {
 #[test]
 fn the_machine_formulation_is_selectable_and_changes_the_answer() {
     let swing = |extra: &[&str]| {
-        let text = stdout_of(&dynamics(&[&["--stop", "4"], extra].concat()));
+        let text = stdout_of(&simulate(&[&["--stop", "4"], extra].concat()));
         let line = text
             .lines()
             .find(|l| l.trim_start().starts_with("G1"))
@@ -189,7 +208,7 @@ fn the_machine_formulation_is_selectable_and_changes_the_answer() {
 
 #[test]
 fn the_modes_flag_reports_the_linearized_system() {
-    let text = stdout_of(&dynamics(&["--modes", "4"]));
+    let text = stdout_of(&modes(&["--count", "4"]));
 
     assert!(
         text.contains("13 mode(s) over 13 differential state(s)"),
@@ -232,7 +251,7 @@ fn the_modes_flag_reports_the_linearized_system() {
 /// four modes near 1 Hz has been misled unless the output told them.
 #[test]
 fn a_named_frequency_selects_the_sparse_method() {
-    let text = stdout_of(&dynamics(&["--modes", "3", "--modes-freq", "1.27"]));
+    let text = stdout_of(&modes(&["--count", "3", "--freq", "1.27"]));
 
     assert!(text.contains("sparse Arnoldi"), "{text}");
     assert!(text.contains("NOT every mode the system has"), "{text}");
@@ -251,7 +270,7 @@ fn a_named_frequency_selects_the_sparse_method() {
 /// The literal form of the same flag.
 #[test]
 fn the_shift_can_be_named_outright() {
-    let text = stdout_of(&dynamics(&["--modes", "2", "--modes-near", "-0.4,7.98"]));
+    let text = stdout_of(&modes(&["--count", "2", "--near", "-0.4,7.98"]));
     assert!(text.contains("sparse Arnoldi"), "{text}");
     assert!(text.contains("-0.4000+7.9800j"), "{text}");
     assert!(text.contains("-0.73018"), "{text}");
@@ -260,37 +279,35 @@ fn the_shift_can_be_named_outright() {
 /// Flags that contradict each other are refused rather than silently ranked.
 #[test]
 fn the_aiming_flags_are_checked_against_each_other() {
-    let out = dynamics(&[
-        "--modes",
+    // --near names the shift outright, so it takes no --freq.
+    let err = usage_error(&modes(&[
+        "--count",
         "2",
-        "--modes-near",
+        "--near",
         "-0.4,7.98",
-        "--modes-freq",
+        "--freq",
         "1.0",
-    ]);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("--modes-near names the shift outright"),
-        "{err}"
-    );
+    ]));
+    assert!(err.contains("cannot be used with"), "{err}");
 
     // A damping ratio says how far off the axis, not where along it.
-    let out = dynamics(&["--modes", "2", "--modes-damping", "0.05"]);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--modes-freq to say where"), "{err}");
+    let err = usage_error(&modes(&["--count", "2", "--damping-ratio", "0.05"]));
+    assert!(err.contains("--freq"), "{err}");
 
-    let out = dynamics(&["--modes", "2", "--modes-near", "nonsense"]);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
+    let err = usage_error(&modes(&["--count", "2", "--near", "nonsense"]));
     assert!(err.contains("expected <re>,<im>"), "{err}");
+
+    // Each mode takes only its own flags.
+    let err = usage_error(&modes(&["--count", "2", "--stop", "1"]));
+    assert!(err.contains("--stop"), "{err}");
+    let err = usage_error(&simulate(&["--freq", "1.0"]));
+    assert!(err.contains("--freq"), "{err}");
 }
 
 /// The sensitivity report answers "what should we change".
 #[test]
 fn the_sensitivity_flag_ranks_the_parameters() {
-    let text = stdout_of(&dynamics(&["--modes", "2", "--modes-sensitivity"]));
+    let text = stdout_of(&modes(&["--count", "2", "--sensitivity"]));
 
     assert!(
         text.contains("sensitivity of the least-damped mode"),

@@ -1,10 +1,8 @@
 //! The `gridox switches` subcommand.
 //!
-//! The CLI had no test coverage at all before this; `main.rs`'s argument
-//! handling is hand-rolled, so the parsing is worth pinning even though the
-//! solver underneath it is tested thoroughly elsewhere. Everything here drives
-//! the built binary through `CARGO_BIN_EXE_gridox` rather than calling into
-//! the library, which is the only way to exercise that parsing at all.
+//! The solver underneath is tested thoroughly elsewhere; what is pinned here is
+//! the command's arguments, by driving the built binary through
+//! `CARGO_BIN_EXE_gridox` rather than calling into the library.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -142,9 +140,9 @@ fn opening_a_switch_is_reflected_in_the_listing_and_the_solve() {
 #[test]
 fn malformed_invocations_are_rejected() {
     let out = run(&["switches"]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("at least one CGMES profile"),
+        String::from_utf8_lossy(&out.stderr).contains("<PROFILE.XML>"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -152,16 +150,16 @@ fn malformed_invocations_are_rejected() {
     let Some(out) = run_switches(&["--retain", "nonsense"]) else {
         return;
     };
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("expected none, busbar_adjacent or all"),
+        err.contains("[possible values: none, busbar_adjacent, all]"),
         "{err}"
     );
 
     let out = run_switches(&["--retain"]).unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("needs a value"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("a value is required"));
 
     let out = run_switches(&["--open", "not-an-mrid"]).unwrap();
     assert!(!out.status.success());
@@ -169,12 +167,16 @@ fn malformed_invocations_are_rejected() {
     assert!(err.contains("no retained switch matches"), "{err}");
 }
 
-/// `--help` mentions the subcommand, so it is discoverable.
+/// `--help` lists the subcommand, and its own help its flags.
 #[test]
 fn the_subcommand_is_documented_in_usage() {
     let out = run(&["--help"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("gridox switches"), "{stdout}");
+    assert!(stdout.contains("switches"), "{stdout}");
+
+    let out = run(&["switches", "--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--retain"), "{stdout}");
 }

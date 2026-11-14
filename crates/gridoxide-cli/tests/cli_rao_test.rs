@@ -1,7 +1,7 @@
 //! The `gridox rao` subcommand's `--parameters` flag.
 //!
-//! `main.rs`'s argument handling is hand-rolled, so it is pinned here by
-//! driving the built binary rather than calling into the library.
+//! Pinned by driving the built binary rather than calling into the library,
+//! as the arguments and exit codes are the binary's own.
 //!
 //! The flag exists because the optimizer could be told to minimize cost, hold
 //! MNECs, run a second preventive pass or measure in amperes — and the binary

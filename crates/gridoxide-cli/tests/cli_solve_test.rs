@@ -4,7 +4,7 @@
 //! --solve` ran one as a side effect of listing switches, `dc` ran the linear
 //! one, and the outer loops were reachable only from Rust. Everything here
 //! drives the built binary, which is the only way to exercise `main.rs`'s
-//! hand-rolled argument handling.
+//! argument handling.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -42,7 +42,7 @@ fn stdout(out: &Output) -> String {
 fn solve_needs_a_path() {
     let out = run(&["solve"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("solve needs a network path"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("<NETWORK>"));
 }
 
 #[test]
@@ -149,8 +149,13 @@ fn a_bad_flag_value_is_rejected() {
         return;
     };
     let out = run(&["solve", dir.to_str().unwrap(), "--max-iter", "banana"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--max-iter"));
+
+    // So is a flag solve does not have, rather than a run that ignores it.
+    let out = run(&["solve", dir.to_str().unwrap(), "--max-iters", "5"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--max-iters"));
 }
 
 /// UCTE reaches the same subcommand, which is the point of loading by

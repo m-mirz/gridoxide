@@ -16,8 +16,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn document() -> PathBuf {
-    PathBuf::from(crate::REPO)
-        .join("tests/data/pgm/state_estimation/transmission-case/input.json")
+    PathBuf::from(crate::REPO).join("tests/data/pgm/state_estimation/transmission-case/input.json")
 }
 
 fn estimate(extra: &[&str]) -> Output {

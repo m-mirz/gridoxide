@@ -2,7 +2,7 @@
 //!
 //! The numerics are gated in `continuation_test.rs` (against a closed form) and
 //! `continuation_events_test.rs` (against a brute-force bisection). What is
-//! pinned here is the hand-rolled argument handling, and that each flag reaches
+//! pinned here is the argument handling, and that each flag reaches
 //! the code it names.
 
 use std::path::PathBuf;
