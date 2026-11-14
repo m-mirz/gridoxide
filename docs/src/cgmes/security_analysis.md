@@ -14,7 +14,7 @@ xml = analysis.to_sar(publisher=..., is_version_of=..., rights_holder=...,
 ```
 
 ```bash
-gridoxide cgmes-security profiles/*.xml --contingencies co/*.xml --sar out.xml \
+gridox cgmes-security profiles/*.xml --contingencies co/*.xml --sar out.xml \
     --publisher <iri> --version-of <iri> --rights-holder <name> --generated-at <time>
 ```
 

@@ -1,4 +1,4 @@
-//! The `gridoxide estimate` subcommand, in both domains.
+//! The `gridox estimate` subcommand, in both domains.
 //!
 //! The numbers are gated elsewhere — against power-grid-model's own state
 //! estimation fixtures in `tests/se_pgm_test.rs`, and against its *asymmetric*
@@ -16,18 +16,17 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn document() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/pgm/state_estimation/transmission-case/input.json")
+    PathBuf::from(crate::REPO).join("tests/data/pgm/state_estimation/transmission-case/input.json")
 }
 
 fn estimate(extra: &[&str]) -> Output {
     let path = document();
     let mut args = vec!["estimate", path.to_str().unwrap()];
     args.extend_from_slice(extra);
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(&args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn stdout_of(out: &Output) -> String {
@@ -153,7 +152,7 @@ fn a_document_without_sensors_is_refused() {
     for extra in [vec![], vec!["--asymmetric"]] {
         let mut args = vec!["estimate", path.to_str().unwrap()];
         args.extend_from_slice(&extra);
-        let out = Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+        let out = Command::new(env!("CARGO_BIN_EXE_gridox"))
             .args(&args)
             .output()
             .expect("runs");

@@ -8,7 +8,7 @@
 //!
 //! It was in the gate's own harness, and only there, which meant the optimizer
 //! could be *told* to minimize cost, hold MNECs, run a second preventive pass or
-//! measure in amperes — and `gridoxide rao` could ask for none of it. The gate
+//! measure in amperes — and `gridox rao` could ask for none of it. The gate
 //! validated behaviour the binary had no way to reach.
 //!
 //! It stays validated: the harness calls this module rather than its own copy,

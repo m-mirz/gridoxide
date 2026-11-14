@@ -212,7 +212,7 @@ pub struct PowerFlowReport {
     /// things about a DC solve that are not so.
     pub islands: Vec<IslandReport>,
     /// Iteration count and per-iteration convergence trace. The solver
-    /// itself prints nothing (see [`solver::SolveStats`]); `src/main.rs`
+    /// itself prints nothing (see [`solver::SolveStats`]); `crates/gridoxide-cli/src/main.rs`
     /// reconstructs the progress output from this.
     ///
     /// For the direct methods this carries only a status — `Converged` or

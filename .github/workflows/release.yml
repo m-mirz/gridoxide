@@ -1,8 +1,8 @@
 name: Release
 
-# A GitHub release per `v*` tag with the `gridoxide` CLI for each platform
-# attached. The MCP server is not attached: it ships on PyPI and inside the
-# VS Code extension (vscode.yml).
+# A GitHub release per `v*` tag with the `gridox` CLI (crates/gridoxide-cli)
+# for each platform attached. The MCP server is not attached: it ships on PyPI
+# and inside the VS Code extension (vscode.yml).
 
 on:
   push:
@@ -30,16 +30,16 @@ jobs:
           # musl: a static binary runs on any Linux distribution.
           - os: ubuntu-latest
             rust_target: x86_64-unknown-linux-musl
-            exe: gridoxide
-            artifact: gridoxide-linux-x64
+            exe: gridox
+            artifact: gridox-linux-x64
           - os: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            exe: gridoxide.exe
-            artifact: gridoxide-windows-x64.exe
+            exe: gridox.exe
+            artifact: gridox-windows-x64.exe
           - os: macos-latest
             rust_target: aarch64-apple-darwin
-            exe: gridoxide
-            artifact: gridoxide-macos-arm64
+            exe: gridox
+            artifact: gridox-macos-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -63,12 +63,11 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.rust_target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.rust_target }}-cargo-release-
 
-      # Every feature that needs no system library; klu, pardiso, opf-highs,
-      # opf-ipopt and smallsignal-arpack each link one, so they stay off.
-      - name: Build gridoxide
-        run: >
-          cargo build --release --bin gridoxide --target ${{ matrix.rust_target }}
-          --features cgmes,ucte,iidm,matpower,opf,rao,dynamics
+      # gridoxide-cli's default features: every one that needs no system
+      # library; klu, pardiso, opf-highs, opf-ipopt and smallsignal-arpack each
+      # link one, so they stay off.
+      - name: Build gridox
+        run: cargo build --release -p gridoxide-cli --target ${{ matrix.rust_target }}
 
       - name: Stage artifact
         shell: bash
@@ -97,8 +96,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber --repo ${{ github.repository }} gridoxide-*
+            gh release upload "$TAG" --clobber --repo ${{ github.repository }} gridox-*
           else
             gh release create "$TAG" --generate-notes \
-              --repo ${{ github.repository }} gridoxide-*
+              --repo ${{ github.repository }} gridox-*
           fi

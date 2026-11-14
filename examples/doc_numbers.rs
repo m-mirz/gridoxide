@@ -1,6 +1,6 @@
 //! Prints the DC quantities the book's remedial-action pages derive by hand.
 //!
-//! `gridoxide security` and `gridoxide rao` already print flows and margins.
+//! `gridox security` and `gridox rao` already print flows and margins.
 //! What they do not print is the *intermediate* arithmetic those pages check —
 //! each branch's per-unit susceptance and the phase-shift distribution factors
 //! a shifter produces — so this exists to keep those numbers reproducible

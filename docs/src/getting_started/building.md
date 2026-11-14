@@ -30,23 +30,28 @@ described on the page that covers it
 
 ## Running
 
-With no arguments the binary runs a bundled power-flow demo:
+The command line is `gridox`, in its own package, `gridoxide-cli`, so a plain `cargo build` at the
+root builds only the library. Run it through cargo, as in `cargo run -p gridoxide-cli -- solve
+case118.m`, or build it with `cargo build -p gridoxide-cli` and run the executable from the
+project root:
 
 ```bash
-cargo run
+./target/debug/gridox     # debug build
+./target/release/gridox   # release build
 ```
 
-Or run the built executable directly from the project root:
-
-```bash
-./target/debug/gridoxide     # debug build
-./target/release/gridoxide   # release build
-```
+`gridox` has every feature on that needs no system library (`cgmes`, `ucte`, `iidm`, `matpower`,
+`opf`, `rao`, `dynamics`); the others it forwards to the library under the same names, as in
+`cargo build -p gridoxide-cli --features opf-highs`. `cargo install gridoxide-cli` installs it, and
+each GitHub release carries it for Linux, Windows and macOS.
 
 ### Subcommands
 
-`gridoxide --help` prints the full argument list. Each subcommand reads a
-[power-grid-model JSON](../cgmes/index.md) document, except `switches`, which reads CGMES profiles.
+`gridox --help` prints the full argument list. `solve`, `dc`, `sensitivity`, `qv` and
+`continuation` read any network: a [power-grid-model JSON](../cgmes/index.md) document (`.json`),
+MATPOWER (`.m`), UCTE-DEF (`.uct`), IIDM (`.xiidm`) or CGMES, each format behind its importer
+feature. `estimate`, `short-circuit` and `opf` read power-grid-model JSON alone, as only it carries
+their sensors, faults and costs; `switches` reads CGMES profiles.
 
 | Command | What it does |
 |---|---|
@@ -54,7 +59,7 @@ Or run the built executable directly from the project root:
 | `dc <path> [--ignore-g] [--ptdf <bus>] [--lodf <branch>]` | [DC power flow](../powerflow/dc.md), optionally printing one sensitivity column. |
 | `sensitivity <path> [--dp\|--dq <bus>] [--dk\|--dalpha <branch>] [--watch <branch>] [--terminal from\|to]` | [AC sensitivity](../sensitivity/ac.md). The first four flags each pick one variable and report what responds; `--watch` picks one branch and reports what would move it. |
 | `short-circuit <path> [--scaling max\|min]` | [IEC 60909 fault currents](../short_circuit/index.md). `--scaling` picks the voltage factor `c`. |
-| `opf <network.json> [--ac] [--data <opf.json>] [--no-shedding] [--shed-price <$/MWh>] [--ignore-r] [--highs] [--no-limits] [--max-iter <n>]` | [DC optimal power flow](../opf/index.md): least-cost dispatch subject to generator limits and branch ratings, reporting dispatch, locational marginal prices and what binds. Costs and limits come from a companion document, defaulting to `<network>.opf.json`. `--ignore-r` selects `b = 1/x` — note this is the *opposite* default from `dc` above, [on purpose](../opf/index.md#which-susceptance--and-why-it-is-not-a-detail). `--highs` swaps the built-in interior-point solver for HiGHS. `--ac` solves the full [AC problem](../opf/index.md#ac-opf) instead — real voltages, reactive power and losses — which is nonconvex, so its answer is a local optimum; `--no-limits` drops branch ratings and `--max-iter` caps the solve. Needs the `opf` feature (`--highs` additionally needs `opf-highs`). |
+| `opf <network.json> [--ac] [--data <opf.json>] [--no-shedding] [--shed-price <$/MWh>] [--ignore-r] [--highs] [--no-limits] [--max-iter <n>]` | [DC optimal power flow](../opf/index.md): least-cost dispatch subject to generator limits and branch ratings, reporting dispatch, locational marginal prices and what binds. Costs and limits come from a companion document, defaulting to `<network>.opf.json`. `--ignore-r` selects `b = 1/x` — note this is the *opposite* default from `dc` above, [on purpose](../opf/index.md#which-susceptance--and-why-it-is-not-a-detail). `--highs` swaps the built-in interior-point solver for HiGHS. `--ac` solves the full [AC problem](../opf/index.md#ac-opf) instead — real voltages, reactive power and losses — which is nonconvex, so its answer is a local optimum; `--no-limits` drops branch ratings and `--max-iter` caps the solve; both need `--ac`, and the DC-only flags refuse it. Needs the `opf` feature (`--highs` additionally needs `opf-highs`). |
 | `switches <profile.xml>… [--retain …] [--open <mrid>] [--solve]` | [Node-breaker switching devices](../cgmes/node_breaker.md) read from CGMES EQ+SSH. Needs the `cgmes` feature. |
 
 Bus and branch arguments are gridoxide's own 0-based indices, and branches are ordered lines first
@@ -62,21 +67,21 @@ then transformers — the tables each command prints say which is which.
 
 ```bash
 # Least-cost dispatch, and what the network is costing you.
-cargo run --features opf -- opf grid.json
+cargo run -p gridoxide-cli -- opf grid.json
 
 # The same question against the full AC equations.
-cargo run --features opf -- opf grid.json --ac
+cargo run -p gridoxide-cli -- opf grid.json --ac
 
 # Which injection would relieve an overload on branch 8?
-cargo run -- sensitivity grid.json --watch 8
+cargo run -p gridoxide-cli -- sensitivity grid.json --watch 8
 
 # The largest three-phase fault current this network can produce.
-cargo run -- short-circuit grid.json --scaling max
+cargo run -p gridoxide-cli -- short-circuit grid.json --scaling max
 ```
 
-Argument handling is deliberately hand-rolled rather than pulled from a CLI crate: a handful of
-modes and one path each does not justify the dependency, and the library — not the binary — is the
-intended interface for anything more involved.
+`gridox --help` lists the commands and `gridox <command> --help` each one's flags; a flag a command
+does not have is an error, not ignored. The library — not the binary — is the intended interface for
+anything more involved.
 
 ## Testing
 

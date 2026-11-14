@@ -20,14 +20,14 @@ The remedial-action network comes from the `benchmark-grids` submodule
 (`git submodule update --init tests/data/benchmark-grids`).
 
 ```bash
-cargo build --release --features rao,ucte,opf
+cargo build --release -p gridoxide-cli
 
-./target/release/gridoxide short-circuit docs/examples/one-node-slg.json --scaling max
-./target/release/gridoxide short-circuit docs/examples/one-node-2ph.json --scaling max
-./target/release/gridoxide opf docs/examples/two-bus-lmp.json
-./target/release/gridoxide security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
+./target/release/gridox short-circuit docs/examples/one-node-slg.json --scaling max
+./target/release/gridox short-circuit docs/examples/one-node-2ph.json --scaling max
+./target/release/gridox opf docs/examples/two-bus-lmp.json
+./target/release/gridox security tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json
-./target/release/gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
+./target/release/gridox rao tests/data/benchmark-grids/powsybl-open-rao/files/cases/flowbased_computation/3nodes_pst.uct \
     --crac docs/examples/pst-worked-example.crac.json
 ```
 

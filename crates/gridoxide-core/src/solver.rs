@@ -90,7 +90,7 @@ impl JacobianBackend {
 /// per-iteration `println!` would serialize every worker on the stdout lock
 /// and dominate the measurement. Callers that want the old progress output
 /// reconstruct it from [`mismatch_history`](Self::mismatch_history) — see
-/// `src/main.rs`, which reproduces it verbatim.
+/// `crates/gridoxide-cli/src/main.rs`, which reproduces it verbatim.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolveStats {
     pub status: SolveStatus,
@@ -542,7 +542,7 @@ impl PersistentSolver {
 ///
 /// Returns [`SolveStats`] rather than printing progress. Per-iteration
 /// `println!` from inside this loop would serialize every worker of a
-/// [`crate::batch::BatchSolver`] run on the stdout lock; `src/main.rs`
+/// [`crate::batch::BatchSolver`] run on the stdout lock; `crates/gridoxide-cli/src/main.rs`
 /// reproduces the old console output from `SolveStats::mismatch_history`
 /// instead.
 fn newton_raphson_cached(

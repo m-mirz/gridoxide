@@ -427,7 +427,7 @@ better than any curative column its second preventive problem can produce.
 ## Reading the plan
 
 ```console
-$ gridoxide rao tests/data/benchmark-grids/powsybl-open-rao/modules/commons/src/test/resources/TestCase12Nodes.uct \
+$ gridox rao tests/data/benchmark-grids/powsybl-open-rao/modules/commons/src/test/resources/TestCase12Nodes.uct \
       --crac tests/data/benchmark-grids/powsybl-open-rao/files/crac/epic15/jsonCrac_ep15us11-4case1.json --depth 2
 
 preventive perimeter (2 state(s)): -182.3 -> -82.9 MW (+99.4), 3 leaf/leaves
@@ -442,7 +442,7 @@ INSECURE: worst margin -89.2 MW (was -182.3)
 
 Each perimeter reports the states it secures, the worst margin before and after, and the leaves it
 cost. The exit code is 0 when every perimeter ends secure and 1 when any does not, so the command can
-gate a pipeline the same way `gridoxide security` does.
+gate a pipeline the same way `gridox security` does.
 
 This run shows both halves of an honest answer. The preventive perimeter improves by 99.4 MW using a
 topological action and a phase shifter together — the PST went to its limit at tap −16 — and is still

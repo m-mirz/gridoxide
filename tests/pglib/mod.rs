@@ -29,7 +29,7 @@ pub fn dir() -> &'static Path {
             .join("pglib-opf")
             .join(env!("CARGO_CRATE_NAME"));
         let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/pglib_opf.py");
+        let script = Path::new(crate::REPO).join("tests/data/pglib_opf.py");
         let out = Command::new(&python)
             .arg(&script)
             .arg(&dir)

@@ -1,13 +1,14 @@
-//! The `gridoxide continuation` subcommand.
+//! The `gridox continuation` subcommand.
 //!
 //! The numerics are gated in `continuation_test.rs` (against a closed form) and
 //! `continuation_events_test.rs` (against a brute-force bisection). What is
-//! pinned here is the hand-rolled argument handling, and that each flag reaches
+//! pinned here is the argument handling, and that each flag reaches
 //! the code it names.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[path = "../../../tests/pglib/mod.rs"]
 mod pglib;
 
 fn case14() -> PathBuf {
@@ -15,10 +16,10 @@ fn case14() -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gridoxide"))
+    Command::new(env!("CARGO_BIN_EXE_gridox"))
         .args(args)
         .output()
-        .expect("failed to run the gridoxide binary")
+        .expect("failed to run the gridox binary")
 }
 
 fn continuation(extra: &[&str]) -> Output {

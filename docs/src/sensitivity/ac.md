@@ -190,8 +190,8 @@ way, so any disagreement is a transpose or indexing error rather than a modellin
 From the CLI — forward, then adjoint:
 
 ```bash
-gridoxide sensitivity network.json --dp 2
-gridoxide sensitivity network.json --watch 8
+gridox sensitivity network.json --dp 2
+gridox sensitivity network.json --watch 8
 ```
 
 `--dp`/`--dq` take a bus, `--dk`/`--dalpha` a branch, `--watch` a branch to watch;

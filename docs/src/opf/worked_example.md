@@ -66,7 +66,7 @@ appears in both balance rows with equal and opposite coefficients and in no bind
 \\(30 - 10 = \$20\\)/MWh, which is exactly the amount by which it is too expensive to run.
 
 ```console
-$ gridoxide opf docs/examples/two-bus-lmp.json
+$ gridox opf docs/examples/two-bus-lmp.json
 
 2 bus(es), 2 generator(s), 100.0 MW of demand
 total cost: 1000.00 $/h
@@ -119,7 +119,7 @@ Three readings of that same number, all correct and all worth having:
   because the line is full.
 
 ```console
-$ gridoxide opf docs/examples/two-bus-lmp.json
+$ gridox opf docs/examples/two-bus-lmp.json
 
 2 bus(es), 2 generator(s), 100.0 MW of demand
 total cost: 1800.00 $/h
@@ -188,7 +188,7 @@ silently, because a relaxed answer that is reported as an optimum is worse than 
 ## Reproducing this
 
 ```bash
-cargo run --release --features opf -- opf docs/examples/two-bus-lmp.json
+cargo run --release -p gridoxide-cli -- opf docs/examples/two-bus-lmp.json
 ```
 
 The committed `.opf.json` has `rate_a: 60.0`, giving Case B. Change it to `200.0` for Case A. The
