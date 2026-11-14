@@ -50,8 +50,11 @@ each GitHub release carries it for Linux, Windows and macOS.
 `gridox --help` prints the full argument list. `solve`, `dc`, `sensitivity`, `qv` and
 `continuation` read any network: a [power-grid-model JSON](../cgmes/index.md) document (`.json`),
 MATPOWER (`.m`), UCTE-DEF (`.uct`), IIDM (`.xiidm`) or CGMES, each format behind its importer
-feature. `estimate`, `short-circuit` and `opf` read power-grid-model JSON alone, as only it carries
-their sensors, faults and costs; `switches` reads CGMES profiles.
+feature. `estimate` and `opf --ac` also read a MATPOWER case: `estimate case.m --measurements
+meas.json` takes the measurements a `.m` does not carry from a JSON list (the layout of grid-bench's
+measurement sets), and `opf case.m --ac` solves what `runopf` would, from the case's own `gencost`
+and limits. The DC `opf` and `short-circuit` read power-grid-model JSON alone, as only it carries the
+companion costs and the sequence data they need; `switches` reads CGMES profiles.
 
 | Command | What it does |
 |---|---|

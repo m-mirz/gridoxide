@@ -93,15 +93,22 @@ pub struct SolveArgs {
     pub max_tap_shift: usize,
 }
 
-/// Run state estimation over a PGM JSON document containing voltage, power or
-/// current sensors.
+/// Run state estimation over a network and its measurements.
 ///
-/// Newton-Raphson by default; --iterative-linear selects the faster, less exact
-/// linearized method.
+/// A PGM JSON document carries its own voltage, power or current sensors. A
+/// MATPOWER case (.m) carries none, so its measurements come from
+/// --measurements. Newton-Raphson by default; --iterative-linear selects the
+/// faster, less exact linearized method.
 #[derive(Args)]
 pub struct EstimateArgs {
-    /// A PGM JSON document with sensors
+    /// A PGM JSON document with sensors, or a MATPOWER case (.m)
     pub path: String,
+    /// A MATPOWER case's measurements, as JSON: `{"measurements": [{"kind":
+    /// "vm" | "p_inj" | "q_inj" | "p_from" | "q_from" | "p_to" | "q_to",
+    /// "bus": <BUS_I> or "branch_row": <0-based row>, "value", "sigma"}]}`,
+    /// |V| in p.u., powers in MW and MVAr as MATPOWER signs them
+    #[arg(long, value_name = "JSON")]
+    pub measurements: Option<String>,
     /// Use the linearized method instead of Newton-Raphson
     #[arg(long)]
     pub iterative_linear: bool,
@@ -409,18 +416,19 @@ fn parse_complex(raw: &str) -> Result<num_complex::Complex<f64>, String> {
     Ok(num_complex::Complex::new(part(re)?, part(im)?))
 }
 
-/// Run an optimal power flow over a PGM JSON document: least-cost dispatch
-/// subject to generator limits and branch ratings.
+/// Run an optimal power flow: least-cost dispatch subject to generator limits
+/// and branch ratings.
 ///
-/// Prints the dispatch, locational marginal prices and whatever binds. Costs
-/// and limits come from a companion document, by default <network>.opf.json,
-/// the pair `gridoxide-matpower` writes. DC unless --ac. Needs the `opf`
-/// feature.
+/// Prints the dispatch, locational marginal prices and whatever binds. For a
+/// PGM JSON document, costs and limits come from a companion document, by
+/// default <network>.opf.json, the pair `gridoxide-matpower` writes. A MATPOWER
+/// case (.m) states its own, in `gencost` and its limit columns, and is solved
+/// as `runopf` would, with --ac. DC unless --ac. Needs the `opf` feature.
 #[derive(Args)]
 pub struct OpfArgs {
-    /// A PGM JSON document
+    /// A PGM JSON document, or a MATPOWER case (.m) with --ac
     pub network: String,
-    /// The companion OPF document
+    /// The companion OPF document of a PGM JSON document
     #[arg(long, value_name = "OPF.JSON")]
     pub data: Option<String>,
     /// Solve the full AC problem: voltages, reactive power and losses,

@@ -31,26 +31,7 @@ fn main() {
 
     let code = match args::Cli::parse().command {
         Command::Solve(a) => outcome(run_solve(&a)),
-        Command::Estimate(a) => {
-            let method = if a.iterative_linear {
-                SeMethod::IterativeLinear
-            } else {
-                SeMethod::NewtonRaphson
-            };
-            let phases = if a.asymmetric { 3 } else { 1 };
-            let sources = if a.ideal_sources {
-                gridoxide::pgm::SourceModel::Ideal
-            } else {
-                gridoxide::pgm::SourceModel::Impedance
-            };
-            outcome(run_estimate(
-                &a.path,
-                method,
-                phases,
-                !a.no_zero_injection,
-                sources,
-            ))
-        }
+        Command::Estimate(a) => outcome(run_estimate(&a)),
         Command::Dc(a) => outcome(run_dc(&a)),
         Command::Sensitivity(a) => outcome(run_sensitivity(&a)),
         Command::ShortCircuit(a) => outcome(run_short_circuit(&a)),
@@ -174,23 +155,22 @@ fn check_index(value: usize, flag: &str, limit: usize) -> Result<usize, String> 
     Ok(value)
 }
 
-/// Estimates the state of the grid in `path` and prints it, along with the two
-/// analyses that say whether the answer should be trusted.
-fn run_estimate(
-    path: &str,
-    method: SeMethod,
-    phases: usize,
-    zero_injection: bool,
-    sources: gridoxide::pgm::SourceModel,
-) -> Result<(), String> {
-    use gridoxide::se::case::{PHASE_NAMES, SeCase};
+/// Whether `path` names a MATPOWER case.
+fn is_matpower(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".m")
+}
 
+/// A PGM document's state-estimation case: its sensors on its network.
+fn pgm_se_case(
+    path: &str,
+    phases: usize,
+    ideal_sources: bool,
+) -> Result<gridoxide::se::case::SeCase, String> {
     let s_base_va = 1e6;
     let raw = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let input: PgmInput = serde_json::from_str(&raw).map_err(|e| format!("parsing {path}: {e}"))?;
-
-    let case = if phases == 3 {
-        if sources == gridoxide::pgm::SourceModel::Ideal {
+    if phases == 3 {
+        if ideal_sources {
             return Err(
                 "--ideal-sources is symmetric only: the phase domain models every \
                         source with its impedance"
@@ -199,11 +179,143 @@ fn run_estimate(
         }
         gridoxide::pgm::se::se_case_from_pgm_3ph(&input, s_base_va, 50.0)
     } else {
+        let sources = if ideal_sources {
+            gridoxide::pgm::SourceModel::Ideal
+        } else {
+            gridoxide::pgm::SourceModel::Impedance
+        };
         gridoxide::pgm::se::se_case_from_pgm_with(&input, s_base_va, 50.0, sources)
     }
-    .map_err(|e| format!("{path}: {e}"))?;
-    let mut case = case;
-    if !zero_injection {
+    .map_err(|e| format!("{path}: {e}"))
+}
+
+/// A MATPOWER case's state-estimation case: the measurements at
+/// `measurements_path` on the network as `runpf` sees it.
+///
+/// The JSON is grid-bench's measurement set: an object with `measurements`, or
+/// the list alone. A flow names its branch by its 0-based row; where it also
+/// names the row's `from_bus` and `to_bus`, they are checked against the case,
+/// so a set written for another case is refused rather than read onto this one.
+#[cfg(feature = "matpower")]
+fn matpower_se_case(
+    path: &str,
+    measurements_path: &str,
+) -> Result<gridoxide::se::case::SeCase, String> {
+    use gridoxide::matpower::{CaseMeasurement, MeasuredQuantity as Q};
+    use serde_json::Value;
+
+    let text = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let case = gridoxide::matpower::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    let net = gridoxide::matpower::to_network(&case).map_err(|e| format!("{path}: {e}"))?;
+    let raw = fs::read_to_string(measurements_path)
+        .map_err(|e| format!("reading {measurements_path}: {e}"))?;
+    let doc: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {measurements_path}: {e}"))?;
+    let list = match &doc {
+        Value::Array(list) => list,
+        Value::Object(map) => map
+            .get("measurements")
+            .and_then(Value::as_array)
+            .ok_or(format!("{measurements_path}: no `measurements` list"))?,
+        _ => return Err(format!("{measurements_path}: expected an object or a list")),
+    };
+
+    let mut out = Vec::with_capacity(list.len());
+    for (k, m) in list.iter().enumerate() {
+        let at = |what: &str| format!("{measurements_path}: measurement {k}: {what}");
+        let number = |key: &str| {
+            m.get(key)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| at(&format!("no number `{key}`")))
+        };
+        let kind = m
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| at("no `kind`"))?;
+        let (quantity, on_branch) = match kind {
+            "vm" => (Q::VoltageMagnitude, false),
+            "p_inj" => (Q::ActiveInjection, false),
+            "q_inj" => (Q::ReactiveInjection, false),
+            "p_from" => (Q::ActiveFlowFrom, true),
+            "q_from" => (Q::ReactiveFlowFrom, true),
+            "p_to" => (Q::ActiveFlowTo, true),
+            "q_to" => (Q::ReactiveFlowTo, true),
+            other => {
+                return Err(at(&format!(
+                    "unknown kind {other:?}, expected vm, p_inj, q_inj, p_from, q_from, p_to \
+                     or q_to"
+                )));
+            }
+        };
+        let key = if on_branch { "branch_row" } else { "bus" };
+        let index = m
+            .get(key)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| at(&format!("a {kind} measurement needs `{key}`")))?;
+        if on_branch {
+            let row = case
+                .branch
+                .get(index as usize)
+                .ok_or_else(|| at(&format!("branch row {index} is not in {path}")))?;
+            for (end, column) in [("from_bus", 0), ("to_bus", 1)] {
+                if let Some(bus) = m.get(end).and_then(Value::as_u64)
+                    && row.get(column).map(|b| *b as u64) != Some(bus)
+                {
+                    return Err(at(&format!(
+                        "says branch row {index} has {end} {bus}, but {path}'s does not"
+                    )));
+                }
+            }
+        }
+        out.push(CaseMeasurement {
+            quantity,
+            at: index,
+            value: number("value")?,
+            sigma: number("sigma")?,
+        });
+    }
+    gridoxide::matpower::se_case(&net, &out).map_err(|e| format!("{path}: {e}"))
+}
+
+#[cfg(not(feature = "matpower"))]
+fn matpower_se_case(_: &str, _: &str) -> Result<gridoxide::se::case::SeCase, String> {
+    Err("this build reads no MATPOWER; rebuild with `--features matpower`".into())
+}
+
+/// Estimates the state of the grid in `path` and prints it, along with the two
+/// analyses that say whether the answer should be trusted.
+fn run_estimate(a: &args::EstimateArgs) -> Result<(), String> {
+    use gridoxide::se::case::{PHASE_NAMES, SeCase};
+
+    let path = a.path.as_str();
+    let method = if a.iterative_linear {
+        SeMethod::IterativeLinear
+    } else {
+        SeMethod::NewtonRaphson
+    };
+    let phases = if a.asymmetric { 3 } else { 1 };
+
+    let mut case = if is_matpower(path) {
+        if a.asymmetric || a.ideal_sources {
+            return Err(
+                "--asymmetric and --ideal-sources model power-grid-model's components; \
+                 a MATPOWER case has neither phases nor sources"
+                    .into(),
+            );
+        }
+        let measurements = a.measurements.as_deref().ok_or(
+            "a MATPOWER case carries no measurements; give them with --measurements <json>",
+        )?;
+        matpower_se_case(path, measurements)?
+    } else {
+        if a.measurements.is_some() {
+            return Err(format!(
+                "--measurements is for a MATPOWER case; {path} carries its own sensors"
+            ));
+        }
+        pgm_se_case(path, phases, a.ideal_sources)?
+    };
+    if a.no_zero_injection {
         case.drop_zero_injection();
     }
 
@@ -379,6 +491,13 @@ fn run_opf(a: &args::OpfArgs) -> Result<(), String> {
     if a.ac {
         return run_ac_opf(a);
     }
+    if is_matpower(&a.network) {
+        return Err(
+            "a MATPOWER case is solved as AC (`--ac`), as `runopf` does; the DC OPF reads a \
+             PGM JSON document and its companion"
+                .into(),
+        );
+    }
     let path = a.network.as_str();
     use gridoxide::opf::dc::{DcOpf, DcOpfOptions};
     use gridoxide::opf::model::OpfData;
@@ -536,22 +655,6 @@ fn run_ac_opf(a: &args::OpfArgs) -> Result<(), String> {
     use gridoxide::opf::ac::{AcOpf, AcOpfOptions};
     use gridoxide::opf::model::OpfData;
 
-    let data_path = match &a.data {
-        Some(p) => PathBuf::from(p),
-        None => PathBuf::from(path).with_extension("opf.json"),
-    };
-    let network_text = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let data_text = fs::read_to_string(&data_path).map_err(|e| {
-        format!(
-            "reading {}: {e} — pass --data if the companion OPF document is elsewhere",
-            data_path.display()
-        )
-    })?;
-    let input: PgmInput =
-        serde_json::from_str(&network_text).map_err(|e| format!("parsing {path}: {e}"))?;
-    let data = OpfData::from_json(&data_text)
-        .map_err(|e| format!("parsing {}: {e}", data_path.display()))?;
-
     let mut options = AcOpfOptions {
         enforce_limits: !a.no_limits,
         ..AcOpfOptions::default()
@@ -560,8 +663,42 @@ fn run_ac_opf(a: &args::OpfArgs) -> Result<(), String> {
         options.nlp.max_iterations = n;
     }
 
-    let network = gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options)
-        .map_err(|e| e.to_string())?;
+    // What to call bus `i` of the OPF: MATPOWER's bus number, else its index.
+    let (network, bus_numbers) = if is_matpower(path) {
+        if a.data.is_some() {
+            return Err(format!(
+                "--data is a PGM document's companion; {path} states its own costs and limits"
+            ));
+        }
+        let (network, numbers, notes) = matpower_ac_opf(path)?;
+        for note in &notes {
+            println!("note: {note}");
+        }
+        (network, Some(numbers))
+    } else {
+        let data_path = match &a.data {
+            Some(p) => PathBuf::from(p),
+            None => PathBuf::from(path).with_extension("opf.json"),
+        };
+        let network_text = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+        let data_text = fs::read_to_string(&data_path).map_err(|e| {
+            format!(
+                "reading {}: {e} — pass --data if the companion OPF document is elsewhere",
+                data_path.display()
+            )
+        })?;
+        let input: PgmInput =
+            serde_json::from_str(&network_text).map_err(|e| format!("parsing {path}: {e}"))?;
+        let data = OpfData::from_json(&data_text)
+            .map_err(|e| format!("parsing {}: {e}", data_path.display()))?;
+        let network = gridoxide::pgm::opf::ac_opf_network_from_pgm(input, &data, 50.0, &options)
+            .map_err(|e| e.to_string())?;
+        (network, None)
+    };
+    let bus_label = |i: usize| match &bus_numbers {
+        Some(numbers) => numbers[i].to_string(),
+        None => i.to_string(),
+    };
     let n_buses = network.n_buses;
     let demand: f64 = network.p_load.iter().sum::<f64>() * network.base_mva;
     let opf = AcOpf::build(network, options).map_err(|e| e.to_string())?;
@@ -612,8 +749,8 @@ fn run_ac_opf(a: &args::OpfArgs) -> Result<(), String> {
         .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, v)| (i, *v));
     if let (Some((lo_bus, lo)), Some((hi_bus, hi))) = (lowest, highest) {
-        println!("  lowest  bus {lo_bus:>4}: {lo:.4}");
-        println!("  highest bus {hi_bus:>4}: {hi:.4}");
+        println!("  lowest  bus {:>4}: {lo:.4}", bus_label(lo_bus));
+        println!("  highest bus {:>4}: {hi:.4}", bus_label(hi_bus));
     }
 
     println!("\nlocational marginal price ($/MWh):");
@@ -627,7 +764,7 @@ fn run_ac_opf(a: &args::OpfArgs) -> Result<(), String> {
         println!("  uniform at {min:.4} — nothing is congested");
     } else {
         for (bus, price) in result.lmp_p.iter().enumerate() {
-            println!("  bus {bus:>4}: {price:>10.4}");
+            println!("  bus {:>4}: {price:>10.4}", bus_label(bus));
         }
         println!("  spread: {:.4} (the congestion)", max - min);
     }
@@ -658,6 +795,25 @@ fn run_ac_opf(a: &args::OpfArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The AC-OPF `runopf` solves on the MATPOWER case at `path`, with each OPF
+/// bus's MATPOWER number and what the conversion decided.
+#[cfg(all(feature = "opf", feature = "matpower"))]
+fn matpower_ac_opf(
+    path: &str,
+) -> Result<(gridoxide::opf::ac::AcOpfNetwork, Vec<u64>, Vec<String>), String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let case = gridoxide::matpower::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    let opf = gridoxide::matpower::ac_opf_network(&case).map_err(|e| format!("{path}: {e}"))?;
+    Ok((opf.network, opf.bus_numbers, opf.notes))
+}
+
+#[cfg(all(feature = "opf", not(feature = "matpower")))]
+fn matpower_ac_opf(
+    _: &str,
+) -> Result<(gridoxide::opf::ac::AcOpfNetwork, Vec<u64>, Vec<String>), String> {
+    Err("this build reads no MATPOWER; rebuild with `--features matpower`".into())
 }
 
 #[cfg(not(feature = "opf"))]
