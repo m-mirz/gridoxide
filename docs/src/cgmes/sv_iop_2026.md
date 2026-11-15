@@ -14,7 +14,7 @@ together.
 |---|---|
 | gridoxide | 0.4.0, commit `766c5a8` (branch `cgmes-relicapgrid`), Python bindings built with the `cgmes` feature |
 | Dataset | [entsoe/relicapgrid](https://github.com/entsoe/relicapgrid) `cgmes-3.0_ncp-2.5_tc-2.0` @ `f09bb34` (2026-09-11), the submodule `tests/data/relicapgrid` |
-| CIM input and SAR export | `cimoxide-model` 0.6.0, a dependency of the `cgmes` feature |
+| CIM input and SAR export | `cimoxide-model` 0.7.0, a dependency of the `cgmes` feature |
 | Test reference | [cimoxide](https://pypi.org/project/cimoxide/) 0.6.0 from PyPI, a test-only dependency |
 
 ## How gridoxide was tested
