@@ -78,7 +78,7 @@ and its fields as written, read by `Class.attr` key — checked against class ta
 ENTSO-E's schemas.
 
 - **Upstream**: <https://github.com/m-mirz/cimoxide>
-- **Crate**: [`cimoxide-model`](https://crates.io/crates/cimoxide-model) `0.6.0`
+- **Crate**: [`cimoxide-model`](https://crates.io/crates/cimoxide-model) `0.7.0`
 
 cimoxide is Apache-2.0, matching gridoxide's own license — no licensing mismatch from this
 dependency.
@@ -86,7 +86,7 @@ dependency.
 ### The `package =` rename
 
 ```toml
-cimmodel = { package = "cimoxide-model", version = "0.6.0", optional = true }
+cimmodel = { package = "cimoxide-model", version = "0.7.0", optional = true }
 ```
 
 The crate's library is named `cimmodel`, so the code says `cimmodel::CimDataset` whatever the
