@@ -72,6 +72,18 @@ fn cpu(
 /// Scenario by scenario, except those in `rough` (whose divergence is
 /// chaotic, so only its outcome is compared, and only as not converged).
 fn assert_same(gpu: &BatchReport, cpu: &BatchReport, rough: &[usize], what: &str) {
+    assert_same_steps(gpu, cpu, rough, what);
+    for (s, (g, c)) in gpu.scenarios.iter().zip(&cpu.scenarios).enumerate() {
+        if !rough.contains(&s) {
+            assert_eq!(g.on_cpu, c.on_cpu, "{what}: scenario {s}");
+        }
+    }
+    assert_eq!(gpu.cpu_handoffs, cpu.cpu_handoffs, "{what}");
+}
+
+/// As [`assert_same`], but for which scenarios the CPU finished: with fewer
+/// slots than scenarios, the last few to finish are those that started last.
+fn assert_same_steps(gpu: &BatchReport, cpu: &BatchReport, rough: &[usize], what: &str) {
     assert_eq!(gpu.scenarios.len(), cpu.scenarios.len());
     for (s, (g, c)) in gpu.scenarios.iter().zip(&cpu.scenarios).enumerate() {
         if rough.contains(&s) {
@@ -82,7 +94,6 @@ fn assert_same(gpu: &BatchReport, cpu: &BatchReport, rough: &[usize], what: &str
         assert_eq!(g.outcome, c.outcome, "{what}: scenario {s}");
         assert_eq!(g.newton_steps, c.newton_steps, "{what}: scenario {s}");
         assert_eq!(g.factorizations, c.factorizations, "{what}: scenario {s}");
-        assert_eq!(g.on_cpu, c.on_cpu, "{what}: scenario {s}");
         assert_eq!(g.voltage_mag.len(), c.voltage_mag.len());
         for (a, b) in g
             .voltage_mag
@@ -96,7 +107,6 @@ fn assert_same(gpu: &BatchReport, cpu: &BatchReport, rough: &[usize], what: &str
             );
         }
     }
-    assert_eq!(gpu.cpu_handoffs, cpu.cpu_handoffs, "{what}");
 }
 
 /// Sweeps in one chunk and in three (the last padded), adaptive and fixed.
@@ -136,8 +146,8 @@ fn sweeps_match_the_cpu_loop() {
     }
 }
 
-/// A sweep's first step is factorized once for the session: across chunks,
-/// a short last chunk that does not share it, and a second solve.
+/// A sweep's first step is factorized once for the session: with more
+/// scenarios than slots, and in a second solve.
 #[test]
 fn a_shared_first_step_factorizes_once() {
     let (_, base, ybus) = load("matpower/case1354pegase.m");
@@ -148,19 +158,19 @@ fn a_shared_first_step_factorizes_once() {
     };
     let want = cpu(&base, &ybus, &scenarios, &opts).unwrap();
     let mut gpu = GpuBatchSolver::new(&base, &ybus, 32).unwrap();
-    // Chunks of 32, 32 and 6: the first two share it, the last has its own.
+    // Through 32 slots, each refilled as its scenario ends: all 70 share it.
     let got = gpu.solve_sweep(&scenarios, &opts).unwrap();
     assert_same(&got, &want, &[], "first solve");
     assert_eq!(
         got.linear.systems_factored,
-        want.linear.systems_factored - 64 + 1
+        want.linear.systems_factored - 70 + 1
     );
     assert_eq!(got.linear.systems_solved, want.linear.systems_solved);
     let again = gpu.solve_sweep(&scenarios, &opts).unwrap();
     assert_same(&again, &want, &[], "second solve");
     assert_eq!(
         again.linear.systems_factored,
-        want.linear.systems_factored - 64
+        want.linear.systems_factored - 70
     );
 }
 
@@ -418,12 +428,13 @@ fn n1_matches_the_cpu_loop() {
             )
             .unwrap();
             let got = gpu.solve_contingencies(&scenarios, &opts).unwrap();
-            assert_same(
-                &got,
-                &want,
-                &[],
-                &format!("N-1 {what}, capacity {capacity}"),
-            );
+            let what = format!("N-1 {what}, capacity {capacity}");
+            if capacity < scenarios.len() && opts.cpu_handoff.is_some() {
+                assert_same_steps(&got, &want, &[], &what);
+                assert!(got.cpu_handoffs <= opts.cpu_handoff.unwrap(), "{what}");
+            } else {
+                assert_same(&got, &want, &[], &what);
+            }
         }
     }
 }

@@ -1,118 +1,85 @@
 # GPU TODO
 
-What is left on the GPU. Numbers are grid-bench's, in its containers, on one
-A100 and 30 cores on 2026-11-07 at gridoxide 1dd1c96, against the stored
-2026-10-31 results of the other tools on the same machine. gridoxide_gpu runs
-every GPU problem there, on the local branch `gridoxide-gpu-opf`, which needs
-a gridoxide release before it can merge. The cuDSS findings behind the batch's
-design are in [probes/cudss_ubatch/README.md](probes/cudss_ubatch/README.md).
+Numbers: grid-bench on one A100, 2026-11-07, at gridoxide v0.4.0 (branch
+`gridoxide-gpu-opf`), against the other tools' 2026-10-31 results. cuDSS findings:
+[probes/cudss_ubatch/README.md](probes/cudss_ubatch/README.md); profiles and
+settings: `scripts/bench/README.md`, section 11.
 
 # AC-OPF
 
-The oracle accepts every solved case. 1.8-2.4x faster than
-ExaModelsPower/MadNLP from case2869_pegase up (case24464_goc 1.58 s against
-3.63), and it solves case9241_pegase and case30000_goc, which MadNLP does not.
-case13659_pegase stops at grid-bench's 200 iterations: it needs 207-211.
+Every case accepted, at grid-bench's limit of 500 iterations. 1.8-2.4x faster
+than ExaModelsPower from case2869_pegase up but on case13659_pegase; it also
+solves case9241_pegase and case30000_goc, which that does not.
 
-- [ ] **The inertia test's false alarms,** at 1e-8 only (at 1e-6
-  case2869_pegase takes 45, MadNLP 46). On case2869_pegase (proportional
-  start) the last 48 of 100 iterations follow a δw at an optimum already
-  reached, each a false alarm: the unpivoted `LDLᵀ` is off by exactly one
-  every time, reporting `(6757, 19486)` where a dense pivoted factorization of
-  the same matrix gives the expected `(6758, 19485)`, with the eigenvalue
-  nearest zero of `D K D` at 5.6e-7, far above rounding. What needs curing is
-  the factorization, not the test. Tried and worse: raising δc (1e-7 takes
-  that case from 131 iterations to 69 from flat but fails case13659_pegase,
-  1e-6 fails more); keeping the δw = 0 step if its curvature is positive, with
-  inertia off by one or two (case118_ieee__api never ends, at 1e-6 too); the
-  same only at μ ≤ 1e-7 and `inf_pr` ≤ 1e-4 (all solve, but 3489 iterations
-  become 3596 over 68 runs at 1e-8, case2869_pegase 131 to 103 from flat and
-  98 to 220 from proportional). faer's intranode pivoted `LBLᵀ` did not cure it
-  (92 iterations; 78 against 68 from flat).
-- [ ] **case13659_pegase over grid-bench's 200 iterations.** Not false alarms:
-  the inertia is off by hundreds to over a thousand, at μ = 0.1 with `inf_pr`
-  about 25 and `inf_du` about 1e5, and 130 of 208 iterations carry a δw of 1e4
-  to 1e9, at steps of about 1e-3.
-- [ ] **The rest of the iteration gap.** case10000_goc takes 81 iterations
-  (IPOPT 82, MadNLP 63), case19402_goc 70 (62), case10480_goc 66 (60).
-  Candidates are IPOPT's adaptive barrier and MadNLP's relaxed equalities.
-- [ ] **cuDSS's analysis**, once a solve: most of the first iteration's 0.64 s
-  on case24464_goc, as much as all the other iterations (0.69 s at 12.4 ms).
-  Reuse it across solves of the same network, or hand cuDSS a reordering
-  without nested dissection's cost.
-- [ ] **The setup around the iterations,** about 0.4 s of case24464_goc's
-  1.6: scaling, the patterns, `DeviceInteriorPoint::new`, each solve anew. Not
-  yet broken down.
-- [ ] **Fewer cuDSS solves.** 4.75 an iteration, 1.65 ms each without
-  deterministic mode, nearly half of an iteration. Fewer refinement rounds
-  bought only 4-5% and moved paths; try cuDSS's own iterative refinement.
-- [ ] **Small cases.** The device costs case14_ieee and case118_ieee 12 ms
-  (0.68x and 0.78x the host's vectors, even on case300_ieee). A fallback by
-  size would keep the host's times there.
-- [ ] **HyKKT on the device.** Its CG and residuals run on the host. Only
-  worth it if it beats the augmented system once they do not.
+- [ ] **case13659_pegase's crawl:** 206-254 iterations and 4.66 s, against
+  ExaModelsPower's 63 and 2.10. The cause is how bus injection writes branch
+  limits: |S(V)|² ≤ rate², nonconvex in the voltages, whose multipliers make the
+  Hessian indefinite (inertia off by hundreds, δw of 1e4 to 1e9, steps of
+  1e-3). Without branch limits bus injection takes 64 iterations; branch flow,
+  whose limit is p² + q² ≤ rate² on flow variables, takes 63-66 with them, as
+  ExaModelsPower and PowerModels (flow variables too) do. But a branch-flow
+  iteration costs 2-2.5x a bus one (case24464_goc: factorization 17.6 ms
+  against 6.3, solves 11.6 against 5.4): cuDSS factors 4 more variables and
+  rows a branch. At grid-bench's settings, bus / branch flow: case13659_pegase
+  218 / 63 iterations, 4.43 / 1.98 s; case24464_goc 1.59 / 3.92 s;
+  case9241_pegase 0.78 / 1.63 s. Next: **condense the flow variables out of
+  branch flow's KKT system**, exactly, as the inequality slacks are now:
+  branch flow's path at about bus injection's cost an iteration. Prototype on
+  the host first, for the iterations and the conditioning (the eliminated rows'
+  barrier terms), then the device. Either formulation is within grid-bench's
+  rules, MATPOWER's problem; the adapter's docstring states which.
+- [ ] **The rest of the iteration gap.** case10000_goc 81 (MadNLP 63),
+  case19402_goc 70 (62), case10480_goc 66 (60). Candidates: IPOPT's adaptive
+  barrier, MadNLP's relaxed equalities.
+- [ ] **False inertia alarms,** at 1e-8 only. On case2869_pegase the `LDLᵀ`
+  reports one negative eigenvalue too many where a dense pivoted factorization
+  gives the right inertia, and 48 of 100 iterations follow. The factorization
+  needs curing, not the test: raising δc, a curvature test (gated or not) and
+  faer's `LBLᵀ` all made it worse or broke other cases.
+- [ ] **cuDSS's analysis,** once a solve: about 0.6 s of case24464_goc's 1.6.
+  Reuse it across solves, or give cuDSS a cheaper reordering.
+- [ ] **The setup around the iterations,** about 0.4 s of the same 1.6. Not yet
+  broken down.
+- [ ] **Fewer cuDSS solves:** 4.75 an iteration, nearly half its time. Try
+  cuDSS's own iterative refinement.
+- [ ] **Small cases:** the device costs case14_ieee and case118_ieee 12 ms. A
+  fallback by size would avoid it.
+- [ ] **HyKKT on the device,** only if it would beat the augmented system.
 
 # Batch power flow
 
-The oracle accepts every scenario of every case, which no other GPU tool
-there manages. What is left to be faster is N-1.
+Every scenario accepted, which no other GPU tool manages. Sweeps lead
+gpusim2grid everywhere; case9241pegase's 10k takes 0.59 ms a scenario, 0.47 of
+it the solve. N-1 is the weak spot: 0.54-0.70x gridoxide's CPU on 200 outages.
+On `#n1-full`, 0.90-1.01x in grid-bench; since its outages' preparation
+finds the network's bridges once and builds the deltas in parallel (it was
+9.6 s of case9241pegase's 22), and slots refill as outages end: 10.65 s
+against the CPU's 21.1 on case9241pegase and 0.85 against 1.36 on
+case2869pegase, through the adapter outside its container.
 
-- **Sweeps:** ahead of gpusim2grid on all of them, 1.35-2.8x on `#sweep-1k` and
-  `#sweep-10k`, and of lightsim2grid from 1000 scenarios up. Against gridoxide
-  on 30 CPU threads: 1.6-2.5x on the transmission cases' large sweeps,
-  0.97-1.1x on mvlv10616's, 0.4-1.2x on 100 scenarios. case9241pegase's 10k
-  takes 0.59 ms a scenario, 0.47 of it the solve (NVIDIA's target: 0.5).
-- **How:** one factorization for a sweep's first step, a solve with a column per
-  scenario, and `chord_steps=12, chord_below=0.9` on those factors before
-  Newton (`scripts/bench/README.md`, section 11). mvlv10616's scenarios leave
-  the chord steps at once, and gain only the first step.
-- **N-1:** 0.54-0.70x gridoxide's CPU on 200 outages and 0.90-1.01x on
-  `#n1-full`. gpusim2grid is about 1.5x faster on `#n1-full`, and the oracle
-  rejects it on all three.
-- **Power flow and DC:** ahead of gpusim2grid and ExaPF on all 13 power-flow
-  cases and of ToOp on all 7 DC ones; ahead of gridoxide's CPU on power flow
-  from case1354pegase up.
-- **Where the time goes** (Nsight Systems, `scripts/bench/README.md`, section
-  11): cuDSS is 87-92% of the device's work and 73-83% of the wall time,
-  factorization 51-58% of the device's work and the triangular solves 33-41%.
+- [x] **N-1's tail:** a slot whose outage ends takes the next one, where a
+  chunk ran at its slowest outage's pace (12 steps on case9241pegase against
+  a mean of 3.8), a masked step at 13-16% of a full one. case9241pegase's
+  every outage 11.4 s to 9.4 in `gpu_bench`, 13.0 to 10.65 through the
+  adapter. Sweeps on the shared first step keep their chunks: refilled, they
+  were 17-35% slower.
+- [ ] **N-1's voltages:** 1.6 s of case9241pegase's `#n1-full` is the copy to
+  Python, 2.1 GB.
+- [ ] **Mixed precision:** factor in FP32, mismatch in FP64, if the oracle
+  accepts it.
 
-- [ ] **Profile `#n1-full`,** where the GPU trails most at scale, then the
-  tail of a 10k sweep, when few scenarios are still active: a masked step
-  still costs 9-12% of a full one.
-- [ ] **Keep the batch full.** As scenarios converge, refill their slots
-  instead of finishing each chunk before starting the next. A refilled slot
-  needs a masked `FACTORIZATION`. Only if the tail's profile asks for it.
-- [ ] **Mixed precision.** Factor in FP32 and keep the mismatch in FP64. An
-  experiment, kept only if the oracle accepts it.
+# Beyond
 
-# Beyond batch power flows
-
-The device solves AC sweeps, AC and DC N-1, DC sweeps, single AC and DC power
-flows and the AC-OPF. Everything else is CPU only. `GpuBatchSolver` and
-`GpuDcSolver` have the same calls: `solve_single`, `solve_sweep`,
-`solve_contingencies`.
-
-- [ ] **A linear start for AC.** The CPU's `start="linear"` has no device
-  counterpart; every scenario starts from the last `solve()`. A DC solve per
-  scenario on the device would give it one.
+- [ ] **A linear start for AC:** a DC solve per scenario on the device.
 
 # Settled
 
-Measured, and not to be tried again without a reason:
+Measured; not to be retried without a reason.
 
-- **The batch's cuDSS settings on the AC-OPF:** no gain, `kkt::CudssSolver`
-  keeps the defaults. Six levels are 5-21% slower, multiblock within 5%, 12
-  levels within 4% either way, AMD about twice as slow.
-- **Factor reuse in the batch:** `reuse_below=0.1` is 3-12% slower than none,
-  its extra Newton steps outweighing the factorizations it saves.
-- **cuDSS 0.8.0:** 1.75-3.7x cheaper per system than 1.0.0, but NaN in a
-  uniform batch.
-- **DC sweeps on the GPU:** slower than `DcBatchSolver` on 30 threads (45 ms
-  against 12 on case1354pegase, 290 against 94 on case9241pegase).
-- **The batch's host round trip and own kernels:** about 0.1 ms of a
-  65-254 ms step, and 3-5% of the device's work.
-- **FMA in `kernels.cu`:** the device residual takes `K` as assembled, without
-  FMA; dropping FMA alone moved `case118_ieee__api` from 83 iterations to 382
-  (CPU: 50). The Newton step's kernels keep it.
-- **`matches` on HyKKT's matrix:** its pattern moves with the rows it counts
-  as equalities, so `fixed_pattern` cannot skip it.
+- **The batch's cuDSS settings on the AC-OPF:** no gain, or 5-21% slower.
+- **Factor reuse in the batch:** 3-12% slower than none.
+- **cuDSS 0.8.0:** cheaper, but NaN in a uniform batch.
+- **DC sweeps on the GPU:** 3x slower than `DcBatchSolver` on 30 threads.
+- **The batch's host round trip and own kernels:** not the bottleneck.
+- **FMA in `kernels.cu`:** the Newton step's kernels keep it; `K`'s product
+  does not.
