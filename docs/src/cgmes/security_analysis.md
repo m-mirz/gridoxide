@@ -31,6 +31,12 @@ terminal a contingency violates. A contingency's own equipment is not monitored:
 `PowerFlowResult.value` is in percent, as the profile defines it. A contingency that does not converge
 has no result, as the profile has no place for one; `stalled` lists them.
 
+Beside the violations, `worst` (`worst_flows()` in Python) keeps, for each terminal with a limit, its
+highest flow after any one contingency and that contingency, before curative actions: how close a
+terminal within its limits after every outage comes to them. It is not in the SAR. A tie goes to the
+contingency of the lower mRID, so analyses of parts of the contingencies, `worst` merged by
+`Worst::beats` or `note_worst`, give what one analysis of them all does.
+
 A TATL allows more than the PATL for a while, so one at or below its PATL is not a limit, and is left
 out. Otherwise terminals are held against every limit they have.
 

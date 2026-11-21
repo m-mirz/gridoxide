@@ -5044,6 +5044,22 @@ impl PySecurityAnalysis {
             .collect()
     }
 
+    /// At each terminal with a limit, its highest flow after any one contingency, by mRID:
+    /// `(contingency, p, q, i)` in MW, Mvar and A.
+    fn worst_flows(&self) -> std::collections::HashMap<String, (String, f64, f64, f64)> {
+        self.inner
+            .worst
+            .iter()
+            .map(|(mrid, w)| {
+                let f = w.flow;
+                (
+                    mrid.clone(),
+                    (w.contingency.clone(), f.p_mw, f.q_mvar, f.amps),
+                )
+            })
+            .collect()
+    }
+
     /// Each violated limit in each state, as a dict: `contingency` (`None` in the base case),
     /// `terminal`, `limit`, `limit_a`, `percent`, `p`, `q`, `i`.
     fn violations(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
