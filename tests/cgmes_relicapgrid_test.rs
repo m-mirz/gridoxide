@@ -664,6 +664,21 @@ fn security_analysis_of_the_cgm() {
         assert_eq!(analysis.stalled.len(), stalled, "{sharing:?}");
         assert_eq!(in_base, base, "{sharing:?}");
         assert_eq!(analysis.violations.len() - in_base, after, "{sharing:?}");
+        // The worst flows hold every violation after a contingency, and lines within their
+        // limits after every one besides.
+        let after_one = || {
+            analysis
+                .violations
+                .iter()
+                .filter(|v| v.contingency.is_some())
+        };
+        for v in after_one() {
+            let worst = &analysis.worst[&v.terminal];
+            assert!(worst.flow.amps >= v.flow.amps, "{sharing:?} {}", v.terminal);
+        }
+        let violating: std::collections::HashSet<&str> =
+            after_one().map(|v| v.terminal.as_str()).collect();
+        assert!(analysis.worst.len() > violating.len(), "{sharing:?}");
         if sharing == ImbalanceSharing::Capability {
             assert!(analysis.past_limits.is_empty());
         }

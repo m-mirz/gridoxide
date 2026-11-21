@@ -299,6 +299,49 @@ impl Violation {
     }
 }
 
+/// The highest flow a terminal with a limit carries after any one contingency, and that
+/// contingency: what a terminal within its limits after every outage would otherwise not show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Worst {
+    pub contingency: String,
+    pub flow: TerminalFlow,
+}
+
+impl Worst {
+    /// Whether this is worse than `other`: more current, or as much after a contingency of a
+    /// lower mRID, so that analyses of parts of the contingencies merge into what one gives, in
+    /// any order.
+    pub fn beats(&self, other: &Worst) -> bool {
+        (self.flow.amps, std::cmp::Reverse(&self.contingency))
+            > (other.flow.amps, std::cmp::Reverse(&other.contingency))
+    }
+}
+
+/// `worst`, with the flows after `contingency` at the terminals with a limit kept where they are
+/// worse than what it has.
+pub fn note_worst(
+    worst: &mut HashMap<String, Worst>,
+    flows: &HashMap<String, TerminalFlow>,
+    limits: &HashMap<String, Vec<CurrentLimit>>,
+    contingency: &str,
+) {
+    for (terminal, flow) in flows {
+        if !limits.contains_key(terminal) {
+            continue;
+        }
+        let candidate = Worst {
+            contingency: contingency.to_string(),
+            flow: *flow,
+        };
+        match worst.get(terminal) {
+            Some(kept) if !candidate.beats(kept) => {}
+            _ => {
+                worst.insert(terminal.clone(), candidate);
+            }
+        }
+    }
+}
+
 /// The limits `flows` exceed.
 pub fn monitor(
     flows: &HashMap<String, TerminalFlow>,
@@ -613,6 +656,9 @@ pub struct SecurityAnalysis {
     pub base: HashMap<String, TerminalFlow>,
     /// Sorted by contingency (the base case's first), terminal and limit.
     pub violations: Vec<Violation>,
+    /// By terminal with a limit, its highest flow after any one contingency, before curative
+    /// actions; a tripped terminal's is not counted.
+    pub worst: HashMap<String, Worst>,
     pub solved: usize,
     /// The contingencies that did not converge.
     pub stalled: Vec<String>,
@@ -715,6 +761,7 @@ pub fn run_with_curative(
         sharing: options.sharing,
         scenario_time,
         violations: monitor(&base.flows, &limits, None),
+        worst: HashMap::new(),
         past_limits: base.past_limits,
         base: base.flows,
         solved: 0,
@@ -816,6 +863,12 @@ pub fn run_with_curative(
         analysis
             .violations
             .extend(monitor(&state.flows, &limits, Some(&contingency.mrid)));
+        note_worst(
+            &mut analysis.worst,
+            &state.flows,
+            &limits,
+            &contingency.mrid,
+        );
         analysis.past_limits.extend(state.past_limits);
         if let Some((names, solved)) = after {
             match solved? {
@@ -1103,6 +1156,28 @@ mod tests {
         assert_eq!(monitor(&both, &limits(), None).len(), 2);
         let elsewhere = HashMap::from([("other".to_string(), flow(1e9))]);
         assert!(monitor(&elsewhere, &limits(), None).is_empty());
+    }
+
+    #[test]
+    fn the_worst_flow_is_kept_within_limits_too() {
+        let mut worst = HashMap::new();
+        let at = |amps| {
+            HashMap::from([
+                ("t".to_string(), flow(amps)),
+                ("other".to_string(), flow(1e9)),
+            ])
+        };
+        note_worst(&mut worst, &at(400.0), &limits(), "b");
+        note_worst(&mut worst, &at(900.0), &limits(), "c");
+        note_worst(&mut worst, &at(600.0), &limits(), "d");
+        assert_eq!(worst.len(), 1, "only terminals with a limit");
+        assert_eq!(worst["t"].contingency, "c");
+        assert_eq!(worst["t"].flow.amps, 900.0);
+        // A tie goes to the lower mRID, whichever comes first.
+        note_worst(&mut worst, &at(900.0), &limits(), "a");
+        assert_eq!(worst["t"].contingency, "a");
+        note_worst(&mut worst, &at(900.0), &limits(), "e");
+        assert_eq!(worst["t"].contingency, "a");
     }
 
     fn fleet() -> Vec<Machine> {
