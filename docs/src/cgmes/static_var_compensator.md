@@ -130,9 +130,8 @@ upgrade:
 
 - If the SVC has an enabled, voltage-mode `RegulatingControl`, the controlled bus (concept 3 — possibly
   remote) is promoted from `PQ` to `PV` and pinned to the target voltage: concept 2's hard pin.
-- Otherwise it falls back to concept 4's fixed Q injection from the SSH `q` value, using the same sign
-  convention `SynchronousMachine.q` already established empirically (no negation — see that code's own
-  comment for why the doc text alone isn't trustworthy here).
+- Otherwise it falls back to concept 4's fixed Q injection from the SSH `q` value, negated: `q` is in the
+  load sign convention, as for every other injection.
 
 `q_min`/`q_max` follow concept 1 — a reactance rating converted to a per-unit reactive-power limit,
 \\(Q \approx V^2 B \approx B_{pu}\\) at \\(V \approx 1\\) pu (the same flat-voltage approximation

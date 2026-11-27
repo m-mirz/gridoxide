@@ -182,13 +182,19 @@ fn harmonizing_moves_the_per_unit_numbers_and_not_the_volts() {
     };
     let idx = cgmes_topological_node_bus_index(&ds).expect("bus index");
 
-    let report = gridoxide::run_power_flow(
+    // With BE-G1's remote control in place, which the published solution has:
+    // see `cgmes_common::solve_with_remote_control`.
+    let report = gridoxide::run_power_flow_with_remote(
         net.buses.clone(),
         &net.lines,
         &net.transformers,
         &net.shunts,
         gridoxide::TapData::none(),
+        gridoxide::RemoteControlData {
+            machines: &net.voltage_control.machines,
+        },
         PowerFlowOptions {
+            control_remote_voltage: true,
             enforce_q_limits: true,
             max_iter: 60,
             max_outer_iter: 60,
@@ -211,10 +217,11 @@ fn harmonizing_moves_the_per_unit_numbers_and_not_the_volts() {
         worst = worst.max((kv - e.v).abs() / e.v.abs().max(1e-9));
     }
     // Recorded. Before harmonizing this fixture solved 4.4% high with a 0.96%
-    // median; the assertion below would have failed by a factor of three.
+    // median, and 1.3% at worst after; with BE-G1's remote control as well,
+    // 0.09%.
     assert!(
-        worst < 0.015,
+        worst < 0.002,
         "worst voltage error against the published solution is {worst:.4}, where harmonizing \
-         the bases should hold it near 0.013"
+         the bases and holding BE-G1's remote bus should hold it near 0.0009"
     );
 }

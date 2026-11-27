@@ -69,5 +69,9 @@ fn test_cgmes_microgrid_be_mas() {
     let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
-    cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 4e-2);
+    // BE-G1 holds this area's own reference bus remotely, which leaves its
+    // output to whatever the exporter's solver chose: see
+    // `cgmes_common::remote_machine_buses`.
+    let skip = cgmes_common::remote_machine_buses(&ds, s_base_va);
+    cgmes_common::assert_matches_sv_skipping(&result, &bus_index, &expected, 4e-2, &skip);
 }

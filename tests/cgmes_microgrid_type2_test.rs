@@ -53,10 +53,8 @@ fn test_cgmes_microgrid_type2_be_mas() {
     assert_eq!(transformers.len(), 8, "expected 8 two-winding transformers");
     assert_eq!(shunts.len(), 4, "expected 4 LinearShuntCompensator shunts");
 
-    let n = buses.len();
-    let mut ybus = build_ybus(n, &lines, &transformers);
-    stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
+    // BE-G1 holds a remote bus; see `solve_with_remote_control`.
+    let result = cgmes_common::solve_with_remote_control(&ds, s_base_va);
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
     cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 1e-1);

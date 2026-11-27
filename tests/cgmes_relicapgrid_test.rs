@@ -646,9 +646,9 @@ fn security_analysis_of_the_cgm() {
         325
     );
     for (sharing, solved, stalled, base, after) in [
-        (ImbalanceSharing::Capability, 304, 21, 13, 4003),
-        (ImbalanceSharing::Reference, 312, 13, 17, 5230),
-        (ImbalanceSharing::Equal, 287, 38, 21, 5970),
+        (ImbalanceSharing::Capability, 303, 22, 13, 3984),
+        (ImbalanceSharing::Reference, 312, 13, 17, 5228),
+        (ImbalanceSharing::Equal, 287, 38, 21, 5978),
     ] {
         let options = SecurityOptions {
             sharing,
