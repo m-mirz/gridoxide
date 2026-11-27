@@ -64,7 +64,11 @@ fn test_cgmes_microgrid_type3_igm_be() {
     let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
-    cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 3e-2);
+    // BE-G1 holds this area's own reference bus remotely, which leaves its
+    // output to whatever the exporter's solver chose: see
+    // `cgmes_common::remote_machine_buses`.
+    let skip = cgmes_common::remote_machine_buses(&ds, s_base_va);
+    cgmes_common::assert_matches_sv_skipping(&result, &bus_index, &expected, 3e-2, &skip);
 }
 
 #[test]
@@ -159,10 +163,8 @@ fn test_cgmes_microgrid_type3_cgm() {
     assert_eq!(transformers.len(), 9, "expected 9 two-winding transformers");
     assert_eq!(shunts.len(), 3, "expected 3 LinearShuntCompensator shunts");
 
-    let n = buses.len();
-    let mut ybus = build_ybus(n, &lines, &transformers);
-    stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
+    // BE-G1 holds a remote bus; see `solve_with_remote_control`.
+    let result = cgmes_common::solve_with_remote_control(&ds, s_base_va);
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
     cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 5e-2);

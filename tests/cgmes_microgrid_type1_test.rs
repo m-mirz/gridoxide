@@ -5,8 +5,6 @@ use std::path::Path;
 use gridoxide::cgmes::{
     cgmes_to_buses_and_branches, cgmes_topological_node_bus_index, load_profiles,
 };
-use gridoxide::network::{build_ybus, stamp_shunts};
-use gridoxide::run_power_flow_analysis_from_ybus;
 
 /// ENTSO-E's MicroGrid "Type1" conformance test configuration, Belgian area
 /// — a different scenario/snapshot from `cgmes_microgrid_be_test.rs`'s own
@@ -57,10 +55,8 @@ fn test_cgmes_microgrid_type1_be_mas() {
     assert_eq!(transformers.len(), 6, "expected 6 two-winding transformers");
     assert_eq!(shunts.len(), 2, "expected 2 LinearShuntCompensator shunts");
 
-    let n = buses.len();
-    let mut ybus = build_ybus(n, &lines, &transformers);
-    stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
+    // BE-G1 holds a remote bus; see `solve_with_remote_control`.
+    let result = cgmes_common::solve_with_remote_control(&ds, s_base_va);
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
     cgmes_common::assert_matches_sv(&result, &bus_index, &expected, 3e-2);
@@ -112,10 +108,8 @@ fn test_cgmes_microgrid_type1_merged() {
     assert_eq!(transformers.len(), 9, "expected 9 two-winding transformers");
     assert_eq!(shunts.len(), 3, "expected 3 LinearShuntCompensator shunts");
 
-    let n = buses.len();
-    let mut ybus = build_ybus(n, &lines, &transformers);
-    stamp_shunts(&mut ybus, &shunts);
-    let result = run_power_flow_analysis_from_ybus(buses, ybus).buses;
+    // BE-G1 holds a remote bus; see `solve_with_remote_control`.
+    let result = cgmes_common::solve_with_remote_control(&ds, s_base_va);
 
     let bus_index = cgmes_topological_node_bus_index(&ds).expect("bus index lookup failed");
     // Tightened from 5e-2 when `cgmes::harmonize_voltage_bases` landed: five of

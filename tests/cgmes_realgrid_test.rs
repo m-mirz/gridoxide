@@ -34,15 +34,16 @@ use gridoxide::run_power_flow_analysis_from_ybus;
 ///   previously exercised by gridoxide's own PGM fixtures — fixed via an
 ///   explicit zero-shunt guard in `half_open_branch_shunt`.
 /// - The Q-sign convention documented in `cgmes.rs`'s Step 3 (load-sign
-///   convention negated for both P and Q) turned out to be a
-///   `SynchronousMachine`-specific exception, not a general CGMES quirk:
-///   applying "no negation" to loads too (extrapolated from a single-machine
-///   finding on the much smaller MicroGrid-BE-MAS fixture, which has no
-///   `EnergyConsumer` at all to independently check against) dragged
-///   RealGrid's median solved-vs-published-SV error to 5.9%, with 3369 of
-///   6051 buses over 5% error. Reverting loads specifically back to the
-///   documented convention (keeping the machine-only exception) dropped that
-///   to a 0.09% median with 11 outliers — see `assert_voltage_match` below.
+///   convention negated for both P and Q): applying "no negation" to loads
+///   (extrapolated from a single-machine finding on the much smaller
+///   MicroGrid-BE-MAS fixture, which has no `EnergyConsumer` at all to
+///   independently check against) dragged RealGrid's median
+///   solved-vs-published-SV error to 5.9%, with 3369 of 6051 buses over 5%
+///   error. Reverting loads back to the documented convention dropped that to
+///   a 0.09% median with 11 outliers — see `assert_voltage_match` below. The
+///   machines kept the exception until it turned out to be that same
+///   MicroGrid finding, an artefact of BE-G1's remote voltage control; with
+///   them signed like the loads, the median falls to 0.011%.
 #[test]
 fn test_cgmes_realgrid() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))

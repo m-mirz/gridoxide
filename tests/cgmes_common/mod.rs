@@ -42,6 +42,61 @@ pub fn expected_voltages(ds: &CimDataset) -> Vec<ExpectedVoltage> {
     out
 }
 
+/// Solves `ds` with its remote voltage control in place, for comparing with a
+/// published solution that has it.
+///
+/// MicroGrid's Type1 Belgian and merged models need this: BE-G1, on a 10.5 kV bus, holds the
+/// 115.5 kV side of its own step-up transformer. Without the control the
+/// machine is a fixed injection at its SSH `q`, which is a setpoint the
+/// regulation overrides rather than what the machine produces: SSH gives it
+/// 100 Mvar out, the published solution 74 Mvar in. The plain solve used to
+/// come close at that bus only because the importer read the machine's `q`
+/// with the wrong sign. `cgmes_remote_test.rs` checks the control itself.
+pub fn solve_with_remote_control(ds: &CimDataset, s_base_va: f64) -> Vec<Bus> {
+    let net = gridoxide::cgmes::cgmes_to_network(ds, s_base_va).expect("conversion failed");
+    let report = gridoxide::run_power_flow_with_remote(
+        net.buses.clone(),
+        &net.lines,
+        &net.transformers,
+        &net.shunts,
+        gridoxide::TapData::none(),
+        gridoxide::RemoteControlData {
+            machines: &net.voltage_control.machines,
+        },
+        gridoxide::PowerFlowOptions {
+            control_remote_voltage: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        report.stats.status,
+        gridoxide::solver::SolveStatus::Converged
+    );
+    report.buses
+}
+
+/// The buses of machines that hold their area's reference bus from afar.
+///
+/// The reference already fixes the voltage such a machine regulates, so
+/// nothing in SSH decides what it produces: its `q` there is a setpoint, and the
+/// published value is whatever the exporter's solver split between the two.
+/// BE-G1 is one in MicroGrid's Belgian models apart from Type1's — in those and
+/// the merged models the reference is elsewhere, and [`solve_with_remote_control`] reaches the
+/// published value. A machine that holds its own bus, or a bus that is not a
+/// reference, is not listed.
+pub fn remote_machine_buses(ds: &CimDataset, s_base_va: f64) -> Vec<usize> {
+    let net = gridoxide::cgmes::cgmes_to_network(ds, s_base_va).expect("conversion failed");
+    net.voltage_control
+        .machines
+        .iter()
+        .filter(|m| {
+            m.at_bus != m.controls_bus
+                && net.buses[m.controls_bus].bus_type == gridoxide::types::BusType::Slack
+        })
+        .map(|m| m.at_bus)
+        .collect()
+}
+
 /// Asserts every solved bus matches its fixture's own published `SvVoltage`
 /// within `tol` (relative to the bus's own rated voltage, so the tolerance is
 /// in per-unit regardless of voltage level) — the CGMES analogue of
@@ -62,10 +117,25 @@ pub fn assert_matches_sv(
     expected: &[ExpectedVoltage],
     tol: f64,
 ) {
+    assert_matches_sv_skipping(solved, bus_index, expected, tol, &[]);
+}
+
+/// [`assert_matches_sv`], leaving out the buses in `skip`, each for a reason
+/// its caller states.
+pub fn assert_matches_sv_skipping(
+    solved: &[Bus],
+    bus_index: &std::collections::HashMap<String, usize>,
+    expected: &[ExpectedVoltage],
+    tol: f64,
+    skip: &[usize],
+) {
     for exp in expected {
         let Some(&idx) = bus_index.get(&exp.tn_mrid) else {
             continue;
         };
+        if skip.contains(&idx) {
+            continue;
+        }
         let bus = &solved[idx];
         // SvVoltage.v is in kV; bus.u_rated is in V (gridoxide's own convention).
         let expected_v_pu = (exp.v * 1e3) / bus.u_rated;

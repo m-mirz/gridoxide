@@ -1792,14 +1792,12 @@ fn convert_equipment(
     // Both P and Q use CGMES's uniform SSH "load sign convention" (positive =
     // flow OUT of the node INTO the equipment, i.e. absorption) — the
     // opposite of gridoxide's own net-injection convention, hence the
-    // negation of both. SynchronousMachine's own Q (below, in Step 8) does
-    // NOT get this same negation — confirmed empirically, not from the CIM
-    // doc text (which reads identically for loads and machines): reverting
-    // Q's negation for loads specifically (keeping it only for
-    // SynchronousMachine) dropped RealGrid's median solved-vs-published-SV
-    // voltage error from 5.9% to 0.09% (and buses over 5% error from 3369 of
-    // 6051 to 11) — a real, load-vs-machine-specific asymmetry, not a
-    // uniform CGMES quirk.
+    // negation of both. Every injection class follows it, machines included:
+    // `RotatingMachine.q`, `StaticVarCompensator.q` and the rest are negated
+    // the same way (Step 8). The fixtures agree — at every machine that holds
+    // no voltage, SSH's `q` equals `SvPowerFlow.q` at its own terminal, which
+    // is load sign by definition: 48 in the IGMs, 42 in RealGrid, and every
+    // MicroGrid and MiniGrid one, none of them flipped.
     for mrid in by_type(ds, "EnergyConsumer") {
         let ec = own(ds, mrid, "EnergyConsumer")?;
         let Some(bus) = terms.bus(mrid, 0) else {
@@ -1845,9 +1843,8 @@ fn convert_equipment(
     // converts it to a plain IIDM Load ("we make no difference based on the
     // type (motor/generator)") with *no* sign flip at all on P0/Q0, because
     // IIDM's own Load.p0/q0 already share CGMES's load-sign convention. That
-    // makes this the load-style *both-negated* case, not SynchronousMachine's
-    // Q exception (which exists only because a machine is normally a source,
-    // not a sink).
+    // makes this the load-style *both-negated* case, like every other
+    // injection.
     for mrid in by_type(ds, "AsynchronousMachine") {
         let am = own(ds, mrid, "AsynchronousMachine")?;
         let Some(bus) = terms.bus(mrid, 0) else {
@@ -1874,8 +1871,8 @@ fn convert_equipment(
     // source (wind/solar/battery via power electronics rather than a
     // rotating machine). Its `p`/`q` doc text is character-for-character
     // EquivalentInjection's ("Load sign convention... positive sign means
-    // flow out from a node"), not SynchronousMachine's — so both get
-    // negated, EquivalentInjection-style, not the machine's Q exception.
+    // flow out from a node") — so both get negated, like every other
+    // injection.
     for mrid in by_type(ds, "PowerElectronicsConnection") {
         let pec = own(ds, mrid, "PowerElectronicsConnection")?;
         let pec_connected = terms.connected(mrid, 0);
@@ -2448,7 +2445,7 @@ fn convert_equipment(
                 let p = sm.get_f64("RotatingMachine.p").unwrap_or(0.0);
                 let q = sm.get_f64("RotatingMachine.q").unwrap_or(0.0);
                 buses[bus].p_spec += -p * 1e6 / s_base_va;
-                buses[bus].q_spec += q * 1e6 / s_base_va; // no negation — see the Step 3 loads comment
+                buses[bus].q_spec += -q * 1e6 / s_base_va;
                 if let Some(g) = generation.get_mut(bus) {
                     *g += -p * 1e6 / s_base_va;
                 }
@@ -2516,8 +2513,7 @@ fn convert_equipment(
                 },
                 id: mrid,
                 at_bus: terms.bus(mrid, 0),
-                // No negation — the same exception the injection above makes.
-                q_scheduled: sm.get_f64("RotatingMachine.q").unwrap_or(0.0) * 1e6 / s_base_va,
+                q_scheduled: -sm.get_f64("RotatingMachine.q").unwrap_or(0.0) * 1e6 / s_base_va,
             },
         );
     }
@@ -2525,13 +2521,9 @@ fn convert_equipment(
     // StaticVarCompensator: same RegulatingCondEq/RegulatingControl pattern as
     // SynchronousMachine above (a voltage-mode, enabled RegulatingControl
     // pins the *controlled* bus's voltage), minus any active-power term — an
-    // SVC is a pure reactive-power device. Falls back to a fixed Q injection
-    // (using SynchronousMachine's empirically-determined sign, not the
-    // negation loads get — see the Step 3 comment: StaticVarCompensator.q's
-    // doc text is character-for-character identical to RotatingMachine.q's,
-    // which was proven unreliable, and both are shunt-connected
-    // RegulatingCondEq sources rather than consuming loads) when the SVC
-    // isn't actively voltage-regulating.
+    // SVC is a pure reactive-power device. Falls back to a fixed Q injection,
+    // load sign like every other one (see Step 3), when the SVC isn't
+    // actively voltage-regulating.
     for mrid in by_type(ds, "StaticVarCompensator") {
         let sc = own(ds, mrid, "StaticVarCompensator")?;
         let svc_connected = terms.connected(mrid, 0);
@@ -2539,7 +2531,7 @@ fn convert_equipment(
         if let Some(bus) = own_bus {
             if svc_connected {
                 buses[bus].q_spec +=
-                    sc.get_f64("StaticVarCompensator.q").unwrap_or(0.0) * 1e6 / s_base_va;
+                    -sc.get_f64("StaticVarCompensator.q").unwrap_or(0.0) * 1e6 / s_base_va;
             }
         }
 
@@ -2607,6 +2599,12 @@ fn convert_equipment(
             _ => f64::INFINITY,
         };
         let target_pu = target * mult / buses[controlled_bus].u_rated;
+        if sc
+            .get_f64("StaticVarCompensator.slope")
+            .is_some_and(|slope| slope != 0.0)
+        {
+            voltage_control.droop[controlled_bus] = true;
+        }
         voltage_control.regulate(
             &mut buses,
             Regulation {
@@ -2617,7 +2615,7 @@ fn convert_equipment(
                 q_max,
                 id: mrid,
                 at_bus: own_bus,
-                q_scheduled: sc.get_f64("StaticVarCompensator.q").unwrap_or(0.0) * 1e6 / s_base_va,
+                q_scheduled: -sc.get_f64("StaticVarCompensator.q").unwrap_or(0.0) * 1e6 / s_base_va,
             },
         );
     }
@@ -2627,10 +2625,7 @@ fn convert_equipment(
     // an optional RegulatingControl — cross-checked against
     // `references/powsybl-core`'s own `ExternalNetworkInjectionConversion`,
     // which negates *both* P and Q (`targetP = -p, targetQ = -q`). That's
-    // `EquivalentInjection`'s convention (Step 3 above), not
-    // SynchronousMachine's Q exception: an ExternalNetworkInjection stands
-    // in for "the rest of the interconnected system", the same conceptual
-    // role EquivalentInjection plays, not a physical rotating machine.
+    // the load sign every injection has (Step 3 above).
     for mrid in by_type(ds, "ExternalNetworkInjection") {
         let eni = own(ds, mrid, "ExternalNetworkInjection")?;
         let eni_connected = terms.connected(mrid, 0);
@@ -2771,7 +2766,28 @@ fn convert_equipment(
     // model this area submission is part of), so matching it here for every
     // slack bus — rather than defaulting to 0° — is what actually reproduces
     // the same solution, not a fixture-specific hack.
+    //
+    // The magnitude is different: a machine holding the reference bus states
+    // it in SSH, as its `RegulatingControl.targetValue`, which
+    // `VoltageControl::regulate` has already written. SSH is the input and SV
+    // the result, and an SV that isn't a solution of this SSH (a case saved
+    // before it was solved, or one solved with other settings) would move
+    // the reference off the setpoint the document gives it. So `SvVoltage.v`
+    // only fills in a reference bus nothing holds at its target. A static var
+    // compensator with a slope doesn't: it droops below its target as it
+    // produces, and the solve doesn't model the slope, so the SV is the better
+    // value there (MicroGrid-Type1's Belgian reference: a 229.5 kV target, a
+    // 222.7 kV solution).
     for (&slack_idx, slack_mrid) in slack_indices.iter().zip(slack_angle_ref_mrid.iter()) {
+        let regulated = voltage_control
+            .target
+            .get(slack_idx)
+            .is_some_and(Option::is_some)
+            && !voltage_control
+                .droop
+                .get(slack_idx)
+                .copied()
+                .unwrap_or(false);
         for mrid in by_type(ds, "SvVoltage") {
             let sv = own(ds, mrid, "SvVoltage")?;
             if sv
@@ -2781,7 +2797,7 @@ fn convert_equipment(
                 if let Some(angle_deg) = sv.get_f64("SvVoltage.angle") {
                     buses[slack_idx].voltage_ang = angle_deg.to_radians();
                 }
-                if let Some(v) = sv.get_f64("SvVoltage.v") {
+                if let Some(v) = sv.get_f64("SvVoltage.v").filter(|_| !regulated) {
                     // SvVoltage.v is also in kV, same conversion as nominalVoltage/ratedU.
                     buses[slack_idx].voltage_mag = (v * 1e3) / buses[slack_idx].u_rated;
                 }
@@ -3172,6 +3188,10 @@ struct VoltageControl {
     /// the part nothing is dispatching — loads, and machines that hold no
     /// voltage — which is what the allocation has to exclude.
     scheduled_q: Vec<f64>,
+    /// Buses held by a `StaticVarCompensator` with a `slope`. Its voltage
+    /// droops with its reactive output, so the bus settles off the target,
+    /// and the solve doesn't model the slope.
+    droop: Vec<bool>,
 }
 
 impl VoltageControl {
@@ -3183,6 +3203,7 @@ impl VoltageControl {
             conflicts: Vec::new(),
             machines: Vec::new(),
             scheduled_q: vec![0.0; n],
+            droop: vec![false; n],
         }
     }
 

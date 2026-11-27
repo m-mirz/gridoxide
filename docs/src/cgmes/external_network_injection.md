@@ -31,11 +31,10 @@ the network at the terminal — so converting to an injection means negating bot
 
 \\[ P_{inj} = -p_{SSH}, \qquad Q_{inj} = -q_{SSH} \\]
 
-This is worth stating explicitly because it is *not* universal across CGMES's regulating-equipment
-classes: `SynchronousMachine`'s own `q` follows a different rule in practice (no negation), so "it derives
-from `RegulatingCondEq`, therefore it signs like a machine" is exactly the wrong inference. The right
-grouping is by *conceptual role*: an external injection stands in for a network, not for a physical
-rotating machine.
+The same holds for every injection class, `SynchronousMachine` and `StaticVarCompensator` included.
+gridoxide used to read a machine's `q` unnegated, from a MicroGrid fixture where a remotely regulating
+machine happened to match that way; at every machine that holds no voltage, the fixtures' SSH `q` equals
+the `SvPowerFlow.q` at its terminal, which is load sign by definition.
 
 ### 3. Boundary-point folding applies to only one of the two classes
 
