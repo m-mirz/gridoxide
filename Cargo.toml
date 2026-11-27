@@ -318,6 +318,12 @@ gpu = ["dep:gridoxide-gpu", "gridoxide-gpu/cuda"]
 # feature already documents for tests and examples.
 capi = ["dep:cbindgen"]
 
+[dev-dependencies]
+# The MATPOWER → CGMES converter, for tests/matpower_via_cgmes_test.rs. Not
+# published yet, so a git pin; the patch below gives it the published
+# cimoxide-model, since the repository doesn't hold the generated classes.
+cimimport = { package = "cimoxide-import", git = "https://github.com/m-mirz/cimoxide", rev = "cc9810d2238963d03a360272d3d729356234337c" }
+
 [[test]]
 name = "all"
 path = "tests/all.rs"
@@ -447,3 +453,9 @@ required-features = ["matpower"]
 name = "gpu_probe_dump"
 path = "examples/gpu_probe_dump.rs"
 required-features = ["matpower"]
+
+# cimoxide's repository doesn't hold cimoxide-model's generated class tables,
+# so the git pin above takes the published crate instead: the same release,
+# and the one gridoxide itself uses.
+[patch."https://github.com/m-mirz/cimoxide"]
+cimoxide-model = { version = "0.7.2" }
