@@ -323,7 +323,7 @@ capi = ["dep:cbindgen"]
 # published yet, so a git pin, at cimoxide #35 on main; the patch below gives
 # it the published cimoxide-model, since the repository doesn't hold the
 # generated classes.
-cimimport = { package = "cimoxide-import", git = "https://github.com/m-mirz/cimoxide", rev = "b75cb9e0fa7030fcd1adaaaf1c12147681b21e56" }
+cimimport = { package = "cimoxide-import", git = "https://github.com/m-mirz/cimoxide", rev = "937d68d067e06f05b8610fb8d854cd1b593fa4f9" }
 
 [[test]]
 name = "all"
