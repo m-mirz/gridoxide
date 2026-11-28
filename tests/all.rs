@@ -182,6 +182,9 @@ mod matpower_se_test;
 #[cfg(feature = "matpower")]
 #[path = "matpower_test.rs"]
 mod matpower_test;
+#[cfg(all(feature = "cgmes", feature = "matpower"))]
+#[path = "matpower_via_cgmes_test.rs"]
+mod matpower_via_cgmes_test;
 #[path = "measurement_residual_test.rs"]
 mod measurement_residual_test;
 #[path = "multi_island_test.rs"]
