@@ -320,9 +320,10 @@ capi = ["dep:cbindgen"]
 
 [dev-dependencies]
 # The MATPOWER → CGMES converter, for tests/matpower_via_cgmes_test.rs. Not
-# published yet, so a git pin; the patch below gives it the published
-# cimoxide-model, since the repository doesn't hold the generated classes.
-cimimport = { package = "cimoxide-import", git = "https://github.com/m-mirz/cimoxide", rev = "cc9810d2238963d03a360272d3d729356234337c" }
+# published yet, so a git pin, at cimoxide #35 on main; the patch below gives
+# it the published cimoxide-model, since the repository doesn't hold the
+# generated classes.
+cimimport = { package = "cimoxide-import", git = "https://github.com/m-mirz/cimoxide", rev = "b75cb9e0fa7030fcd1adaaaf1c12147681b21e56" }
 
 [[test]]
 name = "all"
